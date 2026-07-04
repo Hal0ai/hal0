@@ -39,7 +39,11 @@ class ModelDefaults(BaseModel):
     )
     rope_freq_base: float | None = Field(
         default=None,
-        description="Default --rope-freq-base override.",
+        description=(
+            "DEPRECATED: parsed and persisted but never emitted by the "
+            "container launch path — put --rope-freq-base in extra_args "
+            "or the profile flags instead."
+        ),
     )
     extra_args: str | None = Field(
         default=None,
@@ -93,6 +97,18 @@ class Model(BaseModel):
     size_bytes: int = Field(
         default=0,
         description="Total size of model files in bytes.  0 means unknown.",
+    )
+
+    quant: str | None = Field(
+        default=None,
+        description=(
+            "Quantisation label, e.g. 'Q4_K_M', 'IQ2_XS', 'F16'. Derived at "
+            "registration from the GGUF header (general.file_type) with a "
+            "filename-token fallback (registry/detect.py, WS-13). None = "
+            "unknown / not applicable; serialisation lazily backfills from "
+            "the filename so pre-existing registries surface it without "
+            "re-registration."
+        ),
     )
 
     license: str = Field(

@@ -1,57 +1,27 @@
 """Provider abstract base class.
 
-A Provider encapsulates the logic for a single inference backend (llama.cpp,
-FLM, Moonshine, Kokoro).  It is stateless: all configuration is passed
-per-call via slot_cfg and model_info.  SlotManager calls build_env() and
-start_cmd() to construct the systemd environment; it calls health() and
-infer() to probe and forward requests.
+A Provider encapsulates the logic for a single inference backend
+(container/llama.cpp, FLM, ComfyUI, Kokoro, Qwen3-TTS).  It is stateless:
+all configuration is passed per-call via slot_cfg and model_info.
+SlotManager dispatches every slot through ``ContainerProvider``, which
+builds a :class:`RuntimeLaunchPlan` via ``container_spec()`` and hands it
+to the single unit renderer
+(:func:`hal0.providers.container._render_unit_from_plan`); ``health()``
+and ``infer()`` probe and forward requests.
 
 Port target: haloai lib/providers/base.py.
 See PLAN.md §3, ARCHITECTURE.md §Key boundaries ("Providers are stateless").
 
-ContainerSpec captures everything needed to render a docker-run-based
-systemd ExecStart line.  Frozen so Providers cannot accidentally share
-mutable state across slots.
+RuntimeLaunchPlan (alias ``ContainerSpec``) captures everything needed to
+render a container-run-based systemd ExecStart line.  Frozen so Providers
+cannot accidentally share mutable state across slots.
 """
 
 from __future__ import annotations
 
-import re
-import shlex
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
-
-# A bare systemd variable-expansion reference like ``${HF_TOKEN}``.  When a
-# command/env value is exactly this shape the intent is "let systemd
-# substitute from EnvironmentFile" — we must NOT shell-quote it or the
-# literal ``${VAR}`` reaches the container.
-_SYSTEMD_VAR_REF = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
-
-
-def _quote_for_systemd(value: str) -> str:
-    """Quote ``value`` for inclusion in a systemd ExecStart line.
-
-    Leaves a bare ``${VAR}`` reference alone so systemd expands it from the
-    EnvironmentFile, but shell-quotes anything containing whitespace or
-    metacharacters.  Empty strings become an explicit ``""`` so shlex
-    doesn't drop them.
-    """
-    if value == "":
-        return '""'
-    if _SYSTEMD_VAR_REF.fullmatch(value):
-        return value
-    # shlex.quote handles every other case correctly (spaces, $, etc.).
-    quoted = shlex.quote(value)
-    # Embedded ``${VAR}`` references inside otherwise-quoted strings must
-    # also pass through unmolested so systemd expands them; quote with
-    # double quotes in that case (systemd documents this in `systemd.unit(5)`
-    # §"Command lines").
-    if _SYSTEMD_VAR_REF.search(value) and quoted.startswith("'"):
-        inner = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{inner}"'
-    return quoted
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,8 +169,8 @@ ContainerSpec = RuntimeLaunchPlan
 class Provider(ABC):
     """Abstract base for a hal0 inference backend.
 
-    Concrete implementations: LlamaServerProvider, FLMProvider,
-    MoonshineProvider, KokoroProvider.
+    Concrete implementations: ContainerProvider, FLMProvider,
+    ComfyUIProvider, KokoroProvider, Qwen3TTSProvider.
 
     Each provider is instantiated once and reused across all slots that use
     that backend type.  Providers must not hold per-slot mutable state.
@@ -276,125 +246,10 @@ class Provider(ABC):
         """
         raise NotImplementedError(f"Phase 1: {type(self).__name__} must implement image_ref()")
 
-    # ── systemd override rendering ────────────────────────────────────────────
-    #
-    # Single source of truth for the docker-run line that lands in
-    # ``/etc/systemd/system/hal0-slot@<name>.service.d/override.conf``.
-    # The default implementation reads from ``container_spec(...)`` so
-    # every Provider gets a correct docker run line for free, including
-    # ``--device``, ``--group-add``, ``-v``, the image, and the command args.
-    #
-    # Providers may override ``render_systemd_override`` if they need a
-    # non-docker ExecStart (e.g. a native binary invocation), but the
-    # default covers all current backends (llama-server, FLM, Moonshine,
-    # Kokoro) since they all ship as toolbox container images.
-
-    def render_systemd_override(
-        self,
-        slot_name: str,
-        slot_cfg: dict[str, Any],
-        model_info: dict[str, Any],
-        *,
-        env_file_path: Path,
-        container_runtime: str = "/usr/bin/docker",
-    ) -> str:
-        """Render the per-slot drop-in for ``hal0-slot@<slot_name>.service``.
-
-        The drop-in clears the inherited ExecStart with an empty assignment
-        and replaces it with a concrete ``docker run`` line built from this
-        Provider's :class:`ContainerSpec`.  Per ``systemd.unit(5)`` §"Drop-in
-        files", clearing a list-valued directive is the documented way to
-        override it on a template unit.
-
-        Args:
-            slot_name:        Slot identifier; used in container name and
-                              SyslogIdentifier.
-            slot_cfg:         Raw slot TOML dict (or SlotConfig.model_dump()).
-            model_info:       Model registry entry (path, size_bytes, …).
-            env_file_path:    Path to ``/var/lib/hal0/slots/<name>/env``.  The
-                              EnvironmentFile directive references this so
-                              systemd can expand ``${HAL0_MODEL_PATH}`` etc.
-                              in the rendered docker command.
-            container_runtime: Path to the container runtime binary. Default
-                              ``/usr/bin/docker``; pass ``/usr/bin/podman``
-                              for rootless deployments.
-
-        Returns:
-            Override.conf text ready to be written to
-            ``/etc/systemd/system/hal0-slot@<slot_name>.service.d/override.conf``.
-        """
-        spec = self.container_spec(slot_cfg, model_info)
-        container_name = f"hal0-slot-{slot_name}"
-
-        # ── docker run flags ─────────────────────────────────────────────
-        # Order matches what an operator would write by hand for readability
-        # in the rendered override.
-        argv: list[str] = [
-            f"{container_runtime} run --rm",
-            f"--name {container_name}",
-            f"--env-file {env_file_path}",
-        ]
-        if spec.network_mode:
-            argv.append(f"--network {spec.network_mode}")
-
-        for host_path, container_path in spec.mounts:
-            argv.append(f"-v {_quote_for_systemd(host_path)}:{_quote_for_systemd(container_path)}")
-
-        for device in spec.devices:
-            argv.append(f"--device {_quote_for_systemd(device)}")
-
-        for group in spec.group_add:
-            argv.append(f"--group-add {_quote_for_systemd(str(group))}")
-
-        for cap in spec.cap_add:
-            argv.append(f"--cap-add {_quote_for_systemd(cap)}")
-
-        for opt in spec.security_opt:
-            argv.append(f"--security-opt {_quote_for_systemd(opt)}")
-
-        for key, value in sorted(spec.env.items()):
-            argv.append(f"-e {key}={_quote_for_systemd(value)}")
-
-        argv.extend(spec.extra_args)
-
-        # Image must precede the command (docker treats everything after
-        # the image as args to ENTRYPOINT).
-        argv.append(_quote_for_systemd(spec.image))
-        for arg in spec.command:
-            argv.append(_quote_for_systemd(arg))
-
-        exec_start = " \\\n  ".join(argv)
-
-        # WorkingDirectory must match where the env file actually lives
-        # — the template hardcodes /var/lib/hal0/slots/%i, but a
-        # HAL0_HOME dev install lands the env elsewhere. Re-emit the
-        # directive so systemd doesn't fail with "resources" before it
-        # ever invokes the ExecStart.
-        slot_workdir = env_file_path.parent
-
-        lines = [
-            "# hal0 slot override — rendered by Provider.render_systemd_override",
-            "# Do not edit manually; changes will be overwritten on the next slot config change.",
-            "",
-            "[Unit]",
-            f"Description=hal0 inference slot ({slot_name})",
-            "",
-            "[Service]",
-            # Reset the inherited EnvironmentFile before adding our own —
-            # systemd appends drop-in values to the list, so the template's
-            # /var/lib/hal0/slots/%i/env stays and breaks dev installs
-            # where the env actually lives under HAL0_HOME.
-            "EnvironmentFile=",
-            f"EnvironmentFile={env_file_path}",
-            "WorkingDirectory=",
-            f"WorkingDirectory={slot_workdir}",
-            f"SyslogIdentifier=hal0-slot-{slot_name}",
-            # Clear inherited ExecStart / ExecStop, then set our own.
-            "ExecStart=",
-            f"ExecStart={exec_start}",
-            "ExecStop=",
-            f"ExecStop={container_runtime} stop -t 30 {container_name}",
-            f"ExecStopPost=-{container_runtime} rm -f {container_name}",
-            "",
-        ]
-        return "\n".join(lines)
+    # NOTE (WS-15): the legacy ``render_systemd_override`` default — which
+    # rendered a docker-run drop-in from ``container_spec`` — was deleted.
+    # Unit rendering is owned by the single adapter
+    # :func:`hal0.providers.container._render_unit_from_plan`, which
+    # understands the full :class:`RuntimeLaunchPlan` shape (first-class
+    # :class:`Mount` read-only/SELinux flags, :class:`HealthCheck`); the old
+    # renderer only handled ``(src, dst)`` tuples and drifted from it.

@@ -11,12 +11,20 @@ import { useModels, usePullJob, useHfSearch, fmtBytes } from '@/api/hooks/useMod
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
+import { MODEL_SORT_FIELDS, sortModels, tagChipsFor, modelMatchesTags, fmtAdded } from '@/dash/model-sort.js'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
 function ModelsView() {
   const [selId, setSelId] = useStateM(null);
   const [filters, setFilters] = useStateM({ type: null, device: null });
+  // Multi-select tag filter (AND semantics) — chips sourced from
+  // meta.curated_model_tags ∩ tags actually present on rows.
+  const [tagSel, setTagSel] = useStateM([]);
+  // WS-13 catalog sort — applied WITHIN each section (installed / blessed /
+  // user.* / upstream); the section structure itself never reorders.
+  const [sortField, setSortField] = useStateM("name");
+  const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
   const [addOpen, setAddOpen] = useStateM(false);
   const [addByPathOpen, setAddByPathOpen] = useStateM(false);

@@ -20,6 +20,9 @@ default profile) come from the canonical maps in :mod:`hal0.model_meta`.
 
 from __future__ import annotations
 
+import glob
+import os
+import shutil
 from typing import Any
 
 from hal0.config.schema import HardwareInfo
@@ -60,6 +63,32 @@ _DENSE_CTX_CAP = 32768
 # anything ≥ this many GB as "Strix Halo class" — enough headroom to
 # justify Vulkan over CPU even when there's no discrete VRAM.
 _UMA_UNIFIED_GB_MIN = 32
+
+
+def nvidia_container_toolkit_present() -> bool:
+    """Best-effort: is the nvidia-container-toolkit / a CDI spec available?
+
+    The CUDA container path needs podman's CDI support fed by
+    nvidia-container-toolkit (``nvidia-ctk cdi generate``). Signals, any of
+    which counts:
+
+      - ``nvidia-ctk`` on PATH or at /usr/bin/nvidia-ctk;
+      - a CDI spec file (``*.yaml`` / ``*.json``) under /etc/cdi or
+        /var/run/cdi (the two standard CDI spec directories).
+
+    Purely a filesystem sniff — never spawns a process, never raises.
+    """
+    if shutil.which("nvidia-ctk") or os.path.exists("/usr/bin/nvidia-ctk"):
+        return True
+    for spec_dir in ("/etc/cdi", "/var/run/cdi"):
+        try:
+            if glob.glob(os.path.join(spec_dir, "*.yaml")) or glob.glob(
+                os.path.join(spec_dir, "*.json")
+            ):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _pick_chat_model(ram_gb: float) -> str:
@@ -117,11 +146,19 @@ def _backend_for(hw: HardwareInfo) -> tuple[str, str]:
             return "rocm", "AMD discrete GPU with rocm-smi reachable"
         return "vulkan", "AMD GPU; ROCm not detected, Vulkan via Mesa"
 
-    # NVIDIA — vulkan backend works on the NVIDIA proprietary driver.
-    # We deliberately do NOT pick "cuda" because it's not in the v1
-    # backend allowlist; that's a Phase 2 backend.
+    # NVIDIA — the CUDA path (gpu-cuda device, upstream llama.cpp CUDA
+    # image via CDI) is preferred when the nvidia-container-toolkit is
+    # present; without CDI the container can't see the GPU, so fall back
+    # to Vulkan, which works on the NVIDIA proprietary driver with no
+    # toolkit. (Previously hard-mapped to vulkan — "CUDA deferred to
+    # Phase 2"; Phase 2 is this wave.)
     if primary and primary.vendor == "nvidia":
-        return "vulkan", "NVIDIA GPU (CUDA backend deferred to Phase 2; Vulkan works today)"
+        if nvidia_container_toolkit_present():
+            return "cuda", "NVIDIA GPU with nvidia-container-toolkit (CDI) — llama.cpp CUDA"
+        return "vulkan", (
+            "NVIDIA GPU; nvidia-container-toolkit/CDI not found — Vulkan fallback "
+            "(install nvidia-container-toolkit and run `nvidia-ctk cdi generate` for CUDA)"
+        )
 
     # Intel iGPU / unknown vulkan-capable
     if primary and primary.vulkan_capable:

@@ -27,6 +27,9 @@ export const ENDPOINTS = {
   slotMetrics: '/api/slots/metrics',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,
   slotConfig: (name: string) => `/api/slots/${encodeURIComponent(name)}/config`,
+  // TTS voice-list proxy — forwards to the slot container's /v1/audio/voices;
+  // {voices: [], source: "offline"} when the slot is cold.
+  slotVoices: (name: string) => `/api/slots/${encodeURIComponent(name)}/voices`,
   slotDefaults: (name: string) => `/api/slots/${encodeURIComponent(name)}/defaults`,
   slotBackend: (name: string) => `/api/slots/${encodeURIComponent(name)}/backend`,
   slotRestart: (name: string) => `/api/slots/${encodeURIComponent(name)}/restart`,

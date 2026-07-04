@@ -27,6 +27,7 @@ from hal0.model_meta import (
     BACKEND_TO_DEVICE,
     CANONICAL_DEVICES,
     CAPABILITY_ALIASES,
+    CURATED_MODEL_TAGS,
     DEVICE_CLASSES,
     DEVICE_TO_DEFAULT_PROFILE,
     LEGACY_BACKENDS,
@@ -62,6 +63,9 @@ async def get_enums(request: Request, response: Response) -> Any:
     - ``model_capabilities`` + ``capability_aliases``: canonical registry
       capability spellings and the tolerated synonyms.
     - ``model_backends``: valid registry ``model.backends`` values.
+    - ``curated_model_tags``: the curated ``model.tags`` vocabulary (type
+      tags + provenance + catalogue descriptors) the dashboard's tag
+      chips draw from. Freeform tags outside this list stay legal.
     - ``backend_to_device`` / ``device_default_profiles``: the two
       canonical translation maps.
 
@@ -81,6 +85,7 @@ async def get_enums(request: Request, response: Response) -> Any:
         "model_capabilities": list(MODEL_CAPABILITIES),
         "capability_aliases": dict(CAPABILITY_ALIASES),
         "model_backends": list(MODEL_BACKENDS),
+        "curated_model_tags": list(CURATED_MODEL_TAGS),
         "runtime_families": list(RUNTIME_FAMILIES),
         "backend_to_device": dict(BACKEND_TO_DEVICE),
         "device_default_profiles": dict(DEVICE_TO_DEFAULT_PROFILE),

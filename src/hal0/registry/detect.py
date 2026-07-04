@@ -29,6 +29,7 @@ Detection strategy, cheapest first:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -43,6 +44,89 @@ Confidence = Literal["high", "medium", "low"]
 # Backends llama-server can target for any GGUF file. The slot config
 # picks one based on hardware probe; detection just lists what's *compatible*.
 _GGUF_BACKENDS: list[str] = ["vulkan", "rocm", "cuda", "cpu"]
+
+
+# ── quantisation extraction (WS-13) ────────────────────────────────────────
+#
+# Two sources, header-first:
+#   1. GGUF ``general.file_type`` (llama.cpp LLAMA_FTYPE enum) — authoritative
+#      when the header is readable.
+#   2. Filename token — ``Q4_K_M`` / ``IQ2_XS`` / ``f16`` / ``bf16`` / ``f32``
+#      style markers, boundary-anchored so ``qwen3`` or ``embF16`` never
+#      false-match.
+#
+# The result is a canonical UPPERCASE label ("Q4_K_M", "IQ2_XS", "F16") or
+# ``None`` when unknown. Stored on ``Model.quant`` at registration and
+# lazily backfilled at serialisation time for pre-existing registries.
+
+_QUANT_FILENAME_RE = re.compile(
+    r"(?<![a-z0-9])(i?q\d[_a-z0-9]*|bf16|f16|f32)(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+# llama.cpp LLAMA_FTYPE → label (llama.h; removed/legacy codes omitted).
+# The GUESSED flag (1024) is masked off before lookup.
+_LLAMA_FTYPE_GUESSED = 1024
+_FILE_TYPE_TO_QUANT: dict[int, str] = {
+    0: "F32",
+    1: "F16",
+    2: "Q4_0",
+    3: "Q4_1",
+    7: "Q8_0",
+    8: "Q5_0",
+    9: "Q5_1",
+    10: "Q2_K",
+    11: "Q3_K_S",
+    12: "Q3_K_M",
+    13: "Q3_K_L",
+    14: "Q4_K_S",
+    15: "Q4_K_M",
+    16: "Q5_K_S",
+    17: "Q5_K_M",
+    18: "Q6_K",
+    19: "IQ2_XXS",
+    20: "IQ2_XS",
+    21: "Q2_K_S",
+    22: "IQ3_XS",
+    23: "IQ3_XXS",
+    24: "IQ1_S",
+    25: "IQ4_NL",
+    26: "IQ3_S",
+    27: "IQ3_M",
+    28: "IQ2_S",
+    29: "IQ2_M",
+    30: "IQ4_XS",
+    31: "IQ1_M",
+    32: "BF16",
+    36: "TQ1_0",
+    37: "TQ2_0",
+    38: "MXFP4",
+}
+
+
+def quant_from_filename(name: str) -> str | None:
+    """Quant label from a filename token, or ``None`` when nothing matches.
+
+    Matches are boundary-anchored (no alphanumeric on either side) so
+    incidental substrings (``qwen3``, ``embF16``, ``headQ6``) do not
+    false-positive. The matched token is normalised to UPPERCASE.
+    """
+    m = _QUANT_FILENAME_RE.search(name or "")
+    return m.group(1).upper() if m else None
+
+
+def quant_from_file_type(code: Any) -> str | None:
+    """Map a GGUF ``general.file_type`` value to a quant label.
+
+    Tolerates the LLAMA_FTYPE_GUESSED flag (1024) being OR'd in.
+    Unknown / non-int codes return ``None`` (callers fall back to the
+    filename token).
+    """
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None
+    if code >= _LLAMA_FTYPE_GUESSED:
+        code -= _LLAMA_FTYPE_GUESSED
+    return _FILE_TYPE_TO_QUANT.get(code)
 
 
 def _hf_repo_name_from_path(path: Path) -> str | None:
@@ -90,6 +174,9 @@ class DetectionResult:
     suggested_name: str | None = None
     kind: Kind = "unknown"
     raw_hints: dict[str, Any] = field(default_factory=dict)
+    # Quantisation label ("Q4_K_M", "IQ2_XS", "F16", …) or None when unknown.
+    # Header-derived (general.file_type) when readable, else filename token.
+    quant: str | None = None
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -130,6 +217,7 @@ def _heuristic_only(path: Path) -> DetectionResult:
             suggested_name=_hf_repo_name_from_path(path),
             kind="unknown",
             raw_hints={"source": "comfyui-tree", "stem": path.stem, "suffix": path.suffix.lower()},
+            quant=quant_from_filename(path.name),
         )
 
     backends: list[str] = []
@@ -170,6 +258,7 @@ def _heuristic_only(path: Path) -> DetectionResult:
         suggested_name=_hf_repo_name_from_path(path),
         kind=kind,
         raw_hints={"source": "filename", "stem": path.stem, "suffix": path.suffix.lower()},
+        quant=quant_from_filename(path.name),
     )
 
 
@@ -222,6 +311,10 @@ def detect(path: str | Path) -> DetectionResult:
         if not suggested_name:
             suggested_name = _hf_repo_name_from_path(p)
 
+        # Quant: header file_type is authoritative; filename token is the
+        # fallback for converters that drop general.file_type.
+        quant = quant_from_file_type(header.get("general.file_type")) or quant_from_filename(p.name)
+
         return DetectionResult(
             suggested_backends=list(_GGUF_BACKENDS),
             suggested_capabilities=caps,
@@ -237,7 +330,9 @@ def detect(path: str | Path) -> DetectionResult:
                 "name": header.get("general.name"),
                 "basename": header.get("general.basename"),
                 "size_label": header.get("general.size_label"),
+                "file_type": header.get("general.file_type"),
             },
+            quant=quant,
         )
 
     # Non-GGUF file: filename heuristic only.
@@ -247,4 +342,6 @@ def detect(path: str | Path) -> DetectionResult:
 __all__ = [
     "DetectionResult",
     "detect",
+    "quant_from_file_type",
+    "quant_from_filename",
 ]

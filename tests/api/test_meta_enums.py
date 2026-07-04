@@ -23,6 +23,7 @@ _EXPECTED_KEYS = {
     "runtime_families",
     "backend_to_device",
     "device_default_profiles",
+    "curated_model_tags",
 }
 
 _DEVICE_FIELDS = {
@@ -64,7 +65,7 @@ def test_contract_shape(client: TestClient) -> None:
 
 def test_devices_complete_and_shaped(client: TestClient) -> None:
     devices = _get_enums(client)["devices"]
-    assert [d["id"] for d in devices] == ["gpu-rocm", "gpu-vulkan", "cpu", "npu"]
+    assert [d["id"] for d in devices] == ["gpu-rocm", "gpu-vulkan", "gpu-cuda", "cpu", "npu"]
     for d in devices:
         assert set(d.keys()) == _DEVICE_FIELDS, d
         assert isinstance(d["recommended"], bool)

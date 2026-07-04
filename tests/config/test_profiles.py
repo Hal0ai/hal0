@@ -45,12 +45,14 @@ class TestProfileConfigValidation:
     def test_backend_accepts_rocm_and_vulkan(self) -> None:
         assert ProfileConfig(image="x", backend="rocm").backend == "rocm"
         assert ProfileConfig(image="x", backend="vulkan").backend == "vulkan"
+        # cuda joined the valid set with the gpu-cuda device (GPU generalization).
+        assert ProfileConfig(image="x", backend="cuda").backend == "cuda"
 
     def test_backend_rejects_unknown(self) -> None:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            ProfileConfig(image="x", backend="cuda")
+            ProfileConfig(image="x", backend="metal")
 
     def test_empty_image_raises(self) -> None:
         with pytest.raises(Exception, match="image"):
@@ -406,6 +408,7 @@ def test_device_default_profiles_map() -> None:
     assert DEVICE_DEFAULT_PROFILES == {
         "gpu-rocm": "rocm",
         "gpu-vulkan": "vulkan",
+        "gpu-cuda": "cuda",
         # PS-1: a GPU-less host must default to a chat-capable CPU profile,
         # not the Kokoro TTS engine.
         "cpu": "cpu-llm",
