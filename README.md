@@ -52,6 +52,26 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > configure models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
+## Screenshots
+
+<div align="center">
+
+<a href="https://hal0.dev/docs/"><img src="https://hal0.dev/screenshots/dashboard-overview.png" alt="hal0 dashboard — unified-memory hero, health strip, live slot rows" width="820"></a>
+
+<em>The dashboard — unified-memory hero, at-a-glance health, and live slot rows.</em>
+
+<table>
+<tr>
+<td width="33%"><a href="https://hal0.dev/docs/guides/pull-and-register-models/"><img src="https://hal0.dev/screenshots/models-registry.png" alt="Model registry" width="100%"></a><br><sub><b>Model registry</b> — catalogue with quant chips and pull status.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/generate-images/"><img src="https://hal0.dev/screenshots/image-gen-comfyui.png" alt="Image generation" width="100%"></a><br><sub><b>Image generation</b> — ComfyUI queue and GPU gauges.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/enable-memory/"><img src="https://hal0.dev/screenshots/memory-graph.png" alt="Memory graph" width="100%"></a><br><sub><b>Memory</b> — Hindsight facts and graph extraction.</sub></td>
+</tr>
+</table>
+
+<sub>More in the <a href="https://hal0.dev/docs/">docs</a>.</sub>
+
+</div>
+
 ## Why hal0
 
 **Strix Halo native, but not Strix-Halo-only.** The probe is UMA-aware
