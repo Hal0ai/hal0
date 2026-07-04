@@ -73,7 +73,7 @@ installed, a single FLM process inside the `hal0-toolbox-flm` container
 hosts chat + transcription + embedding concurrently on the one AMDXDNA
 hardware context — ~2 GB NPU memory, gemma3:1b at 40 tok/s +
 Whisper-V3-Turbo + Embedding-Gemma all coresident. hal0 exposes this
-as three slots (`agent`, `stt-npu`, `embed-npu`); the `npu.toml`
+as three slots (`npu`, `stt-npu`, `embed-npu`); the `npu.toml`
 `[npu]` table toggles ASR and embed. The host-side FLM `.deb` is
 installed for device-sanity probes only — inference runs in the
 container. See ADR-0009 (FLM trio NPU packing) for why.
@@ -132,13 +132,21 @@ be evicted out from under a streaming request.
   hardware-aware configuration, live logs, system health, and a
   built-in chat page (with popout window + reasoning toggle).
   SSE-backed status + log tail. Journal panel streams per-slot
-  container logs via journald. Dark by default.
+  container logs via journald. Dark by default. Live telemetry —
+  Power & Thermal (GPU clock/temp/power) and Per-Slot Throughput —
+  is on by default, and the logs/events surface is unified across
+  channels with real source/slot attribution.
   The slots page splits into Inference | Image Gen tabs: the Image-Gen
   tab operates the ComfyUI container (live GTT/RAM gauges, queue
   depth, model inventory) with a gated inference ⇄ generation iGPU
   switchover behind a blast-radius confirm.
 - **Extensions** — selectable Apps (Open WebUI) and Agents (Hermes,
   Pi) that `hal0 setup` auto-wires into the platform.
+- **Companion-service management** — `/api/services` is the declarative
+  source of truth for OpenWebUI, Hermes, Hindsight, ComfyUI, and n8n:
+  audit-logged systemd lifecycle actions (start/stop/restart/enable/
+  disable), mDNS `.local` advertisement, and a dedicated dashboard
+  Services page.
 - **Stacks** — declarative, runtime-switchable model/slot layouts as a
   replacement for install-time bundle tiers. A `StackConfig` is planned
   into a change set, applied atomically (with rollback) and converged
@@ -183,7 +191,8 @@ reachable by any MCP-speaking client — Claude Code, future RAG
 services, external scripts. The bundled agent is single-pick at install:
 `pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
 `@earendil-works/pi-coding-agent` on npm) or `Hermes-Agent` (service
-shape, installed via the hal0-owned `hal0-hermes` wrapper; connects to
+shape, installed via the hal0-owned `hermes` wrapper — `hal0-hermes` is
+kept as a back-compat symlink; connects to
 `hal0-api` via `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Select
 one during `hal0 setup` (Extensions step) or any time via `hal0 agent
 install <name>`; swap atomically with `--switch`. Capital-D destructive MCP calls
@@ -202,11 +211,11 @@ pins the container image and flag bundle for each backend.
 
 | Capability               | Profile / image                  | Device              | Notes                                                        |
 |--------------------------|----------------------------------|---------------------|--------------------------------------------------------------|
-| chat + embed + rerank    | `rocm` / `rocm-mtp` / `vulkan` | ROCm / Vulkan / CPU | ROCm FP4 fork baked into the image; MTP via `--spec-type draft-mtp` |
+| chat + embed + rerank    | `rocm` / `rocm-dnse` / `rocm-moe` / `vulkan` / `cuda` (experimental) | ROCm / Vulkan / CUDA / CPU | ROCm FP4 fork baked into the image; MTP via `--spec-type draft-mtp` on the `rocm-dnse`/`rocm-moe` profiles |
 | chat + STT + embed (NPU) | `flm` (`hal0-toolbox-flm`)  | AMD XDNA (opt-in)   | FLM trio: one container, `[npu] asr/embed` toggles, ~2 GB NPU mem |
 | transcription            | whisper.cpp in toolbox image     | Vulkan / CPU        | `stt` slot                                                   |
-| TTS                      | `tts` (`hal0-toolbox-kokoro`) | CPU             | `[CPU]` chip + tooltip in dashboard                          |
-| image                    | `comfyui` (`hal0-toolbox-comfyui`) | ROCm              | Exclusive GPU via arbiter; SD Turbo / Flux-2-Klein-9B        |
+| TTS                      | `tts` (`hal0-toolbox-kokoro`) / `tts-qwen3` (`hal0-toolbox-qwen3tts`) | CPU / ROCm | `voice.tts` switches Kokoro (CPU) ⇄ Qwen3-TTS (GPU) without reconfiguring the slot |
+| image                    | `comfyui` (`docker.io/kyuz0/amd-strix-halo-comfyui`) | ROCm | Exclusive GPU via arbiter; SD Turbo / Flux-2-Klein-9B        |
 
 The NPU path is opt-in: the installer places a FastFlowLM `.deb` on
 the host for device-sanity probes (`flm validate`); inference runs
@@ -221,16 +230,16 @@ TOML fields, profiles, GPU arbiter, and day-2 commands — see
 ## Hardware
 
 Linux + systemd is the only hard requirement
-([`installer/install.sh:86`](./installer/install.sh)). macOS and Windows
+([`installer/install.sh:246`](./installer/install.sh)). macOS and Windows
 are not in scope for v1.
 
 | Tier            | Hardware                                                                  | Status |
 |-----------------|---------------------------------------------------------------------------|--------|
 | **First-class** | AMD Ryzen AI Max+ 395 ("Strix Halo") with iGPU + XDNA NPU + 128 GB unified | Reference deployment. All published perf numbers come from this box. |
 | **First-class** | AMD Ryzen AI Max 385 / 390 with 64 GB unified                              | Same path; small + mid tiers fit, 70B Q4 with shorter context. |
-| **Supported**   | NVIDIA RTX 30/40/50 (10–32 GB)                                            | CUDA-backed llama-server in the `vulkan` container profile. Same slot lifecycle, dedicated VRAM instead of UMA. |
+| **Experimental** | NVIDIA RTX 30/40/50 (10–32 GB)                                           | Dedicated `cuda` seed profile — upstream `ghcr.io/ggml-org/llama.cpp:server-cuda` via CDI (`nvidia-container-toolkit`), with multi-GPU `gpu_index` pinning on the `gpu-cuda` device. Auto-falls back to the `vulkan` profile when CDI isn't present. `/api/backends` doesn't yet auto-advertise `gpu-cuda`. |
 | **Supported**   | AMD Radeon RX 7000 / discrete (16–24 GB)                                  | ROCm or Vulkan container profiles; same `hal0-slot@<name>` lifecycle. |
-| **Fallback**    | CPU-only x86_64                                                            | `vulkan` profile, CPU path. Usable for tiny models / smoke tests, not the headline experience. |
+| **Fallback**    | CPU-only x86_64                                                            | `cpu-llm` profile — the Vulkan toolbox image run CPU-only (no GPU passed to the container). Usable for tiny models / smoke tests, not the headline experience. |
 
 ## Project layout
 
@@ -241,7 +250,6 @@ hal0/
 │   ├── slots/        # slot manager, state machine, GpuArbiter
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
 ├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3)
-├── ui-vue.bak/       # v0.2.1 Vue 3 dashboard preserved verbatim for reference
 ├── installer/        # install.sh (writes /etc/hal0/, systemd units, hal0-api.service)
 │   ├── etc-hal0/     # seed slot TOMLs + profiles.toml
 │   └── systemd/      # hal0-agent@ template units
@@ -275,8 +283,10 @@ server URL (usually `http://127.0.0.1:5173`).
 
 Run `hal0 doctor` any time to re-check pre-flight (systemd / python /
 disk / ports / NPU probe). `hal0 model pull <ref>` streams models from
-Hugging Face into `registry.toml` under the `user.*` namespace, and
-`hal0 uninstall [--keep-data]` tears down a running install (thin
+Hugging Face into `registry.toml` under the `user.*` namespace — a
+disk-space preflight fails fast before a multi-GB pull, and an
+interrupted pull resumes via HTTP `Range` instead of restarting from
+zero — and `hal0 uninstall [--keep-data]` tears down a running install (thin
 wrapper over `installer/uninstall.sh`).
 
 Useful day-2 commands:
@@ -291,7 +301,7 @@ journalctl -fu hal0-api
 journalctl -fu 'hal0-slot@*'
 
 # restart a wedged slot container
-systemctl restart hal0-slot@chat
+systemctl restart hal0-slot@agent
 ```
 
 ### Auth posture
@@ -358,11 +368,9 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
 
 ### Soon
 
-- **GPU-accelerated TTS** — kokoro-vulkan or successor; closes the
-  `[CPU]` chip on the voice slot card
-- **Advanced memory** — Hindsight graph extraction enabled, MCP
-  client side of hal0 (agents reach external MCP servers), federated
-  memory across local + remote sources
+- **Advanced memory** — MCP client side of hal0 (agents reach
+  external MCP servers), federated memory across local + remote
+  sources
 - **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,
   plus curated loadout presets you can flash onto a fresh install
 - **AUR PKGBUILD & Ubuntu PPA** — native distro packages on top of
