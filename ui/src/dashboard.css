@@ -2924,7 +2924,7 @@ select.pf-input { cursor: pointer; }
 .pf-seg-btn.on { color: var(--bk); border-color: color-mix(in srgb, var(--bk) 50%, transparent); background: color-mix(in srgb, var(--bk) 12%, transparent); }
 
 /* MTP switch */
-.pf-switch { display: inline-flex; align-items: center; gap: 9px; padding: 0; border: none; background: transparent; cursor: pointer; }
+.pf-switch { position: relative; display: inline-flex; align-items: center; gap: 9px; padding: 0; border: none; background: transparent; cursor: pointer; }
 .pf-switch::before { content: ""; width: 34px; height: 19px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--line); position: relative; transition: all 0.15s ease; flex-shrink: 0; }
 .pf-switch.on::before { background: var(--accent-soft); border-color: var(--accent-line); }
 .pf-switch-knob { position: absolute; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg-4); transition: all 0.15s ease; pointer-events: none; }
@@ -3142,14 +3142,31 @@ select.pf-input { cursor: pointer; }
 .st-slugrow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .st-slugrow .pf-input { flex: 1; }
 
-/* Editor: per-slot row. */
-.st-slots-edit { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; }
-.st-slot-edit { display: grid; grid-template-columns: 110px 1fr 96px 1fr auto auto; gap: 6px; align-items: center; }
-.st-slot-edit .pf-input { min-width: 0; }
+/* Editor: per-slot labeled card. Each slot is a card — a header row (slot name
+   + remove) above a two-column labeled field grid — so model/profile/device are
+   each fully visible and labeled, instead of crammed into one unreadable row. */
+.st-slots-edit { margin-top: 6px; display: flex; flex-direction: column; gap: 10px; }
+.st-slot-card {
+  border: 1px solid var(--line-soft); border-radius: var(--rad-md, 9px);
+  background: var(--bg-1); padding: 10px 11px 11px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.st-slot-head { display: flex; align-items: center; gap: 8px; }
+.st-slot-head .st-slot-name { flex: 1 1 auto; min-width: 0; }
+.st-slot-rm { flex: 0 0 auto; padding: 5px 8px; }
+.st-slot-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 10px; align-items: end; }
+.st-fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.st-fld-model { grid-column: 1 / -1; }            /* model spans full width — ids are long */
+.st-fld-lbl {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--fg-4); font-weight: 600;
+}
+.st-fld .pf-input, .st-fld select { width: 100%; min-width: 0; }
+.st-fld-mtp .pf-switch.sm { margin-top: 2px; }
 .pf-switch.sm { gap: 5px; }
 .pf-switch.sm .mono { font-size: 10px; color: var(--fg-3); }
 @media (max-width: 720px) {
-  .st-slot-edit { grid-template-columns: 1fr 1fr; }
+  .st-slot-fields { grid-template-columns: 1fr; }
   .st-diff-row { grid-template-columns: 1fr; gap: 2px; }
 }
 
