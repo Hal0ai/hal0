@@ -50,9 +50,13 @@ _KEEPALIVE_S: float = 15.0
 _STREAM_REPLAY_DEFAULT = 50
 
 
-# ``merged`` / ``all`` are retained as aliases of the full hal0 stream
-# for caller compatibility (the panel historically multiplexed sources).
-SourceFilter = Literal["hal0", "merged", "all"]
+# ``merged`` / ``all`` / ``hal0`` are retained as "no source filter"
+# aliases (the whole hal0 event stream). Any *other* ``?source=`` value
+# is matched against the entry's real ``source`` (e.g. ``slot:npu``,
+# ``system``, ``model:x``) — a prefix like ``slot`` matches every
+# ``slot:*`` source. This is what makes the dashboard source selector
+# actually narrow results instead of being a no-op.
+_SOURCE_ALL = frozenset({"hal0", "merged", "all"})
 LevelFilter = Literal["info", "warn", "error"]
 
 
@@ -63,13 +67,19 @@ class JournalEntry(BaseModel):
     rows through one component. ``data`` carries the raw event ``type``
     + ``source`` + ``data`` so callers wanting native fidelity don't
     have to re-fetch from ``/api/events``.
+
+    ``source`` carries the event's *real* origin (``slot:<name>``,
+    ``system``, ``model:<id>``, …) so the panel can colour + filter by
+    subsystem; ``slot`` is the parsed slot name (or ``None``) so a
+    per-slot filter works without the client re-parsing ``source``.
     """
 
     id: int
     ts: str
-    source: Literal["hal0"]
+    source: str
     level: LevelFilter
     msg: str
+    slot: str | None = None
     data: dict[str, Any] | None = None
 
 
@@ -87,16 +97,24 @@ def _hal0_event_to_entry(event: dict[str, Any]) -> JournalEntry:
     severity = event.get("severity") or "info"
     if severity not in {"info", "warn", "error"}:
         severity = "info"
+    raw_source = str(event.get("source") or "hal0")
+    data = event.get("data") or {}
+    # Slot name: prefer the structured ``data.slot`` (emitted by
+    # slot.state), else parse a ``slot:<name>`` source string.
+    slot = data.get("slot")
+    if not slot and raw_source.startswith("slot:"):
+        slot = raw_source.split(":", 1)[1]
     return JournalEntry(
         id=int(event["id"]),
         ts=str(event["ts"]),
-        source="hal0",
+        source=raw_source,
         level=severity,  # type: ignore[arg-type]
         msg=str(event.get("message") or ""),
+        slot=slot or None,
         data={
             "type": event.get("type"),
-            "source": event.get("source"),
-            **(event.get("data") or {}),
+            "source": raw_source,
+            **data,
         },
     )
 
@@ -112,13 +130,31 @@ def _bus(request: Request) -> EventBus | None:
 # ── Filtering ─────────────────────────────────────────────────────────
 
 
+def _source_matches(entry_source: str, source: str | None) -> bool:
+    """True when ``entry_source`` passes the ``?source=`` filter.
+
+    ``merged``/``all``/``hal0`` (or no value) mean "no filter". Otherwise
+    match exactly, or as a ``:``-delimited prefix so ``slot`` matches
+    every ``slot:*`` source.
+    """
+    if not source or source in _SOURCE_ALL:
+        return True
+    return entry_source == source or entry_source.startswith(f"{source}:")
+
+
 def _passes_filters(
     entry: JournalEntry,
     *,
     level: LevelFilter | None,
     q: str | None,
+    source: str | None = None,
+    slot: str | None = None,
 ) -> bool:
-    """Apply level (exact) + q (case-insensitive substring on ``msg``)."""
+    """Apply source + slot + level (exact) + q (substring on ``msg``)."""
+    if not _source_matches(entry.source, source):
+        return False
+    if slot is not None and entry.slot != slot:
+        return False
     if level is not None and entry.level != level:
         return False
     return not (q and q.lower() not in entry.msg.lower())
@@ -152,7 +188,8 @@ def _sort_and_clamp(entries: list[JournalEntry], limit: int) -> list[JournalEntr
 @router.get("")
 async def get_journal(
     request: Request,
-    source: SourceFilter = Query(default="merged"),
+    source: str = Query(default="merged"),
+    slot: str | None = Query(default=None),
     level: LevelFilter | None = Query(default=None),
     q: str | None = Query(default=None),
     since: int | None = Query(default=None, ge=0),
@@ -163,9 +200,8 @@ async def get_journal(
     ``next_since`` is the **largest id seen** in the returned page —
     callers should pass it back as ``since`` to receive deltas.
     """
-    _ = source  # all source values resolve to the hal0 event stream
     raw = _collect(request, since=since)
-    filtered = [e for e in raw if _passes_filters(e, level=level, q=q)]
+    filtered = [e for e in raw if _passes_filters(e, level=level, q=q, source=source, slot=slot)]
     page = _sort_and_clamp(filtered, limit)
     if page:
         next_since: int | None = max(e.id for e in page)
@@ -186,6 +222,8 @@ async def _stream_iter(
     level: LevelFilter | None,
     q: str | None,
     since: int | None,
+    source: str | None = None,
+    slot: str | None = None,
 ) -> Any:
     """Async generator producing SSE frames for ``/api/journal/stream``.
 
@@ -208,7 +246,9 @@ async def _stream_iter(
     async with bus.subscribe() as queue:
         # ── Replay ────────────────────────────────────────────────────
         raw = _collect(request, since=since)
-        filtered = [e for e in raw if _passes_filters(e, level=level, q=q)]
+        filtered = [
+            e for e in raw if _passes_filters(e, level=level, q=q, source=source, slot=slot)
+        ]
         replay = _sort_and_clamp(filtered, _STREAM_REPLAY_DEFAULT)
         last_id = since or 0
         for entry in replay:
@@ -228,7 +268,7 @@ async def _stream_iter(
             if entry.id <= last_id:
                 continue
             last_id = entry.id
-            if not _passes_filters(entry, level=level, q=q):
+            if not _passes_filters(entry, level=level, q=q, source=source, slot=slot):
                 continue
             yield f"data: {json.dumps(entry.model_dump())}\n\n"
 
@@ -236,7 +276,8 @@ async def _stream_iter(
 @router.get("/stream")
 async def stream_journal(
     request: Request,
-    source: SourceFilter = Query(default="merged"),
+    source: str = Query(default="merged"),
+    slot: str | None = Query(default=None),
     level: LevelFilter | None = Query(default=None),
     q: str | None = Query(default=None),
     since: int | None = Query(default=None, ge=0),
@@ -247,7 +288,6 @@ async def stream_journal(
     live additions until the client disconnects. Keep-alive comment
     frames pulse every 15s so proxies don't reap idle connections.
     """
-    _ = source  # all source values resolve to the hal0 event stream
 
     async def _safe() -> Any:
         try:
@@ -256,6 +296,8 @@ async def stream_journal(
                 level=level,
                 q=q,
                 since=since,
+                source=source,
+                slot=slot,
             ):
                 yield chunk
         except asyncio.CancelledError:

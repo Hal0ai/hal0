@@ -50,6 +50,16 @@ export const ACTIVITY_RING_MAX = 200
 /** Debounce SSE reconnect on rapid filter chip toggling. */
 const SSE_RECONNECT_DEBOUNCE_MS = 200
 
+// Module-level ring cache keyed by filter set. The ActivityLog sidebar is
+// mounted inside several early-return branches of SlotsView (loading / empty
+// / populated) and inside the tab switch, so it UNMOUNTS on every state or
+// sub-tab transition. Without this cache each remount reset the ring to []
+// and forced a fresh SSE backfill — the pane visibly "forgot" recent
+// activity. Seeding useState from (and writing through to) this cache makes
+// the ring survive remounts and even navigating away and back.
+const _ringCache = new Map<string, ActivityRecord[]>()
+const _epochCache = new Map<string, string>()
+
 export interface ActivityFilters {
   since?: number | null
   category?: string | null
@@ -147,24 +157,29 @@ export interface ActivityStreamResult {
  */
 export function useActivityStream(opts: UseActivityStreamOptions = {}): ActivityStreamResult {
   const { follow = true, ...filters } = opts
-  const [records, setRecords] = useState<ActivityRecord[]>([])
+  // Stable filter key so the effect only re-subscribes on a real change,
+  // and so the persistent ring cache is scoped per filter set.
+  const filterKey = JSON.stringify(filters)
+  const [records, setRecords] = useState<ActivityRecord[]>(
+    () => _ringCache.get(filterKey) ?? [],
+  )
   const [disconnected, setDisconnected] = useState(false)
-  const [epoch, setEpoch] = useState<string | null>(null)
+  const [epoch, setEpoch] = useState<string | null>(() => _epochCache.get(filterKey) ?? null)
   const esRef = useRef<EventSource | null>(null)
-  const epochRef = useRef<string | null>(null)
+  const epochRef = useRef<string | null>(_epochCache.get(filterKey) ?? null)
   const errorCountRef = useRef(0)
 
   const push = (record: ActivityRecord) => {
     setRecords((prev) => {
-      // Dedup by id (durable backfill can overlap a reconnect replay).
+      // Dedup by id (durable backfill can overlap a reconnect replay, and a
+      // remount rehydrates from the cache before the SSE replays).
       if (record.id != null && prev.some((r) => r.id === record.id)) return prev
       const next = [record, ...prev]
-      return next.length > ACTIVITY_RING_MAX ? next.slice(0, ACTIVITY_RING_MAX) : next
+      const clamped = next.length > ACTIVITY_RING_MAX ? next.slice(0, ACTIVITY_RING_MAX) : next
+      _ringCache.set(filterKey, clamped)
+      return clamped
     })
   }
-
-  // Stable filter key so the effect only re-subscribes on a real change.
-  const filterKey = JSON.stringify(filters)
 
   useEffect(() => {
     if (!follow) {
@@ -194,9 +209,14 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
           const frame = JSON.parse(evt.data) as { record?: ActivityRecord; epoch?: string }
           const ep = frame?.epoch ?? null
           if (ep && ep !== epochRef.current) {
-            // Backend restarted → fresh stream. Reset cursor + ring.
-            if (epochRef.current != null) setRecords([])
+            // Backend restarted → fresh stream. Reset cursor + ring (and the
+            // persistent cache, else a stale ring would rehydrate on remount).
+            if (epochRef.current != null) {
+              setRecords([])
+              _ringCache.delete(filterKey)
+            }
             epochRef.current = ep
+            _epochCache.set(filterKey, ep)
             setEpoch(ep)
           }
           const record = frame?.record

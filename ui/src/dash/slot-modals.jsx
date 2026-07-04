@@ -19,10 +19,11 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { useSlotLogsStream } from '@/api/hooks/useLogs'
 import { ENDPOINTS } from '@/api/endpoints'
 import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
-const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
+const { useState: useStateSM, useEffect: useEffectSM } = React;
 
 // Map a slot lifecycle state to a chip color class.
 //   running healthy/serving → green (ok); starting/pulling → amber (warn);
@@ -1451,67 +1452,18 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 }
 
 // ─── Slot logs drawer ────────────────────────────────────────────
-// Minimal SSE-backed log tail. The slot-logs stream endpoint
-// (ENDPOINTS.slotLogsStream) emits one JSON-lines event per log line;
-// we render the last N in a fixed-height pre. EventSource closes
-// automatically when the drawer unmounts.
+// Raw per-slot journald tail, backed by the shared `useSlotLogsStream`
+// hook (same transport the Logs page "slot" channel uses). The hook now
+// owns backfill (so the one-shot model-loading lines are visible even when
+// the drawer opens after the slot is up), idle-spam filtering, capped
+// backoff reconnect, and the `degraded` frame — replacing the old inline
+// EventSource with a no-op onerror.
 function SlotLogsDrawer({ open, slot, onClose }) {
-  const [lines, setLines] = useStateSM([]);
-  // B13: when journalctl is unavailable the backend emits a NAMED
-  // `event: degraded` SSE frame instead of streaming lines. Surfacing it
-  // tells the user *why* there are no lines, instead of spinning forever
-  // on "waiting for log lines…".
-  const [degraded, setDegraded] = useStateSM(null);
-  const esRef = useRefSM(null);
-
-  useEffectSM(() => {
-    if (!open || !slot) {
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
-      }
-      setLines([]);
-      setDegraded(null);
-      return;
-    }
-    setLines([]);
-    setDegraded(null);
-    try {
-      const es = new EventSource(ENDPOINTS.slotLogsStream(slot.name));
-      esRef.current = es;
-      es.onmessage = (ev) => {
-        setLines(prev => {
-          const next = prev.concat(ev.data);
-          return next.length > 500 ? next.slice(next.length - 500) : next;
-        });
-      };
-      // Named "degraded" frame — journalctl unavailable for this slot.
-      // Parse the payload for a human reason; fall back to a generic note.
-      es.addEventListener("degraded", (ev) => {
-        let reason = "Log streaming unavailable (journalctl not reachable for this slot).";
-        try {
-          const data = JSON.parse(ev.data);
-          if (data && (data.message || data.reason || data.detail)) {
-            reason = data.message || data.reason || data.detail;
-          }
-        } catch {
-          if (typeof ev.data === "string" && ev.data.trim()) reason = ev.data;
-        }
-        setDegraded(reason);
-      });
-      es.onerror = () => {
-        // Leave the stream open — server can resume; drawer close cleans up.
-      };
-    } catch {
-      // EventSource missing or blocked — log drawer renders empty.
-    }
-    return () => {
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
-      }
-    };
-  }, [open, slot?.name]);
+  const { ring, disconnected, degraded } = useSlotLogsStream(
+    open && slot ? slot.name : null,
+    { follow: open, max: 500 },
+  );
+  const lines = ring.map((r) => r.msg);
 
   if (!slot) return null;
 
@@ -1564,7 +1516,11 @@ function SlotLogsDrawer({ open, slot, onClose }) {
         {lines.length === 0
           ? (
             <span style={{color: "var(--fg-4)", fontStyle: "italic"}}>
-              {degraded ? "No log lines — see the notice above." : "waiting for log lines…"}
+              {degraded
+                ? "No log lines — see the notice above."
+                : disconnected
+                ? "Reconnecting to log stream…"
+                : "waiting for log lines…"}
             </span>
           )
           : lines.join("\n")}
