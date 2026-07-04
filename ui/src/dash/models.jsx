@@ -92,6 +92,8 @@ function ModelsView() {
       const bes = Array.isArray(m.backends) ? m.backends : [];
       if (!bes.includes(filters.device) && m.device !== filters.device) return false;
     }
+    // Tag chips narrow with AND semantics (empty selection matches all).
+    if (!modelMatchesTags(m, tagSel)) return false;
     if (q.trim()) {
       const needle = q.trim().toLowerCase();
       const hay = `${m.longName || ""} ${m.name || ""} ${m.id || ""} ${m.repo || ""}`.toLowerCase();
@@ -99,6 +101,13 @@ function ModelsView() {
     }
     return true;
   };
+  // Sort applied WITHIN each section (the section structure never reorders).
+  const bySort = rows => sortModels(rows, sortField, sortDir);
+  // Tag chips worth rendering: curated vocab ∩ tags actually present on rows.
+  const tagChips = useMemoM(
+    () => tagChipsFor(modelList, enums.curated_model_tags),
+    [modelList, enums],
+  );
   // A model belongs to the ComfyUI/image surface when the backend flags it
   // (owned_by/backends "comfyui", or a comfyui_category derived from its path)
   // or it classifies as image. Path-derived flags self-heal rows an older pull
@@ -200,8 +209,38 @@ function ModelsView() {
                     <button key={d} className={"mdl-chip" + (filters.device === d ? " on" : "")} onClick={() => toggle("device", d)}>{d}</button>
                   ))}
                 </div>
-                {(filters.type || filters.device || q.trim()) && (
-                  <button className="mdl-chip mdl-clear" onClick={() => { setFilters({ type: null, device: null }); setQ(""); }}>clear ✕</button>
+                {tagChips.length > 0 && (
+                  <div className="mdl-toolbar-grp">
+                    <span className="lbl">tag</span>
+                    {tagChips.map(t => (
+                      <button
+                        key={t}
+                        className={"mdl-chip" + (tagSel.includes(t) ? " on" : "")}
+                        data-testid={`mdl-tag-${t}`}
+                        onClick={() => setTagSel(s => s.includes(t) ? s.filter(x => x !== t) : [...s, t])}
+                      >{t}</button>
+                    ))}
+                  </div>
+                )}
+                <div className="mdl-toolbar-grp">
+                  <span className="lbl">sort</span>
+                  <select
+                    className="input mono mdl-sort"
+                    data-testid="mdl-sort-field"
+                    value={sortField}
+                    onChange={e => setSortField(e.target.value)}
+                  >
+                    {MODEL_SORT_FIELDS.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
+                  </select>
+                  <button
+                    className="mdl-chip mdl-sort-dir"
+                    data-testid="mdl-sort-dir"
+                    title={sortDir === "asc" ? "ascending" : "descending"}
+                    onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
+                  >{sortDir === "asc" ? "↑" : "↓"}</button>
+                </div>
+                {(filters.type || filters.device || q.trim() || tagSel.length > 0) && (
+                  <button className="mdl-chip mdl-clear" onClick={() => { setFilters({ type: null, device: null }); setQ(""); setTagSel([]); }}>clear ✕</button>
                 )}
               </>
             )}
@@ -224,22 +263,22 @@ function ModelsView() {
           {tab === "models" ? (
             <>
               {installed.length > 0 && <div className="mdl-section-label">Installed · {installed.length}</div>}
-              {installed.map(m => (
+              {bySort(installed).map(m => (
                 <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
               ))}
 
               {blessed.length > 0 && <div className="mdl-section-label">Available · blessed · {blessed.length}</div>}
-              {blessed.map(m => (
+              {bySort(blessed).map(m => (
                 <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
               ))}
 
               {userNs.length > 0 && <div className="mdl-section-label">user.* · {userNs.length}</div>}
-              {userNs.map(m => (
+              {bySort(userNs).map(m => (
                 <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
               ))}
 
               {upstreamAdv.length > 0 && <div className="mdl-section-label">Upstream · remote · {upstreamAdv.length}</div>}
-              {upstreamAdv.map(m => (
+              {bySort(upstreamAdv).map(m => (
                 <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
               ))}
 
@@ -382,6 +421,7 @@ function ModelRow({ model, selected, onSelect }) {
       </span>
       <span className="mdl-row-tags">
         {model.type && <span className="chip">{model.type}</span>}
+        {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
         {backends.map(b => (
           <span key={b} className={"chip dev-" + b}>{b}</span>
         ))}
@@ -475,10 +515,12 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       <div className="mdl-detail-meta">
         <div><div className="k">params</div><div className="v">{model.params || "—"}</div></div>
         <div><div className="k">size</div><div className="v">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "—")}</div></div>
+        <div><div className="k">quant</div><div className="v" data-testid="mdl-detail-quant">{model.quant || "—"}</div></div>
         <div><div className="k">type</div><div className="v">{model.type || (model.capabilities?.[0]) || "—"}</div></div>
         <div><div className="k">device</div><div className="v">{model.device || (model.backends?.[0]) || "—"}</div></div>
         <div><div className="k">runtime</div><div className="v">{model.runtime || "—"}</div></div>
         <div><div className="k">namespace</div><div className="v">{model.ns || "—"}</div></div>
+        <div><div className="k">added</div><div className="v">{fmtAdded(model.created)}</div></div>
         <div><div className="k">origin</div><div className="v">{isUpstreamModel(model) ? `upstream · ${model.upstream}` : "local"}</div></div>
       </div>
       <div className="mdl-detail-labels">
