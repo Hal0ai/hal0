@@ -35,9 +35,12 @@
     const useUpdateOrch = window.__hal0UseUpdateOrchestration;
     const updateOrch = useUpdateOrch ? useUpdateOrch() : null;
 
-    // Local editable state seeded from live orchData (fallback to prop orch)
+    // Local editable state seeded from live orchData (fallback to prop orch).
+    // NOTE: there is no `mode` knob — GET/PUT /orchestration carry exactly 4
+    // fields (orchestrator_profile, default_assignee, auto_decompose,
+    // auto_promote_children). The old auto/manual segment rendered and PUT a
+    // field the server neither returns nor accepts.
     const src = orchData || orch || {};
-    const [mode, setMode] = useState(src.mode || "auto");
     const [profile, setProfile] = useState(src.orchestrator_profile || "");
     const [assignee, setAssignee] = useState(src.default_assignee || "");
     const [autoDecompose, setAutoDecompose] = useState(
@@ -53,7 +56,6 @@
 
     const handleSave = () => {
       const patch = {
-        mode,
         orchestrator_profile: profile,
         default_assignee: assignee,
         auto_decompose: autoDecompose,
@@ -82,12 +84,12 @@
         onClick={(e) => e.stopPropagation()}
         data-testid="board-orch-popover"
       >
-        {/* header */}
+        {/* header — shows the live orchestrator profile (a real value) */}
         <div className="orch-pop-h">
           <span className="t">Orchestration</span>
           <span className="st">
             <span className="dot" />
-            {mode === "auto" ? "dispatching" : "paused"}
+            {profile || "unset"}
           </span>
           {onClose && (
             <span className="x" onClick={onClose} style={{ marginLeft: "auto", cursor: "pointer" }}>
@@ -97,24 +99,6 @@
         </div>
 
         <div className="orch-pop-b">
-          {/* mode seg — editable */}
-          <div className="orch-mode">
-            <div
-              className={"orch-seg" + (mode === "auto" ? " on" : "")}
-              onClick={() => setMode("auto")}
-              data-testid="board-orch-mode-auto"
-            >
-              auto
-            </div>
-            <div
-              className={"orch-seg" + (mode === "manual" ? " on" : "")}
-              onClick={() => setMode("manual")}
-              data-testid="board-orch-mode-manual"
-            >
-              manual
-            </div>
-          </div>
-
           {/* orchestrator_profile — editable dropdown */}
           <div className="orch-set">
             <div>

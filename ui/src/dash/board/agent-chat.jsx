@@ -10,11 +10,12 @@ function Icon(props) {
   return BI ? <BI {...props} /> : null;
 }
 
+// Grounded in real tools: board reads/mutations + slot/model/hardware reads.
 const AGENT_SUGGEST = window.AGENT_SUGGEST || [
   "what's blocked?",
+  "which slots are serving?",
   "triage everything",
-  "assign all ready tasks",
-  "free memory for img",
+  "how's the hardware doing?",
 ];
 
 // ─── Agent chat slide-out (the orchestrator) ──────────────────────────
@@ -26,55 +27,30 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
     ? chat
     : (window.__hal0UseBoardChat ? window.__hal0UseBoardChat() : null);
 
-  // live path
-  const messages = chatHook ? chatHook.messages : (window.AGENT_SEED || []);
-  const streaming = chatHook ? chatHook.streaming : false;
+  // NO STUB DATA (CONTRACTS.md hard rule): when the hook bridge isn't loaded
+  // the composer is disabled and the thread shows an unavailable notice —
+  // canned fake replies here used to mask a broken bridge as a working agent.
+  const displayMsgs = chatHook ? chatHook.messages : [];
+  const isTyping    = chatHook ? chatHook.streaming : false;
 
-  // local draft (send delegates to hook or stub)
   const [draft, setDraft] = useState("");
-
-  // stub state only used when hook absent
-  const [stubMsgs, setStubMsgs] = useState(window.AGENT_SEED || []);
-  const [stubTyping, setStubTyping] = useState(false);
-
   const threadRef = useRef(null);
 
   useEffect(() => {
     if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
-  }, [messages, stubMsgs, streaming, stubTyping]);
-
-  const stubReply = (q) => {
-    const lc = q.toLowerCase();
-    if (lc.includes("block")) return { body: "One task is blocked: the img slot can't claim GTT to load sdxl-turbo. It needs ~6.5 GB of unified-memory headroom. Everything else is healthy.", refs: [] };
-    if (lc.includes("triage")) return { body: "Triage tasks are being processed. I'll decompose anything over complexity threshold 3.", refs: [] };
-    if (lc.includes("assign") || lc.includes("ready")) return { body: "Ready tasks will be dispatched. Confirm and I'll claim them.", refs: [] };
-    if (lc.includes("memory") || lc.includes("free") || lc.includes("img")) return { body: "To free GTT for img I'd nuclear-evict the previous GPU tenant. Want me to queue the evict and retry the slot?", refs: [] };
-    return { body: "Tracked. I'll keep the board in sync and surface anything that needs your call.", refs: [] };
-  };
+  }, [displayMsgs, isTyping]);
 
   const send = (text) => {
     const t = (text || draft).trim();
-    if (!t) return;
+    if (!t || !chatHook) return;
     setDraft("");
-    if (chatHook) {
-      chatHook.send(t);
-      return;
-    }
-    // stub fallback
-    setStubMsgs(m => [...m, { role: "user", at: "just now", body: t, refs: [] }]);
-    setStubTyping(true);
-    setTimeout(() => {
-      const r = stubReply(t);
-      setStubTyping(false);
-      setStubMsgs(m => [...m, { role: "assistant", at: "just now", body: r.body, refs: r.refs }]);
-    }, 900);
+    chatHook.send(t);
   };
 
-  const displayMsgs = chatHook ? messages : stubMsgs;
-  const isTyping    = chatHook ? streaming : stubTyping;
-
-  const roleLabel = (role) => role === "assistant" ? "agent" : "operator";
-  const roleCls   = (role) => role === "assistant" ? "agent" : "operator";
+  // `tool` frames are the orchestrator's audited board mutations — label them
+  // as tool activity, not as operator messages.
+  const roleLabel = (role) => role === "assistant" ? "agent" : role === "tool" ? "tool" : "operator";
+  const roleCls   = (role) => role === "assistant" ? "agent" : role === "tool" ? "tool" : "operator";
 
   return (
     <React.Fragment>
@@ -82,20 +58,24 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
       <aside
         className="b-drawer chat"
         role="dialog"
-        aria-label="agent orchestrator"
+        aria-label="platform assistant"
         data-testid="board-chat"
       >
         <div className="b-drawer-h">
           <span className="dh-title">
             <span className="kdot live" style={{ "--st": "var(--ok)" }} />
-            agent · orchestrator
+            agent · platform assistant
           </span>
           <span className="spacer" />
           <span className="dh-x" onClick={onClose}><Icon name="close" /></span>
         </div>
 
         <div className="chat-thread" ref={threadRef}>
-          <div className="chat-intro">talks to the gateway dispatcher · acts on this board</div>
+          <div className="chat-intro">
+            {chatHook
+              ? "administers this hal0 instance · board · slots · models · settings"
+              : "chat backend unavailable — hook bridge not loaded"}
+          </div>
 
           {displayMsgs.map((m, i) => (
             <div
@@ -150,7 +130,8 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
         <div className="b-dr-composer">
           <textarea
             value={draft}
-            placeholder="Ask the orchestrator…  (Enter to send)"
+            disabled={!chatHook}
+            placeholder={chatHook ? "Ask the orchestrator…  (Enter to send)" : "chat unavailable"}
             data-testid="board-chat-input"
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
@@ -158,6 +139,7 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
           <button
             className="btn"
             data-testid="board-chat-send"
+            disabled={!chatHook}
             onClick={() => send()}
           >
             <Icon name="send" size={13} />Send

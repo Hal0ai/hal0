@@ -116,13 +116,14 @@ test.describe('BoardView — agent chat', () => {
     await expect(page.locator('[data-testid="board-chat-msg"]').nth(1)).toContainText('Persisted reply')
   })
 
-  // ── Send via stub (no hook) ────────────────────────────────────────────
-  // When __hal0UseBoardChat is absent the stub path is used (typing reply + setTimeout).
-  // The spec uses the mock SSE route which makes the hook present.
+  // ── No hook → honest unavailable state (NO STUB DATA hard rule) ────────
+  // When __hal0UseBoardChat is absent the composer is DISABLED and the thread
+  // shows an unavailable notice. The old canned-reply stub path masked a
+  // broken hook bridge as a working agent.
 
-  test('stub path: suggestion chip sends message and stub reply appears', async ({ page }) => {
-    // Block the chat hook so stub path fires (delete alone won't work —
-    // board-hook-bridge.ts sets it after all init scripts; use defineProperty to prevent that)
+  test('missing hook: composer disabled + unavailable notice, no fake replies', async ({ page }) => {
+    // Block the chat hook (delete alone won't work — board-hook-bridge.ts
+    // sets it after all init scripts; use defineProperty to prevent that)
     await page.addInitScript(() => {
       Object.defineProperty(window, '__hal0UseBoardChat', {
         get: () => undefined,
@@ -134,13 +135,13 @@ test.describe('BoardView — agent chat', () => {
     await gotoBoardAndWait(page)
     await openChat(page)
 
-    // Click first suggestion chip
+    await expect(page.locator('[data-testid="board-chat"] .chat-intro')).toContainText('unavailable')
+    await expect(page.locator('[data-testid="board-chat-input"]')).toBeDisabled()
+    await expect(page.locator('[data-testid="board-chat-send"]')).toBeDisabled()
+    // Clicking a suggestion chip must NOT fabricate a reply.
     await page.locator('[data-testid="board-chat-suggest-0"]').click()
-    // User message should appear
-    const msgs = page.locator('[data-testid="board-chat-msg"]')
-    await expect(msgs.first()).toBeVisible({ timeout: FIVE_S })
-    // After ~1s the stub reply appears
-    await expect(msgs).toHaveCount(2, { timeout: 3000 })
+    await page.waitForTimeout(1200)
+    await expect(page.locator('[data-testid="board-chat-msg"]')).toHaveCount(0)
   })
 
   // ── SSE streaming path ────────────────────────────────────────────────
@@ -240,30 +241,37 @@ test.describe('BoardView — agent chat', () => {
     await expect(msgs.nth(1)).toContainText('Moving task')
   })
 
+  // Ref-chip rendering is driven through a CONTROLLED hook (the stub-reply
+  // path is gone): pin __hal0UseBoardChat to a fake returning messages with
+  // refs, exercising the real render path in AgentChat.
+
+  // NOTE: addInitScript serialises the function — it must not close over
+  // spec-scope variables; everything rides in the single argument.
+  const pinChatHookWithRefs = ({ id, body }: { id: string; body: string }) => {
+    const fakeHook = () => ({
+      messages: [{ role: 'assistant', at: 'just now', body, refs: [id] }],
+      send: () => {},
+      streaming: false,
+    })
+    Object.defineProperty(window, '__hal0UseBoardChat', {
+      get: () => fakeHook,
+      set: () => {},
+      configurable: false,
+    })
+  }
+
   test('chat ref chip (board-chat-ref-<id>) renders when refs present', async ({ page }) => {
     const refTask = BOARD_TASKS.find(t => t.status === 'blocked')!
 
-    // Block hook so stub path fires with refs
-    await page.addInitScript((id: string) => {
-      ;(window as any).AGENT_SEED = [
-        {
-          role: 'assistant',
-          at: 'just now',
-          body: 'Blocked task needs attention.',
-          refs: [id],
-        },
-      ]
-      Object.defineProperty(window, '__hal0UseBoardChat', {
-        get: () => undefined,
-        set: () => {},
-        configurable: false,
-      })
-    }, refTask.id)
+    await page.addInitScript(pinChatHookWithRefs, {
+      id: refTask.id,
+      body: 'Blocked task needs attention.',
+    })
 
     await gotoBoardAndWait(page)
     await openChat(page)
 
-    // Ref chip for the blocked task should be visible in the seeded message
+    // Ref chip for the blocked task should be visible in the hook's message
     const refChip = page.locator(`[data-testid="board-chat-ref-${refTask.id}"]`)
     await expect(refChip).toBeVisible({ timeout: FIVE_S })
   })
@@ -271,21 +279,7 @@ test.describe('BoardView — agent chat', () => {
   test('clicking ref chip opens task drawer', async ({ page }) => {
     const refTask = BOARD_TASKS.find(t => t.status === 'blocked')!
 
-    await page.addInitScript((id: string) => {
-      ;(window as any).AGENT_SEED = [
-        {
-          role: 'assistant',
-          at: 'just now',
-          body: 'Check this.',
-          refs: [id],
-        },
-      ]
-      Object.defineProperty(window, '__hal0UseBoardChat', {
-        get: () => undefined,
-        set: () => {},
-        configurable: false,
-      })
-    }, refTask.id)
+    await page.addInitScript(pinChatHookWithRefs, { id: refTask.id, body: 'Check this.' })
 
     await gotoBoardAndWait(page)
     await openChat(page)

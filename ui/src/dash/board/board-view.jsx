@@ -24,6 +24,8 @@
 //   window.__hal0UseUpdateTask
 //   window.__hal0UseBulkTasks
 //   window.__hal0UseDeleteTask
+//   (board scope: the selected board slug threads through every hook —
+//   query, mutations, events WS — per the frozen ?board= contract)
 //   window.__hal0UseReassignTask
 //   window.__hal0UseNudgeDispatch
 //   window.__hal0UseSwitchBoard
@@ -90,7 +92,9 @@ const BOARD_LANES = [
   { id: "todo",      name: "To-do",     desc: "Specified + queued" },
   { id: "scheduled", name: "Scheduled", desc: "Time-triggered tasks" },
   { id: "ready",     name: "Ready",     desc: "Claimed, agent dispatching" },
-  { id: "running",   name: "Running",   desc: "Worker active" },
+  // Contract (CONTRACTS.md §Status/lane model): UI label for `running` is
+  // "In-progress" — the status VALUE stays `running` on the wire.
+  { id: "running",   name: "In-progress", desc: "Worker active" },
   { id: "blocked",   name: "Blocked",   desc: "Waiting for resource or input" },
   { id: "review",    name: "Review",    desc: "Needs operator sign-off" },
   { id: "done",      name: "Done",      desc: "Completed" },
@@ -99,6 +103,10 @@ const BOARD_LANES = [
   // via the bulk "archive" action and the task-drawer archive button.
   { id: "archived",  name: "Archived",  desc: "Archived tasks" },
 ];
+
+// Published for the drawer's stName() (task-drawer.jsx reads window.LANE to
+// render lane display names — without this it falls back to raw status ids).
+window.LANE = Object.fromEntries(BOARD_LANES.map(l => [l.id, l]));
 
 // ─── Lightweight dropdown (filter selects) ────────────────────────────────────
 function BoardSelect({ label, value, options, onChange, width }) {
@@ -162,6 +170,7 @@ function BoardView() {
   const useBoardOrchestration = window.__hal0UseBoardOrchestration;
   const useBoardConfig      = window.__hal0UseBoardConfig;
   const useUpdateTask       = window.__hal0UseUpdateTask;
+  const useBulkTasks        = window.__hal0UseBulkTasks;
   const useDeleteTask       = window.__hal0UseDeleteTask;
   const useReassignTask     = window.__hal0UseReassignTask;
   const useNudgeDispatch    = window.__hal0UseNudgeDispatch;
@@ -170,25 +179,36 @@ function BoardView() {
   const useCreateTask       = window.__hal0UseCreateTask;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
 
-  // ── keep WS stream alive ──
-  useBoardEventsStream && useBoardEventsStream();
+  // ── board scope (declared before the queries that thread it) ──
+  // null = the server's current board (omit ?board=, per contract). Set only
+  // on an explicit switch so a fresh mount follows whatever Hermes considers
+  // current instead of assuming a "default" slug exists.
+  const [board, setBoard]           = useState(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const boardArg = board || undefined;
+
+  // ── keep WS stream alive (scoped to the selected board) ──
+  useBoardEventsStream && useBoardEventsStream({ board: boardArg });
 
   // ── data queries ──
-  const boardViewQ    = useBoardView ? useBoardView({}) : { data: null };
+  const boardViewQ    = useBoardView
+    ? useBoardView({ board: boardArg, includeArchived: showArchived })
+    : { data: null };
   const boardsQ       = useBoards    ? useBoards()       : { data: null };
   const profilesQ     = useBoardProfiles ? useBoardProfiles() : { data: null };
-  const assigneesQ    = useBoardAssignees ? useBoardAssignees() : { data: null };
+  const assigneesQ    = useBoardAssignees ? useBoardAssignees(boardArg) : { data: null };
   const orchQ         = useBoardOrchestration ? useBoardOrchestration() : { data: null };
   const configQ       = useBoardConfig ? useBoardConfig() : { data: null };
 
-  // ── mutations ──
-  const updateTask  = useUpdateTask  ? useUpdateTask()  : null;
-  const deleteTask  = useDeleteTask  ? useDeleteTask()  : null;
-  const reassignTask = useReassignTask ? useReassignTask() : null;
+  // ── mutations (board-scoped so ?board= + cache invalidation line up) ──
+  const updateTask  = useUpdateTask  ? useUpdateTask(boardArg)  : null;
+  const bulkTasks   = useBulkTasks   ? useBulkTasks(boardArg)   : null;
+  const deleteTask  = useDeleteTask  ? useDeleteTask(boardArg)  : null;
+  const reassignTask = useReassignTask ? useReassignTask(boardArg) : null;
   const nudge       = useNudgeDispatch ? useNudgeDispatch() : null;
   const switchBoard = useSwitchBoard ? useSwitchBoard()  : null;
   const createBoard = useCreateBoard ? useCreateBoard()  : null;
-  const createTask  = useCreateTask  ? useCreateTask()   : null;
+  const createTask  = useCreateTask  ? useCreateTask(boardArg)   : null;
   // The agent-chat slide-out (and its persistent conversation hook) now lives
   // in App (main.jsx) so it can be triggered from anywhere in the dash, not
   // just this page. The board's chat button toggles that global slide-out via
@@ -196,17 +216,17 @@ function BoardView() {
   // state. byId is published below so the global chat can resolve task refs.
 
   // ── local state ──
-  const [board, setBoard]           = useState("default");
   const [boardMenu, setBoardMenu]   = useState(false);
   const [newBoard, setNewBoard]     = useState(false);
 
   const [orchOpen, setOrchOpen]     = useState(false);
-  const [orch, setOrch]             = useState({ mode: "auto", tickInterval: 30, failureLimit: 3, maxInflight: 4, claimTtl: 120 });
+  // Popover fallback seed only — live values come from GET /orchestration.
+  const [orch, setOrch]             = useState({});
 
   const [search, setSearch]         = useState("");
   const [tenant, setTenant]         = useState("all");
   const [profile, setProfile]       = useState("all");
-  const [showArchived, setShowArchived] = useState(false);
+  const [attnOnly, setAttnOnly]     = useState(false);
   const [byProfile, setByProfile]   = useState(true);
 
   const [sel, setSel]               = useState(() => new Set());
@@ -222,7 +242,7 @@ function BoardView() {
 
   const [dragId, setDragId]         = useState(null);
   const [dragOver, setDragOver]     = useState(null);
-  const [delArmed, setDelArmed]     = useState(false);
+  const [archArmed, setArchArmed]   = useState(false);
 
   // ── reassign local state (for bulk reassign select) ──
   const [reassignTarget, setReassignTarget] = useState("");
@@ -282,6 +302,7 @@ function BoardView() {
     )) return false;
     if (tenant !== "all" && t.tenant !== tenant) return false;
     if (profile !== "all" && t.assignee !== profile) return false;
+    if (attnOnly && t.status !== "blocked" && t.status !== "review") return false;
     return true;
   };
 
@@ -294,7 +315,7 @@ function BoardView() {
 
   const visibleIds = useMemo(() =>
     tasks.filter(t => (t.status !== "archived" || showArchived) && matches(t)).map(t => t.id),
-    [tasks, search, tenant, profile, showArchived]
+    [tasks, search, tenant, profile, attnOnly, showArchived]
   );
 
   const attnTasks = tasks.filter(t => t.status === "blocked" || t.status === "review");
@@ -304,9 +325,13 @@ function BoardView() {
   const clearSel  = () => setSel(new Set());
   const selectAllVisible = () => setSel(new Set(visibleIds));
 
-  // ── mutations: bulk move via N updateTask PATCHes ──
+  // ── mutations: multi-card moves ride the audited POST /tasks/bulk (one
+  // round-trip, one audit row); single-card moves stay on PATCH so the
+  // optimistic drag update applies. ──
   const moveTo = (ids, status) => {
-    if (updateTask) {
+    if (ids.length > 1 && bulkTasks) {
+      bulkTasks.mutate({ ids, update: { status } });
+    } else if (updateTask) {
       ids.forEach(id => updateTask.mutate({ id, body: { status } }));
     }
   };
@@ -339,6 +364,7 @@ function BoardView() {
   };
 
   const doRefresh = () => {
+    if (boardViewQ && boardViewQ.refetch) boardViewQ.refetch();
     toast("board refreshed");
   };
 
@@ -351,7 +377,7 @@ function BoardView() {
       e.dataTransfer.effectAllowed = "move";
       try { e.dataTransfer.setData("text/plain", task.id); } catch (_) {}
     },
-    onDragEnd: () => { setDragId(null); setDragOver(null); setDelArmed(false); },
+    onDragEnd: () => { setDragId(null); setDragOver(null); setArchArmed(false); },
     onDrop: (laneId) => {
       if (dragId) {
         moveTo([dragId], laneId);
@@ -362,8 +388,8 @@ function BoardView() {
     },
   };
 
-  const clearFilters = () => { setSearch(""); setTenant("all"); setProfile("all"); setShowArchived(false); };
-  const anyFilter = search || tenant !== "all" || profile !== "all" || showArchived;
+  const clearFilters = () => { setSearch(""); setTenant("all"); setProfile("all"); setAttnOnly(false); setShowArchived(false); };
+  const anyFilter = search || tenant !== "all" || profile !== "all" || attnOnly || showArchived;
 
   // ── window component lookups ──
   const TaskDrawer     = window.TaskDrawer;
@@ -457,13 +483,16 @@ function BoardView() {
             {/* orchestration row */}
             <div className="orch-row">
               <div className="board-select" style={{ position: "relative" }}>
+                {/* The pill shows the REAL orchestrator profile from GET
+                    /orchestration. (An earlier version rendered a `mode`
+                    field the server never returns — a fabricated value.) */}
                 <div
-                  className={"orch-pill" + ((orchData.mode === "manual") ? " manual" : "")}
+                  className="orch-pill"
                   onClick={() => setOrchOpen(o => !o)}
                 >
                   <span className="od" />
                   <span className="k">Orchestration</span>
-                  <span className="v">{orchData.mode ?? "auto"}</span>
+                  <span className="v">{orchData.orchestrator_profile || "unset"}</span>
                 </div>
                 {orchOpen && (
                   <React.Fragment>
@@ -492,7 +521,7 @@ function BoardView() {
                 <span className="spacer" />
                 <button
                   className="ab"
-                  onClick={() => { setTenant("all"); setProfile("all"); setSearch(""); toast("filtered to attention"); }}
+                  onClick={() => { setTenant("all"); setProfile("all"); setSearch(""); setAttnOnly(true); toast("filtered to attention"); }}
                 >Show</button>
                 <span className="axc" onClick={() => setAttn(false)}>
                   <BoardIcon name="close" size={14} />
@@ -595,29 +624,31 @@ function BoardView() {
             )}
           </div>
 
-          {/* lanes — dropping a card ANYWHERE outside a column deletes it.
+          {/* lanes — dropping a card ANYWHERE outside a column ARCHIVES it
+              (recoverable via "Show archived"; a missed lane target must
+              never hard-delete the row — Hermes owns comments/runs/links).
               While a drag is over the board background (not a lane) the
-              danger veil below arms; releasing there removes the card. */}
+              archive veil below arms; releasing there archives the card. */}
           <div
             className="lanes-scroll"
-            data-testid="board-drop-delete"
+            data-testid="board-drop-archive"
             onDragOver={(e) => {
               if (!dragId) return;
               const overLane = e.target.closest && e.target.closest(".lane");
               e.preventDefault();
-              setDelArmed(!overLane);
+              setArchArmed(!overLane);
             }}
             onDrop={(e) => {
               if (!dragId) return;
               const overLane = e.target.closest && e.target.closest(".lane");
               if (!overLane) {
                 e.preventDefault();
-                delTasks([dragId]);
-                toast(dragId + " deleted");
+                moveTo([dragId], "archived");
+                toast(dragId + " archived");
               }
               setDragId(null);
               setDragOver(null);
-              setDelArmed(false);
+              setArchArmed(false);
             }}
           >
             <div className="lanes">
@@ -641,13 +672,13 @@ function BoardView() {
           </div>
         </div>
 
-        {/* danger veil — pointer-events:none so the drop still lands on the
+        {/* archive veil — pointer-events:none so the drop still lands on the
             lanes-scroll background underneath; purely a visual cue. */}
-        {dragId && delArmed && (
-          <div className="danger-veil" data-testid="board-danger-veil" aria-hidden="true">
-            <div className="danger-badge">
-              <BoardIcon name="trash" size={34} />
-              <span>Release to delete</span>
+        {dragId && archArmed && (
+          <div className="archive-veil" data-testid="board-archive-veil" aria-hidden="true">
+            <div className="archive-badge">
+              <BoardIcon name="archive" size={34} />
+              <span>Release to archive</span>
             </div>
           </div>
         )}
@@ -659,6 +690,7 @@ function BoardView() {
           key={opened.id}
           task={opened}
           byId={byId}
+          board={boardArg}
           onClose={() => setOpenTask(null)}
           onOpenTask={(id) => setOpenTask(id)}
           onToast={toast}
@@ -683,7 +715,15 @@ function BoardView() {
               if (createTask) {
                 createTask.mutate(
                   { ...fields, status: laneId },
-                  { onSuccess: () => toast('task "' + fields.title + '" created in ' + laneId) }
+                  {
+                    onSuccess: (res) => {
+                      toast('task "' + fields.title + '" created in ' + laneId);
+                      // Hermes flags creation with no dispatcher running via a
+                      // `warning` on the result — surface it, don't swallow it.
+                      const warn = res && (res.warning || (res.task && res.task.warning));
+                      if (warn) toast(String(warn), "warn");
+                    },
+                  }
                 );
               }
             }}

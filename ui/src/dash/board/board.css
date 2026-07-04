@@ -226,11 +226,12 @@
 .board[data-meta="off"] .kc-id { display: none; }
 .board[data-meta="off"] .kc-when { display: none; }
 
-/* drag-to-delete danger veil — shown while a card is dragged over the board
+/* drag-to-archive veil — shown while a card is dragged over the board
    background (outside any column). pointer-events:none so the drop still
-   reaches the lanes-scroll handler underneath. */
-.board .danger-veil { position: fixed; inset: 0; z-index: 110; pointer-events: none; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 32%, var(--err-soft) 100%); animation: board-fade-in var(--dur) var(--ease); }
-.board .danger-badge { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 22px 30px; border: 1px solid var(--err-line); border-radius: var(--rad-lg); background: var(--err-soft); color: var(--err); font-family: var(--jbm); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; box-shadow: var(--shadow-menu); }
+   reaches the lanes-scroll handler underneath. Amber accent, not destructive
+   red: the drop archives (recoverable via "Show archived"), it never deletes. */
+.board .archive-veil { position: fixed; inset: 0; z-index: 110; pointer-events: none; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 32%, var(--accent-soft) 100%); animation: board-fade-in var(--dur) var(--ease); }
+.board .archive-badge { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 22px 30px; border: 1px solid var(--accent-line); border-radius: var(--rad-lg); background: var(--accent-soft); color: var(--accent); font-family: var(--jbm); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; box-shadow: var(--shadow-menu); }
 
 /* ─── Drawer scrim (position:fixed — intentionally unscoped) ─────────── */
 .b-drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 90; animation: board-fade-in var(--dur) var(--ease); }
@@ -338,6 +339,10 @@
 .b-drawer .msg-ref { display: inline-flex; align-items: center; gap: 6px; font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); border: 1px solid var(--line-strong); border-radius: var(--rad-sm); padding: 2px 7px; cursor: pointer; background: var(--bg-1); }
 .b-drawer .msg-ref:hover { border-color: var(--accent-line); color: var(--accent); }
 .b-drawer .msg-ref .kdot { width: 5px; height: 5px; }
+/* tool frames — the orchestrator's audited board mutations: compact + mono */
+.b-drawer .msg.tool { align-self: flex-start; max-width: 100%; }
+.b-drawer .msg.tool .msg-meta .who { color: var(--info); }
+.b-drawer .msg.tool .msg-b { background: var(--bg-1); border-style: dashed; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); word-break: break-word; }
 .b-drawer .chat-suggest { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 10px; flex-shrink: 0; }
 .b-drawer .sugg { font-family: var(--jbm); font-size: 11px; color: var(--fg-3); border: 1px solid var(--line); border-radius: var(--rad-pill); padding: 5px 11px; cursor: pointer; background: var(--bg); }
 .b-drawer .sugg:hover { border-color: var(--accent-line); color: var(--accent); }
@@ -437,5 +442,17 @@
 
   .board .lanes-scroll {
     padding: 4px 16px 0;
+  }
+}
+
+/* ─── A11y: reduced motion ───────────────────────────────────────────── */
+/* Kill the pulse/typing loops for reduced-motion users (acceptance gate in
+   CONTRACTS.md). Colour + glow stay so the state signal survives without
+   motion; the dashboard-wide guard only covers .dot.*, not the board's kdot. */
+@media (prefers-reduced-motion: reduce) {
+  .board .kdot.live,
+  .board[data-accent="dot"] .st-running .kc-dot,
+  .b-drawer .typing i {
+    animation: none;
   }
 }

@@ -1,18 +1,24 @@
-"""Operator Board chat orchestrator — ``POST /api/board/chat`` (SSE).
+"""Platform assistant chat orchestrator — ``POST /api/board/chat`` (SSE).
 
-SPEC §2.D: a hal0-NATIVE conversational surface that can manage the board.
-hal0-api runs a client-side OpenAI tool-calling loop whose LLM is the hal0
-``primary`` chat slot (reached via hal0-api's own ``/v1/chat/completions``
-surface, mirroring :class:`hal0.omni_router.OmniRouter`). The toolset maps 1:1
-onto the AUDITED ``/api/board/*`` mutations:
+SPEC §2.D grown into the platform surface: a hal0-NATIVE conversational agent
+that administers the whole instance, not just the board. hal0-api runs a
+client-side OpenAI tool-calling loop whose LLM is the hal0 ``agent`` slot
+(reached via hal0-api's own ``/v1/chat/completions`` surface, mirroring
+:class:`hal0.omni_router.OmniRouter`). Three tool families:
 
-    move/assign · create · comment · dep add/remove · block · specify ·
-    decompose · nudge
+* **Board reads** (unaudited, via :class:`HermesKanbanClient` — mirrors the
+  REST proxy's allowlisted GET rows): get_board · get_task · get_assignees ·
+  get_orchestration.
+* **Board mutations** (each an AUDITED ``board.chat.turn`` row through the
+  same client the REST handlers use): move/assign · create · comment ·
+  dep add/remove · block · specify · decompose · nudge · orchestration update.
+* **Platform tools** (hal0-api's OWN surface, self-HTTP against
+  ``app.state.self_api_base_url``): slots list/get/load/unload/restart,
+  models, hardware stats, installed agents. Reads unaudited; slot mutations
+  write ``platform.chat.turn`` rows.
 
-Every tool the LLM calls is dispatched through the SAME audited mutation path
-the REST handlers use (the :class:`HermesKanbanClient` + a ``board.chat.turn``
-audit row per call), so a chat-driven mutation surfaces on the board LIVE via
-the kanban events WS — chat is NOT the board transport.
+A chat-driven board mutation surfaces on the board LIVE via the kanban events
+WS — chat is NOT the board transport.
 
 Transport contract (kept stable so the LLM backend can later swap to the
 Hermes agent via chat_proxy WITHOUT any UI change):
@@ -57,6 +63,39 @@ _MAX_ROUNDS = 8
 # (Named PRIMARY_SLOT_MODEL for back-compat; resolves via the resolver chains.)
 PRIMARY_SLOT_MODEL = "hal0/agent"
 
+# Injected as the leading system message when the client doesn't send one.
+# Without it the LLM had ten write tools, no read tools, and no idea what the
+# lanes mean — it could mutate the board but never see it, so "what's
+# blocked?" or "move the auth task to review" was unanswerable.
+_SYSTEM_PROMPT = """\
+You are the hal0 platform assistant: a terse operations agent that
+administers this hal0 instance via tools — the Operator Board (kanban),
+inference slots, models, agent profiles, and orchestration settings.
+
+Surfaces:
+- Board: lanes (the `status` values) are triage (new, awaiting spec), todo
+  (specified and queued), scheduled (time-triggered), ready (claimed for
+  dispatch), running (worker active), blocked (waiting on input; carries
+  block_reason), review (needs operator sign-off), done, archived.
+- Slots: list_slots / get_slot report each inference slot's state (serving,
+  ready, warming, idle, offline, error), model and throughput;
+  slot_load / slot_unload / slot_restart change them.
+- Catalogue: list_models (model library), list_agents (installed platform
+  agents), hardware_stats (RAM/VRAM/GTT, GPU util, NPU status).
+- Settings: get_orchestration / update_orchestration (board dispatcher knobs:
+  orchestrator_profile, default_assignee, auto_decompose,
+  auto_promote_children).
+
+Rules:
+- You cannot see state unless you look. Call the matching read tool first and
+  resolve exact task ids / slot names before mutating. Never guess ids.
+- Board mutations are audited and land on the live board immediately.
+- Slot load/unload/restart are DISRUPTIVE (they can evict models and drop
+  in-flight requests): do them only when the operator explicitly asks, and
+  state what you did.
+- Prefer a clarifying question over a destructive guess. Keep replies short.
+"""
+
 #: LLM backend signature: an OpenAI chat-completion request body in, the
 #: parsed response dict out.
 LlmFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -81,8 +120,97 @@ def _fn(name: str, desc: str, props: dict[str, Any], required: list[str]) -> dic
 
 
 def _tool_schemas() -> list[dict[str, Any]]:
-    """OpenAI ``tools`` array advertised to the LLM."""
+    """OpenAI ``tools`` array advertised to the LLM (reads first, then writes)."""
     return [
+        _fn(
+            "get_board",
+            "Read the whole board: every task's id/title/status/assignee/"
+            "priority. Call this FIRST to resolve task ids before mutating.",
+            {},
+            [],
+        ),
+        _fn(
+            "get_task",
+            "Read one task in full: body, comments, events, runs, links.",
+            {"task_id": {"type": "string"}},
+            ["task_id"],
+        ),
+        _fn(
+            "get_assignees",
+            "List the assignable actors (agent profiles) on this board.",
+            {},
+            [],
+        ),
+        _fn(
+            "get_orchestration",
+            "Read the board dispatcher settings (orchestrator_profile, "
+            "default_assignee, auto_decompose, auto_promote_children).",
+            {},
+            [],
+        ),
+        _fn(
+            "update_orchestration",
+            "Update the board dispatcher settings. Only pass the knobs to change.",
+            {
+                "orchestrator_profile": {"type": "string"},
+                "default_assignee": {"type": "string"},
+                "auto_decompose": {"type": "boolean"},
+                "auto_promote_children": {"type": "boolean"},
+            },
+            [],
+        ),
+        _fn(
+            "list_slots",
+            "List the inference slots: name, state (serving/ready/warming/idle/"
+            "offline/error), model, backend, throughput.",
+            {},
+            [],
+        ),
+        _fn(
+            "get_slot",
+            "Read one inference slot in detail.",
+            {"name": {"type": "string"}},
+            ["name"],
+        ),
+        _fn(
+            "slot_load",
+            "Load a slot's model into memory. DISRUPTIVE: may evict other "
+            "tenants — only on explicit operator request.",
+            {"name": {"type": "string"}},
+            ["name"],
+        ),
+        _fn(
+            "slot_unload",
+            "Unload a slot's model from memory. DISRUPTIVE — only on explicit "
+            "operator request.",
+            {"name": {"type": "string"}},
+            ["name"],
+        ),
+        _fn(
+            "slot_restart",
+            "Restart a slot's backend process. DISRUPTIVE: drops in-flight "
+            "requests — only on explicit operator request.",
+            {"name": {"type": "string"}},
+            ["name"],
+        ),
+        _fn(
+            "list_models",
+            "List the model library (installed + known models).",
+            {},
+            [],
+        ),
+        _fn(
+            "hardware_stats",
+            "Read hardware utilisation: RAM/VRAM/GTT, GPU util, NPU status.",
+            {},
+            [],
+        ),
+        _fn(
+            "list_agents",
+            "List the installed platform agents (e.g. hermes, pi-coder).",
+            {},
+            [],
+        ),
         _fn(
             "move_task",
             "Move a task to a different lane / status (drag-drop equivalent).",
@@ -168,6 +296,153 @@ def _tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
+# ── read tools (allowlisted GETs — mirror the UNAUDITED REST read rows) ─────
+
+
+def _resolve_read_tool(name: str, args: dict[str, Any]) -> tuple[str | None, str]:
+    """Map a read tool → (method, upstream sub-path); (None, "") if not a read.
+
+    These hit the same allowlisted GET paths the table-driven REST proxy
+    forwards, and like those reads they write NO audit rows.
+    """
+    if name == "get_board":
+        return "GET", "/board"
+    if name == "get_task":
+        return "GET", f"/tasks/{args.get('task_id', '')}"
+    if name == "get_assignees":
+        return "GET", "/assignees"
+    if name == "get_orchestration":
+        return "GET", "/orchestration"
+    return None, ""
+
+
+# Fields kept when compacting a board row for the tool result. Full rows carry
+# bodies/summaries per task; a big board would blow the loop's context budget.
+_COMPACT_TASK_FIELDS = (
+    "id",
+    "title",
+    "status",
+    "assignee",
+    "profile",
+    "priority",
+    "block_reason",
+    "tenant",
+)
+
+
+def _compact_board(result: Any) -> Any:
+    """Trim a GET /board payload to compact task rows.
+
+    Accepts the same four wire shapes the dashboard normaliser handles —
+    ``{columns:[{tasks}]}`` (what Hermes emits), ``{lanes:{status:[...]}}``,
+    ``{tasks:[...]}``, or a bare list — and returns ``{"tasks": [...]}``.
+    Anything unrecognised passes through untouched.
+    """
+    rows: list[dict[str, Any]] = []
+    if isinstance(result, dict):
+        if isinstance(result.get("columns"), list):
+            for col in result["columns"]:
+                if isinstance(col, dict) and isinstance(col.get("tasks"), list):
+                    rows.extend(t for t in col["tasks"] if isinstance(t, dict))
+        elif isinstance(result.get("lanes"), dict):
+            for tasks in result["lanes"].values():
+                if isinstance(tasks, list):
+                    rows.extend(t for t in tasks if isinstance(t, dict))
+        elif isinstance(result.get("tasks"), list):
+            rows = [t for t in result["tasks"] if isinstance(t, dict)]
+        else:
+            return result
+    elif isinstance(result, list):
+        rows = [t for t in result if isinstance(t, dict)]
+    else:
+        return result
+    return {
+        "tasks": [
+            {k: t[k] for k in _COMPACT_TASK_FIELDS if t.get(k) is not None} for t in rows
+        ]
+    }
+
+
+# ── platform tools (hal0-api's OWN surface, via self-HTTP) ──────────────────
+#
+# These do not touch Hermes: they call hal0-api's existing slot/model/agent
+# routes on the same instance (``app.state.self_api_base_url``), re-entering
+# the normal dispatch chain. Tests inject ``app.state.platform_http`` (an
+# httpx.AsyncClient over a MockTransport); production builds one per call.
+
+_PLATFORM_READS = {
+    "list_slots": "/api/slots",
+    "list_models": "/api/models",
+    "hardware_stats": "/api/stats/hardware",
+    "list_agents": "/api/agents",
+}
+
+# Disruptive slot verbs — each is audited as a ``platform.chat.turn`` row.
+_SLOT_MUTATIONS = {"slot_load": "load", "slot_unload": "unload", "slot_restart": "restart"}
+
+
+def _resolve_platform_tool(
+    name: str, args: dict[str, Any]
+) -> tuple[str | None, str, bool]:
+    """Map a platform tool → (method, hal0-api path, mutating)."""
+    if name in _PLATFORM_READS:
+        return "GET", _PLATFORM_READS[name], False
+    if name == "get_slot":
+        return "GET", f"/api/slots/{args.get('name', '')}", False
+    if name in _SLOT_MUTATIONS:
+        return "POST", f"/api/slots/{args.get('name', '')}/{_SLOT_MUTATIONS[name]}", True
+    return None, "", False
+
+
+async def _platform_request(http: httpx.AsyncClient, method: str, path: str) -> Any:
+    """One self-HTTP call, mapped to a tool-result the loop can step against."""
+    try:
+        resp = await http.request(method, path)
+    except httpx.HTTPError as exc:
+        return {"error": f"platform API unreachable: {exc}"}
+    if resp.status_code >= 400:
+        return {"error": f"platform API HTTP {resp.status_code}: {resp.text[:300]}"}
+    if not resp.content:
+        return {}
+    try:
+        return resp.json()
+    except ValueError:
+        return {"raw": resp.text[:500]}
+
+
+async def _dispatch_platform_tool(
+    request: Request,
+    name: str,
+    args: dict[str, Any],
+    *,
+    method: str,
+    path: str,
+    mutating: bool,
+) -> Any:
+    """Run one platform tool; slot mutations write a ``platform.chat.turn`` row."""
+    http = getattr(request.app.state, "platform_http", None)
+    owns = http is None
+    if owns:
+        base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
+        http = httpx.AsyncClient(base_url=base.rstrip("/"), timeout=60.0)
+    try:
+        if not mutating:
+            return await _platform_request(http, method, path)
+        async with record_action(
+            request,
+            category="platform",
+            action="platform.chat.turn",
+            target=args.get("name"),
+            message=f"chat:{name}",
+        ) as rec:
+            result = await _platform_request(http, method, path)
+            rec.after = result if isinstance(result, dict) else {"result": result}
+            return result
+    finally:
+        if owns:
+            await http.aclose()
+
+
 # ── tool dispatch → audited board mutation ──────────────────────────────────
 
 
@@ -218,6 +493,10 @@ def _resolve_tool(
         if args.get("max") is not None:
             params["max"] = args["max"]
         return "POST", "/dispatch", params, {}, None
+    if name == "update_orchestration":
+        # PUT /orchestration — partial update, only the knobs passed.
+        body = {k: v for k, v in args.items() if v is not None}
+        return "PUT", "/orchestration", {}, body, None
     return None, "", {}, None, None
 
 
@@ -229,12 +508,30 @@ async def _dispatch_tool(
     *,
     board: str | None,
 ) -> Any:
-    """Run one board tool through the audited mutation path.
+    """Run one board tool: reads pass straight through, mutations are audited.
 
     Returns the upstream JSON result (or an ``{"error": ...}`` envelope the
-    loop can keep stepping against). Each call writes a ``board.chat.turn``
-    audit row with ``rec.after`` = result.
+    loop can keep stepping against). Each MUTATION writes a ``board.chat.turn``
+    audit row with ``rec.after`` = result; reads write none — matching the
+    REST proxy's audited-mutations / unaudited-reads split.
     """
+    read_method, read_path = _resolve_read_tool(name, args)
+    if read_method is not None:
+        params = {"board": board} if board else None
+        result = await client.request_json(
+            read_method,
+            read_path,
+            params=params,
+            agent_id=request.headers.get("X-hal0-Agent"),
+        )
+        return _compact_board(result) if name == "get_board" else result
+
+    p_method, p_path, p_mutating = _resolve_platform_tool(name, args)
+    if p_method is not None:
+        return await _dispatch_platform_tool(
+            request, name, args, method=p_method, path=p_path, mutating=p_mutating
+        )
+
     method, path, tool_params, body, target = _resolve_tool(name, args)
     if method is None:
         return {"error": f"unknown tool: {name}"}
@@ -365,6 +662,12 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     llm = _resolve_llm(request)
     board = payload.get("board")
     messages: list[dict[str, Any]] = list(payload.get("messages") or [])
+    # Seed the system prompt unless the client sent its own — the model needs
+    # the lane vocabulary and the read-before-write rule to act on the board.
+    if not messages or not (
+        isinstance(messages[0], dict) and messages[0].get("role") == "system"
+    ):
+        messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
 
     body: dict[str, Any] = {
         "model": payload.get("model") or PRIMARY_SLOT_MODEL,
@@ -446,7 +749,11 @@ async def run_board_chat(request: Request) -> StreamingResponse:
 __all__ = [
     "PRIMARY_SLOT_MODEL",
     "_chat_stream",
+    "_compact_board",
+    "_dispatch_platform_tool",
     "_dispatch_tool",
+    "_resolve_platform_tool",
+    "_resolve_read_tool",
     "_resolve_tool",
     "_tool_schemas",
     "run_board_chat",

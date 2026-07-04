@@ -1,5 +1,16 @@
 # Operator Board ↔ Hermes kanban plugin — analysis & recommended hal0-side fixes
 
+> **Implementation status (2026-07-04, this branch):** everything in §2 and §3
+> is FIXED here except §3.1's token streaming (the loop still posts
+> `stream: false`; frames arrive per round). §2.6 resolved as drop-outside →
+> ARCHIVE. §3.1 landed as read tools + system prompt, then grew into the
+> platform-assistant scope (slots/models/agents/orchestration tools — see
+> `board_chat.py` docstring). §3.4 remains open for stats/diagnostics/
+> workers-active/reclaim surfaces. §4's reduced-motion + stub-reply items are
+> fixed; the window-globals hook-guard pattern is unchanged (noted risk only).
+> Bonus: the dashboard's fonts.googleapis.com dependency was replaced with the
+> already-shipped @fontsource packages (offline-correct, deterministic e2e).
+
 > Scope: the hal0 Operator Board surface (`src/hal0/board/`, `src/hal0/api/routes/board*.py`,
 > `ui/src/dash/board/`, `ui/src/api/hooks/useBoard.ts`) versus the connection to the external
 > hermes-agent dashboard's kanban plugin (`{HERMES_DASHBOARD_BASE_URL}/api/plugins/kanban/*`).

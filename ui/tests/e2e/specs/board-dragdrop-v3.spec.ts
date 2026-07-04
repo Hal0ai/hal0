@@ -3,7 +3,8 @@
  *
  * Covers:
  *   - Drag card between lanes → assert PATCH /api/board/tasks/<id> body {status}
- *   - Drop card to delete zone → assert DELETE /api/board/tasks/<id>
+ *   - Drop card outside any lane → assert PATCH {status:"archived"} (a missed
+ *     drop must never hard-delete the row — archiving is recoverable)
  *
  * HTML5 DnD note: Playwright dragTo() fires dragstart+dragover+drop too fast
  * for React's synthetic event to commit dragId state. We use the split approach:
@@ -132,13 +133,20 @@ test.describe('BoardView — drag-and-drop', () => {
     expect(patchBody).toMatchObject({ status: 'done' })
   })
 
-  test('drop card on delete zone → DELETE /api/board/tasks/<id>', async ({ page }) => {
+  test('drop card outside any lane → PATCH {status:"archived"}, never DELETE', async ({ page }) => {
     const anyTask = BOARD_TASKS.find(t => t.status === 'ready')!
-    let deleteUrl = ''
+    let patchUrl = ''
+    let patchBody: any = null
+    let deleted = false
 
     await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
-      if (route.request().method() === 'DELETE') {
-        deleteUrl = route.request().url()
+      const method = route.request().method()
+      if (method === 'PATCH') {
+        patchUrl = route.request().url()
+        patchBody = route.request().postDataJSON()
+        await json(route, { ok: true })
+      } else if (method === 'DELETE') {
+        deleted = true
         await json(route, { ok: true })
       } else {
         await route.fallback()
@@ -150,10 +158,12 @@ test.describe('BoardView — drag-and-drop', () => {
     const cardTestId = `board-task-${anyTask.id}`
     await expect(page.locator(`[data-testid="${cardTestId}"]`)).toBeVisible()
 
-    await doDrag(page, cardTestId, 'board-drop-delete')
+    await doDrag(page, cardTestId, 'board-drop-archive')
 
     await page.waitForTimeout(300)
-    expect(deleteUrl).toContain(anyTask.id)
+    expect(patchUrl).toContain(anyTask.id)
+    expect(patchBody).toMatchObject({ status: 'archived' })
+    expect(deleted).toBe(false)
   })
 
   test('drag blocked task to triage lane → PATCH body {status: "triage"}', async ({ page }) => {
@@ -180,14 +190,14 @@ test.describe('BoardView — drag-and-drop', () => {
     expect(patchBody).toMatchObject({ status: 'triage' })
   })
 
-  test('dragging a card over the board background arms the danger veil', async ({ page }) => {
+  test('dragging a card over the board background arms the archive veil', async ({ page }) => {
     const anyTask = BOARD_TASKS.find(t => t.status === 'ready')!
     await gotoBoardAndWait(page)
     const cardTestId = `board-task-${anyTask.id}`
     await expect(page.locator(`[data-testid="${cardTestId}"]`)).toBeVisible()
 
     // Veil is hidden until a drag is in progress over the background.
-    await expect(page.locator('[data-testid="board-danger-veil"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="board-archive-veil"]')).toHaveCount(0)
 
     // dragstart on the card, then dragover the lanes-scroll background.
     await page.evaluate((src: string) => {
@@ -199,13 +209,13 @@ test.describe('BoardView — drag-and-drop', () => {
     }, cardTestId)
     await page.waitForTimeout(120)
     await page.evaluate(() => {
-      const el = document.querySelector('[data-testid="board-drop-delete"]') as HTMLElement
+      const el = document.querySelector('[data-testid="board-drop-archive"]') as HTMLElement
       const dt = (window as any).__e2eDt || new DataTransfer()
       el.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
     })
 
-    await expect(page.locator('[data-testid="board-danger-veil"]')).toBeVisible({ timeout: FIVE_S })
-    await expect(page.locator('[data-testid="board-danger-veil"]')).toContainText('Release to delete')
+    await expect(page.locator('[data-testid="board-archive-veil"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="board-archive-veil"]')).toContainText('Release to archive')
   })
 
 })

@@ -6,9 +6,10 @@
  *   - reassign → POST /tasks/<id>/reassign body {assignee}
  *   - select-all / clear selection
  *
- * For PATCH-based status moves the test asserts N individual PATCH calls
- * (one per selected task id) with the correct {status} body — this matches
- * the moveTo() implementation in board-view.jsx.
+ * Multi-select status moves ride ONE audited POST /tasks/bulk with
+ * {ids, update:{status}} — this matches the moveTo() implementation in
+ * board-view.jsx (single-card moves stay on per-task PATCH for the
+ * optimistic drag path; delete has no bulk upstream and stays per-id).
  *
  * Card selection is via .kc-check (the checkbox element inside each card).
  */
@@ -17,6 +18,21 @@ import { test, expect, json } from '../fixtures/apiMock'
 import { BOARD_TASKS } from '../fixtures/mock-data'
 
 const FIVE_S = 5_500
+
+// Route + capture POST /api/board/tasks/bulk bodies. Registered by each test
+// BEFORE navigation so it wins over apiMock's stub for the same path.
+async function captureBulk(page: any): Promise<any[]> {
+  const bodies: any[] = []
+  await page.route(/\/api\/board\/tasks\/bulk/, async (route: any) => {
+    if (route.request().method() === 'POST') {
+      bodies.push(route.request().postDataJSON())
+      await json(route, { updated: bodies[bodies.length - 1]?.ids?.length ?? 0 })
+    } else {
+      await route.fallback()
+    }
+  })
+  return bodies
+}
 
 async function gotoBoardAndWait(page: any) {
   await page.goto('/#board')
@@ -46,18 +62,9 @@ test.describe('BoardView — bulk actions', () => {
     await expect(bulkbar).toContainText('2 selected')
   })
 
-  test('bulk → todo: fires PATCH {status:"todo"} per selected id', async ({ page }) => {
+  test('bulk → todo: fires ONE POST /tasks/bulk {ids, update:{status:"todo"}}', async ({ page }) => {
     const targets = BOARD_TASKS.filter(t => t.status === 'ready').slice(0, 2)
-    const patchBodies: any[] = []
-
-    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
-      if (route.request().method() === 'PATCH') {
-        patchBodies.push(route.request().postDataJSON())
-        await json(route, { ok: true })
-      } else {
-        await route.fallback()
-      }
-    })
+    const bulkBodies = await captureBulk(page)
 
     await gotoBoardAndWait(page)
     await selectCards(page, targets.map(t => t.id))
@@ -65,57 +72,42 @@ test.describe('BoardView — bulk actions', () => {
     await page.locator('[data-testid="board-action-todo"]').click()
     await page.waitForTimeout(300)
 
-    expect(patchBodies.length).toBeGreaterThanOrEqual(2)
-    expect(patchBodies.every(b => b.status === 'todo')).toBe(true)
+    expect(bulkBodies.length).toBe(1)
+    expect(bulkBodies[0].update).toMatchObject({ status: 'todo' })
+    expect(bulkBodies[0].ids.sort()).toEqual(targets.map(t => t.id).sort())
   })
 
-  test('bulk → ready: fires PATCH {status:"ready"} per selected id', async ({ page }) => {
+  test('bulk → ready: fires POST /tasks/bulk {update:{status:"ready"}}', async ({ page }) => {
     const targets = BOARD_TASKS.filter(t => t.status === 'todo').slice(0, 2)
-    const patchBodies: any[] = []
-
-    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
-      if (route.request().method() === 'PATCH') {
-        patchBodies.push(route.request().postDataJSON())
-        await json(route, { ok: true })
-      } else {
-        await route.fallback()
-      }
-    })
+    const bulkBodies = await captureBulk(page)
 
     await gotoBoardAndWait(page)
     await selectCards(page, targets.map(t => t.id))
     await page.locator('[data-testid="board-action-ready"]').click()
     await page.waitForTimeout(300)
 
-    expect(patchBodies.some(b => b.status === 'ready')).toBe(true)
+    expect(bulkBodies.some(b => b.update?.status === 'ready')).toBe(true)
   })
 
-  test('bulk → block: fires PATCH {status:"blocked"} per selected id', async ({ page }) => {
+  test('bulk → block: fires POST /tasks/bulk {update:{status:"blocked"}}', async ({ page }) => {
     const targets = BOARD_TASKS.filter(t => t.status === 'todo').slice(0, 2)
-    const patchBodies: any[] = []
-
-    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
-      if (route.request().method() === 'PATCH') {
-        patchBodies.push(route.request().postDataJSON())
-        await json(route, { ok: true })
-      } else {
-        await route.fallback()
-      }
-    })
+    const bulkBodies = await captureBulk(page)
 
     await gotoBoardAndWait(page)
     await selectCards(page, targets.map(t => t.id))
     await page.locator('[data-testid="board-action-block"]').click()
     await page.waitForTimeout(300)
 
-    expect(patchBodies.some(b => b.status === 'blocked')).toBe(true)
+    expect(bulkBodies.some(b => b.update?.status === 'blocked')).toBe(true)
   })
 
-  test('bulk → unblock: fires PATCH {status:"todo"} (unblock = move to todo)', async ({ page }) => {
+  test('bulk → unblock (single selection): stays on per-task PATCH', async ({ page }) => {
+    // One selected card = single-task path (optimistic PATCH), not bulk.
     const targets = BOARD_TASKS.filter(t => t.status === 'blocked').slice(0, 1)
     const patchBodies: any[] = []
+    const bulkBodies = await captureBulk(page)
 
-    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
+    await page.route(/\/api\/board\/tasks\/(?!bulk)[^/]+$/, async (route) => {
       if (route.request().method() === 'PATCH') {
         patchBodies.push(route.request().postDataJSON())
         await json(route, { ok: true })
@@ -130,48 +122,31 @@ test.describe('BoardView — bulk actions', () => {
     await page.waitForTimeout(300)
 
     expect(patchBodies.some(b => b.status === 'todo')).toBe(true)
+    expect(bulkBodies.length).toBe(0)
   })
 
-  test('bulk → complete: fires PATCH {status:"done"}', async ({ page }) => {
+  test('bulk → complete: fires POST /tasks/bulk {update:{status:"done"}}', async ({ page }) => {
     const targets = BOARD_TASKS.filter(t => t.status === 'ready').slice(0, 2)
-    const patchBodies: any[] = []
-
-    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
-      if (route.request().method() === 'PATCH') {
-        patchBodies.push(route.request().postDataJSON())
-        await json(route, { ok: true })
-      } else {
-        await route.fallback()
-      }
-    })
+    const bulkBodies = await captureBulk(page)
 
     await gotoBoardAndWait(page)
     await selectCards(page, targets.map(t => t.id))
     await page.locator('[data-testid="board-action-complete"]').click()
     await page.waitForTimeout(300)
 
-    expect(patchBodies.some(b => b.status === 'done')).toBe(true)
+    expect(bulkBodies.some(b => b.update?.status === 'done')).toBe(true)
   })
 
-  test('bulk → archive: fires PATCH {status:"archived"}', async ({ page }) => {
+  test('bulk → archive: fires POST /tasks/bulk {update:{status:"archived"}}', async ({ page }) => {
     const targets = BOARD_TASKS.filter(t => t.status === 'done').slice(0, 2)
-    const patchBodies: any[] = []
-
-    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
-      if (route.request().method() === 'PATCH') {
-        patchBodies.push(route.request().postDataJSON())
-        await json(route, { ok: true })
-      } else {
-        await route.fallback()
-      }
-    })
+    const bulkBodies = await captureBulk(page)
 
     await gotoBoardAndWait(page)
     await selectCards(page, targets.map(t => t.id))
     await page.locator('[data-testid="board-action-archive"]').click()
     await page.waitForTimeout(300)
 
-    expect(patchBodies.some(b => b.status === 'archived')).toBe(true)
+    expect(bulkBodies.some(b => b.update?.status === 'archived')).toBe(true)
   })
 
   test('bulk → delete: fires DELETE per selected id', async ({ page }) => {
