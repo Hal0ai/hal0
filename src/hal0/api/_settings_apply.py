@@ -126,6 +126,10 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "slots.port_range_end": {"apply_class": "immediate", "services": []},
     "slots.idle_timeout_s": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "slots.evict_pressure_mb": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # publish_host is baked into each slot's rendered ExecStart --publish; the
+    # unit re-renders from config on load, so the affected slot units must be
+    # restarted to observe the new bind address.
+    "slots.publish_host": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     # [models]
     "models.roots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "models.auto_scan_on_start": {"apply_class": "immediate", "services": []},

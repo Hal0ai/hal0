@@ -1768,6 +1768,42 @@ class SlotsConfig(BaseModel):
             "back above the floor. 0 disables pressure eviction."
         ),
     )
+    publish_host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Host address slot containers publish their port on "
+            "(``--publish=<host>:<port>:<port>``). Default ``127.0.0.1`` keeps "
+            "slot ports loopback-only, reachable solely through hal0-api/Traefik "
+            "— the safe default. Set to ``0.0.0.0`` to bind every slot on all "
+            "interfaces so raw slot ports are reachable directly over the LAN "
+            "(e.g. ``http://<host>.local:<port>``); this EXPOSES inference "
+            "endpoints on your network, bypassing the API/reverse-proxy front "
+            "door. A specific interface IP (e.g. ``10.0.1.142``) binds just that "
+            "address. Applies on the next slot (re)start. Host-networked slots "
+            "(``network_mode=host``) ignore this — port publishing is a no-op there."
+        ),
+    )
+
+    @field_validator("publish_host")
+    @classmethod
+    def _publish_host_sane(cls, v: str) -> str:
+        """Reject shapes that would break the rendered ``--publish`` token.
+
+        The value lands verbatim in ``--publish=<host>:<port>:<port>`` on the
+        systemd ExecStart line, so a stray space, colon, or newline would
+        corrupt the argv. We don't resolve/validate reachability — an operator
+        may legitimately bind an address that isn't up yet — only that the
+        token is well-formed.
+        """
+        host = str(v).strip()
+        if not host:
+            raise ValueError("[slots].publish_host must not be empty (use 127.0.0.1 for loopback)")
+        if any(c.isspace() for c in host) or ":" in host or "/" in host:
+            raise ValueError(
+                f"[slots].publish_host {host!r} is not a bare IPv4/hostname "
+                "(no spaces, ':', or '/'; IPv6 literals are not supported here)"
+            )
+        return host
 
     @model_validator(mode="after")
     def port_range_sane(self) -> SlotsConfig:
