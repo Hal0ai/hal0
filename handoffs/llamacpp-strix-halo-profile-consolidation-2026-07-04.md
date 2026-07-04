@@ -300,7 +300,7 @@ cells GPU-exclusive (slots `enabled=false`), noise <1.1%. Raw JSON:
 | dense-batch | confirm `8192/2048`? | inconclusive (jagged) | — | keep seeded |
 | vulkan-ub | RADV sweet spot 1024? | **`-ub 256`** (not 1024) | pp +5.4% vs 512; 1024 −6% | vulkan `-ub 256` |
 | kv-rocm @32k | q8 vs f16 symmetric | f16 (tg 9.0 vs 8.0) | tg +12.5% | keep q8 (memory); note cost |
-| kv-vulkan @32k | q8 valid on RADV? | **q8** (pp 168 vs 116) | pp **+45%**, tg +4% | doc'd override; held (gemma) |
+| kv-vulkan @32k | q8 valid on RADV? | **q8** (pp 168 vs 116) | pp **+45%**, tg +4% | HELD — gemma f16 guard missing (§7.1) |
 | threads | `-t 8` vs `16` | tie (noise) | <3% | drop `--threads-batch 32` |
 | MTP n-max (dense) | 2 vs 4 | **4** | decode **+23%** (32.6 vs 26.4) | keep seeded n-max 4 |
 | cache-reuse (agent) | 256 vs 0 | tie (noise) | ~1.7% | don't adopt |
@@ -312,3 +312,27 @@ collides on one filename per model+backend (skips cells); asymmetric KV at 32k
 depth falls back to CPU (2h hang) — run symmetric only; GPU slots auto-warm
 mid-run (disable them). MoE-MTP draft depth NOT run (no MoE-MTP slot; dense
 result + prior data corroborate n-max 4).
+
+### 7.1 Vulkan q8 KV verify — the gemma f16 guard does NOT exist (2026-07-04)
+
+Fact #3 assumes gemma stays f16 via "per-MODEL registry defaults"; the vulkan q8
+adoption was gated on that. **Verified false:**
+- `CuratedModel` (registry/curated.py) has NO launcher-default field — it is pure
+  download metadata (hf_repo/hf_file/size/license). No catalog entry can carry
+  `-ctk f16`.
+- The only launcher-default mechanism is `ModelDefaults.extra_args` on the SLOT
+  `[model].defaults` (manual, per-slot). Precedence
+  (`container._llama_argv_segments`) is `profile < model_defaults < … < extra_args`
+  last-wins, so a slot-level `-ctk f16` WOULD override a profile `-ctk q8_0` — but
+  nothing auto-populates it per model/family.
+- Live proof: the `explore` slot (gemma4-v2-q4-k-m on `rocm-dnse`, which already
+  ships `-ctk q8_0 -ctv q8_0`) resolves to `-ctk q8_0` with no override — **gemma
+  is already on quantized KV today, unguarded** (pre-existing, independent of the
+  vulkan change).
+
+**Consequences:** (1) vulkan q8 KV stays OUT of the seed (the +45% pp is real but
+unsafe for gemma). (2) Separately, gemma-on-rocm-dnse is a latent 10x-pp trap now.
+**Fix path (separate change):** wire a gemma-family f16 KV default — either a
+`family=="gemma"` guard that injects `-ctk f16 -ctv f16 --cache-reuse 0` into
+`model_defaults` at slot resolution, or a per-slot `[model].defaults.extra_args`
+on gemma slots. Then vulkan q8 KV can be adopted.

@@ -863,8 +863,13 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     "vulkan": {
         # Strix Halo matrix 2026-07-04 (RADV): -ub sweep monotonic — 256 is the
         # sweet spot (pp2048 274.7 vs 260.7 @512 = +5.4%; 1024 is WORSE at 244.7),
-        # so -ub 512→256. +-ngl 999/--jinja. (Symmetric q8 KV measured +45% pp at
-        # 32k depth here but held back: gemma slots need f16 KV via registry.)
+        # so -ub 512→256. +-ngl 999/--jinja. Symmetric q8 KV measured +45% pp at
+        # 32k depth here but deliberately NOT set: gemma on quantized KV is a ~10x
+        # pp trap (#12352) + iSWA/cache-quant incompatibility (#23978), and the
+        # per-model f16 override the consolidation handoff assumes is NOT yet
+        # implemented (verified 2026-07-04: CuratedModel carries no launcher
+        # defaults; the live gemma `explore` slot already resolves to -ctk q8_0 on
+        # rocm-dnse). Keep f16 KV on vulkan until a gemma-family f16 guard lands.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         "flags": "-ngl 999 -fa on -b 512 -ub 256 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
