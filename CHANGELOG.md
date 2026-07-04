@@ -13,6 +13,15 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+## [v0.8.5b2] — 2026-07-04
+
+Hotfix over v0.8.5b1, closing the three findings from the first live
+update+verification pass on Strix Halo hardware (CT105): stale `mtp = true`
+overrides crashing slots on re-render, slot units not re-rendering on update,
+and the gateway missing `POST /v1/rerank`. **Safe upgrade from v0.8.5b1** —
+the one migration (crash-only MTP override defuse) touches exactly the slot
+configs that could not have loaded anyway, with a loud per-slot log.
+
 ### Added
 - **Slot units re-render automatically on update.** A slot's systemd unit
   bakes the launch argv at load time, so updating hal0 changed the code that
