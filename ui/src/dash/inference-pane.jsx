@@ -713,10 +713,11 @@ function MiniCard({ s, ind, busy, handlers }) {
         <SlotControls
           phase={ph}
           busy={busy}
-          compact
           onStart={() => handlers.onStart(s)}
           onStop={() => handlers.onStop(s)}
           onRestart={() => handlers.onRestart(s)}
+          onLogs={() => handlers.onLogs(s)}
+          onEdit={() => handlers.onEdit(s)}
         />
       </div>
     </div>
