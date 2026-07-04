@@ -3,8 +3,8 @@
  * P2 card direction (design_handoff_inference_slots).
  *
  * Behaviour under test:
- *   - the page-level hero band (InferenceHeroBand, above the tabs) renders the
- *     iGPU GTT memory map + combined-throughput tile from HAL0_DATA
+ *   - the page-level telemetry header (TelemetryHeader, above the tabs)
+ *     renders the combined metrics card: throughput cell + memory rack ruler
  *   - the engine pane renders the epill + ALL slots as full cards, always
  *     visible (the old collapse/expand accordion + qcaret were removed)
  *   - the serving card's status pill shows live tok/s (no fabricated numbers)
@@ -19,25 +19,27 @@
  * The slot LIST comes from in-bundle HAL0_DATA (VITE_MOCK_HAL0=1); mutations
  * go through fetch, so per-route stubs capture the write path.
  *
- * NOTE: the page now carries TWO `.infer-pane` roots — the hero band
- * (`.infer-hero-top`, above the tabs) and the engine pane below it. The engine
- * locators scope to `.infer-pane:not(.infer-hero-top)` to target the pane; the
- * hero band is reached via its `infer-hero-band` testid.
+ * NOTE: the old hero band (`.infer-hero-top`) was replaced by the telemetry
+ * header card (telemetry-header.jsx), reached via its `telemetry-header`
+ * testid. The engine locators keep the `:not(.infer-hero-top)` scope so they
+ * stay valid either way.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
 
 const pane = (page: Page) => page.locator('.infer-pane:not(.infer-hero-top)').first()
 const engine = (page: Page) => pane(page).locator('.engine').first()
 const body = (page: Page) => pane(page).locator('.engine-b').first()
-const hero = (page: Page) => page.getByTestId('infer-hero-band')
+const hero = (page: Page) => page.getByTestId('telemetry-header')
 
 test.describe('Inference engine pane (/slots · Inference tab)', () => {
-  test('hero band renders memory + throughput; engine renders epill + full slot cards', async ({ page }) => {
+  test('telemetry header renders throughput cell + memory ruler; engine renders epill + full slot cards', async ({ page }) => {
     await page.goto('/#slots')
-    // page-level hero band (above the tabs): iGPU GTT memory map + throughput.
+    // page-level telemetry header (above the tabs): throughput cell + memory
+    // rack ruler. Forced-mock has no throughput-history endpoint, so the cell
+    // shows its honest "source pending" gate — the cell itself must render.
     await expect(hero(page)).toBeVisible()
-    await expect(hero(page).locator('.mem .blk-h')).toContainText('memory · iGPU GTT')
-    await expect(hero(page).locator('.tp-tile')).toBeVisible()
+    await expect(hero(page).locator('.th-ruler-h')).toContainText('memory ·')
+    await expect(hero(page).locator('.th-cell-tps')).toBeVisible()
     // engine pane: state pill summarises serving/loaded counts (primary serving).
     await expect(pane(page)).toBeVisible()
     await expect(page.getByTestId('infer-epill')).toContainText('serving')
@@ -76,10 +78,10 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
 
   test('engine renders full slot cards with the metric meta row (no accordion)', async ({ page }) => {
     await page.goto('/#slots')
-    // full-card grid is always present; the throughput tile now lives in the
-    // page hero band, not the engine body.
+    // full-card grid is always present; throughput now lives in the page
+    // telemetry header's cell, not the engine body.
     await expect(body(page).locator('.scards.full')).toHaveCount(1)
-    await expect(hero(page).locator('.tp-tile')).toHaveCount(1)
+    await expect(hero(page).locator('.th-cell-tps')).toHaveCount(1)
     await expect(body(page).locator('.tp-tile')).toHaveCount(0)
     // the full card's meta row reports real metrics for the serving primary
     // slot (toks 45 · ttft 220 in the seed; no fabricated numbers).
