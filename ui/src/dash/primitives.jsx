@@ -617,6 +617,51 @@ function PillToggle({ on, disabled, label, stateText, onToggle }) {
   );
 }
 
+// ─── MtpControl — tri-state MTP override (Auto / On / Off) ────────────────
+// After the profile↔model MTP separation, whether a slot speculates is decided
+// by model eligibility (MTP heads) × profile opt-in (profile.mtp) × this slot
+// override. This control edits the OVERRIDE: Auto (null) defers to the derived
+// decision; On/Off (true/false) force it. Under Auto we surface whether MTP is
+// actually effective so "Auto" never masks an inactive state.
+//   value: null (auto) | true (on) | false (off)
+//   autoActive: whether the derived decision is currently ON (model eligible AND
+//               profile opts in) — only shown as context while value is Auto.
+function MtpControl({ value, autoActive, disabled, onChange }) {
+  const isAuto = value == null;
+  const OPTS = [
+    { key: "auto", v: null, label: "Auto" },
+    { key: "on", v: true, label: "On" },
+    { key: "off", v: false, label: "Off" },
+  ];
+  const eff = isAuto
+    ? (autoActive ? "Auto · MTP active" : "Auto · inactive — needs an MTP model on an MTP profile")
+    : (value ? "Forced on" : "Forced off");
+  return (
+    <div className="mtp-ctl">
+      <div className="mtp-seg" role="radiogroup" aria-label="MTP speculative decoding">
+        {OPTS.map((o) => {
+          const active = (o.v === null && isAuto) || o.v === value;
+          return (
+            <button
+              key={o.key}
+              type="button"
+              className={"mtp-seg-btn" + (active ? " on" : "")}
+              role="radio"
+              aria-checked={active}
+              disabled={disabled}
+              data-testid={`mtp-seg-${o.key}`}
+              onClick={() => { if (!active && !disabled) onChange(o.v); }}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      <span className={"mtp-eff mono" + (isAuto && !autoActive ? " muted" : "")}>{eff}</span>
+    </div>
+  );
+}
+
 // ─── Dropdown menu ───────────────────────────────────────────────────────
 function Menu({ anchor = "right", items, onClose, style }) {
   return (
@@ -916,4 +961,4 @@ function ImportDialog({
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });

@@ -248,10 +248,10 @@ class TestLoadProfilesConfig:
         with pytest.raises(ConfigParseError):
             load_profiles_config(path=p)
 
-    # ── additive seed merge (#838) ────────────────────────────────────────────
+    # ── virtual seeds (overlay from code, never trusted from disk) ─────────────
 
     def test_partial_file_gets_missing_seeds_merged_in(self, tmp_path: Path) -> None:
-        """A profiles.toml with only one profile gets the missing seeds injected."""
+        """A profiles.toml with only one profile still exposes every seed."""
         # Write a file with just the 'rocm' seed — everything else is missing.
         toml_content = (
             "[profile.rocm]\n"
@@ -268,20 +268,24 @@ class TestLoadProfilesConfig:
 
         cfg = load_profiles_config(path=p)
 
-        # All SEED_PROFILES keys must now be present.
+        # All SEED_PROFILES keys must be present (overlaid from code).
         assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys()), (
-            f"missing seeds after merge: {set(SEED_PROFILES.keys()) - set(cfg.profile.keys())}"
+            f"missing seeds after overlay: {set(SEED_PROFILES.keys()) - set(cfg.profile.keys())}"
         )
 
-    def test_operator_customised_profile_not_overwritten(self, tmp_path: Path) -> None:
-        """An operator-edited seed profile is left untouched by the additive merge."""
-        # Write a 'rocm' entry with a custom image — the merge must not reset it
-        # to the SEED_PROFILES value.
-        custom_image = "ghcr.io/my-org/custom-rocm-toolbox:operator-build"
+    def test_materialised_seed_on_disk_is_overwritten_by_code(self, tmp_path: Path) -> None:
+        """Seeds are virtual: a stale on-disk seed is replaced by the code definition.
+
+        This is the #PS-2 fix — an installer/upgrade that materialised a now-stale
+        seed into profiles.toml must NOT shadow a re-tuned seed shipped in code.
+        Seed profiles are immutable via the catalog API (operators clone to
+        customise), so a seed key on disk is never a legitimate operator edit.
+        """
+        stale_image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-OLD-STALE-server"
         toml_content = (
             "[profile.rocm]\n"
-            f'image = "{custom_image}"\n'
-            'flags = "-fa on"\n'
+            f'image = "{stale_image}"\n'
+            'flags = "-fa on --stale-flag"\n'
             "mtp = false\n"
             'device_class = "gpu"\n'
             'backend = "rocm"\n'
@@ -291,10 +295,11 @@ class TestLoadProfilesConfig:
 
         cfg = load_profiles_config(path=p)
 
-        # The operator's custom image must be preserved — NOT replaced by the seed.
-        assert cfg.profile["rocm"].image == custom_image, (
-            "additive merge overwrote an operator-customised profile (key 'rocm')"
+        # The code seed wins — the stale on-disk copy is discarded.
+        assert cfg.profile["rocm"].image == SEED_PROFILES["rocm"]["image"], (
+            "virtual-seed overlay failed: a stale on-disk seed shadowed the code definition"
         )
+        assert cfg.profile["rocm"].flags == SEED_PROFILES["rocm"]["flags"]
 
     def test_partial_file_custom_profile_preserved(self, tmp_path: Path) -> None:
         """A non-seed (operator-created) profile survives the additive merge."""
@@ -332,11 +337,17 @@ class TestLoadProfilesConfig:
         assert set(cfg.profile.keys()) == set(SEED_PROFILES.keys())
 
 
-# ── seed file parity check ────────────────────────────────────────────────────
+# ── seed file: virtual-seed invariant ─────────────────────────────────────────
 
 
 class TestSeedFileParity:
-    """Installer seed file must match the code-level SEED_PROFILES constant."""
+    """Installer seed file must NOT materialise seeds — they overlay from code.
+
+    Under virtual seeds, ``SEED_PROFILES`` is the single source of truth; the
+    shipped ``profiles.toml`` is documentation + a home for operator custom
+    profiles only.  Materialising seeds there is exactly the freeze bug the
+    overlay fixes (#PS-2).
+    """
 
     @pytest.fixture
     def seed_file(self) -> Path:
@@ -347,23 +358,13 @@ class TestSeedFileParity:
     def test_seed_file_exists(self, seed_file: Path) -> None:
         assert seed_file.is_file(), f"seed file missing at {seed_file}"
 
-    def test_seed_file_names_match_code(self, seed_file: Path) -> None:
+    def test_seed_file_materialises_no_seeds(self, seed_file: Path) -> None:
         raw = tomllib.loads(seed_file.read_text(encoding="utf-8"))
-        file_names = set(raw.get("profile", {}).keys())
-        code_names = set(SEED_PROFILES.keys())
-        assert file_names == code_names, f"seed file names {file_names!r} != code {code_names!r}"
-
-    def test_seed_file_mtp_flags_match_code(self, seed_file: Path) -> None:
-        raw = tomllib.loads(seed_file.read_text(encoding="utf-8"))
-        for name, code_vals in SEED_PROFILES.items():
-            file_entry = raw["profile"][name]
-            assert file_entry["mtp"] == code_vals["mtp"], (
-                f"profiles.toml mtp for {name!r} ({file_entry['mtp']}) "
-                f"!= SEED_PROFILES ({code_vals['mtp']})"
-            )
-            assert file_entry["image"] == code_vals["image"], (
-                f"profiles.toml image for {name!r} differs from SEED_PROFILES"
-            )
+        on_disk = set(raw.get("profile", {}).keys())
+        assert on_disk.isdisjoint(SEED_PROFILES), (
+            f"installer profiles.toml materialises seed profiles: "
+            f"{on_disk & set(SEED_PROFILES)} — seeds must live in code only"
+        )
 
 
 # ── tts (kokoro) seed profile ─────────────────────────────────────────────────

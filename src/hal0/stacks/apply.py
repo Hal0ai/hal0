@@ -247,8 +247,12 @@ class StackApplyEngine:
             updates["role"] = entry.role
         # ``vision`` is a plain bool (no inherit) → declaratively written.
         updates["vision"] = entry.vision
-        if entry.mtp is not None:
-            updates["mtp"] = entry.mtp
+        # ``mtp`` is declaratively written INCLUDING None: a stack row set to
+        # Auto (null) must clear any forced true/false already on the slot, or
+        # the stack UI's "Auto" hint disagrees with what actually launches.
+        # merge_slot_config treats None as delete-key, so Auto rows reset the
+        # slot to the derived decision (model eligibility x profile opt-in).
+        updates["mtp"] = entry.mtp
         if entry.enable_thinking is not None:
             updates["enable_thinking"] = entry.enable_thinking
         if entry.server_extra_args is not None:

@@ -55,9 +55,26 @@ is active; `--exclusive` stops/restarts them for clean numbers (briefly offlines
 - Add a context: entry in `CTX_CONFIGS` (`args|reps`, `%UB%` = per-backend ubatch).
 - Curated default model set: `DEFAULT_MODELS`. Common flags: `COMMON_BENCH_ARGS`.
 
+## Profile-matrix (seed-profile re-tune)
+
+Two companions script the flag re-tune matrix from the profile-consolidation
+handoff (2026-07-04):
+
+- **`profile-matrix.sh`** — Tier A: the llama-bench cells (batch/ubatch grids
+  per profile class, symmetric KV-quant at depth on both backends, threads
+  sanity) as `hal0-benchctl sweep` calls. Runs as the unprivileged user;
+  `--dry-run` prints the seam commands; `--cell` selects a subset.
+- **`server_ab.py`** — Tier B: the server-only levers llama-bench can't see —
+  MTP draft depth (`--spec-draft-n-max`), `--cache-reuse` on a shared-prefix
+  trace, poll, and the embed/rerank endpoints. Talks to hal0-api + the slot
+  port as the hal0 user (no sudo), always restores the slot's original
+  `extra_args`, and writes JSON to `/var/lib/hal0/benchmarks/server-ab/`.
+  Supersedes the ad-hoc `/root/bench_mtp.py`.
+
 ## Scope & roadmap
 
-Now: the kyuz0 **toolbox sweep** (raw `llama-bench` across backends) + a tuning `sweep` verb.
-Deferred: MTP/draft-speculative bench (server-level; see `/root/bench_mtp.py`), RPC bench
-(needs ≥2 nodes), pi-bench (coding-agent eval). Upstream end-state: a `hal0 bench` CLI +
-`/api/benchmarks` route reading `index.json`, landed in the hal0 git repo.
+Now: the kyuz0 **toolbox sweep** (raw `llama-bench` across backends) + a tuning `sweep` verb
++ the profile-matrix pair above (Tier A seam cells, Tier B server-level A/Bs incl.
+MTP/draft-speculative). Deferred: RPC bench (needs ≥2 nodes), pi-bench (coding-agent eval).
+Upstream end-state: a `hal0 bench` CLI + `/api/benchmarks` route reading `index.json`,
+landed in the hal0 git repo.

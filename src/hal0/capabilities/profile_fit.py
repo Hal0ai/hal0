@@ -35,6 +35,13 @@ def profile_name_for_fit(capability: str, device: str) -> str | None:
         return tts_profile_for_device(device)
     if device == "npu":
         return DEVICE_DEFAULT_PROFILES.get("npu")
+    if device == "gpu-rocm" and capability == "embed":
+        # Dedicated GPU embed lane (llama-server --embedding). Non-MTP, so it
+        # honours this resolver's "never force MTP" contract.
+        return "embed"
+    if device == "gpu-rocm" and capability == "rerank":
+        # Dedicated GPU rerank lane (llama-server --reranking → /v1/rerank).
+        return "rerank"
     if device in {"gpu-rocm", "gpu-vulkan"}:
         return DEVICE_DEFAULT_PROFILES.get(device)
     if capability == "image":

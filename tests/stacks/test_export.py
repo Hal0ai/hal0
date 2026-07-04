@@ -81,12 +81,20 @@ class TestEmbedReferences:
         assert out.models["bge-m3"].hf_repo == ""
 
     def test_embeds_referenced_profile(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        # A stack embeds the CUSTOM (non-seed) profiles its slots reference so an
+        # importer that lacks them can still apply. Seed profiles are virtual —
+        # resolved from code on import — so they need no embedding and a seed
+        # name can't carry a custom image (the overlay always wins).
         save_profiles_config(
-            ProfilesConfig(profile={"rocm": ProfileConfig(image="ghcr.io/x:y", quant="FP4")})
+            ProfilesConfig(profile={"custom-moe": ProfileConfig(image="ghcr.io/x:y", quant="FP4")})
         )
-        out = embed_references(_stack(), registry=reg)
-        assert "rocm" in out.profiles
-        assert out.profiles["rocm"].image == "ghcr.io/x:y"
+        stack = StackConfig(
+            name="Saber",
+            slots=[StackSlotEntry(slot="agent", model="ace-saber", profile="custom-moe")],
+        )
+        out = embed_references(stack, registry=reg)
+        assert "custom-moe" in out.profiles
+        assert out.profiles["custom-moe"].image == "ghcr.io/x:y"
 
     def test_stamps_hal0_version(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         from hal0 import __version__

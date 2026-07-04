@@ -88,12 +88,21 @@ model, context size, and port.
 | `rocm-moe`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | MoE + MTP · q8 KV     |
 | `vulkan`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`         | off   | Vulkan std · fallback |
 | `cuda`      | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                             | off   | CUDA · NVIDIA (upstream, experimental) |
+| `embed`     | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | Embeddings · GPU      |
+| `rerank`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | Reranking · GPU       |
 | `flm`       | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                             | off   | FLM NPU inference     |
 | `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS · Kokoro          |
 | `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`   | off   | Image generation      |
 
 ![The Profiles tab in the hal0 dashboard showing seed profile cards with device class, intent, and bench metrics](/screenshots/profiles-tab.png)
 *Profiles tab in the hal0 dashboard — seed profile cards display device class, quantisation, and bench throughput (tokens/sec or RTF).*
+
+The `embed` and `rerank` profiles bake in the llama-server serving flags
+(`--embedding` / `--reranking`, `-ub 8192` so a full input fits one physical
+batch) so an embedding or reranking slot no longer has to hand-wire them in
+`extra_args`. On a `gpu-rocm` box, embed/rerank slots derive onto these lanes
+automatically; a Vulkan or CPU box falls back to the `vulkan` / `cpu-llm`
+profile until backend-specific embed/rerank variants ship.
 
 <Aside type="note">
 GPU profiles also carry a `backend` field (`rocm`, `vulkan`, or `cuda`) — that
@@ -111,6 +120,15 @@ image — not one of the AMD Strix Halo toolboxes — and needs
 profile family; it exists so NVIDIA hosts have a working `gpu-cuda` path. See
 [Hardware matrix](/docs/reference/hardware-matrix) for the current support
 level.
+</Aside>
+
+<Aside type="tip" title="Seeds are virtual">
+Seed profiles live in code (`SEED_PROFILES`) and are overlaid on every load —
+they are never materialised into `/etc/hal0/profiles.toml`. That means a
+re-tuned seed (new flags, a bumped toolbox image) reaches every install on
+upgrade instead of being frozen by a stale on-disk copy. The file holds only
+your own (non-seed) profiles; seed profiles are immutable, so to customise one
+you clone it under a new name.
 </Aside>
 
 <Aside type="caution" title="The old `rocm-mtp` slug">

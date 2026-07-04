@@ -28,6 +28,7 @@ import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { deviceClassForToken, profileDeviceClass } from '@/lib/deviceMeta'
+import { isMtpEligibleModel } from '@/lib/normalizeApiModel'
 import { api } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { slotIndicatorFromPhase } from './slot-status.js'
@@ -56,7 +57,10 @@ function buildDeviceMeta(enums) {
 
 // `NAME_RE` (slug regex) and `toast` are shared globals from primitives.jsx.
 
-const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', profile: '', mtp: false, capabilities: [] };
+// mtp defaults to null = AUTO: MTP is derived from model-eligibility × profile
+// opt-in on apply, so a row carries an explicit boolean only when the user
+// forces it — no stale `mtp:false` frozen onto every row.
+const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', profile: '', mtp: null, capabilities: [] };
 const BLANK = { name: '', description: '', icon: '', tags: '', slots: [{ ...BLANK_SLOT }] };
 
 // Live-slot → dot class, derived from the SHARED slot-status classifier
@@ -386,7 +390,7 @@ function fromStack(s) {
       model: e.model || '',
       device: e.device || 'gpu-rocm',
       profile: e.profile || '',
-      mtp: !!e.mtp,
+      mtp: e.mtp ?? null, // preserve Auto (null) vs explicit on/off
       capabilities: e.capabilities || [],
     })),
   };
@@ -539,15 +543,16 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
               const pc = profileDeviceClass(p);
               (!pc || !rowClass || pc === rowClass ? compatProfiles : incompatProfiles).push(p);
             }
-            // MTP gate — same rule as the slot drawer (slot-modals.jsx):
-            // the picked model must carry the "mtp" tag AND the row must run
-            // the rocm backend. A pre-existing mtp=true row stays visible so
-            // it can be turned off.
+            // MTP is DERIVED (model-eligibility × profile opt-in) and defaults
+            // to Auto — no stale boolean per row. Surface the tri-state control
+            // when the picked model is MTP-eligible, or when a force-ON was
+            // persisted (so it stays adjustable). The row's own model+profile
+            // pick drive whether Auto is actually effective.
             const rowModel = models.find(m => m.id === s.model);
-            const mtpCapable = Array.isArray(rowModel?.tags) && rowModel.tags.includes('mtp');
-            const rowIsRocm = (enums.devices.find(d => d.id === s.device)?.legacy_backend === 'rocm')
-              || String(s.device || '').includes('rocm');
-            const showMtp = (mtpCapable && rowIsRocm) || !!s.mtp;
+            // Same eligibility rule as the server: `mtp` tag OR MTP name marker.
+            const modelEligible = isMtpEligibleModel(rowModel);
+            const profileOptsIn = !!profiles.find(p => p.name === s.profile)?.mtp;
+            const showMtp = modelEligible || s.mtp === true;
             return (
               <div className="st-slot-card" key={i}>
                 <div className="st-slot-head">
@@ -608,16 +613,13 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
                     </select>
                   </label>
                   {showMtp && (
-                    <div className="st-fld st-fld-mtp">
-                      <span className="st-fld-lbl">Speculative decode</span>
-                      <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
-                        onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp}
-                        title={mtpCapable && rowIsRocm
-                          ? 'MTP speculative decode'
-                          : 'MTP persisted on this row — model tag/backend no longer qualify (mtp tag + rocm required)'}
-                        data-testid={`st-slot-mtp-${i}`}>
-                        <span className="pf-switch-knob" /><span className="mono">MTP</span>
-                      </button>
+                    <div className="st-fld st-fld-mtp" data-testid={`st-slot-mtp-${i}`}>
+                      <span className="st-fld-lbl">Speculative decode (MTP)</span>
+                      <MtpControl
+                        value={s.mtp ?? null}
+                        autoActive={modelEligible && profileOptsIn}
+                        onChange={(next) => setSlot(i, 'mtp', next)}
+                      />
                     </div>
                   )}
                 </div>
