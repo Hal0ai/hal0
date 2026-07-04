@@ -1132,6 +1132,25 @@ else:
 PYEOF
 fi
 
+# ── slot-unit re-render ───────────────────────────────────────────────────────
+# Slot units bake the launch argv at load time; without this, systemctl
+# restarts and reboots keep running PRE-update flags until an operator does a
+# hal0-level slot restart. Rewrite existing units through the just-installed
+# code + one daemon-reload — running services are NOT bounced; new argv
+# applies on each slot's next start.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping slot-unit re-render (no system writes)"
+else
+    "${VENV_DIR}/bin/python" - <<'PYEOF'
+from hal0.updater.updater import rerender_slot_units
+n = rerender_slot_units()
+if n:
+    print(f"  re-rendered {n} slot unit(s) through the new code (services not restarted)")
+else:
+    print("  all slot units already match the new code")
+PYEOF
+fi
+
 # ── ComfyUI model share ───────────────────────────────────────────────────────
 # The docker comfy-up/down/logs/postinstall.sh scripts have been retired; the
 # podman img slot (hal0-slot@img.service) is the sole lifecycle owner of :8188

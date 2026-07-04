@@ -13,6 +13,19 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Added
+- **Slot units re-render automatically on update.** A slot's systemd unit
+  bakes the launch argv at load time, so updating hal0 changed the code that
+  WOULD render but not the file that DID — `systemctl restart`, crash
+  restarts, and reboots kept running pre-update flags until an operator did a
+  hal0-level slot restart (field finding). The updater (post venv-reinstall,
+  via a fresh interpreter so the NEW code renders) and `install.sh` now
+  rewrite every existing unit through current code plus one `daemon-reload` —
+  running services are never bounced; fresh argv applies on each slot's next
+  start from any path. Per-slot failures log and skip. The dashboard drift
+  indicator still covers the "process running old argv until next restart"
+  window.
+
 ### Fixed
 - **Crash-only `mtp = true` overrides are defused automatically.** A forced
   MTP override pointing at a model with no MTP heads crashes llama-server at

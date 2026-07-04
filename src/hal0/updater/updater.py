@@ -1069,6 +1069,64 @@ def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None
     return cleared
 
 
+def rerender_slot_units(*, job_id: str | None = None) -> int:
+    """Re-render every existing container slot unit through current code.
+
+    A slot's systemd unit bakes the launch argv at load time. Updating hal0
+    changes the code that WOULD render but not the file that DID — so
+    ``systemctl restart``, crash-restarts, and reboots keep running pre-update
+    flags until an operator remembers a hal0-level reload (field finding,
+    CT105). This sweep rewrites each on-disk unit via the same plan path a
+    load uses and batches one ``daemon-reload`` — it never enables, starts, or
+    restarts anything, so serving is not bounced; the fresh argv applies on
+    the next start from ANY path. The dashboard's drift indicator covers the
+    remaining "process still running old argv" window.
+
+    Per-slot failures (unresolvable model/profile, malformed TOML) log and
+    skip — a bad slot must never wedge an update.
+
+    Returns the number of unit files rewritten.
+    """
+    import tomllib
+
+    from hal0.config.paths import slots_config_dir
+    from hal0.providers.container import ContainerProvider, _best_effort_model_info
+
+    provider = ContainerProvider()
+    rewritten = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+            # Slot TOMLs exist flat (manager-written) or with a [slot] table
+            # (installer seeds); hoist the nested shape to the flat one the
+            # provider consumes. [model]/[server] tables pass through as-is.
+            cfg: dict[str, Any] = {**raw, **(raw.get("slot") or {})}
+            cfg.pop("slot", None)
+            cfg.setdefault("name", slot_name)
+            # Same registry-backed, never-raising resolver the preview path
+            # uses — a registry miss degrades to a minimal path dict.
+            model_info = _best_effort_model_info(cfg, None)
+            if provider.rerender_unit_sync(cfg, model_info):
+                rewritten += 1
+                log.info("updater.unit_rerendered", job_id=job_id, slot=slot_name)
+        except Exception as exc:
+            log.warning(
+                "updater.unit_rerender_skipped",
+                job_id=job_id,
+                slot=slot_name,
+                error=str(exc),
+            )
+    if rewritten:
+        try:
+            provider.daemon_reload()
+        except Exception as exc:
+            log.warning("updater.unit_rerender_daemon_reload_failed", job_id=job_id, error=str(exc))
+        log.info("updater.unit_rerender_complete", job_id=job_id, rewritten=rewritten)
+    return rewritten
+
+
 # ── Updater class ──────────────────────────────────────────────────────────────
 
 
@@ -1357,6 +1415,48 @@ class Updater:
                     with contextlib.suppress(OSError):
                         _atomic_symlink_swap(prior, link)
                 raise
+
+        # Step 8c: re-render existing slot units through the NEW code so any
+        # subsequent start (systemctl restart, crash-restart, reboot) uses
+        # current argv — never bounces serving (write + daemon-reload only).
+        # Must run AFTER the 8b venv reinstall and in a FRESH interpreter:
+        # this (still-old) process would render pre-update argv, defeating the
+        # point; a subprocess of the re-pipped venv executes the new module.
+        if not _is_editable_install():
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        sys.executable,
+                        "-c",
+                        "from hal0.updater.updater import rerender_slot_units; "
+                        "print(rerender_slot_units())",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if proc.returncode == 0:
+                    log.info(
+                        "updater.unit_rerender_done",
+                        job_id=self.job_id,
+                        rewritten=(proc.stdout or "").strip(),
+                    )
+                else:
+                    log.warning(
+                        "updater.unit_rerender_failed",
+                        job_id=self.job_id,
+                        rc=proc.returncode,
+                        stderr=(proc.stderr or "")[-500:],
+                    )
+            except Exception as exc:
+                log.warning(
+                    "updater.unit_rerender_failed",
+                    job_id=self.job_id,
+                    error=str(exc),
+                )
+                # Non-fatal: stale units keep old flags until a hal0-level slot
+                # restart; the dashboard drift indicator surfaces them.
 
         if prior is not None:
             _write_atomic_text(_previous_record(), str(prior))
