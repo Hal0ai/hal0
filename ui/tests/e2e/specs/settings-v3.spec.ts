@@ -1,7 +1,7 @@
 /**
- * settings-v3 — `#settings` route renders the rail nav with all 9
- * sections (secrets, storage, updates, voice, image-gen, default slots,
- * general, advanced, about) and swaps the right pane on click.
+ * settings-v3 — `#settings` route renders the rail nav with all 10
+ * sections (secrets, storage, updates, voice, image-gen, npu, default
+ * slots, general, advanced, about) and swaps the right pane on click.
  *
  * Auth section removed per ADR-0012 (PRs #254-#267); default landing
  * is now Secrets. #544 pruned the fully-mock OmniRouter/Agent-policy/
@@ -15,11 +15,11 @@
 import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
-  'Secrets', 'Storage', 'Updates', 'Voice', 'Image-gen', 'Default slots', 'General', 'Advanced', 'About',
+  'Secrets', 'Storage', 'Updates', 'Voice', 'Image-gen', 'NPU', 'Default slots', 'General', 'Advanced', 'About',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
-  test('renders rail nav with all 9 sections', async ({ page }) => {
+  test('renders rail nav with all 10 sections', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.view .vh h1')).toHaveText('Settings')
     const nav = page.locator('.settings-nav .nav-item')
