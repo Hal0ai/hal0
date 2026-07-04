@@ -13,6 +13,20 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Added
+
+- **`FAMILY_DEFAULTS` — per-model-family launcher-flag overrides.** A new
+  resolution layer between a profile's generic flags and a slot's own
+  `[model].defaults`, keyed on model family (matched from the id/filename).
+  Applied automatically at slot resolution (launch + preview parity) and
+  collapsed by `normalize_argv` last-wins, so a family override beats the
+  profile but a per-slot `[server].extra_args` still beats the family. First
+  tenant: **gemma → `-ctk f16 -ctv f16 --cache-reuse 0`** — any gemma model on
+  any q8 profile is pinned back to f16 KV (gemma iSWA regresses on quantized KV:
+  measured -28.5% pp on RADV / -10% tg on rocm, plus SWA+cache-reuse bugs
+  #21468/#21749). This fixes the live gemma-on-`rocm-dnse` regression and makes
+  adopting Vulkan q8 KV safe as a follow-up.
+
 ### Changed
 
 - **Seed profiles: bench-driven flag re-tune (Strix Halo matrix, 2026-07-04).**

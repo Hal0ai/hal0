@@ -55,7 +55,7 @@ from typing import Any
 import httpx
 
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
-from hal0.config.schema import resolve_chat_template, resolve_profile_flags
+from hal0.config.schema import family_flags, resolve_chat_template, resolve_profile_flags
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
@@ -728,7 +728,21 @@ def _resolve_llama_scalars(
         mmproj = None
 
     defaults = model_info.get("defaults")
-    model_defaults = defaults if isinstance(defaults, dict) else None
+    model_defaults = dict(defaults) if isinstance(defaults, dict) else None
+
+    # Family-architecture overrides (e.g. gemma → f16 KV): the middle layer
+    # between the profile's generic flags and the slot's own [model].defaults.
+    # Prepended INSIDE the model_defaults segment so it beats the profile
+    # (later segment, normalize_argv last-wins) but a per-slot extra_args in
+    # [model].defaults still wins over the family default.
+    fam = family_flags(
+        model_info.get("_model_key"), model_table.get("default"), model_info.get("path")
+    )
+    if fam:
+        if model_defaults is None:
+            model_defaults = {}
+        existing = model_defaults.get("extra_args") or ""
+        model_defaults["extra_args"] = f"{fam} {existing}".strip()
 
     slot_n_gpu_layers = model_table.get("n_gpu_layers")
 

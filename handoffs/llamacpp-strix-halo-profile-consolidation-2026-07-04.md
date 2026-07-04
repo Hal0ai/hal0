@@ -344,8 +344,16 @@ So the guard is justified at a −28% pp (vulkan) magnitude, not 10x.
 
 **Consequences:** (1) vulkan q8 KV stays OUT of the seed. (2) gemma-on-rocm-dnse
 today pays only ~10% tg (pp fine) — a real but mild regression, not a fire.
-**Fix path (separate change):** wire a gemma-family f16 KV default — a
-`family=="gemma"` guard that injects `-ctk f16 -ctv f16 --cache-reuse 0` into
-`model_defaults` at slot resolution (auto, catalog-driven), or a per-slot
-`[model].defaults.extra_args` on gemma slots (manual, immediate). Then vulkan q8
-KV can be adopted for the +45% qwen win.
+
+**Fix — IMPLEMENTED as `FAMILY_DEFAULTS` (config/schema.py).** Rather than a
+one-off gemma KV guard, a general per-family override layer: a `{family: flags}`
+table injected into the `model_defaults` argv segment at slot resolution (family
+matched from the model id/filename via `model_family()`). Precedence
+`profile < FAMILY_DEFAULTS < [model].defaults < … < [server].extra_args`, riding
+the existing `normalize_argv` last-wins dedup — so the family override beats the
+profile but a per-slot override still beats the family. First entry
+`"gemma": "-ctk f16 -ctv f16 --cache-reuse 0"` auto-protects every gemma slot
+(catalog or scanned) on any profile, fixing the live rocm-dnse regression. GGUF
+`general.architecture` is the future family-detection hardening (not persisted on
+rows today). **Follow-up:** with gemma auto-guarded, adopting Vulkan q8 KV for
+the +45% qwen-at-depth win is now a safe one-line seed change.

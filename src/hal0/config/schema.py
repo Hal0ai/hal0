@@ -999,6 +999,48 @@ PROFILE_BENCH: dict[str, dict[str, float]] = {
     "tts-qwen3": {"rtf": 0.48},
 }
 
+#: Per-family llama-server flag overrides — the "model-architecture quirks"
+#: layer, distinct from profiles (backend/hardware tuning) and slot config
+#: (per-instance).  Applied when a slot's model resolves to the family; each
+#: string merges into the ``model_defaults`` argv segment, so it OVERRIDES the
+#: profile's generic flags (``normalize_argv`` keeps the last occurrence) but a
+#: per-slot ``[model].defaults.extra_args`` still beats it.  Virtual like
+#: SEED_PROFILES — ships to every install, never persisted to config.
+FAMILY_DEFAULTS: dict[str, str] = {
+    # Gemma is an iSWA (interleaved sliding-window) architecture: quantized KV
+    # regresses prompt-processing — measured 2026-07-04 on gemma-4-12B @32k depth,
+    # -ctk/-ctv q8_0 costs -28.5% pp on RADV / -10% tg on rocm vs f16 (the mirror
+    # of qwen's +45% q8 gain) — and SWA + cache-reuse has upstream bugs
+    # (#21468/#21749).  So any gemma model, on any q8 profile, is pinned back to
+    # f16 KV with cache-reuse off.
+    "gemma": "-ctk f16 -ctv f16 --cache-reuse 0",
+}
+
+#: Families FAMILY_DEFAULTS can key on, matched as a token in the model id /
+#: filename.  GGUF ``general.architecture`` would be the canonical signal, but
+#: it is not persisted on registry rows today (auto-scan stores only
+#: ``{discovered, source}``); the id/filename carries the family reliably for
+#: the GGUF fleet, and arch-from-header is the future hardening.
+_KNOWN_FAMILIES: tuple[str, ...] = ("gemma", "qwen", "llama", "phi", "mistral", "deepseek")
+
+
+def model_family(*hints: str | None) -> str | None:
+    """Best-effort model family from id/name/path hints (lower-cased token scan).
+
+    Returns the first :data:`_KNOWN_FAMILIES` token found across the hints, or
+    ``None``.  Cheap and side-effect-free so the launch + preview argv paths can
+    both call it.
+    """
+    hay = " ".join(h for h in hints if h).lower()
+    return next((fam for fam in _KNOWN_FAMILIES if fam in hay), None)
+
+
+def family_flags(*hints: str | None) -> str:
+    """The :data:`FAMILY_DEFAULTS` flag string for the model's family, else ''."""
+    fam = model_family(*hints)
+    return FAMILY_DEFAULTS.get(fam, "") if fam else ""
+
+
 #: Preselect map for the create-modal device picker and legacy-slot
 #: migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
 #: gpu-vulkan, cpu, npu); values are seed profile names that best represent
@@ -2476,6 +2518,7 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
+    "FAMILY_DEFAULTS",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
@@ -2512,6 +2555,8 @@ __all__ = [
     "ToolPolicy",
     "UpstreamEntry",
     "UpstreamsConfig",
+    "family_flags",
     "map_backend_to_device",
+    "model_family",
     "resolve_profile_flags",
 ]
