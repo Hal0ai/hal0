@@ -128,7 +128,21 @@ def _effective_mtp(slot_mtp: bool | None, profile: Any, model_info: Mapping[str,
     """
     if slot_mtp is not None:
         return bool(slot_mtp)
-    return bool(getattr(profile, "mtp", False)) and model_is_mtp_eligible(model_info)
+    profile_opts_in = bool(getattr(profile, "mtp", False))
+    eligible = model_is_mtp_eligible(model_info)
+    if profile_opts_in and not eligible:
+        # Visible breadcrumb for the silent-auto-off case: an MTP-capable model
+        # that carries neither the registry tag nor a name marker stops
+        # speculating under auto. The fix is tagging the model (or slot
+        # mtp=true); this log is how an operator finds that out.
+        log.info(
+            "mtp.auto_off_model_ineligible",
+            extra={
+                "model": str(model_info.get("_model_key") or model_info.get("path") or ""),
+                "hint": "tag the model 'mtp' or set slot mtp=true to speculate",
+            },
+        )
+    return profile_opts_in and eligible
 
 
 log = logging.getLogger(__name__)

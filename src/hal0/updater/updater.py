@@ -874,17 +874,34 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
     seed definitions on upgrade (a re-tuned seed never reached an existing
     install).  This migration rewrites the on-disk catalog to operator
     (non-seed) profiles only, so the shipped seed definition is authoritative
-    again on the next load.  Operator-authored profiles are untouched; if the
-    file is absent nothing is written (the overlay serves the seeds in-memory).
+    again on the next load.  If the file is absent nothing is written (the
+    overlay serves the seeds in-memory).
+
+    Data-safety (this rewrite is the one destructive step of the virtual-seed
+    design, so it hedges):
+
+    * The pre-prune file is copied to ``profiles.toml.pre-virtual-seeds.bak``
+      once (never overwritten on re-runs), so nothing is unrecoverable.
+    * A seed-named entry whose content DIFFERS from the code seed is **rescued
+      to ``<name>-custom``**, not deleted.  Two real cases: an operator
+      hand-edited a seed table in the TOML (previously honoured by the #838
+      additive merge), or an operator created a profile under a name that only
+      became a seed in a later release (e.g. ``embed``/``rerank``).  Slots
+      keep referencing ``<name>`` (now the code seed) — the rescue preserves
+      the operator's content under the new name and the log says so loudly.
+    * A seed-named entry byte-identical to the code seed is just a stale
+      materialisation — pruned without rescue.
 
     Args:
         job_id: Optional breadcrumb for structured-log tracing.
 
     Returns:
-        Number of materialised seed profiles pruned (0 means nothing to do).
+        Number of materialised seed entries handled (pruned + rescued).
     """
+    import shutil
+
     from hal0.config.loader import _read_toml
-    from hal0.config.schema import SEED_PROFILES, ProfilesConfig
+    from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
 
     target = paths.profiles_toml()
     if not target.exists():
@@ -894,7 +911,7 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
         return 0
 
     # Load the raw on-disk catalog directly so we can detect exactly which
-    # seed keys are missing before deciding whether to write anything.
+    # seed keys are materialised before deciding whether to write anything.
     raw = _read_toml(target)
     try:
         cfg = ProfilesConfig.model_validate(raw)
@@ -904,23 +921,59 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
             details={"path": str(target), "reason": str(exc)},
         ) from exc
 
-    # Seeds are virtual — prune any materialised seed entries so the on-disk
-    # catalog holds operator (non-seed) profiles only. Older installers wrote
-    # every seed inline, which froze stale seed definitions on upgrade;
-    # rewriting through save_profiles_config (which strips seeds) makes the
-    # code definition authoritative again on the very next load.
     stale = [key for key in cfg.profile if key in SEED_PROFILES]
     if not stale:
         log.info("updater.seed_profiles_noop", job_id=job_id, reason="no materialised seeds")
         return 0
 
-    save_profiles_config(cfg, path=target)
+    # One-time backup before the only destructive rewrite of this migration.
+    backup = target.with_name(target.name + ".pre-virtual-seeds.bak")
+    if not backup.exists():
+        try:
+            shutil.copy2(target, backup)
+            log.info("updater.seed_profiles_backup", job_id=job_id, path=str(backup))
+        except OSError as exc:
+            log.warning("updater.seed_profiles_backup_failed", job_id=job_id, error=str(exc))
+
+    pruned: list[str] = []
+    rescued: dict[str, str] = {}
+    for key in stale:
+        entry = cfg.profile[key]
+        seed = ProfileConfig.model_validate(SEED_PROFILES[key])
+        if entry == seed:
+            # Byte-identical stale materialisation — safe to drop.
+            pruned.append(key)
+            continue
+        # Divergent content: operator-authored (hand-edit, or a name that only
+        # later became a seed). Rescue under <name>-custom (suffix until free).
+        rescue = f"{key}-custom"
+        n = 2
+        while rescue in cfg.profile or rescue in SEED_PROFILES:
+            rescue = f"{key}-custom{n}"
+            n += 1
+        cfg.profile[rescue] = entry
+        rescued[key] = rescue
+
+    save_profiles_config(cfg, path=target)  # strips all seed-named keys
     log.info(
         "updater.seed_profiles_pruned",
         job_id=job_id,
-        pruned=stale,
+        pruned=pruned,
+        rescued=rescued,
         count=len(stale),
+        backup=str(backup),
     )
+    if rescued:
+        log.warning(
+            "updater.seed_profiles_rescued_customs",
+            job_id=job_id,
+            rescued=rescued,
+            note=(
+                "profiles with seed names but non-seed content were renamed; "
+                "slots referencing the original name now use the built-in seed — "
+                "repoint them at the -custom profile if the old behaviour is wanted"
+            ),
+        )
     return len(stale)
 
 

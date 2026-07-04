@@ -28,6 +28,7 @@ import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { deviceClassForToken, profileDeviceClass } from '@/lib/deviceMeta'
+import { isMtpEligibleModel } from '@/lib/normalizeApiModel'
 import { api } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { slotIndicatorFromPhase } from './slot-status.js'
@@ -548,7 +549,8 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
             // persisted (so it stays adjustable). The row's own model+profile
             // pick drive whether Auto is actually effective.
             const rowModel = models.find(m => m.id === s.model);
-            const modelEligible = Array.isArray(rowModel?.tags) && rowModel.tags.includes('mtp');
+            // Same eligibility rule as the server: `mtp` tag OR MTP name marker.
+            const modelEligible = isMtpEligibleModel(rowModel);
             const profileOptsIn = !!profiles.find(p => p.name === s.profile)?.mtp;
             const showMtp = modelEligible || s.mtp === true;
             return (

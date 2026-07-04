@@ -22,7 +22,7 @@ import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSlotLogsStream } from '@/api/hooks/useLogs'
 import { ENDPOINTS } from '@/api/endpoints'
-import { normalizeApiModel, isUpstreamModel } from '@/lib/normalizeApiModel'
+import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from '@/lib/normalizeApiModel'
 import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
 const { useState: useStateSM, useEffect: useEffectSM } = React;
@@ -1042,7 +1042,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
       {(() => {
         const cur = slot.model_id || slot.model || "";
         const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
-        const modelEligible = Array.isArray(m?.tags) && m.tags.includes("mtp");
+        // Same eligibility rule as the server (`model_is_mtp_eligible`): the
+        // `mtp` tag OR a delimited MTP name marker — so an untagged local pull
+        // named "…-MTP-….gguf" (which the server WILL auto-speculate on an MTP
+        // profile) still surfaces the control here.
+        const modelEligible = isMtpEligibleModel(m);
         // Show for an eligible model, or when MTP is force-ON on a now-ineligible
         // model so it stays adjustable. A force-OFF on an ineligible model needs
         // no control (it's already off and would be off under Auto too).
