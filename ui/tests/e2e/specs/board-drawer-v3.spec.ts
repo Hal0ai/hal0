@@ -412,3 +412,83 @@ test.describe('TaskDrawer — per-status contract', () => {
   })
 
 })
+
+// ── Real Hermes kanban wire shape ───────────────────────────────────────
+//
+// Regression guard for the "blank drawer" bug: GET /tasks/{id} returns an
+// ENVELOPE ({task, comments, events, links, runs}) with snake_case item
+// fields (created_at/payload/outcome/summary) and a {content} log — NOT the
+// flat camelCase shape the other fixtures mock. normaliseTask must unwrap the
+// envelope and remap the item fields, otherwise every scalar falls to its
+// default (status→"triage", desc/assignee blank) and events/runs/log render
+// empty. See useBoard.ts normaliseTask/normaliseEvent/normaliseRun.
+
+test.describe('TaskDrawer — Hermes envelope wire shape', () => {
+  test('done task detail: envelope unwrapped → desc, event payload, run state, log all render', async ({ page }) => {
+    const id = 't_865ad502'
+    const nowS = Math.floor(Date.now() / 1000)
+
+    // GET /tasks/:id → the real wrapped envelope (snake_case throughout).
+    await page.route(/\/api\/board\/tasks\/[^/]+$/, async (route) => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await json(route, {
+        task: {
+          id,
+          title: 'Audit container image digests',
+          body: 'Check all running containers have pinned digests in slot TOML files.',
+          assignee: 'admin-agent',
+          status: 'done',
+          priority: 2,
+          created_by: 'operator',
+          created_at: nowS - 120,
+          workspace_kind: 'scratch',
+          workspace_path: '/var/lib/hal0/.hermes/kanban/workspaces/' + id,
+          tenant: 'network',
+        },
+        comments: [{ id: 5, author: 'operator', body: 'looks good', created_at: nowS - 60 }],
+        events: [
+          { id: 88, kind: 'completed', payload: { result_len: 0, summary: 'all 6 verified' }, created_at: nowS - 30, run_id: 8 },
+          { id: 87, kind: 'created', payload: { assignee: 'admin-agent', status: 'ready' }, created_at: nowS - 120, run_id: null },
+        ],
+        attachments: [],
+        links: { parents: [], children: [] },
+        runs: [{ id: 8, profile: 'admin-agent', status: 'done', outcome: 'completed', started_at: nowS - 120, ended_at: nowS - 30, summary: 'all 6 containers verified' }],
+      })
+    })
+
+    // GET /tasks/:id/log → the {content} shape (raw log text, not an array).
+    await page.route(/\/api\/board\/tasks\/[^/]+\/log/, async (route) => {
+      await json(route, {
+        task_id: id,
+        path: '/var/lib/hal0/.hermes/kanban/logs/' + id + '.log',
+        exists: true,
+        size_bytes: 42,
+        content: 'Query: work kanban task ' + id + '\nBENCH RESULT 42 tok/s',
+      })
+    })
+
+    await gotoBoardAndWait(page)
+    await openTask(page, id)
+
+    const drawer = page.locator('[data-testid="board-task-drawer"]')
+
+    // Scalars off the inner `task` — proves the envelope was unwrapped
+    // (pre-fix these were blank / status defaulted to "triage").
+    await expect(drawer.locator('.dr-desc')).toContainText('pinned digests')
+    await expect(drawer.locator('.dr-meta')).toContainText('@admin-agent')
+
+    // Event payload rendered (payload → json) with a real timestamp (created_at → at).
+    const events = page.locator('[data-testid="board-events"]')
+    await expect(events).toContainText('completed')
+    await expect(events).toContainText('result_len')
+    await expect(events).toContainText('ago')
+
+    // Run row: outcome → state ("completed"), summary → msg.
+    const runs = page.locator('[data-testid="board-runs"]')
+    await expect(runs).toContainText('completed')
+    await expect(runs).toContainText('all 6 containers verified')
+
+    // Worker log: {content} split into lines and rendered.
+    await expect(page.locator('[data-testid="board-worklog"]')).toContainText('BENCH RESULT 42 tok/s')
+  })
+})
