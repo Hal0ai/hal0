@@ -33,15 +33,12 @@ export interface SlotMetrics {
   ctx?: number
   kv?: number | null
   mem?: number
-  rpm?: number
   lat?: number | null
   dim?: number
-  xrt?: number
   precision?: string
   maxDocs?: number
   secs?: number
   voice?: string
-  avg?: number
   res?: string
 }
 
@@ -175,15 +172,12 @@ const DEFAULT_METRICS: SlotMetrics = {
   ctx: 0,
   kv: null,
   mem: 0,
-  rpm: 0,
   lat: null,
   dim: 0,
-  xrt: 0,
   precision: '',
   maxDocs: 0,
   secs: 0,
   voice: '',
-  avg: 0,
   res: '',
 }
 
@@ -479,14 +473,33 @@ export function useSlotDefaults() {
 }
 
 /**
+ * Response of POST /api/slots/{name}/backend. The backend is being
+ * extended to carry the post-switch snapshot (declared/effective backend,
+ * device, profile) — every field is OPTIONAL so the UI tolerates both the
+ * old bare response and the enriched one. `effective_backend` and
+ * `actual_backend` are alternative spellings during the transition.
+ */
+export interface SlotBackendSwitchResponse {
+  name?: string
+  declared_backend?: string | null
+  effective_backend?: string | null
+  actual_backend?: string | null
+  device?: string | null
+  profile?: string | null
+  [k: string]: unknown
+}
+
+/**
  * POST /api/slots/{name}/backend — switch the slot's backend
- * (e.g. vulkan → rocm). Body shape: `{ backend: string }`.
+ * (e.g. vulkan → rocm). Body shape: `{ backend: string }`. Triggers a
+ * container restart server-side; the caller should confirm with the
+ * operator first (see the backend-mismatch chip in slots.jsx).
  */
 export function useSlotBackend() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
     mutationFn: ({ name, backend }: { name: string; backend: string }) =>
-      slotPost(ENDPOINTS.slotBackend(name), { backend }),
+      slotPost<SlotBackendSwitchResponse>(ENDPOINTS.slotBackend(name), { backend }),
     onSuccess: invalidate,
   })
 }
@@ -516,8 +529,23 @@ export function useSlotConfig(name: string | null | undefined) {
 
 // ─── useSlotResolved ──────────────────────────────────────────────────────────
 
-/** Source segment that supplied the surviving value for a flag. */
-export type ProvenanceSource = 'base' | 'profile' | 'extra_args'
+/**
+ * Source segment that supplied the surviving value for a flag.
+ * Known values: base | profile | extra_args, plus the newer assembler
+ * segments (model_defaults | chat_template | mmproj | slot_overrides).
+ * Kept open (`string`) — the badge renderer in slot-modals.jsx falls back
+ * to a generic style for labels it doesn't recognise, so a new backend
+ * segment never breaks the drawer.
+ */
+export type ProvenanceSource =
+  | 'base'
+  | 'profile'
+  | 'extra_args'
+  | 'model_defaults'
+  | 'chat_template'
+  | 'mmproj'
+  | 'slot_overrides'
+  | (string & {})
 
 /** Per-flag provenance entry returned by GET /api/slots/{name}/resolved. */
 export interface FlagProvenance {
