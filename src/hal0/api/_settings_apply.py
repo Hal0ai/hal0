@@ -111,8 +111,14 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [dispatcher] — prefetch_timeout_s is threaded into the Dispatcher at
     # create_app time, so a change lands on the next hal0-api restart.
     # prefetch_parallel_cap is reserved (not yet consumed by the fanout).
-    "dispatcher.prefetch_timeout_s": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "dispatcher.prefetch_parallel_cap": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "dispatcher.prefetch_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "dispatcher.prefetch_parallel_cap": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [slots]
     "slots.max_slots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "slots.port_range_start": {"apply_class": "manual-restart", "services": []},
@@ -134,12 +140,30 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # service-restart, not immediate. The remaining rerank knobs are
     # reserved (cognee-era; not consumed by the hindsight provider).
     "memory.embedding.model": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_url": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_over_fetch_factor": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_max_candidates": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_connect_timeout_s": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_read_timeout_s": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.embedding.rerank_enabled": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_url": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_over_fetch_factor": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_max_candidates": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_connect_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_read_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [memory.graph] — ADR-0023: extraction_slot propagates to hindsight-api via a
     # systemd drop-in + restart (handled in the /api/memory/graph PUT handler, which
     # is the sole writer; the apply pipeline only needs to know the key is valid).

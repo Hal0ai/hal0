@@ -173,6 +173,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
             "hal0 config saved",
             data={"keys": sorted(body.keys())},
         )
+
     # Issue #552 — the per-save apply plan. The UI needs to know which
     # keys are live vs. which need a service restart vs. which need a
     # manual operator action *before* it renders the success toast, so
