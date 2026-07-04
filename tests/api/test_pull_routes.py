@@ -134,6 +134,86 @@ def test_pull_body_hf_coords_used_when_id_not_registered(
     assert fake_run_pull[0]["hf_repo"] == "unsloth/Qwen3.6-27B-A3B-MTP-GGUF"
 
 
+def test_pull_body_chat_template_seeds_defaults(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """WS-6 — a chat_template in the pull body is pinned onto the freshly
+    seeded registry row's defaults at pull start (the modal closes on start
+    and can't sequence a later PUT). It only matters at load time, so the
+    default persists whether or not the pull ultimately succeeds.
+    """
+    new_id = "user.WithTemplate"
+    r = client_isolated.post(
+        f"/api/models/{new_id}/pull",
+        json={
+            "hf_repo": "unsloth/Some-GGUF",
+            "hf_filename": "Some-Q4_K_M.gguf",
+            "labels": ["chat"],
+            "chat_template": "chatml",
+        },
+    )
+    assert r.status_code == 202, r.text
+    entry = app_isolated.state.model_registry.get(new_id)
+    assert entry.defaults is not None
+    assert entry.defaults.chat_template == "chatml"
+
+
+def test_pull_body_chat_template_auto_seeds_no_default(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """The "auto" sentinel means "use the GGUF-embedded template" — it must
+    NOT persist as an override (so the launcher keeps its auto behavior)."""
+    new_id = "user.AutoTemplate"
+    r = client_isolated.post(
+        f"/api/models/{new_id}/pull",
+        json={
+            "hf_repo": "unsloth/Some-GGUF",
+            "hf_filename": "Some-Q4_K_M.gguf",
+            "chat_template": "auto",
+        },
+    )
+    assert r.status_code == 202, r.text
+    entry = app_isolated.state.model_registry.get(new_id)
+    assert entry.defaults is None or entry.defaults.chat_template is None
+
+
+def test_pull_body_chat_template_patches_existing_row(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """A re-pull that supplies a chat_template carries the pin onto an
+    already-registered row alongside the refreshed HF coordinates."""
+    from hal0.registry.model import Model
+
+    app_isolated.state.model_registry.add(
+        Model(
+            id="user.RepullTemplate",
+            name="user.RepullTemplate",
+            path="/tmp/stub.gguf",
+            hf_repo="stub/old-repo",
+            hf_filename="old.gguf",
+        )
+    )
+    r = client_isolated.post(
+        "/api/models/user.RepullTemplate/pull",
+        json={
+            "hf_repo": "stub/new-repo",
+            "hf_filename": "new.gguf",
+            "chat_template": "llama3",
+        },
+    )
+    assert r.status_code == 202, r.text
+    entry = app_isolated.state.model_registry.get("user.RepullTemplate")
+    assert entry.hf_filename == "new.gguf"
+    assert entry.defaults is not None
+    assert entry.defaults.chat_template == "llama3"
+
+
 def test_pull_body_hf_coords_override_registry_entry(
     client_isolated: TestClient,
     app_isolated: FastAPI,

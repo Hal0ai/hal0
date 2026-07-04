@@ -1247,6 +1247,7 @@ def _seed_registry_from_body(
     hf_repo: str,
     hf_file: str,
     labels: list[str] | None,
+    chat_template: str | None = None,
 ) -> None:
     """Upsert a registry row for ``model_id`` from body-supplied HF coords.
 
@@ -1262,23 +1263,30 @@ def _seed_registry_from_body(
     intentional (rather than silently re-pulling the old variant).
     """
     from hal0.config import paths
-    from hal0.registry.model import Model
+    from hal0.registry.model import Model, ModelDefaults
     from hal0.registry.store import ModelAlreadyExists
 
     registry = request.app.state.model_registry
     provisional_path = str(paths.models_dir() / model_id / hf_file)
     caps = [str(c).strip() for c in (labels or []) if str(c).strip()] or ["chat"]
+    # A pinned chat template is a launcher default that only matters at load
+    # time (long after the pull finishes), so seed it now while the row is
+    # created — the modal closes on pull start and can't sequence a later PUT.
+    # The "auto" sentinel means "use the GGUF-embedded template" → no override.
+    ct = (chat_template or "").strip()
+    defaults = ModelDefaults(chat_template=ct) if ct and ct != "auto" else None
     try:
         existing = registry.get(model_id)
     except Exception:
         existing = None
     if existing is not None:
-        # Refresh HF coords so a retry with a different variant lands.
+        # Refresh HF coords so a retry with a different variant lands, and
+        # carry a freshly-picked chat template onto the existing row.
+        patch: dict[str, Any] = {"hf_repo": hf_repo, "hf_filename": hf_file}
+        if defaults is not None:
+            patch["defaults"] = defaults.model_dump(exclude_none=True)
         with contextlib.suppress(Exception):
-            registry.update(
-                model_id,
-                {"hf_repo": hf_repo, "hf_filename": hf_file},
-            )
+            registry.update(model_id, patch)
         return
     entry = Model(
         id=model_id,
@@ -1290,6 +1298,7 @@ def _seed_registry_from_body(
         hf_filename=hf_file,
         tags=["user-added"],
         metadata={"source": "add-by-hf"},
+        defaults=defaults,
     )
     # Race with another caller — the existing row already has coords.
     with contextlib.suppress(ModelAlreadyExists):
@@ -1566,7 +1575,10 @@ async def pull_model(
         labels = body.get("labels") if isinstance(body, dict) else None
         if not isinstance(labels, list):
             labels = None
-        _seed_registry_from_body(request, model_id, hf_repo, hf_file, labels)
+        chat_template = body.get("chat_template") if isinstance(body, dict) else None
+        if not isinstance(chat_template, str):
+            chat_template = None
+        _seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template)
     job = make_job(model_id)
     jobs[model_id] = job
     # Persist the queued snapshot before returning so a status poll resolves
