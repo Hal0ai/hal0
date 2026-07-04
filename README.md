@@ -7,7 +7,7 @@
 
 ### Open-source home AI inference platform
 
-[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/roadmap)
+[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
 
 </div>
 
@@ -402,7 +402,8 @@ The contribution model is still being decided
 ([`PLAN.md`](./PLAN.md) §16). File issues for discussion; PRs aren't
 being accepted from outside contributors yet. See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the test tiers and the
-eventual flow.
+eventual flow. For questions and general chat, join the
+[hal0 Discord](https://discord.gg/7M4y6dcUyq).
 
 This project adheres to the [Contributor Covenant](./CODE_OF_CONDUCT.md)
 code of conduct. To report a security vulnerability, see
