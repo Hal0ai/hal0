@@ -23,6 +23,7 @@ See PLAN.md §3, §5 Tier 1 ("pydantic-validated TOML schema at load time").
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -93,6 +94,9 @@ _VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro", "qwe
 # bookmarks/tooling keep working.
 _SLOT_PORT_MIN = 8081
 _SLOT_PORT_MAX = 8200
+
+#: A valid POSIX environment-variable name — used to validate [server].env keys.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
@@ -167,7 +171,12 @@ class ModelConfig(BaseModel):
     rope_freq_base: float = Field(
         default=0.0,
         ge=0.0,
-        description="RoPE frequency base override.  0.0 means use model default.",
+        description=(
+            "DEPRECATED (accepted, ignored): the launch path no longer emits "
+            "--rope-freq-base from this field. To override RoPE base, pass "
+            "``--rope-freq-base <n>`` via [server].extra_args instead. Retained "
+            "so existing TOMLs round-trip; 0.0 means use the model default."
+        ),
     )
     extra: dict[str, Any] = Field(
         default_factory=dict,
@@ -253,6 +262,42 @@ class ServerConfig(BaseModel):
             "(append-list flags like --lora / --draft-model / --override-kv are kept)."
         ),
     )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Environment variables injected into the slot container via "
+            "docker/podman ``--env`` (e.g. HSA_OVERRIDE_GFX_VERSION). Lets an "
+            "operator tune the runtime without forking the toolbox image. Keys "
+            "must be valid env-var names ([A-Za-z_][A-Za-z0-9_]*); values must "
+            "not contain newlines."
+        ),
+    )
+
+    @field_validator("env")
+    @classmethod
+    def _env_keys_and_values_sane(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        """Reject non-env-var-name keys and multi-line values.
+
+        A stray newline in a value would break the rendered ``--env=K=V``
+        ExecStart line (systemd is line-oriented); an invalid key name would
+        be silently ignored or mangled by the container runtime.
+        """
+        if v is None:
+            return v
+        cleaned: dict[str, str] = {}
+        for key, value in v.items():
+            if not _ENV_VAR_NAME_RE.match(str(key)):
+                raise ValueError(
+                    f"[server].env key {key!r} is not a valid environment variable name "
+                    "(must match [A-Za-z_][A-Za-z0-9_]*)"
+                )
+            sval = str(value)
+            if "\n" in sval or "\r" in sval:
+                raise ValueError(f"[server].env value for {key!r} must not contain newlines")
+            cleaned[str(key)] = sval
+        return cleaned
 
 
 class SlotConfig(BaseModel):
@@ -1268,8 +1313,10 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
         # asking for ``--spec-draft-type-k f16`` still launched with q8_0.
         #
         # Local import: ``hal0.config`` is imported before ``hal0.slots``, so a
-        # module-level import would create a cycle.
-        from hal0.slots.flag_merge import merge_flags
+        # module-level import would create a cycle. ``merge_flags`` now lives in
+        # hal0.slots.argv (folded from the retired flag_merge module) so it
+        # shares argv's tokenizer + short/long alias table.
+        from hal0.slots.argv import merge_flags
 
         return merge_flags(MTP_FLAG_BUNDLE, base)
     return base

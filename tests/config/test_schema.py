@@ -23,12 +23,32 @@ from hal0.config.schema import (
     ModelConfig,
     ProviderEntry,
     ProvidersConfig,
+    ServerConfig,
     SlotConfig,
     SlotsConfig,
     TelemetryConfig,
     UpstreamEntry,
     UpstreamsConfig,
 )
+
+
+class TestServerConfigEnv:
+    def test_valid_env_accepted(self) -> None:
+        sc = ServerConfig(env={"HSA_OVERRIDE_GFX_VERSION": "11.0.0", "FOO_BAR": "x"})
+        assert sc.env == {"HSA_OVERRIDE_GFX_VERSION": "11.0.0", "FOO_BAR": "x"}
+
+    def test_env_default_none(self) -> None:
+        assert ServerConfig().env is None
+
+    def test_invalid_env_key_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ServerConfig(env={"1BAD": "x"})
+        with pytest.raises(ValidationError):
+            ServerConfig(env={"has-dash": "x"})
+
+    def test_newline_in_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ServerConfig(env={"OK": "line1\nline2"})
 
 # ── SlotConfig ────────────────────────────────────────────────────────────────
 

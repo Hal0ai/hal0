@@ -492,3 +492,27 @@ def test_flm_id_to_tag_empty_catalog_returns_none() -> None:
 
     with patch("hal0.providers.flm.flm_served_models", list):
         assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") is None
+
+
+# ─── parse_flm_progress units (incl. terabyte) ───────────────────────────────
+
+
+def test_parse_flm_progress_megabytes() -> None:
+    import hal0.providers.flm as flm
+
+    got = flm.parse_flm_progress("[FLM]  Downloading: 38.8% (253.0MB / 652.1MB)")
+    assert got == (int(253.0 * 1024**2), int(652.1 * 1024**2))
+
+
+def test_parse_flm_progress_terabytes() -> None:
+    """The unit map now includes 'T' so a multi-TB shard doesn't KeyError→None."""
+    import hal0.providers.flm as flm
+
+    got = flm.parse_flm_progress("[FLM]  Downloading: 10.0% (0.5TB / 5.0TB)")
+    assert got == (int(0.5 * 1024**4), int(5.0 * 1024**4))
+
+
+def test_parse_flm_progress_non_matching_line_is_none() -> None:
+    import hal0.providers.flm as flm
+
+    assert flm.parse_flm_progress("[FLM] verifying checksum") is None
