@@ -45,8 +45,7 @@ def test_seed_profiles_toml_materialises_no_seeds() -> None:
     )
     on_disk = raw.get("profile", {})
     assert set(on_disk).isdisjoint(SEED_PROFILES), (
-        f"installer profiles.toml materialises seed profiles: "
-        f"{set(on_disk) & set(SEED_PROFILES)}"
+        f"installer profiles.toml materialises seed profiles: {set(on_disk) & set(SEED_PROFILES)}"
     )
 
 
