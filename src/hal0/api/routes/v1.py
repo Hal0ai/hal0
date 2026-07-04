@@ -996,6 +996,15 @@ async def rerankings(request: Request, dispatcher: DispatcherDep) -> Response:
     return await _dispatch_and_forward(request, dispatcher)
 
 
+@router.post("/rerank")
+async def rerank(request: Request, dispatcher: DispatcherDep) -> Response:
+    """Alias of ``/rerankings`` under the path llama-server (and Jina/Cohere-
+    style clients) actually use. The capability path map already resolved
+    ``/rerank`` to the rerank slot, but no gateway route existed — clients got
+    405 and had to hit the slot port directly (field finding, CT105)."""
+    return await _dispatch_and_forward(request, dispatcher)
+
+
 @router.post("/audio/transcriptions")
 async def audio_transcriptions(request: Request, dispatcher: DispatcherDep) -> Response:
     # Multipart upload — extract the model field to route, then forward the
