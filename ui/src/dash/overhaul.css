@@ -964,6 +964,15 @@
   letter-spacing: 0.04em;
 }
 
+/* iGPU clock + temp caption — mirrors the Inference GPU gauge readout */
+.uc-gpu-caption {
+  font-family: var(--jbm);
+  font-size: 9px;
+  color: var(--fg-4);
+  letter-spacing: 0.04em;
+  margin: -4px 0 2px 16px;
+}
+
 /* NPU pill: active / idle */
 .uc-npu-status {
   display: flex;
