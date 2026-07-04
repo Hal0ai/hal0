@@ -311,8 +311,14 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     expect(puts[1].mtp).toBeNull()
   })
 
-  test('C7j — MTP pill hidden when the model is not MTP-capable', async ({ page }) => {
-    await seedSlotsAndModels(page, [MTP_SLOT], [{ id: 'qwen-mtp', name: 'qwen-mtp', capabilities: ['chat'], tags: ['rocmfp4'] }])
+  test('C7j — MTP control hidden when the model is not MTP-capable', async ({ page }) => {
+    // Eligibility = registry `mtp` tag OR a delimited MTP name marker (server
+    // parity via isMtpEligibleModel) — so this fixture model must carry
+    // NEITHER. The old fixture reused the id "qwen-mtp", which the name-marker
+    // rule now correctly treats as eligible (the server would auto-speculate
+    // it too), so it needs a marker-free id here.
+    const slot = { ...MTP_SLOT, model_id: 'qwen-plain', model: 'qwen-plain' }
+    await seedSlotsAndModels(page, [slot], [{ id: 'qwen-plain', name: 'qwen-plain', capabilities: ['chat'], tags: ['rocmfp4'] }])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
     // Expect no .form-row whose label span reads exactly "MTP"
