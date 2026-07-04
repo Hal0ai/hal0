@@ -10,6 +10,7 @@
 import { useModels, usePullJob, useHfSearch, fmtBytes } from '@/api/hooks/useModels'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
+import { isUpstreamModel } from '@/lib/normalizeApiModel'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -101,9 +102,14 @@ function ModelsView() {
     m.type === "image";
 
   // Dispatcher-routable models — the ComfyUI ones are pulled out to their tab.
+  // Upstream-advertised rows (aggregated from a provider's /v1/models, never
+  // on this host's disk) get their own section instead of masquerading as
+  // local not-yet-pulled entries in user.*.
   const installed = modelList.filter(m => m.installed && !isComfy(m) && fil(m));
   const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && !isComfy(m) && fil(m));
-  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && !isComfy(m) && fil(m));
+  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && !isUpstreamModel(m) && !isComfy(m) && fil(m));
+  const upstreamAdv = modelList.filter(m => isUpstreamModel(m) && !isComfy(m) && fil(m));
+  const upstreamTotal = modelList.filter(m => isUpstreamModel(m)).length;
 
   // ComfyUI/image surface — INSTALLED only (we never advertise un-pulled image
   // models, same rule as FLM). Text search applies; the type/device chips do
@@ -194,8 +200,8 @@ function ModelsView() {
           </div>
           <div className="mdl-list-h">
             <span>{tab === "models" ? "Catalog" : "Image / ComfyUI"}</span>
-            <span className="ct">· {tab === "models" ? (installed.length + blessed.length + userNs.length) : comfyModels.length} shown</span>
-            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {comfyTotal} image</span>
+            <span className="ct">· {tab === "models" ? (installed.length + blessed.length + userNs.length + upstreamAdv.length) : comfyModels.length} shown</span>
+            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {upstreamTotal} upstream · {comfyTotal} image</span>
           </div>
 
           {modelsQuery.isPending && (
@@ -224,7 +230,12 @@ function ModelsView() {
                 <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
               ))}
 
-              {!modelsQuery.isPending && !modelsQuery.isError && (installed.length + blessed.length + userNs.length) === 0 && (
+              {upstreamAdv.length > 0 && <div className="mdl-section-label">Upstream · remote · {upstreamAdv.length}</div>}
+              {upstreamAdv.map(m => (
+                <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              ))}
+
+              {!modelsQuery.isPending && !modelsQuery.isError && (installed.length + blessed.length + userNs.length + upstreamAdv.length) === 0 && (
                 <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
                   No models match — {(q.trim() || filters.type || filters.device) ? "adjust the search or filters." : "the catalog is empty."}
                 </div>
@@ -371,7 +382,9 @@ function ModelRow({ model, selected, onSelect }) {
       <span className="tg">
         {model.installed
           ? <span className="chip ok">installed</span>
-          : <span className="chip" style={{color: model.ns === "blessed" ? "var(--accent)" : "var(--fg-3)", borderColor: model.ns === "blessed" ? "var(--accent-line)" : "var(--line)", background: model.ns === "blessed" ? "var(--accent-soft)" : "transparent"}}>{model.ns}</span>}
+          : isUpstreamModel(model)
+            ? <span className="chip info" title={`Advertised by the "${model.upstream}" upstream — not stored on this host`}>upstream</span>
+            : <span className="chip" style={{color: model.ns === "blessed" ? "var(--accent)" : "var(--fg-3)", borderColor: model.ns === "blessed" ? "var(--accent-line)" : "var(--line)", background: model.ns === "blessed" ? "var(--accent-soft)" : "transparent"}}>{model.ns}</span>}
       </span>
     </div>
   );
@@ -444,7 +457,9 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
           <span style={{marginLeft: "auto"}}>
             {model.installed
               ? <span className="chip ok">installed</span>
-              : <span className="chip amber">available</span>}
+              : isUpstreamModel(model)
+                ? <span className="chip info">upstream · {model.upstream}</span>
+                : <span className="chip amber">available</span>}
           </span>
         </div>
         <div className="repo">{model.repo || model.hf_repo || model.id}</div>
@@ -456,6 +471,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
         <div><div className="k">device</div><div className="v">{model.device || (model.backends?.[0]) || "—"}</div></div>
         <div><div className="k">runtime</div><div className="v">{model.runtime || "—"}</div></div>
         <div><div className="k">namespace</div><div className="v">{model.ns || "—"}</div></div>
+        <div><div className="k">origin</div><div className="v">{isUpstreamModel(model) ? `upstream · ${model.upstream}` : "local"}</div></div>
       </div>
       <div className="mdl-detail-labels">
         {(model.labels || model.capabilities || []).map(l => <span key={l} className="chip">{l}</span>)}
@@ -526,6 +542,12 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>
+        ) : isUpstreamModel(model) ? (
+          // Upstream-advertised row: nothing to pull — the dispatcher proxies
+          // requests to the remote provider. Manage it on the Connections view.
+          <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+            Served remotely by the <span className="chip info">{model.upstream}</span> upstream — not stored on this host.
+          </div>
         ) : (
           <>
             <button className="btn" onClick={onPull} disabled={pull.inFlight}>

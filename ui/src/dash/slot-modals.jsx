@@ -22,7 +22,7 @@ import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSlotLogsStream } from '@/api/hooks/useLogs'
 import { ENDPOINTS } from '@/api/endpoints'
-import { normalizeApiModel } from '@/lib/normalizeApiModel'
+import { normalizeApiModel, isUpstreamModel } from '@/lib/normalizeApiModel'
 import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
 const { useState: useStateSM, useEffect: useEffectSM } = React;
@@ -59,8 +59,12 @@ function stateChipClass(stateOrSlot) {
 // fork binary). Previously the create modal filtered on type ALONE and could
 // offer rocmfp4 models that the backend then rejects — this closes that gap.
 function compatibleModels(models, { type, backend }) {
+  // Upstream-advertised rows are excluded outright: a slot binds a local
+  // file path, and these rows have none (they'd render as "will pull" and
+  // then 422 — there is no HF source to pull them from).
   return (models ?? []).map(normalizeApiModel).filter(m =>
     m.type === type &&
+    !isUpstreamModel(m) &&
     !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && backend !== "rocm")
   );
 }
