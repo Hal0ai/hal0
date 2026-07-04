@@ -102,12 +102,12 @@ def test_orchestrator_profile_for_fit_tts_cpu_is_kokoro(tmp_hal0_home: str) -> N
 
 
 def test_orchestrator_profile_for_fit_non_tts_gpu_unchanged(tmp_hal0_home: str) -> None:
-    # Regression guard: non-TTS gpu selections still resolve the llama
-    # rocm/vulkan profile — the tts special-case must not leak.
+    # Regression guard: non-TTS gpu selections still resolve a llama-server
+    # profile — the tts special-case must not leak. `chat` takes the plain
+    # rocm base; `embed` takes its dedicated (still llama-server) embed lane.
     orch = CapabilityOrchestrator.__new__(CapabilityOrchestrator)
-    profile = orch._profile_for_fit("embed", "gpu-rocm")
-    assert profile is not None
-    assert profile.name == "rocm"
+    assert orch._profile_for_fit("chat", "gpu-rocm").name == "rocm"
+    assert orch._profile_for_fit("embed", "gpu-rocm").name == "embed"
 
 
 # ── tts_profile_for_device (the shared device→profile mapping) ────────────────

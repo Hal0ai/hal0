@@ -30,23 +30,27 @@ from hal0.install.profile_derive import derive_profile
 
 # The exact CURRENT (capability, device) → derive_profile matrix. Any change
 # here is a behaviour change and must be a deliberate, reviewed edit.
-_CAPABILITIES = ("chat", "coder", "embed", "utility", "tts", "agent", "image")
+_CAPABILITIES = ("chat", "coder", "embed", "rerank", "utility", "tts", "agent", "image")
 _DEVICES = ("gpu-rocm", "gpu-vulkan", "cpu", "npu")
 
 # derive_profile (install path): MTP-preferring on ROCm for dense chat/coder.
 _DERIVE_MATRIX: dict[tuple[str, str], str] = {
-    # gpu-rocm — dense chat/coder get MTP rocm-dnse; everything else plain rocm.
+    # gpu-rocm — dense chat/coder get MTP rocm-dnse; embed/rerank take their
+    # dedicated GPU lanes; everything else plain rocm.
     ("chat", "gpu-rocm"): "rocm-dnse",
     ("coder", "gpu-rocm"): "rocm-dnse",
-    ("embed", "gpu-rocm"): "rocm",
+    ("embed", "gpu-rocm"): "embed",
+    ("rerank", "gpu-rocm"): "rerank",
     ("utility", "gpu-rocm"): "rocm",
     ("tts", "gpu-rocm"): "rocm",
     ("agent", "gpu-rocm"): "rocm",
     ("image", "gpu-rocm"): "rocm",
-    # gpu-vulkan — always the vulkan profile.
+    # gpu-vulkan — always the vulkan profile (no dedicated vulkan embed/rerank
+    # variants yet; the vulkan lane serves them until those ship).
     ("chat", "gpu-vulkan"): "vulkan",
     ("coder", "gpu-vulkan"): "vulkan",
     ("embed", "gpu-vulkan"): "vulkan",
+    ("rerank", "gpu-vulkan"): "vulkan",
     ("utility", "gpu-vulkan"): "vulkan",
     ("tts", "gpu-vulkan"): "vulkan",
     ("agent", "gpu-vulkan"): "vulkan",
@@ -56,6 +60,7 @@ _DERIVE_MATRIX: dict[tuple[str, str], str] = {
     ("chat", "cpu"): "cpu-llm",
     ("coder", "cpu"): "cpu-llm",
     ("embed", "cpu"): "cpu-llm",
+    ("rerank", "cpu"): "cpu-llm",
     ("utility", "cpu"): "cpu-llm",
     ("tts", "cpu"): "tts",
     ("agent", "cpu"): "cpu-llm",
@@ -64,6 +69,7 @@ _DERIVE_MATRIX: dict[tuple[str, str], str] = {
     ("chat", "npu"): "flm",
     ("coder", "npu"): "flm",
     ("embed", "npu"): "flm",
+    ("rerank", "npu"): "flm",
     ("utility", "npu"): "flm",
     ("tts", "npu"): "flm",
     ("agent", "npu"): "flm",
@@ -78,10 +84,12 @@ def test_derive_profile_matrix_is_pinned(capability: str, device: str) -> None:
 
 
 def test_derive_profile_rocm_prefers_mtp_for_dense_chat_coder() -> None:
-    # The one genuine install-path specialisation on ROCm.
+    # The install-path specialisations on ROCm: MTP for dense chat/coder, and
+    # the dedicated embed/rerank lanes for those capabilities.
     assert derive_profile("chat", "gpu-rocm") == "rocm-dnse"
     assert derive_profile("coder", "gpu-rocm") == "rocm-dnse"
-    assert derive_profile("embed", "gpu-rocm") == "rocm"
+    assert derive_profile("embed", "gpu-rocm") == "embed"
+    assert derive_profile("rerank", "gpu-rocm") == "rerank"
 
 
 def test_derive_profile_cpu_tts_vs_non_tts() -> None:
@@ -137,7 +145,10 @@ def test_fit_helper_is_non_mtp_on_rocm() -> None:
     """
     assert profile_name_for_fit("chat", "gpu-rocm") == "rocm"
     assert profile_name_for_fit("coder", "gpu-rocm") == "rocm"
-    assert profile_name_for_fit("embed", "gpu-rocm") == "rocm"
+    # embed/rerank resolve to their dedicated lanes — still non-MTP, so the
+    # "never force rocm-dnse" guarantee holds.
+    assert profile_name_for_fit("embed", "gpu-rocm") == "embed"
+    assert profile_name_for_fit("rerank", "gpu-rocm") == "rerank"
     assert profile_name_for_fit("chat", "gpu-vulkan") == "vulkan"
 
 

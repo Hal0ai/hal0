@@ -32,11 +32,22 @@ def test_seed_img_toml_validates() -> None:
     assert cfg.image_gen.idle_restore_minutes == 60  # #599 [image] section
 
 
-def test_seed_profiles_toml_has_comfyui_parity() -> None:
+def test_seed_profiles_toml_materialises_no_seeds() -> None:
+    """Seeds are virtual — the shipped installer file must NOT materialise any.
+
+    A re-tuned seed (new flags / bumped image) must reach every install via the
+    code overlay, not be frozen by a stale on-disk copy. The reference file is
+    documentation + a home for operator custom profiles only, so it defines no
+    ``[profile.*]`` tables (and certainly none named after a seed).
+    """
     raw = tomllib.loads(
         (_REPO_ROOT / "installer" / "etc-hal0" / "profiles.toml").read_text(encoding="utf-8")
     )
-    assert raw["profile"]["comfyui"] == SEED_PROFILES["comfyui"]
+    on_disk = raw.get("profile", {})
+    assert set(on_disk).isdisjoint(SEED_PROFILES), (
+        f"installer profiles.toml materialises seed profiles: "
+        f"{set(on_disk) & set(SEED_PROFILES)}"
+    )
 
 
 def test_port_range_admits_comfyui_stock_port() -> None:

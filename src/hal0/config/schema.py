@@ -852,6 +852,40 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "CUDA · NVIDIA (upstream llama.cpp, experimental)",
         "quant": "Q4_K_M",
     },
+    "embed": {
+        # GPU embedding template (llama-server --embedding). Serves
+        # /v1/embeddings for Qwen3-Embedding / nomic / bge GGUFs. -ub must
+        # cover the longest single input: pooled embeddings run the whole
+        # sequence in ONE physical ubatch, so -ub 8192 (== -b) matches the
+        # 8k-token models and larger inputs would truncate/fail on a smaller
+        # ubatch (llama.cpp #6263/#11105). Pooling is left to GGUF metadata
+        # (Qwen3-Embedding pins --pooling last via its model defaults); no KV
+        # quant — meaningless for a single-pass encoder. GPU because these
+        # tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "Embeddings · GPU",
+        "quant": "",
+    },
+    "rerank": {
+        # GPU reranker template (llama-server --reranking → /v1/rerank, implies
+        # embedding-mode + rank pooling). Sized for bge-reranker-v2-m3
+        # (8192-token query+doc pairs): -ub 8192 must cover the longest pair or
+        # the request truncates. MUST be a SEPARATE instance from `embed` —
+        # combining --embedding and --reranking on one server yields all-zero
+        # scores (llama.cpp #20085). For parallel scoring raise ctx via the
+        # slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "Reranking · GPU",
+        "quant": "",
+    },
     "flm": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
         "flags": "",
