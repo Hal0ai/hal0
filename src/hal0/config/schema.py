@@ -824,8 +824,11 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: let ``device_class`` drive display.
 SEED_PROFILES: dict[str, dict[str, object]] = {
     "rocm": {
+        # -ngl 999 explicit (GTT/unified free-mem autodetect is unreliable) and
+        # --jinja for correct chat templating — house-standard on all GPU LLM
+        # profiles (consolidation handoff §3).
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
@@ -833,8 +836,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "FP4",
     },
     "rocm-dnse": {
+        # Strix Halo matrix 2026-07-04: dense -b/-ub inconclusive (keep 8192/2048);
+        # --threads-batch 32 and --poll 100/--poll-batch 1 measured within noise at
+        # full offload → dropped (simpler flags win ties). +-ngl 999/--jinja.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --no-mmap --jinja",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -842,8 +848,12 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "FP4",
     },
     "rocm-moe": {
+        # Strix Halo matrix 2026-07-04 (Qwen3.6-35B-A3B-MTP): -ub 1024 beats the
+        # old -ub 2048 by +30% pp2048 (1165 vs 895 t/s), consistent across every
+        # -b; tg flat ~47. --threads-batch 32 and --poll 100/--poll-batch 1 within
+        # noise → dropped. +-ngl 999.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 1024 --parallel 1 --threads 16 --no-mmap --jinja",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -851,8 +861,16 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "FP4",
     },
     "vulkan": {
+        # Strix Halo matrix 2026-07-04 (RADV): -ub sweep monotonic — 256 is the
+        # sweet spot (pp2048 274.7 vs 260.7 @512 = +5.4%; 1024 is WORSE at 244.7),
+        # so -ub 512→256. +-ngl 999/--jinja. Symmetric q8 KV measured +45% pp at
+        # 32k depth on qwen (168 vs 116) and halves KV memory — now ADOPTED. It is
+        # the mirror image on gemma (gemma-4-12B @32k: q8 costs -28.5% pp RADV), so
+        # this profile is NO LONGER intrinsically gemma-safe — it relies on
+        # FAMILY_DEFAULTS["gemma"] pinning gemma slots back to f16 KV. Do NOT drop
+        # the gemma family guard without reverting this to f16.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 256 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
@@ -867,7 +885,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # tuning, no KV-quant assumptions); requires nvidia-container-toolkit
         # (CDI) for GPU passthrough — see providers/_gpu.nvidia_cdi_devices.
         "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
-        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "cuda",
@@ -943,7 +961,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # batch to limit peak RAM, and a thread count sensible for a typical
         # multi-core host.  backend=None keeps the #807 coherence check happy.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap",
+        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap --jinja",
         "mtp": False,
         "device_class": "cpu",
         "intent": "CPU-only LLM · llama-server",
@@ -963,6 +981,10 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: ``tps`` = tokens/sec (LLM throughput); ``rtf`` = real-time factor (synth,
 #: e.g. TTS).  Grounded in hal0-container-bench-2026-06-08.md.  Custom
 #: profiles have no entry → the card shows "—" until benched.
+#: Unchanged by the 2026-07-04 Strix Halo flag re-tune: every adopted change
+#: (rocm-moe -ub 1024, vulkan -ub 256, dropped threads-batch/poll) is a prefill
+#: (pp) win — token-generation throughput was flat across all matrix cells, so
+#: these decode-based hero numbers still hold.
 PROFILE_BENCH: dict[str, dict[str, float]] = {
     "rocm": {"tps": 52.8},
     "rocm-moe": {"tps": 90.0},
@@ -973,6 +995,48 @@ PROFILE_BENCH: dict[str, dict[str, float]] = {
     # Native gfx1151 ~2.1x realtime -> rtf ~= 1/2.1 (memory qwen3tts-voice-ct105).
     "tts-qwen3": {"rtf": 0.48},
 }
+
+#: Per-family llama-server flag overrides — the "model-architecture quirks"
+#: layer, distinct from profiles (backend/hardware tuning) and slot config
+#: (per-instance).  Applied when a slot's model resolves to the family; each
+#: string merges into the ``model_defaults`` argv segment, so it OVERRIDES the
+#: profile's generic flags (``normalize_argv`` keeps the last occurrence) but a
+#: per-slot ``[model].defaults.extra_args`` still beats it.  Virtual like
+#: SEED_PROFILES — ships to every install, never persisted to config.
+FAMILY_DEFAULTS: dict[str, str] = {
+    # Gemma is an iSWA (interleaved sliding-window) architecture: quantized KV
+    # regresses prompt-processing — measured 2026-07-04 on gemma-4-12B @32k depth,
+    # -ctk/-ctv q8_0 costs -28.5% pp on RADV / -10% tg on rocm vs f16 (the mirror
+    # of qwen's +45% q8 gain) — and SWA + cache-reuse has upstream bugs
+    # (#21468/#21749).  So any gemma model, on any q8 profile, is pinned back to
+    # f16 KV with cache-reuse off.
+    "gemma": "-ctk f16 -ctv f16 --cache-reuse 0",
+}
+
+#: Families FAMILY_DEFAULTS can key on, matched as a token in the model id /
+#: filename.  GGUF ``general.architecture`` would be the canonical signal, but
+#: it is not persisted on registry rows today (auto-scan stores only
+#: ``{discovered, source}``); the id/filename carries the family reliably for
+#: the GGUF fleet, and arch-from-header is the future hardening.
+_KNOWN_FAMILIES: tuple[str, ...] = ("gemma", "qwen", "llama", "phi", "mistral", "deepseek")
+
+
+def model_family(*hints: str | None) -> str | None:
+    """Best-effort model family from id/name/path hints (lower-cased token scan).
+
+    Returns the first :data:`_KNOWN_FAMILIES` token found across the hints, or
+    ``None``.  Cheap and side-effect-free so the launch + preview argv paths can
+    both call it.
+    """
+    hay = " ".join(h for h in hints if h).lower()
+    return next((fam for fam in _KNOWN_FAMILIES if fam in hay), None)
+
+
+def family_flags(*hints: str | None) -> str:
+    """The :data:`FAMILY_DEFAULTS` flag string for the model's family, else ''."""
+    fam = model_family(*hints)
+    return FAMILY_DEFAULTS.get(fam, "") if fam else ""
+
 
 #: Preselect map for the create-modal device picker and legacy-slot
 #: migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
@@ -2451,6 +2515,7 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
+    "FAMILY_DEFAULTS",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
@@ -2487,6 +2552,8 @@ __all__ = [
     "ToolPolicy",
     "UpstreamEntry",
     "UpstreamsConfig",
+    "family_flags",
     "map_backend_to_device",
+    "model_family",
     "resolve_profile_flags",
 ]

@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig, resolve_profile_flags
+from hal0.config.schema import (
+    FAMILY_DEFAULTS,
+    MTP_FLAG_BUNDLE,
+    SEED_PROFILES,
+    ProfileConfig,
+    family_flags,
+    model_family,
+    resolve_profile_flags,
+)
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
@@ -827,3 +835,78 @@ class TestContextSizeDerive:
         cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
         mi = _model_info(metadata={"context_length": 262144})
         assert self._ctx(self._spec(cfg, mi).command) == "131072"
+
+
+class TestFamilyDefaults:
+    """FAMILY_DEFAULTS — the per-family override layer (gemma → f16 KV)."""
+
+    def test_model_family_token_scan(self) -> None:
+        assert model_family("gemma-4-12b-it-ud-q4-k-xl") == "gemma"
+        assert model_family("Qwen3.6-27B-UD-Q5_K_XL.gguf") == "qwen"
+        assert model_family(None, "/mnt/ai-models/gemma4-v2/gemma4-v2-Q4_K_M.gguf") == "gemma"
+        assert model_family("chadrock-35b-ace-saber") is None
+        assert model_family(None) is None
+
+    def test_family_flags_lookup(self) -> None:
+        assert "gemma" in FAMILY_DEFAULTS
+        assert family_flags("gemma-4-12b-it") == FAMILY_DEFAULTS["gemma"]
+        assert "-ctk f16" in family_flags("gemma-4-12b-it")
+        assert family_flags("qwen3-27b") == ""  # no qwen entry today
+        assert family_flags(None) == ""
+
+    def test_gemma_on_q8_profile_pins_f16_kv(self) -> None:
+        """A gemma model on a q8 profile resolves to f16 KV — profile's
+        -ctk q8_0 is overridden and deduped away by the family layer."""
+        profile = _moe_profile()  # ships -ctk q8_0 -ctv q8_0
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "gemma-4-12b-it"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
+        assert argv is not None
+        assert "q8_0" not in argv  # deduped: family f16 wins, no stale q8 dup
+        assert argv[argv.index("-ctk") + 1] == "f16"
+        assert argv[argv.index("-ctv") + 1] == "f16"
+        assert "--cache-reuse" in argv and argv[argv.index("--cache-reuse") + 1] == "0"
+
+    def test_non_gemma_on_q8_profile_keeps_q8(self) -> None:
+        """A qwen model on the same profile is untouched — no family entry."""
+        profile = _moe_profile()
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "qwen3-27b"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
+        assert argv is not None
+        assert argv[argv.index("-ctk") + 1] == "q8_0"
+        assert "f16" not in argv
+
+    def test_slot_extra_args_still_beats_family(self) -> None:
+        """A hand-authored [server].extra_args overrides the family default."""
+        profile = _moe_profile()
+        cfg = {
+            "profile": "rocm",
+            "port": 8095,
+            "model": {"default": "gemma-4-12b-it"},
+            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},
+        }
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
+        assert argv is not None
+        assert argv[argv.index("-ctk") + 1] == "q4_0"  # slot override wins over family
+
+    def test_vulkan_seed_ships_q8_but_gemma_is_guarded(self) -> None:
+        """The vulkan seed adopts q8 KV (qwen +45% pp win) and RELIES on the
+        gemma family guard for safety — qwen-on-vulkan gets q8, gemma gets f16."""
+        vseed = SEED_PROFILES["vulkan"]
+        assert "-ctk q8_0 -ctv q8_0" in vseed["flags"], "vulkan seed must ship q8 KV"
+        profile = ProfileConfig(image=vseed["image"], flags=vseed["flags"], mtp=False)
+
+        def _resolve(model_default: str, path: str) -> list[str]:
+            cfg = {"profile": "vulkan", "port": 8096, "model": {"default": model_default}}
+            with patch("hal0.providers.container._resolve_profile", return_value=profile):
+                argv = resolved_command_for_slot(cfg, model_path=path)
+            assert argv is not None
+            return argv
+
+        qwen = _resolve("qwen3-27b", "/mnt/ai-models/qwen3-27b.gguf")
+        assert qwen[qwen.index("-ctk") + 1] == "q8_0"  # adopted win, no guard
+        gemma = _resolve("gemma-4-12b-it", "/mnt/ai-models/gemma-4-12b-it.gguf")
+        assert "q8_0" not in gemma  # family guard pins f16, q8 deduped away
+        assert gemma[gemma.index("-ctk") + 1] == "f16"

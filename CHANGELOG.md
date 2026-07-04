@@ -13,6 +13,40 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Added
+
+- **`FAMILY_DEFAULTS` — per-model-family launcher-flag overrides.** A new
+  resolution layer between a profile's generic flags and a slot's own
+  `[model].defaults`, keyed on model family (matched from the id/filename).
+  Applied automatically at slot resolution (launch + preview parity) and
+  collapsed by `normalize_argv` last-wins, so a family override beats the
+  profile but a per-slot `[server].extra_args` still beats the family. First
+  tenant: **gemma → `-ctk f16 -ctv f16 --cache-reuse 0`** — any gemma model on
+  any q8 profile is pinned back to f16 KV (gemma iSWA regresses on quantized KV:
+  measured -28.5% pp on RADV / -10% tg on rocm, plus SWA+cache-reuse bugs
+  #21468/#21749). This fixes the live gemma-on-`rocm-dnse` regression and makes
+  adopting Vulkan q8 KV safe as a follow-up.
+
+### Changed
+
+- **Seed profiles: bench-driven flag re-tune (Strix Halo matrix, 2026-07-04).**
+  `rocm-moe` micro-batch `-ub 2048` → `-ub 1024` (+30% prompt-processing on
+  Qwen3.6-35B-A3B-MTP: 1165 vs 895 t/s pp2048, consistent across all `-b`;
+  token-gen flat ~47). `vulkan` `-ub 512` → `-ub 256` (+5.4% pp; the reported
+  1024 sweet spot measured *worse*). Dropped `--threads-batch 32` and
+  `--poll 100 --poll-batch 1` from the rocm chat profiles (measured within noise
+  at full offload — simpler flags win ties). Added explicit `-ngl 999` to all
+  GPU LLM profiles (GTT/unified free-mem autodetect is unreliable) and `--jinja`
+  to all LLM profiles. Decode throughput is unchanged (all wins are prefill), so
+  `PROFILE_BENCH` hero numbers stand. MTP draft depth measured `n-max 4` optimal
+  (+23% decode vs n-max 2 on dense MTP) — seeded default kept.
+- **Vulkan seed adopts symmetric q8 KV** (`-ctk q8_0 -ctv q8_0`): +45% pp at 32k
+  depth on qwen (168 vs 116 t/s) and halves KV memory. It is the mirror image on
+  gemma (gemma-4-12B @32k: q8 costs -28.5% pp on RADV), so the vulkan profile is
+  no longer intrinsically gemma-safe — it relies on `FAMILY_DEFAULTS["gemma"]`
+  pinning gemma slots back to f16 KV. (The upstream "~10x pp cliff" did NOT
+  reproduce on this fork.)
+
 ## [v0.8.5b2] — 2026-07-04
 
 Hotfix over v0.8.5b1, closing the three findings from the first live
