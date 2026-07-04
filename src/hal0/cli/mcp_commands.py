@@ -26,7 +26,6 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 
 from hal0.cli._shared import (
@@ -36,7 +35,6 @@ from hal0.cli._shared import (
     api_delete,
     api_get,
     api_post,
-    api_patch,
     die,
 )
 
@@ -73,9 +71,7 @@ def _state_style(state: str) -> str:
 
 @app.command("list")
 def list_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit raw JSON instead of the table."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the table."),
 ) -> None:
     """List all MCP servers (bundled + installed)."""
     url = _api_base()
@@ -123,9 +119,7 @@ def list_cmd(
 @app.command("status")
 def status_cmd(
     server_id: str = typer.Argument(..., help="MCP server id (e.g. 'hal0-admin')."),
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit raw JSON instead of the panel."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the panel."),
 ) -> None:
     """Show detail for one MCP server."""
     url = _api_base()
@@ -210,9 +204,7 @@ def status_cmd(
 @app.command("install")
 def install_cmd(
     url_spec: str = typer.Argument(..., help="MCP server URL or spec (oci://…, npm:…, etc.)."),
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit raw JSON instead of the panel."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the panel."),
 ) -> None:
     """Install a user MCP server from a URL / spec."""
     api_url = _api_base()
@@ -247,9 +239,7 @@ def install_cmd(
 @app.command("uninstall")
 def uninstall_cmd(
     server_id: str = typer.Argument(..., help="MCP server id to remove."),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Skip confirmation prompt."
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
 ) -> None:
     """Uninstall a user-installed MCP server. Bundled servers reject 409."""
     if not force:
@@ -301,9 +291,7 @@ def restart_cmd(
 
 @catalog_app.command("list")
 def catalog_list_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit raw JSON instead of the table."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the table."),
 ) -> None:
     """List installable MCP servers from the catalog."""
     url = _api_base()
@@ -352,9 +340,7 @@ def catalog_list_cmd(
 
 @catalog_app.command("refresh")
 def catalog_refresh_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit raw JSON instead of the table."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the table."),
 ) -> None:
     """Refresh the installable-MCP catalog (re-fetches from upstream).
 

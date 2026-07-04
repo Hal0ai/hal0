@@ -209,6 +209,7 @@ def test_require_loopback_helper_handles_missing_client() -> None:
         require_loopback(req)
     assert exc.value.status_code == status.HTTP_403_FORBIDDEN
 
+
 # ── Gating behaviour (HAL0_OPENROUTER_OAUTH_ENABLED) ──────────────────
 # The route is only mounted when the env var is set to "1" or "true".
 # When unset (default) the callback URL is not registered — it does
@@ -219,6 +220,7 @@ def test_require_loopback_helper_handles_missing_client() -> None:
 def gated_app() -> FastAPI:
     """FastAPI app that behaves like create_app() gating decision."""
     import os
+
     app = FastAPI()
     if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
         app.include_router(openrouter_router)
@@ -238,6 +240,7 @@ def test_callback_mounted_when_env_is_one(
     """With HAL0_OPENROUTER_OAUTH_ENABLED=1, the route mounts (501)."""
     monkeypatch.setenv("HAL0_OPENROUTER_OAUTH_ENABLED", "1")
     import os
+
     app = FastAPI()
     if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
         app.include_router(openrouter_router)
@@ -256,6 +259,7 @@ def test_callback_mounted_when_env_is_true(
     """Case-insensitive — "true" also mounts."""
     monkeypatch.setenv("HAL0_OPENROUTER_OAUTH_ENABLED", "true")
     import os
+
     app = FastAPI()
     if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
         app.include_router(openrouter_router)
@@ -271,6 +275,7 @@ def test_callback_mounted_when_env_is_true(
 def test_callback_not_mounted_for_unknown_env_value() -> None:
     """Garbage values like yes do NOT mount — fail-closed."""
     import os
+
     app = FastAPI()
     # os.environ.get defaults to yes → NOT in (1,true) → no router
     if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "yes").lower() in ("1", "true"):
