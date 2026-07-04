@@ -115,6 +115,43 @@ class FLMInferError(Hal0Error):
     status = 502
 
 
+# ── NPU device nodes ──────────────────────────────────────────────────────────
+# Strix Halo defaults, kept as the LAST link of the fallback chain below.
+_DEFAULT_NPU_ACCEL_NODE = "/dev/accel/accel0"
+_DEFAULT_NPU_RENDER_NODE = "/dev/dri/renderD128"
+
+
+def _npu_device_nodes() -> list[str]:
+    """Device nodes to pass through to the FLM container.
+
+    Fallback chain (documented per the hardware-generalization wave):
+
+      1. hardware.json ``npu.accel_path`` / ``npu.render_path`` — the actual
+         nodes ``hal0 probe`` detected on this host (a second accel device or
+         a non-renderD128 iGPU node lands here);
+      2. the Strix Halo constants ``/dev/accel/accel0`` +
+         ``/dev/dri/renderD128`` — today's behaviour, used when the snapshot
+         is missing, pre-wave (fields absent/empty), or unreadable.
+
+    Raw-JSON read (no pydantic) so spec builds stay cheap and never raise.
+    """
+    accel = ""
+    render = ""
+    try:
+        import json as _json
+
+        from hal0.config import paths as _paths
+
+        raw = _json.loads(_paths.hardware_json().read_text())
+        npu = raw.get("npu") or {}
+        if isinstance(npu, dict):
+            accel = str(npu.get("accel_path") or "")
+            render = str(npu.get("render_path") or "")
+    except Exception:
+        pass
+    return [accel or _DEFAULT_NPU_ACCEL_NODE, render or _DEFAULT_NPU_RENDER_NODE]
+
+
 def _resolve_render_gid() -> int | None:
     """Look up the ``render`` group's numeric gid on the host.
 
@@ -308,8 +345,10 @@ class FLMProvider(Provider):
                 "LD_LIBRARY_PATH": f"{_CONTAINER_FLM_ROOT}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
             },
             mounts=mounts,
-            # /dev/accel/accel0: XDNA2 NPU. /dev/dri/renderD128: iGPU companion.
-            devices=["/dev/accel/accel0", "/dev/dri/renderD128"],
+            # accel node: XDNA2 NPU. render node: iGPU companion. Probe-recorded
+            # paths from hardware.json when present; Strix Halo constants
+            # otherwise — see _npu_device_nodes for the fallback chain.
+            devices=_npu_device_nodes(),
             cap_add=[],
             # apparmor=unconfined is required in LXC; on bare metal a
             # tailored profile would be tighter but Strix Halo deployments

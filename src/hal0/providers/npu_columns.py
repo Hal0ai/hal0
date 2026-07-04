@@ -59,6 +59,38 @@ _XRT_SMI_SH = (
 # Exec timeout — xrt-smi examine is sub-second when healthy.
 _EXEC_TIMEOUT_S = 2.0
 
+# Strix Halo's XDNA NPU has 8 AIE columns; last link of the fallback chain
+# in :func:`aie_total_columns`.
+_DEFAULT_AIE_TOTAL_COLUMNS = 8
+
+
+def aie_total_columns() -> int:
+    """Total AIE columns on this host's NPU (the occupancy denominator/cap).
+
+    Fallback chain (hardware-generalization wave):
+
+      1. hardware.json ``npu.aie_columns`` — the count ``hal0 probe``
+         discovered via xrt-smi at probe time (>0 = known);
+      2. the Strix Halo constant 8 — used when the snapshot is missing,
+         pre-wave (field absent/0), or unreadable.
+
+    Raw-JSON read (no pydantic), never raises — mirrors the fail-soft
+    posture of the rest of this module.
+    """
+    try:
+        from hal0.config import paths as _paths
+
+        raw = json.loads(_paths.hardware_json().read_text())
+        npu = raw.get("npu") or {}
+        if isinstance(npu, dict):
+            cols = int(npu.get("aie_columns") or 0)
+            if cols > 0:
+                return cols
+    except Exception:
+        pass
+    return _DEFAULT_AIE_TOTAL_COLUMNS
+
+
 # ── cache (TTL, monotonic clock seam) ────────────────────────────────────────
 # Module attr so tests can monkeypatch the clock: ``npu_columns._now``.
 _now = time.monotonic
@@ -95,7 +127,10 @@ def _parse_aie_partitions(payload: str) -> dict[str, Any] | None:
     ``hw_contexts[]``. Returns::
 
         {"partitions": [{"start_col": 0, "num_cols": 8, "contexts": N}],
-         "total": <sum of num_cols, capped at 8>}
+         "total": <sum of num_cols, capped at aie_total_columns()>}
+
+    The cap comes from :func:`aie_total_columns` (probe-recorded column
+    count when available, Strix Halo's 8 otherwise).
 
     Defensive: any missing/garbage key → ``None`` so the caller degrades.
     """
@@ -148,7 +183,7 @@ def _parse_aie_partitions(payload: str) -> dict[str, Any] | None:
 
     if not parts:
         return None
-    return {"partitions": parts, "total": min(total, 8)}
+    return {"partitions": parts, "total": min(total, aie_total_columns())}
 
 
 async def read_aie_columns(container_name: str) -> dict[str, Any] | None:
@@ -226,6 +261,7 @@ def invalidate_columns_cache(container_name: str | None = None) -> None:
 
 
 __all__ = [
+    "aie_total_columns",
     "cached_aie_columns",
     "invalidate_columns_cache",
     "read_aie_columns",

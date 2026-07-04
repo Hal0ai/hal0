@@ -47,6 +47,10 @@ without touching the curated list.
 #   1. Add a multi-file pull mode to ``registry/pull.py`` that snapshots
 #      a HF repo dir into the model store, and relax the curated
 #      ``hf_file`` validator to allow a directory glob.
+#      (Partially landed: pull.py now handles a fixed two-file shape —
+#      main GGUF + ``mmproj_file`` vision sidecar — but not arbitrary
+#      repo-dir snapshots, so the ONNX/PyTorch bundles above are still
+#      blocked.)
 #   2. Ship a whisper-cpp toolbox image and add a ``whisper`` entry to
 #      ``_RUNTIME_TO_HOST_BACKENDS``, then surface whisper.cpp GGUFs
 #      under stt.
@@ -101,6 +105,16 @@ class CuratedModel(BaseModel):
         ..., description="HuggingFace repo id, e.g. 'Qwen/Qwen3-4B-Instruct-GGUF'."
     )
     hf_file: str = Field(..., description="Filename within the repo (GGUF, safetensors, etc.).")
+    mmproj_file: str = Field(
+        default="",
+        description=(
+            "Optional multimodal projector (mmproj) filename within the same "
+            "HF repo. When set, the pull layer downloads it alongside the "
+            "main file (WS-11) and associates it as the registry row's "
+            "``mmproj`` sidecar so vision works without a directory scan. "
+            "Empty for non-vision entries."
+        ),
+    )
     context_length: int = Field(
         default=0,
         description=("Native context window in tokens. Zero/omitted for image-gen entries."),

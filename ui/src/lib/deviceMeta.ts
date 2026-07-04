@@ -37,6 +37,8 @@ export interface MetaEnums {
   model_capabilities: string[]
   capability_aliases: Record<string, string>
   model_backends: string[]
+  /** Curated Model.tags vocabulary (type tags + provenance + catalogue descriptors). */
+  curated_model_tags: string[]
   runtime_families: string[]
   backend_to_device: Record<string, string>
   device_default_profiles: Record<string, string>
@@ -124,6 +126,49 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
     stt: 'asr',
   },
   model_backends: ['rocm', 'vulkan', 'cpu', 'cuda', 'flm', 'moonshine', 'kokoro'],
+  // Curated Model.tags vocabulary — kept in step with
+  // src/hal0/model_meta CURATED_MODEL_TAGS (type tags first, then
+  // provenance, then the curated-catalogue descriptors).
+  curated_model_tags: [
+    'mtp',
+    'moe',
+    'tool-calling',
+    'reasoning',
+    'coder',
+    'vision',
+    'curated',
+    'user-added',
+    'chat',
+    'code',
+    'coding',
+    'frontier',
+    'long-context',
+    'multilingual',
+    'default',
+    'rocmfp4',
+    'balanced',
+    'tiny',
+    'lite-bundle',
+    'smoke-test',
+    'fast',
+    'low-vram',
+    'mit',
+    'embed',
+    'light',
+    'medium',
+    'rerank',
+    'image',
+    'sdxl',
+    'sd-1.5',
+    'lora',
+    'upscale',
+    'esrgan',
+    'research-only',
+    'stt',
+    'transcription',
+    'tts',
+    'edit',
+  ],
   runtime_families: ['llamacpp', 'flm', 'whispercpp', 'sdcpp', 'kokoro', 'comfyui'],
   backend_to_device: {
     rocm: 'gpu-rocm',
@@ -174,6 +219,9 @@ export function resolveMetaEnums(data?: Partial<MetaEnums> | null): MetaEnums {
     model_backends: _isFilledArray(data.model_backends)
       ? (data.model_backends as string[])
       : f.model_backends,
+    curated_model_tags: _isFilledArray(data.curated_model_tags)
+      ? (data.curated_model_tags as string[])
+      : f.curated_model_tags,
     runtime_families: _isFilledArray(data.runtime_families)
       ? (data.runtime_families as string[])
       : f.runtime_families,

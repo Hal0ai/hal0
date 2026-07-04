@@ -21,12 +21,14 @@ Vocabulary                Purpose / members
 ========================  ====================================================
 device                    v0.2 hardware-preference enum stored in slot TOMLs
                           and the capabilities catalog:
-                          ``gpu-rocm | gpu-vulkan | cpu | npu``
+                          ``gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu``
                           (:data:`CANONICAL_DEVICES` carries per-device
                           metadata; :data:`VALID_DEVICES` is the id set).
 legacy backend            DEPRECATED v0.1 ``SlotConfig.backend`` enum, kept
-                          one release for TOML round-trip:
-                          ``rocm | vulkan | cpu | flm | moonshine | kokoro``
+                          one release for TOML round-trip (plus ``cuda`` so
+                          the gpu-cuda device write-back round-trips):
+                          ``rocm | vulkan | cuda | cpu | flm | moonshine |
+                          kokoro``
                           (:data:`LEGACY_BACKENDS`). It overloaded hardware
                           intent with provider identity — ``moonshine`` /
                           ``kokoro`` were CPU runtimes, hence they map to
@@ -105,11 +107,12 @@ class DeviceMeta:
     description: str
 
 
-#: The four canonical devices (ADR-0006 §7), with per-device metadata.
+#: The canonical devices (ADR-0006 §7, gpu-cuda added by the GPU
+#: generalization wave), with per-device metadata.
 #: Ordering is presentation order for pickers: recommended first, then the
-#: fallback, then the non-GPU devices. Per CONTEXT.md (spike data):
-#: ``gpu-rocm`` is the recommended default on Strix Halo; ``gpu-vulkan`` is
-#: the slower fallback.
+#: fallbacks (Vulkan, then the experimental CUDA path), then the non-GPU
+#: devices. Per CONTEXT.md (spike data): ``gpu-rocm`` is the recommended
+#: default on Strix Halo; ``gpu-vulkan`` is the slower fallback.
 CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
     DeviceMeta(
         id="gpu-rocm",
@@ -128,6 +131,15 @@ CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
         legacy_backend="vulkan",
         recommended=False,
         description="Runs anywhere Mesa Vulkan does; slower than ROCm on Strix Halo — fallback.",
+    ),
+    DeviceMeta(
+        id="gpu-cuda",
+        label="GPU (CUDA)",
+        device_class="gpu",
+        default_profile="cuda",
+        legacy_backend="cuda",
+        recommended=False,
+        description="NVIDIA GPUs via llama.cpp CUDA — experimental on hal0.",
     ),
     DeviceMeta(
         id="cpu",
@@ -158,7 +170,10 @@ DEFAULT_DEVICE: str = "gpu-rocm"
 
 #: DEPRECATED v0.1 ``SlotConfig.backend`` enum (whitelist source for
 #: ``config.schema._VALID_BACKENDS``). Tuple so JSON surfaces are ordered.
-LEGACY_BACKENDS: tuple[str, ...] = ("rocm", "vulkan", "cpu", "flm", "moonshine", "kokoro")
+#: ``cuda`` never existed in v0.1 but is accepted here so the gpu-cuda
+#: device round-trips through the one-release ``backend`` write-back the
+#: same way every other device does.
+LEGACY_BACKENDS: tuple[str, ...] = ("rocm", "vulkan", "cuda", "cpu", "flm", "moonshine", "kokoro")
 
 #: Tokens POST /api/slots/{name}/backend accepts (``auto`` clears the device
 #: so the load path falls back to its default). flm/npu are deliberately not
@@ -273,6 +288,59 @@ MODEL_BACKENDS: tuple[str, ...] = (
     "moonshine",
     "kokoro",
     "comfyui",
+)
+
+#: Curated ``model.tags`` vocabulary served on /api/meta/enums (WS-13) so the
+#: dashboard's tag chips stop hardcoding their own copies. Ordering is
+#: presentation order: the behaviour-driving type tags first (mirrors the UI
+#: edit pane's toggles — ui/src/dash/model-types.js MODEL_TYPE_TAGS), then
+#: provenance, then the descriptive tags the curated catalogue seeds
+#: (registry/curated.py). Tags remain freeform on ``Model.tags`` — this tuple
+#: is the *curated* superset, not a validation whitelist.
+#: tests/model_meta/test_curated_model_tags.py pins this against the curated
+#: catalogue so a new seed tag can't silently drift out of the enums payload.
+CURATED_MODEL_TAGS: tuple[str, ...] = (
+    # behaviour-driving type tags (routing / slot-feature gates)
+    "mtp",
+    "moe",
+    "tool-calling",
+    "reasoning",
+    "coder",
+    "vision",
+    # provenance
+    "curated",
+    "user-added",
+    # curated-catalogue descriptive tags
+    "chat",
+    "code",
+    "coding",
+    "frontier",
+    "long-context",
+    "multilingual",
+    "default",
+    "rocmfp4",
+    "balanced",
+    "tiny",
+    "lite-bundle",
+    "smoke-test",
+    "fast",
+    "low-vram",
+    "mit",
+    "embed",
+    "light",
+    "medium",
+    "rerank",
+    "image",
+    "sdxl",
+    "sd-1.5",
+    "lora",
+    "upscale",
+    "esrgan",
+    "research-only",
+    "stt",
+    "transcription",
+    "tts",
+    "edit",
 )
 
 
@@ -430,9 +498,10 @@ def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
     """Map hal0's ``device`` enum onto the recipe+backend pair.
 
     Args:
-        device: One of ``gpu-rocm`` | ``gpu-vulkan`` | ``cpu`` | ``npu``.
-                Empty / unknown values fall back to ``(None, None)``
-                ("no opinion" — callers apply their own defaults).
+        device: One of ``gpu-rocm`` | ``gpu-vulkan`` | ``gpu-cuda`` | ``cpu``
+                | ``npu``. Empty / unknown values fall back to
+                ``(None, None)`` ("no opinion" — callers apply their own
+                defaults).
 
     Returns:
         ``(recipe, llamacpp_backend)``. Either may be ``None`` to mean
@@ -448,6 +517,8 @@ def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
         return (None, "rocm")
     if d == "gpu-vulkan":
         return (None, "vulkan")
+    if d == "gpu-cuda":
+        return (None, "cuda")
     if d == "cpu":
         return (None, "cpu")
     if d == "npu":
@@ -558,6 +629,7 @@ __all__ = [
     "BACKEND_TO_DEVICE",
     "CANONICAL_DEVICES",
     "CAPABILITY_ALIASES",
+    "CURATED_MODEL_TAGS",
     "DEFAULT_DEVICE",
     "DEVICE_CLASSES",
     "DEVICE_TO_DEFAULT_PROFILE",
