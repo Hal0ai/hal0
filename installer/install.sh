@@ -765,8 +765,13 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         install -m 0644 "${BENCH_SRC}/config.sh"                "${LIB_DIR}/bench/config.sh"
         install -m 0755 "${BENCH_SRC}/run_benchmarks.sh"        "${LIB_DIR}/bench/run_benchmarks.sh"
         install -m 0755 "${BENCH_SRC}/generate_results_json.py" "${LIB_DIR}/bench/generate_results_json.py"
+        # Profile-matrix orchestrator (seam-driven Tier A) + server-level A/B
+        # harness (Tier B: MTP/spec, cache-reuse, embed/rerank — hits hal0-api
+        # + slot ports as the hal0 user, no sudo needed).
+        install -m 0755 "${BENCH_SRC}/profile-matrix.sh"        "${LIB_DIR}/bench/profile-matrix.sh"
+        install -m 0755 "${BENCH_SRC}/server_ab.py"             "${LIB_DIR}/bench/server_ab.py"
         install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
-        install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs"
+        install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" "${VAR_DIR}/benchmarks/server-ab"
         chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
         chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
