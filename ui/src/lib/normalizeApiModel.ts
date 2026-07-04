@@ -62,13 +62,23 @@ function formatSize(b: number): string {
   return `${(b / 1024 ** 3).toFixed(2)} GB`
 }
 
+// A row `/api/models` aggregated from an upstream provider's `/v1/models`
+// rather than the local registry: advertised-only, never on this host's
+// disk, routed by the dispatcher to `m.upstream`. FLM/NPU rows also carry
+// `upstream` ("npu") but are installed host-side, so the `installed` check
+// keeps them local.
+export function isUpstreamModel(m: ApiModelRaw): boolean {
+  return !m.installed && typeof m.upstream === 'string' && m.upstream !== ''
+}
+
 // Coordinate shown under a model's name. We standardize on the HuggingFace
 // `<org>/<repo>` style and NEVER surface a raw `/mnt/ai-models/…/x.gguf`
 // filesystem path (which leaked through the old `hf_repo || path` fallback):
 //   1. an explicit `hf_repo` wins;
 //   2. else reconstruct coords from a HF cache path
 //      (`…/models--<org>--<repo>/snapshots/<sha>/…` → `<org>/<repo>`);
-//   3. else it's a genuinely local model → a clean `local/<id>` coordinate.
+//   3. else an upstream-advertised row → name the provider, never `local/…`;
+//   4. else it's a genuinely local model → a clean `local/<id>` coordinate.
 function deriveRepo(m: ApiModelRaw): string {
   if (typeof m.hf_repo === 'string' && m.hf_repo) return m.hf_repo
   const path = typeof m.path === 'string' ? m.path : ''
@@ -77,6 +87,7 @@ function deriveRepo(m: ApiModelRaw): string {
     const parts = cacheMatch[1].split('--')
     if (parts.length >= 2) return `${parts[0]}/${parts.slice(1).join('--')}`
   }
+  if (isUpstreamModel(m)) return `via ${m.upstream}`
   if (m.id) return `local/${m.id}`
   return ''
 }
