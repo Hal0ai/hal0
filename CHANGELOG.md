@@ -26,11 +26,13 @@ tree is gitignored, #638) and referenced by number throughout the code.
   to all LLM profiles. Decode throughput is unchanged (all wins are prefill), so
   `PROFILE_BENCH` hero numbers stand. MTP draft depth measured `n-max 4` optimal
   (+23% decode vs n-max 2 on dense MTP) — seeded default kept. Symmetric q8 KV
-  on Vulkan measured +45% pp at 32k depth but deliberately not adopted: gemma on
-  quantized KV is a ~10x pp trap and the per-model f16 override that would guard
-  it is unimplemented (verified 2026-07-04 — the catalog carries no launcher
-  defaults; the live gemma slot already runs q8 KV on rocm-dnse). Needs a
-  gemma-family f16 KV guard first.
+  on Vulkan measured +45% pp at 32k depth (qwen) but deliberately not adopted:
+  it is the mirror image on gemma — measured 2026-07-04 on gemma-4-12B @32k, q8
+  KV costs -28.5% pp on RADV (-10% tg on rocm). (The upstream "~10x pp trap" did
+  NOT reproduce on this fork, but gemma still regresses.) No per-model f16
+  override exists to guard a gemma-on-vulkan slot (the catalog carries no
+  launcher defaults; the live gemma slot already runs q8 KV on rocm-dnse). Needs
+  a gemma-family f16 KV guard first.
 
 ## [v0.8.5b2] — 2026-07-04
 

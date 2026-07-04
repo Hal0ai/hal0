@@ -330,9 +330,22 @@ adoption was gated on that. **Verified false:**
   is already on quantized KV today, unguarded** (pre-existing, independent of the
   vulkan change).
 
-**Consequences:** (1) vulkan q8 KV stays OUT of the seed (the +45% pp is real but
-unsafe for gemma). (2) Separately, gemma-on-rocm-dnse is a latent 10x-pp trap now.
-**Fix path (separate change):** wire a gemma-family f16 KV default — either a
+**Trap validated + magnitude corrected (gemma-4-12B @32k, 2026-07-04):**
+
+| backend | pp f16 | pp q8 | Δpp | tg f16 | tg q8 | Δtg |
+|---|---|---|---|---|---|---|
+| ROCm | 379.1 | 369.1 | −2.6% | 20.4 | 18.3 | **−10.4%** |
+| Vulkan | 394.4 | 281.9 | **−28.5%** | 23.3 | 23.6 | +1.3% |
+
+The upstream "~10x pp cliff" (#12352/#23978) did NOT reproduce on this
+ROCm-7.2.4/RADV fork — q8 stayed GPU-resident (87% CPU, no fallback). But q8 KV
+still clearly regresses gemma, the **mirror image** of qwen's +45% vulkan gain.
+So the guard is justified at a −28% pp (vulkan) magnitude, not 10x.
+
+**Consequences:** (1) vulkan q8 KV stays OUT of the seed. (2) gemma-on-rocm-dnse
+today pays only ~10% tg (pp fine) — a real but mild regression, not a fire.
+**Fix path (separate change):** wire a gemma-family f16 KV default — a
 `family=="gemma"` guard that injects `-ctk f16 -ctv f16 --cache-reuse 0` into
-`model_defaults` at slot resolution, or a per-slot `[model].defaults.extra_args`
-on gemma slots. Then vulkan q8 KV can be adopted.
+`model_defaults` at slot resolution (auto, catalog-driven), or a per-slot
+`[model].defaults.extra_args` on gemma slots (manual, immediate). Then vulkan q8
+KV can be adopted for the +45% qwen win.
