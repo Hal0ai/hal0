@@ -32,9 +32,15 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   const [name, setName] = useStateMM("");
   const [labels, setLabels] = useStateMM({ chat: true });
   const [mmproj, setMmproj] = useStateMM("");
+  // Optional chat-template pin, applied at pull time (WS-6). "auto" = use the
+  // GGUF-embedded template — the common case, so it's the default.
+  const [chatTemplate, setChatTemplate] = useStateMM("auto");
 
   const inspect = useModelInspect();
   const pullJob = usePullJob();
+  // Chat-template catalogue — gated on `open` like the Recipe editor so the
+  // request only fires while the modal is visible.
+  const templates = useChatTemplates(open);
   // One canonical capability vocabulary for every add/edit surface —
   // meta.model_capabilities (this modal used to carry its own ad-hoc list
   // with legacy spellings: embeddings/reranking/transcription).
@@ -47,6 +53,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
       setName("");
       setLabels({ chat: true });
       setMmproj("");
+      setChatTemplate("auto");
       inspect.reset();
       pullJob.reset();
     }
@@ -99,6 +106,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
         hf_filename: variant,
         mmproj_filename: mmproj || undefined,
         labels: labelList,
+        chat_template: chatTemplate && chatTemplate !== "auto" ? chatTemplate : undefined,
       });
       window.__hal0Toast && window.__hal0Toast(
         `Pulling ${name} · ${sel?.size ?? ""}`, "info",
@@ -239,6 +247,25 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
               </div>
             </div>
           )}
+
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>chat template</span>
+              <span className="sub">auto = use template embedded in the GGUF · applied on pull</span>
+            </div>
+            <div className="form-ctl">
+              <select
+                className="input mono chat-template-select"
+                value={chatTemplate}
+                onChange={e => setChatTemplate(e.target.value)}
+              >
+                <option value="auto">Auto (GGUF embedded)</option>
+                {(Array.isArray(templates.data) ? templates.data : []).filter(t => t.id !== "auto").map(t => (
+                  <option key={t.id} value={t.id}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
 
           {inspect.data?.metadata?.license && (
             <div className="form-section">License · <span className="mono" style={{color: "var(--fg)"}}>{inspect.data.metadata.license}</span></div>
