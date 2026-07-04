@@ -58,9 +58,9 @@ export const CARD_REGISTRY: CardDef[] = [
   { id: 'services',    name: 'Services',           icon: 'route',     span: 6,  min: 4,  locked: false, defaultOn: true  },
   { id: 'utilization', name: 'Utilization',        icon: 'gauge',     span: 4,  min: 3,  locked: false, defaultOn: true  },
   { id: 'attention',   name: 'Needs Attention',    icon: 'shield',    span: 4,  min: 3,  locked: false, defaultOn: true  },
-  { id: 'slottrack',   name: 'Per-Slot Throughput',icon: 'flow',      span: 4,  min: 3,  locked: false, defaultOn: false },
+  { id: 'slottrack',   name: 'Per-Slot Throughput',icon: 'flow',      span: 4,  min: 3,  locked: false, defaultOn: true  },
   { id: 'approvals',   name: 'Agent Approvals',    icon: 'shield',    span: 4,  min: 3,  locked: false, defaultOn: false },
-  { id: 'power',       name: 'Power & Thermal',    icon: 'thermo',    span: 4,  min: 3,  locked: false, defaultOn: false },
+  { id: 'power',       name: 'Power & Thermal',    icon: 'thermo',    span: 4,  min: 3,  locked: false, defaultOn: true  },
   { id: 'scheduler',   name: 'Scheduler',          icon: 'clock',     span: 4,  min: 3,  locked: false, defaultOn: false },
 ]
 
