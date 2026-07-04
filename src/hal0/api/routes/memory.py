@@ -228,6 +228,9 @@ async def graph_status(request: Request) -> dict[str, Any]:
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
     status["slot_resolves"] = status.get("extraction_slot") in available
+    # llm_timeout_s lives in hal0.toml (not on the provider) — echo it so the
+    # dashboard's graph panel can edit it without a second config fetch.
+    status["llm_timeout_s"] = load_hal0_config().memory.graph.llm_timeout_s
     await _augment_build_counters(request, status)
     return status
 
@@ -341,14 +344,18 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     except ValueError as exc:
         raise MemoryGraphConfigInvalid(str(exc)) from exc
 
-    # Propagate the extraction slot to hindsight-api (drop-in + restart) so the
-    # engine's native extraction LLM follows the choice. Best-effort: a restart
-    # failure is surfaced in the response but does not roll back the config.
+    # Propagate the extraction slot + LLM timeout to hindsight-api (drop-in +
+    # restart) so the engine's native extraction LLM follows the choice.
+    # Best-effort: a restart failure is surfaced in the response but does not
+    # roll back the config.
+    timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
     propagation: dict[str, Any] | None = None
-    if slot_changed:
+    if slot_changed or timeout_changed:
         from hal0.memory.extraction_env import apply_extraction_slot
 
-        propagation = apply_extraction_slot(new_cfg.extraction_slot)
+        propagation = apply_extraction_slot(
+            new_cfg.extraction_slot, timeout_s=new_cfg.llm_timeout_s
+        )
 
     cfg.memory.graph = new_cfg
     try:

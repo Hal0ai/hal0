@@ -82,8 +82,18 @@ _VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro", "qwe
 # Slot port range.  8080 is the hal0 API; slots get 8081-8099; 8188 =
 # ComfyUI's stock port for the img slot — kept well-known so operator
 # bookmarks/tooling keep working.
+#
+# Two distinct bounds on purpose:
+#   * _SLOT_PORT_MIN/_SLOT_PORT_MAX bound what a single slot's ``port``
+#     field may be — wide enough to admit the img slot's 8188.
+#   * _SLOT_PORT_POOL_END is the default END of the AUTO-ALLOCATION pool
+#     ([slots].port_range_end) — deliberately below 8188 so freshly
+#     created slots can never squat on ComfyUI's port. Operators may
+#     widen the pool in hal0.toml; the allocator still skips ports
+#     claimed by existing slot TOMLs.
 _SLOT_PORT_MIN = 8081
 _SLOT_PORT_MAX = 8200
+_SLOT_PORT_POOL_END = 8099
 
 #: A valid POSIX environment-variable name — used to validate [server].env keys.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1545,19 +1555,30 @@ class SlotsConfig(BaseModel):
     max_slots: int = Field(
         default=0,
         ge=0,
-        description="Maximum concurrent slots.  0 means unlimited.",
+        description=(
+            "Maximum number of slots that may exist (creation gate; 0 = "
+            "unlimited). Counts every slot TOML including the seeded ones "
+            "(utility, rerank, tts, img, npu, …), so values below the "
+            "current slot count block new-slot creation. Applies to the "
+            "next slot creation — no restart needed."
+        ),
     )
     port_range_start: int = Field(
         default=_SLOT_PORT_MIN,
         ge=1024,
         le=65535,
-        description="First port in the slot pool.",
+        description="First port in the auto-allocation pool for new slots.",
     )
     port_range_end: int = Field(
-        default=_SLOT_PORT_MAX,
+        default=_SLOT_PORT_POOL_END,
         ge=1024,
         le=65535,
-        description="Last port in the slot pool (inclusive).",
+        description=(
+            "Last port in the auto-allocation pool (inclusive). The default "
+            "stops below 8188 so new slots never claim ComfyUI's port; the "
+            "allocator also skips any port already used by an existing slot "
+            "TOML. Applies to the next slot creation — no restart needed."
+        ),
     )
     idle_timeout_s: int = Field(
         default=300,
@@ -1664,8 +1685,19 @@ class MemoryGraphConfig(BaseModel):
             "The local llm slot Hindsight uses for graph extraction / "
             "consolidation / reflect. Propagated to hindsight-api as "
             "HINDSIGHT_API_LLM_MODEL=hal0/<slot> via a systemd drop-in. Validated "
-            "against the live enabled-llm-slot set by the API at set-time. This is "
-            "the sole memory-graph knob."
+            "against the live enabled-llm-slot set by the API at set-time."
+        ),
+    )
+    llm_timeout_s: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description=(
+            "Timeout (seconds) for the Hindsight daemon's LLM calls — "
+            "extraction, consolidation, and reflect. Covers cold slot starts "
+            "and long reflects. Propagated to hindsight-api as "
+            "HINDSIGHT_API_LLM_TIMEOUT via the same systemd drop-in as the "
+            "extraction slot; the daemon restarts to pick it up."
         ),
     )
 
@@ -1948,85 +1980,44 @@ class AgentConfig(BaseModel):
 
 
 class MemoryEmbeddingConfig(BaseModel):
-    """[memory.embedding] section of hal0.toml (issue #116 G3 + G4).
+    """[memory.embedding] section of hal0.toml — Hindsight-era rerank knobs.
 
-    Pins the embedding model Cognee uses for memory vector retrieval and
-    (optionally) wires a second-pass rerank slot in front of
-    :meth:`hal0.memory.cognee_wrapper.CogneeWrapper.search`.
+    ADR-0023 made Hindsight the platform memory engine. Hindsight embeds
+    server-side with its own bundled model, so hal0 no longer pins an
+    embedding model here; what remains configurable is the second-pass
+    reranker hal0 runs over cross-bank recall results
+    (:class:`hal0.memory.hindsight_provider.Hal0Reranker`):
 
-    Defaults are zero-config preserving:
+      - ``rerank_gateway_url`` — the OpenAI-surface gateway the reranker
+        POSTs ``/v1/rerankings`` to (hal0-api's dispatcher, which routes
+        to the rerank slot).
+      - ``rerank_model`` — the rerank model id sent in the request body.
+      - ``rerank_connect_timeout_s`` / ``rerank_read_timeout_s`` — the
+        HTTP budgets; failures fall through to fused vector ordering,
+        never blocking recall.
 
-      - ``model`` keeps Cognee's stock pick (``BAAI/bge-small-en-v1.5``,
-        384-dim) so an upgrade does NOT silently re-embed an existing
-        LanceDB index (dimension mismatch corrupts the store).
-      - ``rerank_enabled`` is OFF by default; when flipped on, the
-        wrapper calls ``rerank_url`` after vector retrieval and reorders
-        candidates by relevance score. Failures fall through to the
-        original vector ordering — never block memory_search.
-      - ``rerank_url`` points at hal0's built-in rerank container slot
-        (port 8083, seeded by ``installer/etc-hal0/slots/rerank.toml``).
-        The old value 8086 was the retired embed-rerank combined slot;
-        ``hal0.toml`` overrides take precedence over this default.
-
-    G3 (pin embedding model) deliberately ships the *existing* default
-    so users who do not flip the toggle see no behavioral change. Future
-    work (audit doc §G3) may bump the default to ``bge-large-en-v1.5``
-    once a migration story for the LanceDB index exists.
+    The cognee-era fields (``model``, ``rerank_enabled``, ``rerank_url``,
+    ``rerank_over_fetch_factor``, ``rerank_max_candidates``) were removed
+    with the cognee wrapper; ``extra = "ignore"`` silently drops them
+    from an older hal0.toml on load (gone on next save), mirroring how
+    ADR-0023 retired ``[memory.graph]``'s ``route``/``upstream``.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "ignore"}
 
-    model: str = Field(
-        default="BAAI/bge-small-en-v1.5",
+    rerank_gateway_url: str = Field(
+        default="http://127.0.0.1:8080",
         description=(
-            "Embedding model the Cognee wrapper pins (issue #116 G3). "
-            "Defaults to the existing Cognee stock value so the install "
-            "default is byte-identical to v0.3.0 behavior — bumping this "
-            "without a re-embed migration corrupts the LanceDB index."
+            "Base URL of the OpenAI-compatible gateway the memory reranker "
+            "calls (``POST {url}/v1/rerankings``). Defaults to hal0-api "
+            "itself, whose dispatcher routes to the rerank slot."
         ),
     )
-    rerank_enabled: bool = Field(
-        default=False,
+    rerank_model: str = Field(
+        default="builtin.jina-reranker-v1-tiny-en-q8",
         description=(
-            "When True, memory_search posts the vector top-N candidates "
-            "to ``rerank_url`` and reorders by ``relevance_score`` before "
-            "returning the top-K (issue #116 G4). When False (default), "
-            "vector ordering is returned unchanged."
-        ),
-    )
-    rerank_url: str = Field(
-        default="http://127.0.0.1:8083",
-        description=(
-            "Base URL of the llama.cpp rerank endpoint. The wrapper "
-            "POSTs to ``{rerank_url}/rerank`` with "
-            "``{model, query, documents}`` per llama.cpp's reranking "
-            "protocol. Defaults to hal0's bundled rerank container slot "
-            "(port 8083). hal0.toml overrides win."
-        ),
-    )
-    rerank_over_fetch_factor: int = Field(
-        default=5,
-        ge=1,
-        le=20,
-        description=(
-            "Multiplier on ``limit`` used to determine the vector-search "
-            "candidate count fed into the rerank pass. With the default of "
-            "5, a ``limit=10`` search rerank-scores up to 50 candidates "
-            "before clipping back to the top 10. Bumping this trades "
-            "rerank latency for recall; dropping it toward 1 makes the "
-            "rerank pass increasingly pointless."
-        ),
-    )
-    rerank_max_candidates: int = Field(
-        default=500,
-        ge=10,
-        le=2000,
-        description=(
-            "Absolute cap on candidates per rerank call, applied AFTER "
-            "``rerank_over_fetch_factor`` so memory + latency stay bounded "
-            "regardless of the requested ``limit``. The pre-PR hard-coded "
-            "100 silently collapsed the over-fetch ratio at ``limit >= 20`` "
-            "and made rerank a no-op at ``limit >= 100``."
+            "Rerank model id sent to the gateway. Must resolve to a model "
+            "the rerank slot serves (see /v1/models on the gateway)."
         ),
     )
     rerank_connect_timeout_s: float = Field(
@@ -2054,18 +2045,11 @@ class MemoryEmbeddingConfig(BaseModel):
         ),
     )
 
-    @field_validator("model")
+    @field_validator("rerank_gateway_url", "rerank_model")
     @classmethod
-    def model_nonempty(cls, v: str) -> str:
+    def rerank_fields_nonempty(cls, v: str, info: Any) -> str:
         if not v or not v.strip():
-            raise ValueError("memory.embedding.model must not be empty")
-        return v
-
-    @field_validator("rerank_url")
-    @classmethod
-    def rerank_url_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("memory.embedding.rerank_url must not be empty")
+            raise ValueError(f"memory.embedding.{info.field_name} must not be empty")
         return v
 
 

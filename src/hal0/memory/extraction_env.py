@@ -35,28 +35,38 @@ DROP_IN_DIR = Path("/etc/systemd/system/hindsight-api.service.d")
 DROP_IN_PATH = DROP_IN_DIR / "extraction-model.conf"
 SERVICE = "hindsight-api"
 
+#: Default daemon LLM timeout (seconds) — mirrors MemoryGraphConfig.llm_timeout_s.
+DEFAULT_LLM_TIMEOUT_S = 300
+
 _DROP_IN_TEMPLATE = (
-    "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot).\n"
-    "# Overrides HINDSIGHT_API_LLM_MODEL in the base hindsight-api.service unit.\n"
-    "# Do not edit by hand; set via `hal0 memory graph enable --slot <name>` or the\n"
-    "# Memory dashboard, which rewrites this file and restarts the service.\n"
+    "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot / llm_timeout_s).\n"
+    "# Overrides HINDSIGHT_API_LLM_MODEL and HINDSIGHT_API_LLM_TIMEOUT in the base\n"
+    "# hindsight-api.service unit. Do not edit by hand; set via `hal0 memory graph\n"
+    "# enable --slot <name>` or the dashboard, which rewrites this file and\n"
+    "# restarts the service.\n"
     "[Service]\n"
     "Environment=HINDSIGHT_API_LLM_MODEL=hal0/{slot}\n"
+    "Environment=HINDSIGHT_API_LLM_TIMEOUT={timeout_s}\n"
 )
 
 
-def render_drop_in(slot: str) -> str:
-    """Return the drop-in file contents pinning extraction to ``hal0/<slot>``."""
-    return _DROP_IN_TEMPLATE.format(slot=slot)
+def render_drop_in(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> str:
+    """Return the drop-in contents pinning extraction to ``hal0/<slot>`` + timeout."""
+    return _DROP_IN_TEMPLATE.format(slot=slot, timeout_s=int(timeout_s))
 
 
-def apply_extraction_slot(slot: str, *, restart: bool = True) -> dict[str, Any]:
+def apply_extraction_slot(
+    slot: str,
+    *,
+    timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
+    restart: bool = True,
+) -> dict[str, Any]:
     """Write the drop-in for ``slot`` and (best-effort) restart hindsight-api.
 
     Returns a status dict::
 
-        {"slot", "model", "drop_in", "written", "daemon_reloaded",
-         "restarted", "error"}
+        {"slot", "model", "timeout_s", "drop_in", "written",
+         "daemon_reloaded", "restarted", "error"}
 
     ``error`` is ``None`` on full success. The write is atomic (temp + rename) so a
     crash mid-write never leaves a half-written override that would wedge the unit.
@@ -65,6 +75,7 @@ def apply_extraction_slot(slot: str, *, restart: bool = True) -> dict[str, Any]:
     result: dict[str, Any] = {
         "slot": slot,
         "model": model,
+        "timeout_s": int(timeout_s),
         "drop_in": str(DROP_IN_PATH),
         "written": False,
         "daemon_reloaded": False,
@@ -75,7 +86,7 @@ def apply_extraction_slot(slot: str, *, restart: bool = True) -> dict[str, Any]:
     try:
         DROP_IN_DIR.mkdir(parents=True, exist_ok=True)
         tmp = DROP_IN_PATH.with_suffix(".conf.tmp")
-        tmp.write_text(render_drop_in(slot), encoding="utf-8")
+        tmp.write_text(render_drop_in(slot, timeout_s), encoding="utf-8")
         tmp.replace(DROP_IN_PATH)
         result["written"] = True
     except OSError as exc:

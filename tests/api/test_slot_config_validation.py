@@ -148,14 +148,25 @@ def test_create_flat_body_valid_keys_201(slot_toml: Path, client: TestClient) ->
 # ── port-range allocation ────────────────────────────────────────────────────
 
 
-def test_next_free_slot_port_spans_full_schema_range(tmp_hal0_home: str) -> None:
-    """Ports beyond the stale 8099 cap are allocatable (schema max 8200)."""
+def test_next_free_slot_port_pool_capped_below_comfyui(tmp_hal0_home: str) -> None:
+    """The auto-allocation pool deliberately ends at 8099 (#1036).
+
+    The pool default is capped below ComfyUI's 8188 so a freshly
+    auto-created slot never squats on the image port; per-slot ``port``
+    validation still allows explicit values up to 8200. Occupying the
+    whole default pool therefore exhausts it rather than spilling into
+    the 8100+ range — a wider pool must be opted into via
+    ``[slots].port_range_end`` (covered by the hal0.toml-range test).
+    """
+    from hal0.api.middleware.error_codes import BadRequest
+
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     root.mkdir(parents=True, exist_ok=True)
-    for port in range(8081, 8100):  # occupy the legacy 8081-8099 window
+    for port in range(8081, 8100):  # occupy the whole default 8081-8099 pool
         (root / f"s{port}.toml").write_text(f'name = "s{port}"\nport = {port}\n', encoding="utf-8")
-    # Pre-fix this raised slot.no_free_port; now the pool extends to 8200.
-    assert _next_free_slot_port() == 8100
+    with pytest.raises(BadRequest) as exc:
+        _next_free_slot_port()
+    assert exc.value.code == "slot.no_free_port"
 
 
 def test_next_free_slot_port_honors_hal0_toml_range(tmp_hal0_home: str) -> None:

@@ -87,3 +87,24 @@ def test_apply_no_restart_skips_systemctl(monkeypatch, tmp_path: Path):
     assert result["restarted"] is False
     assert result["error"] is None
     assert drop_in.exists()
+
+
+def test_render_drop_in_includes_llm_timeout():
+    # Default mirrors MemoryGraphConfig.llm_timeout_s (300s); explicit values
+    # ride the same drop-in so one file owns both hindsight LLM env overrides.
+    assert "HINDSIGHT_API_LLM_TIMEOUT=300" in render_drop_in("utility")
+    assert "HINDSIGHT_API_LLM_TIMEOUT=600" in render_drop_in("utility", timeout_s=600)
+
+
+def test_apply_threads_timeout_into_drop_in_and_status(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+
+    result = apply_extraction_slot("agent", timeout_s=900, restart=False)
+    assert result["timeout_s"] == 900
+    text = drop_in.read_text()
+    assert "HINDSIGHT_API_LLM_MODEL=hal0/agent" in text
+    assert "HINDSIGHT_API_LLM_TIMEOUT=900" in text

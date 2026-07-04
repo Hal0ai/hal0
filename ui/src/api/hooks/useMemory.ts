@@ -88,6 +88,9 @@ export interface MemoryGraphStatus {
   slot_resolves: boolean
   // Enabled llm slot names the operator may pick.
   available_slots: string[]
+  // Hindsight daemon LLM timeout ([memory.graph].llm_timeout_s) — echoed by
+  // the status route so the settings panel can edit it in one round trip.
+  llm_timeout_s?: number
   in_flight: number
   builds_ok: number
   errors: number
@@ -98,6 +101,7 @@ export interface MemoryGraphStatus {
 export interface MemoryGraphUpdate {
   enabled?: boolean
   extraction_slot?: string
+  llm_timeout_s?: number
 }
 
 // ADR-0023 §3: when the extraction slot changes, the PUT response carries a

@@ -417,6 +417,8 @@ class Dispatcher:
         model_registry:     Source of truth for model→upstream bindings.
         prefetch_timeout_s: Cold-cache prefetch fanout timeout
                             (PLAN.md §5 Tier 2 — was hardcoded 4s, now 8s).
+        prefetch_parallel_cap: Max concurrent cold-prefetch legs
+                            ([dispatcher].prefetch_parallel_cap, default 4).
         cached_models:      Returns the cached /v1/models for an upstream.
         is_online:          Health probe predicate.
         fetch_models:       Async /v1/models fetcher.
@@ -429,6 +431,7 @@ class Dispatcher:
         model_registry: ModelRegistry | None = None,
         *,
         prefetch_timeout_s: float = 8.0,  # TIER2 — configurable (was hardcoded 4s)
+        prefetch_parallel_cap: int = 4,  # max concurrent cold-prefetch legs
         cached_models: CachedModelsFn | None = None,
         is_online: IsOnlineFn | None = None,
         fetch_models: FetchModelsFn | None = None,
@@ -440,6 +443,8 @@ class Dispatcher:
         self._models = model_registry
         # TIER2 — prefetch timeout is configurable.  Default 8s (haloai had 4s).
         self.prefetch_timeout_s: float = prefetch_timeout_s
+        # Cap on concurrent cold-prefetch legs ([dispatcher].prefetch_parallel_cap).
+        self._prefetch_parallel_cap: int = max(1, int(prefetch_parallel_cap))
         self._cached_models: CachedModelsFn = cached_models or _default_cached_models
         self._is_online: IsOnlineFn = is_online or _default_is_online
         self._fetch_models: FetchModelsFn = fetch_models or _default_fetch_models
@@ -1274,13 +1279,18 @@ class Dispatcher:
 
         All concurrent prefetches for the same upstream share one HTTP call
         (Tier 3).  The total fanout is bounded by ``prefetch_timeout_s``
-        (Tier 2, configurable; was hardcoded 4s in haloai).
+        (Tier 2, configurable; was hardcoded 4s in haloai) and its
+        concurrency by ``prefetch_parallel_cap`` — a leg waiting on the
+        semaphore still counts against the timeout, so a small cap over
+        many cold remotes trades tail legs for bounded connection churn.
         """
+        sem = asyncio.Semaphore(self._prefetch_parallel_cap)
 
         async def _one(u: Upstream) -> None:
             key = f"prefetch:{u.name}"
             try:
-                await self._single_flight.do(key, self._fetch_models, u)
+                async with sem:
+                    await self._single_flight.do(key, self._fetch_models, u)
             except Exception as exc:  # TIER1 — log, don't crash the fanout
                 # Errors in cold prefetch are *expected* (remotes go offline).
                 # We swallow at this granularity ONLY because the call sites
