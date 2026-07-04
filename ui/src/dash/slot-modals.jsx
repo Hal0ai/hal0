@@ -349,40 +349,6 @@ function validateExtraArgs(s) {
   return null;
 }
 
-// UI-2: apply-semantics marker. Mirrors the Settings ApplyBadge 'live' vs
-// restart language so operators can tell, at a glance, which drawer controls
-// take effect the instant they're touched (their own PUT/POST — enable, model
-// swap, reasoning, MTP, vision, NPU) from those that only persist when the
-// Save button is pressed (ctx, profile, chat_template, extra_args,
-// idle_timeout). `mode` is "live" | "save".
-function ApplyChip({ mode }) {
-  const live = mode === "live";
-  return (
-    <span
-      className="chip"
-      title={
-        live
-          ? "Applies immediately when toggled — no Save needed"
-          : "Staged — persisted when you press Save"
-      }
-      style={{
-        fontFamily: "var(--jbm)",
-        fontSize: 9,
-        padding: "1px 6px",
-        marginLeft: 6,
-        verticalAlign: "middle",
-        whiteSpace: "nowrap",
-        letterSpacing: "0.04em",
-        color: live ? "var(--ok)" : "var(--fg-4)",
-        borderColor: live ? "var(--ok)" : "var(--line-soft)",
-        background: live ? "rgba(46,204,113,0.08)" : "var(--bg)",
-      }}
-    >
-      {live ? "applies now" : "on Save"}
-    </span>
-  );
-}
-
 function EditSlotDrawer({ open, slot, onClose }) {
   // Hooks must execute every render — early `return null` would skip
   // them; render the drawer shell with a sentinel slot instead.
@@ -448,12 +414,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [vision, setVision] = useStateSM(slot?.vision !== false);
   const [visionPending, setVisionPending] = useStateSM(false);
   const [visionErr, setVisionErr] = useStateSM(null);
-  // Task 2 (idle_timeout_s): Save-batched numeric field (ge=0; 0 disables
-  // eviction). Seeded from the slot list payload — empty string when unset so
-  // an untouched field never writes a fabricated default.
-  const [idleTimeout, setIdleTimeout] = useStateSM(
-    slot?.idle_timeout_s != null ? String(slot.idle_timeout_s) : ""
-  );
   // Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
   // device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
   // revert-on-error.
@@ -484,13 +444,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // Task 5: re-seed chat_template override from the slot prop.
       setChatTemplate(slot.chat_template || "");
       setOverrideOpen(!!(slot.chat_template));
-      // Wave 8: re-seed the instant-apply toggles + idle_timeout field from
-      // the (possibly-updated) slot prop.
+      // Wave 8: re-seed the instant-apply toggles from the (possibly-updated)
+      // slot prop.
       setMtp(slot.mtp === true);
       setVision(slot.vision !== false);
       setVisionPending(false);
       setVisionErr(null);
-      setIdleTimeout(slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : "");
       setNpuAsr(slot.npu?.asr === true);
       setNpuEmbed(slot.npu?.embed === true);
       setNpuPending(false);
@@ -508,15 +467,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
     const errs = {};
     if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
       errs.ctx = "Must be an integer ≥ 128";
-    }
-    // Task 2 (idle_timeout_s): validate only when the field carries a value —
-    // an empty field means "leave the on-disk value alone". Backend contract
-    // is ge=0 (0 disables idle eviction).
-    if (idleTimeout !== "") {
-      const idleNum = Number(idleTimeout);
-      if (!Number.isFinite(idleNum) || !Number.isInteger(idleNum) || idleNum < 0) {
-        errs.idleTimeout = "Must be an integer ≥ 0 (0 disables eviction)";
-      }
     }
     // Task 5: GPU-class slots have an editable profile select; mirror the
     // create-slot modal's guard and block Save when it's been cleared. NPU/CPU
@@ -545,11 +495,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // Task 5: include chat_template only when the user has set/changed an override.
     // Dirty-track against slot.chat_template (mirrors profileChanged pattern).
     const chatTemplateChanged = overrideOpen && chatTemplate !== (slot.chat_template || "");
-    // Task 2 (idle_timeout_s): dirty-track against the on-disk value. An empty
-    // field is "no change" (can't clear the override from this UI — 0 is the
-    // explicit disable-eviction value, not empty).
-    const idleBaseline = slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : "";
-    const idleTimeoutChanged = idleTimeout !== "" && idleTimeout !== idleBaseline;
     // Per-slot extra_args override — ship only when changed, nested under
     // [server] so the backend one-level merge preserves sibling server keys.
     const extraArgsChanged = extraArgs !== extraArgsBaseline;
@@ -568,11 +513,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
       }
       if (chatTemplateChanged) {
         slotBody.chat_template = chatTemplate;
-      }
-      // Task 2: idle_timeout_s is a top-level SlotConfig field — PUT /config
-      // shallow-merges it. Only sent when changed (ge=0, 0 disables eviction).
-      if (idleTimeoutChanged) {
-        slotBody.idle_timeout_s = Number(idleTimeout);
       }
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
@@ -698,9 +638,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
     extraArgsDirty ||
     String(ctx) !== String(slot.metrics?.ctx || 16384) ||
     (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
-    (overrideOpen && chatTemplate !== (slot.chat_template || "")) ||
-    // Task 2: idle_timeout_s is Save-batched — a pending edit is unsaved.
-    (idleTimeout !== "" && idleTimeout !== (slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : ""));
+    (overrideOpen && chatTemplate !== (slot.chat_template || ""));
   const requestClose = () => {
     if (dirty && !window.confirm("Discard unsaved changes?")) return;
     onClose();
@@ -802,7 +740,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Profile{isGpuProfile && <ApplyChip mode="save" />}</span>
+              <span>Profile</span>
               {isGpuProfile
                 ? <span className="sub warn">⟳ restart required on change</span>
                 : <span className="sub">image + bench-tuned flags for this slot — runtime-pinned</span>
@@ -872,7 +810,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Model<ApplyChip mode="live" /></span>
+              <span>Model</span>
               <span className="sub">
                 {isContainer ? "swap restarts the container to load" : "applies immediately"}
               </span>
@@ -923,7 +861,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       <div className="form-row">
         <div className="form-lbl">
-          <span>ctx_size<ApplyChip mode="save" /></span>
+          <span>ctx_size</span>
           <span className="warn">⟳ restarts the container (~model-load seconds)</span>
         </div>
         <div className="form-ctl">
@@ -950,7 +888,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Template<ApplyChip mode="save" /></span>
+              <span>Template</span>
               <span className="sub warn">⟳ restart required on change</span>
             </div>
             <div className="form-ctl">
@@ -1012,7 +950,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       {slot.type === "llm" && (
         <div className="form-row">
           <div className="form-lbl">
-            <span>Reasoning<ApplyChip mode="live" /></span>
+            <span>Reasoning</span>
             <span className="sub">Stream reasoning before the answer. Off = faster, direct replies. Applies to the next message.</span>
           </div>
           <div className="form-ctl">
@@ -1060,7 +998,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>MTP<ApplyChip mode="live" /></span>
+              <span>MTP</span>
               <span className="sub">Multi-token speculative decoding — dense models only (MoE runs slower). Restarts the container.</span>
             </div>
             <div className="form-ctl">
@@ -1104,7 +1042,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Vision<ApplyChip mode="live" /></span>
+              <span>Vision</span>
               <span className="sub">Load the multimodal projector so the slot accepts images. Off frees ~0.9 GB (text-only). Restarts the container.</span>
             </div>
             <div className="form-ctl">
@@ -1167,7 +1105,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           <>
             <div className="form-row">
               <div className="form-lbl">
-                <span>NPU · ASR<ApplyChip mode="live" /></span>
+                <span>NPU · ASR</span>
                 <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
@@ -1182,7 +1120,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
             </div>
             <div className="form-row">
               <div className="form-lbl">
-                <span>NPU · Embed<ApplyChip mode="live" /></span>
+                <span>NPU · Embed</span>
                 <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
@@ -1206,27 +1144,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
           disclosure primitive exists in primitives.jsx). */}
       <details className="adv-disclosure">
       <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
-
-      {/* Task 2: idle_timeout_s — editable, Save-batched (PUT /config). Seconds
-          of inactivity before the slot is evicted; 0 disables eviction. Blank
-          leaves the on-disk value untouched. */}
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>idle_timeout_s<ApplyChip mode="save" /></span>
-          <span className="sub">evict after N idle seconds · 0 disables · blank = leave as-is</span>
-        </div>
-        <div className="form-ctl">
-          <input
-            className={"input mono" + (fieldErrs.idleTimeout ? " input-err" : "")}
-            value={idleTimeout}
-            inputMode="numeric"
-            onChange={e => { setIdleTimeout(e.target.value); setFieldErrs(p => ({...p, idleTimeout: undefined})); }}
-            placeholder={slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : "unset (uses default)"}
-            data-testid="idle-timeout-input"
-          />
-          {fieldErrs.idleTimeout && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.idleTimeout}</div>}
-        </div>
-      </div>
 
       {/* C5: GPU offload tuning — read-only, defined by the profile. */}
       <div className="form-row">
@@ -1256,7 +1173,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           operators can test one-off flags without minting a new profile. */}
       <div className="form-row">
         <div className="form-lbl">
-          <span>extra_args<ApplyChip mode="save" /></span>
+          <span>extra_args</span>
           <span className="sub">per-slot override · wins over profile flags</span>
         </div>
         <div className="form-ctl">
