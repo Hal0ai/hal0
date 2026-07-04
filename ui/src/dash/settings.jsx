@@ -23,6 +23,7 @@ import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import {
   useSettings,
   useSettingsUpdate,
+  useSettingsReload,
   useModelStore,
   useModelStoreSet,
   useModelStoreMigrate,
@@ -165,6 +166,7 @@ function _fmtBytes(n) {
 function StorageSection() {
   const settings = useSettings();
   const update = useSettingsUpdate();
+  const reload = useSettingsReload();
   const storeQuery = useModelStore();
   const storeSet = useModelStoreSet();
   const storeMigrate = useModelStoreMigrate();
@@ -362,9 +364,18 @@ function StorageSection() {
           </div>
 
           <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
-            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)", display: "inline-flex", alignItems: "center", gap: 8}}>
               Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span>
-              {storeDirty && <span style={{marginLeft: 8, color: "var(--warn)"}}>· unsaved changes</span>}
+              <button
+                className="btn ghost sm"
+                title="Re-read hal0.toml from disk — use after editing it with hal0 config edit"
+                disabled={reload.isPending}
+                onClick={() => reload.mutate(undefined, {
+                  onSuccess: () => window.__hal0Toast && window.__hal0Toast("Config reloaded from disk", "ok"),
+                  onError: (err) => window.__hal0Toast && window.__hal0Toast(`Reload failed — ${err?.message || "see logs"}`, "err"),
+                })}
+              >{reload.isPending ? "Reloading…" : "Reload from disk"}</button>
+              {storeDirty && <span style={{color: "var(--warn)"}}>· unsaved changes</span>}
             </span>
             <div style={{display: "inline-flex", alignItems: "center", gap: 8}}>
               <ApplyBadge settingsKey="models.store" registry={registry} />

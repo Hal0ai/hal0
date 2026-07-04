@@ -15,6 +15,7 @@ export const SECRET_PRESETS = [
   { id: "GOOGLE_API_KEY",     desc: "Fallback provider — Gemini",                                     prefix: "AIza",      prefixLen: 39 },
   { id: "GROQ_API_KEY",       desc: "Fallback provider — Groq",                                       prefix: "gsk_",      prefixLen: 56 },
   { id: "AWS_ACCESS_KEY_ID",  desc: "Bedrock provider — paired with AWS_SECRET_ACCESS_KEY",            prefix: "AKIA",      prefixLen: 20 },
+  { id: "AWS_SECRET_ACCESS_KEY", desc: "Bedrock provider — paired with AWS_ACCESS_KEY_ID",              prefix: "",          prefixLen: 40 },
   { id: "CUSTOM",             desc: "Custom — name it yourself",                                       prefix: "",          prefixLen: 0 },
 ];
 
