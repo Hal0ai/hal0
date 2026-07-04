@@ -181,14 +181,80 @@ function MemTimeseries({ bank, period, setPeriod }) {
   );
 }
 
+// ── Live per-bank activity (ingest / extraction / consolidation) ──────────────
+//
+// Polls GET /api/memory/banks/{bank}/operations via the shared, adaptive
+// useBankOperations query (fast while work is in flight, backing off when
+// idle) so the operator can SEE what's happening and WHERE. Renders a spinner
+// "N working" badge while pending+processing > 0, plus pending/processing/
+// completed/failed counts. Failed count is a button that reveals the failed
+// operation types (affordance for "extraction failed, roughly why").
+function MemBankActivity({ bank, active = true, compact = false }) {
+  const useBankOperations = window.__hal0UseBankOperations;
+  const summarize = window.__hal0MemSummarizeOps;
+  const q = useBankOperations ? useBankOperations(bank, { enabled: active }) : { data: null };
+  const [showFailed, setShowFailed] = useStateMem(false);
+  const a = summarize
+    ? summarize(q.data)
+    : { pending: 0, processing: 0, completed: 0, failed: 0, inFlight: 0, failedTypes: [], total: 0 };
+
+  if (!q.data) return null;
+  if (a.total === 0) {
+    return compact ? null : <span className="mem-act-quiet mono">no activity yet</span>;
+  }
+
+  function toggleFailed(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setShowFailed(v => !v);
+  }
+
+  return (
+    <span className="mem-activity mono" data-testid={`mem-activity-${bank}`}>
+      {a.inFlight > 0 && (
+        <span className="mem-act-badge working" title={`${a.inFlight} operation(s) in flight`}>
+          <span className="mem-spin" aria-hidden="true" />
+          {a.inFlight} working
+        </span>
+      )}
+      {a.processing > 0 && <span className="mem-act-chip proc" title="processing">{a.processing} proc</span>}
+      {a.pending > 0 && <span className="mem-act-chip pend" title="queued / pending">{a.pending} pending</span>}
+      {!compact && a.completed > 0 && (
+        <span className="mem-act-chip done" title="completed">{a.completed} done</span>
+      )}
+      {a.failed > 0 && (
+        <button
+          type="button"
+          className={'mem-act-chip failed' + (showFailed ? ' open' : '')}
+          onClick={toggleFailed}
+          title="failed operations — click to see which"
+          data-testid={`mem-failed-${bank}`}
+        >
+          {a.failed} failed
+        </button>
+      )}
+      {showFailed && a.failed > 0 && (
+        <span
+          className="mem-failed-pop mono"
+          data-testid={`mem-failed-pop-${bank}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span className="mem-failed-h">failed operations</span>
+          {a.failedTypes.map((t, i) => (
+            <span key={i} className="mem-failed-row">{t}</span>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // ── Bank card ─────────────────────────────────────────────────────────────────
 
 function MemBankCard({ bank, selected, onSelect }) {
   const useBankStats = window.__hal0UseBankStats;
   const stats = (useBankStats ? useBankStats(bank.bank_id) : { data: null }).data;
   const byType = stats?.nodes_by_fact_type || {};
-  const pending = stats?.pending_operations || 0;
-  const failed = stats?.failed_operations || 0;
   function onKey(ev) {
     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSelect(bank); }
   }
@@ -204,12 +270,7 @@ function MemBankCard({ bank, selected, onSelect }) {
       <div className="mo-bank-head">
         <span className="mono mo-bank-id">{bank.bank_id}</span>
         <div className="mem-bank-badges">
-          {pending > 0 && (
-            <span className="mo-badge warn mono" title="pending operations">{pending} pending</span>
-          )}
-          {failed > 0 && (
-            <span className="mo-badge warn mono" style={{ color: 'var(--err)', borderColor: 'var(--err-line)' }} title="failed operations">{failed} failed</span>
-          )}
+          <MemBankActivity bank={bank.bank_id} compact />
         </div>
       </div>
       {bank.mission && <div className="mo-bank-mission">{bank.mission}</div>}
@@ -341,6 +402,11 @@ function MemBankDetail({ bank, onClose, onDeleted }) {
           <button className="btn ghost sm pf-form-close" onClick={onClose} aria-label="Close">×</button>
         </div>
       </div>
+      {/* Live activity for this bank — spinner while ingest/extraction/
+          consolidation is in flight, with failed-ops affordance. */}
+      <div className="mem-detail-activity">
+        <MemBankActivity bank={bank.bank_id} />
+      </div>
       {/* .sec is a flex title-row — keep only the heading in it; content
           (ops list, danger controls) must be siblings or they shrink-wrap. */}
       <div className="sec">
@@ -453,6 +519,7 @@ function MemoryView({ param } = {}) {
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null, isLoading: false };
   const graphQuery = useMemoryGraphStatus ? useMemoryGraphStatus() : { data: null };
   const graphEnabled = !!graphQuery.data?.enabled;
+  const graphInFlight = graphQuery.data?.in_flight || 0;
 
   const banks = banksQuery.data?.banks || [];
   const [selectedId, setSelectedId] = useStateMem(() => {
@@ -527,6 +594,12 @@ function MemoryView({ param } = {}) {
       <div className="sec">
         <h2>Graph extraction</h2>
         <div className="rule" />
+        {graphInFlight > 0 && (
+          <span className="mem-act-badge working" data-testid="mem-graph-inflight" title="graph extraction running">
+            <span className="mem-spin" aria-hidden="true" />
+            extracting… ({graphInFlight} in flight)
+          </span>
+        )}
       </div>
       {typeof MemoryGraphPanel === 'function' ? <MemoryGraphPanel /> : null}
 

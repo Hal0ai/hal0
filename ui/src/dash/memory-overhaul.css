@@ -201,6 +201,36 @@
 .mo-bank-meta { font-size: 10.5px; color: var(--fg-4); display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
 .mo-bank-meta .num { color: var(--fg-2); }
 
+/* ─── Live activity (ingest / extraction / consolidation) ────────── */
+/* Compact, wrapping row of status chips shown on bank cards + detail, plus
+   the graph-extraction "extracting…" badge. Spinner appears only while work
+   is in flight so the operator can SEE progress + WHERE it is happening. */
+.mem-activity { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; position: relative; }
+.mem-detail-activity { margin: 4px 0 14px; }
+.mem-act-quiet { font-size: 10.5px; color: var(--fg-5); }
+
+.mem-act-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; padding: 2px 8px; border-radius: var(--rad-pill, 999px); border: 1px solid var(--accent-line, var(--line)); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.mem-act-badge.working { color: var(--accent); }
+
+.mem-act-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; padding: 2px 7px; border-radius: var(--rad-xs); border: 1px solid var(--line); color: var(--fg-3); background: transparent; line-height: 1.5; }
+.mem-act-chip.proc { color: var(--accent); border-color: var(--accent-line, var(--line)); }
+.mem-act-chip.pend { color: var(--warn); border-color: var(--warn-line); }
+.mem-act-chip.done { color: var(--ok); border-color: var(--ok-line); }
+.mem-act-chip.failed { color: var(--err); border-color: var(--err-line); cursor: pointer; font-family: var(--jbm); }
+.mem-act-chip.failed:hover, .mem-act-chip.failed.open { background: color-mix(in srgb, var(--err) 12%, transparent); }
+
+/* Failed-ops popover — lightweight list of failed operation types. */
+.mem-failed-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 160px; max-width: 280px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--err-line); border-radius: var(--rad); background: var(--bg-1); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); }
+.mem-failed-h { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-4); margin-bottom: 2px; }
+.mem-failed-row { font-size: 11px; color: var(--err); }
+
+/* Spinner — self-contained (no cross-file keyframe dependency). */
+.mem-spin { width: 11px; height: 11px; border: 1.5px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: mem-spin 0.7s linear infinite; flex-shrink: 0; }
+@keyframes mem-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .mem-spin { animation: none; }
+}
+
 /* ─── Tools ──────────────────────────────────────────────────────── */
 .mt-bankbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 11px; }
 .mt-bankbar .input { padding: 6px 9px; }

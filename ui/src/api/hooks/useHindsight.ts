@@ -143,15 +143,59 @@ export function useBankDelete() {
 
 // ── operations ───────────────────────────────────────────────────────────────
 
-export function useBankOperations(bank: string | null, opts?: { status?: string }) {
+const IN_FLIGHT_STATUSES = new Set(['pending', 'processing'])
+
+/** Rolled-up per-bank operation counts for the live activity indicators. */
+export interface BankActivity {
+  pending: number
+  processing: number
+  completed: number
+  failed: number
+  cancelled: number
+  /** pending + processing — "work in flight" drives the spinner/pulse. */
+  inFlight: number
+  /** operation_type of each failed op, for the failed-ops affordance. */
+  failedTypes: string[]
+  total: number
+}
+
+/** Fold a bank's operations list into the counts the activity badges render. */
+export function summarizeBankOperations(ops?: BankOperations | null): BankActivity {
+  const counts = { pending: 0, processing: 0, completed: 0, failed: 0, cancelled: 0 }
+  const failedTypes: string[] = []
+  const items = ops?.items ?? []
+  for (const op of items) {
+    if (op.status in counts) counts[op.status as keyof typeof counts] += 1
+    if (op.status === 'failed') failedTypes.push(op.operation_type)
+  }
+  return {
+    ...counts,
+    inFlight: counts.pending + counts.processing,
+    failedTypes,
+    total: items.length,
+  }
+}
+
+// Shared query — the bank list card AND the bank detail panel read the same
+// key so there is one poll per bank, not one per consumer (no stampede).
+// Polling is adaptive: fast (3s) while work is in flight so ingest/extraction
+// visibly progresses, then it backs off (20s) once the bank is quiescent.
+export function useBankOperations(
+  bank: string | null,
+  opts?: { status?: string; enabled?: boolean },
+) {
   const qs = opts?.status ? `?status=${encodeURIComponent(opts.status)}` : ''
   return useQuery<BankOperations>({
     queryKey: ['memory', 'banks', bank, 'operations', opts?.status ?? 'all'],
     queryFn: () =>
       apiGet<BankOperations>(`${ENDPOINTS.memoryBankOperations(bank as string)}${qs}`),
-    enabled: !!bank,
-    staleTime: 5_000,
-    refetchInterval: 15_000,
+    enabled: !!bank && opts?.enabled !== false,
+    staleTime: 3_000,
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? []
+      const inFlight = items.some((o) => IN_FLIGHT_STATUSES.has(o.status))
+      return inFlight ? 3_000 : 20_000
+    },
   })
 }
 

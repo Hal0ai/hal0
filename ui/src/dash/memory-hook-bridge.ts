@@ -40,6 +40,7 @@ import {
   useMemoryEngine,
   useOperationCancel,
   useOperationRetry,
+  summarizeBankOperations,
 } from '@/api/hooks/useHindsight'
 // ADR-0023 graph-extraction gate hooks — the Memory Overview drives its
 // graph on/off line + slot picker from these (same source as the #agent
@@ -57,6 +58,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseBankUpsert: useBankUpsert,
   __hal0UseBankDelete: useBankDelete,
   __hal0UseBankOperations: useBankOperations,
+  __hal0MemSummarizeOps: summarizeBankOperations,
   __hal0UseOperationRetry: useOperationRetry,
   __hal0UseOperationCancel: useOperationCancel,
   __hal0UseConsolidate: useConsolidate,
