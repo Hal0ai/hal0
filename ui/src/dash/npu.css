@@ -2,15 +2,41 @@
  *
  * The NPU is an AMD XDNA 2 (Ryzen AI) inference engine: a 4×8 = 32 AIE-ML
  * tile array, partitioned by columns, running FLM slots. This sheet owns the
- * PURPLE device accent (--dev-npu) — the NPU's stable hue — and rations amber
- * (--accent) to the single live throughput number, as the rest of the product
- * rations amber to "live / primary".
+ * PURPLE device accent (--dev-npu) — the NPU's stable hue. Throughput
+ * readouts on this card are tinted --dev-npu (telemetry-header handoff);
+ * amber stays reserved for the product-wide "live / primary" accents.
  *
  * Everything is scoped under .npu-card so the generic class names (.combo,
  * .aie-tile, .gauge…) can't collide with other panes. Slot-control buttons
  * (.sctrl / .slot-ctrls) are intentionally NOT redefined here — they reuse the
  * shared definitions in engine-panes.css, whose selector includes .npu-card
  * so the buttons match the inference/comfyui slot cards exactly. */
+
+/* per-slot owner accents — assigned by slot index (npu-pane HUES). These
+   fill the slot's claimed columns (grid + mini strip + partition bars) and
+   are SHARED with the dashboard telemetry header's NPU cell, so they live
+   on :root rather than .npu-card. The glow/line halos are deliberately
+   *lightened* tints of each base so the colours (esp. the dark indigo s0)
+   read as a halo against the dark grid; the -fg tints are the same
+   lightened hues at full alpha, used for owner-tinted text (per-slot
+   tok/s, partition labels, owner tags). */
+:root {
+  --npu-s0: #4a4466; /* slot 0 — deep indigo */
+  --npu-s0-dim: rgba(74, 68, 102, 0.2);
+  --npu-s0-glow: rgba(138, 130, 184, 0.62); /* lightened indigo halo */
+  --npu-s0-line: rgba(138, 130, 184, 0.5);
+  --npu-s0-fg: #8a82b8; /* solid lightened indigo — text tint */
+  --npu-s1: #6eadbc; /* slot 1 — teal */
+  --npu-s1-dim: rgba(110, 173, 188, 0.2);
+  --npu-s1-glow: rgba(140, 205, 220, 0.62);
+  --npu-s1-line: rgba(140, 205, 220, 0.5);
+  --npu-s1-fg: #8ccddc;
+  --npu-s2: #9fcbad; /* slot 2 — sage */
+  --npu-s2-dim: rgba(159, 203, 173, 0.2);
+  --npu-s2-glow: rgba(183, 224, 196, 0.62);
+  --npu-s2-line: rgba(183, 224, 196, 0.5);
+  --npu-s2-fg: #9fcbad;
+}
 
 .npu-card {
   --npu: var(--dev-npu); /* #c896ff — NPU device hue, the card accent */
@@ -25,23 +51,6 @@
   --npu-b-dim: rgba(104, 112, 149, 0.18);
   --npu-b-glow: rgba(104, 112, 149, 0.5);
   --npu-b-line: rgba(104, 112, 149, 0.45);
-
-  /* per-slot owner accents — assigned by slot index in npu-pane HUES. These
-     fill the slot's claimed columns (grid + mini strip). The glow/line halos
-     are deliberately *lightened* tints of each base so the colours (esp. the
-     dark indigo s0) read as a halo against the dark grid. */
-  --npu-s0: #4a4466; /* slot 0 — deep indigo */
-  --npu-s0-dim: rgba(74, 68, 102, 0.2);
-  --npu-s0-glow: rgba(138, 130, 184, 0.62); /* lightened indigo halo */
-  --npu-s0-line: rgba(138, 130, 184, 0.5);
-  --npu-s1: #6eadbc; /* slot 1 — teal */
-  --npu-s1-dim: rgba(110, 173, 188, 0.2);
-  --npu-s1-glow: rgba(140, 205, 220, 0.62);
-  --npu-s1-line: rgba(140, 205, 220, 0.5);
-  --npu-s2: #9fcbad; /* slot 2 — sage */
-  --npu-s2-dim: rgba(159, 203, 173, 0.2);
-  --npu-s2-glow: rgba(183, 224, 196, 0.62);
-  --npu-s2-line: rgba(183, 224, 196, 0.5);
 }
 .npu-card * {
   box-sizing: border-box;
@@ -257,8 +266,10 @@
   margin-left: 3px;
   letter-spacing: 0;
 }
+/* throughput readout — tinted with the NPU device hue, not amber
+   (telemetry-header handoff: amber stays the product-wide live accent) */
 .npu-card .aie-stat .sv.acc {
-  color: var(--accent);
+  color: var(--npu);
 }
 .npu-card .aie-stat .sl {
   font-family: var(--jbm);
@@ -532,9 +543,13 @@
   flex-shrink: 0;
 }
 .npu-card .cslot-mx .tps {
-  font-size: 14.5px;
+  /* enlarged + tinted with the slot's own owner hue fg tint (--slot-fg is
+     set per-card in npu-pane ComboSlot; --npu-b is the pre-handoff
+     fallback for a card that carries no owner hue) */
+  font-size: 17px;
   font-weight: 500;
-  color: var(--npu-b);
+  font-feature-settings: 'tnum' 1;
+  color: var(--slot-fg, var(--npu-b));
 }
 .npu-card .cslot-mx .tps .u {
   font-size: 9px;
