@@ -34,7 +34,11 @@ without restructuring how they build the list.
 
 from __future__ import annotations
 
+import logging
+import shlex
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 # Short→long canonicalisation. Used ONLY to compute the dedup key; the emitted
 # token keeps its original spelling. Seeded from the flags hal0 profiles +
@@ -235,12 +239,65 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     return ResolvedArgv(argv=out, provenance=provenance, removed=removed)
 
 
+# ── merge_flags: string ⊕ string, last-wins per-flag ─────────────────────────
+#
+# Folded in from the retired ``hal0.slots.flag_merge`` module so it shares this
+# module's tokenizer + short/long alias table (``-b`` now dedups against
+# ``--batch-size``, which the old ``--``-only tokenizer could not do). Combines
+#
+#     model_defaults (registry Model.defaults.extra_args)
+#     slot_extra     (SlotConfig.server.extra_args)
+#
+# into one argv-ready string: the slot string wins on any colliding flag, and
+# APPEND_FLAGS (--lora / --draft-model / --override-kv) are kept additively.
+
+
+def merge_flags(model_defaults: str | None, slot_extra: str | None) -> str:
+    """Combine model-default and slot-override CLI flag strings (last-wins).
+
+    Args:
+        model_defaults: ``Model.defaults.extra_args`` from the registry, or
+            ``None`` if the model has no defaults.
+        slot_extra: ``SlotConfig.server.extra_args``, or ``None``.
+
+    Returns:
+        A single trimmed string with the slot's flags winning any collision
+        with a model default (short/long aliases collapse against each other;
+        APPEND_FLAGS are kept). Empty inputs collapse to ``""``.
+
+        On malformed input (unbalanced quotes that ``shlex.split`` rejects)
+        this falls back to a whitespace concat with a structured warning, so
+        the launcher still gets *something* runnable instead of crashing.
+    """
+    left = model_defaults if (model_defaults and model_defaults.strip()) else ""
+    right = slot_extra if (slot_extra and slot_extra.strip()) else ""
+    if not left and not right:
+        return ""
+
+    try:
+        left_tokens = shlex.split(left) if left else []
+        right_tokens = shlex.split(right) if right else []
+    except ValueError as exc:
+        log.warning(
+            "flag_merge: unbalanced quotes; falling back to dumb concat",
+            extra={"event": "flag_merge.malformed_input", "reason": str(exc)},
+        )
+        return " ".join(p.strip() for p in (left, right) if p.strip())
+
+    # model defaults first, slot override last → resolve keeps the slot's value
+    # on any collision (last-wins). Re-quote each surviving token so a value
+    # with embedded spaces survives the launcher's re-``shlex.split``.
+    merged = normalize_argv(left_tokens + right_tokens).argv
+    return " ".join(shlex.quote(tok) for tok in merged)
+
+
 __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
     "FlagProvenance",
     "NormalizedArgv",
     "ResolvedArgv",
+    "merge_flags",
     "normalize_argv",
     "resolve_argv",
 ]

@@ -13,6 +13,7 @@ import {
   useSlotLoad,
   useSlotSwap,
   useSlotEdit,
+  useSlotBackend,
   useSlotImagePull,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
@@ -110,9 +111,12 @@ function SlotImagePullBar({ slot }) {
         {label}
       </div>
       <div style={{height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden"}}>
+        {/* The backend only reports image_status === "pulling" (no layer
+            progress on the slot payload), so this bar is INDETERMINATE:
+            per the ARIA progressbar pattern, aria-valuenow is omitted
+            entirely rather than pinned to a fabricated 0. */}
         <div
           role="progressbar"
-          aria-valuenow={0}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-label={label}
@@ -145,6 +149,29 @@ function SlotCard({
   busy,
 }) {
   const { type, device, model, state, isDefault, coresident, metrics } = slot;
+  // ADR-0022: backend-mismatch remediation. The amber "≠ declared" chip now
+  // has a real affordance — a "Switch to <declared>" button that confirms
+  // (container restart) then POSTs /api/slots/{name}/backend with the
+  // declared backend. Fire-and-forget (mutate): the hook invalidates
+  // ['slots'] and the 5s poll reflects the restart.
+  const backendMut = useSlotBackend();
+  const [switchOpen, setSwitchOpen] = useStateS(false);
+  const declaredBackend = slot.declared_backend || slot.backend || device;
+  const onSwitchBackendConfirm = () => {
+    setSwitchOpen(false);
+    backendMut.mutate({ name: slot.name, backend: declaredBackend }, {
+      onSuccess: (resp) => {
+        const effective = resp?.effective_backend || resp?.actual_backend || declaredBackend;
+        window.__hal0Toast && window.__hal0Toast(
+          `${slot.name} backend → ${effective}`, "ok");
+      },
+      onError: (err) =>
+        window.__hal0Toast && window.__hal0Toast(
+          `${slot.name}: backend switch failed — ${err?.message || "see logs"}`, "warn"),
+    });
+    window.__hal0Toast && window.__hal0Toast(
+      `Switching ${slot.name} to ${declaredBackend} — restarting…`, "info");
+  };
   // Spec 1 / C3: a slot is enabled unless explicitly off. Disabled slots fade,
   // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
   const enabled = slot.enabled !== false;
@@ -208,6 +235,7 @@ function SlotCard({
   })();
 
   return (
+    <>
     <div className={"slot" + statusClass + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled") + (liveWhileDisabled ? " slot--live" : "")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
@@ -307,15 +335,31 @@ function SlotCard({
         {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL runtime
             backend when it differs from the declared one. Container slots are
             the only real slots, so this now renders alongside the image-tag
-            chip (previously trapped in the dead non-container branch). */}
+            chip (previously trapped in the dead non-container branch).
+            Clicking the chip or the paired button opens the switch-backend
+            confirm (container restart) — the chip is no longer advice-only. */}
         {slot.backend_mismatch && slot.actual_backend && (
-          <span
-            className={"chip dev-" + String(slot.actual_backend)}
-            style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
-            title={`Declared ${slot.declared_backend || slot.backend || device} but running ${slot.actual_backend} — switch backend to reload`}
-          >
-            {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
-          </span>
+          <>
+            <button
+              type="button"
+              className={"chip dev-" + String(slot.actual_backend)}
+              style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)", cursor: "pointer"}}
+              title={`Declared ${declaredBackend} but running ${slot.actual_backend} — click to switch back to ${declaredBackend} (restarts the container)`}
+              disabled={backendMut.isPending}
+              onClick={() => setSwitchOpen(true)}
+            >
+              {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              style={{fontSize: 10, padding: "1px 6px"}}
+              disabled={backendMut.isPending}
+              onClick={() => setSwitchOpen(true)}
+            >
+              {backendMut.isPending ? "Switching…" : `Switch to ${declaredBackend}`}
+            </button>
+          </>
         )}
         {(() => {
           // Colour aligned to the slotIndicatorFromPhase() vocabulary
@@ -377,6 +421,23 @@ function SlotCard({
       </div>
       {errorMsg && <div style={{marginTop: 4}}><ErrorSlotCardBanner slot={slot} message={errorMsg} /></div>}
     </div>
+    <ConfirmDialog
+      open={switchOpen}
+      onCancel={() => setSwitchOpen(false)}
+      onConfirm={onSwitchBackendConfirm}
+      title={`Switch ${slot.name} to ${declaredBackend}?`}
+      message={
+        <span>
+          <span className="mono" style={{color: "var(--fg)"}}>{slot.name}</span> is running
+          on <span className="mono">{slot.actual_backend}</span> but is declared
+          as <span className="mono">{declaredBackend}</span>. Switching restarts the
+          container to reload on the declared backend (~model-load seconds); the slot
+          is unavailable while it reloads.
+        </span>
+      }
+      confirmLabel="Switch backend"
+    />
+    </>
   );
 }
 
@@ -397,11 +458,11 @@ function SlotListRow({ slot, onEdit }) {
     });
     window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}…`, "info");
   };
-  const tps = type === "llm" ? `${metrics.toks || 0} t/s` :
-              type === "embedding" ? `${metrics.rpm} r/m` :
-              type === "transcription" ? `${metrics.xrt} xrt` :
-              type === "image" ? `${metrics.avg}s avg` :
-              `${metrics.rpm || 0} r/m`;
+  // Only tok/s is backed by a real slot-payload field. The legacy rpm/xrt/avg
+  // metrics were never populated by the backend (same reasoning as the card
+  // variant's dead-chip cleanup, W6) — non-llm rows show an em-dash instead
+  // of a fabricated 0.
+  const tps = type === "llm" ? `${metrics.toks || 0} t/s` : "—";
   return (
     <div className="slot-list-row" onClick={goEdit}>
       <IndicatorDot slot={slot} />
@@ -763,11 +824,9 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     );
   }
 
-  const renderSlot = (s) => slotVariant === "list"
-    ? <SlotListRow key={s.name} slot={s} />
-    : slotVariant === "spec"
-      ? <SlotCard key={s.name} slot={s} />
-      : <SlotCard key={s.name} slot={s} />;
+  // (The old `renderSlot` helper was dead code — renderGroup below is the
+  // only card/list dispatcher, and its "spec"/"list" branches rendered
+  // handler-less, inert cards. Removed.)
 
   // C6: stable-sort enabled slots before disabled ones, preserving the
   // existing order within each bucket. Array.prototype.sort is stable, so a
@@ -807,13 +866,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           <div className="rule" />
         </div>
         <div className={"slots-grid" + (slotVariant === "spec" ? " spec" : "") + (opts.quarter ? " quarter" : "")}>
-          {items.map(s => {
-            // Demo: show error banner on a single slot if a banner-state would fire
-            const errMsg = (window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["model-missing"] && s.name === "primary")
-              ? "sha256 mismatch on shard 2 — verify the model on /models then retry"
-              : null;
-            return slotWithState(s, errMsg);
-          })}
+          {items.map(s => slotWithState(s))}
         </div>
       </section>
     );

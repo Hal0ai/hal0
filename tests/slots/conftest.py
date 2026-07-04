@@ -76,7 +76,10 @@ class FakeContainerProvider:
     async def wait_ready(self, port: int, timeout_s: float | None = None) -> None:
         return None
 
-    async def health(self, port: int) -> dict[str, Any]:
+    async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Mirrors ContainerProvider.health's (port, slot_cfg) signature —
+        # the manager passes the slot config so FLM slots get the Tier-1
+        # real-inference probe in production.
         return {"ok": self.healthy}
 
     # — slot_view container_enrichment extras —

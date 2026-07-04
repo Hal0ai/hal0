@@ -27,6 +27,19 @@ export interface ApiModelRaw {
   hf_repo?: string
   path?: string
   type?: string | null
+  // ── Legacy HAL0_DATA mock shape (data.jsx fixtures / mock.ts 404
+  // fallback). Real /api/models rows never carry these; the normalizer
+  // tolerates them so mock mode keeps working through the same code path.
+  /** Legacy alias of `capabilities`. */
+  labels?: string[]
+  /** Legacy pre-derived device token (rocm|vulkan|cpu|npu|…). */
+  device?: string
+  /** Legacy pre-derived display name. */
+  longName?: string
+  /** Legacy pre-formatted human size ("18.8 GB"). */
+  size?: string
+  /** Legacy pre-derived repo coordinate. */
+  repo?: string
   [k: string]: unknown
 }
 
@@ -40,7 +53,7 @@ export interface NormalizedModel extends ApiModelRaw {
 
 function deriveType(caps: string[]): SlotType {
   if (caps.includes('chat') || caps.includes('coding') || caps.includes('tool-calling') || caps.includes('vision')) return 'llm'
-  if (caps.includes('rerank')) return 'reranking'
+  if (caps.includes('rerank') || caps.includes('reranking')) return 'reranking'
   if (caps.includes('embed') || caps.includes('embeddings')) return 'embedding'
   if (caps.includes('transcription') || caps.includes('asr')) return 'transcription'
   if (caps.includes('tts')) return 'tts'
@@ -48,18 +61,27 @@ function deriveType(caps: string[]): SlotType {
   return ''
 }
 
-function deriveDevice(backends: string[]): string {
+export function deriveDevice(backends: string[]): string {
   if (backends.includes('rocm')) return 'rocm'
   if (backends.includes('vulkan')) return 'vulkan'
   if (backends.includes('cpu')) return 'cpu'
   return backends[0] || ''
 }
 
-function formatSize(b: number): string {
+export function formatSize(b: number): string {
   if (!b) return '—'
   if (b < 1024 ** 2) return `${(b / 1024).toFixed(1)} KB`
   if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`
   return `${(b / 1024 ** 3).toFixed(2)} GB`
+}
+
+// A row `/api/models` aggregated from an upstream provider's `/v1/models`
+// rather than the local registry: advertised-only, never on this host's
+// disk, routed by the dispatcher to `m.upstream`. FLM/NPU rows also carry
+// `upstream` ("npu") but are installed host-side, so the `installed` check
+// keeps them local.
+export function isUpstreamModel(m: ApiModelRaw): boolean {
+  return !m.installed && typeof m.upstream === 'string' && m.upstream !== ''
 }
 
 // Coordinate shown under a model's name. We standardize on the HuggingFace
@@ -68,7 +90,8 @@ function formatSize(b: number): string {
 //   1. an explicit `hf_repo` wins;
 //   2. else reconstruct coords from a HF cache path
 //      (`…/models--<org>--<repo>/snapshots/<sha>/…` → `<org>/<repo>`);
-//   3. else it's a genuinely local model → a clean `local/<id>` coordinate.
+//   3. else an upstream-advertised row → name the provider, never `local/…`;
+//   4. else it's a genuinely local model → a clean `local/<id>` coordinate.
 function deriveRepo(m: ApiModelRaw): string {
   if (typeof m.hf_repo === 'string' && m.hf_repo) return m.hf_repo
   const path = typeof m.path === 'string' ? m.path : ''
@@ -77,19 +100,29 @@ function deriveRepo(m: ApiModelRaw): string {
     const parts = cacheMatch[1].split('--')
     if (parts.length >= 2) return `${parts[0]}/${parts.slice(1).join('--')}`
   }
+  if (isUpstreamModel(m)) return `via ${m.upstream}`
   if (m.id) return `local/${m.id}`
   return ''
 }
 
+// Accepts BOTH shapes: the registry/API shape (capabilities + backends +
+// size_bytes + name + hf_repo) and the legacy HAL0_DATA seed shape
+// (labels + device + size + longName + repo + type). Local dev without a
+// backend falls back via src/api/mock.ts to HAL0_DATA.models, and the
+// γ-suite hits that fallback when fetch fails before page.route catches.
+// Explicit legacy fields win; API fields are derived otherwise. Also
+// idempotent — normalizing an already-normalized row is a no-op.
 export function normalizeApiModel(m: ApiModelRaw): NormalizedModel {
-  const caps = Array.isArray(m.capabilities) ? m.capabilities : []
+  const caps = Array.isArray(m.capabilities)
+    ? m.capabilities
+    : Array.isArray(m.labels) ? m.labels : []
   const backends = Array.isArray(m.backends) ? m.backends : []
   return {
     ...m,
-    type: deriveType(caps),
-    device: deriveDevice(backends),
-    longName: m.name || m.id,
-    size: formatSize(m.size_bytes || 0),
-    repo: deriveRepo(m),
+    type: typeof m.type === 'string' && m.type ? (m.type as SlotType) : deriveType(caps),
+    device: typeof m.device === 'string' && m.device ? m.device : deriveDevice(backends),
+    longName: (typeof m.longName === 'string' && m.longName) || m.name || m.id,
+    size: typeof m.size === 'string' && m.size ? m.size : formatSize(m.size_bytes || 0),
+    repo: (typeof m.repo === 'string' && m.repo) || deriveRepo(m),
   }
 }

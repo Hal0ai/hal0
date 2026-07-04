@@ -19,8 +19,10 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSlotLogsStream } from '@/api/hooks/useLogs'
 import { ENDPOINTS } from '@/api/endpoints'
+import { normalizeApiModel, isUpstreamModel } from '@/lib/normalizeApiModel'
 import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
 const { useState: useStateSM, useEffect: useEffectSM } = React;
@@ -39,55 +41,16 @@ function stateChipClass(stateOrSlot) {
   return stateChipClassForSlot(stateOrSlot);
 }
 
-// Map /api/models registry rows → the shape this file's swap popover and
-// create-slot modal grew up around (HAL0_DATA seed). Done in JSX rather
-// than at the API layer so the response stays identical to what the
-// Models view (models.jsx) already consumes. NEVER ship HAL0_DATA model
-// ids to the backend — they're fictional (`qwen3.6-27b-mtp` etc.) and
-// the slot orchestrator correctly rejects them against the real registry.
-function normalizeApiModel(m) {
-  // Accept both shapes: the registry/API shape (capabilities + backends +
-  // size_bytes + name + hf_repo) and the legacy HAL0_DATA seed shape
-  // (labels + device + size + longName + repo + type). Local dev without
-  // a backend falls back via src/api/mock.ts to HAL0_DATA.models, and the
-  // γ-suite hits that fallback when fetch fails before page.route catches
-  // (race + connection-refused on the Vite proxy target). Tolerating both
-  // shapes keeps the popover non-empty in every mock path.
-  const sourceCaps = Array.isArray(m.capabilities)
-    ? m.capabilities
-    : Array.isArray(m.labels) ? m.labels : [];
-  const derivedType =
-    sourceCaps.includes('chat') || sourceCaps.includes('coding') ? 'llm'
-    : sourceCaps.includes('rerank') || sourceCaps.includes('reranking') ? 'reranking'
-    : sourceCaps.includes('embed') || sourceCaps.includes('embeddings') ? 'embedding'
-    : sourceCaps.includes('transcription') || sourceCaps.includes('asr') ? 'transcription'
-    : sourceCaps.includes('tts') ? 'tts'
-    : sourceCaps.includes('image') ? 'image'
-    : '';
-  const type = typeof m.type === 'string' && m.type ? m.type : derivedType;
-  const backends = Array.isArray(m.backends) ? m.backends : [];
-  const derivedDevice =
-    backends.includes('rocm') ? 'rocm'
-    : backends.includes('vulkan') ? 'vulkan'
-    : backends.includes('cpu') ? 'cpu'
-    : backends[0] || '';
-  const device = typeof m.device === 'string' && m.device ? m.device : derivedDevice;
-  const b = m.size_bytes || 0;
-  const derivedSize = !b
-    ? '—'
-    : b < 1024 ** 2 ? `${(b / 1024).toFixed(1)} KB`
-    : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(1)} MB`
-    : `${(b / 1024 ** 3).toFixed(2)} GB`;
-  const size = typeof m.size === 'string' && m.size ? m.size : derivedSize;
-  return {
-    ...m,
-    type,
-    device,
-    longName: m.longName || m.name || m.id,
-    size,
-    repo: m.repo || m.hf_repo || m.path || '',
-  };
-}
+// Model rows come from /api/models and are normalized by the SHARED
+// lib/normalizeApiModel (imported above), which tolerates both the
+// registry/API shape (capabilities + backends + size_bytes + name +
+// hf_repo) and the legacy HAL0_DATA seed shape (labels + device + size +
+// longName + repo + type — mock.ts fallback / γ-suite race). This file
+// used to carry its own divergent copy whose deriveType missed
+// tool-calling/vision → 'llm', hiding those models from every slot's
+// model picker. NEVER ship HAL0_DATA model ids to the backend — they're
+// fictional (`qwen3.6-27b-mtp` etc.) and the slot orchestrator correctly
+// rejects them against the real registry.
 
 // One shared compatible-models filter for all three slot surfaces (create
 // modal, edit drawer, swap popover). Takes the raw /api/models list, normalizes
@@ -96,8 +59,12 @@ function normalizeApiModel(m) {
 // fork binary). Previously the create modal filtered on type ALONE and could
 // offer rocmfp4 models that the backend then rejects — this closes that gap.
 function compatibleModels(models, { type, backend }) {
+  // Upstream-advertised rows are excluded outright: a slot binds a local
+  // file path, and these rows have none (they'd render as "will pull" and
+  // then 422 — there is no HF source to pull them from).
   return (models ?? []).map(normalizeApiModel).filter(m =>
     m.type === type &&
+    !isUpstreamModel(m) &&
     !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && backend !== "rocm")
   );
 }
@@ -128,13 +95,25 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const setModel = (val) => f.set("model", val);
   const setMakeDefault = (val) => f.set("makeDefault", val);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // UI: dirty-close confirms through the shared ConfirmDialog (state-driven)
+  // instead of window.confirm. Every dismiss path (Cancel, ✕, Esc, backdrop)
+  // funnels through requestClose below.
+  const [discardOpen, setDiscardOpen] = useStateSM(false);
 
   const createMut = useSlotCreate();
   const hwQuery = useHardware();
   const modelsQuery = useModels();
   const profilesQuery = useProfiles();
+  // Slot type vocabulary — meta-driven (GET /api/meta/enums, static fallback
+  // when absent) instead of the old hardcoded <option> list.
+  const enums = useMetaEnums();
 
-  useEffectSM(() => { if (open) setSubmitErr(null); }, [open]);
+  useEffectSM(() => { if (open) { setSubmitErr(null); setDiscardOpen(false); } }, [open]);
+
+  const requestClose = () => {
+    if (f.isDirty) { setDiscardOpen(true); return; }
+    onClose();
+  };
 
   // validation — slot collision uses the live slot list passed in from
   // the SlotsView (useSlots data), not HAL0_DATA.
@@ -189,13 +168,13 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   }
 
   return (
+    <>
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={requestClose}
       eyebrow="Slots · new"
       title="Create slot"
       width={640}
-      dirty={f.isDirty}
       foot={
         <>
           <span>
@@ -204,7 +183,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
               : "capabilities.toml will be written on save."}
           </span>
           <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={() => { if (f.isDirty && !window.confirm("Discard unsaved changes?")) return; onClose(); }}>Cancel</button>
+            <button className="btn ghost sm" onClick={requestClose}>Cancel</button>
             <button
               className="btn sm"
               onClick={onCreateClick}
@@ -239,12 +218,9 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
         <div className="form-ctl">
           <select className="input mono" value={type} onChange={e => setType(e.target.value)}>
-            <option value="llm">llm</option>
-            <option value="embedding">embedding</option>
-            <option value="reranking">reranking</option>
-            <option value="transcription">transcription</option>
-            <option value="tts">tts</option>
-            <option value="image">image</option>
+            {/* keep an out-of-vocab persisted type selectable */}
+            {type && !enums.slot_types.includes(type) && <option value={type}>{type}</option>}
+            {enums.slot_types.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </div>
       </div>
@@ -329,6 +305,15 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       </div>
 
     </Modal>
+    <ConfirmDialog
+      open={discardOpen}
+      onCancel={() => setDiscardOpen(false)}
+      onConfirm={() => { setDiscardOpen(false); onClose(); }}
+      title="Discard unsaved changes?"
+      message="The new slot has not been created — closing now discards what you entered."
+      confirmLabel="Discard"
+    />
+    </>
   );
 }
 
@@ -363,9 +348,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const chatTemplatesQuery = useChatTemplates(open);
 
   // Seed from the slot list payload when available (PR #587 — same fix
-  // class as #584). llamacpp_args / n_gpu_layers / rope_freq_base are
-  // surfaced on the list payload and rendered read-only (the profile
-  // owns them for container slots).
+  // class as #584). llamacpp_args (profile base flags) is read-only;
+  // n_gpu_layers is an editable per-slot override (PATCH /defaults →
+  // [model].n_gpu_layers).
   const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
 
   // Seed from the PERSISTED context window (slot.ctx_max, from
@@ -375,18 +360,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // metric, then the backend's safe 8192 floor.
   const [ctx, setCtx] = useStateSM(slot?.ctx_max ?? (slot?.metrics?.ctx || 8192));
   // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
-  // button through PATCH /defaults. Both seed from the slot list payload.
+  // button through PATCH /defaults ([model].n_gpu_layers; -1/empty = unset →
+  // sends null). Both seed from the slot list payload.
   const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
   const [thinkingPending, setThinkingPending] = useStateSM(false);
   const [nGpuLayers, setNGpuLayers] = useStateSM(
     slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
   );
-  // Issue #548: rope_freq_base — seeded from list payload (null → "0" default).
-  const [ropeFreqBase, setRopeFreqBase] = useStateSM(
-    slot?.rope_freq_base != null ? String(slot.rope_freq_base) : "0"
-  );
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // Dirty-close confirms through the shared ConfirmDialog (state-driven),
+  // replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
+  // backdrop) funnels through requestClose below.
+  const [discardOpen, setDiscardOpen] = useStateSM(false);
+  // UI-5 (state-driven): swapping the model on a LIVE container slot
+  // cold-restarts it — stash the picked {id, label} here and confirm through
+  // ConfirmDialog before firing the swap. null = no confirm pending.
+  const [pendingSwap, setPendingSwap] = useStateSM(null);
   // Enable/disable is instant-apply via its own PUT (mirrors the slot card's
   // pill toggle, which the redesigned cards dropped). `enableBusy` gates the
   // header toggle against a double-trigger while the mutation is in flight.
@@ -438,11 +428,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setThinking(slot.enable_thinking === true);
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
-      setRopeFreqBase(slot.rope_freq_base != null ? String(slot.rope_freq_base) : "0");
       // #587: re-seed from the slot prop so the drawer tracks the real
       // on-disk values.
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
       setSubmitErr(null);
+      setDiscardOpen(false);
+      setPendingSwap(null);
       setThinkingErr(null);
       setFieldErrs({});
       // C7: re-seed profile from the (possibly-updated) slot prop.
@@ -473,6 +464,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
     const errs = {};
     if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
       errs.ctx = "Must be an integer ≥ 128";
+    }
+    // n_gpu_layers: -1 or empty = "use model default / profile" (persisted as
+    // null → backend unsets [model].n_gpu_layers); otherwise an integer ≥ 0.
+    const nglRaw = String(nGpuLayers).trim();
+    const nglNum = nglRaw === "" ? null : Number(nglRaw);
+    if (nglRaw !== "" && (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1)) {
+      errs.ngl = "Must be an integer ≥ -1 (or empty)";
     }
     // Task 5: GPU-class slots have an editable profile select; mirror the
     // create-slot modal's guard and block Save when it's been cleared. NPU/CPU
@@ -509,12 +507,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // on a not-currently-serving slot clobbered the persisted context window
     // with the seeded fallback. Gate on the persisted baseline (ctxBaseline).
     const ctxChanged = ctxNum !== Number(ctxBaseline);
+    // n_gpu_layers rides the same PATCH /defaults path as ctx_size
+    // ([model].n_gpu_layers). -1 and empty both mean "unset" (→ null on the
+    // wire); only ship when the NORMALIZED value differs from the persisted
+    // baseline so a no-op Save stays quiet (#587 dirty-tracking contract).
+    const nglValue = nglRaw === "" || nglNum === -1 ? null : nglNum;
+    const nglChanged = nglValue !== nglBaselineValue;
     try {
-      // Two-step: defaults (ctx_size lives under [model]) + slot config
-      // for the top-level keys (default, profile). n_gpu_layers /
-      // rope_freq_base / llamacpp_args are owned by the profile — never
-      // include them in a save. These are fast on-disk writes, so we await
-      // them and keep the drawer open to surface any write error.
+      // Two-step: defaults (ctx_size / n_gpu_layers live under [model]) +
+      // slot config for the top-level keys (profile, chat_template, server).
+      // llamacpp_args base flags are owned by the profile — never included in
+      // a save (extra_args is the per-slot override). These are fast on-disk
+      // writes, so we await them and keep the drawer open to surface any
+      // write error.
       const slotBody = {};
       if (profileChanged) {
         slotBody.profile = selectedProfile;
@@ -525,10 +530,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
       }
-      if (ctxChanged) {
+      const defaultsBody = {};
+      if (ctxChanged) defaultsBody.ctx_size = ctxNum;
+      if (nglChanged) defaultsBody.n_gpu_layers = nglValue;
+      if (Object.keys(defaultsBody).length > 0) {
         await defaultsMut.mutateAsync({
           name: slot.name,
-          body: { ctx_size: ctxNum },
+          body: defaultsBody,
         });
       }
       await editMut.mutateAsync({
@@ -644,27 +652,66 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // the 8192 floor only when nothing is persisted, so an untouched field on a
   // cold slot is never counted dirty (and never written — see ctxChanged).
   const ctxBaseline = slot.ctx_max ?? (slot.metrics?.ctx || 8192);
+  // n_gpu_layers baseline, NORMALIZED: -1 and absent both mean "unset" (use
+  // model default / profile), so they compare equal — an untouched "-1" seed
+  // never counts dirty and never rides the PATCH.
+  const nglBaselineValue =
+    slot.n_gpu_layers == null || slot.n_gpu_layers === -1 ? null : slot.n_gpu_layers;
+  const nglRawNow = String(nGpuLayers).trim();
+  const nglValueNow =
+    nglRawNow === "" || Number(nglRawNow) === -1 ? null : Number(nglRawNow);
+  const nglDirty = nglValueNow !== nglBaselineValue;
 
   // UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields
-  // (extra_args, ctx, profile, chat_template override). The instant-apply
-  // toggles (thinking / MTP / enable) fire their own PUT/POST outside Save and
-  // are intentionally excluded — a flipped toggle is already persisted.
+  // (extra_args, ctx, n_gpu_layers, profile, chat_template override). The
+  // instant-apply toggles (thinking / MTP / enable) fire their own PUT/POST
+  // outside Save and are intentionally excluded — a flipped toggle is
+  // already persisted.
+  // ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
+  // onSaveClick: Number(ctx) !== Number(ctxBaseline)) — the old string compare
+  // flagged "8192 " / "08192" as dirty even though Save would send nothing.
+  // Trim + parse before comparing; an unparseable edit still counts dirty
+  // (NaN !== N) so garbage input keeps the guard armed.
+  const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
   const dirty =
     extraArgsDirty ||
-    String(ctx) !== String(ctxBaseline) ||
+    ctxDirty ||
+    nglDirty ||
     (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
     (overrideOpen && chatTemplate !== (slot.chat_template || ""));
   const requestClose = () => {
-    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    if (dirty) { setDiscardOpen(true); return; }
     onClose();
+  };
+
+  // Fire the model swap (POST /slots/{name}/swap). Non-blocking: a swap
+  // cold-restarts container slots to load the model (slow) — fire it and let
+  // the slots poll reflect the transitional phase; never freeze the drawer on
+  // the load. Called directly for non-live swaps, or from the ConfirmDialog
+  // once the operator confirms a live-container cold restart.
+  const fireSwap = (id, label) => {
+    setSubmitErr(null);
+    swapMut.mutate({ name: slot.name, model_id: id }, {
+      onError: (err) => setSubmitErr(err?.message || "model swap failed"),
+    });
+    window.__hal0Toast && window.__hal0Toast(
+      slot.runtime === "container"
+        ? `Restarting ${slot.name} to load ${label} — loading in the background`
+        : `${slot.name} → ${label}`,
+      "info",
+    );
   };
 
   return (
     <>
+    {/* The Drawer's Esc/backdrop/✕ paths call onClose — routed through
+        requestClose so the dirty guard runs through this drawer's own
+        ConfirmDialog copy below. (The primitive's `dirty` prop is now also
+        dialog-based — DiscardGuardDialog in primitives.jsx — but this drawer
+        keeps its slot-specific discard copy.) */}
     <Drawer
       open={open}
-      onClose={onClose}
-      dirty={dirty}
+      onClose={requestClose}
       eyebrow={`Slots · /slots/${slot.name}`}
       title={`Edit ${slot.name}`}
       width={560}
@@ -839,27 +886,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
                 onChange={(e) => {
                   const id = e.target.value;
                   if (!id || id === cur) return;
-                  // UI-5: swapping the model on a LIVE container slot cold-restarts
-                  // it (~model-load seconds). Confirm before firing — bailing here
-                  // re-renders the select back to `cur` (value={cur}), so no manual
-                  // revert is needed. Mirrors the delete/dirty-close confirm gates.
-                  const live = slotButtonPhase(slot) === "running";
-                  if (isContainer && live && !window.confirm(`Swap model on running slot "${slot.name}"? This cold-restarts the container (~model-load seconds).`)) return;
-                  setSubmitErr(null);
                   const picked = compatible.find(m => m.id === id);
                   const label = picked?.longName || id;
-                  // Non-blocking: a swap cold-restarts container slots to load
-                  // the model (slow). Fire it and let the slots poll reflect the
-                  // transitional phase — never freeze the drawer on the load.
-                  swapMut.mutate({ name: slot.name, model_id: id }, {
-                    onError: (err) => setSubmitErr(err?.message || "model swap failed"),
-                  });
-                  window.__hal0Toast && window.__hal0Toast(
-                    isContainer
-                      ? `Restarting ${slot.name} to load ${label} — loading in the background`
-                      : `${slot.name} → ${label}`,
-                    "info",
-                  );
+                  // UI-5: swapping the model on a LIVE container slot cold-restarts
+                  // it (~model-load seconds). Confirm through the shared
+                  // ConfirmDialog before firing — stashing the pick re-renders the
+                  // select back to `cur` (value={cur}), so cancel needs no manual
+                  // revert. Mirrors the delete/dirty-close confirm gates.
+                  const live = slotButtonPhase(slot) === "running";
+                  if (isContainer && live) { setPendingSwap({ id, label }); return; }
+                  fireSwap(id, label);
                 }}
               >
                 {cur && !has && <option value={cur}>{slot.modelLong || slot.model || cur}</option>}
@@ -1160,25 +1196,27 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <details className="adv-disclosure">
       <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
 
-      {/* C5: GPU offload tuning — read-only, defined by the profile. */}
+      {/* GPU offload tuning — per-slot override persisted via
+          PATCH /defaults ([model].n_gpu_layers). -1/empty = unset, i.e. the
+          model default / profile value applies. Rides the Save button with
+          the same dirty-tracking as ctx_size.
+          (rope_freq_base was removed — deprecated; advanced users set it via
+          extra_args below.) */}
       <div className="form-row">
         <div className="form-lbl">
           <span>n_gpu_layers</span>
-          <span className="sub">defined by profile {slot.profile}</span>
+          <span className="sub">-1 / empty = use model default / profile</span>
         </div>
         <div className="form-ctl">
-          <input className="input mono" value={nGpuLayers} readOnly />
-        </div>
-      </div>
-
-      {/* Issue #548: rope_freq_base — read-only, defined by the profile. */}
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>rope_freq_base</span>
-          <span className="sub">defined by profile {slot.profile}</span>
-        </div>
-        <div className="form-ctl">
-          <input className="input mono" value={ropeFreqBase} readOnly />
+          <input
+            className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
+            value={nGpuLayers}
+            onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
+            placeholder="-1"
+            inputMode="numeric"
+            data-testid="n-gpu-layers-input"
+          />
+          {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
         </div>
       </div>
 
@@ -1274,14 +1312,28 @@ function EditSlotDrawer({ open, slot, onClose }) {
         if (!resolvedData || !Array.isArray(resolvedData.provenance) || resolvedData.provenance.length === 0) {
           return null;
         }
-        // Source → display label + CSS variable colour
+        // Source → display label + CSS variable colour. The backend command
+        // assembler emits MORE segment labels than the original three (new:
+        // model_defaults, chat_template, mmproj, slot_overrides) and may grow
+        // others — metaFor() falls back to a generic neutral badge carrying
+        // the raw label text, so an unknown source renders instead of being
+        // mislabelled "base" or breaking the drawer.
         const SOURCE_META = {
           base:       { label: "base",       color: "var(--fg-4)" },
           profile:    { label: "profile",    color: "var(--info)" },
           extra_args: { label: "extra_args", color: "var(--accent)" },
         };
+        const metaFor = (source) =>
+          SOURCE_META[source] || { label: String(source || "unknown"), color: "var(--fg-3)" };
+        // Legend: the known trio plus any additional sources actually present
+        // in this slot's provenance (deduped, generic-styled).
+        const legendSources = [
+          ...Object.keys(SOURCE_META),
+          ...[...new Set(resolvedData.provenance.map((e) => e.source))]
+            .filter((s) => !SOURCE_META[s]),
+        ];
         const badgeStyle = (source) => {
-          const meta = SOURCE_META[source] || SOURCE_META.base;
+          const meta = metaFor(source);
           return {
             display: "inline-block",
             padding: "1px 5px",
@@ -1304,8 +1356,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
               paddingBottom: 6, flexWrap: "wrap",
             }}>
               <span style={{fontSize: 10, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>source:</span>
-              {Object.entries(SOURCE_META).map(([src, meta]) => (
-                <span key={src} style={badgeStyle(src)}>{meta.label}</span>
+              {legendSources.map((src) => (
+                <span key={src} style={badgeStyle(src)}>{metaFor(src).label}</span>
               ))}
             </div>
             {/* Per-flag provenance rows */}
@@ -1326,7 +1378,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     )}
                   </span>
                   <span style={badgeStyle(entry.source)}>
-                    {SOURCE_META[entry.source]?.label ?? entry.source}
+                    {metaFor(entry.source).label}
                   </span>
                 </div>
               ))}
@@ -1364,6 +1416,36 @@ function EditSlotDrawer({ open, slot, onClose }) {
       destructive
       typeToConfirm={slot.name}
     />
+    <ConfirmDialog
+      open={discardOpen}
+      onCancel={() => setDiscardOpen(false)}
+      onConfirm={() => { setDiscardOpen(false); onClose(); }}
+      title="Discard unsaved changes?"
+      message={
+        <span>
+          <span className="mono" style={{color: "var(--fg)"}}>{slot.name}</span> has
+          unsaved edits — closing the drawer discards them.
+        </span>
+      }
+      confirmLabel="Discard"
+    />
+    <ConfirmDialog
+      open={!!pendingSwap}
+      onCancel={() => setPendingSwap(null)}
+      onConfirm={() => {
+        const p = pendingSwap;
+        setPendingSwap(null);
+        if (p) fireSwap(p.id, p.label);
+      }}
+      title={`Swap model on running slot ${slot.name}?`}
+      message={
+        <span>
+          Loading <span className="mono" style={{color: "var(--fg)"}}>{pendingSwap?.label || ""}</span> cold-restarts
+          the container (~model-load seconds). The slot is unavailable while it reloads.
+        </span>
+      }
+      confirmLabel="Swap model"
+    />
     </>
   );
 }
@@ -1384,6 +1466,10 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
   // useQuery's own caching means useModels() costs ~nothing when closed.
   const modelsQuery = useModels();
   const hwQuery = useHardware();
+  // UI-5 (state-driven): a live-container pick is stashed here and confirmed
+  // through the shared ConfirmDialog before committing. Must be declared
+  // before the early return (rules-of-hooks).
+  const [pendingPick, setPendingPick] = useStateSM(null);
   if (!open) return null;
 
   const isContainer = slot.runtime === "container";
@@ -1393,25 +1479,27 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
   const compatible = compatibleModels(modelsQuery.data, { type: slot.type, backend: slot.backend });
 
   // N2: container swap = cold systemctl restart (not a hot in-place swap).
-  // Intercept onPick for container slots: show a confirm toast and fire
-  // the same onPick (which drives restart), so the parent card drives to
-  // "starting" state immediately. The parent's onSwapPick calls useSlotSwap
-  // which triggers a restart for container slots server-side.
-  const handlePick = (m) => {
+  // Intercept onPick for container slots: toast the restart and fire the same
+  // onPick (which drives restart), so the parent card drives to "starting"
+  // state immediately. The parent's onSwapPick calls useSlotSwap which
+  // triggers a restart for container slots server-side.
+  const commitPick = (m) => {
     if (isContainer) {
-      const name = slot.name;
-      const label = m.longName || m.id;
-      // UI-5: confirm before cold-restarting a LIVE container slot. Bail out
-      // (leaving the popover open) when the operator declines.
-      const live = slotButtonPhase(slot) === "running";
-      if (live && !window.confirm(`Swap model on running slot "${name}"? This cold-restarts the container (~model-load seconds).`)) return;
       window.__hal0Toast && window.__hal0Toast(
-        `Restarting ${name} to load ${label} — ~model-load seconds`,
+        `Restarting ${slot.name} to load ${m.longName || m.id} — ~model-load seconds`,
         "info"
       );
     }
     onPick(m);
     onClose();
+  };
+  const handlePick = (m) => {
+    // UI-5: confirm before cold-restarting a LIVE container slot. Cancelling
+    // the dialog leaves the popover open, same as declining the old
+    // window.confirm.
+    const live = slotButtonPhase(slot) === "running";
+    if (isContainer && live) { setPendingPick(m); return; }
+    commitPick(m);
   };
 
   return (
@@ -1461,6 +1549,23 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
            onClick={() => { onClose(); window.location.hash = "#models"; }}>
         + Browse all models →
       </div>
+      <ConfirmDialog
+        open={!!pendingPick}
+        onCancel={() => setPendingPick(null)}
+        onConfirm={() => {
+          const m = pendingPick;
+          setPendingPick(null);
+          if (m) commitPick(m);
+        }}
+        title={`Swap model on running slot ${slot.name}?`}
+        message={
+          <span>
+            Loading <span className="mono" style={{color: "var(--fg)"}}>{pendingPick?.longName || pendingPick?.id || ""}</span> cold-restarts
+            the container (~model-load seconds). The slot is unavailable while it reloads.
+          </span>
+        }
+        confirmLabel="Swap model"
+      />
     </div>
   );
 }
@@ -1590,9 +1695,11 @@ function ImagePullBar({ pull }) {
         {label}
       </div>
       <div style={{height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden"}}>
+        {/* Correct ARIA pattern: omit aria-valuenow entirely while the
+            layer count is unknown (indeterminate progressbar). */}
         <div
           role="progressbar"
-          aria-valuenow={pct ?? 0}
+          {...(pct !== null ? { "aria-valuenow": pct } : {})}
           aria-valuemin={0}
           aria-valuemax={100}
           style={{

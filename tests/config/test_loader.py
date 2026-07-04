@@ -290,6 +290,26 @@ class TestSlotConfigRoundTrip:
         # No stray empty [server] table.
         assert "server" not in data
 
+    # ── [server].env ─────────────────────────────────────────────────────
+
+    def test_server_env_loads_and_round_trips(self, tmp_hal0_home: str) -> None:
+        """`[server].env` populates the typed field and round-trips to disk."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "primary.toml").write_text(
+            "[slot]\n"
+            'name = "primary"\n'
+            "port = 8081\n"
+            "[server.env]\n"
+            'HSA_OVERRIDE_GFX_VERSION = "11.0.0"\n'
+        )
+        cfg = load_slot_config("primary")
+        assert cfg.server.env == {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}
+
+        save_slot_config(cfg)
+        with open(paths.slots_config_dir() / "primary.toml", "rb") as f:
+            data = tomllib.load(f)
+        assert data["server"]["env"]["HSA_OVERRIDE_GFX_VERSION"] == "11.0.0"
+
 
 # ── providers.toml round-trip ────────────────────────────────────────────────
 

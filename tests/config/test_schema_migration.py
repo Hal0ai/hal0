@@ -98,7 +98,9 @@ class TestMapBackendToDevice:
 
     def test_unknown_value_maps_to_cpu_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         # Edge case: operator hand-edited backend to a typo.
-        with caplog.at_level("WARNING", logger="hal0.config.schema"):
+        # The implementation moved to hal0.model_meta (schema re-exports it);
+        # the log event name is unchanged for grep continuity.
+        with caplog.at_level("WARNING", logger="hal0.model_meta"):
             result = map_backend_to_device("rcom")
         assert result == "cpu"
         assert any("device_mapping_unknown_backend" in r.message for r in caplog.records)

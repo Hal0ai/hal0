@@ -34,11 +34,17 @@ import {
   useSlotUnload,
   useSlotLoad,
   useSlotSwap,
+  useSlotBackend,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+// devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
+// the copy this file used to carry (and the verbatim clones in slot-list.jsx
+// and npu-pane.jsx).
+import { devKind } from '@/lib/deviceMeta'
 
 const { useState: useStateI, useRef: useRefI, useEffect: useEffectI } = React
 
@@ -97,16 +103,6 @@ const Ic = ({ name, size = 16 }) =>
 const round1 = (n) => Math.round((n || 0) * 10) / 10
 const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
-
-// Normalize a slot.device string to the chip's device-kind token.
-function devKind(device) {
-  const d = String(device || '').toLowerCase()
-  if (d === 'npu') return 'npu'
-  if (d === 'cpu') return 'cpu'
-  if (d.includes('vulkan')) return 'vulkan'
-  if (d.includes('rocm') || d.startsWith('gpu')) return 'rocm'
-  return 'cpu'
-}
 
 // Utility (support) slot types — the non-conversational tier that renders as
 // the compact mini-card row below the headline chat/agent cards. Placement is
@@ -418,6 +414,85 @@ function DevCell({ s, onProfile }) {
   )
 }
 
+// Backend-mismatch remediation (ADR-0022) — mirrors slots.jsx SlotCard: when
+// the slot reports backend_mismatch + actual_backend, render an amber chip
+// surfacing the ACTUAL runtime backend plus a "Switch to <declared>" action.
+// Confirming POSTs /api/slots/{name}/backend (useSlotBackend) — a container
+// restart — via the shared ConfirmDialog (primitives.jsx window global).
+function BackendMismatch({ s }) {
+  const backendMut = useSlotBackend()
+  const [open, setOpen] = useStateI(false)
+  if (!s.backend_mismatch || !s.actual_backend) return null
+  const declared = s.declared_backend || s.backend || s.device
+  const onConfirm = () => {
+    setOpen(false)
+    backendMut.mutate(
+      { name: s.name, backend: declared },
+      {
+        onSuccess: (resp) => {
+          const effective = resp?.effective_backend || resp?.actual_backend || declared
+          toast(`${s.name} backend → ${effective}`, 'ok')
+        },
+        onError: (err) =>
+          toast(`${s.name}: backend switch failed — ${err?.message || 'see logs'}`, 'warn'),
+      },
+    )
+    toast(`Switching ${s.name} to ${declared} — restarting…`, 'info')
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className="tag-chip"
+        style={{
+          color: 'var(--warn)',
+          borderColor: 'var(--warn-line)',
+          background: 'var(--warn-soft)',
+          cursor: 'pointer',
+        }}
+        title={`Declared ${declared} but running ${s.actual_backend} — click to switch back to ${declared} (restarts the container)`}
+        disabled={backendMut.isPending}
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(true)
+        }}
+        data-testid={`infer-backend-mismatch-${s.name}`}
+      >
+        {s.actual_backend} ≠ declared
+      </button>
+      <button
+        type="button"
+        className="rbtn"
+        style={{ fontSize: 10, padding: '1px 6px' }}
+        disabled={backendMut.isPending}
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(true)
+        }}
+        data-testid={`infer-backend-switch-${s.name}`}
+      >
+        {backendMut.isPending ? 'Switching…' : `Switch to ${declared}`}
+      </button>
+      <ConfirmDialog
+        open={open}
+        onCancel={() => setOpen(false)}
+        onConfirm={onConfirm}
+        title={`Switch ${s.name} to ${declared}?`}
+        message={
+          <span>
+            <span className="mono" style={{ color: 'var(--fg)' }}>{s.name}</span> is running
+            on <span className="mono">{s.actual_backend}</span> but is declared
+            as <span className="mono">{declared}</span>. Switching restarts the
+            container to reload on the declared backend (~model-load seconds); the slot
+            is unavailable while it reloads.
+          </span>
+        }
+        confirmLabel="Switch backend"
+      />
+    </>
+  )
+}
+
 // full cards get a real model picker (a styled <select> wired to useModels);
 // non-LLM slots keep their static model line.
 export function ModelPicker({ s, models, disabled, onSwap }) {
@@ -427,7 +502,11 @@ export function ModelPicker({ s, models, disabled, onSwap }) {
         {s.model || '—'}
       </div>
     )
-  const opts = (Array.isArray(models) ? models : []).filter((m) => m.type === 'llm')
+  // Upstream-advertised rows can't be bound to a slot (no local file) —
+  // same exclusion as slot-modals' compatibleModels().
+  const opts = (Array.isArray(models) ? models : []).filter(
+    (m) => m.type === 'llm' && !isUpstreamModel(m),
+  )
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
   return (
@@ -557,6 +636,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
         )}
         <div className={'scard-foot' + (full ? '' : ' bare')}>
           <DevCell s={s} onProfile={onEdit} />
+          <BackendMismatch s={s} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
           <span className="grow" />
           {controls}

@@ -62,19 +62,13 @@ export const ENDPOINTS = {
   hfSearch: '/api/hf/search',
 
   // ── Backends ─────────────────────────────────────────────────────
+  // There is NO generic install route — the only install-like operations
+  // the server exposes are the NPU load/unload pair below
+  // (src/hal0/api/routes/backends.py).
   backends: '/api/backends',
   backend: (id: string) => `/api/backends/${encodeURIComponent(id)}`,
-  // NOTE: backendInstall has no generic backend route. The only install-
-  // like operation available is NPU: POST /api/backends/npu/load (and
-  // /api/backends/npu/unload). The UI flow-modals.jsx BackendInstallModal
-  // should route the NPU case to backendNpuLoad; remove this constant once
-  // ui-sweep-a's BackendInstallModal migration is complete.
-  backendInstall: (id: string) => `/api/backends/${encodeURIComponent(id)}/install`,
   backendNpuLoad: '/api/backends/npu/load',
   backendNpuUnload: '/api/backends/npu/unload',
-  // Alias spelling used in ui-sweep-a hook files (PR #741 TODOs).
-  backendsNpuLoad: '/api/backends/npu/load',
-  backendsNpuUnload: '/api/backends/npu/unload',
 
   // ── Capabilities ─────────────────────────────────────────────────
   capabilities: '/api/capabilities',
@@ -296,6 +290,13 @@ export const ENDPOINTS = {
   // PUT <DashLayout> → 204
   // Fail-soft: 404 treated as "no layout saved" by useDashLayout hook.
   dashboardLayout: '/api/user/dashboard-layout',
+
+  // ── Meta enums (static per-release taxonomy) ─────────────────────
+  // GET /api/meta/enums → devices / backends / device_classes / slot_types /
+  // model_capabilities (+ aliases) / model_backends / runtime_families +
+  // backend_to_device / device_default_profiles maps. Consumed by useMeta;
+  // useMetaEnums() falls back to META_ENUMS_FALLBACK when absent.
+  metaEnums: '/api/meta/enums',
 
   // ── Chat templates (per-model default template catalogue) ────────
   // GET /api/chat-templates → [{id, label}] list of known template ids

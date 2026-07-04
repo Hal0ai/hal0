@@ -18,19 +18,11 @@
 import { useSlots } from '@/api/hooks/useSlots'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { slotIndicatorFromPhase } from './slot-status.js'
+// devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
+// the copy this file used to carry alongside npu-pane and inference-pane.
+import { devKind } from '@/lib/deviceMeta'
 
 const { useState: useStateL, useCallback: useCallbackL } = React
-
-// ── devKind — copied verbatim from inference-pane.jsx (window-global fn there;
-//    safest to carry a local copy than depend on load order).
-function devKind(device) {
-  const d = String(device || '').toLowerCase()
-  if (d === 'npu') return 'npu'
-  if (d === 'cpu') return 'cpu'
-  if (d.includes('vulkan')) return 'vulkan'
-  if (d.includes('rocm') || d.startsWith('gpu')) return 'rocm'
-  return 'cpu'
-}
 
 // ── metric helpers ────────────────────────────────────────────────────────────
 

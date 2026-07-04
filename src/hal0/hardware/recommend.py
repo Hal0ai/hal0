@@ -10,21 +10,20 @@ Picks intentionally use models from :mod:`hal0.registry.curated` so the
 slot validates against the registry as soon as the model is downloaded.
 We do NOT invent model names.
 
-Device choice respects ``hal0.config.schema._VALID_DEVICES`` —
-``gpu-rocm``, ``gpu-vulkan``, ``cpu``, ``npu`` (ADR-0006 §7). The
-output also emits the legacy ``backend`` field for one release so a
-downgrade to v0.1.x reads the recommendation file cleanly.
+Device choice respects the canonical device enum
+(``hal0.model_meta.VALID_DEVICES`` — ``gpu-rocm``, ``gpu-vulkan``,
+``cpu``, ``npu``, ADR-0006 §7). The output also emits the legacy
+``backend`` field for one release so a downgrade to v0.1.x reads the
+recommendation file cleanly. Both translations (backend→device, device→
+default profile) come from the canonical maps in :mod:`hal0.model_meta`.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from hal0.config.schema import (
-    DEVICE_DEFAULT_PROFILES,
-    HardwareInfo,
-    map_backend_to_device,
-)
+from hal0.config.schema import HardwareInfo
+from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE, map_backend_to_device
 from hal0.registry.curated import get_curated
 
 # Curated chat models suitable for the primary slot, ordered from
@@ -200,7 +199,7 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     # "profile '' not found in catalog", so the primary slot is born broken
     # on every fresh install. Map the device to its default profile using
     # the same table the create-modal + legacy-slot migration use.
-    profile = DEVICE_DEFAULT_PROFILES.get(device)
+    profile = DEVICE_TO_DEFAULT_PROFILE.get(device)
 
     return {
         "name": "chat",

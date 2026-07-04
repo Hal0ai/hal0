@@ -845,34 +845,31 @@ class CapabilityOrchestrator:
             ) from exc
 
     def _next_free_slot_port(self) -> int:
-        """Pick a free port in the slot range.
+        """Pick a free port in the configured slot range.
 
-        Scans every existing slot TOML for its ``port``, returns the
-        first gap inside ``8081-8099``. The SlotConfig validator pins
-        ports into that range; collisions here would surface as a
-        validation error from ``SlotManager.create``.
+        Delegates to the shared allocator
+        (:func:`hal0.api.routes.slots._next_free_slot_port`), which walks
+        every slot TOML (top-level ``port`` AND nested ``[server] port``)
+        over the configured pool — hal0.toml ``[slots]``
+        ``port_range_start/end``, defaulting to the schema's
+        ``_SLOT_PORT_MIN``/``_SLOT_PORT_MAX`` (8081-8200). This replaced a
+        stale local copy pinned to an 8081-8099 literal that contradicted
+        the schema range and capped installs at 19 slots. Exhaustion is
+        re-raised as apply_failed rather than silently colliding — the
+        user sees the envelope and knows to clean up.
         """
-        used: set[int] = set()
-        cfg_dir = paths.slots_config_dir()
-        if cfg_dir.exists():
-            for p in cfg_dir.glob("*.toml"):
-                try:
-                    slot_cfg = load_slot_config(p.stem)
-                    used.add(slot_cfg.port)
-                except Exception:
-                    # Malformed TOMLs don't reserve ports — they'll be
-                    # surfaced via the slot routes the next time the
-                    # operator looks.
-                    continue
-        for port in range(8081, 8100):
-            if port not in used:
-                return port
-        # Pool is full — surface as apply_failed rather than silently
-        # collide. The user will see the envelope and know to clean up.
-        raise CapabilityApplyFailed(
-            "no free slot port available in 8081-8099",
-            details={"used": sorted(used)},
-        )
+        # Lazy import: the API route module imports widely; keep the
+        # orchestrator importable without dragging the route graph in at
+        # module-import time.
+        from hal0.api.routes.slots import _next_free_slot_port as shared_next_free_slot_port
+
+        try:
+            return shared_next_free_slot_port()
+        except BadRequest as exc:
+            raise CapabilityApplyFailed(
+                str(exc),
+                details=dict(getattr(exc, "details", None) or {}),
+            ) from exc
 
 
 __all__ = [

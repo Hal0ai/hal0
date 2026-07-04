@@ -97,6 +97,9 @@ from hal0.api.routes import (
     memory_admin as memory_admin_routes,
 )
 from hal0.api.routes import (
+    meta as meta_routes,
+)
+from hal0.api.routes import (
     profiles as profiles_routes,
 )
 from hal0.api.routes import (
@@ -1247,6 +1250,10 @@ def create_app() -> FastAPI:
     # public (e.g. /api/status, /api/config/urls). Auth was removed in
     # ADR-0012; all endpoints on this server are open on the local network.
     app.include_router(health.router, prefix="/api", tags=["health"])
+    # Static backend vocabulary (GET /api/meta/enums) — the canonical
+    # device/backend/capability enums from hal0.model_meta, read once by the
+    # dashboard at startup. Code-level constants only; no auth (ADR-0012).
+    app.include_router(meta_routes.router, prefix="/api/meta", tags=["meta"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
 
     # Profile catalog — read-only, no auth (ADR-0012). Returns every profile

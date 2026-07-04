@@ -65,15 +65,38 @@ function useFocusTrap(ref, open) {
   }, [open, ref]);
 }
 
+// ─── DiscardGuardDialog — shared unsaved-changes confirm ────────────────────
+// Dialog-based replacement for the window.confirm the Modal/Drawer/FormDrawer
+// `dirty` prop used to fire (same ConfirmDialog idiom the slot drawer adopted
+// in slot-modals.jsx). `message` is the caller's `confirmDiscard` copy, kept
+// as the dialog body so the existing prop API stays backward compatible.
+function DiscardGuardDialog({ open, message, onCancel, onDiscard }) {
+  return (
+    <ConfirmDialog
+      open={open}
+      onCancel={onCancel}
+      onConfirm={onDiscard}
+      title="Unsaved changes"
+      message={message || "Discard unsaved changes?"}
+      confirmLabel="Discard"
+      cancelLabel="Keep editing"
+    />
+  );
+}
+
 // ─── Portal-less Modal ────────────────────────────────────────────────────
 // Click backdrop or Esc to close. Captures + restores focus on close and traps
 // Tab within the shell. Width auto-sized. Pass `dirty` (+ optional
-// `confirmDiscard`) to guard the dismiss paths against unsaved changes.
+// `confirmDiscard`) to guard the dismiss paths against unsaved changes —
+// the guard confirms through the shared DiscardGuardDialog (state-driven),
+// not window.confirm.
 function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dismissable = true, dirty = false, confirmDiscard = "Discard unsaved changes?" }) {
   const overlayRef = useRefP(null);
   const shellRef = useRefP(null);
+  const [discardOpen, setDiscardOpen] = useStateP(false);
+  useEffectP(() => { if (!open) setDiscardOpen(false); }, [open]);
   const requestClose = () => {
-    if (dirty && !window.confirm(confirmDiscard)) return;
+    if (dirty) { setDiscardOpen(true); return; }
     onClose();
   };
   useEffectP(() => {
@@ -90,6 +113,7 @@ function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dis
   useFocusTrap(shellRef, open);
   if (!open) return null;
   return (
+    <>
     <div
       className="modal-backdrop"
       ref={overlayRef}
@@ -109,6 +133,15 @@ function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dis
         {foot && <div className="modal-foot mono">{foot}</div>}
       </div>
     </div>
+    {dirty && (
+      <DiscardGuardDialog
+        open={discardOpen}
+        message={confirmDiscard}
+        onCancel={() => setDiscardOpen(false)}
+        onDiscard={() => { setDiscardOpen(false); onClose(); }}
+      />
+    )}
+    </>
   );
 }
 
@@ -119,8 +152,10 @@ function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dis
 // disables backdrop dismissal.
 function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, headRight, dirty = false, dismissable = true, confirmDiscard = "Discard unsaved changes?" }) {
   const shellRef = useRefP(null);
+  const [discardOpen, setDiscardOpen] = useStateP(false);
+  useEffectP(() => { if (!open) setDiscardOpen(false); }, [open]);
   const requestClose = () => {
-    if (dirty && !window.confirm(confirmDiscard)) return;
+    if (dirty) { setDiscardOpen(true); return; }
     onClose();
   };
   useEffectP(() => {
@@ -137,6 +172,14 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
         className={"drawer-backdrop" + (open ? " open" : "")}
         onClick={() => { if (dismissable) requestClose(); }}
       />
+      {dirty && (
+        <DiscardGuardDialog
+          open={discardOpen}
+          message={confirmDiscard}
+          onCancel={() => setDiscardOpen(false)}
+          onDiscard={() => { setDiscardOpen(false); onClose(); }}
+        />
+      )}
       <aside
         ref={shellRef}
         tabIndex={-1}
@@ -708,15 +751,20 @@ function useForm({ initial, deriveInitial, resetKey, validate, warn }) {
 // editor's submit + validation exactly as they were.
 function FormDrawer({ eyebrow, title, ariaLabel, panelClassName = "", submitting = false, dirty = false, confirmDiscard = "Discard unsaved changes?", onClose, children, foot }) {
   const [closing, setClosing] = useStateP(false);
+  const [discardOpen, setDiscardOpen] = useStateP(false);
   const shellRef = useRefP(null);
-  const requestClose = () => {
-    if (submitting) return;
-    if (dirty && !window.confirm(confirmDiscard)) return;
+  const beginClose = () => {
     setClosing(true);
     setTimeout(onClose, 200);
   };
+  const requestClose = () => {
+    if (submitting) return;
+    if (dirty) { setDiscardOpen(true); return; }
+    beginClose();
+  };
   useFocusTrap(shellRef, true);
   return (
+    <>
     <div className={"pf-scrim" + (closing ? " out" : "")} onMouseDown={requestClose}>
       <div
         ref={shellRef}
@@ -740,6 +788,16 @@ function FormDrawer({ eyebrow, title, ariaLabel, panelClassName = "", submitting
         </div>
       </div>
     </div>
+    {/* Rendered after the scrim — equal z-index overlays stack by DOM order. */}
+    {dirty && (
+      <DiscardGuardDialog
+        open={discardOpen}
+        message={confirmDiscard}
+        onCancel={() => setDiscardOpen(false)}
+        onDiscard={() => { setDiscardOpen(false); beginClose(); }}
+      />
+    )}
+    </>
   );
 }
 
