@@ -19,6 +19,7 @@ from typing import Any
 
 import structlog
 
+from hal0.config.schema import _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
 from hal0.hardware import gpu_view
 from hal0.hardware.gpu_view import GPUMemorySample
 from hal0.hardware.probe import _amd_drm_device, _run
@@ -26,16 +27,15 @@ from hal0.hardware.probe import _amd_drm_device, _run
 log = structlog.get_logger(__name__)
 
 
-# Slot port pool (PLAN §2: "8081-8099 — slot ports assigned by config").
-# The task brief says 8100-8199; PLAN.md says 8081-8099. We honour PLAN.md
-# (the canonical decision) and expose the range here so the API + dashboard
-# don't drift from config.SlotsConfig.port_range_{start,end}.
-#
-# # NOTE: PLAN §2 says ports 8081-8099 — task brief mentioned 8100-8199.
-# Going with PLAN. If the brief was right the constant can be flipped here
-# without touching call sites.
-SLOT_PORT_RANGE_START = 8081
-SLOT_PORT_RANGE_END = 8099
+# Slot port pool — derived from the schema constants (imported above) so
+# this module can never drift from config.SlotsConfig.port_range_{start,end}
+# again (the previous hand-copied 8081-8099 literals predated the schema
+# constants). The default pool deliberately ends at _SLOT_PORT_POOL_END
+# (8099, below ComfyUI's 8188); an operator [slots] override widens the
+# live pool but this port-scan snapshot intentionally covers only the
+# default pool.
+SLOT_PORT_RANGE_START = _SLOT_PORT_MIN
+SLOT_PORT_RANGE_END = _SLOT_PORT_POOL_END
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:

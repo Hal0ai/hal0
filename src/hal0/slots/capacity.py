@@ -27,6 +27,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+# Context-window fallbacks are imported from the launch path so the capacity
+# estimator can never drift from what a slot will actually launch with
+# (providers.container._resolve_context_size: explicit > min(native, dense
+# cap) > safe fallback).  The names are underscore-private in container.py;
+# importing them anyway is the lesser evil vs. a re-declared constant
+# silently diverging again (container.py is owned by another workstream, so
+# the constants cannot be moved to a neutral module from here).
+from hal0.providers.container import _CTX_DENSE_CAP
 from hal0.slots.state import SlotError
 
 if TYPE_CHECKING:
@@ -92,9 +100,12 @@ def _read_meminfo() -> tuple[float, float]:
 _RESIDENT_STATES = frozenset({"warming", "ready", "serving", "idle"})
 
 # Default context window assumed when neither the model nor the slot config
-# pins one. Matches the hal0 ctx_size baseline the platform has shipped
-# with since v0.2.
-_DEFAULT_CTX_TOKENS = 65536
+# pins one.  Sourced from the launch path (see the _CTX_DENSE_CAP import
+# above): an unpinned slot actually launches at min(native, _CTX_DENSE_CAP)
+# — never more — so the capacity estimate must budget the same ceiling.
+# The previous private 65536 here disagreed with the launcher's 8192/32768
+# fallbacks and over-reported KV for slots that launch at ≤32768.
+_DEFAULT_CTX_TOKENS = _CTX_DENSE_CAP
 
 # Coarse KV-cache footprint estimate: bytes per context token, summed across
 # K and V. Real KV size depends on n_layers * n_kv_heads * head_dim * dtype,

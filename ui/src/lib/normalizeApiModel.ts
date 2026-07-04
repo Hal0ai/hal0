@@ -27,6 +27,15 @@ export interface ApiModelRaw {
   hf_repo?: string
   path?: string
   type?: string | null
+  /** Explicit provenance from the backend: "local" | "upstream". Older
+   * backends omit it — isUpstreamModel falls back to installed+upstream. */
+  origin?: string
+  /** Quantisation label ("Q4_K_M", "IQ2_XS", "F16") — header/filename derived. */
+  quant?: string | null
+  /** Freeform registry tags ("mtp", "coder", "user-added", …). */
+  tags?: string[]
+  /** Unix seconds the row was registered / first seen. */
+  created?: number
   // ── Legacy HAL0_DATA mock shape (data.jsx fixtures / mock.ts 404
   // fallback). Real /api/models rows never carry these; the normalizer
   // tolerates them so mock mode keeps working through the same code path.
@@ -77,10 +86,14 @@ export function formatSize(b: number): string {
 
 // A row `/api/models` aggregated from an upstream provider's `/v1/models`
 // rather than the local registry: advertised-only, never on this host's
-// disk, routed by the dispatcher to `m.upstream`. FLM/NPU rows also carry
-// `upstream` ("npu") but are installed host-side, so the `installed` check
-// keeps them local.
+// disk, routed by the dispatcher to `m.upstream`. The backend now stamps an
+// explicit `origin` ("local" | "upstream") on every row — prefer it when
+// present. Fallback (older backends / legacy fixtures): infer from
+// installed+upstream. FLM/NPU rows also carry `upstream` ("npu") but are
+// installed host-side, so the `installed` check keeps them local.
 export function isUpstreamModel(m: ApiModelRaw): boolean {
+  if (m.origin === 'upstream') return true
+  if (m.origin === 'local') return false
   return !m.installed && typeof m.upstream === 'string' && m.upstream !== ''
 }
 

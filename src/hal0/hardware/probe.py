@@ -93,14 +93,21 @@ def _read_sysfs_mb(path: Path) -> float | None:
         return None
 
 
+def _amd_drm_devices() -> list[Path]:
+    """All AMD DRM card device dirs whose sysfs exports VRAM totals, sorted."""
+    try:
+        return [
+            p.parent
+            for p in sorted(Path("/sys/class/drm").glob("card*/device/mem_info_vram_total"))
+        ]
+    except OSError:
+        return []
+
+
 def _amd_drm_device() -> Path | None:
     """Find the first AMD DRM card whose sysfs exports VRAM totals."""
-    try:
-        for p in sorted(Path("/sys/class/drm").glob("card*/device/mem_info_vram_total")):
-            return p.parent
-    except OSError:
-        return None
-    return None
+    devices = _amd_drm_devices()
+    return devices[0] if devices else None
 
 
 # ── CPU + RAM ──────────────────────────────────────────────────────────────────
@@ -341,59 +348,82 @@ def _read_cgroup_memory_max_mb() -> int | None:
 # ── GPU detection ──────────────────────────────────────────────────────────────
 
 
-def _detect_nvidia() -> GPUInfo | None:
-    """Probe nvidia-smi. Returns a populated GPUInfo or None if no NVIDIA GPU."""
+def _detect_nvidia_gpus() -> list[GPUInfo]:
+    """Probe nvidia-smi and return EVERY NVIDIA GPU, with index + PCI id.
+
+    ``index`` is nvidia-smi's enumeration order — the same ordinal
+    ``CUDA_VISIBLE_DEVICES`` and the CDI per-index device names
+    (``nvidia.com/gpu=<n>``) use, so ``SlotConfig.gpu_index`` pinning can be
+    picked straight off this list. Tolerates older nvidia-smi outputs that
+    lack trailing columns (driver / pci.bus_id).
+    """
     rc, out, err = _run(
         [
             "nvidia-smi",
-            "--query-gpu=name,memory.total,driver_version",
+            "--query-gpu=index,name,memory.total,driver_version,pci.bus_id",
             "--format=csv,noheader,nounits",
         ]
     )
     if rc != 0 or not out.strip():
         if rc == -1:
             log.debug("hardware.probe.nvidia_smi_unavailable", err=err)
-        return None
-    first = out.strip().splitlines()[0]
-    parts = [p.strip() for p in first.split(",")]
-    if len(parts) < 2:
-        return None
-    name = parts[0]
-    try:
-        vram_mb = round(float(parts[1]))
-    except ValueError:
-        vram_mb = 0
-    driver = parts[2] if len(parts) >= 3 else ""
-    return GPUInfo(
-        vendor="nvidia",
-        name=name,
-        vram_mb=vram_mb,
-        driver=f"nvidia {driver}".strip(),
-        compute_capable=True,  # nvidia-smi presence => CUDA capable
-    )
+        return []
+    gpus: list[GPUInfo] = []
+    for pos, line in enumerate(out.strip().splitlines()):
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            index = pos
+        name = parts[1]
+        try:
+            vram_mb = round(float(parts[2]))
+        except ValueError:
+            vram_mb = 0
+        driver = parts[3] if len(parts) >= 4 else ""
+        pci_id = parts[4] if len(parts) >= 5 else ""
+        gpus.append(
+            GPUInfo(
+                vendor="nvidia",
+                index=index,
+                name=name,
+                vram_mb=vram_mb,
+                pci_id=pci_id,
+                driver=f"nvidia {driver}".strip(),
+                compute_capable=True,  # nvidia-smi presence => CUDA capable
+            )
+        )
+    return gpus
 
 
-def _detect_amd() -> GPUInfo | None:
-    """Probe AMD GPU via DRM sysfs and (optionally) rocm-smi.
+def _detect_nvidia() -> GPUInfo | None:
+    """Probe nvidia-smi. Returns the primary GPUInfo or None if no NVIDIA GPU."""
+    gpus = _detect_nvidia_gpus()
+    return gpus[0] if gpus else None
+
+
+def _amd_gpu_info(drm: Path, index: int, compute_capable: bool) -> GPUInfo:
+    """Build one AMD GPUInfo from a DRM device dir.
 
     On Strix Halo (UMA) the vram_total counter reports the small carve-out;
     the real model-loading pool is GTT. We pick the larger of vram_total and
     gtt_total so the slot-form's "will it fit" check uses the right number.
     """
-    drm = _amd_drm_device()
-    if drm is None:
-        return None
     vram_total = _read_sysfs_mb(drm / "mem_info_vram_total") or 0.0
     gtt_total = _read_sysfs_mb(drm / "mem_info_gtt_total") or 0.0
     effective_mb = round(max(vram_total, gtt_total))
 
-    # Name via lspci on the device's PCI slot
+    # Name + PCI id via lspci on the device's PCI slot
     name = ""
+    pci_id = ""
     try:
         pci_link = (drm / "uevent").read_text()
         m = re.search(r"PCI_SLOT_NAME=(\S+)", pci_link)
         if m:
-            rc, out, _ = _run(["lspci", "-s", m.group(1)])
+            pci_id = m.group(1)
+            rc, out, _ = _run(["lspci", "-s", pci_id])
             if rc == 0 and out:
                 # e.g. "c5:00.0 VGA compatible controller: AMD ... [Radeon 890M] (rev cc)"
                 after = out.split(":", 2)[-1].strip()
@@ -401,19 +431,39 @@ def _detect_amd() -> GPUInfo | None:
     except OSError:
         pass
 
-    # ROCm probe (very lightweight — just presence of binary + non-error exit)
-    rc, _, _ = _run(["rocm-smi", "--showproductname"])
-    compute_capable = rc == 0
-
     return GPUInfo(
         vendor="amd",
+        index=index,
         name=name or "AMD GPU",
         vram_mb=effective_mb,
+        pci_id=pci_id,
         driver="amdgpu",
         drm_path=str(drm),
         compute_capable=compute_capable,
         vulkan_capable=True,  # amdgpu ships Mesa Vulkan
     )
+
+
+def _detect_amd_gpus() -> list[GPUInfo]:
+    """Probe every AMD GPU via DRM sysfs and (optionally) rocm-smi.
+
+    ``index`` is the DRM card enumeration order (which matches ROCm's device
+    ordering for HIP_VISIBLE_DEVICES on single-vendor hosts). The lightweight
+    rocm-smi presence check runs once and applies to all cards.
+    """
+    devices = _amd_drm_devices()
+    if not devices:
+        return []
+    # ROCm probe (very lightweight — just presence of binary + non-error exit)
+    rc, _, _ = _run(["rocm-smi", "--showproductname"])
+    compute_capable = rc == 0
+    return [_amd_gpu_info(drm, i, compute_capable) for i, drm in enumerate(devices)]
+
+
+def _detect_amd() -> GPUInfo | None:
+    """Probe the primary AMD GPU via DRM sysfs (see _detect_amd_gpus)."""
+    gpus = _detect_amd_gpus()
+    return gpus[0] if gpus else None
 
 
 def _detect_vulkan_fallback() -> GPUInfo | None:
@@ -486,6 +536,34 @@ def _detect_gpu() -> GPUInfo:
         if info is not None:
             return info
     return GPUInfo(vendor="unknown")
+
+
+def _detect_gpus() -> list[GPUInfo]:
+    """Enumerate ALL GPUs, primary first (multi-GPU generalization).
+
+    Back-compat shape: ``HardwareInfo.gpus`` was already a list; this fills
+    it with every enumerated GPU (nvidia-smi rows / DRM cards) instead of
+    just the primary. ``gpus[0]`` keeps its "primary GPU" meaning for every
+    existing consumer. The Vulkan/lspci fallbacks can only identify a single
+    device, so they contribute a one-entry list.
+    """
+    for fn in (_detect_nvidia_gpus, _detect_amd_gpus):
+        try:
+            infos = fn()
+        except Exception as exc:  # defensive: never let one probe crash the rest
+            log.warning("hardware.probe.detector_fail", detector=fn.__name__, error=str(exc))
+            continue
+        if infos:
+            return infos
+    for fallback in (_detect_vulkan_fallback, _detect_lspci_fallback):
+        try:
+            info = fallback()
+        except Exception as exc:
+            log.warning("hardware.probe.detector_fail", detector=fallback.__name__, error=str(exc))
+            continue
+        if info is not None:
+            return [info]
+    return []
 
 
 # ── Platform detection ────────────────────────────────────────────────────────
@@ -623,29 +701,154 @@ def _detect_platform(gpu: GPUInfo, npu: NPUInfo) -> str:
 # ── NPU detection ──────────────────────────────────────────────────────────────
 
 
+def _first_render_node(dri_dir: Path = Path("/dev/dri")) -> str:
+    """First /dev/dri/renderD* node on this host, or "" when none exist.
+
+    Recorded into hardware.json so the FLM container spec passes the ACTUAL
+    iGPU render companion instead of assuming renderD128 (which shifts to
+    renderD129+ when a discrete GPU enumerates first).
+    """
+    try:
+        nodes = sorted(p for p in dri_dir.iterdir() if p.name.startswith("renderD"))
+    except OSError:
+        return ""
+    return str(nodes[0]) if nodes else ""
+
+
+# Candidate xrt-smi binaries for the probe-time AIE column discovery. The
+# unwrapped ELF is preferred (the wrapped launcher needs setup.sh sourced);
+# a bare "xrt-smi" on PATH is the last candidate.
+_XRT_SMI_CANDIDATES = (
+    "/opt/xilinx/xrt/bin/unwrapped/xrt-smi",
+    "/opt/xilinx/xrt/bin/xrt-smi",
+    "xrt-smi",
+)
+
+
+def _detect_aie_columns() -> int:
+    """Best-effort total AIE column count via host xrt-smi. 0 = unknown.
+
+    Fallback chain consumers apply (documented at the consumer,
+    ``hal0.providers.npu_columns.aie_total_columns``): hardware.json value
+    when > 0 → Strix Halo constant 8. Most hosts have no host-side XRT (it
+    lives in the FLM toolbox image), so 0/unknown is the common case and the
+    constant keeps today's behaviour.
+
+    xrt-smi can't stream JSON to stdout reliably (see npu_columns), so JSON
+    is written to a private temp file and read back. Looks for an explicit
+    ``total_columns`` count, else sums partition ``num_cols``.
+    """
+    import json as _json
+    import tempfile
+
+    for candidate in _XRT_SMI_CANDIDATES:
+        if "/" in candidate and not os.path.exists(candidate):
+            continue
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(prefix="hal0-aie-", suffix=".json")
+            os.close(fd)
+            rc, _, _ = _run(
+                [candidate, "examine", "-r", "aie-partitions", "-f", "JSON", "-o", tmp, "--force"],
+                timeout=4.0,
+            )
+            if rc != 0:
+                continue
+            payload = _read_text(Path(tmp)) or ""
+            data = _json.loads(payload) if payload.strip() else None
+            if not isinstance(data, dict):
+                continue
+            devices = data.get("devices")
+            if not isinstance(devices, list) or not devices or not isinstance(devices[0], dict):
+                continue
+            aie = devices[0].get("aie_partitions")
+            if not isinstance(aie, dict):
+                continue
+            total = aie.get("total_columns") or aie.get("columns")
+            with contextlib.suppress(TypeError, ValueError):
+                if total and int(total) > 0:
+                    return int(total)
+            parts = aie.get("partitions")
+            if isinstance(parts, list):
+                summed = 0
+                for p in parts:
+                    if isinstance(p, dict):
+                        with contextlib.suppress(TypeError, ValueError):
+                            summed += max(int(p.get("num_cols") or 0), 0)
+                if summed > 0:
+                    return summed
+        except Exception as exc:  # never let the optional probe break `hal0 probe`
+            log.debug("hardware.probe.aie_columns_fail", binary=candidate, error=str(exc))
+        finally:
+            if tmp:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+    return 0
+
+
 def _detect_npu() -> NPUInfo:
     """Detect AMD XDNA NPU presence via sysfs / /dev nodes.
 
     Strix Halo / Hawk Point / Phoenix expose /dev/accel/accel* once the amdxdna
     driver is loaded. We don't run `flm validate` here — that's stats territory.
+
+    Also records the ACTUAL device nodes (accel_path + iGPU render companion)
+    and, best-effort, the AIE column count — the FLM container spec and the
+    NPU-occupancy card read these from hardware.json instead of hard-coding
+    the Strix Halo constants (which remain their documented fallbacks).
     """
     accel = Path("/dev/accel")
     if accel.exists():
         try:
-            entries = list(accel.iterdir())
+            entries = sorted(accel.iterdir())
             if entries:
                 return NPUInfo(
                     present=True,
                     vendor="amd",
                     name="AMD NPU (XDNA)",
                     driver="amdxdna",
+                    accel_path=str(entries[0]),
+                    render_path=_first_render_node(),
+                    aie_columns=_detect_aie_columns(),
                 )
         except OSError:
             pass
     # Some kernels expose it through /sys/class/accel
     if Path("/sys/module/amdxdna").exists():
-        return NPUInfo(present=True, vendor="amd", name="AMD NPU (XDNA)", driver="amdxdna")
+        return NPUInfo(
+            present=True,
+            vendor="amd",
+            name="AMD NPU (XDNA)",
+            driver="amdxdna",
+            render_path=_first_render_node(),
+            aie_columns=_detect_aie_columns(),
+        )
     return NPUInfo(present=False)
+
+
+# ── GPU access groups ─────────────────────────────────────────────────────────
+
+
+def _gpu_group_gids() -> dict[str, int]:
+    """Resolve the render/video GIDs from the live /etc/group at probe time.
+
+    Recorded into hardware.json (``gpu_group_gids``) so
+    ``hal0.providers._gpu.resolve_gpu_group_ids`` has a probe-time source when
+    its own live lookup fails (fallback chain documented there: live lookup →
+    this record → Linux-convention constants 993/44). Groups that don't exist
+    are simply omitted.
+    """
+    out: dict[str, int] = {}
+    try:
+        import grp
+    except ImportError:
+        return out
+    for name in ("render", "video"):
+        try:
+            out[name] = grp.getgrnam(name).gr_gid
+        except KeyError:
+            continue
+    return out
 
 
 # ── Disk ───────────────────────────────────────────────────────────────────────
@@ -689,7 +892,10 @@ class HardwareProbe:
         try:
             cpu_model, cpu_cores, cpu_threads = _parse_cpuinfo()
             ram_total_mb, ram_avail_mb = _parse_meminfo()
-            gpu = _detect_gpu()
+            gpus = _detect_gpus()
+            # Primary GPU keeps its historical single-GPU meaning (platform
+            # detection, unified-memory derivation, card rendering).
+            gpu = gpus[0] if gpus else GPUInfo(vendor="unknown")
             npu = _detect_npu()
             disk_mb = _disk_free_mb(_paths.var_lib())
 
@@ -713,7 +919,9 @@ class HardwareProbe:
             # gave us a perfectly good model string (e.g. a virtio GPU in a
             # Proxmox VM). UI consumers can still gate on gpu.vendor when
             # they need real compute capability.
-            include_gpu = bool(gpu.vendor and gpu.vendor != "unknown") or bool(gpu.name)
+            visible_gpus = [
+                g for g in gpus if bool(g.vendor and g.vendor != "unknown") or bool(g.name)
+            ]
 
             return HardwareInfo(
                 hostname=_read_hostname(),
@@ -726,7 +934,8 @@ class HardwareProbe:
                 ram_mb=ram_total_mb,
                 ram_available_mb=ram_avail_mb,
                 unified_memory_mb=unified_mb,
-                gpus=[gpu] if include_gpu else [],
+                gpus=visible_gpus,
+                gpu_group_gids=_gpu_group_gids(),
                 npu=npu,
                 disk_free_mb=disk_mb,
                 cgroup_max_mb=_read_cgroup_memory_max_mb(),

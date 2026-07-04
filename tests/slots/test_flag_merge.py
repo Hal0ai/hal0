@@ -1,4 +1,8 @@
-"""Unit tests for hal0.slots.flag_merge.merge_flags.
+"""Unit tests for hal0.slots.argv.merge_flags.
+
+(The ``hal0.slots.flag_merge`` module this once tested was folded into
+``hal0.slots.argv`` and its deprecation shim deleted once the last
+importer — the retired native llama-server launch path — went away.)
 
 Covers the Phase 1 A3 contract:
   * Empty / None inputs collapse to ''.
@@ -16,7 +20,7 @@ import logging
 
 import pytest
 
-from hal0.slots.flag_merge import merge_flags
+from hal0.slots.argv import merge_flags
 
 # ─── Empty inputs ─────────────────────────────────────────────────────────────
 

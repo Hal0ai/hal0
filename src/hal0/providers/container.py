@@ -51,7 +51,13 @@ import httpx
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
 from hal0.config.schema import resolve_chat_template, resolve_profile_flags
 from hal0.profiles import ProfileCatalog
-from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
+from hal0.providers._gpu import (
+    gpu_visibility_env,
+    is_nvidia_gpu_device,
+    nvidia_cdi_devices,
+    resolve_gpu_device_paths,
+    resolve_gpu_group_ids,
+)
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.slots.argv import ResolvedArgv, resolve_argv
 
@@ -635,6 +641,16 @@ def _resolve_llama_scalars(
 
     slot_n_gpu_layers = model_table.get("n_gpu_layers")
 
+    # Multi-GPU pinning (SlotConfig.gpu_index): affects env/devices only —
+    # never argv — so launch/preview argv parity is untouched.
+    gpu_index = slot_cfg.get("gpu_index")
+    try:
+        gpu_index = int(gpu_index) if gpu_index is not None else None
+    except (TypeError, ValueError):
+        gpu_index = None
+    if gpu_index is not None and gpu_index < 0:
+        gpu_index = None
+
     return {
         "image": str(image),
         "flags_str": str(flags_str),
@@ -647,6 +663,11 @@ def _resolve_llama_scalars(
         "model_defaults": model_defaults,
         "slot_n_gpu_layers": slot_n_gpu_layers,
         "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
+        # GPU vendor discriminator: the profile's declared backend (rocm /
+        # vulkan / cuda / None) — configuration, not host probing.
+        "profile_backend": getattr(profile, "backend", None),
+        "device": str(slot_cfg.get("device") or ""),
+        "gpu_index": gpu_index,
     }
 
 
@@ -700,9 +721,18 @@ class ContainerProvider(Provider):
         the health-check override are all included, so what loads matches what
         the plan describes (no GPU-special argv assembly elsewhere).
 
-        GPU device nodes + group GIDs are included ONLY for gpu/img profiles
-        and are existence-filtered — a cpu (or npu) ``device_class`` profile
-        gets no ``/dev/kfd`` / ``/dev/dri`` passthrough or ``--group-add``.
+        GPU passthrough branches by VENDOR, decided from the slot's declared
+        device/profile (never by probing at spec-build time):
+
+        * AMD/other (default): device nodes + group GIDs are included ONLY
+          for gpu/img profiles and are existence-filtered — a cpu (or npu)
+          ``device_class`` profile gets no ``/dev/kfd`` / ``/dev/dri``
+          passthrough or ``--group-add``.
+        * NVIDIA (``device=gpu-cuda`` or profile ``backend="cuda"``): CDI —
+          ``--device nvidia.com/gpu=all`` (per-index ``nvidia.com/gpu=<n>``
+          when ``gpu_index`` is set). CDI names are not paths, so no
+          existence filter and no GID ``--group-add`` (the CDI spec injects
+          nodes + permissions itself).
         """
         profile_name = slot_cfg.get("profile") or ""
         profile = _resolve_profile(profile_name)
@@ -712,14 +742,25 @@ class ContainerProvider(Provider):
         port = int(slot_cfg.get("port", 0))
 
         # GPU plumbing gate (#674/CPU-profile fix): only gpu/img profiles get
-        # device nodes + group GIDs, and only device paths that actually exist
-        # on this host are passed (podman errors on a non-existent --device).
+        # GPU passthrough. On the AMD path only device paths that actually
+        # exist on this host are passed (podman errors on a non-existent
+        # --device); CDI entries are names, not paths — passed verbatim.
         if scalars["device_class"] in ("gpu", "img"):
-            devices = [p for p in resolve_gpu_device_paths() if os.path.exists(p)]
-            group_ids = [str(g) for g in resolve_gpu_group_ids()]
+            if is_nvidia_gpu_device(scalars["device"], scalars["profile_backend"]):
+                devices = nvidia_cdi_devices(scalars["gpu_index"])
+                group_ids = []
+            else:
+                devices = [p for p in resolve_gpu_device_paths() if os.path.exists(p)]
+                group_ids = [str(g) for g in resolve_gpu_group_ids()]
         else:
             devices = []
             group_ids = []
+
+        # gpu_index visibility env (per device family), merged UNDER the
+        # slot's [server].env so an operator's explicit key always wins.
+        vis_env = gpu_visibility_env(scalars["device"], scalars["gpu_index"])
+        server_env = scalars["server_env"] or {}
+        merged_env = {**vis_env, **server_env}
 
         return _llama_launch_plan(
             image=scalars["image"],
@@ -735,7 +776,7 @@ class ContainerProvider(Provider):
             mmproj=scalars["mmproj"],
             model_defaults=scalars["model_defaults"],
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
-            env=scalars["server_env"],
+            env=merged_env or None,
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────

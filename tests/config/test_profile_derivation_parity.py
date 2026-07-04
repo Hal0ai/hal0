@@ -95,6 +95,7 @@ def test_device_default_profiles_table_is_pinned() -> None:
     assert DEVICE_DEFAULT_PROFILES == {
         "gpu-rocm": "rocm",
         "gpu-vulkan": "vulkan",
+        "gpu-cuda": "cuda",
         "cpu": "cpu-llm",
         "npu": "flm",
     }
