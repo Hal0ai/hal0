@@ -20,6 +20,9 @@ export const ENDPOINTS = {
   comfyuiRenderCancel: '/api/comfyui/render/cancel',
   comfyuiRestart: '/api/comfyui/restart',
   comfyuiLogs: '/api/comfyui/logs',
+  // List launchable workflow .json files discovered on disk (operator-dropped
+  // files in the bind-mounted workflows dir show up here without a rebuild).
+  comfyuiWorkflows: '/api/comfyui/workflows',
   comfyuiWorkflowLaunch: (name: string) => `/api/comfyui/workflows/${encodeURIComponent(name)}/launch`,
   // Latest output image proxy
   comfyuiPreview: '/api/comfyui/preview',

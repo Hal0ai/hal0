@@ -2048,6 +2048,32 @@ class SlotManager:
                 write_state_atomic(self._state_file(slot_name), refreshed)
                 self._states[slot_name] = refreshed
 
+        # #599 follow-up: ``[image].idle_restore_minutes`` is read into the
+        # GpuArbiter once at lazy construction, so a config write alone left
+        # the live idle-restore window stale until the next api restart — the
+        # Settings control silently under-delivered. Push the new value into
+        # the already-constructed arbiter (if any) so the idle loop's next
+        # tick honours it immediately. Fail-soft: the arbiter reads
+        # ``idle_restore_minutes`` fresh each tick, so a bad value can't wedge
+        # it, and an absent arbiter picks the value up at construction anyway.
+        if self._arbiter is not None and "image" in updates:
+            from hal0.slots.arbiter import gpu_exclusive_group
+
+            if gpu_exclusive_group(cfg_dict) == "img":
+                image = cfg_dict.get("image") or cfg_dict.get("image_gen") or {}
+                val = image.get("idle_restore_minutes") if isinstance(image, dict) else None
+                if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                    if val != self._arbiter.idle_restore_minutes:
+                        log.info(
+                            "gpu_arbiter.idle_restore_minutes_hot_reload",
+                            extra={
+                                "slot": slot_name,
+                                "old": self._arbiter.idle_restore_minutes,
+                                "new": val,
+                            },
+                        )
+                    self._arbiter.idle_restore_minutes = val
+
         return await self.status(slot_name)
 
     async def reconcile_unconfigured_slots(self) -> None:
