@@ -16,11 +16,12 @@ servers, mounted on the API as Streamable-HTTP sub-apps:
   hardware probes. Its `memory_*` tools route in-process to the memory
   server.
 
-<Aside type="caution">
-hal0 has **no built-in network auth** (ADR-0012). The MCP mounts are
-reachable to anything that can reach the API. Run hal0 on a trusted LAN
-or behind your own reverse proxy — do not expose `/mcp/*` to the
-internet.
+<Aside type="note">
+hal0 ships built-in auth via `--auth=basic` (Caddy + basic_auth + bearer
+tokens + automatic HTTPS). Without it, hal0 runs open on the LAN — run it
+on a trusted network or behind your own reverse proxy. Do not expose
+`/mcp/*` unprotected to the internet. See
+[Security](/docs/concepts/security).
 </Aside>
 
 ## Connect
@@ -34,8 +35,7 @@ http://localhost:8080/mcp/memory
 
 ### Identify with X-hal0-Agent
 
-Caller identity flows on the **`X-hal0-Agent`** request header (Bearer
-auth was removed in ADR-0012). The value must match
+Caller identity flows on the **`X-hal0-Agent`** request header. The value must match
 `^[a-zA-Z0-9_-]{1,64}$`. It stamps the audit trail and powers the
 `private:<agent>` memory namespace.
 

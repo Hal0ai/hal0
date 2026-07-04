@@ -1241,19 +1241,39 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
 
 # ── logs ───────────────────────────────────────────────────────────────────
 #
-# Real journalctl-backed log access is a Phase 2 surface — the SlotManager
-# doesn't expose a logs() method today (state lives in journald, not in
-# the manager). Leaving these as typed 501 stubs so a UI build that
-# touches them gets a clear envelope rather than a 404.
+# journalctl-backed per-slot log access. Slot containers run under the
+# ``hal0-slot@<name>.service`` template unit (podman ``--log-driver=none``
+# so conmon→journal is the single sink), so the container's llama-server /
+# ComfyUI stdout — including the one-shot model-loading lines — lands in
+# journald and is reachable here.
+
+# Heartbeat lines llama-server prints every few seconds while idle. Left
+# unfiltered they flood the last-N tail window within minutes and push the
+# (one-shot, at-startup) model-loading lines out of view — which is why the
+# UI "stopped" showing detailed load logs. The ``quiet`` param drops them.
+_LOG_NOISE_MARKERS: tuple[str, ...] = (
+    "update_slots: all slots are idle",
+    "prompt processing progress",
+    "kv cache rm",
+)
+
+
+def _is_log_noise(line: str) -> bool:
+    """True for high-frequency heartbeat lines with no diagnostic value."""
+    return any(marker in line for marker in _LOG_NOISE_MARKERS)
 
 
 @router.get("/{name}/logs")
-async def slot_logs(name: str, request: Request, lines: int = 200) -> dict[str, object]:
+async def slot_logs(
+    name: str, request: Request, lines: int = 200, quiet: bool = True
+) -> dict[str, object]:
     """Return the last ``lines`` of this slot's journal output.
 
-    Best-effort: on hosts without systemd or where the slot has never
-    started, returns an empty string with a hint. The UI tolerates that
-    (renders "No logs available") rather than treating it as an error.
+    ``quiet`` (default on) drops idle heartbeat spam so the window holds
+    signal (model-load lines, errors) rather than ``all slots are idle``
+    repeats. Best-effort: on hosts without systemd or where the slot has
+    never started, returns an empty string with a hint. The UI tolerates
+    that (renders "No logs available") rather than treating it as an error.
     """
     import asyncio as _asyncio
     import shutil
@@ -1266,12 +1286,16 @@ async def slot_logs(name: str, request: Request, lines: int = 200) -> dict[str, 
     if shutil.which("journalctl") is None:
         return {"name": name, "logs": "", "hint": "journalctl not available on this host"}
 
+    want = max(1, min(int(lines or 200), 5000))
+    # When filtering noise, over-fetch so the post-filter result still holds
+    # ~``want`` meaningful lines even if most of the raw tail is heartbeat.
+    fetch = min(want * 8, 20000) if quiet else want
     cmd = [
         "journalctl",
         "-u",
         f"hal0-slot@{name}.service",
         "-n",
-        str(max(1, min(int(lines or 200), 5000))),
+        str(fetch),
         "--no-pager",
         "-o",
         "short-iso",
@@ -1282,12 +1306,16 @@ async def slot_logs(name: str, request: Request, lines: int = 200) -> dict[str, 
         stderr=_asyncio.subprocess.PIPE,
     )
     try:
-        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=5.0)
+        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=8.0)
     except TimeoutError:
         with contextlib_suppress():
             proc.kill()
         return {"name": name, "logs": "", "hint": "journalctl timed out"}
-    return {"name": name, "logs": stdout.decode("utf-8", errors="replace")}
+    text = stdout.decode("utf-8", errors="replace")
+    if quiet:
+        kept = [ln for ln in text.splitlines() if ln and not _is_log_noise(ln)]
+        text = "\n".join(kept[-want:])
+    return {"name": name, "logs": text}
 
 
 def contextlib_suppress():
@@ -1298,8 +1326,16 @@ def contextlib_suppress():
 
 
 @router.get("/{name}/logs/stream")
-async def slot_logs_stream(name: str, request: Request) -> StreamingResponse:
+async def slot_logs_stream(
+    name: str, request: Request, backfill: int = 400, quiet: bool = True
+) -> StreamingResponse:
     """SSE stream that tails this slot's journal output line-by-line.
+
+    ``backfill`` (default 400) replays recent history before the live
+    tail — CRITICAL because the model-loading lines are emitted once at
+    container start, so a stream opened with ``-n 0`` (future-only) would
+    never show them. ``quiet`` (default on) drops idle heartbeat spam so
+    the backfill window holds signal.
 
     Best-effort: gracefully exits when journalctl is missing or the slot
     has no journal entries yet. Client disconnects close the subprocess.
@@ -1309,6 +1345,8 @@ async def slot_logs_stream(name: str, request: Request) -> StreamingResponse:
 
     sm = _get_slot_manager(request)
     await sm.status(name)  # 404 fast if unknown
+
+    backfill_n = max(0, min(int(backfill or 0), 5000))
 
     async def event_source() -> Any:
         if shutil.which("journalctl") is None:
@@ -1324,7 +1362,7 @@ async def slot_logs_stream(name: str, request: Request) -> StreamingResponse:
             f"hal0-slot@{name}.service",
             "-f",
             "-n",
-            "0",
+            str(backfill_n),
             "--output=cat",
             "--no-pager",
         ]
@@ -1338,6 +1376,8 @@ async def slot_logs_stream(name: str, request: Request) -> StreamingResponse:
             async for raw in proc.stdout:
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
+                    continue
+                if quiet and _is_log_noise(line):
                     continue
                 yield f"data: {json.dumps(line)}\n\n"
         except asyncio.CancelledError:

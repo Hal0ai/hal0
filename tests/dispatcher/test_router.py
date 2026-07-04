@@ -639,3 +639,21 @@ async def test_composite_bound_model_without_live_slot_is_no_route() -> None:
             make_request(),
             body={"model": "gemma3-4b-FLM", "messages": []},
         )
+
+
+# ── DR-12: capability heuristics extraction — public surface preservation ─────
+
+
+def test_resolve_by_capability_reexported_from_router() -> None:
+    """DR-12: resolve_by_capability lives in _capability_resolve but stays
+    re-exported from router (same object, in __all__) so every existing
+    call site and importer keeps working unchanged after the extraction."""
+    import hal0.dispatcher.router as r
+    from hal0.dispatcher import _capability_resolve as cr
+
+    assert r.resolve_by_capability is cr.resolve_by_capability
+    assert "resolve_by_capability" in r.__all__
+    # LegacyResolutionFailed is raised by the extracted function and imported
+    # by external callers from router — the identity must be preserved too.
+    assert r.LegacyResolutionFailed is cr.LegacyResolutionFailed
+    assert "LegacyResolutionFailed" in r.__all__

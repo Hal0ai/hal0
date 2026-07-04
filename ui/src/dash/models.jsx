@@ -21,6 +21,12 @@ function ModelsView() {
   const [scanOpen, setScanOpen] = useStateM(false);
   const [recipeOpen, setRecipeOpen] = useStateM(false);
   const [delModel, setDelModel] = useStateM(null);
+  // Image-gen / ComfyUI models live on their own segment of this view — the
+  // dispatcher-routable models (llm/embed/rerank/stt/tts) and the image-gen
+  // tree (checkpoints/loras/vae/…) are different worlds and were bleeding into
+  // one list (a mis-tagged checkpoint showing under "llm", the "image" filter
+  // surfacing nothing). ``tab`` toggles between them.
+  const [tab, setTab] = useStateM("models");
   // Issue #311: "Search HF" panel state. ``searchOpen`` toggles the
   // panel; ``searchQ`` is the input; ``searchPick`` is the coord the
   // user clicked "Add" on, which the panel hands off to AddByHfModal
@@ -64,9 +70,38 @@ function ModelsView() {
     }
     return true;
   };
-  const installed = modelList.filter(m => m.installed && fil(m));
-  const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && fil(m));
-  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && fil(m));
+  // A model belongs to the ComfyUI/image surface when the backend flags it
+  // (owned_by/backends "comfyui", or a comfyui_category derived from its path)
+  // or it classifies as image. Path-derived flags self-heal rows an older pull
+  // mis-tagged, so this catches them even when capabilities still say "chat".
+  const isComfy = m =>
+    m.owned_by === "comfyui" ||
+    (Array.isArray(m.backends) && m.backends.includes("comfyui")) ||
+    !!m.comfyui_category ||
+    m.type === "image";
+
+  // Dispatcher-routable models — the ComfyUI ones are pulled out to their tab.
+  const installed = modelList.filter(m => m.installed && !isComfy(m) && fil(m));
+  const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && !isComfy(m) && fil(m));
+  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && !isComfy(m) && fil(m));
+
+  // ComfyUI/image surface — INSTALLED only (we never advertise un-pulled image
+  // models, same rule as FLM). Text search applies; the type/device chips do
+  // not (they're dispatcher concepts). Grouped by models-tree subdir.
+  const comfySearch = m => {
+    if (!q.trim()) return true;
+    const needle = q.trim().toLowerCase();
+    const hay = `${m.longName || ""} ${m.name || ""} ${m.id || ""} ${m.repo || ""} ${m.comfyui_category || ""}`.toLowerCase();
+    return hay.includes(needle);
+  };
+  const comfyModels = modelList.filter(m => m.installed && isComfy(m) && comfySearch(m));
+  const comfyByCat = {};
+  for (const m of comfyModels) {
+    const cat = m.comfyui_category || "other";
+    (comfyByCat[cat] = comfyByCat[cat] || []).push(m);
+  }
+  const comfyCats = Object.keys(comfyByCat).sort();
+  const comfyTotal = modelList.filter(m => m.installed && isComfy(m)).length;
 
   const toggle = (k, v) => setFilters(f => ({ ...f, [k]: f[k] === v ? null : v }));
 
@@ -99,32 +134,48 @@ function ModelsView() {
         {/* ── List (toolbar + rows) ── */}
         <div className="mdl-list">
           <div className="mdl-toolbar">
+            <div className="mdl-toolbar-grp">
+              <button
+                className={"mdl-chip" + (tab === "models" ? " on" : "")}
+                onClick={() => setTab("models")}
+              >Models</button>
+              <button
+                className={"mdl-chip" + (tab === "image" ? " on" : "")}
+                onClick={() => setTab("image")}
+              >Image / ComfyUI{comfyTotal ? ` · ${comfyTotal}` : ""}</button>
+            </div>
             <input
               className="input mono mdl-search"
               placeholder="search name, repo, id…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
-            <div className="mdl-toolbar-grp">
-              <span className="lbl">type</span>
-              {["llm", "embedding", "reranking", "transcription", "tts", "image"].map(t => (
-                <button key={t} className={"mdl-chip" + (filters.type === t ? " on" : "")} onClick={() => toggle("type", t)}>{t}</button>
-              ))}
-            </div>
-            <div className="mdl-toolbar-grp">
-              <span className="lbl">device</span>
-              {["rocm", "vulkan", "cpu", "npu"].map(d => (
-                <button key={d} className={"mdl-chip" + (filters.device === d ? " on" : "")} onClick={() => toggle("device", d)}>{d}</button>
-              ))}
-            </div>
-            {(filters.type || filters.device || q.trim()) && (
-              <button className="mdl-chip mdl-clear" onClick={() => { setFilters({ type: null, device: null }); setQ(""); }}>clear ✕</button>
+            {tab === "models" && (
+              <>
+                <div className="mdl-toolbar-grp">
+                  <span className="lbl">type</span>
+                  {/* image models moved to the Image/ComfyUI tab — no "image"
+                      chip here (it used to match nothing). */}
+                  {["llm", "embedding", "reranking", "transcription", "tts"].map(t => (
+                    <button key={t} className={"mdl-chip" + (filters.type === t ? " on" : "")} onClick={() => toggle("type", t)}>{t}</button>
+                  ))}
+                </div>
+                <div className="mdl-toolbar-grp">
+                  <span className="lbl">device</span>
+                  {["rocm", "vulkan", "cpu", "npu"].map(d => (
+                    <button key={d} className={"mdl-chip" + (filters.device === d ? " on" : "")} onClick={() => toggle("device", d)}>{d}</button>
+                  ))}
+                </div>
+                {(filters.type || filters.device || q.trim()) && (
+                  <button className="mdl-chip mdl-clear" onClick={() => { setFilters({ type: null, device: null }); setQ(""); }}>clear ✕</button>
+                )}
+              </>
             )}
           </div>
           <div className="mdl-list-h">
-            <span>Catalog</span>
-            <span className="ct">· {installed.length + blessed.length + userNs.length} shown</span>
-            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {modelList.filter(m => m.ns === "blessed").length} blessed · {modelList.filter(m => m.ns === "pulled").length} pulled</span>
+            <span>{tab === "models" ? "Catalog" : "Image / ComfyUI"}</span>
+            <span className="ct">· {tab === "models" ? (installed.length + blessed.length + userNs.length) : comfyModels.length} shown</span>
+            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {comfyTotal} image</span>
           </div>
 
           {modelsQuery.isPending && (
@@ -136,25 +187,48 @@ function ModelsView() {
             </div>
           )}
 
-          {installed.length > 0 && <div className="mdl-section-label">Installed · {installed.length}</div>}
-          {installed.map(m => (
-            <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
-          ))}
+          {tab === "models" ? (
+            <>
+              {installed.length > 0 && <div className="mdl-section-label">Installed · {installed.length}</div>}
+              {installed.map(m => (
+                <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              ))}
 
-          {blessed.length > 0 && <div className="mdl-section-label">Available · blessed · {blessed.length}</div>}
-          {blessed.map(m => (
-            <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
-          ))}
+              {blessed.length > 0 && <div className="mdl-section-label">Available · blessed · {blessed.length}</div>}
+              {blessed.map(m => (
+                <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              ))}
 
-          {userNs.length > 0 && <div className="mdl-section-label">user.* · {userNs.length}</div>}
-          {userNs.map(m => (
-            <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
-          ))}
+              {userNs.length > 0 && <div className="mdl-section-label">user.* · {userNs.length}</div>}
+              {userNs.map(m => (
+                <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              ))}
 
-          {!modelsQuery.isPending && !modelsQuery.isError && (installed.length + blessed.length + userNs.length) === 0 && (
-            <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
-              No models match — {(q.trim() || filters.type || filters.device) ? "adjust the search or filters." : "the catalog is empty."}
-            </div>
+              {!modelsQuery.isPending && !modelsQuery.isError && (installed.length + blessed.length + userNs.length) === 0 && (
+                <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
+                  No models match — {(q.trim() || filters.type || filters.device) ? "adjust the search or filters." : "the catalog is empty."}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {comfyCats.map(cat => (
+                <React.Fragment key={cat}>
+                  <div className="mdl-section-label">{cat} · {comfyByCat[cat].length}</div>
+                  {comfyByCat[cat].map(m => (
+                    <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+                  ))}
+                </React.Fragment>
+              ))}
+
+              {!modelsQuery.isPending && !modelsQuery.isError && comfyModels.length === 0 && (
+                <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
+                  {q.trim()
+                    ? "No image models match the search."
+                    : "No image-gen models installed yet — pull one from the ComfyUI catalog."}
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -299,6 +373,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   // {context_size, n_gpu_layers, rope_freq_base, extra_args}.
   const defaults = model.defaults || {};
   const recipeRows = [
+    ["preferred_profile", defaults.profile],
     ["context_size", defaults.context_size],
     ["n_gpu_layers", defaults.n_gpu_layers],
     ["rope_freq_base", defaults.rope_freq_base],

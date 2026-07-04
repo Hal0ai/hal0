@@ -20,17 +20,27 @@ from typing import Any
 
 @dataclass(frozen=True)
 class StackStateRecord:
-    """Which stack is applied, and the hash of what it wrote."""
+    """Which stack is applied, the hash of what it wrote, and whether converge
+    brought runtime up cleanly.
+
+    ``converge_ok`` is ``False`` when the apply committed config to disk (Phase A)
+    but one or more per-slot lifecycle steps failed during converge (Phase B), so
+    live disk still matches the fingerprint yet the runtime never fully came up.
+    Drift detection reads it to tell ``clean`` from ``degraded`` (PS-5 part 2).
+    Older records lacking the field default to ``True`` (assume a clean converge).
+    """
 
     active_slug: str
     content_hash: str
     applied_at: float
+    converge_ok: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "active_slug": self.active_slug,
             "content_hash": self.content_hash,
             "applied_at": self.applied_at,
+            "converge_ok": self.converge_ok,
         }
 
     @classmethod
@@ -39,6 +49,7 @@ class StackStateRecord:
             active_slug=str(data.get("active_slug", "")),
             content_hash=str(data.get("content_hash", "")),
             applied_at=float(data.get("applied_at", 0.0)),
+            converge_ok=bool(data.get("converge_ok", True)),
         )
 
 

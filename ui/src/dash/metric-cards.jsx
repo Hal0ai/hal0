@@ -153,6 +153,16 @@ function UtilizationCard() {
   // iGPU: gpu_util (float 0-1). Present in existing endpoint.
   const gpuUtil = stats?.gpu_util ?? null
 
+  // Live iGPU clock + temp — same payload, mirrors the Inference GPU gauge
+  // caption (inference-pane.jsx). Rendered as a small caption, each piece
+  // guarded so a missing value is simply omitted (never a fake 0).
+  const gpuMhz  = stats?.gpu_clock_mhz ?? null
+  const gpuTemp = stats?.gpu_temp_c ?? null
+  const gpuCaption = [
+    gpuMhz  != null ? `${Math.round(gpuMhz)} MHz` : null,
+    gpuTemp != null ? `${Math.round(gpuTemp)}°C` : null,
+  ].filter(Boolean).join(' · ')
+
   // CPU: cpu_util — NEW field (§2b), optional until backend ships.
   // Plain JS property access — absent key returns undefined, ?? null gates it.
   const cpuUtil = stats?.cpu_util ?? null
@@ -174,6 +184,11 @@ function UtilizationCard() {
           color="var(--dev-vulkan)"
           note={gpuUtil == null ? 'pending driver' : null}
         />
+
+        {/* iGPU clock + temp caption — live from the same hardware payload */}
+        {gpuCaption && (
+          <div className="uc-gpu-caption mono">{gpuCaption}</div>
+        )}
 
         {/* CPU row */}
         <UtilCard_Row

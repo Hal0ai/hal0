@@ -1,10 +1,12 @@
 """Tests for the unified ``/api/journal`` + ``/api/journal/stream`` routes.
 
-Phase E (issue #687): the journal is single-source. Every entry comes
-from :class:`hal0.events.EventBus` (``app.state.events``) and always
-carries ``source="hal0"``. ``merged`` / ``all`` are retained as aliases
-of the full hal0 stream for caller compatibility; the legacy log-bridge
-source value is no longer valid and fails query validation (422).
+The journal projects :class:`hal0.events.EventBus` events. Each entry
+now carries the event's REAL ``source`` (``slot:<name>`` / ``system`` /
+``model:<id>`` …) plus a parsed ``slot`` field, so the dashboard can
+colour + filter by subsystem. ``merged`` / ``all`` / ``hal0`` are
+retained as "no source filter" aliases of the full stream; any other
+``?source=`` value narrows by real source (exact or ``:``-prefix), and
+``?slot=`` narrows by slot — an unknown value simply matches nothing.
 
 These tests cover the HTTP backfill + filters + cursor, plus the SSE
 handshake + replay + live-emit paths.
@@ -69,7 +71,7 @@ def test_journal_get_empty_returns_empty_list(client: TestClient) -> None:
 
 
 async def test_journal_get_with_hal0_event_returns_it(client: TestClient) -> None:
-    """Emit a slot.state event → GET returns it with source=hal0 + level=info."""
+    """Emit a slot.state event → GET returns it with the real source + slot."""
     _clear_bootstrap_events(client)
     bus = _bus(client)
     await bus.emit("slot.state", "info", "slot:primary", "primary: starting → ready")
@@ -79,9 +81,12 @@ async def test_journal_get_with_hal0_event_returns_it(client: TestClient) -> Non
     body = r.json()
     assert len(body["entries"]) == 1
     entry = body["entries"][0]
-    # Shape check.
-    assert set(entry.keys()) == {"id", "ts", "source", "level", "msg", "data"}
-    assert entry["source"] == "hal0"
+    # Shape check — entries now carry a parsed ``slot`` alongside the core fields.
+    assert set(entry.keys()) == {"id", "ts", "source", "level", "msg", "slot", "data"}
+    # Real source is preserved (no longer collapsed to the literal "hal0"),
+    # and the slot name is parsed out of the ``slot:<name>`` source.
+    assert entry["source"] == "slot:primary"
+    assert entry["slot"] == "primary"
     assert entry["level"] == "info"
     assert entry["msg"] == "primary: starting → ready"
     # The original event's type + source ride along in ``data``.
@@ -91,10 +96,10 @@ async def test_journal_get_with_hal0_event_returns_it(client: TestClient) -> Non
 
 
 @pytest.mark.parametrize("source", ["hal0", "merged", "all"])
-async def test_journal_get_source_aliases_resolve_to_hal0_stream(
+async def test_journal_get_source_aliases_return_full_stream(
     client: TestClient, source: str
 ) -> None:
-    """``hal0`` / ``merged`` / ``all`` are aliases of the one hal0 stream."""
+    """``hal0`` / ``merged`` / ``all`` all mean "no source filter"."""
     _clear_bootstrap_events(client)
     bus = _bus(client)
     await bus.emit("slot.state", "info", "slot:a", "hal0 event")
@@ -103,25 +108,35 @@ async def test_journal_get_source_aliases_resolve_to_hal0_stream(
     assert r.status_code == 200
     entries = r.json()["entries"]
     assert len(entries) == 1
-    assert {e["source"] for e in entries} == {"hal0"}
+    # The real source is preserved regardless of which alias was requested.
+    assert {e["source"] for e in entries} == {"slot:a"}
 
 
-# The retired log-bridge daemon's source token, split so the repo-wide
-# grep for the removed subsystem stays clean while the wire value under
-# test remains byte-exact.
-_LEGACY_SOURCE = "lem" + "ond"
+async def test_journal_get_source_filter_narrows(client: TestClient) -> None:
+    """A real ``?source=`` narrows: exact or ``:``-prefix; ``slot`` matches ``slot:*``."""
+    _clear_bootstrap_events(client)
+    bus = _bus(client)
+    await bus.emit("slot.state", "info", "slot:a", "slot a")
+    await bus.emit("slot.state", "info", "slot:b", "slot b")
+    await bus.emit("system.restart", "info", "system", "sys")
+
+    # Prefix match on the ``slot`` group.
+    entries = client.get("/api/journal?source=slot").json()["entries"]
+    assert {e["source"] for e in entries} == {"slot:a", "slot:b"}
+    # Exact source.
+    entries = client.get("/api/journal?source=slot:a").json()["entries"]
+    assert {e["msg"] for e in entries} == {"slot a"}
+    # ``?slot=`` narrows by parsed slot name.
+    entries = client.get("/api/journal?slot=b").json()["entries"]
+    assert {e["msg"] for e in entries} == {"slot b"}
 
 
-def test_journal_get_legacy_source_is_invalid(client: TestClient) -> None:
-    """The legacy log-bridge source value fails query validation (422)."""
-    r = client.get(f"/api/journal?source={_LEGACY_SOURCE}")
-    assert r.status_code == 422, r.text
-
-
-def test_journal_stream_legacy_source_is_invalid(client: TestClient) -> None:
-    """The stream endpoint rejects the legacy source value the same way."""
-    r = client.get(f"/api/journal/stream?source={_LEGACY_SOURCE}")
-    assert r.status_code == 422, r.text
+def test_journal_get_unknown_source_matches_nothing(client: TestClient) -> None:
+    """An unknown source is a valid filter that simply matches no events."""
+    _clear_bootstrap_events(client)
+    r = client.get("/api/journal?source=nope-not-a-real-source")
+    assert r.status_code == 200, r.text
+    assert r.json()["entries"] == []
 
 
 async def test_journal_get_level_filter(client: TestClient) -> None:
@@ -199,6 +214,7 @@ async def test_journal_stream_handshake_returns_sse_content_type(app: FastAPI) -
         resp = await stream_journal(
             _StubRequest(),  # type: ignore[arg-type]
             source="merged",
+            slot=None,
             level=None,
             q=None,
             since=None,
@@ -241,6 +257,7 @@ async def test_journal_stream_yields_event_on_emit(app: FastAPI) -> None:
         resp = await stream_journal(
             _StubRequest(),  # type: ignore[arg-type]
             source="merged",
+            slot=None,
             level=None,
             q=None,
             since=None,
@@ -278,9 +295,9 @@ async def test_journal_stream_yields_event_on_emit(app: FastAPI) -> None:
 
         msgs = [e["msg"] for e in seen]
         assert "live-tail event" in msgs
-        # And it came through with source=hal0 / level=info.
+        # And it came through with the real source (slot:a) / level=info.
         match = next(e for e in seen if e.get("msg") == "live-tail event")
-        assert match["source"] == "hal0"
+        assert match["source"] == "slot:a"
         assert match["level"] == "info"
 
 
@@ -307,6 +324,7 @@ async def test_journal_stream_replay_includes_prior_entries(app: FastAPI) -> Non
         resp = await stream_journal(
             _StubRequest(),  # type: ignore[arg-type]
             source="hal0",
+            slot=None,
             level=None,
             q=None,
             since=None,
@@ -338,5 +356,5 @@ async def test_journal_stream_replay_includes_prior_entries(app: FastAPI) -> Non
         msgs = [f["msg"] for f in frames]
         assert "stream-replay event" in msgs
         match = next(f for f in frames if f["msg"] == "stream-replay event")
-        assert match["source"] == "hal0"
+        assert match["source"] == "slot:a"
         assert match["level"] == "warn"

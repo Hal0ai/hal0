@@ -39,8 +39,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
-from hal0.slot_config import write_slot_toml
+from hal0.slot_config import merge_slot_config, write_slot_toml
 from hal0.slots.state import (
+    DISPATCHABLE_STATES,
     IllegalSlotTransition,
     NpuExclusivityViolation,
     SlotConfigError,
@@ -120,9 +121,10 @@ _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 # inactive underneath us the watcher flips state and emits an SSE
 # frame within ~1s.
 _FAIL_WATCH_INTERVAL_S: float = 2.0
-_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
-    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-)
+#: The "live" states the fail-watcher polls are exactly the dispatchable
+#: ready-set (container up and usable) — alias the one canonical set (DR-8)
+#: rather than re-declaring the literal.
+_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
 # #783/B4: an active unit is not necessarily healthy. The watcher also probes
 # the model server's /health; a crashed-but-active server (active unit, failing
 # /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
@@ -515,11 +517,10 @@ class SlotManager:
     # ── public readiness interface (issue #696) ─────────────────────────────
 
     #: States in which a slot is safe to dispatch inference requests to.
-    #: Single source of truth per #696 — never duplicate inline.
+    #: Single source of truth per #696 / DR-8 — aliases the one canonical set
+    #: in ``hal0.slots.state`` so this class never re-declares the literal.
     #: Sync read so call sites in the hot dispatch path pay zero await overhead.
-    _DISPATCHABLE_STATES: frozenset[SlotState] = frozenset(
-        {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-    )
+    _DISPATCHABLE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
 
     def state(self, name: str) -> SlotState:
         """Return the current :class:`SlotState` for *name*.
@@ -1148,6 +1149,17 @@ class SlotManager:
             raise SlotConfigError("swap requires a non-empty model id")
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        # Q1 (model profiles): adopt the new model's preferred profile — when it
+        # fits the slot — BEFORE the reload, so the container comes up on the
+        # right image. A no-op when the model has no preference or it doesn't
+        # fit; a write failure must not block the swap, so it soft-fails.
+        try:
+            await self._apply_preferred_profile(slot_name, new_model_id)
+        except SlotConfigError as exc:
+            log.warning(
+                "slot.preferred_profile_swap_failed",
+                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
+            )
         await self.unload(slot_name)
         slot = await self.load(slot_name, model_id=new_model_id)
         # Refresh Hermes's live-context files so a model swap is visible to
@@ -1728,6 +1740,15 @@ class SlotManager:
 
             model_info = await self._resolve_model_info(model_tbl.get("default"))
             model_tbl["context_size"] = _resolve_context_size(None, model_info)
+        # Q1 (model profiles): a new slot bound to a model but with NO explicit
+        # profile adopts the model's preferred profile when it fits the slot's
+        # device/type. An operator's explicit create-time profile is left
+        # untouched (only an empty profile is filled) — the reconcile below then
+        # validates device/profile coherence as usual.
+        if isinstance(model_tbl, dict) and model_tbl.get("default") and not cfg_dict.get("profile"):
+            preferred = await self._preferred_profile_for(model_tbl.get("default"))
+            if preferred and self._profile_fits_slot(preferred, cfg_dict):
+                cfg_dict["profile"] = preferred
         # Reject (or normalize) an incoherent device/profile backend pairing
         # before it ever lands on disk — the door the dashboard left open for
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
@@ -1735,7 +1756,25 @@ class SlotManager:
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
+        # SC-4: refuse a second default=true slot of the same type before
+        # the TOML lands on disk (belt to default_slot_for's routing-time
+        # suspenders). Fast fast path when this write isn't a new default.
+        await self._check_default_uniqueness(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
+        # SC-5: refuse to clobber an existing slot's config. Without this,
+        # a duplicate create() overwrote the on-disk TOML and force-reset
+        # state.json to OFFLINE, orphaning any running container. Most
+        # internal reconcile callers pre-check cfg_path.exists() before
+        # create() (orchestrator, backends, stacks._create_missing_slots),
+        # so they never reach this guard; install/orchestrate does NOT
+        # pre-check but wraps create() in a best-effort except, so a
+        # duplicate degrades to a per-slot error rather than a crash.
+        # add_slot and POST /api/slots surface the conflict to the caller.
+        if cfg_path.exists():
+            raise SlotConfigError(
+                f"slot {slot_name!r} already exists; use update to modify it",
+                details={"slot": slot_name, "config": str(cfg_path)},
+            )
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             write_slot_toml(cfg_path, cfg_dict)
@@ -1804,27 +1843,24 @@ class SlotManager:
         self._ensure_known(slot_name)
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
-        # One-level deep merge for nested TOML tables ([model], [server]).
+        # One-level deep merge for nested TOML tables ([model], [server]) plus
+        # the #585 ctx_size→context_size fold, via the shared, copy-safe
+        # ``merge_slot_config`` primitive (SC-11) — the SAME projection the
+        # SlotConfigStore uses, so the two can't silently diverge.
+        #
         # A bare shallow ``dict.update`` replaced a sub-table wholesale, so a
         # partial ``PATCH /defaults`` body like ``{"model": {"ctx_size": N}}``
         # silently dropped sibling keys — most damagingly ``[model].default``
         # (the model name), which left the slot unable to resolve a model and
         # turned the dashboard Start button into a silent no-op after a
-        # restart. Merge sub-table dicts key-by-key so partial updates only
-        # touch the fields they carry; scalars and lists still replace
-        # wholesale (predictable, and no caller relies on list-merge).
-        for key, value in updates.items():
-            existing = cfg_dict.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                merged = dict(existing)
-                merged.update(value)
-                cfg_dict[key] = merged
-            else:
-                cfg_dict[key] = value
-
-        # #585: the dashboard writes [model].ctx_size; canonicalize to
-        # context_size so the two keys can't diverge on disk.
-        _normalize_ctx_key(cfg_dict)
+        # restart. The helper merges sub-table dicts key-by-key so partial
+        # updates only touch the fields they carry; scalars and lists still
+        # replace wholesale (predictable, and no caller relies on list-merge).
+        # It also folds the dashboard's legacy ``[model].ctx_size`` alias into
+        # the canonical ``context_size`` (#585) so the two keys can't diverge
+        # on disk. ``merge_slot_config`` returns a fresh dict, so rebind
+        # ``cfg_dict`` before the downstream reconcile/guard calls below.
+        cfg_dict = merge_slot_config(cfg_dict, updates)
 
         # Keep device↔profile backend coherent: a profile switch re-derives
         # device (the drawer path that previously left a vulkan device under a
@@ -1839,6 +1875,13 @@ class SlotManager:
         # §5.3). Cheap when no NPU LLM is involved — the helper short-
         # circuits on the merged cfg's own device/type.
         await self._check_npu_exclusivity(slot_name, cfg_dict)
+
+        # SC-4: a PATCH that flips default=true (even when ``type`` lives
+        # only on the pre-existing config) is checked against the merged
+        # cfg_dict — the authoritative post-merge state, same as the NPU
+        # guard. The peer walk excludes slot_name, so re-persisting the
+        # sole default never self-conflicts.
+        await self._check_default_uniqueness(slot_name, cfg_dict)
 
         cfg_path = self._config_file(slot_name)
         try:
@@ -1987,6 +2030,97 @@ class SlotManager:
                 details={"slot": slot_name, "model_id": model_id},
             ) from exc
 
+    # ── model preferred profile (Q1: profile loads with the model) ────────────
+
+    async def _preferred_profile_for(self, model_id: str | None) -> str | None:
+        """The model's preferred runtime profile name (``defaults.profile``).
+
+        A registry model may carry ``defaults.profile`` — the runtime profile
+        it wants loaded with it. Returns the name or ``None`` (no preference /
+        model not in registry).
+        """
+        if not model_id:
+            return None
+        info = await self._resolve_model_info(model_id)
+        defaults = info.get("defaults")
+        preferred = defaults.get("profile") if isinstance(defaults, dict) else None
+        return preferred if isinstance(preferred, str) and preferred else None
+
+    @staticmethod
+    def _profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
+        """True when ``profile_name`` is safe to adopt for this slot.
+
+        A model's profile preference is honoured only when the profile exists in
+        the catalog AND matches the slot's device/type. We never flip a slot's
+        hardware (device/backend) to satisfy a preference — an image or
+        cross-backend profile on the wrong device is rejected so the caller
+        keeps the slot's current/device-default profile.
+        """
+        from hal0.errors import NotFound
+        from hal0.profiles import ProfileCatalog
+
+        try:
+            resolved = ProfileCatalog().resolve(profile_name)
+        except NotFound:
+            return False
+        slot_type = cfg_dict.get("type")
+        if slot_type and slot_type not in resolved.supported_slot_types:
+            return False
+        device = str(cfg_dict.get("device") or "")
+        if device:
+            slot_class = (
+                "gpu"
+                if device.startswith("gpu")
+                else device
+                if device in ("npu", "cpu", "img")
+                else "cpu"
+            )
+            if resolved.device_class != slot_class:
+                return False
+            if resolved.backend:
+                from hal0.model_meta import device_to_backend
+
+                slot_backend = device_to_backend(device)[1]
+                if slot_backend and slot_backend != resolved.backend:
+                    return False
+        return True
+
+    async def _apply_preferred_profile(self, slot_name: str, model_id: str) -> bool:
+        """Adopt ``model_id``'s preferred profile for this slot when compatible.
+
+        Q1 (model profiles): on every model swap the slot adopts the new
+        model's ``defaults.profile`` — but only when it fits the slot (see
+        :meth:`_profile_fits_slot`); an incompatible preference is logged and
+        ignored. Writes the slot TOML BEFORE the reload so the container comes
+        up on the new profile's image. Returns True when ``profile`` changed.
+        """
+        preferred = await self._preferred_profile_for(model_id)
+        if not preferred:
+            return False
+        cfg = await self._load_slot_config(slot_name)
+        cfg_dict = _cfg_to_dict(cfg)
+        if cfg_dict.get("profile") == preferred:
+            return False
+        if not self._profile_fits_slot(preferred, cfg_dict):
+            log.info(
+                "slot.preferred_profile_skipped",
+                extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
+            )
+            return False
+        cfg_dict = {**cfg_dict, "profile": preferred}
+        try:
+            write_slot_toml(self._config_file(slot_name), cfg_dict)
+        except OSError as exc:
+            raise SlotConfigError(
+                f"failed to persist preferred profile to slot {slot_name}: {exc}",
+                details={"slot": slot_name, "profile": preferred},
+            ) from exc
+        log.info(
+            "slot.preferred_profile_applied",
+            extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
+        )
+        return True
+
     async def _check_npu_exclusivity(
         self,
         slot_name: str,
@@ -2050,6 +2184,71 @@ class SlotManager:
                     "slot": slot_name,
                     "conflicting_slots": sorted(offenders),
                     "hint": "disable the existing NPU LLM slot before enabling another",
+                },
+            )
+
+    async def _check_default_uniqueness(
+        self,
+        slot_name: str,
+        cfg_dict: dict[str, Any],
+    ) -> None:
+        """Reject a write that would land a second ``default=true`` per type.
+
+        SC-4 (CONTEXT.md §defaults): exactly one ``default = true`` slot
+        is allowed per ``type``. :meth:`default_slot_for` already raises
+        at routing time when two defaults slip onto disk; this guard is
+        the belt to that suspenders — it refuses the offending write on
+        every ``create()`` and ``update_config()`` so the second default
+        never reaches disk.
+
+        Cheap fast path: the write only introduces a conflict when the
+        slot being written is itself ``default=true``. A write that
+        clears or leaves the default alone can't create a new collision,
+        so it returns immediately (mirrors the NPU guard's "not the
+        constrained kind → return"). We deliberately do NOT retroactively
+        reject writes to unrelated slots just because two stale defaults
+        already exist on disk — that's the routing check's job, and
+        firing here would brick legitimate edits.
+
+        On the slow path we walk the other configured slots, keying on
+        the merged ``cfg_dict``'s own ``type``, and collect any peer of
+        the same type that is already ``default=true``. Reading the
+        writer's own slot is skipped — the in-memory ``cfg_dict`` IS the
+        authoritative new state.
+        """
+        if cfg_dict.get("default") is not True:
+            return
+        type_ = cfg_dict.get("type")
+        if not type_:
+            return
+        # Walk peers. Use _all_configured_slot_names() so we see slots
+        # whose TOML exists but whose in-memory state hasn't been hit
+        # yet (e.g. installer-seeded slots before first poll).
+        peer_names = [n for n in self._all_configured_slot_names() if n != slot_name]
+        offenders: list[str] = []
+        for name in peer_names:
+            try:
+                peer = await self._load_slot_config(name)
+            except SlotConfigError:
+                # Malformed TOML doesn't block the user's legitimate
+                # write — surface the malformed-slot warning via the
+                # usual path instead of conflating it here.
+                continue
+            except SlotNotFound:
+                continue
+            if peer.get("type") != type_:
+                continue
+            if peer.get("default") is True:
+                offenders.append(name)
+        if offenders:
+            raise SlotConfigError(
+                f"slot type {type_!r} already has a default=true slot "
+                f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
+                details={
+                    "slot": slot_name,
+                    "type": type_,
+                    "conflicting_slots": sorted(offenders),
+                    "hint": "clear the existing default before setting another",
                 },
             )
 
@@ -3119,6 +3318,13 @@ def _base_profile_for_backend(catalog: Any, backend: str) -> str:
 
     Prefers the seed profile named after the backend (``rocm`` / ``vulkan``);
     falls back to any non-MTP then any profile that declares ``backend``.
+
+    This is the deliberate *non-MTP* counterpart of
+    :func:`hal0.install.profile_derive.derive_profile`'s ``rocm-dnse``
+    preference: it answers backend→base-profile from the live catalog so a
+    drawer device-flip re-derives a plain base image (``rocm``/``vulkan``) and
+    never silently switches a slot onto the MTP ``rocm-dnse`` image. Do NOT
+    fold it into the device→profile helper (finding PS-4).
     """
     named = catalog.profile.get(backend)
     if named is not None and getattr(named, "backend", None) == backend:

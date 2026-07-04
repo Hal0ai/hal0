@@ -37,6 +37,7 @@ from hal0.api._audit import record_action
 from hal0.config import paths
 from hal0.config.schema import StackConfig
 from hal0.errors import BadRequest
+from hal0.profiles import ProfileCatalog
 from hal0.stacks import ResolvedStack, StacksCatalog
 from hal0.stacks.apply import StackApplyEngine
 from hal0.stacks.portable import (
@@ -201,6 +202,31 @@ async def _create_missing_slots(
     return created, errors
 
 
+def _known_profile_names() -> set[str]:
+    """Profile names in the local catalog (seed-merged); empty on read failure.
+
+    Feeds ``StackApplyEngine.validate`` so apply can flag a slot pinned to a
+    profile this host doesn't have. Best-effort: a malformed profiles.toml must
+    not sink the apply preview.
+    """
+    try:
+        return {p.name for p in ProfileCatalog().list()}
+    except Exception:  # pragma: no cover — advisory validation, never fatal
+        return set()
+
+
+def _known_model_ids(request: Request) -> set[str]:
+    """Model ids in the live registry; empty when the registry is unavailable.
+
+    Feeds ``StackApplyEngine.validate`` so apply can flag a slot whose model id
+    isn't registered on this host.
+    """
+    try:
+        return {m.id for m in _registry(request).list()}
+    except Exception:  # pragma: no cover — advisory validation, never fatal
+        return set()
+
+
 def _diff_rows(plan: Any) -> list[dict[str, Any]]:
     """Per-slot before→after model summary for the dry-run preview UI."""
     rows: list[dict[str, Any]] = []
@@ -230,7 +256,7 @@ def list_stacks() -> dict[str, Any]:
         {
           "stacks": [ {slug, name, ..., seed, active, drift}, ... ],
           "active": "coding" | null,
-          "drift":  "clean" | "modified" | "none"
+          "drift":  "clean" | "degraded" | "modified" | "none"
         }
 
     ``drift`` is meaningful for the active stack; the matching item also carries
@@ -339,7 +365,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
     cfg = _config_of(resolved)
 
     if dry_run:
-        plan = StackApplyEngine().plan(slug, cfg)
+        engine = StackApplyEngine()
+        plan = engine.plan(slug, cfg)
         return {
             "stack": slug,
             "dry_run": True,
@@ -347,6 +374,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
             "changes": _diff_rows(plan),
             # Slots the stack names that don't exist yet — apply will create them.
             "creates": _missing_slot_names(cfg),
+            # Profile/model refs that won't resolve on this host (silent divergence).
+            "warnings": engine.validate(cfg, _known_profile_names(), _known_model_ids(request)),
         }
 
     slot_manager = getattr(request.app.state, "slot_manager", None)
@@ -365,10 +394,15 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
 
         plan = engine.plan(slug, cfg)
         engine.apply_config(plan)
-        engine.record_active(plan, applied_at=time.time())
+        # converge BEFORE recording active so the pointer carries the Phase-B
+        # outcome (PS-5 part 2). A slot-create or per-slot lifecycle failure
+        # means disk is honest but runtime never fully came up → converge_ok
+        # False so drift_status reports ``degraded`` rather than ``clean``.
         converged: dict[str, Any] = {}
+        converge_ok = not create_errors
         if slot_manager is not None and orchestrator is not None:
             report = await engine.converge(cfg)
+            converge_ok = converge_ok and not report.errors
             converged = {
                 "loaded": report.loaded,
                 "swapped": report.swapped,
@@ -377,6 +411,7 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
                 "capabilities_applied": report.capabilities_applied,
                 "errors": [{"target": t, "error": e} for t, e in report.errors] + create_errors,
             }
+        engine.record_active(plan, applied_at=time.time(), converge_ok=converge_ok)
         rec.after = {
             "slug": slug,
             "changed": sum(1 for r in _diff_rows(plan) if r["changed"]),
@@ -390,6 +425,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
         "summary": plan.summary,
         "changes": _diff_rows(plan),
         "converged": converged,
+        # Same pre-apply divergence flags the dry-run preview surfaces.
+        "warnings": engine.validate(cfg, _known_profile_names(), _known_model_ids(request)),
     }
 
 

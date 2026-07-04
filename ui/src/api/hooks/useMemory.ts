@@ -125,7 +125,9 @@ export function useMemoryGraphStatus() {
   return useQuery<MemoryGraphStatus>({
     queryKey: ['memory', 'graph', 'status'],
     queryFn: () => apiGet<MemoryGraphStatus>(ENDPOINTS.memoryGraphStatus),
-    refetchInterval: POLL_MS,
+    // Poll faster while extraction is in flight so the "extracting…" badge
+    // tracks live progress; back off to the idle cadence otherwise.
+    refetchInterval: (query) => ((query.state.data?.in_flight ?? 0) > 0 ? 3_000 : POLL_MS),
   })
 }
 

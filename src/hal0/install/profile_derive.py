@@ -12,7 +12,7 @@ The (device, profile) pairs this produces are backend-coherent per #807:
 
 from __future__ import annotations
 
-from hal0.config.schema import HardwareInfo
+from hal0.config.schema import DEVICE_DEFAULT_PROFILES, HardwareInfo
 
 #: NPU-trio capabilities (NPU chat agent + npu stt/embed passengers). Kept as a
 #: symbol because the trio code is left **dormant** (out of scope to remove,
@@ -89,18 +89,29 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
 
 
 def derive_profile(capability: str, device: str) -> str:
-    """Return a ``SEED_PROFILES`` name for a (capability, device) pair."""
-    if device == "npu":
-        return "flm"
-    if device == "gpu-rocm":
+    """Return a ``SEED_PROFILES`` name for a (capability, device) pair.
+
+    Reads the canonical device-class base profile from the single-source
+    :data:`~hal0.config.schema.DEVICE_DEFAULT_PROFILES` table (gpu-rocm→rocm,
+    gpu-vulkan→vulkan, cpu→cpu-llm, npu→flm) and layers the install path's
+    TWO genuine specialisations on top:
+
+    * ``gpu-rocm`` + dense chat/coder → the MTP ``rocm-dnse`` image. This MTP
+      preference is what makes this the *install*-flavoured resolver — the
+      picker/reconcile fit path (:func:`hal0.capabilities.profile_fit.profile_name_for_fit`)
+      and the drawer device-flip (``_base_profile_for_backend``) deliberately
+      stay on plain ``rocm`` so nothing silently forces a slot onto MTP.
+    * ``cpu`` + ``tts`` → the kokoro ``tts`` profile.
+
+    An unknown device falls back to ``cpu-llm`` (the CPU-coherent llama-server
+    profile) — returning a GPU profile there caused #807 to reject the slot on
+    GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
+    """
+    if device == "gpu-rocm" and capability in ("chat", "coder"):
         # Dense chat/coder benefit from MTP; embed + others take plain rocm.
-        return "rocm-dnse" if capability in ("chat", "coder") else "rocm"
-    if device == "gpu-vulkan":
-        return "vulkan"
-    if device == "cpu":
-        # ``tts`` stays on the kokoro/CPU profile; everything else (chat,
-        # coder, embed, utility, …) goes to the CPU-coherent llama-server
-        # profile.  Returning "vulkan" here caused #807 to reject the slot
-        # on GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
-        return "tts" if capability == "tts" else "cpu-llm"
-    return "cpu-llm"
+        return "rocm-dnse"
+    if device == "cpu" and capability == "tts":
+        # ``tts`` stays on the kokoro/CPU profile; everything else on CPU takes
+        # the CPU-coherent llama-server profile from the base table below.
+        return "tts"
+    return DEVICE_DEFAULT_PROFILES.get(device, "cpu-llm")

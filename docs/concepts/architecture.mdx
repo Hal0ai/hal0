@@ -61,9 +61,13 @@ state changes to the dashboard footer. These are shared across all requests —
 the API is a thin layer over them.
 
 <Aside type="note">
-hal0 ships with **no built-in authentication or TLS**. The API is open on the
-local network by design. See [Security](/docs/concepts/security) for the
-reverse-proxy pattern you put in front of it.
+hal0 ships built-in auth via `--auth=basic` (Caddy + basic_auth + bearer tokens + automatic HTTPS). Without the flag (or your own reverse proxy), the API binds
+`0.0.0.0:8080` open on the LAN. What it *does* provide:
+HMAC session cookies for the dashboard and agent chat, MCP host and origin
+allowlists, per-agent bearer tokens, and an approval queue for privileged
+agent actions. For TLS and per-request access control, put a reverse proxy
+(Traefik / Caddy / nginx) in front of it. See
+[Security](/docs/concepts/security) for the full threat model.
 </Aside>
 
 ## Slots: where models actually run

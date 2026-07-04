@@ -23,7 +23,7 @@ from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
-from hal0.slots.state import SlotState
+from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 from hal0.stacks.state import (
     StackStateRecord,
     read_stack_state,
@@ -62,7 +62,8 @@ class StackChangePlan:
 
 
 # Slot states by convergence intent.
-_DISPATCHABLE = frozenset({SlotState.READY, SlotState.SERVING, SlotState.IDLE})
+# _DISPATCHABLE aliases the canonical ready-set (DR-8) — single source of truth.
+_DISPATCHABLE = DISPATCHABLE_STATES
 _TRANSITIONAL = frozenset(
     {SlotState.PULLING, SlotState.STARTING, SlotState.WARMING, SlotState.UNLOADING}
 )
@@ -156,6 +157,30 @@ class StackApplyEngine:
             summary=summary,
         )
 
+    def validate(
+        self,
+        stack: StackConfig,
+        known_profiles: set[str],
+        known_models: set[str],
+    ) -> list[str]:
+        """Pre-apply sanity check: flag entries whose profile/model won't resolve.
+
+        Import-light on purpose — the caller passes the known profile-name and
+        model-id sets (already loaded at the route layer). Returns one
+        human-readable warning per unresolved reference so the dry-run preview
+        and a real apply can flag that runtime will silently diverge from the
+        stack (e.g. a slot pinned to a profile absent from the local catalog, or
+        a model id not in the registry). Advisory only: apply still proceeds and
+        converge records its own per-slot lifecycle errors separately.
+        """
+        warnings: list[str] = []
+        for entry in stack.slots:
+            if entry.profile and entry.profile not in known_profiles:
+                warnings.append(f"{entry.slot}: profile {entry.profile!r} not found")
+            if entry.model and entry.model not in known_models:
+                warnings.append(f"{entry.slot}: model {entry.model!r} not in registry")
+        return warnings
+
     def _reconciled_stack_slot(
         self, before: dict[str, Any] | None, entry: StackSlotEntry
     ) -> dict[str, Any] | None:
@@ -217,8 +242,14 @@ class StackApplyEngine:
         tmpfile+fsync+rename; a mid-set failure restores every already-written
         file to its ``before`` snapshot and re-raises — disk is never left
         half-reconciled. A no-op ChangeSet (nothing changed) writes nothing.
+
+        SC-10: the commit runs under the store's shared advisory lock so a
+        stack apply and a concurrent capability apply (which reconcile the same
+        ``slots/*.toml`` surface) serialize rather than interleaving their
+        writes.
         """
-        self._store.commit(plan.change_set)
+        with self._store.transaction():
+            self._store.commit(plan.change_set)
 
     # ── drift / active pointer ───────────────────────────────────────────────
 
@@ -235,17 +266,25 @@ class StackApplyEngine:
             out[entry.slot] = _read_toml_or_none(self._slot_path(entry.slot))
         return out
 
-    def record_active(self, plan: StackChangePlan, *, applied_at: float) -> None:
+    def record_active(
+        self, plan: StackChangePlan, *, applied_at: float, converge_ok: bool = True
+    ) -> None:
         """Record ``plan``'s stack as active, fingerprinting what it wrote.
 
         Call AFTER ``apply_config`` succeeds. The hash is taken over the
         after-state projection, which equals live disk immediately post-commit
         (so ``drift_status`` reports ``clean`` until something hand-edits a slot).
+
+        ``converge_ok`` carries the Phase-B outcome (PS-5 part 2): pass ``False``
+        when converge recorded per-slot lifecycle errors, so ``drift_status``
+        reports ``degraded`` instead of ``clean`` even though disk still matches
+        the fingerprint. Defaults to ``True`` (no converge attempted / clean).
         """
         record = StackStateRecord(
             active_slug=plan.stack_slug,
             content_hash=stack_content_hash(self._projection_from_plan(plan)),
             applied_at=applied_at,
+            converge_ok=converge_ok,
         )
         write_stack_state_atomic(paths.stacks_state_path(), record)
 
@@ -253,8 +292,11 @@ class StackApplyEngine:
         """Report the active stack and whether live config has drifted from it.
 
         ``none`` — no stack applied. ``clean`` — live slot config matches the
-        applied fingerprint. ``modified`` — a slot was hand-edited since apply.
-        ``catalog`` is a ``StacksCatalog`` (duck-typed: needs ``.resolve(slug)``).
+        applied fingerprint AND converge brought runtime up cleanly. ``degraded``
+        — disk matches but converge recorded per-slot lifecycle errors (PS-5
+        part 2): the config is honest but the runtime never fully came up.
+        ``modified`` — a slot was hand-edited since apply.  ``catalog`` is a
+        ``StacksCatalog`` (duck-typed: needs ``.resolve(slug)``).
         """
         record = read_stack_state(paths.stacks_state_path())
         if record is None:
@@ -265,7 +307,12 @@ class StackApplyEngine:
             # Active stack was deleted out from under the pointer.
             return {"active": record.active_slug, "status": "modified"}
         live = self._projection_live(StackConfig(slots=list(resolved.slots)))
-        status = "clean" if stack_content_hash(live) == record.content_hash else "modified"
+        if stack_content_hash(live) != record.content_hash:
+            status = "modified"
+        elif not record.converge_ok:
+            status = "degraded"
+        else:
+            status = "clean"
         return {"active": record.active_slug, "status": status}
 
     # ── converge (Phase B — runtime lifecycle) ───────────────────────────────

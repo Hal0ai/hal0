@@ -38,18 +38,13 @@ const DEVICE_META = {
 };
 const DEVICES = Object.keys(DEVICE_META);
 
-// Mirrors the API slug regex ^[a-z0-9][a-z0-9_-]{0,31}$.
-const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// `NAME_RE` (slug regex) and `toast` are shared globals from primitives.jsx.
 
 const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', profile: '', mtp: false, capabilities: [] };
 const BLANK = { name: '', description: '', icon: '', tags: '', slots: [{ ...BLANK_SLOT }] };
 
 const DOT_STATES = new Set(['serving', 'ready', 'warming', 'idle', 'offline']);
 function dotCls(state) { return DOT_STATES.has(state) ? state : 'offline'; }
-
-function toast(msg, kind = 'info') {
-  if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
-}
 
 // ── status dot ────────────────────────────────────────────────────────────────
 
@@ -287,104 +282,59 @@ function LibCard({ vm, idx, isCustom, onLoad, onPull, onExport, onClone, onEdit,
 
 // ── Import modal (file → dry-run resolve → commit) ──────────────────────────
 
+// Thin wrapper over the shared <ImportDialog>: owns the useStackImport hook and
+// the stacks-specific preview (model resolutions + unresolvable warning) and
+// filename→slug derivation. The dialog shell + name input + commit button live
+// in primitives.jsx.
 function ImportModal({ existing, onClose, onImported }) {
   const imp = useStackImport();
-  const [envelope, setEnvelope] = useState(null);
-  const [report, setReport] = useState(null);
-  const [slug, setSlug] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-
-  async function onFile(file) {
-    setErr('');
-    try {
-      const text = await file.text();
-      const env = JSON.parse(text);
-      setEnvelope(env);
-      const r = await imp.mutateAsync({ envelope: env, dry_run: true });
-      setReport(r);
-      const base = (file.name || '').replace(/\.hal0stack\.json$|\.json$/i, '')
-        .toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
-      setSlug(base || 'imported-stack');
-    } catch (e) {
-      setErr(e?.message || 'Not a valid .hal0stack.json envelope');
-      setEnvelope(null); setReport(null);
-    }
-  }
-
-  const slugTaken = existing.includes(slug);
-  const slugValid = NAME_RE.test(slug) && !slugTaken;
-
-  async function commit() {
-    if (!slugValid) return;
-    setBusy(true);
-    try {
-      await imp.mutateAsync({ envelope, slug });
-      toast(`Imported as ${slug}`, 'ok');
-      onImported();
-    } catch (e) {
-      toast(e?.message || 'Import failed', 'err');
-    } finally { setBusy(false); }
-  }
-
-  return (
-    <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
-      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Import stack">
-        <div className="stk-dlg-h">
-          <span className="stk-dlg-eye">Import stack</span>
-          <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
-        </div>
-        <div className="stk-dlg-b">
-          {!report ? (
-            <label className="stk-drop">
-              <input type="file" accept=".json,application/json" style={{ display: 'none' }}
-                onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} data-testid="st-import-file" />
-              <span className="stk-drop-glyph">{Icons.attach}</span>
-              <span className="mono">Choose a .hal0stack.json file</span>
-              {err && <span className="stk-dlg-warn">{Icons.alert}{err}</span>}
-            </label>
-          ) : (
-            <>
-              <div className="stk-dlg-hint">
-                {report.name || 'stack'} · schema v{report.schema_version} · checksum {report.checksum_ok ? 'ok' : '⚠ mismatch'}
-              </div>
-              <div className="stk-slot-list">
-                {(report.resolutions || []).map(r => (
-                  <div key={r.model_id} className={'stk-slot-row' + (r.status === 'unresolvable' ? ' miss' : '')}>
-                    <span className="smodel">{r.model_id}</span>
-                    <span className="smiss" style={{ color: r.status === 'present' ? 'var(--ok)' : r.status === 'pullable' ? 'var(--info)' : 'var(--err)' }}>{r.status}</span>
-                  </div>
-                ))}
-                {(!report.resolutions || report.resolutions.length === 0) && (
-                  <div className="stk-dlg-hint" style={{ color: 'var(--fg-5)' }}>no model references</div>
-                )}
-              </div>
-              {report.unresolvable?.length > 0 && (
-                <div className="stk-dlg-warn">{Icons.alert}{report.unresolvable.length} model(s) unresolvable — those slots import disabled.</div>
-              )}
-              <div className="stk-slot-list">
-                <div className="stk-slot-row">
-                  <span className="sname">Save as</span>
-                  <input className={'pf-input mono' + (slug && !slugValid ? ' err' : '')} value={slug}
-                    onChange={e => setSlug(e.target.value)} maxLength={32} placeholder="my-stack"
-                    style={{ flex: 1, background: 'transparent', border: 'none', color: 'var(--fg)', fontFamily: 'var(--jbm)' }}
-                    data-testid="st-import-slug" />
-                </div>
-              </div>
-              {slugTaken && <div className="stk-dlg-warn">{Icons.alert}“{slug}” already exists</div>}
-            </>
-          )}
-        </div>
-        <div className="stk-dlg-f">
-          <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
-          {report && (
-            <button className="btn sm" onClick={commit} disabled={!slugValid || busy} data-testid="st-import-confirm">
-              {busy ? 'Importing…' : 'Import'}
-            </button>
-          )}
-        </div>
+  const deriveSlug = (file) => {
+    const base = (file.name || '').replace(/\.hal0stack\.json$|\.json$/i, '')
+      .toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+    return base || 'imported-stack';
+  };
+  const renderPreview = (report) => (
+    <>
+      <div className="stk-dlg-hint">
+        {report.name || 'stack'} · schema v{report.schema_version} · checksum {report.checksum_ok ? 'ok' : '⚠ mismatch'}
       </div>
-    </div>
+      <div className="stk-slot-list">
+        {(report.resolutions || []).map(r => (
+          <div key={r.model_id} className={'stk-slot-row' + (r.status === 'unresolvable' ? ' miss' : '')}>
+            <span className="smodel">{r.model_id}</span>
+            <span className="smiss" style={{ color: r.status === 'present' ? 'var(--ok)' : r.status === 'pullable' ? 'var(--info)' : 'var(--err)' }}>{r.status}</span>
+          </div>
+        ))}
+        {(!report.resolutions || report.resolutions.length === 0) && (
+          <div className="stk-dlg-hint" style={{ color: 'var(--fg-5)' }}>no model references</div>
+        )}
+      </div>
+      {report.unresolvable?.length > 0 && (
+        <div className="stk-dlg-warn">{Icons.alert}{report.unresolvable.length} model(s) unresolvable — those slots import disabled.</div>
+      )}
+    </>
+  );
+  return (
+    <ImportDialog
+      title="Import stack"
+      ariaLabel="Import stack"
+      fileHint="Choose a .hal0stack.json file"
+      fileTestid="st-import-file"
+      nameTestid="st-import-slug"
+      confirmTestid="st-import-confirm"
+      namePlaceholder="my-stack"
+      invalidCopy="Not a valid .hal0stack.json envelope"
+      existing={existing}
+      deriveName={deriveSlug}
+      renderPreview={renderPreview}
+      dryRun={(env) => imp.mutateAsync({ envelope: env, dry_run: true })}
+      commit={async ({ envelope, name }) => {
+        await imp.mutateAsync({ envelope, slug: name });
+        toast(`Imported as ${name}`, 'ok');
+      }}
+      onClose={onClose}
+      onImported={onImported}
+    />
   );
 }
 
@@ -407,55 +357,59 @@ function fromStack(s) {
   };
 }
 
-function Drawer({ mode, source, existing = [], onClose, onSaved }) {
+// The editor drawer. Consumes the shared FormDrawer shell + useForm hook +
+// shared FormRow from primitives.jsx. Named StackDrawer (not Drawer) to avoid
+// shadowing the primitives.jsx Drawer global. Validation rules (slug/slot) and
+// the submit body are preserved verbatim.
+function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const models = useModels().data || [];
   const profiles = useProfiles().data || [];
   const liveSlots = (useSlots().data || []).filter(s => (s.kind ?? 'local') === 'local');
 
-  const initial = (() => {
-    if (mode === 'create') return source ? fromStack(source) : { ...BLANK, slots: [{ ...BLANK_SLOT }] };
+  const create = useStackCreate();
+  const update = useStackUpdate();
+
+  const deriveInitial = () => {
+    if (mode === 'create') {
+      const base = source ? fromStack(source) : { ...BLANK, slots: [{ ...BLANK_SLOT }] };
+      return { ...base, _slug: '' };
+    }
     const base = fromStack(source);
     if (mode === 'clone') {
       const suffix = source.seed ? '-custom' : '-copy';
       return { ...base, _slug: (source.slug + suffix).slice(0, 32) };
     }
     return { ...base, _slug: source.slug };
-  })();
+  };
 
-  const [form, setForm] = useState(initial);
-  const [slug, setSlug] = useState(initial._slug || '');
-  const [submitting, setSubmitting] = useState(false);
-  const [closing, setClosing] = useState(false);
+  const f = useForm({ deriveInitial, resetKey: `${mode}:${source?.slug ?? ''}` });
+  const v = f.values;
+  const slug = v._slug || '';
 
-  const create = useStackCreate();
-  const update = useStackUpdate();
-
-  useEffect(() => { setForm(initial); setSlug(initial._slug || ''); /* eslint-disable-next-line */ }, [mode, source]);
+  const setSlug = (val) => f.set('_slug', val);
+  const setSlot = (i, k, val) => f.setValues(ff => ({ ...ff, slots: ff.slots.map((s, j) => j === i ? { ...s, [k]: val } : s) }));
+  const addSlot = () => f.setValues(ff => ({ ...ff, slots: [...ff.slots, { ...BLANK_SLOT }] }));
+  const rmSlot = (i) => f.setValues(ff => ({ ...ff, slots: ff.slots.filter((_, j) => j !== i) }));
 
   const taken = existing.filter(n => !(isEdit && n === source?.slug));
   const slugErr = !slug.trim() ? 'Slug is required'
     : !NAME_RE.test(slug) ? 'lowercase · digits · - · _ · ≤32'
     : taken.includes(slug) ? `“${slug}” already exists` : '';
-  const slotErr = !form.slots.length ? 'add at least one slot'
-    : form.slots.some(s => !s.slot.trim()) ? 'every slot needs a name' : '';
+  const slotErr = !v.slots.length ? 'add at least one slot'
+    : v.slots.some(s => !s.slot.trim()) ? 'every slot needs a name' : '';
   const blocking = (!isEdit && !!slugErr) || !!slotErr;
-
-  const setSlot = (i, k, v) => setForm(f => ({ ...f, slots: f.slots.map((s, j) => j === i ? { ...s, [k]: v } : s) }));
-  const addSlot = () => setForm(f => ({ ...f, slots: [...f.slots, { ...BLANK_SLOT }] }));
-  const rmSlot = (i) => setForm(f => ({ ...f, slots: f.slots.filter((_, j) => j !== i) }));
-  const close = () => { if (submitting) return; setClosing(true); setTimeout(onClose, 200); };
 
   async function submit(e) {
     e.preventDefault();
     if (blocking) { toast('Fix the highlighted fields', 'warn'); return; }
-    setSubmitting(true);
+    f.setSubmitting(true);
     const body = {
-      name: form.name.trim(),
-      description: form.description.trim(),
-      icon: form.icon.trim(),
-      tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
-      slots: form.slots.map(s => ({
+      name: v.name.trim(),
+      description: v.description.trim(),
+      icon: v.icon.trim(),
+      tags: v.tags.split(',').map(t => t.trim()).filter(Boolean),
+      slots: v.slots.map(s => ({
         slot: s.slot.trim(),
         model: s.model || null,
         device: s.device || null,
@@ -478,7 +432,7 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
       if (code === 'stacks.exists') toast(`A stack named ${slug} already exists`, 'err');
       else if (code === 'stacks.seed_immutable') toast('Seed stacks cannot be modified', 'err');
       else toast(err?.message || 'Save failed', 'err');
-    } finally { setSubmitting(false); }
+    } finally { f.setSubmitting(false); }
   }
 
   const title = isEdit ? `Edit · ${source.slug}`
@@ -487,100 +441,99 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
   const eyebrow = isEdit ? 'EDIT' : mode === 'clone' ? (source?.seed ? 'EDIT A COPY' : 'CLONE') : 'CREATE';
 
   return (
-    <div className={'pf-scrim' + (closing ? ' out' : '')} onMouseDown={close}>
-      <div className={'pf-drawer pf-form-panel st-drawer' + (closing ? ' out' : '')}
-        onMouseDown={e => e.stopPropagation()} role="dialog" aria-label={title} aria-busy={submitting}>
-        <div className="pf-drawer-head">
-          <div>
-            <div className="pf-drawer-eye mono">{eyebrow}</div>
-            <div className="pf-drawer-title pf-form-title mono">{title}</div>
+    <FormDrawer
+      eyebrow={eyebrow}
+      title={title}
+      panelClassName="st-drawer"
+      submitting={f.submitting}
+      dirty={f.isDirty}
+      onClose={onClose}
+      foot={({ requestClose }) => (
+        <>
+          <span className="pf-grow" />
+          <button className="pf-btn" onClick={requestClose} type="button" disabled={f.submitting}>Cancel</button>
+          <button className="pf-btn primary" onClick={submit} disabled={f.submitting} data-testid="st-btn-submit">
+            {f.submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create stack'}
+          </button>
+        </>
+      )}
+    >
+      <form className="pf-drawer-body" onSubmit={submit} noValidate>
+        <FormRow label="Slug" req sub="lowercase · - _ · ≤32" error={!isEdit ? slugErr : null}>
+          <input className={'pf-input mono' + (!isEdit && slugErr ? ' err' : '')} value={slug}
+            onChange={e => setSlug(e.target.value)} placeholder="my-stack" maxLength={32}
+            disabled={isEdit} data-testid="st-input-slug" />
+        </FormRow>
+        <FormRow label="Name" sub="display label">
+          <input className="pf-input" value={v.name}
+            onChange={e => f.set('name', e.target.value)} placeholder="Coding" data-testid="st-input-name" />
+        </FormRow>
+        <FormRow label="Description" sub="what it's for">
+          <textarea className="pf-input pf-textarea" rows={2} value={v.description}
+            onChange={e => f.set('description', e.target.value)}
+            placeholder="Fast coder + agentic muscle + repo retrieval" />
+        </FormRow>
+        <FormRow label="Tags" sub="comma-separated">
+          <input className="pf-input mono" value={v.tags}
+            onChange={e => f.set('tags', e.target.value)} placeholder="coding, fast" />
+        </FormRow>
+
+        <div className="st-slots-edit">
+          <div className="pf-row-lbl" style={{ marginBottom: 6 }}>
+            <span>Slots{slotErr && <span className="pf-msg err mono hint err" style={{ marginLeft: 8 }}>{Icons.alert}{slotErr}</span>}</span>
           </div>
-          <button className="pf-x" onClick={close} aria-label="Close" disabled={submitting}>{Icons.close}</button>
-        </div>
-
-        <form className="pf-drawer-body" onSubmit={submit} noValidate>
-          <FormRow label="Slug" req sub="lowercase · - _ · ≤32" error={!isEdit ? slugErr : null}>
-            <input className={'pf-input mono' + (!isEdit && slugErr ? ' err' : '')} value={slug}
-              onChange={e => setSlug(e.target.value)} placeholder="my-stack" maxLength={32}
-              disabled={isEdit} data-testid="st-input-slug" />
-          </FormRow>
-          <FormRow label="Name" sub="display label">
-            <input className="pf-input" value={form.name}
-              onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Coding" data-testid="st-input-name" />
-          </FormRow>
-          <FormRow label="Description" sub="what it's for">
-            <textarea className="pf-input pf-textarea" rows={2} value={form.description}
-              onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-              placeholder="Fast coder + agentic muscle + repo retrieval" />
-          </FormRow>
-          <FormRow label="Tags" sub="comma-separated">
-            <input className="pf-input mono" value={form.tags}
-              onChange={e => setForm(f => ({ ...f, tags: e.target.value }))} placeholder="coding, fast" />
-          </FormRow>
-
-          <div className="st-slots-edit">
-            <div className="pf-row-lbl" style={{ marginBottom: 6 }}>
-              <span>Slots{slotErr && <span className="pf-msg err mono hint err" style={{ marginLeft: 8 }}>{Icons.alert}{slotErr}</span>}</span>
-            </div>
-            <datalist id="st-existing-slots">
-              {liveSlots.map(s => <option key={s.name} value={s.name} />)}
-            </datalist>
-            {form.slots.map((s, i) => {
-              const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
-              return (
-                <div className="st-slot-edit" key={i}>
+          <datalist id="st-existing-slots">
+            {liveSlots.map(s => <option key={s.name} value={s.name} />)}
+          </datalist>
+          {v.slots.map((s, i) => {
+            const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
+            return (
+              <div className="st-slot-card" key={i}>
+                <div className="st-slot-head">
                   <input className="pf-input mono st-slot-name" value={s.slot} list="st-existing-slots"
-                    onChange={e => setSlot(i, 'slot', e.target.value)} placeholder="pick or name…" maxLength={32}
+                    onChange={e => setSlot(i, 'slot', e.target.value)} placeholder="slot name — pick or type…" maxLength={32}
                     title={isNew ? 'New slot — created on apply' : 'Existing slot'} data-testid={`st-slot-name-${i}`} />
                   {isNew && <span className="st-slot-new mono" title="Created on apply">new</span>}
-                  <select className="pf-input mono st-slot-model" value={s.model}
-                    onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
-                    <option value="">— model —</option>
-                    {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
-                  </select>
-                  <select className="pf-input mono st-slot-dev" value={s.device} onChange={e => setSlot(i, 'device', e.target.value)}>
-                    {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
-                  </select>
-                  <select className="pf-input mono st-slot-prof" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)}>
-                    <option value="">— profile —</option>
-                    {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-                  </select>
-                  <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
-                    onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp} title="MTP speculative decode">
-                    <span className="pf-switch-knob" /><span className="mono">MTP</span>
-                  </button>
-                  <button type="button" className="pf-btn danger" onClick={() => rmSlot(i)} title="Remove slot" data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
+                  <span className="pf-grow" />
+                  <button type="button" className="pf-btn danger st-slot-rm" onClick={() => rmSlot(i)} title="Remove slot" data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
                 </div>
-              );
-            })}
-            <button type="button" className="pf-btn" onClick={addSlot} data-testid="st-slot-add">{Icons.plus} Add slot</button>
-          </div>
-        </form>
-
-        <div className="pf-drawer-foot">
-          <span className="pf-grow" />
-          <button className="pf-btn" onClick={close} type="button" disabled={submitting}>Cancel</button>
-          <button className="pf-btn primary" onClick={submit} disabled={submitting} data-testid="st-btn-submit">
-            {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create stack'}
-          </button>
+                <div className="st-slot-fields">
+                  <label className="st-fld st-fld-model">
+                    <span className="st-fld-lbl">Model</span>
+                    <select className="pf-input mono" value={s.model}
+                      onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
+                      <option value="">— model —</option>
+                      {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+                    </select>
+                  </label>
+                  <label className="st-fld">
+                    <span className="st-fld-lbl">Device</span>
+                    <select className="pf-input mono" value={s.device} onChange={e => setSlot(i, 'device', e.target.value)}>
+                      {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
+                    </select>
+                  </label>
+                  <label className="st-fld">
+                    <span className="st-fld-lbl">Profile</span>
+                    <select className="pf-input mono" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)}>
+                      <option value="">— profile —</option>
+                      {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                    </select>
+                  </label>
+                  <div className="st-fld st-fld-mtp">
+                    <span className="st-fld-lbl">Speculative decode</span>
+                    <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
+                      onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp} title="MTP speculative decode">
+                      <span className="pf-switch-knob" /><span className="mono">MTP</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          <button type="button" className="pf-btn" onClick={addSlot} data-testid="st-slot-add">{Icons.plus} Add slot</button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function FormRow({ label, sub, req, children, error }) {
-  return (
-    <div className={'pf-row' + (error ? ' has-err' : '')}>
-      <div className="pf-row-lbl">
-        <span>{label}{req && <span className="pf-req" title="required">*</span>}</span>
-        {sub && <span className="pf-row-sub mono">{sub}</span>}
-      </div>
-      <div className="pf-row-ctl">
-        <div className={'pf-field' + (error ? ' err' : '')}>{children}</div>
-        {error && <div className="pf-row-foot"><span className="pf-msg err mono hint err">{Icons.alert}{error}</span></div>}
-      </div>
-    </div>
+      </form>
+    </FormDrawer>
   );
 }
 
@@ -779,7 +732,7 @@ function StacksView() {
         </div>
       )}
 
-      {drawer && <Drawer mode={drawer.mode} source={drawer.source} existing={existing}
+      {drawer && <StackDrawer mode={drawer.mode} source={drawer.source} existing={existing}
         onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />}
       {confirm && <DeleteConfirm vm={confirm} onCancel={() => setConfirm(null)} onConfirmed={() => setConfirm(null)} />}
       {loadTgt && <LoadDialog vm={loadTgt} busy={loadBusy} onLoad={confirmLoad} onPull={openPull} onClose={() => setLoadTgt(null)} />}

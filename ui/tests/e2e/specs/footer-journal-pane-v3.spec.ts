@@ -9,8 +9,10 @@
  *      still render.
  *   2. Expanding the pane opens the SSE; entries pushed through the
  *      sseHarness render in the body.
- *   3. Clicking `hal0` filter chip rebuilds the EventSource with
- *      `?source=hal0` and only hal0-source entries pass through.
+ *   3. Clicking a source chip (derived from the live ring's real sources)
+ *      filters the visible rows client-side by source group — the footer
+ *      streams the merged feed and never opens a per-source SSE, so every
+ *      source chip stays available regardless of the active filter.
  *   4. Typing in the search box filters the in-memory ring client-side
  *      (no SSE reconnect; matches `entry.msg` case-insensitively).
  *   5. When the SSE has produced 0 entries the pane shows the empty
@@ -77,7 +79,7 @@ test.describe('Footer journal pane (#325)', () => {
     await expect(body.locator('.foot-line .msg', { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
   })
 
-  test('hal0 filter chip narrows source and rebuilds SSE with ?source=hal0', async ({ page }) => {
+  test('source chip filters visible rows client-side (no per-source SSE rebuild)', async ({ page }) => {
     await page.goto('/')
     await page.locator('.foot-toggle').click()
     await waitForSse(page, '/api/journal/stream', 6_000)
@@ -89,26 +91,26 @@ test.describe('Footer journal pane (#325)', () => {
     await expect(body.locator('.foot-line', { hasText: HAL0_ENTRY.msg })).toBeVisible()
     await expect(body.locator('.foot-line', { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
 
-    // Click the hal0 chip — debounce + reconnect.
+    // Chips are derived from the live ring's real sources; a `hal0` chip
+    // appears once a hal0-source entry lands. Clicking it filters by source
+    // group CLIENT-SIDE — no SSE reconnect.
     await page.locator('.foot-pane-chip', { hasText: 'hal0' }).click()
-    await waitForSse(page, '/api/journal/stream?source=hal0', 6_000)
 
-    // Client-side source filter applied on top of the SSE URL filter —
-    // residual container entry already in the ring is hidden immediately.
+    // Residual container entry is hidden immediately; the hal0 entry stays.
     await expect(body.locator('.foot-line', { hasText: CONTAINER_ENTRY.msg })).toHaveCount(0)
-    // hal0 entry stays.
     await expect(body.locator('.foot-line', { hasText: HAL0_ENTRY.msg })).toBeVisible()
 
-    // Push another hal0 entry on the new stream — arrives normally.
+    // A further hal0 entry arrives on the SAME (merged) stream — no reconnect.
     const HAL0_AFTER = { ...HAL0_ENTRY, id: 4, msg: 'slot:agent ready' }
-    await emitSse(page, '/api/journal/stream?source=hal0', HAL0_AFTER)
+    await emitSse(page, '/api/journal/stream', HAL0_AFTER)
     await expect(body.locator('.foot-line .msg', { hasText: 'slot:agent ready' })).toBeVisible()
 
-    // Confirm the URL gained the source param.
+    // The footer never opens a per-source SSE — it streams merged and filters
+    // client-side, so every source chip stays available regardless of filter.
     const seen = await page.evaluate(
       () => Object.keys((window as any).__sseStreams || {}),
     )
-    expect(seen.some((u: string) => u.includes('source=hal0'))).toBe(true)
+    expect(seen.some((u: string) => u.includes('source='))).toBe(false)
   })
 
   test('search input filters the in-memory ring case-insensitively', async ({ page }) => {

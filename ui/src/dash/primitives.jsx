@@ -7,34 +7,101 @@ import { useComfyui } from '@/api/hooks/useComfyui'
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, createContext: createContextP, useContext: useContextP } = React;
 
-// ─── Portal-less Modal ────────────────────────────────────────────────────
-// Click backdrop or Esc to close. Focus restored on close. Width auto-sized.
-function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dismissable = true }) {
-  const overlayRef = useRefP(null);
+// ─── Shared leaf utilities (single source of truth for the dash editors) ───
+// Slug/name rule — mirrors the API regex ^[a-z0-9][a-z0-9_-]{0,31}$. Consumed
+// by the Profiles/Stacks drawers + import dialogs (was duplicated per-file).
+const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+// Toast shim — dash modules fire user-facing toasts through the global
+// installed by chrome.jsx. Safe no-op when it isn't present (SSR/tests).
+function toast(msg, kind = "info") {
+  if (typeof window !== "undefined" && window.__hal0Toast) window.__hal0Toast(msg, kind);
+}
+
+// ─── useFocusTrap — shared focus management for modal surfaces ──────────────
+// On open: remembers the previously-focused element and, unless something
+// inside the container already holds focus (e.g. an autoFocus input), moves
+// focus to the container (which must carry tabIndex=-1). While open: Tab /
+// Shift+Tab cycle within the container's focusables. On close/unmount: focus
+// returns to the previously-focused element. Used by Modal, Drawer, FormDrawer
+// so the role="dialog" aria-modal="true" contract is actually honoured.
+const FOCUSABLE_SEL =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+function useFocusTrap(ref, open) {
   useEffectP(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === "Escape" && dismissable) onClose(); };
+    const node = ref.current;
+    if (!node) return;
+    const prev = document.activeElement;
+    // Initial focus: honour an existing autoFocus inside the container;
+    // otherwise focus the container itself so the surface is announced
+    // without stealing focus from a specific control.
+    if (!node.contains(document.activeElement)) {
+      try { node.focus(); } catch { /* jsdom / detached node */ }
+    }
+    const onKey = (e) => {
+      if (e.key !== "Tab") return;
+      const items = Array.from(node.querySelectorAll(FOCUSABLE_SEL))
+        .filter(el => el.offsetParent !== null || el === document.activeElement);
+      if (items.length === 0) { e.preventDefault(); node.focus(); return; }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !node.contains(active)) { e.preventDefault(); last.focus(); }
+      } else if (active === last || !node.contains(active)) {
+        e.preventDefault(); first.focus();
+      }
+    };
+    node.addEventListener("keydown", onKey);
+    return () => {
+      node.removeEventListener("keydown", onKey);
+      // Return focus only if it's still inside the closing surface — avoid
+      // yanking focus if the user has already clicked elsewhere.
+      if (prev && typeof prev.focus === "function" && node.contains(document.activeElement)) {
+        try { prev.focus(); } catch { /* element gone */ }
+      }
+    };
+  }, [open, ref]);
+}
+
+// ─── Portal-less Modal ────────────────────────────────────────────────────
+// Click backdrop or Esc to close. Captures + restores focus on close and traps
+// Tab within the shell. Width auto-sized. Pass `dirty` (+ optional
+// `confirmDiscard`) to guard the dismiss paths against unsaved changes.
+function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dismissable = true, dirty = false, confirmDiscard = "Discard unsaved changes?" }) {
+  const overlayRef = useRefP(null);
+  const shellRef = useRefP(null);
+  const requestClose = () => {
+    if (dirty && !window.confirm(confirmDiscard)) return;
+    onClose();
+  };
+  useEffectP(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === "Escape" && dismissable) requestClose(); };
     document.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
-  }, [open, dismissable, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, dismissable, onClose, dirty]);
+  useFocusTrap(shellRef, open);
   if (!open) return null;
   return (
     <div
       className="modal-backdrop"
       ref={overlayRef}
-      onMouseDown={(e) => { if (dismissable && e.target === overlayRef.current) onClose(); }}
+      onMouseDown={(e) => { if (dismissable && e.target === overlayRef.current) requestClose(); }}
     >
-      <div className="modal-shell" style={{ maxWidth: width }} onMouseDown={(e) => e.stopPropagation()}>
+      <div className="modal-shell" ref={shellRef} tabIndex={-1} role="dialog" aria-modal="true" style={{ maxWidth: width }} onMouseDown={(e) => e.stopPropagation()}>
         {(title || eyebrow) && (
           <div className="modal-h">
             {eyebrow && <div className="modal-h-eye mono">{eyebrow}</div>}
             {title && <h2 className="mono">{title}</h2>}
             {dismissable && (
-              <button className="modal-close" onClick={onClose} aria-label="Close">{Icons.close}</button>
+              <button className="modal-close" onClick={requestClose} aria-label="Close">{Icons.close}</button>
             )}
           </div>
         )}
@@ -46,20 +113,33 @@ function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dis
 }
 
 // ─── Right-side Drawer ────────────────────────────────────────────────────
-function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, headRight }) {
+// Captures + restores focus and traps Tab within the drawer (honours
+// role="dialog" aria-modal). Pass `dirty` (+ optional `confirmDiscard`) to
+// guard Esc/backdrop/close against unsaved changes; `dismissable={false}`
+// disables backdrop dismissal.
+function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, headRight, dirty = false, dismissable = true, confirmDiscard = "Discard unsaved changes?" }) {
+  const shellRef = useRefP(null);
+  const requestClose = () => {
+    if (dirty && !window.confirm(confirmDiscard)) return;
+    onClose();
+  };
   useEffectP(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => { if (e.key === "Escape") requestClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, onClose, dirty]);
+  useFocusTrap(shellRef, open);
   return (
     <>
       <div
         className={"drawer-backdrop" + (open ? " open" : "")}
-        onClick={onClose}
+        onClick={() => { if (dismissable) requestClose(); }}
       />
       <aside
+        ref={shellRef}
+        tabIndex={-1}
         className={"drawer" + (open ? " open" : "")}
         style={{ width }}
         role="dialog"
@@ -70,7 +150,7 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
           {eyebrow && <div className="modal-h-eye mono">{eyebrow}</div>}
           {title && <h2 className="mono">{title}</h2>}
           {headRight && <div className="drawer-h-right">{headRight}</div>}
-          <button className="modal-close" onClick={onClose} aria-label="Close">{Icons.close}</button>
+          <button className="modal-close" onClick={requestClose} aria-label="Close">{Icons.close}</button>
         </div>
         <div className="drawer-body">{children}</div>
         {foot && <div className="drawer-foot mono">{foot}</div>}
@@ -526,4 +606,256 @@ function Menu({ anchor = "right", items, onClose, style }) {
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle });
+// ─── FormRow — labelled config row (shared by Profiles + Stacks drawers) ───
+// The superset variant: supports error / warn / ok / counter affordances.
+// Renders a real <label htmlFor> wired to a single input/select/textarea child
+// (id auto-generated) so the visible label is a genuine control label; non-
+// control children (segmented buttons, switches) are passed through untouched.
+function FormRow({ label, sub, req, children, error, warn, ok, counter }) {
+  const autoId = React.useId();
+  const genId = "fr-" + autoId;
+  let control = children;
+  let htmlFor;
+  if (
+    React.isValidElement(children) &&
+    (children.type === "input" || children.type === "select" || children.type === "textarea")
+  ) {
+    const childId = children.props.id || genId;
+    control = React.cloneElement(children, { id: childId });
+    htmlFor = childId;
+  }
+  return (
+    <div className={"pf-row" + (error ? " has-err" : "")}>
+      <label className="pf-row-lbl" htmlFor={htmlFor}>
+        <span>{label}{req && <span className="pf-req" title="required">*</span>}</span>
+        {sub && <span className="pf-row-sub mono">{sub}</span>}
+      </label>
+      <div className="pf-row-ctl">
+        <div className={"pf-field" + (ok ? " ok" : "") + (error ? " err" : "")}>
+          {control}
+          {ok && <span className="pf-field-ok" aria-hidden="true">{Icons.check}</span>}
+        </div>
+        {(error || warn || counter) && (
+          <div className="pf-row-foot">
+            {error
+              ? <span className="pf-msg err mono hint err">{Icons.alert}{error}</span>
+              : warn
+              ? <span className="pf-msg warn mono">{Icons.alert}{warn}</span>
+              : <span />}
+            {counter && <span className={"pf-counter mono" + (counter.warn ? " warn" : "")}>{counter.text}</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── useForm — shared form-state hook for the dash editors ──────────────────
+// Owns: values (single object), touched map, submitted/submitting/closing
+// flags, a set(k,v) that also marks touched, touch(k), reset(), derived
+// errors/warns (validation rules stay in the CALLER — passed in verbatim), a
+// submitted/touched `show(field)` gate, a `blocking` flag, and an `isDirty`
+// snapshot diff (the field that unlocks the unsaved-changes guard). Re-derives
+// the initial snapshot whenever `resetKey` changes — replicating the editors'
+// existing [mode, source] / [open, defaults] reset effects.
+function useForm({ initial, deriveInitial, resetKey, validate, warn }) {
+  const compute = () => (typeof deriveInitial === "function" ? deriveInitial() : initial);
+  const initialRef = useRefP(null);
+  const [values, setValues] = useStateP(() => {
+    const v = compute();
+    initialRef.current = v;
+    return v;
+  });
+  const [touched, setTouched] = useStateP({});
+  const [submitted, setSubmitted] = useStateP(false);
+  const [submitting, setSubmitting] = useStateP(false);
+  const [closing, setClosing] = useStateP(false);
+
+  useEffectP(() => {
+    const v = compute();
+    initialRef.current = v;
+    setValues(v);
+    setTouched({});
+    setSubmitted(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
+
+  const set = (k, v) => { setValues(f => ({ ...f, [k]: v })); setTouched(t => ({ ...t, [k]: true })); };
+  const touch = (k) => setTouched(t => ({ ...t, [k]: true }));
+  const reset = () => { setValues(initialRef.current); setTouched({}); setSubmitted(false); };
+
+  const errors = validate ? (validate(values) || {}) : {};
+  const warns = warn ? (warn(values) || {}) : {};
+  const blocking = Object.keys(errors).length > 0;
+  const show = (f) => submitted || !!touched[f];
+  const isDirty = JSON.stringify(values) !== JSON.stringify(initialRef.current);
+
+  return {
+    values, setValues, set, touch, touched,
+    submitted, setSubmitted, submitting, setSubmitting,
+    closing, setClosing,
+    errors, warns, blocking, show, reset, isDirty,
+    initial: initialRef.current,
+  };
+}
+
+// ─── FormDrawer — the shared pf-drawer form shell (Profiles + Stacks) ───────
+// Owns the pf-scrim / pf-drawer / pf-form-panel chrome, the closing + 200ms
+// animation on dismiss, eyebrow/title head, the aria-busy panel, focus trap +
+// return-focus, and the unsaved-changes guard on the scrim + X. The per-view
+// body (children) and foot (render-prop receiving `requestClose` so a Cancel
+// button routes through the same guard) stay with the caller, keeping each
+// editor's submit + validation exactly as they were.
+function FormDrawer({ eyebrow, title, ariaLabel, panelClassName = "", submitting = false, dirty = false, confirmDiscard = "Discard unsaved changes?", onClose, children, foot }) {
+  const [closing, setClosing] = useStateP(false);
+  const shellRef = useRefP(null);
+  const requestClose = () => {
+    if (submitting) return;
+    if (dirty && !window.confirm(confirmDiscard)) return;
+    setClosing(true);
+    setTimeout(onClose, 200);
+  };
+  useFocusTrap(shellRef, true);
+  return (
+    <div className={"pf-scrim" + (closing ? " out" : "")} onMouseDown={requestClose}>
+      <div
+        ref={shellRef}
+        tabIndex={-1}
+        className={("pf-drawer pf-form-panel " + panelClassName).trim() + (closing ? " out" : "")}
+        onMouseDown={e => e.stopPropagation()}
+        role="dialog"
+        aria-label={ariaLabel || title}
+        aria-busy={submitting}
+      >
+        <div className="pf-drawer-head">
+          <div>
+            <div className="pf-drawer-eye mono">{eyebrow}</div>
+            <div className="pf-drawer-title pf-form-title mono">{title}</div>
+          </div>
+          <button className="pf-x" onClick={requestClose} aria-label="Close" disabled={submitting}>{Icons.close}</button>
+        </div>
+        {children}
+        <div className="pf-drawer-foot">
+          {typeof foot === "function" ? foot({ requestClose }) : foot}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ImportDialog — shared stk-dialog import shell (file → dry-run → commit) ─
+// Wraps the .stk-scrim / .stk-dialog / .stk-dlg-* chrome + the file picker,
+// dry-run report, "Save as" name/slug input, and commit button. Per-view
+// specifics are injected: `deriveName(file, report)` seeds the name field,
+// `renderPreview(report)` draws the resolutions/model rows (Stacks) or nothing
+// (Profiles), and `onFileError` supplies the "not a valid envelope" copy. The
+// caller owns the actual mutations via `dryRun` / `commit` callbacks so the
+// hook stays in the per-view wrapper.
+function ImportDialog({
+  title = "Import",
+  ariaLabel,
+  fileAccept = ".json,application/json",
+  fileHint = "Choose a file",
+  fileTestid,
+  nameTestid,
+  confirmTestid,
+  namePlaceholder = "name",
+  existing = [],
+  invalidCopy = "Not a valid envelope",
+  deriveName,
+  renderPreview,
+  dryRun,
+  commit,
+  onClose,
+  onImported,
+}) {
+  const [envelope, setEnvelope] = useStateP(null);
+  const [report, setReport] = useStateP(null);
+  const [name, setName] = useStateP("");
+  const [busy, setBusy] = useStateP(false);
+  const [err, setErr] = useStateP("");
+
+  async function onFile(file) {
+    setErr("");
+    try {
+      const text = await file.text();
+      const env = JSON.parse(text);
+      setEnvelope(env);
+      const r = await dryRun(env);
+      setReport(r);
+      setName(deriveName ? deriveName(file, r) : (r?.name || ""));
+    } catch (e) {
+      setErr(e?.message || invalidCopy);
+      setEnvelope(null);
+      setReport(null);
+    }
+  }
+
+  const taken = existing.includes(name);
+  const nameValid = NAME_RE.test(name) && !taken;
+  const canCommit = !!report && nameValid && !busy;
+
+  async function onCommit() {
+    if (!canCommit) return;
+    setBusy(true);
+    try {
+      await commit({ envelope, name });
+      onImported();
+    } catch (e) {
+      // The caller's commit() may rethrow with a friendly inline message for
+      // collisions; otherwise fall back to a generic toast.
+      if (e?.inline) setErr(e.inline);
+      else toast(e?.message || "Import failed", "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
+      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label={ariaLabel || title} aria-busy={busy}>
+        <div className="stk-dlg-h">
+          <span className="stk-dlg-eye">{title}</span>
+          <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
+        </div>
+        <div className="stk-dlg-b">
+          {!report ? (
+            <label className="stk-drop">
+              <input type="file" accept={fileAccept} style={{ display: "none" }}
+                onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} data-testid={fileTestid} />
+              <span className="stk-drop-glyph">{Icons.attach}</span>
+              <span className="mono">{fileHint}</span>
+              {err && <span className="stk-dlg-warn">{Icons.alert}{err}</span>}
+            </label>
+          ) : (
+            <>
+              {renderPreview && renderPreview(report)}
+              <div className="stk-slot-list">
+                <div className="stk-slot-row">
+                  <span className="sname">Save as</span>
+                  <input className={"pf-input mono" + (name && !NAME_RE.test(name) ? " err" : "")} value={name}
+                    onChange={e => { setName(e.target.value); setErr(""); }} maxLength={32} placeholder={namePlaceholder}
+                    style={{ flex: 1, background: "transparent", border: "none", color: "var(--fg)", fontFamily: "var(--jbm)" }}
+                    data-testid={nameTestid} />
+                </div>
+              </div>
+              {name && !NAME_RE.test(name) && <div className="stk-dlg-warn">{Icons.alert}lowercase · digits · - · _ · ≤32</div>}
+              {taken && NAME_RE.test(name) && <div className="stk-dlg-warn">{Icons.alert}“{name}” already exists</div>}
+              {err && <div className="stk-dlg-warn">{Icons.alert}{err}</div>}
+            </>
+          )}
+        </div>
+        <div className="stk-dlg-f">
+          <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
+          {report && (
+            <button className="btn sm" onClick={onCommit} disabled={!canCommit} data-testid={confirmTestid}>
+              {busy ? "Importing…" : "Import"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });

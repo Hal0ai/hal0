@@ -84,8 +84,8 @@ for chunk in stream:
         print(delta.content, end="", flush=True)
 ```
 
-The SDK consumes the `[DONE]` sentinel for you. hal0 ships with no built-in
-auth, so any `api_key` value is accepted on the local network.
+The SDK consumes the `[DONE]` sentinel for you. Without `--auth=basic`,
+any `api_key` value is accepted on the local network.
 
 </TabItem>
 </Tabs>

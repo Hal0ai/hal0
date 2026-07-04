@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from hal0.model_meta import capability_from_filename
 from hal0.registry.gguf_header import read_gguf_header
 
 log = logging.getLogger(__name__)
@@ -42,10 +43,6 @@ Confidence = Literal["high", "medium", "low"]
 # Backends llama-server can target for any GGUF file. The slot config
 # picks one based on hardware probe; detection just lists what's *compatible*.
 _GGUF_BACKENDS: list[str] = ["vulkan", "rocm", "cuda", "cpu"]
-
-_EMBED_TOKENS = ("embed", "bge", "e5", "nomic", "gte-", "jina-embed")
-_ASR_TOKENS = ("whisper", "moonshine", "-asr", "_asr")
-_TTS_TOKENS = ("kokoro", "vibevoice", "-tts", "_tts")
 
 
 def _hf_repo_name_from_path(path: Path) -> str | None:
@@ -99,21 +96,41 @@ class DetectionResult:
 
 
 def _filename_capability(name: str) -> str | None:
-    """Best-effort capability inferred from filename tokens. ``None`` if no hit."""
-    lower = name.lower()
-    if any(tok in lower for tok in _EMBED_TOKENS):
-        return "embed"
-    if any(tok in lower for tok in _ASR_TOKENS):
-        return "asr"
-    if any(tok in lower for tok in _TTS_TOKENS):
-        return "tts"
-    return None
+    """Best-effort capability inferred from filename tokens. ``None`` if no hit.
+
+    Delegates to the single shared token table
+    (:func:`hal0.model_meta.capability_from_filename`, MR-3) but preserves
+    detect's narrower contract: the downstream branching in
+    :func:`_heuristic_only` and the GGUF embed fallback in :func:`detect`
+    only understand ``embed``/``asr``/``tts``, so any other token the shared
+    helper recognises (rerank/vision/video/image) is collapsed back to
+    ``None`` here. Extending detect to emit ``rerank`` is a separate,
+    pooling-semantics follow-up.
+    """
+    cap = capability_from_filename(name)
+    return cap if cap in ("embed", "asr", "tts") else None
 
 
 def _heuristic_only(path: Path) -> DetectionResult:
     """Fallback detection: filename heuristic, no header read."""
     name = path.name.lower()
     cap = _filename_capability(name)
+
+    # A file under the ComfyUI models tree is an image-gen asset — tag it
+    # image/comfyui so add-by-path / scan-preview file it on the dashboard's
+    # image surface instead of "unknown" with empty caps (``_filename_capability``
+    # deliberately collapses the image token to None, so this is the only place
+    # a manually-added checkpoint gets the image capability).
+    if "/comfyui/models/" in str(path).replace("\\", "/"):
+        return DetectionResult(
+            suggested_backends=["comfyui"],
+            suggested_capabilities=["image"],
+            context_length=None,
+            confidence="low",
+            suggested_name=_hf_repo_name_from_path(path),
+            kind="unknown",
+            raw_hints={"source": "comfyui-tree", "stem": path.stem, "suffix": path.suffix.lower()},
+        )
 
     backends: list[str] = []
     caps: list[str] = []

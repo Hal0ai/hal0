@@ -302,6 +302,7 @@ class TestConfigEnrichment:
             enable_thinking=True,
             idle_timeout_s=900,
             workers=2,
+            vision=False,
             server={"extra_args": "--flash-attn on"},
             npu={"asr": True, "embed": False},
         )
@@ -321,6 +322,8 @@ class TestConfigEnrichment:
         assert e["chat_template"] == "chatml"
         assert e["n_gpu_layers"] == 24
         assert e["rope_freq_base"] == 10000.0
+        # #901: vision toggle lifted (default-on; explicit false persisted).
+        assert e["vision"] is False
         assert e["idle_timeout_s"] == 900
         assert e["workers"] == 2
         assert e["llamacpp_args"] == "--flash-attn on"
@@ -350,6 +353,8 @@ class TestConfigEnrichment:
         assert e["chat_template"] is None
         assert e["n_gpu_layers"] == -1
         assert e["rope_freq_base"] is None
+        # #901: vision surfaces as None when absent (UI treats null as on).
+        assert e["vision"] is None
         assert e["idle_timeout_s"] is None
         assert e["workers"] is None
         assert e["llamacpp_args"] is None

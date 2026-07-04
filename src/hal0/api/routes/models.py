@@ -179,6 +179,21 @@ _FLM_DISPATCH_TYPE: dict[str, str] = {
 }
 
 
+def _comfyui_category(path: Any) -> str | None:
+    """ComfyUI models subdir for a path under ``.../comfyui/models/<subdir>/``.
+
+    Returns the subdir (``checkpoints`` / ``loras`` / ``vae`` / ``upscale_models``
+    / …) that the dashboard's dedicated image-gen surface groups by, or ``None``
+    for a non-ComfyUI path. Path-derived so a row mis-tagged by an older pull
+    (``capabilities=["chat"]``, ``backends=[]``) is still recognised as ComfyUI
+    without a data migration.
+    """
+    if not isinstance(path, str) or "/comfyui/models/" not in path:
+        return None
+    seg = path.split("/comfyui/models/", 1)[1].split("/", 1)[0].strip()
+    return seg or None
+
+
 @router.get("")
 async def list_models(request: Request) -> dict[str, Any]:
     """Aggregate models from the local registry + every upstream.
@@ -202,8 +217,43 @@ async def list_models(request: Request) -> dict[str, Any]:
         dumped.setdefault("created", now)
         dumped.setdefault("owned_by", "local")
         dumped["type"] = classify(dumped.get("id", ""), capabilities=dumped.get("capabilities"))
+        # ComfyUI discriminator + category for the dashboard's dedicated
+        # image-gen surface. Path-derived so it self-heals rows an older pull
+        # mis-tagged (capabilities=["chat"], backends=[]) with no migration:
+        # any model whose bytes live under the ComfyUI models tree — or that
+        # already carries the comfyui backend — is owned_by "comfyui" and
+        # advertises its subdir as ``comfyui_category``. The UI groups the
+        # image-gen surface on this, not on the (possibly stale) capability.
+        _cat = _comfyui_category(dumped.get("path"))
+        _bes = list(dumped.get("backends") or [])
+        if _cat is not None or "comfyui" in _bes:
+            dumped["owned_by"] = "comfyui"
+            if "comfyui" not in _bes:
+                _bes.append("comfyui")
+                dumped["backends"] = _bes
+            if _cat is not None:
+                dumped["comfyui_category"] = _cat
         data.append(dumped)
         seen.add(entry.id)
+    # "Don't surface invisible models": the composite ``hal0``/npu upstream
+    # advertises FLM slot-default tags via /v1/models even when the weights are
+    # not on disk, so they used to leak into the catalog as available-but-
+    # uninstalled rows. The dedicated FLM probe below is the authoritative
+    # source (it re-adds the INSTALLED ones with the right npu shape), so drop
+    # every FLM-servable tag from the generic upstream advertisement. The probe
+    # is module-cached, so the second call in the injector below is O(1).
+    flm_skip: set[str] = set()
+    try:
+        from hal0.providers.flm import flm_served_models as _flm_probe
+
+        for _fm in _flm_probe():
+            _tag = _fm.get("tag")
+            if isinstance(_tag, str) and _tag:
+                flm_skip.add(_tag)
+                flm_skip.add(_tag.replace(":", "-") + "-FLM")
+    except Exception:
+        # Probe unavailable (no flm binary / dev host) — nothing to skip.
+        pass
     for u in upstreams.list():
         try:
             ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
@@ -215,6 +265,11 @@ async def list_models(request: Request) -> dict[str, Any]:
                 continue
             if _is_alias(mid):
                 filtered += 1
+                continue
+            # FLM-servable tag advertised before its weights are pulled — the
+            # dedicated probe below re-adds the installed ones. Skip here so an
+            # un-pulled FLM model never shows as an available upstream row.
+            if mid in flm_skip:
                 continue
             seen.add(mid)
             data.append(
@@ -1049,6 +1104,11 @@ async def delete_model(
             _clear_slot_default(Path(entry["path"]), entry["config"])
 
         removed = registry.remove(model_id)
+        # Best-effort GC of the durable pull-job snapshot (#MR-8). A failed
+        # unlink must never break the delete or the model.deleted emit; the
+        # startup sweep reaps anything we miss here.
+        with contextlib.suppress(OSError):
+            _pull_job_file(model_id).unlink(missing_ok=True)
         rec.after = {
             "id": model_id,
             "deleted": bool(removed),

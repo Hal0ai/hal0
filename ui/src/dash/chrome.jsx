@@ -413,7 +413,22 @@ const _SRC_HUE = {
   comfyui: '#5ea4f9',
   hermes: 'var(--fg-2)',
 };
-const _srcHue = (s) => _SRC_HUE[s] || 'var(--fg-3)';
+// Sources are now real + structured (`slot:npu`, `system`, `model:x`). Try
+// an exact hit, then the leaf after `:` (so `slot:npu` picks up the npu hue),
+// then the group before `:`, then a neutral fallback.
+const _srcHue = (s) => {
+  if (!s) return 'var(--fg-3)';
+  if (_SRC_HUE[s]) return _SRC_HUE[s];
+  const i = s.indexOf(':');
+  if (i >= 0) return _SRC_HUE[s.slice(i + 1)] || _SRC_HUE[s.slice(0, i)] || 'var(--fg-3)';
+  return 'var(--fg-3)';
+};
+// Collapse a source to its group chip key: `slot:npu` → `slot`, `system` → `system`.
+const _srcGroup = (s) => {
+  const v = s || 'hal0';
+  const i = v.indexOf(':');
+  return i >= 0 ? v.slice(0, i) : v;
+};
 
 // Journal rows show wall-clock time only (HH:MM:SS.mmm), like the design —
 // the full ISO `2026-06-16T21:12:56.942581+00:00` overflowed the ts column
@@ -455,10 +470,11 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   const serviceHealth = useServicesHealth();
   const [paneSrc, setPaneSrc] = useStateC("merged");
   const [paneQ, setPaneQ] = useStateC("");
-  // Source filter rides the SSE URL so the backend pre-filters; search
-  // is client-only against `entry.msg` so the user sees instant feedback
-  // while typing (no reconnect per keystroke).
-  const live = useLogsStream({ follow: expanded, source: paneSrc });
+  // Stream the full (merged) event feed and filter by source group
+  // CLIENT-SIDE. This keeps every source chip available regardless of the
+  // active filter (deriving chips from a server-narrowed ring would drop
+  // the other groups) and makes switching instant — no SSE reconnect.
+  const live = useLogsStream({ follow: expanded });
 
   // The ring is the SOLE source of truth — no HAL0_DATA fallback. When
   // empty (cold load before SSE replays or a genuinely quiet system)
@@ -467,13 +483,14 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
     (a.ts || '').localeCompare(b.ts || ''),
   );
 
-  // Source filter is also applied client-side so entries that arrived
-  // on the previous (broader) SSE stream don't linger after the user
-  // narrows the chip. Server-side filtering on the new SSE prevents
-  // FUTURE entries from arriving; this catches the residual ring.
-  // Search filter is purely client-only (no SSE reconnect per keystroke).
+  // Distinct source groups present in the ring → the chip set. `merged` is
+  // always first (no filter); the rest come from real event sources.
+  const srcGroups = ["merged", ...[...new Set(ringSorted.map((e) => _srcGroup(e.source)))].sort()];
+
+  // Source chip filters by group (`slot` matches every `slot:*`); search is
+  // client-only against `entry.msg` for instant feedback while typing.
   const filtered = ringSorted.filter((e) => {
-    if (paneSrc !== 'merged' && e.source !== paneSrc) return false;
+    if (paneSrc !== 'merged' && _srcGroup(e.source) !== paneSrc) return false;
     return !(paneQ && (!e.msg || !e.msg.toLowerCase().includes(paneQ.toLowerCase())));
   });
 
@@ -530,12 +547,12 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             <span>Live journal</span>
             <span className="ct">· {filtered.length} / {ringSorted.length}</span>
             <div className="foot-pane-filter mono">
-              {[["merged", "merged"], ["hal0", "hal0"]].map(([k, l]) => (
+              {srcGroups.map((k) => (
                 <button
                   key={k}
                   onClick={() => setPaneSrc(k)}
                   className={"foot-pane-chip" + (paneSrc === k ? " on" : "")}
-                >{l}</button>
+                >{k}</button>
               ))}
             </div>
             <input

@@ -927,3 +927,69 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
     assert "context_size = 32768" in cfg_text
     assert "4096" not in cfg_text
     assert "ctx_size = " not in cfg_text
+
+
+@pytest.mark.parametrize(
+    ("seed_model_lines", "updates", "expected_model"),
+    [
+        # Partial ctx-only update keeps the seeded [model].default sibling.
+        (
+            ['default = "seed-model"'],
+            {"model": {"ctx_size": 2048}},
+            {"default": "seed-model", "context_size": 2048},
+        ),
+        # A fresh ctx_size wins over a stale context_size seed, alias dropped.
+        (
+            ['default = "seed-model"', "context_size = 4096"],
+            {"model": {"ctx_size": 32768}},
+            {"default": "seed-model", "context_size": 32768},
+        ),
+        # A model default swap merges, leaving the seeded context_size intact.
+        (
+            ['default = "seed-model"', "context_size = 8192"],
+            {"model": {"default": "new-model"}},
+            {"default": "new-model", "context_size": 8192},
+        ),
+    ],
+)
+async def test_update_config_model_merge_matches_shared_helper(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    seed_model_lines: list[str],
+    updates: dict[str, object],
+    expected_model: dict[str, object],
+) -> None:
+    """SC-11: ``update_config`` and the shared ``merge_slot_config`` primitive
+    must project the same (base, updates) pair onto the same ``[model]`` — the
+    manager routes through the helper, so the on-disk table equals what the
+    helper computes (sibling keys survive, ctx_size folds)."""
+    import tomllib
+
+    from hal0.slot_config import merge_slot_config
+    from hal0.slots.state import SlotState as _S
+
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                "port = 8081",
+                'provider = "llama-server"',
+                "enabled = true",
+                "[model]",
+                *seed_model_lines,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # The shared helper's projection of the same base + updates.
+    base = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
+    helper_after = merge_slot_config(base, updates)
+    assert helper_after["model"] == expected_model
+
+    sm = SlotManager()
+    await sm._transition("chat", _S.OFFLINE, force=True)
+    await sm.update_config("chat", updates)
+    on_disk = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
+    assert on_disk["model"] == expected_model
+    assert on_disk["model"] == helper_after["model"]

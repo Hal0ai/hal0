@@ -69,9 +69,10 @@ FastFlowLM is installed) runs in a dedicated podman container. See the
   />
 </CardGrid>
 
-<Aside type="caution" title="No built-in auth or TLS">
-`hal0-api` binds `0.0.0.0:8080` and treats every request as authenticated
-by network reachability — the right posture for a trusted LAN appliance.
-If hal0 is reachable from anywhere you do not control, front it with a
-reverse proxy that owns auth and TLS.
+<Aside type="note" title="Auth & HTTPS">
+hal0 ships Caddy + basic_auth + bearer tokens + automatic HTTPS behind
+one flag: `--auth=basic`. Pass it at install time for a public-facing
+setup. Without it (the default), hal0 runs open on the LAN — front it
+with your own reverse proxy if it's reachable from untrusted networks.
+See [Security](/docs/concepts/security) for the full picture.
 </Aside>

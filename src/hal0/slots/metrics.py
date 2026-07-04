@@ -22,8 +22,12 @@ from __future__ import annotations
 
 from typing import Any
 
-#: Dispatchable ready-set (#696) — mirrors SlotManager.is_ready_for_dispatch.
-_READY_STATES = frozenset({"ready", "serving", "idle"})
+from hal0.slots.state import DISPATCHABLE_STATES
+
+#: Dispatchable ready-set (#696 / DR-8) — the one canonical set from
+#: hal0.slots.state. SlotState is a StrEnum, so membership works for the
+#: lowercase wire strings this renderer compares against (``"ready" in set``).
+_READY_STATES = DISPATCHABLE_STATES
 
 
 def _escape_label(value: str) -> str:

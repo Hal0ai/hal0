@@ -125,6 +125,42 @@ class TestFilenameHeuristic:
         assert r.confidence == "low"
 
 
+class TestMr3ConsolidationPreservesDetectContract:
+    """MR-3: routing detect's filename heuristic through the shared token
+    table must not change detect's embed/asr/tts-only output vocabulary."""
+
+    def test_chat_gguf_still_chat(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama")),
+            ("llama.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 8192)),
+        ]
+        p = _write_fixture(tmp_path, "llama-3.1-8b.gguf", _build_gguf(3, kvs))
+        assert detect(p).suggested_capabilities == ["chat"]
+
+    def test_embed_gguf_still_embed(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+            ("bert.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 512)),
+            ("bert.pooling_type", _GGUF_TYPE_UINT32, struct.pack("<I", 2)),
+        ]
+        p = _write_fixture(tmp_path, "bge-small.gguf", _build_gguf(3, kvs))
+        assert detect(p).suggested_capabilities == ["embed"]
+
+    def test_reranker_is_not_emitted_by_detect(self, tmp_path: Path) -> None:
+        """detect deliberately does NOT emit 'rerank' yet — a reranker gguf
+        with no pooling_type is not forced to embed by the shared table (the
+        'rerank' token is collapsed to None in detect's narrower contract)."""
+        p = tmp_path / "bge-reranker-v2-m3.onnx"
+        p.write_bytes(b"")
+        # Non-gguf, rerank token → collapsed to None → unknown, empty caps.
+        assert detect(p).suggested_capabilities == []
+
+    def test_classify_multicap_rerank_preserved(self) -> None:
+        from hal0.model_meta import classify
+
+        assert classify("", capabilities=["chat", "rerank"]) == "rerank"
+
+
 class TestMissingFile:
     def test_missing_path_returns_filename_heuristic(self, tmp_path: Path) -> None:
         # Detect on a path that doesn't exist; gguf extension → heuristic

@@ -34,6 +34,14 @@ def namespace_to_bank(namespace: str) -> str:
     return namespace.replace(":", "__")
 
 
+def bank_to_namespace(bank: str) -> str:
+    """Inverse of :func:`namespace_to_bank` — map a Hindsight bank id back to
+    its hal0 namespace (``private__hermes`` -> ``private:hermes``; ``shared``
+    stays ``shared``). Only the prefix delimiter is rewritten, so agent ids
+    that contain single underscores survive untouched."""
+    return bank.replace("__", ":", 1)
+
+
 class Hal0Reranker:
     """Async reranker over hal0-api's OpenAI surface (Cohere-style ``/v1/rerankings``).
 
