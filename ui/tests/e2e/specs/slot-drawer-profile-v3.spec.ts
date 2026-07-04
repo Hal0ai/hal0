@@ -316,8 +316,10 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     // undiscoverable (can't see WHY it's off; the force-on escape hatch had no
     // UI). The row is now ALWAYS shown on llm slots — for an ineligible model
     // it explains Auto is off and warns before a force-on that would fail at
-    // launch. Fixture model carries neither the tag nor a name marker.
-    const slot = { ...MTP_SLOT, model_id: 'qwen-plain', model: 'qwen-plain' }
+    // launch. Fixture model carries neither the tag nor a name marker, and the
+    // slot has NO override (mtp: null = Auto) — MTP_SLOT's mtp:false would
+    // legitimately select "Off" instead of Auto.
+    const slot = { ...MTP_SLOT, model_id: 'qwen-plain', model: 'qwen-plain', mtp: null }
     await seedSlotsAndModels(page, [slot], [{ id: 'qwen-plain', name: 'qwen-plain', capabilities: ['chat'], tags: ['rocmfp4'] }])
     await page.route('**/api/slots/chat/config', async (route) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
