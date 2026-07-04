@@ -53,7 +53,7 @@ from hal0.config.schema import resolve_chat_template, resolve_profile_flags
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
-from hal0.slots.argv import ResolvedArgv, normalize_argv, resolve_argv
+from hal0.slots.argv import ResolvedArgv, resolve_argv
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -335,6 +335,86 @@ def _render_unit_from_spec(
     return _render_unit_from_plan(slot_name, spec, runtime_bin=runtime_bin)
 
 
+def _llama_argv_segments(
+    *,
+    port: int,
+    model_path: str,
+    model_alias: str | None = None,
+    context_size: int | None = None,
+    profile_flags: str = "",
+    model_defaults: dict[str, Any] | None = None,
+    chat_template_path: str | None = None,
+    mmproj: str | None = None,
+    slot_n_gpu_layers: int | None = None,
+    extra_args: str | None = None,
+) -> list[tuple[str, list[str]]]:
+    """Build the ordered, labelled llama-server argv segments (SINGLE SOURCE).
+
+    Both the launch path (:func:`_llama_launch_plan` → :func:`normalize_argv`)
+    and the preview path (:func:`_resolve_slot_argv` → :func:`resolve_argv`
+    provenance) consume THESE segments, so what an operator previews via
+    ``GET /api/slots`` / ``.../resolved`` is exactly what launches.
+
+    Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
+    LAST occurrence of each canonical flag)::
+
+        base < profile < model_defaults < chat_template < mmproj
+             < slot_overrides < extra_args
+
+    Rationale: profile flags are generic bench-tuning; per-model registry
+    ``defaults`` should override the profile; the chat-template / mmproj the
+    slot+model resolve to come next; a slot-level ``[model].n_gpu_layers`` beats
+    the model default; and a hand-authored ``[server].extra_args`` always wins.
+    """
+    base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
+    if model_path:
+        base += ["--model", model_path]
+    # Advertise the hal0 registry model id (else llama-server reports the raw
+    # GGUF basename, which the dispatcher can't match to hal0/* virtual names).
+    if model_alias:
+        base += ["--alias", str(model_alias)]
+    # Slot context window (always resolved by _resolve_context_size — never let
+    # a slot silently inherit llama-server's 4096 default).
+    if context_size is not None:
+        base += ["--ctx-size", str(context_size)]
+
+    profile_tokens = shlex.split(profile_flags) if profile_flags and profile_flags.strip() else []
+
+    # Model-registry defaults: shlex-split extra_args + `-ngl <n>` from
+    # defaults.n_gpu_layers. rope_freq_base is intentionally NOT emitted
+    # (reachable via extra_args only — see ModelDefaults deprecation note).
+    md_tokens: list[str] = []
+    if model_defaults:
+        md_extra = model_defaults.get("extra_args")
+        if md_extra and str(md_extra).strip():
+            md_tokens += shlex.split(str(md_extra))
+        md_ngl = model_defaults.get("n_gpu_layers")
+        if md_ngl is not None:
+            md_tokens += ["-ngl", str(int(md_ngl))]
+
+    chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
+    mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
+
+    # Slot-level [model].n_gpu_layers (schema default -1 = unset). Emitted just
+    # before extra_args so it beats the model default but a manual -ngl in
+    # extra_args still wins.
+    slot_override_tokens: list[str] = []
+    if slot_n_gpu_layers is not None and int(slot_n_gpu_layers) >= 0:
+        slot_override_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
+
+    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
+
+    return [
+        ("base", base),
+        ("profile", profile_tokens),
+        ("model_defaults", md_tokens),
+        ("chat_template", chat_tokens),
+        ("mmproj", mmproj_tokens),
+        ("slot_overrides", slot_override_tokens),
+        ("extra_args", extra_tokens),
+    ]
+
+
 def _llama_launch_plan(
     *,
     image: str,
@@ -348,43 +428,37 @@ def _llama_launch_plan(
     model_alias: str | None = None,
     chat_template_path: str | None = None,
     mmproj: str | None = None,
+    model_defaults: dict[str, Any] | None = None,
+    slot_n_gpu_layers: int | None = None,
+    env: dict[str, str] | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
     Single source of the llama-server launch shape — used by both
     :meth:`ContainerProvider.container_spec` (the load path) and the
-    :func:`_render_unit` scalar shim.  llama-server takes space-separated
-    args (``--host HOST``), so they go in ``command`` after the image.
+    :func:`_render_unit` scalar shim.  The in-container argv is assembled from
+    :func:`_llama_argv_segments` and collapsed by :func:`normalize_argv`
+    (last-wins, effective-value-preserving) so cross-segment duplicates become
+    one auditable source of truth.  llama-server takes space-separated args
+    (``--host HOST``), so they go in ``command`` after the image.
     """
-    flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
-    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
-
-    command: list[str] = ["--host", "0.0.0.0", "--port", str(port), "--model", model_path]
-    # Advertise the hal0 registry model id (else llama-server reports the raw
-    # GGUF basename, which the dispatcher can't match to hal0/* virtual names).
-    if model_alias:
-        command += ["--alias", model_alias]
-    # Slot context window (else llama-server defaults to 4096).
-    if context_size is not None:
-        command += ["--ctx-size", str(context_size)]
-    # Bench-tuned profile flags, then chat-template (resolved from slot/model),
-    # then [server].extra_args (slot wins — a manual --chat-template-file in
-    # extra_args can override the resolved one since it follows).
-    command += flag_tokens
-    if chat_template_path:
-        command += ["--chat-template-file", chat_template_path]
-    # Vision projector: --mmproj loads the multimodal projector so the model
-    # can accept images. Mirrors the native llama_server.py provider. Placed
-    # before extra_tokens so a manual --mmproj in [server].extra_args can win.
-    if mmproj:
-        command += ["--mmproj", mmproj]
-    command += extra_tokens
-
-    # Collapse cross-segment duplicates (profile flags vs [server].extra_args vs
-    # toggle-derived flags) to one source of truth: last-wins dedup, which is
-    # effective-value-preserving because llama-server already used the last
-    # occurrence. See hal0.slots.argv.normalize_argv.
-    command = normalize_argv(command).argv
+    segments = _llama_argv_segments(
+        port=port,
+        model_path=model_path,
+        model_alias=model_alias,
+        context_size=context_size,
+        profile_flags=flags_str,
+        model_defaults=model_defaults,
+        chat_template_path=chat_template_path,
+        mmproj=mmproj,
+        slot_n_gpu_layers=slot_n_gpu_layers,
+        extra_args=extra_args,
+    )
+    # resolve_argv over the labelled segments is argv-equivalent to
+    # normalize_argv over the flat concatenation (pinned by tests/slots/
+    # test_argv.py::test_resolve_argv_equivalent_argv_to_normalize), so launch
+    # and preview render byte-identical commands.
+    command = resolve_argv(segments).argv
 
     # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
     # default /mnt/ai-models). Mounted identical-path, read-only, with an
@@ -394,6 +468,9 @@ def _llama_launch_plan(
     return RuntimeLaunchPlan(
         image=image,
         command=command,
+        # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
+        # operators can tune the runtime without forking the image.
+        env=dict(env) if env else {},
         mounts=[Mount(model_store, model_store, read_only=True, selinux="z")],
         devices=list(devices),
         group_add=list(group_ids),
@@ -507,6 +584,72 @@ def _resolve_context_size(explicit: int | None, model_info: dict[str, Any]) -> i
     return _CTX_SAFE_FALLBACK
 
 
+def _resolve_llama_scalars(
+    slot_cfg: dict[str, Any],
+    model_info: dict[str, Any],
+    profile: Any,
+) -> dict[str, Any]:
+    """Resolve every llama-server launch scalar for a slot+model+profile.
+
+    SINGLE SOURCE for both the launch path (:meth:`ContainerProvider.container_spec`)
+    and the preview path (:func:`_resolve_slot_argv`): profile flags (MTP-expanded
+    via the slot ``mtp`` override), the always-resolved context size, the
+    registry model alias, the resolved chat-template file path, the vision-gated
+    mmproj sidecar, the per-model registry ``defaults`` bundle, the slot-level
+    ``[model].n_gpu_layers`` override, and the ``[server]`` env / extra_args.
+    Returning one dict means the two paths can never drift.
+    """
+    image, flags_str = _profile_image_and_flags(profile, slot_cfg.get("mtp"))
+
+    model_table = slot_cfg.get("model") or {}
+    if not isinstance(model_table, dict):
+        model_table = {}
+    context_size = _resolve_context_size(model_table.get("context_size"), model_info)
+
+    server_table = slot_cfg.get("server") or {}
+    if not isinstance(server_table, dict):
+        server_table = {}
+    extra_args = server_table.get("extra_args")
+    server_env = server_table.get("env")
+    if not isinstance(server_env, dict):
+        server_env = None
+
+    # Registry model id → llama-server --alias so the container advertises the
+    # hal0 id (not the raw GGUF basename) for dispatcher matching.
+    model_alias = model_info.get("_model_key") or model_table.get("default") or None
+
+    # Resolve chat template: slot override > model defaults.chat_template > None.
+    # None/'auto' = GGUF-embedded template (no --chat-template-file flag).
+    tmpl_id = resolve_chat_template(slot_cfg, model_info)
+    chat_template_path = (
+        str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja") if tmpl_id else None
+    )
+
+    # Vision projector sidecar, gated by the per-slot ``vision`` toggle (#901).
+    mmproj = model_info.get("mmproj")
+    if not slot_cfg.get("vision", True):
+        mmproj = None
+
+    defaults = model_info.get("defaults")
+    model_defaults = defaults if isinstance(defaults, dict) else None
+
+    slot_n_gpu_layers = model_table.get("n_gpu_layers")
+
+    return {
+        "image": str(image),
+        "flags_str": str(flags_str),
+        "context_size": context_size,
+        "extra_args": extra_args,
+        "server_env": server_env,
+        "model_alias": model_alias,
+        "chat_template_path": chat_template_path,
+        "mmproj": str(mmproj) if mmproj else None,
+        "model_defaults": model_defaults,
+        "slot_n_gpu_layers": slot_n_gpu_layers,
+        "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
+    }
+
+
 class ContainerProvider(Provider):
     """Podman-container-per-slot inference backend.
 
@@ -551,64 +694,48 @@ class ContainerProvider(Provider):
 
         This is the load path for GPU slots: :meth:`load_sync` resolves the
         provider, calls ``container_spec``, and hands the plan to the single
-        renderer.  The plan is complete — registry alias, slot ``context_size``,
-        ``[server].extra_args``, the read-only model-store mount, and the
-        health-check override are all included, so what loads matches what the
-        plan describes (no GPU-special argv assembly elsewhere).
+        renderer.  The plan is complete — registry alias, model-registry
+        ``defaults``, slot ``context_size``, chat-template, mmproj,
+        ``[server].env``/``extra_args``, the read-only model-store mount, and
+        the health-check override are all included, so what loads matches what
+        the plan describes (no GPU-special argv assembly elsewhere).
+
+        GPU device nodes + group GIDs are included ONLY for gpu/img profiles
+        and are existence-filtered — a cpu (or npu) ``device_class`` profile
+        gets no ``/dev/kfd`` / ``/dev/dri`` passthrough or ``--group-add``.
         """
         profile_name = slot_cfg.get("profile") or ""
-        image, flags_str = _profile_image_and_flags(
-            _resolve_profile(profile_name), slot_cfg.get("mtp")
-        )
+        profile = _resolve_profile(profile_name)
+        scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
 
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))
 
-        model_table = slot_cfg.get("model") or {}
-        context_size = _resolve_context_size(
-            model_table.get("context_size") if isinstance(model_table, dict) else None,
-            model_info,
-        )
-        server_table = slot_cfg.get("server") or {}
-        extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
-        # Registry model id → llama-server --alias so the container advertises
-        # the hal0 id (not the raw GGUF basename) for dispatcher matching.
-        model_alias = model_info.get("_model_key") or (
-            model_table.get("default") if isinstance(model_table, dict) else None
-        )
-
-        # Resolve chat template: slot override > model defaults.chat_template > None.
-        # None/'auto' = use GGUF-embedded template (no --chat-template-file flag).
-        # Templates live at <model_store_root>/chat-templates/<id>.jinja and are
-        # mounted identical-path into the container, so the host path == container path.
-        tmpl_id = resolve_chat_template(slot_cfg, model_info)
-        chat_template_path = (
-            str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja")
-            if tmpl_id
-            else None
-        )
-
-        # Vision projector sidecar associated with the model in the registry
-        # (#899). Bind-mounted at its identical host path, so the container sees
-        # the same path. None for text-only models — no flag emitted. Gated by
-        # the per-slot ``vision`` toggle (#901, default-on): vision=false boots
-        # the slot text-only even when a sidecar exists.
-        mmproj = model_info.get("mmproj")
-        if not slot_cfg.get("vision", True):
-            mmproj = None
+        # GPU plumbing gate (#674/CPU-profile fix): only gpu/img profiles get
+        # device nodes + group GIDs, and only device paths that actually exist
+        # on this host are passed (podman errors on a non-existent --device).
+        if scalars["device_class"] in ("gpu", "img"):
+            devices = [p for p in resolve_gpu_device_paths() if os.path.exists(p)]
+            group_ids = [str(g) for g in resolve_gpu_group_ids()]
+        else:
+            devices = []
+            group_ids = []
 
         return _llama_launch_plan(
-            image=image,
+            image=scalars["image"],
             port=port,
             model_path=model_path,
-            flags_str=flags_str,
-            devices=list(resolve_gpu_device_paths()),
-            group_ids=[str(g) for g in resolve_gpu_group_ids()],
-            context_size=context_size,
-            extra_args=extra_args,
-            model_alias=model_alias,
-            chat_template_path=chat_template_path,
-            mmproj=str(mmproj) if mmproj else None,
+            flags_str=scalars["flags_str"],
+            devices=devices,
+            group_ids=group_ids,
+            context_size=scalars["context_size"],
+            extra_args=scalars["extra_args"],
+            model_alias=scalars["model_alias"],
+            chat_template_path=scalars["chat_template_path"],
+            mmproj=scalars["mmproj"],
+            model_defaults=scalars["model_defaults"],
+            slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+            env=scalars["server_env"],
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -623,7 +750,7 @@ class ContainerProvider(Provider):
         """Run a subprocess synchronously (load/unload are blocking ops anyway)."""
         return subprocess.run(list(args), capture_output=True, text=True, check=check)
 
-    async def health(self, port: int) -> dict[str, Any]:
+    async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         """Probe GET /health on the container port.
 
         For llama-server slots /health returns 200 when ready.
@@ -632,6 +759,18 @@ class ContainerProvider(Provider):
         body is JSON and carries a ``model_loaded`` key, ok is gated on
         ``model_loaded is True``. Bodies without the key (llama-server) keep
         the plain-200 behavior.
+
+        FLM Tier-1 delegation: when ``slot_cfg`` is supplied and the slot
+        resolves to :class:`~hal0.providers.flm.FLMProvider` (via
+        :func:`_spec_provider_for`), delegate to that provider's health probe —
+        a real ``/v1/chat/completions`` round-trip (non-empty /v1/models is a
+        known-insufficient check for a wedged NPU). The probe distinguishes
+        "up but still loading" (ok=False, status ``models_endpoint_empty`` /
+        ``sentinel_completion_*``) from "dead" (transport error), preserving
+        FLMProvider.health's semantics for the manager's strike-based
+        fail-watcher. Callers without slot context (the legacy port-only path)
+        keep the weak /v1/models fallback below.
+
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to
         GET /v1/models; 200 there means the server is up and healthy.
@@ -639,6 +778,16 @@ class ContainerProvider(Provider):
 
         Returns {"ok": bool, "status": str}.
         """
+        if slot_cfg is not None:
+            try:
+                provider = _spec_provider_for(slot_cfg)
+            except Exception:
+                provider = None
+            from hal0.providers.flm import FLMProvider
+
+            if isinstance(provider, FLMProvider):
+                return await provider.health(port)
+
         health_url = f"http://127.0.0.1:{port}/health"
         models_url = f"http://127.0.0.1:{port}/v1/models"
         try:
@@ -1005,6 +1154,43 @@ def resolved_command_for_slot(
     return [image, *result.argv]
 
 
+def _best_effort_model_info(
+    slot_cfg: dict[str, Any],
+    model_path: str | None = None,
+) -> dict[str, Any]:
+    """Best-effort model-registry entry for the preview path.
+
+    The preview builders (:func:`resolved_command_for_slot` /
+    :func:`resolved_argv_detail_for_slot`) run without a live model download and
+    are called with only the slot cfg. To render the SAME argv the launch path
+    would (model registry ``defaults``, mmproj sidecar, native context window,
+    chat-template), look the model up in the registry — but never raise: a miss
+    or an un-wired registry degrades to a minimal ``{_model_key, path}`` dict,
+    exactly the best-effort contract the launch path's ``_resolve_model_path``
+    already tolerates.
+    """
+    model_table = slot_cfg.get("model") or {}
+    model_id = (
+        model_table.get("default", "") if isinstance(model_table, dict) else str(model_table)
+    ) or ""
+    info: dict[str, Any] = {}
+    if model_id:
+        info["_model_key"] = model_id
+        try:
+            from hal0.registry.store import ModelRegistry
+
+            model = ModelRegistry().get(model_id)
+            dump = model.model_dump() if hasattr(model, "model_dump") else dict(model)
+            info.update(dump)
+        except Exception:
+            # Registry miss / un-wired / stub — minimal info is fine for preview.
+            pass
+    effective = model_path or info.get("path") or model_id
+    if effective:
+        info["path"] = str(effective)
+    return info
+
+
 def _resolve_slot_argv(
     slot_cfg: dict[str, Any],
     model_path: str | None = None,
@@ -1013,49 +1199,39 @@ def _resolve_slot_argv(
 
     Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
     excluded) plus per-flag provenance — or ``None`` when the slot has no
-    profile / the profile lookup fails. Segments are ordered lowest-precedence
-    first (base < profile < extra_args) so ``resolve_argv``'s last-wins matches
-    the launch path: a flag in ``[server].extra_args`` overrides the profile.
+    profile / the profile lookup fails. Consumes the SAME
+    :func:`_llama_argv_segments` builder and :func:`_resolve_llama_scalars`
+    resolver the launch path uses, so the previewed argv (including the mtp
+    override, model-registry defaults, chat-template file, mmproj, slot ngl
+    override, and the always-resolved ctx-size) is byte-identical to what
+    :meth:`ContainerProvider.container_spec` would launch.
     """
     profile_name = str(slot_cfg.get("profile") or "")
     if not profile_name:
         return None
     try:
-        image, flags_str = _profile_image_and_flags(_resolve_profile(profile_name))
+        profile = _resolve_profile(profile_name)
+        model_info = _best_effort_model_info(slot_cfg, model_path)
+        scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
     except Exception:
         return None
 
-    flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
-
     # port: may be at top-level or nested under [slot]
     port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
-    # model lives under [model] default (nested TOML table), not as a top-level string
-    model_table = slot_cfg.get("model") or {}
-    default_model = (
-        model_table.get("default", "") if isinstance(model_table, dict) else str(model_table)
-    )
-    effective_model = model_path or str(default_model or "")
-    context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
-    server_table = slot_cfg.get("server") or {}
-    extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
-    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
-    base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
-    if effective_model:
-        base += ["--model", effective_model]
-    if default_model:
-        base += ["--alias", str(default_model)]
-    if context_size is not None:
-        base += ["--ctx-size", str(context_size)]
-
-    result = resolve_argv(
-        [
-            ("base", base),
-            ("profile", flag_tokens),
-            ("extra_args", extra_tokens),
-        ]
+    segments = _llama_argv_segments(
+        port=port,
+        model_path=str(model_info.get("path") or ""),
+        model_alias=scalars["model_alias"],
+        context_size=scalars["context_size"],
+        profile_flags=scalars["flags_str"],
+        model_defaults=scalars["model_defaults"],
+        chat_template_path=scalars["chat_template_path"],
+        mmproj=scalars["mmproj"],
+        slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+        extra_args=scalars["extra_args"],
     )
-    return image, result
+    return str(scalars["image"]), resolve_argv(segments)
 
 
 def resolved_argv_detail_for_slot(
@@ -1066,9 +1242,10 @@ def resolved_argv_detail_for_slot(
 
     Returns ``{"argv", "provenance", "removed"}`` where ``provenance`` lists each
     surviving flag with the segment that set its final value (``base`` /
-    ``profile`` / ``extra_args``) — so an operator can see exactly which source
-    won each flag and how many duplicates were collapsed. ``None`` for a slot
-    with no profile.
+    ``profile`` / ``model_defaults`` / ``chat_template`` / ``mmproj`` /
+    ``slot_overrides`` / ``extra_args``) — so an operator can see exactly which
+    source won each flag and how many duplicates were collapsed. The UI renders
+    these labels generically. ``None`` for a slot with no profile.
     """
     resolved = _resolve_slot_argv(slot_cfg, model_path)
     if resolved is None:

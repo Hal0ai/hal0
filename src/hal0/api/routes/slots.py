@@ -32,7 +32,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
-from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.model_meta import device_to_backend, is_resolvable
 from hal0.slot_view import (
     SlotViewAggregator,
@@ -42,7 +42,7 @@ from hal0.slot_view import (
     serialize_slot,
     synthesize_upstream_entries,
 )
-from hal0.slots.manager import Slot, SlotManager
+from hal0.slots.manager import Slot, SlotManager, _cfg_effective_backend
 
 # Auth was removed in ADR-0012. All routes are open on the local network.
 
@@ -227,18 +227,46 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     return [view.to_dict() for view in await aggregator.snapshot()]
 
 
-def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
-    """Return the next free port in the slots range (#275 bug 2).
+def _slot_port_range() -> tuple[int, int]:
+    """Resolve the slot port pool: hal0.toml ``[slots]`` or the schema pool.
+
+    ``SlotsConfig.port_range_start/end`` default to ``_SLOT_PORT_MIN`` ..
+    ``_SLOT_PORT_POOL_END`` (8081..8099) — the AUTO-ALLOCATION pool, kept
+    deliberately below ComfyUI's 8188 so fresh slots never squat on it.
+    Per-slot ``port`` validation still allows up to ``_SLOT_PORT_MAX``
+    (8200) for explicit operator choices. An operator ``[slots]``
+    ``port_range_start/end`` in hal0.toml narrows/moves/widens the pool.
+    Falls back to the pool constants when hal0.toml is unreadable.
+    """
+    from hal0.config.schema import _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
+
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        slots_cfg = load_hal0_config().slots
+        return int(slots_cfg.port_range_start), int(slots_cfg.port_range_end)
+    except Exception:
+        return _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
+
+
+def _next_free_slot_port(start: int | None = None, end: int | None = None) -> int:
+    """Return the next free port in the configured slot range (#275 bug 2).
 
     Walks ``/etc/hal0/slots/*.toml`` collecting both top-level ``port``
     and nested ``[server] port`` values. Returns the lowest port in
-    ``[start, end]`` not already claimed. The default range matches
-    PLAN.md §2; callers thread ``[slots].port_range_start/end`` from the
-    live config so the pool is operator-tunable.
+    ``[start, end]`` not already claimed. The bounds default to the
+    configured pool (hal0.toml ``[slots] port_range_start/end``); callers
+    with the live config in hand may thread the bounds explicitly to
+    avoid a disk read.
     """
     import tomllib
 
     from hal0.config.paths import slots_config_dir
+
+    if start is None or end is None:
+        cfg_start, cfg_end = _slot_port_range()
+        start = cfg_start if start is None else start
+        end = cfg_end if end is None else end
 
     used: set[int] = set()
     slots_dir = slots_config_dir()
@@ -266,11 +294,37 @@ def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
     )
 
 
+def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write body carries keys the schema doesn't know.
+
+    ``SlotConfig``/``ModelConfig``/``ServerConfig`` are ``extra="allow"`` so a
+    typo'd key (``ctx_sizee``, ``enabeld``) used to persist to TOML silently
+    and the intended setting never took effect. The boundary now validates
+    against :func:`hal0.slot_config.unknown_slot_config_keys` (field sets
+    derived dynamically from the pydantic models, tolerating the documented
+    legacy aliases like ``[model].ctx_size`` and the string ``image``
+    override) and rejects unknown keys with the paths listed.
+    """
+    from hal0.slot_config import unknown_slot_config_keys
+
+    unknown = unknown_slot_config_keys(payload)
+    if unknown:
+        raise BadRequest(
+            "unknown slot config key(s): " + ", ".join(unknown),
+            details={
+                "unknown_keys": unknown,
+                "hint": "check spelling against the SlotConfig schema "
+                "(known sub-tables: [model], [server], [npu], [image])",
+            },
+            code="validation.unknown_keys",
+        )
+
+
 def _normalize_create_body(
     body: dict[str, Any],
     *,
-    port_start: int = 8081,
-    port_end: int = 8099,
+    port_start: int | None = None,
+    port_end: int | None = None,
 ) -> dict[str, Any]:
     """Normalize a POST /api/slots body to the canonical nested shape.
 
@@ -348,9 +402,10 @@ async def create_slot(request: Request) -> dict[str, object]:
 
     body = _normalize_create_body(
         body,
-        port_start=int(getattr(slots_cfg, "port_range_start", 8081) or 8081),
-        port_end=int(getattr(slots_cfg, "port_range_end", 8099) or 8099),
+        port_start=(int(slots_cfg.port_range_start) if slots_cfg else None),
+        port_end=(int(slots_cfg.port_range_end) if slots_cfg else None),
     )
+    _reject_unknown_config_keys(body)
     async with record_action(
         request,
         category="slot",
@@ -926,6 +981,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+    _reject_unknown_config_keys(body)
     before = await _safe_config(sm, name)
     async with record_action(
         request, category="slot", action="slot.edit_config", target=name, before=before
@@ -955,10 +1011,13 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
 
 @router.patch("/{name}/defaults")
 async def update_slot_defaults(name: str, request: Request) -> dict[str, object]:
-    """Update slot defaults (ctx_size, temperature, etc.).
+    """Update slot defaults (ctx_size / context_size, n_gpu_layers, …).
 
     Convenience wrapper over update_config — body keys merge into the
-    slot's [model] sub-table rather than the top level.
+    slot's [model] sub-table rather than the top level. Keys are validated
+    against the ModelConfig schema (plus the documented ``ctx_size``
+    alias); unknown keys 400 with ``validation.unknown_keys``. Provider-
+    specific params belong under ``extra`` (passed through verbatim).
     """
     sm = _get_slot_manager(request)
     try:
@@ -971,6 +1030,9 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+    # Defaults merge into [model] — validate the wrapped shape so unknown
+    # keys surface as their real destination path (``model.<key>``).
+    _reject_unknown_config_keys({"model": body})
     before = await _safe_config(sm, name)
     async with record_action(
         request, category="slot", action="slot.edit_defaults", target=name, before=before
@@ -980,31 +1042,23 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     return _slot_to_dict(snap, request)
 
 
-# Map a normalized runtime-backend token to the SlotConfig ``device`` enum
-# the TOML persists. ``auto`` clears the device so the load path falls back
-# to its default. flm/npu are not selectable through this control (they
-# require a profile switch, not a device flip).
-_BACKEND_TO_DEVICE: dict[str, str | None] = {
-    "rocm": "gpu-rocm",
-    "vulkan": "gpu-vulkan",
-    "cpu": "cpu",
-    "auto": None,
-}
+def _selectable_backend_devices() -> dict[str, str | None]:
+    """Selectable backend token → SlotConfig ``device`` enum for the TOML.
 
-# Container images supply the backend builds; a missing image surfaces as
-# ``image_status="missing"`` on the slot card and pulls on demand, so no
-# on-disk build-presence validation is needed here.
-_BACKEND_BUILD_BIN: dict[str, str] = {}
-
-
-def _backend_build_present(backend: str) -> bool:
-    """Backend builds ship inside container images — always present.
-
-    Kept as a seam (module-level, monkeypatchable) for tests and for any
-    future host-side build requirement.
+    Derived from the single schema map (``config.schema.BACKEND_TO_DEVICE``)
+    rather than a duplicated literal, so the two can't drift; only the
+    ``auto`` → ``None`` entry (clear the device so the load path falls back
+    to its default) is endpoint-local. flm/npu are not selectable through
+    this control (they require a recipe/profile switch, not a device flip).
     """
-    del backend
-    return True
+    from hal0.config.schema import BACKEND_TO_DEVICE
+
+    return {
+        "rocm": BACKEND_TO_DEVICE["rocm"],
+        "vulkan": BACKEND_TO_DEVICE["vulkan"],
+        "cpu": BACKEND_TO_DEVICE["cpu"],
+        "auto": None,
+    }
 
 
 def _normalize_backend_token(raw: str) -> str:
@@ -1034,18 +1088,24 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     ``update_config`` (which auto-refreshes the mirrored ``extra.backend``);
     if the slot is currently loaded it is restarted so the model reloads
     under the new backend. Idempotent — when the requested backend already
-    equals the declared device (and, when loaded, the actual backend) it is
-    a no-op with ``reloaded: false``.
+    equals the declared device (and, when loaded, the effective backend) it
+    is a no-op with ``reloaded: false``.
 
-    Validation:
-      - ``rocm``/``vulkan`` → 409 ``backend.build_missing`` when the build's
-        ``llama-server`` binary is absent.
-      - ``cpu`` and ``auto`` are always valid.
-      - ``flm``/``npu`` → 400 ``backend.not_selectable``.
+    Validation: ``rocm``/``vulkan``/``cpu``/``auto`` are valid (backend
+    builds ship inside the container images — a missing image surfaces as
+    ``image_status="missing"`` on the slot card and pulls on demand, so
+    there is no host-side build-presence check); ``flm``/``npu`` → 400
+    ``backend.not_selectable``.
 
-    Response 200: the standard ``_slot_to_dict`` payload plus
-    ``requested_backend`` / ``declared_backend`` / ``actual_backend`` /
-    ``reloaded``.
+    Response 200: the standard ``_slot_to_dict`` payload plus the ADR-0022
+    declared/effective snapshot — ``requested_backend`` /
+    ``declared_backend`` / ``effective_backend`` / ``device`` / ``profile``
+    / ``reloaded``. ``actual_backend`` is kept for wire back-compat
+    (ui useSlots.ts) and carries the same EFFECTIVE backend token, derived
+    from the post-write config (device → backend via the single
+    ``_cfg_effective_backend`` mapping); per-process introspection was
+    retired with the legacy runtime (#663 — the running image is the
+    backend-of-record, surfaced as ``actual_image``).
     """
     sm = _get_slot_manager(request)
     try:
@@ -1078,22 +1138,14 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
             "(NPU/FLM requires a recipe change, not a backend flip)",
             code="backend.not_selectable",
         )
-    if backend not in _BACKEND_TO_DEVICE:
+    backend_to_device = _selectable_backend_devices()
+    if backend not in backend_to_device:
         raise BadRequest(
             f"backend {backend!r} is not recognised; choose from rocm|vulkan|cpu|auto",
             code="backend.not_selectable",
         )
 
-    # Build-presence validation for the GPU backends.
-    if not _backend_build_present(backend):
-        bin_path = _BACKEND_BUILD_BIN.get(backend)
-        raise Conflict(
-            f"backend {backend!r} build is not installed ({bin_path} missing)",
-            details={"backend": backend, "expected_binary": bin_path},
-            code="backend.build_missing",
-        )
-
-    target_device = _BACKEND_TO_DEVICE[backend]
+    target_device = backend_to_device[backend]
 
     # Determine current declared device + whether the slot is loaded, so we
     # can short-circuit an idempotent no-op and decide whether to restart.
@@ -1103,6 +1155,11 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     # the idempotency comparison).
     _recipe, _llamacpp = device_to_backend(current_device)
     current_declared = _llamacpp or (_recipe if _recipe == "flm" else None)
+    # EFFECTIVE backend for the current config: device-derived (with the
+    # legacy ``backend``-field fallback) via the single shared mapping —
+    # what the container will actually run under. This fills the ADR-0022
+    # declared/actual contract honestly instead of a hardcoded None.
+    current_effective = _cfg_effective_backend(cfg) if isinstance(cfg, dict) else None
 
     # Is the slot currently loaded? Container truth is the slot's
     # lifecycle state; per-process backend introspection retired with the
@@ -1112,21 +1169,25 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
         is_loaded = bool(sm.is_ready_for_dispatch(name))
     except Exception:
         is_loaded = False
-    actual_backend = None
 
     # Idempotency: the requested backend already equals the declared device,
-    # AND (when loaded) the actual backend already matches → no-op.
+    # AND (when loaded) the effective backend already matches → no-op.
+    # ``auto`` has no requested token to compare, so declared-match decides.
     requested_declared = device_to_backend(target_device)[1] if target_device else None
     already_declared = current_device == (target_device or "")
-    already_actual = (
-        (not is_loaded) or (actual_backend is None) or (actual_backend == requested_declared)
+    already_effective = (
+        (not is_loaded) or (requested_declared is None) or (current_effective == requested_declared)
     )
-    if already_declared and already_actual:
+    if already_declared and already_effective:
         snap = await sm.status(name)
         out = _slot_to_dict(snap, request)
         out["requested_backend"] = backend
         out["declared_backend"] = current_declared
-        out["actual_backend"] = actual_backend if actual_backend else None
+        out["effective_backend"] = current_effective
+        # Back-compat alias — carries the effective value now (see docstring).
+        out["actual_backend"] = current_effective
+        out["device"] = current_device or None
+        out["profile"] = cfg.get("profile") if isinstance(cfg, dict) else None
         out["reloaded"] = False
         return out
 
@@ -1152,15 +1213,21 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
 
     snap = await sm.status(name)
     out = _slot_to_dict(snap, request)
-    # Recompute declared/actual from the post-change state.
+    # Recompute the declared/effective snapshot from the post-change config
+    # so the response reports {declared_backend, effective_backend, device,
+    # profile} coherently for what will actually run.
     new_cfg = await sm.get_config(name)
     new_device = (new_cfg.get("device") if isinstance(new_cfg, dict) else None) or ""
     _nrecipe, _nllamacpp = device_to_backend(new_device)
     new_declared = _nllamacpp or (_nrecipe if _nrecipe == "flm" else None)
-    new_actual = None
+    new_effective = _cfg_effective_backend(new_cfg) if isinstance(new_cfg, dict) else None
     out["requested_backend"] = backend
     out["declared_backend"] = new_declared
-    out["actual_backend"] = new_actual if new_actual else None
+    out["effective_backend"] = new_effective
+    # Back-compat alias — carries the effective value now (see docstring).
+    out["actual_backend"] = new_effective
+    out["device"] = new_device or None
+    out["profile"] = new_cfg.get("profile") if isinstance(new_cfg, dict) else None
     out["reloaded"] = reloaded
     return out
 

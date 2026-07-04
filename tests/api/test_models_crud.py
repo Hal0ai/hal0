@@ -61,7 +61,9 @@ def container_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     def is_active(self: ContainerProvider, slot_name: str) -> bool:
         return slot_name in state["active"]
 
-    async def health(self: ContainerProvider, port: int) -> dict[str, Any]:
+    async def health(
+        self: ContainerProvider, port: int, slot_cfg: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return {"ok": True, "status": 200}
 
     async def wait_ready(self: ContainerProvider, port: int) -> None:

@@ -51,11 +51,16 @@ _DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
 # at the binary. ENTRYPOINT runs the in-image flm via tini, so the
 # container_spec only supplies the subcommand + args.
 #
-# _DEFAULT_FLM_ROOT below is retained ONLY for the non-container fallback
-# path used by start_cmd() (native systemd runs, tests, debug shells).
-# Container runs no longer reference it.
-_IMAGE_FLM_ROOT = "/opt/fastflowlm"
-_DEFAULT_FLM_ROOT = "/opt/hal0/flm-ubuntu"
+# Two distinct FLM install roots — kept clearly named so they never get
+# confused again:
+#   * _CONTAINER_FLM_ROOT — where the toolbox IMAGE bundles FLM (binary, libs,
+#     xclbins, share assets). Used only to build the container's env
+#     (FLM_CONFIG_PATH / LD_LIBRARY_PATH) in container_spec().
+#   * _NATIVE_FLM_ROOT — where a HOST/native FLM tree lives for the non-
+#     container fallback path used by start_cmd() (native systemd runs, tests,
+#     debug shells). Container runs never reference it.
+_CONTAINER_FLM_ROOT = "/opt/fastflowlm"
+_NATIVE_FLM_ROOT = "/opt/hal0/flm-ubuntu"
 # FLM's per-user model cache. Bind-mounted writable so `flm pull` downloads
 # survive container restarts. (Still used by the serving container_spec below.)
 _DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/.config/flm/models"
@@ -193,7 +198,7 @@ class FLMProvider(Provider):
         Used by tests and the fallback systemd-without-Docker path. The
         primary deployment path is ``container_spec``.
         """
-        binary = os.environ.get("HAL0_FLM_BINARY", f"{_DEFAULT_FLM_ROOT}/bin/flm")
+        binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
         argv = [
             binary,
             "serve",
@@ -292,7 +297,7 @@ class FLMProvider(Provider):
             env={
                 # Image-internal paths (the Dockerfile installs FLM at
                 # /opt/fastflowlm and XRT at /opt/xilinx/xrt).
-                "FLM_CONFIG_PATH": f"{_IMAGE_FLM_ROOT}/share/flm/model_list.json",
+                "FLM_CONFIG_PATH": f"{_CONTAINER_FLM_ROOT}/share/flm/model_list.json",
                 # Docker `--env LD_LIBRARY_PATH=...` REPLACES the image ENV
                 # set by the Dockerfile rather than augmenting it, so we
                 # must spell out every path here even though the image's
@@ -300,7 +305,7 @@ class FLMProvider(Provider):
                 # (XRT runtime) and the FLM libs (libllama_npu.so &c, dlopen'd
                 # when models load) both need to be findable; missing either
                 # crashes /usr/local/bin/flm at startup before main().
-                "LD_LIBRARY_PATH": f"{_IMAGE_FLM_ROOT}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
+                "LD_LIBRARY_PATH": f"{_CONTAINER_FLM_ROOT}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
             },
             mounts=mounts,
             # /dev/accel/accel0: XDNA2 NPU. /dev/dri/renderD128: iGPU companion.
@@ -424,15 +429,16 @@ class FLMProvider(Provider):
 # hal0.capabilities.catalog, which calls flm_served_models() to learn
 # which model tags the NPU advertises.
 #
-# Design call (2026-05-20): cache the probe result until process restart.
-# Toolbox image upgrades require an hal0-api restart anyway, and the
-# catalog refresh path is rare enough that a TTL would add complexity
-# without buying us much. Tests + a future manual-refresh CLI can call
-# reset_flm_catalog_cache() to invalidate.
-
+# Design call: cache the probe result with a short TTL. A `flm pull` (or a
+# toolbox/host FLM upgrade) changes what's installed WITHOUT restarting
+# hal0-api, so a restart-only cache would show a stale catalog for the rest of
+# the process lifetime. A 5-minute TTL bounds that staleness cheaply; tests and
+# the force-refresh CLI/UI hook call reset_flm_catalog_cache() to invalidate
+# immediately.
+_FLM_CATALOG_TTL_S = 300.0
 
 _FLM_CATALOG_CACHE: list[dict[str, Any]] | None = None
-_FLM_PROBE_OK: bool = False
+_FLM_CATALOG_CACHED_AT: float = 0.0
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -562,19 +568,22 @@ def flm_served_models() -> list[dict[str, Any]]:
             "family":       "embed-gemma",       # details.family — useful for grouping
         }
 
-    Cached at module scope on first successful probe; subsequent calls
-    are O(1). On probe failure the result is an empty list (also
-    cached) so the catalog still renders — call
-    :func:`reset_flm_catalog_cache` to force a re-probe.
+    Cached at module scope with a 5-minute TTL (:data:`_FLM_CATALOG_TTL_S`);
+    subsequent calls inside the window are O(1). On probe failure the result is
+    an empty list (also cached, same TTL) so the catalog still renders — call
+    :func:`reset_flm_catalog_cache` to force an immediate re-probe.
     """
-    global _FLM_CATALOG_CACHE, _FLM_PROBE_OK
-    if _FLM_CATALOG_CACHE is not None:
+    import time
+
+    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT
+    now = time.monotonic()
+    if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
         return _FLM_CATALOG_CACHE
 
     raw = _probe_flm_catalog()
     if raw is None:
         _FLM_CATALOG_CACHE = []
-        _FLM_PROBE_OK = False
+        _FLM_CATALOG_CACHED_AT = now
         return _FLM_CATALOG_CACHE
 
     out: list[dict[str, Any]] = []
@@ -597,19 +606,20 @@ def flm_served_models() -> list[dict[str, Any]]:
         )
 
     _FLM_CATALOG_CACHE = out
-    _FLM_PROBE_OK = True
+    _FLM_CATALOG_CACHED_AT = now
     return _FLM_CATALOG_CACHE
 
 
 def reset_flm_catalog_cache() -> None:
-    """Drop the cached FLM catalog so the next call re-probes.
+    """Drop the cached FLM catalog so the next call re-probes immediately.
 
-    Exposed for tests and for a future "refresh catalog" CLI/UI hook.
-    Production code relies on process restart to invalidate.
+    Exposed for tests and for the "refresh catalog" CLI/UI hook. The 5-minute
+    TTL bounds staleness on its own; this forces an out-of-band refresh (e.g.
+    right after a ``flm pull``).
     """
-    global _FLM_CATALOG_CACHE, _FLM_PROBE_OK
+    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT
     _FLM_CATALOG_CACHE = None
-    _FLM_PROBE_OK = False
+    _FLM_CATALOG_CACHED_AT = 0.0
 
 
 def is_flm_tag(model_id: str) -> bool:
@@ -691,7 +701,7 @@ def flm_pull_command(tag: str) -> tuple[list[str], str]:
 
 
 _FLM_PROGRESS_RE = re.compile(
-    r"Downloading:\s*([0-9.]+)%\s*\(([0-9.]+)\s*([KMG]?)B\s*/\s*([0-9.]+)\s*([KMG]?)B\)"
+    r"Downloading:\s*([0-9.]+)%\s*\(([0-9.]+)\s*([KMGT]?)B\s*/\s*([0-9.]+)\s*([KMGT]?)B\)"
 )
 
 
@@ -709,7 +719,7 @@ def parse_flm_progress(line: str) -> tuple[int, int] | None:
     if not m:
         return None
     _pct, cur, cur_unit, tot, tot_unit = m.groups()
-    units = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
+    units = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
     try:
         bytes_downloaded = int(float(cur) * units[cur_unit])
         bytes_total = int(float(tot) * units[tot_unit])

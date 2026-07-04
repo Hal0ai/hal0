@@ -39,7 +39,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
-from hal0.slot_config import merge_slot_config, write_slot_toml
+from hal0.model_meta import SLOT_TYPES
+from hal0.slot_config import (
+    fold_ctx_size_alias,
+    merge_slot_config,
+    slot_write_lock,
+    write_slot_toml,
+)
 from hal0.slots.state import (
     DISPATCHABLE_STATES,
     IllegalSlotTransition,
@@ -104,10 +110,10 @@ SLOT_ALIASES: dict[str, str] = {
     "agent-hermes": "agent",
 }
 
-#: Slot ``type`` vocabulary (plan §4.1).
-_VALID_SLOT_TYPES: frozenset[str] = frozenset(
-    {"llm", "embedding", "reranking", "transcription", "tts", "image"}
-)
+#: Slot ``type`` vocabulary (plan §4.1) — sourced from the canonical
+#: taxonomy (:data:`hal0.model_meta.SLOT_TYPES`) so validation, profiles,
+#: and /api/meta/enums can never drift.
+_VALID_SLOT_TYPES: frozenset[str] = frozenset(SLOT_TYPES)
 
 #: Slot-name policy: kebab-case, max 32 chars, leading alphanumeric.
 _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -121,17 +127,29 @@ _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 # inactive underneath us the watcher flips state and emits an SSE
 # frame within ~1s.
 _FAIL_WATCH_INTERVAL_S: float = 2.0
-#: The "live" states the fail-watcher polls are exactly the dispatchable
-#: ready-set (container up and usable) — alias the one canonical set (DR-8)
-#: rather than re-declaring the literal.
-_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
+#: The "live" states the fail-watcher polls: the dispatchable ready-set
+#: (container up and usable, aliased from the one canonical set — DR-8) PLUS
+#: WARMING. WARMING is watched because a health-wait timeout leaves the slot
+#: parked there indefinitely (see ``_await_ready``); without a watcher a unit
+#: that later dies is never noticed. WARMING gets softer treatment inside the
+#: loop: only the systemd is-active check can strike it (never /health), so a
+#: slot legitimately still loading a large model is never killed.
+_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES | {SlotState.WARMING}
 # #783/B4: an active unit is not necessarily healthy. The watcher also probes
 # the model server's /health; a crashed-but-active server (active unit, failing
 # /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
 # so a single transient blip doesn't trigger a disruptive model reload.
 _HEALTH_FAIL_STRIKES: int = 2
-# Must match the exact flag spellings emitted by ContainerProvider's llama
-# launch renderer; drift checks compare argv text, not llama-server aliases.
+# WARMING-only: consecutive is-active failures before a warming slot is
+# declared dead. Higher than _HEALTH_FAIL_STRIKES because a freshly-spawned
+# unit can legitimately read "activating"/inactive to the probe for a beat or
+# two while podman brings the container up — a warming slot must only be
+# flipped when the unit is *stably* down, never while a big model loads.
+_WARMING_INACTIVE_STRIKES: int = 3
+# Config-drift comparison keys. Spelling no longer needs to match the launch
+# renderer exactly: both sides of the comparison are canonicalized through
+# slots.argv.FLAG_ALIASES (so ``--batch-size`` in a running argv matches a
+# rendered ``-b`` instead of reporting false drift).
 _CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b", "-ub")
 
 # Idle-monitor defaults. A READY slot whose last activity is older than
@@ -730,8 +748,8 @@ class SlotManager:
     def _update_fail_watcher(self, name: str, new_state: SlotState) -> None:
         """Spawn or cancel the per-slot fail-watcher to match ``new_state``.
 
-        Live states (READY/SERVING/IDLE) → ensure a watcher task is running.
-        Any other state → cancel the watcher if present.
+        Live states (READY/SERVING/IDLE/WARMING) → ensure a watcher task is
+        running. Any other state → cancel the watcher if present.
 
         Self-cancellation is a no-op: when the watcher itself fires the
         transition to ERROR, we let it return naturally rather than calling
@@ -770,12 +788,17 @@ class SlotManager:
     async def _fail_watch_loop(self, slot_name: str) -> None:
         """Poll the container unit's is-active and flip state when it dies.
 
-        Runs as a background task while the slot is in READY/SERVING/IDLE.
+        Runs as a background task while the slot is in READY/SERVING/IDLE —
+        or WARMING (the post-health-timeout blind spot): a warming slot is
+        judged ONLY on the unit's is-active (``_WARMING_INACTIVE_STRIKES``
+        consecutive failures), never on /health, so a dead unit is caught
+        while a slot legitimately still loading a large model is left alone.
         Detection latency = up to one poll interval (~2s). Exits cleanly
         once the slot leaves the live-state set, by self-cancel via the
         ERROR transition, or via outer ``task.cancel()``.
         """
         health_failures = 0
+        warming_inactive = 0
         try:
             while True:
                 await asyncio.sleep(_FAIL_WATCH_INTERVAL_S)
@@ -796,6 +819,15 @@ class SlotManager:
                     )
                     continue
                 if active:
+                    warming_inactive = 0
+                    if current is SlotState.WARMING:
+                        # Warming slots are still loading — /health failing is
+                        # the EXPECTED condition, not a crash signal. Only the
+                        # unit's liveness may strike a warming slot, so skip
+                        # the health probe entirely (a big-model load can hold
+                        # /health down for minutes without being wedged).
+                        health_failures = 0
+                        continue
                     # #783/B4: active is necessary but not sufficient. Probe
                     # the model server's /health — a crashed/wedged server is
                     # active to systemd while /health fails, so an is-active-
@@ -834,6 +866,29 @@ class SlotManager:
                 # have moved us legitimately during the probe.
                 current = self._current_state(slot_name)
                 if current not in _FAIL_WATCH_LIVE_STATES:
+                    return
+                if current is SlotState.WARMING:
+                    # A warming slot tolerates a few inactive reads (a
+                    # freshly-spawned unit can look inactive to the probe
+                    # for a beat) but a *stably* dead unit is a real load
+                    # failure — flip to ERROR so the red dot cues the
+                    # operator instead of the slot lying in WARMING forever.
+                    warming_inactive += 1
+                    if warming_inactive < _WARMING_INACTIVE_STRIKES:
+                        continue
+                    try:
+                        await self._transition(
+                            slot_name,
+                            SlotState.ERROR,
+                            message="container unit died while warming",
+                            extra={"health_ok": False},
+                            force=True,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "slot.fail_watch_transition_failed",
+                            extra={"slot": slot_name, "error": str(exc)},
+                        )
                     return
                 # A stopped unit (GPU arbiter handoff, systemd stop,
                 # OOM-kill with Restart= pending) is a clean not-loaded
@@ -904,7 +959,13 @@ class SlotManager:
         from hal0.providers.container import container_provider
 
         try:
-            health = await container_provider().health(port)
+            # Pass the slot config so FLM slots get the Tier-1 real-inference
+            # probe (health() delegates to FLMProvider.health when the cfg
+            # resolves to FLM) instead of the weak /v1/models fallback. The
+            # probe distinguishes "up but still loading" (ok=False) from
+            # "dead"; WARMING slots are never health-struck by the
+            # fail-watcher (is-active only), so a loading FLM model is safe.
+            health = await container_provider().health(port, cfg)
         except Exception as exc:
             # Inconclusive — a transport error is not proof the model server
             # is dead. Don't demote; the next poll re-probes.
@@ -944,10 +1005,13 @@ class SlotManager:
         if not active:
             return False, "inactive"
 
-        # 2) /health probe (only meaningful when the unit is active)
+        # 2) /health probe (only meaningful when the unit is active). The
+        # slot config is passed so FLM slots use the Tier-1 real-inference
+        # probe (see ContainerProvider.health) — a still-loading FLM reports
+        # ok=False here, which maps to the retryable "starting" reason.
         port = _cfg_port(cfg)
         if port:
-            health = await container_provider().health(port)
+            health = await container_provider().health(port, cfg)
             if not health.get("ok"):
                 return False, "starting"
 
@@ -1728,8 +1792,10 @@ class SlotManager:
         slots/*.toml write path (issue #697).
         """
         cfg_dict = _cfg_to_dict(slot_cfg)
-        # #585: canonicalize a ctx_size alias from the create modal too.
-        _normalize_ctx_key(cfg_dict)
+        # #585: canonicalize a ctx_size alias from the create modal too —
+        # same single fold (:func:`hal0.slot_config.fold_ctx_size_alias`)
+        # the merge/update path uses.
+        fold_ctx_size_alias(cfg_dict)
         # Persist a concrete context window when the operator left it unset, so
         # the TOML, the dashboard, and the running container all agree. The
         # provider's load-path derive is the belt-and-suspenders fallback; this
@@ -1761,46 +1827,55 @@ class SlotManager:
         # suspenders). Fast fast path when this write isn't a new default.
         await self._check_default_uniqueness(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
-        # SC-5: refuse to clobber an existing slot's config. Without this,
-        # a duplicate create() overwrote the on-disk TOML and force-reset
-        # state.json to OFFLINE, orphaning any running container. Most
-        # internal reconcile callers pre-check cfg_path.exists() before
-        # create() (orchestrator, backends, stacks._create_missing_slots),
-        # so they never reach this guard; install/orchestrate does NOT
-        # pre-check but wraps create() in a best-effort except, so a
-        # duplicate degrades to a per-slot error rather than a crash.
-        # add_slot and POST /api/slots surface the conflict to the caller.
-        if cfg_path.exists():
-            raise SlotConfigError(
-                f"slot {slot_name!r} already exists; use update to modify it",
-                details={"slot": slot_name, "config": str(cfg_path)},
-            )
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            write_slot_toml(cfg_path, cfg_dict)
-        except OSError as exc:
-            raise SlotConfigError(
-                f"failed to write slot config {cfg_path}: {exc}",
-                details={"slot": slot_name},
-            ) from exc
+        # TOCTOU fix: the exists-check + write below used to run unlocked, so
+        # two concurrent create() calls (all callers are async — api routes,
+        # orchestrator, stacks _create_missing_slots) could both pass the
+        # check and the loser clobbered the winner's TOML. Serialize
+        # in-process on the per-slot asyncio lock and cross-process on the
+        # coarse slot-TOML file lock so the SC-5 guard is race-free.
+        async with self._lock(slot_name):
+            with slot_write_lock():
+                # SC-5: refuse to clobber an existing slot's config. Without
+                # this, a duplicate create() overwrote the on-disk TOML and
+                # force-reset state.json to OFFLINE, orphaning any running
+                # container. Most internal reconcile callers pre-check
+                # cfg_path.exists() before create() (orchestrator, backends,
+                # stacks._create_missing_slots), so they never reach this
+                # guard; install/orchestrate does NOT pre-check but wraps
+                # create() in a best-effort except, so a duplicate degrades
+                # to a per-slot error rather than a crash. add_slot and
+                # POST /api/slots surface the conflict to the caller.
+                if cfg_path.exists():
+                    raise SlotConfigError(
+                        f"slot {slot_name!r} already exists; use update to modify it",
+                        details={"slot": slot_name, "config": str(cfg_path)},
+                    )
+                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    write_slot_toml(cfg_path, cfg_dict)
+                except OSError as exc:
+                    raise SlotConfigError(
+                        f"failed to write slot config {cfg_path}: {exc}",
+                        details={"slot": slot_name},
+                    ) from exc
 
-        # Initialise state.
-        await self._transition(
-            slot_name,
-            SlotState.OFFLINE,
-            port=_cfg_port(cfg_dict),
-            model_id=_model_default(cfg_dict) or None,
-            extra={
-                # W3: seed the device-derived effective backend, not a
-                # hardcoded "vulkan" default — the slot's ``device`` is what
-                # will actually run. ``status()`` re-derives from the TOML on
-                # every read, so this is only a fallback, but keeping it
-                # honest avoids a transient lie before the first status call.
-                "backend": _cfg_effective_backend(cfg_dict) or "vulkan",
-                "provider": cfg_dict.get("provider", "llama-server"),
-            },
-            force=True,
-        )
+            # Initialise state.
+            await self._transition(
+                slot_name,
+                SlotState.OFFLINE,
+                port=_cfg_port(cfg_dict),
+                model_id=_model_default(cfg_dict) or None,
+                extra={
+                    # W3: seed the device-derived effective backend, not a
+                    # hardcoded "vulkan" default — the slot's ``device`` is what
+                    # will actually run. ``status()`` re-derives from the TOML on
+                    # every read, so this is only a fallback, but keeping it
+                    # honest avoids a transient lie before the first status call.
+                    "backend": _cfg_effective_backend(cfg_dict) or "vulkan",
+                    "provider": cfg_dict.get("provider", "llama-server"),
+                },
+                force=True,
+            )
         return await self.status(slot_name)
 
     async def delete(self, slot_name: str) -> None:
@@ -1841,55 +1916,55 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        cfg = await self._load_slot_config(slot_name)
-        cfg_dict = _cfg_to_dict(cfg)
-        # One-level deep merge for nested TOML tables ([model], [server]) plus
-        # the #585 ctx_size→context_size fold, via the shared, copy-safe
-        # ``merge_slot_config`` primitive (SC-11) — the SAME projection the
-        # SlotConfigStore uses, so the two can't silently diverge.
-        #
-        # A bare shallow ``dict.update`` replaced a sub-table wholesale, so a
-        # partial ``PATCH /defaults`` body like ``{"model": {"ctx_size": N}}``
-        # silently dropped sibling keys — most damagingly ``[model].default``
-        # (the model name), which left the slot unable to resolve a model and
-        # turned the dashboard Start button into a silent no-op after a
-        # restart. The helper merges sub-table dicts key-by-key so partial
-        # updates only touch the fields they carry; scalars and lists still
-        # replace wholesale (predictable, and no caller relies on list-merge).
-        # It also folds the dashboard's legacy ``[model].ctx_size`` alias into
-        # the canonical ``context_size`` (#585) so the two keys can't diverge
-        # on disk. ``merge_slot_config`` returns a fresh dict, so rebind
-        # ``cfg_dict`` before the downstream reconcile/guard calls below.
-        cfg_dict = merge_slot_config(cfg_dict, updates)
-
-        # Keep device↔profile backend coherent: a profile switch re-derives
-        # device (the drawer path that previously left a vulkan device under a
-        # rocm-dnse profile), a cross-backend device flip re-points the profile
-        # (the POST /backend path, which writes device only), and an explicit
-        # conflicting pair raises. Only the field(s) the caller changed drive
-        # reconciliation.
-        _reconcile_device_profile(cfg_dict, set(updates.keys()))
-
-        # PR-11: re-run the NPU exclusivity guard whenever the merged
-        # config could land a second device=npu, type=llm anchor (plan
-        # §5.3). Cheap when no NPU LLM is involved — the helper short-
-        # circuits on the merged cfg's own device/type.
-        await self._check_npu_exclusivity(slot_name, cfg_dict)
-
-        # SC-4: a PATCH that flips default=true (even when ``type`` lives
-        # only on the pre-existing config) is checked against the merged
-        # cfg_dict — the authoritative post-merge state, same as the NPU
-        # guard. The peer walk excludes slot_name, so re-persisting the
-        # sole default never self-conflicts.
-        await self._check_default_uniqueness(slot_name, cfg_dict)
-
         cfg_path = self._config_file(slot_name)
-        try:
-            write_slot_toml(cfg_path, cfg_dict)
-        except OSError as exc:
-            raise SlotConfigError(
-                f"failed to rewrite {cfg_path}: {exc}",
-            ) from exc
+        # The whole read→merge→guard→write below is one cross-process
+        # critical section (slot_write_lock): a concurrent CLI / stacks /
+        # capabilities writer can no longer interleave its own RMW and drop
+        # this update. Everything awaited inside is sync at heart (plain
+        # file IO) so the event loop never actually suspends while the
+        # advisory lock is held — do not introduce real awaits here.
+        with slot_write_lock():
+            cfg = await self._load_slot_config(slot_name)
+            cfg_dict = _cfg_to_dict(cfg)
+            # One-level deep merge for nested TOML tables ([model], [server])
+            # plus the #585 ctx_size→context_size fold and device↔profile
+            # backend coherence, via the shared ``reconcile_slot_updates``
+            # pipeline — the SAME projection the SlotConfigStore and the
+            # stacks apply engine use, so the writers can't silently diverge.
+            #
+            # A bare shallow ``dict.update`` replaced a sub-table wholesale,
+            # so a partial ``PATCH /defaults`` body like ``{"model":
+            # {"ctx_size": N}}`` silently dropped sibling keys — most
+            # damagingly ``[model].default`` (the model name). The merge
+            # touches only the fields the update carries; scalars and lists
+            # still replace wholesale. Device/profile coherence: a profile
+            # switch re-derives device (the drawer path that previously left
+            # a vulkan device under a rocm-dnse profile), a cross-backend
+            # device flip re-points the profile (the POST /backend path,
+            # which writes device only), and an explicit conflicting pair
+            # raises. Only the field(s) the caller changed drive
+            # reconciliation. Returns a fresh dict — rebind ``cfg_dict``.
+            cfg_dict = reconcile_slot_updates(cfg_dict, updates)
+
+            # PR-11: re-run the NPU exclusivity guard whenever the merged
+            # config could land a second device=npu, type=llm anchor (plan
+            # §5.3). Cheap when no NPU LLM is involved — the helper short-
+            # circuits on the merged cfg's own device/type.
+            await self._check_npu_exclusivity(slot_name, cfg_dict)
+
+            # SC-4: a PATCH that flips default=true (even when ``type`` lives
+            # only on the pre-existing config) is checked against the merged
+            # cfg_dict — the authoritative post-merge state, same as the NPU
+            # guard. The peer walk excludes slot_name, so re-persisting the
+            # sole default never self-conflicts.
+            await self._check_default_uniqueness(slot_name, cfg_dict)
+
+            try:
+                write_slot_toml(cfg_path, cfg_dict)
+            except OSError as exc:
+                raise SlotConfigError(
+                    f"failed to rewrite {cfg_path}: {exc}",
+                ) from exc
 
         # Issue #359: invalidate stale top-level metadata in state.json
         # whenever the operator's update changes a field that's also
@@ -2015,20 +2090,23 @@ class SlotManager:
         slots/*.toml write path (issue #697). Failures bubble up so the
         caller can log + soft-fail without affecting the live load state.
         """
-        cfg = await self._load_slot_config(slot_name)
-        cfg_dict = _cfg_to_dict(cfg)
-        existing_model = cfg_dict.get("model")
-        base_model = existing_model if isinstance(existing_model, dict) else {}
-        cfg_dict = {**cfg_dict, "model": {**base_model, "default": model_id}}
+        # Cross-process RMW guard: read + rewrite under the shared slot-TOML
+        # lock so a concurrent update_config / stacks apply can't be dropped.
+        with slot_write_lock():
+            cfg = await self._load_slot_config(slot_name)
+            cfg_dict = _cfg_to_dict(cfg)
+            existing_model = cfg_dict.get("model")
+            base_model = existing_model if isinstance(existing_model, dict) else {}
+            cfg_dict = {**cfg_dict, "model": {**base_model, "default": model_id}}
 
-        cfg_path = self._config_file(slot_name)
-        try:
-            write_slot_toml(cfg_path, cfg_dict)
-        except OSError as exc:
-            raise SlotConfigError(
-                f"failed to persist model.default to {cfg_path}: {exc}",
-                details={"slot": slot_name, "model_id": model_id},
-            ) from exc
+            cfg_path = self._config_file(slot_name)
+            try:
+                write_slot_toml(cfg_path, cfg_dict)
+            except OSError as exc:
+                raise SlotConfigError(
+                    f"failed to persist model.default to {cfg_path}: {exc}",
+                    details={"slot": slot_name, "model_id": model_id},
+                ) from exc
 
     # ── model preferred profile (Q1: profile loads with the model) ────────────
 
@@ -2097,24 +2175,27 @@ class SlotManager:
         preferred = await self._preferred_profile_for(model_id)
         if not preferred:
             return False
-        cfg = await self._load_slot_config(slot_name)
-        cfg_dict = _cfg_to_dict(cfg)
-        if cfg_dict.get("profile") == preferred:
-            return False
-        if not self._profile_fits_slot(preferred, cfg_dict):
-            log.info(
-                "slot.preferred_profile_skipped",
-                extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
-            )
-            return False
-        cfg_dict = {**cfg_dict, "profile": preferred}
-        try:
-            write_slot_toml(self._config_file(slot_name), cfg_dict)
-        except OSError as exc:
-            raise SlotConfigError(
-                f"failed to persist preferred profile to slot {slot_name}: {exc}",
-                details={"slot": slot_name, "profile": preferred},
-            ) from exc
+        # Read + rewrite under the shared cross-process slot-TOML lock so a
+        # concurrent config writer isn't silently dropped.
+        with slot_write_lock():
+            cfg = await self._load_slot_config(slot_name)
+            cfg_dict = _cfg_to_dict(cfg)
+            if cfg_dict.get("profile") == preferred:
+                return False
+            if not self._profile_fits_slot(preferred, cfg_dict):
+                log.info(
+                    "slot.preferred_profile_skipped",
+                    extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
+                )
+                return False
+            cfg_dict = {**cfg_dict, "profile": preferred}
+            try:
+                write_slot_toml(self._config_file(slot_name), cfg_dict)
+            except OSError as exc:
+                raise SlotConfigError(
+                    f"failed to persist preferred profile to slot {slot_name}: {exc}",
+                    details={"slot": slot_name, "profile": preferred},
+                ) from exc
         log.info(
             "slot.preferred_profile_applied",
             extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
@@ -2146,46 +2227,13 @@ class SlotManager:
         whether any pre-existing NPU LLM is already enabled. Reading
         the writer's own slot from disk is skipped — the in-memory
         ``cfg_dict`` IS the authoritative new state.
+
+        Thin async wrapper (kept for the public method surface and test
+        monkeypatchability) over the module-level sync
+        :func:`check_npu_exclusivity`, which the stacks apply engine
+        shares so its writes obey the same guard.
         """
-        device = cfg_dict.get("device")
-        type_ = cfg_dict.get("type")
-        if device != "npu" or type_ != "llm":
-            return
-        # The merged write is for an NPU LLM slot. If it isn't being
-        # enabled, no collision is possible — at most one OTHER slot
-        # could still be enabled, and that's the legal state we want.
-        if cfg_dict.get("enabled") is False:
-            return
-        # Walk peers. Use _all_configured_slot_names() so we see slots
-        # whose TOML exists but whose in-memory state hasn't been hit
-        # yet (e.g. installer-seeded slots before first poll).
-        peer_names = [n for n in self._all_configured_slot_names() if n != slot_name]
-        offenders: list[str] = []
-        for name in peer_names:
-            try:
-                peer = await self._load_slot_config(name)
-            except SlotConfigError:
-                # Malformed TOML doesn't block the user's legitimate
-                # write — surface the malformed-slot warning via the
-                # usual path instead of conflating it here.
-                continue
-            except SlotNotFound:
-                continue
-            if peer.get("device") != "npu" or peer.get("type") != "llm":
-                continue
-            if peer.get("enabled") is False:
-                continue
-            offenders.append(name)
-        if offenders:
-            raise NpuExclusivityViolation(
-                "only one NPU LLM slot may be enabled at a time "
-                f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
-                details={
-                    "slot": slot_name,
-                    "conflicting_slots": sorted(offenders),
-                    "hint": "disable the existing NPU LLM slot before enabling another",
-                },
-            )
+        check_npu_exclusivity(slot_name, cfg_dict)
 
     async def _check_default_uniqueness(
         self,
@@ -2215,42 +2263,13 @@ class SlotManager:
         the same type that is already ``default=true``. Reading the
         writer's own slot is skipped — the in-memory ``cfg_dict`` IS the
         authoritative new state.
+
+        Thin async wrapper (kept for the public method surface and test
+        monkeypatchability) over the module-level sync
+        :func:`check_default_uniqueness`, which the stacks apply engine
+        shares so its writes obey the same guard.
         """
-        if cfg_dict.get("default") is not True:
-            return
-        type_ = cfg_dict.get("type")
-        if not type_:
-            return
-        # Walk peers. Use _all_configured_slot_names() so we see slots
-        # whose TOML exists but whose in-memory state hasn't been hit
-        # yet (e.g. installer-seeded slots before first poll).
-        peer_names = [n for n in self._all_configured_slot_names() if n != slot_name]
-        offenders: list[str] = []
-        for name in peer_names:
-            try:
-                peer = await self._load_slot_config(name)
-            except SlotConfigError:
-                # Malformed TOML doesn't block the user's legitimate
-                # write — surface the malformed-slot warning via the
-                # usual path instead of conflating it here.
-                continue
-            except SlotNotFound:
-                continue
-            if peer.get("type") != type_:
-                continue
-            if peer.get("default") is True:
-                offenders.append(name)
-        if offenders:
-            raise SlotConfigError(
-                f"slot type {type_!r} already has a default=true slot "
-                f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
-                details={
-                    "slot": slot_name,
-                    "type": type_,
-                    "conflicting_slots": sorted(offenders),
-                    "hint": "clear the existing default before setting another",
-                },
-            )
+        check_default_uniqueness(slot_name, cfg_dict)
 
     # ── idle / wake-on-request ───────────────────────────────────────────────
 
@@ -2688,6 +2707,28 @@ class SlotManager:
             return None
         return float(self._evict_after_s) if self._evict_after_s > 0 else None
 
+    def _sweep_candidates(self) -> dict[str, float]:
+        """Slot → last-activity timestamp map for the idle/pressure sweeps.
+
+        ``_last_used`` only tracks slots that served a request (or were
+        adopted) during THIS process's lifetime. Dispatchable slots missing
+        from it — e.g. adopted before the bump-on-adoption fix, or hydrated
+        from a state.json that outlived an api restart — used to be
+        invisible to both sweeps and could squat on RAM forever. For those,
+        fall back to the state record's ``updated_at`` (the last observed
+        transition) as the activity timestamp; the sweeps' own state and
+        serving-count guards still apply on top.
+        """
+        candidates = dict(self._last_used)
+        for name, rec in list(self._states.items()):
+            if name in candidates:
+                continue
+            if rec.state not in (SlotState.READY, SlotState.IDLE):
+                continue
+            if rec.updated_at:
+                candidates[name] = float(rec.updated_at)
+        return candidates
+
     async def _sweep_idle_once(self) -> None:
         """One idle-sweep pass over every tracked slot.
 
@@ -2705,7 +2746,7 @@ class SlotManager:
         so eviction is safe.
         """
         now = time.time()
-        for slot_name, ts in list(self._last_used.items()):
+        for slot_name, ts in self._sweep_candidates().items():
             idle_for = now - ts
             if self._serving_count.get(slot_name, 0) > 0:
                 continue
@@ -2784,11 +2825,12 @@ class SlotManager:
         if free_mb >= self._evict_pressure_mb:
             return
 
-        # Build the LRU-ordered candidate list.  Only slots with a
-        # last_used timestamp are candidates (unloaded/offline slots are
-        # never in _last_used) so this is naturally bounded.
+        # Build the LRU-ordered candidate list. ``_sweep_candidates`` unions
+        # _last_used with dispatchable slots known only via state.json
+        # (adopted / restart-surviving), timestamped by their last observed
+        # transition, so pressure eviction can also reclaim those.
         candidates: list[tuple[float, str]] = []
-        for slot_name, ts in list(self._last_used.items()):
+        for slot_name, ts in self._sweep_candidates().items():
             if self._serving_count.get(slot_name, 0) > 0:
                 continue
             canonical = self._resolve_alias(slot_name)
@@ -2884,13 +2926,21 @@ class SlotManager:
                     f"(no config at {path} and no in-memory state)",
                     details={"slot": slot_name, "path": str(path)},
                 )
-            return {
+            # W3: no hardcoded "vulkan" fallback — carry whatever backend the
+            # state record actually recorded (itself device-derived at
+            # create/adopt time). When absent, omit the key so downstream
+            # consumers (``_cfg_effective_backend``) honestly report
+            # "unknown" / derive from ``device`` instead of a stale lie.
+            fallback: dict[str, Any] = {
                 "name": slot_name,
                 "port": rec.port,
-                "backend": rec.extra.get("backend", "vulkan"),
                 "provider": rec.extra.get("provider", "llama-server"),
                 "model": {"default": rec.model_id or ""},
             }
+            rec_backend = rec.extra.get("backend")
+            if rec_backend:
+                fallback["backend"] = rec_backend
+            return fallback
         try:
             with open(path, "rb") as f:
                 data = tomllib.load(f)
@@ -3043,7 +3093,11 @@ class SlotManager:
         healthy = await self._probe_health(slot_name)
         resolved = SlotState.READY if healthy else SlotState.WARMING
         extras: dict[str, Any] = {
-            "backend": cfg.get("backend", "vulkan"),
+            # W3: mirror the device-derived EFFECTIVE backend, not a
+            # hardcoded "vulkan" fallback — the slot's ``device`` (or its
+            # legacy ``backend`` field, folded by _cfg_effective_backend)
+            # is what is actually running.
+            "backend": _cfg_effective_backend(cfg) or cfg.get("backend"),
             "provider": cfg.get("provider", "llama-server"),
             "adopted": True,
             # Record the probe result so /api/health + hal0_slot_up can fold
@@ -3063,6 +3117,13 @@ class SlotManager:
             extra=extras,
             force=True,
         )
+        # Start the idle clock: adopted slots were invisible to the idle-TTL
+        # and pressure sweeps because nothing ever bumped ``_last_used`` for
+        # them (both sweeps key off it), so a container that outlived an api
+        # restart could squat on RAM forever. Adoption counts as activity —
+        # the TTL runs from now, and the sweeps' state.json fallback covers
+        # any dispatchable slot that still slips through in-memory tracking.
+        self.bump_last_used(slot_name)
         log.info(
             "slot.adopted",
             extra={
@@ -3234,26 +3295,35 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
 
 
 def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None]:
-    """Return the last value for each flag key in argv.
+    """Return the last value for each flag key in argv, alias-aware.
+
+    Both the requested ``keys`` and the argv tokens are canonicalized
+    through :data:`hal0.slots.argv.FLAG_ALIASES` before comparison, so a
+    running ``--batch-size 512`` matches a rendered ``-b 512`` (and vice
+    versa) instead of reporting false config drift. The result stays keyed
+    by the caller's original ``keys`` spelling (the drift payload contract).
 
     Last value wins because slot ``[server].extra_args`` intentionally follows
     profile flags and can override them.
     """
-    wanted = set(keys)
+    from hal0.slots.argv import FLAG_ALIASES
+
+    canon_to_key = {FLAG_ALIASES.get(k, k): k for k in keys}
     out: dict[str, str | None] = {}
     i = 0
     while i < len(argv):
         token = argv[i]
-        if token in wanted:
-            out[token] = argv[i + 1] if i + 1 < len(argv) else None
-            i += 2
+        flag, eq, inline = token.partition("=")
+        key = canon_to_key.get(FLAG_ALIASES.get(flag, flag))
+        if key is None:
+            i += 1
             continue
-        for key in keys:
-            prefix = f"{key}="
-            if token.startswith(prefix):
-                out[key] = token[len(prefix) :]
-                break
-        i += 1
+        if eq:
+            out[key] = inline
+            i += 1
+        else:
+            out[key] = argv[i + 1] if i + 1 < len(argv) else None
+            i += 2
     return out
 
 
@@ -3261,21 +3331,6 @@ def _config_drift_values_equal(key: str, running: str | None, rendered: str | No
     if key == "--model" and running is not None and rendered is not None:
         return os.path.realpath(running) == os.path.realpath(rendered)
     return running == rendered
-
-
-def _normalize_ctx_key(cfg_dict: dict[str, Any]) -> None:
-    """Fold the legacy ``[model].ctx_size`` alias into the canonical
-    ``context_size`` (SlotConfig's field), in place (#585).
-
-    The dashboard slot-edit panel writes ``ctx_size``; the load path
-    reads ``context_size``. Persisting both lets them silently diverge.
-    A fresh ``ctx_size`` (the operator's latest UI write) wins over any
-    stale ``context_size`` seed, then the alias is dropped so exactly one
-    key survives on disk. No-op when ``ctx_size`` is absent.
-    """
-    model = cfg_dict.get("model")
-    if isinstance(model, dict) and "ctx_size" in model:
-        model["context_size"] = model.pop("ctx_size")
 
 
 def _cfg_effective_backend(cfg: SlotConfig | dict[str, Any]) -> str | None:
@@ -3405,10 +3460,167 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
     # edit.
 
 
+# ── shared slot-config write pipeline (guards for every writer) ──────────────
+#
+# SlotManager.update_config, SlotManager.create, and the stacks apply engine
+# all project "partial updates onto an existing slot config". Historically
+# only update_config/create ran the full guard pipeline; the stacks engine
+# hand-rolled its own merge and could persist a vulkan-device+rocm-profile
+# incoherence or a second NPU anchor. These module-level, synchronous
+# functions are the ONE pipeline every writer calls.
+
+
+def _read_slot_toml_dict(path: Path) -> dict[str, Any] | None:
+    """Best-effort raw read of one ``slots/*.toml`` (with the [slot] hoist).
+
+    Returns ``None`` on a missing or malformed file — guard peer-walks skip
+    those rather than blocking the caller's legitimate write (the malformed
+    slot surfaces its own error on its own paths).
+    """
+    import tomllib
+
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    slot_tbl = data.pop("slot", None)
+    if isinstance(slot_tbl, dict):
+        for k, v in slot_tbl.items():
+            data[k] = v
+    return data
+
+
+def _iter_peer_configs(
+    slot_name: str, slots_dir: Path | None = None
+) -> list[tuple[str, dict[str, Any]]]:
+    """(name, cfg) for every readable configured slot other than ``slot_name``."""
+    base = Path(slots_dir) if slots_dir is not None else paths.slots_config_dir()
+    if not base.is_dir():
+        return []
+    peers: list[tuple[str, dict[str, Any]]] = []
+    for path in sorted(base.glob("*.toml")):
+        if path.stem == slot_name:
+            continue
+        peer = _read_slot_toml_dict(path)
+        if peer is not None:
+            peers.append((path.stem, peer))
+    return peers
+
+
+def check_npu_exclusivity(
+    slot_name: str,
+    cfg_dict: dict[str, Any],
+    *,
+    slots_dir: Path | None = None,
+) -> None:
+    """Reject a write that would land a second enabled NPU LLM anchor.
+
+    Sync core of :meth:`SlotManager._check_npu_exclusivity` (see its
+    docstring for the full contract), shared with the stacks apply engine.
+    ``slots_dir`` overrides the default config dir for engines constructed
+    against a custom directory (tests).
+    """
+    if cfg_dict.get("device") != "npu" or cfg_dict.get("type") != "llm":
+        return
+    if cfg_dict.get("enabled") is False:
+        return
+    offenders = [
+        name
+        for name, peer in _iter_peer_configs(slot_name, slots_dir)
+        if peer.get("device") == "npu"
+        and peer.get("type") == "llm"
+        and peer.get("enabled") is not False
+    ]
+    if offenders:
+        raise NpuExclusivityViolation(
+            "only one NPU LLM slot may be enabled at a time "
+            f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
+            details={
+                "slot": slot_name,
+                "conflicting_slots": sorted(offenders),
+                "hint": "disable the existing NPU LLM slot before enabling another",
+            },
+        )
+
+
+def check_default_uniqueness(
+    slot_name: str,
+    cfg_dict: dict[str, Any],
+    *,
+    slots_dir: Path | None = None,
+) -> None:
+    """Reject a write that would land a second ``default=true`` per type.
+
+    Sync core of :meth:`SlotManager._check_default_uniqueness` (see its
+    docstring for the full contract), shared with the stacks apply engine.
+    """
+    if cfg_dict.get("default") is not True:
+        return
+    type_ = cfg_dict.get("type")
+    if not type_:
+        return
+    offenders = [
+        name
+        for name, peer in _iter_peer_configs(slot_name, slots_dir)
+        if peer.get("type") == type_ and peer.get("default") is True
+    ]
+    if offenders:
+        raise SlotConfigError(
+            f"slot type {type_!r} already has a default=true slot "
+            f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
+            details={
+                "slot": slot_name,
+                "type": type_,
+                "conflicting_slots": sorted(offenders),
+                "hint": "clear the existing default before setting another",
+            },
+        )
+
+
+def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """Normalize + merge ``updates`` onto ``base`` and keep device/profile coherent.
+
+    The write-side projection shared by ``SlotManager.update_config`` and the
+    stacks apply engine: the copy-safe one-level merge + #585 ctx_size fold
+    (:func:`hal0.slot_config.merge_slot_config`) followed by
+    :func:`_reconcile_device_profile` driven by exactly the keys the caller
+    changed. Returns a fresh dict; ``base`` is never mutated.
+    """
+    merged = merge_slot_config(base, updates)
+    _reconcile_device_profile(merged, set(updates.keys()))
+    return merged
+
+
+def reconcile_and_guard_slot_config(
+    slot_name: str,
+    base: dict[str, Any],
+    updates: dict[str, Any],
+    *,
+    slots_dir: Path | None = None,
+) -> dict[str, Any]:
+    """The full guarded write pipeline: normalize + merge + reconcile + guards.
+
+    Raises :class:`SlotConfigError` / :class:`NpuExclusivityViolation` when the
+    projected config is incoherent (conflicting device+profile backends) or
+    violates a cross-slot invariant (second enabled NPU anchor, second
+    default=true of a type). Used by the stacks apply engine so a stack can no
+    longer persist what ``update_config`` would have refused.
+    """
+    merged = reconcile_slot_updates(base, updates)
+    check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
+    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir)
+    return merged
+
+
 __all__ = [
     "NPU_SEEDED_SLOTS",
     "SEEDED_SLOTS",
     "SLOT_ALIASES",
     "Slot",
     "SlotManager",
+    "check_default_uniqueness",
+    "check_npu_exclusivity",
+    "reconcile_and_guard_slot_config",
+    "reconcile_slot_updates",
 ]

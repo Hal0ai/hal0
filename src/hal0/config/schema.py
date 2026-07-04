@@ -23,16 +23,36 @@ See PLAN.md §3, §5 Tier 1 ("pydantic-validated TOML schema at load time").
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from hal0.config import paths
+from hal0.model_meta import (
+    BACKEND_TO_DEVICE,
+    DEFAULT_DEVICE,
+    DEVICE_TO_DEFAULT_PROFILE,
+    map_backend_to_device,
+)
+from hal0.model_meta import (
+    LEGACY_BACKENDS as _LEGACY_BACKENDS,
+)
+from hal0.model_meta import (
+    VALID_DEVICES as _VALID_DEVICES,
+)
 
 log = logging.getLogger(__name__)
 
 # ── Shared constants ───────────────────────────────────────────────────────────
+#
+# The identity vocabularies (device enum, legacy backend enum, the
+# backend→device map, per-device default profiles) live in ONE place —
+# ``hal0.model_meta`` (see its module docstring for the full vocabulary
+# table + unknown-value policy). This module re-exports them so every
+# existing ``from hal0.config.schema import …`` call site keeps working.
+# model_meta imports nothing from schema, so the dependency is one-way.
 
 # TIER1: surface-area for the backend whitelist. Typos like
 # `backend = "vukan"` must raise at load time with the field path.
@@ -42,43 +62,14 @@ log = logging.getLogger(__name__)
 # one release so legacy slot TOMLs round-trip cleanly; a warning is logged
 # whenever ``backend`` is read without an accompanying ``device``. See
 # ADR-0006 §7 (v0.2 migration plan, decision 15).
-_VALID_BACKENDS = frozenset({"vulkan", "rocm", "flm", "moonshine", "kokoro", "cpu"})
+_VALID_BACKENDS = frozenset(_LEGACY_BACKENDS)
 
 # v0.2 hardware-preference enum. ``device`` replaces the overloaded
 # ``backend`` field — it carries hardware intent only, not provider choice.
 # ``hal0.model_meta.device_to_backend`` maps these to the recipe:backend
-# pair that feeds container profile/argv derivation.
+# pair that feeds container profile/argv derivation. The Literal must match
+# ``hal0.model_meta.VALID_DEVICES`` (asserted by tests/model_meta).
 DeviceLiteral = Literal["gpu-rocm", "gpu-vulkan", "cpu", "npu"]
-_VALID_DEVICES = frozenset({"gpu-rocm", "gpu-vulkan", "cpu", "npu"})
-
-# Default ``device`` for fresh installs. Strix Halo (hal0's reference
-# target) gets best throughput on ROCm; the recommender may downgrade
-# this in hardware-aware seeds.
-DEFAULT_DEVICE: str = "gpu-rocm"
-
-# Mapping from the legacy ``backend`` enum to the v0.2 ``device`` enum.
-# Used by:
-#   - ``SlotConfig`` model-validator (auto-promote on load).
-#   - ``hal0/config/migrations/capabilities_v2.py`` (file migration).
-#   - the capabilities on-load auto-migration.
-# Keep these aligned with ADR-0006 §7. The values for moonshine/kokoro map
-# to ``cpu`` because those toolboxes were always CPU runtimes — the legacy
-# enum overloaded the term ``backend`` with provider identity.
-BACKEND_TO_DEVICE: dict[str, str] = {
-    "vulkan": "gpu-vulkan",
-    "rocm": "gpu-rocm",
-    "flm": "npu",
-    "moonshine": "cpu",
-    "kokoro": "cpu",
-    "cpu": "cpu",
-    # The capabilities catalog has historically stored values in the new
-    # namespace already (e.g. ``gpu-rocm``); accept them idempotently so
-    # both SlotConfig.backend and CapabilitySelection.backend can flow
-    # through the same map without surprise.
-    "gpu-rocm": "gpu-rocm",
-    "gpu-vulkan": "gpu-vulkan",
-    "npu": "npu",
-}
 
 # Valid provider names. ContainerProvider drives every slot lifecycle;
 # the pre-container names remain accepted so legacy slot TOMLs round-trip
@@ -104,6 +95,9 @@ _SLOT_PORT_MIN = 8081
 _SLOT_PORT_MAX = 8200
 _SLOT_PORT_POOL_END = 8099
 
+#: A valid POSIX environment-variable name — used to validate [server].env keys.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
 CURRENT_SCHEMA_VERSION = 1
@@ -121,27 +115,9 @@ CAPABILITIES_SCHEMA_VERSION_LEGACY = 1
 CAPABILITIES_SCHEMA_VERSION_CURRENT = 2
 
 
-def map_backend_to_device(backend: str | None) -> str:
-    """Map a legacy ``backend`` value to the v0.2 ``device`` enum.
-
-    Unknown values (e.g. an operator hand-edited a slot TOML with a
-    bespoke backend tag) fall back to ``cpu`` so the runtime has a safe
-    default rather than crashing at load. A warning is logged so the
-    operator notices on the next ``hal0-api`` boot.
-
-    Empty / None input is treated as "no opinion" and returns the
-    package-level default ``DEFAULT_DEVICE``.
-    """
-    if not backend:
-        return DEFAULT_DEVICE
-    mapped = BACKEND_TO_DEVICE.get(backend)
-    if mapped is not None:
-        return mapped
-    log.warning(
-        "config.device_mapping_unknown_backend",
-        extra={"backend": backend, "fallback": "cpu"},
-    )
-    return "cpu"
+# NOTE: ``map_backend_to_device`` now lives in ``hal0.model_meta`` (imported
+# above and re-exported via ``__all__``) so the legacy→device translation and
+# its unknown-value policy are defined exactly once.
 
 
 # ── ModelConfig + SlotConfig ───────────────────────────────────────────────────
@@ -177,7 +153,12 @@ class ModelConfig(BaseModel):
     rope_freq_base: float = Field(
         default=0.0,
         ge=0.0,
-        description="RoPE frequency base override.  0.0 means use model default.",
+        description=(
+            "DEPRECATED (accepted, ignored): the launch path no longer emits "
+            "--rope-freq-base from this field. To override RoPE base, pass "
+            "``--rope-freq-base <n>`` via [server].extra_args instead. Retained "
+            "so existing TOMLs round-trip; 0.0 means use the model default."
+        ),
     )
     extra: dict[str, Any] = Field(
         default_factory=dict,
@@ -263,6 +244,40 @@ class ServerConfig(BaseModel):
             "(append-list flags like --lora / --draft-model / --override-kv are kept)."
         ),
     )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Environment variables injected into the slot container via "
+            "docker/podman ``--env`` (e.g. HSA_OVERRIDE_GFX_VERSION). Lets an "
+            "operator tune the runtime without forking the toolbox image. Keys "
+            "must be valid env-var names ([A-Za-z_][A-Za-z0-9_]*); values must "
+            "not contain newlines."
+        ),
+    )
+
+    @field_validator("env")
+    @classmethod
+    def _env_keys_and_values_sane(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        """Reject non-env-var-name keys and multi-line values.
+
+        A stray newline in a value would break the rendered ``--env=K=V``
+        ExecStart line (systemd is line-oriented); an invalid key name would
+        be silently ignored or mangled by the container runtime.
+        """
+        if v is None:
+            return v
+        cleaned: dict[str, str] = {}
+        for key, value in v.items():
+            if not _ENV_VAR_NAME_RE.match(str(key)):
+                raise ValueError(
+                    f"[server].env key {key!r} is not a valid environment variable name "
+                    "(must match [A-Za-z_][A-Za-z0-9_]*)"
+                )
+            sval = str(value)
+            if "\n" in sval or "\r" in sval:
+                raise ValueError(f"[server].env value for {key!r} must not contain newlines")
+            cleaned[str(key)] = sval
+        return cleaned
 
 
 class SlotConfig(BaseModel):
@@ -844,13 +859,10 @@ PROFILE_BENCH: dict[str, dict[str, float]] = {
 #: Preselect map for the create-modal device picker and legacy-slot
 #: migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
 #: gpu-vulkan, cpu, npu); values are seed profile names that best represent
-#: each device class.
-DEVICE_DEFAULT_PROFILES: dict[str, str] = {
-    "gpu-rocm": "rocm",
-    "gpu-vulkan": "vulkan",
-    "cpu": "cpu-llm",
-    "npu": "flm",
-}
+#: each device class.  Alias of the canonical
+#: :data:`hal0.model_meta.DEVICE_TO_DEFAULT_PROFILE` (kept under the old
+#: name so existing imports don't break).
+DEVICE_DEFAULT_PROFILES: dict[str, str] = DEVICE_TO_DEFAULT_PROFILE
 
 
 class ProfileConfig(BaseModel):
@@ -1278,8 +1290,10 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
         # asking for ``--spec-draft-type-k f16`` still launched with q8_0.
         #
         # Local import: ``hal0.config`` is imported before ``hal0.slots``, so a
-        # module-level import would create a cycle.
-        from hal0.slots.flag_merge import merge_flags
+        # module-level import would create a cycle. ``merge_flags`` now lives in
+        # hal0.slots.argv (folded from the retired flag_merge module) so it
+        # shares argv's tokenizer + short/long alias table.
+        from hal0.slots.argv import merge_flags
 
         return merge_flags(MTP_FLAG_BUNDLE, base)
     return base

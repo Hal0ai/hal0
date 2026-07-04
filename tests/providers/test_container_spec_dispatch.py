@@ -198,6 +198,9 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
             "hal0.providers.container.resolve_gpu_group_ids",
             return_value=[],
         ),
+        # GPU device nodes are existence-filtered at the container_spec call
+        # site; force them "present" so the CI host (no /dev/kfd) still renders.
+        patch("hal0.providers.container.os.path.exists", return_value=True),
         patch.object(provider, "_run", side_effect=fake_run),
         patch.object(provider, "_unit_path", return_value=unit_file),
     ):

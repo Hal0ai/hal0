@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,13 @@ from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
-from hal0.slots.state import DISPATCHABLE_STATES, SlotState
+from hal0.slots.manager import reconcile_and_guard_slot_config
+from hal0.slots.state import (
+    DISPATCHABLE_STATES,
+    NpuExclusivityViolation,
+    SlotConfigError,
+    SlotState,
+)
 from hal0.stacks.state import (
     StackStateRecord,
     read_stack_state,
@@ -53,12 +59,18 @@ class StackChangePlan:
 
     ``change_set`` is consumed by :meth:`StackApplyEngine.apply_config` (commit)
     and by the drift hasher; ``summary`` is human-readable diff lines for the
-    dry-run preview.
+    dry-run preview. ``errors`` carries per-slot guard violations
+    (``(slot, message)``) from the shared write pipeline — an entry that
+    would persist an incoherent device/profile pair (or break the NPU /
+    default-uniqueness invariants) is kept at ``after == before`` and
+    reported here instead of aborting the whole plan; the rejection also
+    appears as a ``summary`` line so dry-run and apply responses surface it.
     """
 
     stack_slug: str
     change_set: ChangeSet
     summary: list[str]
+    errors: list[tuple[str, str]] = field(default_factory=list)
 
 
 # Slot states by convergence intent.
@@ -135,17 +147,29 @@ class StackApplyEngine:
         Only entries that carry a primary ``model`` and whose slot TOML already
         exists are reconciled (slot creation is SlotManager's job, out of 2a
         scope). For every other entry ``after == before``.
+
+        Guard violations from the shared write pipeline (incoherent
+        device+profile pair, NPU exclusivity, default uniqueness) never abort
+        the plan: the offending entry keeps ``after == before`` and the
+        violation is recorded per-slot in ``plan.errors`` (mirrored into
+        ``summary``), matching the engine's report-don't-raise philosophy.
         """
         befores: list[FileState] = []
         afters: list[FileState] = []
         summary: list[str] = []
+        errors: list[tuple[str, str]] = []
 
         for entry in stack.slots:
             if not entry.model:
                 continue
             path = self._slot_path(entry.slot)
             before = _read_toml_or_none(path)
-            after = self._reconciled_stack_slot(before, entry)
+            try:
+                after = self._reconciled_stack_slot(before, entry)
+            except (SlotConfigError, NpuExclusivityViolation) as exc:
+                errors.append((entry.slot, str(exc)))
+                summary.append(f"{entry.slot}: rejected — {exc}")
+                after = before
             befores.append(FileState(path=path, data=before))
             afters.append(FileState(path=path, data=after))
             if before != after:
@@ -155,6 +179,7 @@ class StackApplyEngine:
             stack_slug=slug,
             change_set=ChangeSet(before=tuple(befores), after=tuple(afters)),
             summary=summary,
+            errors=errors,
         )
 
     def validate(
@@ -186,44 +211,52 @@ class StackApplyEngine:
     ) -> dict[str, Any] | None:
         """Project a stack slot entry onto the existing slot TOML dict.
 
-        Deep-merges the nested ``[model]``/``[server]`` tables so sibling keys
-        (``context_size`` etc.) survive. Writes both the v0.2 ``device`` and the
-        one-release-legacy ``backend`` alias via :mod:`hal0.model_meta`. Returns
-        ``before`` unchanged when the slot file is absent (creation is out of
-        2a scope).
+        Builds the update set (both the v0.2 ``device`` and the
+        one-release-legacy ``backend`` alias via :mod:`hal0.model_meta` —
+        the SAME dual write ``SlotConfigStore._reconciled_slot`` performs)
+        and then routes it through the shared guarded pipeline
+        :func:`hal0.slots.manager.reconcile_and_guard_slot_config`: the
+        copy-safe one-level ``[model]``/``[server]`` merge, the #585
+        ``ctx_size``→``context_size`` fold, device↔profile backend
+        coherence, and the NPU-exclusivity / default-uniqueness guards.
+        A stack can therefore no longer persist what ``update_config``
+        would refuse (e.g. a vulkan device under a rocm profile) — guard
+        violations raise and :meth:`plan` records them per-slot. Returns
+        ``before`` unchanged when the slot file is absent (creation is out
+        of 2a scope).
         """
         if before is None:
             return None
-        after = dict(before)
+        updates: dict[str, Any] = {}
 
         if entry.model:
-            model = dict(after.get("model") or {})
-            model["default"] = entry.model
-            after["model"] = model
+            updates["model"] = {"default": entry.model}
         if entry.device:
             device = canonical_device(entry.device)
             if device:
-                after["device"] = device
+                updates["device"] = device
+                # Deprecated field, kept for one release — see ADR-0006 §7.
                 legacy = device_to_legacy_backend(device)
                 if legacy:
-                    after["backend"] = legacy
+                    updates["backend"] = legacy
         if entry.provider:
-            after["provider"] = entry.provider
+            updates["provider"] = entry.provider
         if entry.profile is not None:
-            after["profile"] = entry.profile
+            updates["profile"] = entry.profile
         if entry.role is not None:
-            after["role"] = entry.role
+            updates["role"] = entry.role
         # ``vision`` is a plain bool (no inherit) → declaratively written.
-        after["vision"] = entry.vision
+        updates["vision"] = entry.vision
         if entry.mtp is not None:
-            after["mtp"] = entry.mtp
+            updates["mtp"] = entry.mtp
         if entry.enable_thinking is not None:
-            after["enable_thinking"] = entry.enable_thinking
+            updates["enable_thinking"] = entry.enable_thinking
         if entry.server_extra_args is not None:
-            server = dict(after.get("server") or {})
-            server["extra_args"] = entry.server_extra_args
-            after["server"] = server
-        return after
+            updates["server"] = {"extra_args": entry.server_extra_args}
+
+        return reconcile_and_guard_slot_config(
+            entry.slot, before, updates, slots_dir=self._slots_dir
+        )
 
     @staticmethod
     def _summarize(slot: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:

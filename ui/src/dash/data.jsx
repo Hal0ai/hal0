@@ -141,7 +141,7 @@ const HAL0_DATA = {
       isDefault: true,
       port: 8095,
       pid: 28498,
-      metrics: { rpm: 124, lat: 18, dim: 768, mem: 0.35 },
+      metrics: { lat: 18, dim: 768, mem: 0.35 },
       spark: [4, 5, 5, 6, 5, 7, 8, 6, 7, 8, 9, 7, 8, 9, 8, 7],
     },
     {
@@ -162,7 +162,7 @@ const HAL0_DATA = {
       isDefault: true,
       port: 8096,
       pid: 28502,
-      metrics: { rpm: 22, lat: 32, maxDocs: 200, mem: 0.4 },
+      metrics: { lat: 32, maxDocs: 200, mem: 0.4 },
       spark: [1, 0, 2, 1, 1, 0, 1, 2, 1, 0, 1, 1, 2, 1, 0, 1],
     },
     {
@@ -183,7 +183,7 @@ const HAL0_DATA = {
       coresident: true,
       port: 8093,
       pid: 28482,
-      metrics: { rpm: 8, xrt: 0.18, precision: "Q4_K_M", mem: 0.4 },
+      metrics: { precision: "Q4_K_M", mem: 0.4 },
     },
     {
       name: "embed-npu",
@@ -202,7 +202,7 @@ const HAL0_DATA = {
       coresident: true,
       port: 8093,
       pid: 28482,
-      metrics: { rpm: 0, lat: null, dim: 768, mem: 0.35 },
+      metrics: { lat: null, dim: 768, mem: 0.35 },
     },
     {
       name: "tts",
@@ -224,7 +224,7 @@ const HAL0_DATA = {
       cpuOnly: true,
       port: 8097,
       pid: 28510,
-      metrics: { rpm: 4, secs: 47, voice: "af_heart", mem: 0.4 },
+      metrics: { secs: 47, voice: "af_heart", mem: 0.4 },
     },
     {
       name: "img",
@@ -244,7 +244,7 @@ const HAL0_DATA = {
       container_health: true,
       port: 8098,
       pid: 28518,
-      metrics: { rpm: 2, avg: 4.1, res: "512×512", mem: 1.2 },
+      metrics: { res: "512×512", mem: 1.2 },
     },
   ],
 

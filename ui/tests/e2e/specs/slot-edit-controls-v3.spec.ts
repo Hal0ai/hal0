@@ -5,8 +5,10 @@
  *   C3. enabled toggle on the slot CARD → PUT /config { enabled } + fade.
  *   C4. enable_thinking toggle in the edit DRAWER (llm slots only) →
  *       PUT /config { enable_thinking } instantly.
- *   C5. n_gpu_layers in the drawer Advanced section is READ-ONLY —
- *       profile-owned; Save ships ctx_size via PATCH /defaults instead.
+ *   C5. n_gpu_layers in the drawer Advanced section is an EDITABLE per-slot
+ *       override persisted via PATCH /defaults ([model].n_gpu_layers);
+ *       -1/empty = unset (null on the wire) and an untouched field never
+ *       rides the PATCH. ctx_size shares the same PATCH.
  *   C6. enabled slots sort before disabled ones in the grid.
  *
  * The dashboard renders the slot LIST from in-bundle HAL0_DATA
@@ -87,7 +89,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
   })
 
-  test('C5 — n_gpu_layers is read-only, owned by the profile', async ({ page }) => {
+  test('C5 — n_gpu_layers is editable with the unset helper text', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
@@ -95,8 +97,51 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.locator('.drawer details.adv-disclosure summary').click()
     const row = page.locator('.drawer .form-row', { hasText: 'n_gpu_layers' })
     await expect(row).toBeVisible()
-    await expect(row.locator('.form-lbl .sub')).toContainText('defined by profile')
-    await expect(row.locator('input')).toHaveAttribute('readonly', '')
+    await expect(row.locator('.form-lbl .sub')).toContainText('-1 / empty = use model default / profile')
+    const input = page.getByTestId('n-gpu-layers-input')
+    await expect(input).not.toHaveAttribute('readonly', '')
+    await expect(input).toHaveValue('-1')
+  })
+
+  test('C5 — editing n_gpu_layers Save PATCHes /defaults { n_gpu_layers }', async ({ page }) => {
+    const patches: any[] = []
+    await page.route('**/api/slots/primary/defaults', async (route) => {
+      patches.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/config', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await seedSlots(page, [PRIMARY, EMBED])
+
+    await page.goto('/#slots/primary')
+    await page.locator('.drawer details.adv-disclosure summary').click()
+    await page.getByTestId('n-gpu-layers-input').fill('24')
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => patches.length).toBeGreaterThan(0)
+    expect(patches[0].n_gpu_layers).toBe(24)
+    // Untouched ctx_size must not ride along (dirty-tracking contract).
+    expect(patches[0]).not.toHaveProperty('ctx_size')
+  })
+
+  test('C5 — clearing n_gpu_layers back to -1/empty PATCHes null (unset)', async ({ page }) => {
+    const patches: any[] = []
+    await page.route('**/api/slots/primary/defaults', async (route) => {
+      patches.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/config', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    // Baseline has an explicit override (24) — clearing the field unsets it.
+    await seedSlots(page, [{ ...PRIMARY, n_gpu_layers: 24 }, EMBED])
+
+    await page.goto('/#slots/primary')
+    await page.locator('.drawer details.adv-disclosure summary').click()
+    await page.getByTestId('n-gpu-layers-input').fill('')
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => patches.length).toBeGreaterThan(0)
+    expect(patches[0]).toHaveProperty('n_gpu_layers', null)
   })
 
   test('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {
@@ -118,7 +163,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => patches.length).toBeGreaterThan(0)
     expect(patches[0].ctx_size).toBe(16384)
-    // Profile-owned knobs never ride the defaults PATCH.
+    // Untouched n_gpu_layers (seeded -1 = unset) never rides the PATCH.
     expect(patches[0]).not.toHaveProperty('n_gpu_layers')
   })
 
