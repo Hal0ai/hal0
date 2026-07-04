@@ -28,17 +28,19 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.8.2b3** — container-runtime era, declarative
-> config. Each slot (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, NPU
-> trio) runs as a dedicated podman container (`hal0-slot@<name>.service`).
+> **Status:** **v0.8.4b1** — container-runtime era, declarative
+> config. Each slot (`agent`, `utility`, `embed`, `rerank`, `stt`, `tts`,
+> `img`, `vision`, NPU trio) runs as a dedicated podman container
+> (`hal0-slot@<name>.service`).
 > Slot definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
 > in `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
 > single source of truth for every HuggingFace coordinate and SHA-256
-> digest. The launch command for every slot is now resolved from a single
-> source (deduped, with per-flag provenance), and **Stacks** apply
-> declarative model/slot layouts atomically. `hal0-api` can run
-> unprivileged — install with `HAL0_USER=hal0` to drop it off root (slot
-> containers stay rootful; default `root` is unchanged). The one-liner
+> digest. The launch command for every slot is resolved from a single
+> source (deduped, with per-flag provenance), **Stacks** apply
+> declarative model/slot layouts atomically, and profiles share the same
+> portable export/import envelope. Models can carry a preferred runtime
+> profile, interrupted pulls resume, and voice runs end-to-end (NPU STT +
+> Kokoro or GPU Qwen3-TTS). The one-liner
 > seeds the recommended Main slot non-interactively; run `hal0 setup`
 > anytime to configure models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
@@ -101,9 +103,9 @@ be evicted out from under a streaming request.
 - **Slots** — each named target in `capabilities.toml` carries a
   `type` (`llm | embedding | reranking | transcription | tts | image`),
   a `device` (`gpu-rocm | gpu-vulkan | cpu | npu | img`), a `model`,
-  plus `enabled` and optional `default`. Six seeded slots (`chat`,
-  `embed`, `rerank`, `stt`, `tts`, `img`) plus three NPU slots
-  (`npu`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
+  plus `enabled` and optional `default`. Eight seeded slots (`agent`,
+  `utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`) plus NPU
+  slots (`npu`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
   User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
   Slots refer to a **profile** in `/etc/hal0/profiles.toml` that pins
   the container image + flag bundle for that backend.
