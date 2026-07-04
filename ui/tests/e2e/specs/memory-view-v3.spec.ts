@@ -8,7 +8,7 @@
  *   - Nav: "Memory" item present when memory_enabled, routes to #memory
  *   - Engine card: version + reachable chip + bank count from /api/memory/engine
  *   - Engine card: unreachable state renders a degraded (not crashed) card
- *   - Bank cards: fact-type counts, pending/failed op badges from per-bank stats
+ *   - Bank cards: fact-type counts, live activity (working/pending/failed) from /operations
  *   - Timeseries: stacked spark bars render from stats/timeseries buckets
  *   - Operations panel: failed op row exposes Retry → POST .../operations/{id}/retry
  *   - Create bank: form PUTs /api/memory/banks/{name}
@@ -173,22 +173,31 @@ test.describe('Memory view — Hindsight surface', () => {
     await expect(card.locator('.chip')).toContainText(/reachable/i)
   })
 
-  test('bank cards show fact-type counts and op badges', async ({ page }) => {
+  test('bank cards show fact-type counts and live activity', async ({ page }) => {
     await gotoMemory(page)
-    // baked banks: primary (default) has fact-type breakdowns; ingest carries
-    // the failed-operation badge.
+    // baked banks: primary (default) has fact-type breakdowns + a pending op;
+    // ingest carries in-flight + failed operations.
     const primary = page.locator('[data-testid="mem-bank-primary"]')
     await expect(primary).toBeVisible()
     await expect(primary).toContainText('world')
     await expect(primary).toContainText('experience')
     await expect(primary).toContainText('observation')
-    // primary has a pending op → warn badge.
-    await expect(primary.locator('.mo-badge.warn', { hasText: 'pending' })).toBeVisible()
+    // primary has a pending op in flight → live spinner "working" badge + a
+    // pending activity chip (driven by /operations, not stats).
+    await expect(primary.locator('.mem-act-badge.working')).toBeVisible()
+    await expect(primary.locator('.mem-act-chip.pend')).toContainText('pending')
 
-    // ingest bank exposes a failed-ops badge from its stats (1 failed).
+    // ingest bank carries a failed op → a red failed affordance that reveals
+    // the failed operation type(s) on click.
     const ingest = page.locator('[data-testid="mem-bank-ingest"]')
     await expect(ingest).toBeVisible()
-    await expect(ingest.locator('.mo-badge.warn', { hasText: 'failed' })).toContainText('1')
+    const failed = ingest.locator('[data-testid="mem-failed-ingest"]')
+    await expect(failed).toContainText('1')
+    await expect(failed).toContainText('failed')
+    await failed.click()
+    await expect(ingest.locator('[data-testid="mem-failed-pop-ingest"]')).toContainText(
+      'consolidation',
+    )
   })
 
   test('timeseries renders stacked spark bars per bucket', async ({ page }) => {

@@ -187,9 +187,23 @@ def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recor
     assert recorder.requests[-1]["method"] == "PUT"
     assert recorder.requests[-1]["path"] == "/v1/default/banks/scratch"
 
+    # Bank deletion is guarded: without a matching ?confirm= it is rejected
+    # (400) and NOT forwarded upstream.
+    before = len(recorder.requests)
     r = client.delete("/api/memory/banks/scratch")
+    assert r.status_code == 400
+    assert len(recorder.requests) == before
+
+    # Mismatched confirmation is likewise rejected.
+    r = client.delete("/api/memory/banks/scratch?confirm=other")
+    assert r.status_code == 400
+    assert len(recorder.requests) == before
+
+    # Matching confirmation forwards the DELETE.
+    r = client.delete("/api/memory/banks/scratch?confirm=scratch")
     assert r.status_code == 200
     assert recorder.requests[-1]["method"] == "DELETE"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/scratch"
 
 
 def test_operation_retry_and_consolidate_forward(client: TestClient, recorder: _Recorder) -> None:

@@ -18,6 +18,7 @@ veneer that:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -27,6 +28,7 @@ from pydantic import ValidationError
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import MemoryGraphConfig
+from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
     MemoryNamespaceError,
@@ -35,6 +37,8 @@ from hal0.memory.namespace import (
 )
 
 router = APIRouter()
+
+log = logging.getLogger(__name__)
 
 
 # ── ADR-0012 identity + ADR-0005 §3 namespace helpers ─────────────────────
@@ -223,7 +227,61 @@ async def graph_status(request: Request) -> dict[str, Any]:
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
     status["slot_resolves"] = status.get("extraction_slot") in available
+    await _augment_build_counters(request, status)
     return status
+
+
+async def _augment_build_counters(request: Request, status: dict[str, Any]) -> None:
+    """Replace the provider's placeholder ``0``/``None`` build counters with
+    real extraction/consolidation activity aggregated from Hindsight's
+    per-bank ``/stats`` (``operations_by_status``, ``pending_operations``,
+    ``failed_operations``, ``last_consolidated_at``).
+
+    Extraction runs inside the Hindsight daemon, so hal0 keeps no in-process
+    counter — we read it back. Best-effort: on any error the provider's
+    placeholder values are left intact, so the endpoint never fails.
+    """
+    provider = getattr(request.app.state, "memory_provider", None)
+    client = getattr(provider, "hindsight_client", None) if provider is not None else None
+    if client is None:
+        return
+
+    async def _get(path: str) -> Any | None:
+        try:
+            return await client.request_json("GET", path)
+        except Exception:
+            return None
+
+    banks_resp = await _get("/v1/default/banks")
+    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
+    if not isinstance(banks, list):
+        return
+
+    in_flight = builds_ok = errors = 0
+    last_built: str | None = None
+    saw_stats = False
+    for entry in banks:
+        bank_id = entry.get("bank_id") if isinstance(entry, dict) else entry
+        if not bank_id:
+            continue
+        st = await _get(f"/v1/default/banks/{bank_id}/stats")
+        if not isinstance(st, dict):
+            continue
+        saw_stats = True
+        by_status = st.get("operations_by_status") or {}
+        in_flight += int(st.get("pending_operations") or 0)
+        in_flight += int(by_status.get("processing") or 0) + int(by_status.get("claimed") or 0)
+        builds_ok += int(by_status.get("completed") or 0)
+        errors += int(st.get("failed_operations") or by_status.get("failed") or 0)
+        built = st.get("last_consolidated_at")
+        if built and (last_built is None or built > last_built):
+            last_built = built
+
+    if saw_stats:
+        status["in_flight"] = in_flight
+        status["builds_ok"] = builds_ok
+        status["errors"] = errors
+        status["last_built_at"] = last_built
 
 
 # ── PUT /api/memory/graph ──────────────────────────────────────────────────
@@ -485,6 +543,7 @@ async def memory_recall(request: Request) -> dict[str, Any]:
 async def memory_list(
     request: Request,
     dataset: str | None = None,
+    bank: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
@@ -494,7 +553,24 @@ async def memory_list(
     explicit ``?dataset=`` resolves to the caller's own private bucket
     so the ``hal0 agent memory list`` CLI subcommand can enumerate
     per-agent items without the operator passing the namespace by hand.
+
+    ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
+    browser: a bank id (``private__hermes``) is translated to the matching
+    dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
+    given. If both are supplied and conflict, the explicit ``dataset`` wins.
     """
+    if bank is not None:
+        bank_dataset = bank_to_namespace(bank)
+        if dataset is None:
+            dataset = bank_dataset
+        elif dataset != bank_dataset:
+            log.info(
+                "memory_list: ?dataset=%r overrides conflicting ?bank=%r (->%r)",
+                dataset,
+                bank,
+                bank_dataset,
+            )
+
     agent_id = _agent_id(request)
     private = _is_private(request)
     try:
