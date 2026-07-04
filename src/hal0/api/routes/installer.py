@@ -636,6 +636,26 @@ async def service_repair(unit: str) -> dict[str, Any]:
             details={"unit": unit, "allowed": sorted(_REPAIRABLE_UNITS)},
             code="install.unit_not_repairable",
         )
+    if unit == "hal0-api.service":
+        # Self-restart: a synchronous ``systemctl restart`` of our own unit
+        # deadlocks — systemd SIGTERMs this process while the blocking
+        # subprocess call holds the event loop, so neither the restart nor
+        # the HTTP response can complete until a timeout kills one of them.
+        # Mirror the updater's pattern instead (updater._try_restart_hal0_api):
+        # flush the response first, then fail-soft try-restart off-loop.
+        # Callers should poll /api/health for recovery.
+        async def _bounce_self() -> None:
+            await asyncio.sleep(0.5)  # let the response flush
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["systemctl", "try-restart", unit],
+                    check=False,
+                    timeout=60,
+                )
+
+        asyncio.get_running_loop().create_task(_bounce_self())
+        return {"unit": unit, "active": True, "deferred": True}
     try:
         subprocess.run(["systemctl", "restart", unit], check=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:

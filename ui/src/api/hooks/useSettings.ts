@@ -62,6 +62,21 @@ export function useSettingsReload() {
   })
 }
 
+// ── Settings JSON schema (pydantic Hal0Config) ──────────────────────────
+//
+// GET /api/settings/schema serves the full pydantic JSON Schema for
+// hal0.toml — per-field types, bounds, and descriptions. The Advanced
+// settings section renders its controls from this so descriptions stay
+// server-sourced instead of drifting in frontend copy. Static for the
+// server's lifetime.
+export function useSettingsSchema() {
+  return useQuery({
+    queryKey: ['settings', 'json-schema'],
+    queryFn: () => apiGet<Record<string, unknown>>(ENDPOINTS.settingsSchema),
+    staleTime: Infinity,
+  })
+}
+
 // ── Model storage (single source of truth) ──────────────────────────────
 //
 // `[models].store` (v0.3) replaces #313's roots + pull_root with one
