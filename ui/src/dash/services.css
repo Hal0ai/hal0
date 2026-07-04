@@ -1,0 +1,147 @@
+/* hal0 dashboard — Services page (#services)
+   Page-scoped styles (svcp- prefix). Reuses the global service atoms from
+   overhaul.css: .sdot, .svc-pill, .svc-icon-tile, .svc-btn, .svc-pending,
+   .svc-comfy-drawer (queue drawer shared with services-card.jsx). */
+
+.svcp-view .dcard { margin-bottom: 14px; }
+
+.svcp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
+}
+
+.svcp-card {
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.25));
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--card-bg, rgba(127, 127, 127, 0.04));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.svcp-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.svcp-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.svcp-name { font-weight: 600; }
+
+.svcp-uptime {
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.svcp-desc {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.svcp-detail {
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.svcp-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+
+.svcp-meta-row b { font-weight: 600; }
+
+.svcp-unmanaged { opacity: 0.55; font-style: italic; }
+
+.svcp-hints {
+  font-size: 11px;
+  opacity: 0.65;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.svcp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.svcp-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.svcp-act-danger { color: var(--danger, #d05050); }
+
+.svcp-busy { font-size: 11px; opacity: 0.6; }
+
+.svcp-result {
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(80, 180, 110, 0.1);
+}
+
+.svcp-result.err { background: rgba(210, 80, 80, 0.12); }
+
+/* ── logs drawer ── */
+.svcp-logs {
+  border-top: 1px solid var(--line, rgba(127, 127, 127, 0.2));
+  padding-top: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.svcp-logs-pre {
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.svcp-logs-empty {
+  font-size: 11px;
+  opacity: 0.55;
+  padding: 6px 0;
+}
+
+/* ── discovery / mDNS card ── */
+.svcp-mdns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.svcp-mdns-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.svcp-mdns-host { opacity: 0.7; font-size: 12px; }
+
+.svcp-mdns-sub {
+  font-size: 12px;
+  opacity: 0.7;
+  line-height: 1.55;
+}

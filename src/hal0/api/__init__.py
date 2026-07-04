@@ -109,6 +109,9 @@ from hal0.api.routes import (
     secrets as secrets_routes,
 )
 from hal0.api.routes import (
+    services as services_routes,
+)
+from hal0.api.routes import (
     stacks as stacks_routes,
 )
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
@@ -1155,6 +1158,10 @@ def create_app() -> FastAPI:
     app.include_router(throughput.router, prefix="/api", tags=["stats"])
     app.include_router(power.router, prefix="/api", tags=["stats"])
     app.include_router(services_health.router, prefix="/api/services", tags=["services"])
+    # Services management page (registry-driven detail + lifecycle + mDNS):
+    #   services_routes.router → GET /api/services, POST /api/services/{id}/action,
+    #   GET/POST /api/services/mdns — see hal0/services/ for the registry.
+    app.include_router(services_routes.router, prefix="/api/services", tags=["services"])
     app.include_router(dashboard_layout.router, prefix="/api/user", tags=["user"])
     app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
     app.include_router(

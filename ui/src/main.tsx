@@ -84,6 +84,11 @@ import './dash/profiles.jsx'
 // window.StacksView, rendered as the third Slots tab.
 import './dash/stacks.css'
 import './dash/stacks.jsx'
+// Services page (#services): companion-service management — status +
+// lifecycle + mDNS. Registers window.ServicesView. Must load after
+// services-card.jsx (reuses its ComfyJobQueue window global).
+import './dash/services.css'
+import './dash/services.jsx'
 import './dash/settings.jsx'
 
 import './dash/extras.jsx'

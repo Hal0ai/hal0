@@ -97,6 +97,7 @@ const Icons = {
   hardware:  <Icon><rect x="3" y="3" width="10" height="10" rx="1"/><rect x="5.5" y="5.5" width="5" height="5" rx="0.5"/><path d="M3 6h-1M3 10h-1M13 6h1M13 10h1M6 3v-1M10 3v-1M6 13v1M10 13v1"/></Icon>,
   backends:  <Icon><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><path d="M6 4h4M4 6v4M12 6v4M6 12h4"/></Icon>,
   logs:      <Icon><path d="M3 3h10M3 6h10M3 9h7M3 12h5"/></Icon>,
+  services:  <Icon><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/><circle cx="11.5" cy="4.5" r="2.5"/><path d="M4.5 9v2a2 2 0 0 0 2 2H7"/></Icon>,
   // issue #549 — two linked rings echo the "remote ↔ local" connection metaphor.
   connections: <Icon><circle cx="6" cy="8" r="2.5"/><circle cx="11" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M8 9.5l2 1M3.5 4.5h4M3.5 6.5h3"/></Icon>,
   agent:     <Icon><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/><circle cx="13" cy="3" r="1.5"/></Icon>,
@@ -162,6 +163,7 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     connections: ["Network", "Connections"],
     profiles:  ["iGPU Slots", "Profiles"],
     board:     ["Orchestration", "Board"],
+    services:  ["Companions", "Services"],
   };
   const [eyebrow, title] = labels[route] || ["", ""];
   return (
@@ -253,6 +255,10 @@ function useNavItems() {
       ...(memoryEnabled ? [{ id: "memory", label: "Memory" }] : []),
       { id: "mcp", label: "MCP" },
     ] },
+    // Services (#services): dedicated companion-service management page
+    // (status + lifecycle + mDNS). The sidebar-bottom ServiceLinks zone
+    // stays as the quick external-launch shortcuts; this is the manager.
+    { id: "services", label: "Services", icon: Icons.services },
     { id: "logs", label: "Logs", icon: Icons.logs },
     { id: "settings", label: "Settings", icon: Icons.settings },
   ];
