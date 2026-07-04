@@ -181,8 +181,7 @@ def _tool_schemas() -> list[dict[str, Any]]:
         ),
         _fn(
             "slot_unload",
-            "Unload a slot's model from memory. DISRUPTIVE — only on explicit "
-            "operator request.",
+            "Unload a slot's model from memory. DISRUPTIVE — only on explicit operator request.",
             {"name": {"type": "string"}},
             ["name"],
         ),
@@ -357,9 +356,7 @@ def _compact_board(result: Any) -> Any:
     else:
         return result
     return {
-        "tasks": [
-            {k: t[k] for k in _COMPACT_TASK_FIELDS if t.get(k) is not None} for t in rows
-        ]
+        "tasks": [{k: t[k] for k in _COMPACT_TASK_FIELDS if t.get(k) is not None} for t in rows]
     }
 
 
@@ -381,9 +378,7 @@ _PLATFORM_READS = {
 _SLOT_MUTATIONS = {"slot_load": "load", "slot_unload": "unload", "slot_restart": "restart"}
 
 
-def _resolve_platform_tool(
-    name: str, args: dict[str, Any]
-) -> tuple[str | None, str, bool]:
+def _resolve_platform_tool(name: str, args: dict[str, Any]) -> tuple[str | None, str, bool]:
     """Map a platform tool → (method, hal0-api path, mutating)."""
     if name in _PLATFORM_READS:
         return "GET", _PLATFORM_READS[name], False
@@ -664,9 +659,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     messages: list[dict[str, Any]] = list(payload.get("messages") or [])
     # Seed the system prompt unless the client sent its own — the model needs
     # the lane vocabulary and the read-before-write rule to act on the board.
-    if not messages or not (
-        isinstance(messages[0], dict) and messages[0].get("role") == "system"
-    ):
+    if not messages or not (isinstance(messages[0], dict) and messages[0].get("role") == "system"):
         messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
 
     body: dict[str, Any] = {
