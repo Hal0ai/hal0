@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
+from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import MemoryGraphConfig
@@ -508,6 +509,11 @@ async def memory_recall(request: Request) -> dict[str, Any]:
 
     Falls back to ``search`` semantics on engines without a richer recall
     (the ABC default), so this route is safe regardless of active engine.
+
+    Contract note (#1026): this is the NAMESPACE recall — ACL-scoped,
+    cross-bank fan-out, envelope ``{items}``. It is distinct from the bank
+    console recall ``POST /api/memory/banks/{bank}/recall`` (single-bank
+    Hindsight passthrough, envelope ``{results}``). Same verb, different scope.
     """
     body = await _read_json_body(request)
     query = body.get("query")
@@ -627,11 +633,19 @@ async def memory_delete(request: Request) -> dict[str, int]:
         except MemoryNamespaceError as exc:
             raise MemoryNamespaceInvalid(str(exc)) from exc
     wrapper = _wrapper(request)
-    return await wrapper.delete(
-        ids=ids,
-        client_id=agent_id if agent_id != "anonymous" else None,
-        dataset=dataset,
-    )
+    # #1024 hardening: id-scoped delete is destructive — record it (actor +
+    # ids + outcome) so bulk removals are attributable after the fact.
+    async with record_action(
+        request,
+        category="memory",
+        action="memory.items.delete",
+        target=",".join(str(i) for i in ids)[:200],
+    ):
+        return await wrapper.delete(
+            ids=ids,
+            client_id=agent_id if agent_id != "anonymous" else None,
+            dataset=dataset,
+        )
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:

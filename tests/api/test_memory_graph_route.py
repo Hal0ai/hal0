@@ -191,6 +191,53 @@ def test_put_bad_slot_name_returns_400(client: TestClient, stub_wrapper: StubWra
     assert r.json()["error"]["code"] == "config.memory_graph_invalid"
 
 
+class _HindsightyWrapper(StubWrapper):
+    """Wrapper that also exposes a hindsight_client, so graph/status can
+    aggregate real per-bank extraction counters (#1025)."""
+
+    def __init__(self, stats_by_bank: dict[str, Any]) -> None:
+        super().__init__()
+        self._stats = stats_by_bank
+        parent = self
+
+        class _Client:
+            async def request_json(self, method: str, path: str) -> Any:
+                if path == "/v1/default/banks":
+                    return {"banks": [{"bank_id": b} for b in parent._stats]}
+                for bank, stats in parent._stats.items():
+                    if path == f"/v1/default/banks/{bank}/stats":
+                        return stats
+                raise AssertionError(f"unexpected path {path}")
+
+        self.hindsight_client = _Client()
+
+
+def test_graph_status_aggregates_real_counters_from_hindsight(hal0_home: Path) -> None:
+    # #1025: graph/status must reflect ACTUAL extraction activity read back from
+    # Hindsight per-bank /stats, not the provider's 0/None placeholders.
+    wrapper = _HindsightyWrapper(
+        {
+            "shared": {
+                "operations_by_status": {"completed": 3, "processing": 1, "failed": 0},
+                "pending_operations": 2,
+                "failed_operations": 1,
+                "last_consolidated_at": "2026-07-04T01:00:00Z",
+            },
+            "private__hermes": {
+                "operations_by_status": {"completed": 5},
+                "last_consolidated_at": "2026-07-04T02:00:00Z",
+            },
+        }
+    )
+    app = _build_app(wrapper, "utility")
+    with TestClient(app) as c:
+        body = c.get("/api/memory/graph/status").json()
+    assert body["builds_ok"] == 8  # 3 + 5 completed
+    assert body["in_flight"] == 3  # 2 pending + 1 processing
+    assert body["errors"] == 1  # failed_operations on shared
+    assert body["last_built_at"] == "2026-07-04T02:00:00Z"  # newest across banks
+
+
 def test_status_unavailable_when_no_wrapper(
     hal0_home: Path,
 ) -> None:

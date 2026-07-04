@@ -19,6 +19,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hal0.activity import AuditStore
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory_admin
 from hal0.memory.hindsight_client import HindsightRestClient
@@ -167,6 +168,9 @@ def test_memories_list_maps_paths_and_params(client: TestClient, recorder: _Reco
 
 
 def test_recall_post_passes_body_through(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "POST", "/v1/default/banks/shared/memories/recall", 200, {"results": [{"text": "x"}]}
+    )
     body = {"query": "what changed", "budget": "high", "include": {"entities": {}}}
     r = client.post("/api/memory/banks/shared/recall", json=body)
     assert r.status_code == 200
@@ -176,9 +180,41 @@ def test_recall_post_passes_body_through(client: TestClient, recorder: _Recorder
 
 
 def test_reflect_post_forwards(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond("POST", "/v1/default/banks/shared/reflect", 200, {"text": "you are hal0"})
     r = client.post("/api/memory/banks/shared/reflect", json={"query": "who am i"})
     assert r.status_code == 200
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/reflect"
+
+
+# ── #1026: response-shape guards on the cognition consoles ──────────────────────
+
+
+def test_recall_shape_drift_maps_to_502(client: TestClient, recorder: _Recorder) -> None:
+    # Upstream drops the ``results`` key → loud 502 instead of a blank console.
+    recorder.respond("POST", "/v1/default/banks/shared/memories/recall", 200, {"answers": []})
+    r = client.post("/api/memory/banks/shared/recall", json={"query": "x"})
+    assert r.status_code == 502
+    payload = r.json()["error"]
+    assert payload["code"] == "memory.engine_shape"
+    assert payload["details"]["expected_key"] == "results"
+
+
+def test_reflect_shape_drift_maps_to_502(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond("POST", "/v1/default/banks/shared/reflect", 200, {"summary": "nope"})
+    r = client.post("/api/memory/banks/shared/reflect", json={"query": "x"})
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "memory.engine_shape"
+
+
+def test_directives_get_shape_guard(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond("GET", "/v1/default/banks/shared/directives", 200, {"items": [], "total": 0})
+    r = client.get("/api/memory/banks/shared/directives")
+    assert r.status_code == 200
+
+    recorder.respond("GET", "/v1/default/banks/shared/directives", 200, {"directives": []})
+    r = client.get("/api/memory/banks/shared/directives")
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "memory.engine_shape"
 
 
 def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recorder) -> None:
@@ -231,6 +267,48 @@ def test_document_delete_and_reprocess_forward(client: TestClient, recorder: _Re
     r = client.post("/api/memory/banks/shared/documents/doc-1/reprocess")
     assert r.status_code == 200
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/documents/doc-1/reprocess"
+
+
+# ── #1024: destructive ops are audited ─────────────────────────────────────────
+
+
+def _build_app_with_audit(provider: Any, audit: AuditStore) -> FastAPI:
+    app = _build_app(provider)
+    app.state.audit = audit
+    return app
+
+
+def test_destructive_ops_land_audit_rows(recorder: _Recorder, tmp_path: Any) -> None:
+    audit = AuditStore(tmp_path / "audit.db")
+    audit.init_schema()
+    transport = httpx.MockTransport(recorder.handler)
+    http = httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177")
+    rest = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+    app = _build_app_with_audit(_HindsightStubProvider(rest), audit)
+
+    with TestClient(app) as c:
+        # Rejected (unconfirmed) bank delete → NOT a destructive op → no row.
+        assert c.delete("/api/memory/banks/scratch").status_code == 400
+        assert audit.query(action="memory.bank.delete") == []
+
+        # Confirmed bank delete → audited, actor derived from X-hal0-Agent.
+        r = c.delete(
+            "/api/memory/banks/scratch?confirm=scratch", headers={"X-hal0-Agent": "hermes"}
+        )
+        assert r.status_code == 200
+        # A generic table DELETE (document) → audited via _make_handler.
+        assert c.delete("/api/memory/banks/scratch/documents/doc-1").status_code == 200
+
+    bank_rows = audit.query(action="memory.bank.delete")
+    assert bank_rows, "expected a memory.bank.delete audit row"
+    assert bank_rows[0]["outcome"] == "ok"
+    assert bank_rows[0]["actor"] == "mcp:hermes"
+    assert bank_rows[0]["target"] == "scratch"
+
+    doc_rows = audit.query(action="memory.document.delete")
+    assert doc_rows, "expected a memory.document.delete audit row"
+    assert doc_rows[0]["actor"] == "dashboard"
+    assert doc_rows[0]["target"] == "/v1/default/banks/scratch/documents/doc-1"
 
 
 # ── upstream error mapping ─────────────────────────────────────────────────────

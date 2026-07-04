@@ -119,8 +119,9 @@ function MemTimeseries({ bank, period, setPeriod }) {
 
   return (
     <div className="card mo-ts" data-testid="mem-timeseries">
-      <div className="mo-ts-head">
-        <span className="mono">memories retained · {bank || '—'}</span>
+      <div className="mo-ts-head mo-card-h">
+        <span className="mo-eyebrow">memories retained · {bank || '—'}</span>
+        <span className="grow" />
         <div className="mo-ts-periods">
           {['1d', '7d', '30d', '90d'].map(p => (
             <button
@@ -577,6 +578,11 @@ function MemoryView({ param } = {}) {
         <MemToolsPanel />
       ) : (
       <div className="mo">
+      {/* Top row: engine identity · (shrunk) memories-retained spark ·
+          the graph-extraction gate/slot panel beside it. MemoryGraphPanel is
+          the canonical window global from agents/memory-tab.jsx so the
+          enabled/slot/builds_ok/errors/last_built_at controls live here on the
+          Overview, not just the #agent tab. */}
       <div className="mo-top">
         <MemEngineCard
           engine={engineQuery.data}
@@ -585,23 +591,16 @@ function MemoryView({ param } = {}) {
           onOpenGraph={() => { window.location.hash = '#memory/graph'; }}
         />
         <MemTimeseries bank={chartBank} period={period} setPeriod={setPeriod} />
+        <div className="mo-graphcol">
+          {graphInFlight > 0 && (
+            <span className="mem-act-badge working" data-testid="mem-graph-inflight" title="graph extraction running">
+              <span className="mem-spin" aria-hidden="true" />
+              extracting… ({graphInFlight} in flight)
+            </span>
+          )}
+          {typeof MemoryGraphPanel === 'function' ? <MemoryGraphPanel /> : null}
+        </div>
       </div>
-
-      {/* ADR-0023 graph-extraction gate + slot picker — reuses the canonical
-          MemoryGraphPanel (window global from agents/memory-tab.jsx) so the
-          enabled/slot/slot_resolves/builds_ok/errors/last_built_at/last_error
-          controls live here on the Memory Overview, not just the #agent tab. */}
-      <div className="sec">
-        <h2>Graph extraction</h2>
-        <div className="rule" />
-        {graphInFlight > 0 && (
-          <span className="mem-act-badge working" data-testid="mem-graph-inflight" title="graph extraction running">
-            <span className="mem-spin" aria-hidden="true" />
-            extracting… ({graphInFlight} in flight)
-          </span>
-        )}
-      </div>
-      {typeof MemoryGraphPanel === 'function' ? <MemoryGraphPanel /> : null}
 
       {/* .sec is a flex title-row (h2 + flex:1 rule); content must be a SIBLING,
           not a child, or it gets pinned into the heading row and shrink-wraps. */}

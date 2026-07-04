@@ -13,6 +13,25 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Added
+- **Memory: audit trail for destructive ops (#1024).** Every destructive
+  `/api/memory/*` op — bank delete, and memories/config/document/directive/
+  operation/mental-model deletes, plus the namespace `POST /api/memory/delete`
+  — now records a durable audit row (actor + target + truthful outcome) via the
+  shared `record_action` facility, so a memory wipe is attributable after the
+  fact. Complements the bank-DELETE `?confirm=` guard shipped in #1028.
+- **Memory: response-shape guard on the cognition consoles (#1026).** The
+  recall/reflect/directives passthroughs now validate the load-bearing envelope
+  key (`results`/`text`/`items`); upstream Hindsight shape drift surfaces as a
+  loud `memory.engine_shape` 502 instead of a silently-blank console panel. The
+  two colliding `recall` contracts (namespace `{items}` vs bank `{results}`) are
+  now documented at both call sites.
+
+### Changed
+- **Memory Overview UI.** The graph-extraction gate now sits beside a shrunk
+  "memories retained" spark in the top row; card headings share one unified
+  "eyebrow" style; dropped the stray `ADR-0023` label from the extraction title.
+
 ## [v0.8.3b1] — 2026-07-04
 
 A large **reliability and UI-completeness** release. The headline is a

@@ -306,6 +306,28 @@ def test_delete_passes_ids_unchanged(client: TestClient, stub_wrapper: StubWrapp
     assert r.json() == {"deleted": 2}
 
 
+def test_delete_is_audited(stub_wrapper: StubWrapper, tmp_path: Any) -> None:
+    """#1024: id-scoped delete lands a durable audit row (actor + ids)."""
+    from hal0.activity import AuditStore
+
+    audit = AuditStore(tmp_path / "audit.db")
+    audit.init_schema()
+    app = _build_app(stub_wrapper)
+    app.state.audit = audit
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/memory/delete",
+            json={"ids": ["a", "b"]},
+            headers={"X-hal0-Agent": "hermes-agent"},
+        )
+        assert r.status_code == 200, r.text
+    rows = audit.query(action="memory.items.delete")
+    assert rows, "expected a memory.items.delete audit row"
+    assert rows[0]["outcome"] == "ok"
+    assert rows[0]["actor"] == "mcp:hermes-agent"
+    assert rows[0]["target"] == "a,b"
+
+
 # ── PR #366 review hardening (closes #317 + #367) ──────────────────────────
 #
 # Six new contract pins surfaced by the request-changes review. The
