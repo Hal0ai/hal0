@@ -18,18 +18,23 @@
 #   sudo bash install.sh
 #
 # Env overrides:
-#   HAL0_RELEASES_URL          full URL to a hal0.releases.v1 manifest
-#                              (default: GitHub Releases /latest/download/stable.json)
-#   HAL0_CHANNEL               channel name when using the default URL (default: stable)
-#   HAL0_UPDATE_SKIP_COSIGN=1  skip cosign verify (only honored when cosign
-#                              isn't installed; emits a loud warning)
-#   HAL0_BOOTSTRAP_KEEP_TMP=1  don't delete the work directory on exit
-#                              (debugging the unpacked tree)
+#   HAL0_RELEASES_URL           full URL to a hal0.releases.v1 manifest
+#                               (default: GitHub Releases /latest/download/stable.json)
+#   HAL0_CHANNEL                channel name when using the default URL (default: stable)
+#   HAL0_INSTALL_REQUIRE_COSIGN=1
+#                               fail the install if cosign is not present
+#                               (restores the old hard requirement for
+#                               security-conscious / enterprise installs)
+#   HAL0_BOOTSTRAP_KEEP_TMP=1   don't delete the work directory on exit
+#                               (debugging the unpacked tree)
 #
-# This script is the trust boundary for the one-line install — it never
-# executes anything from the manifest or the tarball until cosign (or
-# the documented skip) has verified the signature against the workflow
-# OIDC identity in the manifest.
+# This script is the trust boundary for the one-line install. The tarball's
+# sha256 is ALWAYS checked against the manifest digest (fatal on mismatch)
+# before anything is executed. cosign then verifies the publisher signature
+# against the workflow OIDC identity — but cosign is no longer a hard
+# install-time dependency: if the binary is absent, the install proceeds on
+# the sha256 check alone with a loud warning (opt back into strict mode with
+# HAL0_INSTALL_REQUIRE_COSIGN=1). See docs/internal/release-manifest.md.
 #
 # Schema reference: docs/internal/release-manifest.md (hal0.releases.v1).
 
@@ -124,14 +129,23 @@ cosign_verify() {
     local tarball="$1" sig="$2" cert="$3" identity="$4" issuer="$5"
 
     if ! command -v cosign >/dev/null 2>&1; then
-        if [[ "${HAL0_UPDATE_SKIP_COSIGN:-0}" == "1" ]]; then
-            warn "cosign not installed AND HAL0_UPDATE_SKIP_COSIGN=1 — skipping signature verify"
-            warn "this is only safe if you trust the network path to ${HAL0_RELEASES_URL}"
-            return 0
+        if [[ "${HAL0_INSTALL_REQUIRE_COSIGN:-0}" == "1" ]]; then
+            die "cosign is required (HAL0_INSTALL_REQUIRE_COSIGN=1) but not installed.
+   install it from https://docs.sigstore.dev/cosign/installation/"
         fi
-        die "cosign is required to verify the release signature.
-   install it from https://docs.sigstore.dev/cosign/installation/, or
-   re-run with HAL0_UPDATE_SKIP_COSIGN=1 to bypass (NOT recommended)"
+        # cosign is not a hard dependency: the tarball's sha256 was already
+        # verified against the manifest digest (fetch_and_hash_check, fatal on
+        # mismatch), so integrity relative to the manifest holds. What we lose
+        # by skipping is proof that the tarball was built by hal0's signing
+        # workflow rather than substituted upstream of the manifest — hence the
+        # loud warning. Install cosign, or set HAL0_INSTALL_REQUIRE_COSIGN=1, to
+        # keep that guarantee.
+        warn "cosign not installed — skipping publisher signature verification"
+        warn "  the tarball sha256 was verified against the manifest, but its"
+        warn "  cosign/OIDC signature was NOT checked."
+        warn "  for full supply-chain verification install cosign:"
+        warn "    ${_C_DIM}https://docs.sigstore.dev/cosign/installation/${_C_RST}"
+        return 0
     fi
 
     info "verifying signature with cosign keyless OIDC"
