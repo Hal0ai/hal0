@@ -1442,12 +1442,36 @@
   border-radius: var(--rad-lg, 10px);
   background: var(--bg-1);
   overflow: hidden;
+  container-type: inline-size;
 }
+/* Base = auto-fit (also the fallback for pre-container-query browsers);
+   the ruler is a strip item spanning the full row. Container queries
+   below pin explicit column counts so the 3-column band can pull the
+   ruler UP into the blank space beside the wrapped NPU cell instead of
+   leaving a dead cell; at 4 / 2 / 1 columns it returns to full width. */
 .th-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 1px;
   background: var(--line-soft);
+}
+@supports (container-type: inline-size) {
+  /* ≥1283cqw: four cells one row, ruler full-width row 2 */
+  .th-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  /* 3-col band: cells 1-3 on row 1, NPU wraps to row 2 col 1 — the ruler
+     rises beside it (cols 2-3) so no blank cell remains */
+  @container (max-width: 1282px) {
+    .th-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .th-strip .th-ruler { grid-column: 2 / -1; }
+  }
+  /* 2-col band: clean 2×2 with the ruler back to full width */
+  @container (max-width: 961px) {
+    .th-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .th-strip .th-ruler { grid-column: 1 / -1; }
+  }
+  @container (max-width: 640px) {
+    .th-strip { grid-template-columns: minmax(0, 1fr); }
+  }
 }
 .th-cell {
   padding: 14px 18px 12px;
@@ -1757,9 +1781,13 @@
 }
 
 /* memory rack ruler — full-width second row; absorbs the memory-map band */
+/* Strip item: bg-1 over the line-soft strip background — the 1px grid gap
+   draws the hairline that the old border-top used to. */
 .th-ruler {
   padding: 14px 18px 16px;
-  border-top: 1px solid var(--line-soft);
+  background: var(--bg-1);
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 .th-ruler-h {
   display: flex;
