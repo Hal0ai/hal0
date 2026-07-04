@@ -560,8 +560,11 @@ export function TelemetryHeader({ slots: slotsProp }) {
         <ThCellGpu />
         <ThCellCpuMem />
         <ThCellNpu slots={slots} />
+        {/* The ruler is a strip item (grid-column set in overhaul.css) so the
+            3-column band can pull it up into the blank space beside the
+            wrapped NPU cell; at 4/2/1 columns it spans the full width. */}
+        <ThRuler slots={slots} />
       </div>
-      <ThRuler slots={slots} />
     </div>
   )
 }
