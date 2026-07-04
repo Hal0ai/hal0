@@ -54,10 +54,12 @@ flow is **list → pull → assign**.
    slot):
 
    ```sh
-   hal0 model assign qwen3-4b --slot chat
+   hal0 model assign qwen3-4b --slot agent
    ```
 
-   This writes `model.default` into the slot's configuration. Start the
+   This writes `model.default` into the slot's configuration. `agent` is the
+   always-seeded default/anchor slot (see [Slots](/docs/concepts/slots)); swap
+   in `utility` or any other slot name you've created instead. Start the
    slot afterward (see [Manage slots](/docs/guides/manage-slots/)).
 
 </Steps>

@@ -17,7 +17,7 @@ autonomous-write, or approval-gated. Gated tools enqueue for owner approval
 before they run; autonomous tools execute immediately.
 
 <Aside type="note">
-hal0 ships built-in auth via `--auth=basic` (Caddy + basic_auth + bearer tokens). Without it, the API is open — there are no bearer tokens. When Hermes
+hal0 has no built-in auth (ADR-0012) — there are no bearer tokens. When Hermes
 or another bundled agent calls the MCP server, it identifies itself with the
 `X-hal0-Agent` header (set from `$HAL0_AGENT_ID` by the agent wrapper). The
 server stamps that identity on every audit row and carries it onto the internal
@@ -27,7 +27,7 @@ secret. Each tool call is written to the audit log.
 
 ## Memory MCP (`/mcp/memory`)
 
-Hindsight (Cognee-backed) long-term memory. The memory subsystem is **opt-in** — these tools
+Hindsight-backed long-term memory. The memory subsystem is **opt-in** — these tools
 only function when the server is started with `HAL0_MEMORY_ENABLED=1`; otherwise
 calls degrade to a no-op / unavailable surface.
 

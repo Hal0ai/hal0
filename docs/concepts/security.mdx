@@ -1,60 +1,50 @@
 ---
 title: Security posture
-description: hal0 ships Caddy + basic_auth + bearer tokens + automatic HTTPS behind one flag. Learn the built-in and bring-your-own-proxy auth paths, the MCP host and origin allowlists, and the gated-agent model.
+description: hal0 ships no built-in auth or TLS — open on your LAN by design. Learn the threat model, the reverse-proxy pattern, and the MCP host and origin allowlists.
 sidebar:
   order: 70
 ---
 
 import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
 
-hal0 ships real authentication and TLS behind a single flag: `--auth=basic`.
-Pass it at install time and you get Caddy running at the edge with browser
-basic_auth, bearer tokens for the OpenAI-compatible API, and automatic HTTPS —
-internal CA for `.local` addresses, Let's Encrypt for real domains. Zero
-certbot.
-
-<Aside type="tip">
-**`--auth=basic`** is the quickest way to a public-facing hal0. It brings up
-Caddy with basic_auth at the edge, bearer tokens for the API, and automatic
-HTTPS — internal CA for `.local`, Let's Encrypt for real domains. The rest of
-this page covers what ships built in and how to bring your own proxy if you
-prefer.
-</Aside>
-
-## Two auth paths
-
-hal0 intentionally offers two paths so you pick the one that fits your
-deployment:
-
-- **Built-in Caddy (`--auth=basic`)** — hal0 provisions and manages a Caddy
-  reverse proxy in front of the API. You get basic_auth for browser sessions
-  (dashboard, OpenWebUI), bearer tokens for programmatic `/v1/*` access, and
-  automatic HTTPS. This is the recommended path when hal0 needs to be
-  reachable beyond a single trusted LAN. See
-  [Authentication & HTTPS](/docs/operate/auth) for the full reference.
-
-- **Bring your own proxy** — hal0 binds `0.0.0.0:8080` with no auth gate of
-  its own. You front it with Traefik, nginx, or any reverse proxy you already
-  operate, and that proxy owns TLS termination and authentication. This is
-  the original posture from the early betas and still the right choice when
-  hal0 lives inside infrastructure you already manage.
+hal0 makes one security decision explicit and central: it does **not** ship
+built-in authentication or TLS. The API binds `0.0.0.0:8080` and every endpoint
+is open to anything that can reach that port. This is a deliberate design choice
+(ADR-0012), and the rest of your security posture is built on top of it rather
+than inside it.
 
 <Aside type="caution">
-Without `--auth=basic` (or your own reverse proxy), hal0-api binds
-`0.0.0.0:8080` and every endpoint is open to anything that can reach that
-port. Do not expose an unprotected hal0 to the public internet. Keep it on a
-trusted network or put a proxy in front of it.
+Do not expose hal0-api directly to the public internet. It has no auth gate —
+anyone who can reach the port can load models, run inference, drive agents, and
+read activity. Keep it on a trusted network, and put a reverse proxy in front of
+it for anything beyond a single trusted LAN.
 </Aside>
 
-## The reverse-proxy pattern (bring your own)
+## Why no built-in auth?
 
-When you already run a reverse proxy in your infrastructure, hal0 stays a
-pure inference and control plane behind it:
+Earlier designs bundled an auth layer and a TLS-terminating proxy. That was
+removed (ADR-0012) because it duplicated, badly, what every operator already
+runs better elsewhere: a real reverse proxy. Bundling auth meant maintaining
+credential storage, token rotation, and TLS certificate plumbing inside the
+inference server — surface area that is someone else's core competency.
+
+Instead, hal0 assumes one of two postures:
+
+- **Single trusted LAN** — hal0 is reachable only from machines you trust, and
+  the open API is acceptable.
+- **Reverse proxy in front** — you terminate TLS and enforce authentication at a
+  proxy you control, and only the proxy talks to hal0.
+
+## The reverse-proxy pattern
+
+To add TLS and authentication, place a reverse proxy of your choice — Traefik
+and nginx are common choices — between your clients and hal0-api. The proxy
+owns:
 
 <Steps>
 
 1. **TLS termination** — present a certificate for your chosen hostname and
-   terminate HTTPS at your proxy.
+   terminate HTTPS at the proxy.
 
 2. **Authentication** — enforce whatever you need (basic auth, OAuth/OIDC, mTLS,
    an allowlist) before a request is forwarded.
@@ -71,13 +61,12 @@ control lives.
 
 <Aside type="note">
 The proxy is **your** infrastructure, not a hal0 feature. hal0 has no opinion
-about which one you use and ships nothing to configure it — unless you use
-`--auth=basic`, in which case hal0 provisions and manages Caddy for you.
+about which one you use and ships nothing to configure it.
 </Aside>
 
 ## MCP host and origin allowlists
 
-The one place hal0 always enforces a network gate is the MCP mount. The admin and
+The one place hal0 does enforce a network gate is the MCP mount. The admin and
 memory MCP servers are mounted as sub-applications under `/mcp/admin` and
 `/mcp/memory`, and the MCP transport applies DNS-rebinding protection.
 
@@ -99,10 +88,24 @@ to reach `/mcp/*` from another machine or through your proxy:
   each host you add, so the dashboard and a reverse-proxy vhost work without a
   second knob.
 
-When Caddy auth is active (`--auth=basic`), the MCP mounts sit behind the same
-Caddy instance — they inherit its TLS and basic_auth gating. The host/origin
-allowlist is still relevant for the MCP transport layer but the outer gate is
-already handled.
+This is a host/origin gate, not authentication — it stops a browser on another
+site from rebinding DNS to reach your loopback MCP server. Real access control
+still belongs at your reverse proxy.
+
+## Agent chat: origin allowlist + session cookie
+
+The agent-chat WebSocket routes carry a second, narrower gate on top of the
+MCP allowlist above: every WS upgrade is checked against an **origin
+allowlist** (`HAL0_ALLOWED_ORIGINS`, comma-separated; the default covers
+`http://hal0.local`, `http://localhost:5173`, and `http://127.0.0.1:8080`),
+and an **HMAC-SHA256 session cookie** (`hal0_session`, `HttpOnly`,
+`SameSite=Lax`) is minted on first `GET /agents/` and verified on every
+WebSocket upgrade after that. The signing secret lives at
+`/var/lib/hal0/agents/secret.bin` (mode `0600`), generated on first use and
+never leaves the hal0 service user. This closes off drive-by sites
+WebSocket-ing into the chat proxy from a browser that already has a session
+open elsewhere — it is not a general-purpose auth system, and caller identity
+still flows on `X-hal0-Agent` underneath it.
 
 ## Agent identity and gated actions
 
@@ -118,13 +121,12 @@ approval queue fit together.
 ## Practical checklist
 
 <CardGrid>
-  <Card title="Use --auth=basic for public exposure" icon="approve-check">
-    One flag at install time: Caddy + basic_auth + bearer tokens + automatic
-    HTTPS. See Authentication & HTTPS.
+  <Card title="Keep it off the internet" icon="warning">
+    Never bind the open API where untrusted clients can reach it. Front it with
+    a proxy or keep it LAN-only.
   </Card>
-  <Card title="Or bring your own proxy" icon="setting">
-    Front hal0 with Traefik / nginx / any reverse proxy you already trust;
-    let only the proxy reach hal0.
+  <Card title="Terminate TLS at a proxy" icon="approve-check">
+    Add HTTPS and auth at Traefik / nginx; let only the proxy reach hal0.
   </Card>
   <Card title="Scope the MCP allowlist" icon="setting">
     Widen `HAL0_MCP_ALLOWED_HOSTS` only to the hosts that must reach `/mcp/*`;
@@ -139,7 +141,7 @@ approval queue fit together.
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Authentication & HTTPS" href="/docs/operate/auth" description="Caddy, basic_auth, bearer tokens, automatic HTTPS — one flag." />
+  <LinkCard title="Securing hal0" href="/docs/operate/auth" description="The reverse-proxy-at-edge pattern, worked example, and what hal0 provides on its own." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How the open API, slots, and dispatcher fit together." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="Personas, tool gating, and the approval queue." />
   <LinkCard title="Memory" href="/docs/concepts/memory" description="The opt-in memory subsystem." />

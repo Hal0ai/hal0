@@ -24,6 +24,17 @@ running version. It shows `current → latest (channel)` plus whether an
 update is available, and (when present) the release date, notes URL,
 digest, and signer identity.
 
+<Aside type="note">
+Version comparison uses [PEP 440](https://peps.python.org/pep-0440/)
+(`packaging.version.Version`) in both the updater and the API route, so a
+pip-normalized installed beta (`0.8.0b3`) and a tag-form manifest version
+(`0.8.1-beta.1`) compare correctly. A digit-tuple parser used to misread the
+installed beta number as a patch component, so every box on a `0.8.0bN`
+beta saw the newer release as "not newer" and `hal0 update` reported
+nothing to apply — fixed in v0.8.1-beta.2. Non-PEP-440 nightly tags still
+fall back to the digit-tuple comparator for their timestamp ordering.
+</Aside>
+
 ## Apply an update
 
 ```sh
@@ -85,6 +96,16 @@ The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
 <Aside type="caution">
 Signature verification is mandatory on the `stable` channel — there is no
 skip hatch. Don't disable it.
+</Aside>
+
+<Aside type="note">
+This mandatory check is for the ongoing `hal0 update` path above. The
+**initial one-line installer** is more lenient (v0.8.4b1): it no longer
+hard-requires the `cosign` binary to be present — a missing `cosign` logs a
+warning and the install proceeds without publisher-signature verification
+(the tarball's checksum is still checked). Set
+`HAL0_INSTALL_REQUIRE_COSIGN=1` before running the installer to restore the
+old hard-require behavior.
 </Aside>
 
 ## Roll back

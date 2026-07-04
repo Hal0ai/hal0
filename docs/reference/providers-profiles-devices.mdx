@@ -15,7 +15,9 @@ authoritative reference for the valid values of each and how they connect.
 <Aside type="caution" title="device, not backend">
 The legacy `backend` field is deprecated and accepted for one migration release
 only. Author every slot with `device`. A slot TOML that sets `backend` without
-`device` logs a deprecation warning and auto-fills `device`.
+`device` logs a deprecation warning and auto-fills `device`. (The legacy enum
+also accepts `cuda` now, so a `gpu-cuda` device round-trips through the same
+one-release write-back as every other device.)
 </Aside>
 
 ## Devices
@@ -23,17 +25,40 @@ only. Author every slot with `device`. A slot TOML that sets `backend` without
 `device` carries hardware intent only. It is validated at config-load time —
 a typo raises a `ValidationError` with the field path.
 
-| `device`     | Hardware                       | Default provider |
-|--------------|--------------------------------|------------------|
-| `gpu-rocm`   | AMD GPU via ROCm               | `llama-server`   |
-| `gpu-vulkan` | Any GPU via Vulkan             | `llama-server`   |
-| `cpu`        | CPU-only fallback              | `llama-server`   |
-| `npu`        | AMD XDNA NPU via FastFlowLM    | `flm`            |
+| `device`     | Hardware                              | Default provider |
+|--------------|----------------------------------------|------------------|
+| `gpu-rocm`   | AMD GPU via ROCm                      | `llama-server`   |
+| `gpu-vulkan` | Any GPU via Vulkan                    | `llama-server`   |
+| `gpu-cuda`   | NVIDIA GPU via CUDA — **experimental** | `llama-server`   |
+| `cpu`        | CPU-only fallback                     | `llama-server`   |
+| `npu`        | AMD XDNA NPU via FastFlowLM            | `flm`            |
 
 `gpu-rocm` is the package-level default `device` constant, but the hardware
 recommender actively steers Strix Halo (unified memory) installs to `gpu-vulkan`
-for broader compatibility. The recommender may also select `cpu` or `npu` on
+for broader compatibility. On an NVIDIA host the recommender picks `gpu-cuda`
+when `nvidia-container-toolkit` (CDI) is present, and falls back to
+`gpu-vulkan` otherwise. The recommender may also select `cpu` or `npu` on
 hosts without ROCm support.
+
+<Aside type="note">
+This page, the dashboard, and the API all draw from one canonical device/
+backend taxonomy, served live at `GET /api/meta/enums` (devices, legacy
+backends, selectable backends, device classes, capabilities, and the
+device→default-profile map). If this page and a running host ever disagree,
+`/api/meta/enums` is the source of truth.
+</Aside>
+
+### Multi-GPU hosts
+
+hal0's hardware probe enumerates every detected GPU (index + PCI bus id),
+additively for both AMD and NVIDIA parts. A slot can pin to one GPU via the
+`gpu_index` field, which emits the backend-appropriate visibility mechanism:
+`HIP_VISIBLE_DEVICES` + `ROCR_VISIBLE_DEVICES` for `gpu-rocm`,
+`GGML_VK_VISIBLE_DEVICES` for `gpu-vulkan`, or a CDI `nvidia.com/gpu=<n>`
+device plus `CUDA_VISIBLE_DEVICES=0` inside the container for `gpu-cuda`. An
+explicit `[server].env` entry always wins over the derived visibility var.
+Leaving `gpu_index` unset (the default) exposes all GPUs — unchanged
+behaviour.
 
 ## Providers
 
@@ -43,7 +68,7 @@ backwards compatibility.
 
 | `provider`     | Runtime                                  | Typical slot types                     |
 |----------------|------------------------------------------|----------------------------------------|
-| `llama-server` | llama.cpp server (ROCm / Vulkan / CPU)   | chat, embed, rerank                     |
+| `llama-server` | llama.cpp server (ROCm / Vulkan / CUDA / CPU) | chat, embed, rerank                     |
 | `flm`          | FastFlowLM on the NPU                     | chat / stt / embed (one process, trio) |
 | `kokoro`       | Kokoro-82M text-to-speech (ONNX)          | tts                                    |
 | `comfyui`      | ComfyUI image generation                  | image                                  |
@@ -59,9 +84,10 @@ model, context size, and port.
 | Profile     | `device_class` | Image                                                                | MTP   | Intent                |
 |-------------|----------------|----------------------------------------------------------------------|-------|-----------------------|
 | `rocm`      | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | MoE agents · q8 KV    |
-| `rocm-dnse` | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense + MTP · q4 KV   |
-| `rocm-moe`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | MoE + MTP · q4 KV     |
+| `rocm-dnse` | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense + MTP · q8 KV   |
+| `rocm-moe`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | MoE + MTP · q8 KV     |
 | `vulkan`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`         | off   | Vulkan std · fallback |
+| `cuda`      | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                             | off   | CUDA · NVIDIA (upstream, experimental) |
 | `flm`       | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                             | off   | FLM NPU inference     |
 | `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS · Kokoro          |
 | `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`   | off   | Image generation      |
@@ -70,11 +96,21 @@ model, context size, and port.
 *Profiles tab in the hal0 dashboard — seed profile cards display device class, quantisation, and bench throughput (tokens/sec or RTF).*
 
 <Aside type="note">
-GPU profiles also carry a `backend` field (`rocm` or `vulkan`) — that field, not
-the slug, is the authoritative ROCm-vs-Vulkan choice. Non-GPU profiles
-(`flm`, `tts`, `comfyui`) omit it and let `device_class` drive display.
-Canonical image refs are pinned per release in `manifest.json` and may differ
-from these seed defaults.
+GPU profiles also carry a `backend` field (`rocm`, `vulkan`, or `cuda`) — that
+field, not the slug, is the authoritative ROCm-vs-Vulkan-vs-CUDA choice.
+Non-GPU profiles (`flm`, `tts`, `comfyui`) omit it and let `device_class` drive
+display. Canonical image refs are pinned per release in `manifest.json` and may
+differ from these seed defaults.
+</Aside>
+
+<Aside type="caution" title="`cuda` is experimental">
+The `cuda` profile runs the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda`
+image — not one of the AMD Strix Halo toolboxes — and needs
+`nvidia-container-toolkit` (CDI) on the host for GPU passthrough. It has no
+`PROFILE_BENCH` entry (unbenched) and isn't part of the Strix Halo–tuned
+profile family; it exists so NVIDIA hosts have a working `gpu-cuda` path. See
+[Hardware matrix](/docs/reference/hardware-matrix) for the current support
+level.
 </Aside>
 
 <Aside type="caution" title="The old `rocm-mtp` slug">
@@ -88,8 +124,13 @@ repointed to one of the current profiles.
 ### MTP flag bundle
 
 When a profile's effective MTP setting is on (profile `mtp = true`, or a slot's
-`mtp = true` override), the multi-token-prediction draft-speculation flag bundle
-is appended after the profile flags at resolve time. A slot's `mtp` field
+`mtp = true` override), `resolve_profile_flags` merges the multi-token-prediction
+draft-speculation flag bundle (`MTP_FLAG_BUNDLE`) into the profile's flags — as
+**defaults only**. A profile's own explicit `--spec-draft-*` flags win; the
+bundle just fills in whatever the profile left unset. Before v0.8.2b2 (#963)
+the bundle was appended verbatim and silently clobbered a profile's pinned
+spec-draft flags (e.g. a profile asking for `--spec-draft-type-k f16` still
+launched with the bundle's `q8_0`) — that's fixed now. A slot's `mtp` field
 (`true` / `false` / unset-to-inherit) overrides the profile default.
 
 ## Device-to-default-profile map
@@ -101,8 +142,51 @@ a starting profile per device class:
 |--------------|-----------------|
 | `gpu-rocm`   | `rocm`          |
 | `gpu-vulkan` | `vulkan`        |
-| `cpu`        | `tts`           |
+| `gpu-cuda`   | `cuda`          |
+| `cpu`        | `cpu-llm`       |
 | `npu`        | `flm`           |
+
+<Aside type="note">
+`cpu`'s default profile is `cpu-llm`, not `tts` — an earlier map pointed `cpu`
+at `tts`, which left a `profile=""` slot unloadable ("profile '' not found").
+`cpu-llm` runs the Vulkan toolbox image in CPU-only mode (no GPU devices passed
+to the container).
+</Aside>
+
+### Model preferred profile
+
+A registry model can also carry a preferred profile via `defaults.profile`. A
+slot adopts it on **create** (when the slot has no explicit profile) and on
+**every model swap** — but only when the profile fits the slot: it must exist
+in the catalog, support the slot's `type`, and match the slot's
+`device_class`/`backend`. An incompatible preference is skipped (logged as
+`slot.preferred_profile_skipped`) and the slot keeps its current or
+device-default profile; hal0 never flips a slot's device to satisfy a model's
+preference.
+
+## Portable profiles: export/import
+
+A profile can be exported to a self-contained, checksummed
+`.hal0profile.json` envelope and imported on another host — the same sharing
+model stacks use (no secrets, no host paths, an independent `schema_version`).
+
+- `GET /api/profiles/{name}` — resolve a single profile.
+- `POST /api/profiles/{name}/export` — build the envelope:
+  `{kind: "hal0.profile", schema_version, hal0_version, exported_at, name,
+  checksum, profile}`. `checksum` is a sha256 over the canonical profile body
+  only (key-order independent), so re-exporting an unchanged profile yields the
+  same checksum every time.
+- `POST /api/profiles/import` — dry-run then commit. `{"envelope": {...},
+  "name": "...", "dry_run": true}` validates the envelope + checksum and
+  reports whether `name` collides with an existing profile, without creating
+  anything. A commit (`dry_run` false, `name` set) creates the profile and
+  returns `409 profiles.exists` on a name collision.
+
+MCP mirrors the same surface: `profile_list` / `profile_status` /
+`profile_export` are read-shaped (autonomous, no confirmation gate);
+`profile_import` / `profile_delete` are gated. The dashboard's Profiles tab
+has an **Export** button on every profile card and an **Import** dialog
+(file → dry-run → commit) in the tab header.
 
 ## Toolbox images
 

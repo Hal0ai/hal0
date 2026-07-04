@@ -59,9 +59,10 @@ hal0 ships seed profiles so a fresh install is immediately usable:
 | Profile | Targets | Purpose |
 |---|---|---|
 | `rocm` | GPU (ROCm) | MoE / agent models, FP4, no MTP (larger q8 KV) — the `gpu-rocm` default |
-| `rocm-dnse` | GPU (ROCm) | Dense models with MTP speculative decoding (q4 KV) |
-| `rocm-moe` | GPU (ROCm) | MoE models with MTP speculative decoding (q4 KV) |
+| `rocm-dnse` | GPU (ROCm) | Dense models with MTP speculative decoding (q8 KV) |
+| `rocm-moe` | GPU (ROCm) | MoE models with MTP speculative decoding (q8 KV) |
 | `vulkan` | GPU (Vulkan) | Standard Vulkan path and fallback |
+| `cuda` | GPU (CUDA) | NVIDIA GPUs via upstream llama.cpp CUDA — **experimental**, the `gpu-cuda` default |
 | `flm` | NPU | FLM inference on the NPU |
 | `tts` | CPU | Text-to-speech (Kokoro) |
 | `comfyui` | image | Image generation (ComfyUI) |
@@ -72,14 +73,29 @@ clone it under a new name and edit the copy. Each profile is also classified
 into a runtime family (llama-server, FLM, Kokoro, or ComfyUI) that determines
 which slot types it can serve.
 
+Profiles are also **portable**: any profile can be exported to a
+self-contained, checksummed `.hal0profile.json` envelope and imported on
+another host — the same sharing model stacks use. See [Devices, providers &
+profiles](/docs/reference/providers-profiles-devices#portable-profiles-exportimport)
+for the routes and MCP tools.
+
+A registry model can also carry a **preferred profile** (`defaults.profile`)
+that a slot adopts automatically on creation and on every model swap, gated on
+device/type compatibility — see [Devices, providers &
+profiles](/docs/reference/providers-profiles-devices#model-preferred-profile)
+for the exact rule.
+
 ![The Profiles tab in the hal0 dashboard showing seed profile cards for rocm, rocm-dnse, rocm-moe, vulkan, flm, tts, and comfyui with bench metrics and device class chips](/screenshots/profiles-tab.png)
 
 *The Profiles tab — seed profile cards with bench metrics, device class chips, and the clone affordance for creating custom profiles.*
 
 <Aside type="tip">
-When `mtp` is enabled on a profile, hal0 appends a tuned speculative-decoding
-flag bundle to the profile's flags at launch. A slot can override the profile's
-MTP setting for itself.
+When `mtp` is enabled on a profile, hal0 merges a tuned speculative-decoding
+flag bundle into the profile's flags at launch — as defaults only. Any
+`--spec-draft-*` flag the profile pins explicitly wins over the bundle; the
+bundle just fills in what the profile left unset (fixed in v0.8.2b2 — the
+bundle used to be appended verbatim and could clobber a profile's own tuning).
+A slot can override the profile's MTP setting for itself.
 </Aside>
 
 ## Device and backend: where a slot runs
@@ -90,12 +106,17 @@ typo fails fast. The valid devices are:
 
 - `gpu-rocm` — the AMD iGPU via ROCm.
 - `gpu-vulkan` — a GPU via Vulkan (the broad-compatibility path).
+- `gpu-cuda` — an NVIDIA GPU via CUDA (**experimental**).
 - `cpu` — CPU-only execution.
 - `npu` — the AMD XDNA NPU via FastFlowLM.
 
 <Aside type="caution">
-NVIDIA/CUDA is **not** a valid device. An NVIDIA GPU is detected and shown, but
-hal0 runs it through Vulkan, never CUDA. There is no `cuda` device.
+NVIDIA/CUDA support is **experimental**. `gpu-cuda` runs an NVIDIA GPU through
+the upstream `llama.cpp` CUDA image via CDI passthrough (requires
+`nvidia-container-toolkit`); it isn't part of the bench-tuned AMD Strix Halo
+profile family and isn't yet auto-advertised by the dashboard's
+backend-availability probe. Without `nvidia-container-toolkit`, an NVIDIA GPU
+still only surfaces through the generic Vulkan path.
 </Aside>
 
 `device` replaced an older overloaded `backend` field that mixed hardware and
@@ -111,7 +132,8 @@ migration:
 |---|---|
 | `gpu-rocm` | `rocm` |
 | `gpu-vulkan` | `vulkan` |
-| `cpu` | `tts` |
+| `gpu-cuda` | `cuda` |
+| `cpu` | `cpu-llm` |
 | `npu` | `flm` |
 
 Because a slot carries both a `device` and a `profile`, the two must stay

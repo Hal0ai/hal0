@@ -28,6 +28,15 @@ snapshots.
 | `UNLOADING` | `unloading` | Graceful shutdown in progress; waiting for the container to exit. |
 | `ERROR` | `error` | Slot has failed. Details in `state.json` and journald. |
 
+<Aside type="note">
+A health-probe timeout during `warming` resolves to `WARMING`, never a false
+`READY` — a slot is only ever advertised dispatchable once it has actually
+answered a health probe. The fail-watcher still polls the underlying systemd
+unit while a slot sits in `WARMING`, so a container that dies mid-load is
+caught even though `/health` alone can't distinguish "still loading" from
+"hung."
+</Aside>
+
 ### The two faces of `idle`
 
 `idle` is reached two ways; both render identically on the wire but the state
@@ -70,6 +79,38 @@ Some providers serve a baked-in model and need no explicit `model_id` to reach
 `ready`: `kokoro` and `vibevoice`. Other providers require a loaded model before
 they can serve.
 </Aside>
+
+## Idle eviction and wake-on-request
+
+Beyond the idle-timeout demotion to `IDLE`, a slot can be **unloaded**
+(`ready`/`idle → unloading → offline`) two ways:
+
+- **Hard TTL.** A slot idle past its resolved `idle_timeout_s` (per-slot TOML
+  override, else a 300-second default) is unloaded outright, freeing host RAM.
+  An explicit `idle_timeout_s = 0` pins a slot against this.
+- **Host-memory-pressure LRU eviction.** When host `MemAvailable` drops below a
+  configured floor, hal0 evicts idle, `lru = true`-flagged slots oldest-`last_used`-first
+  until free RAM recovers (or no eligible slots remain). A slot actively
+  serving a request is never evicted, and `agent`, `utility`, and `npu` are
+  never evicted by pressure regardless of their `lru` flag — they're the
+  anchors the dispatch fallback chains depend on.
+
+Either kind of eviction leaves the slot in `OFFLINE`, not `ERROR` — it's a
+resource-management transition, not a failure. A request that lands on an
+idle-evicted slot triggers a lazy reload rather than a 404: the dispatcher
+kicks off `SlotManager.load()` for the target slot and returns a structured
+`slot.loading` 503 with `Retry-After`, so the client's retry lands once the
+slot is back up.
+
+## Fallback on load
+
+If a slot's configured `model.default` isn't locally servable — deleted,
+never pulled, or pulled-away — `load()` doesn't just fail. It searches the
+local registry for the best match by the slot's capability (chat, embed,
+rerank, asr, tts) and loads that instead, preferring name-similarity to the
+configured id. Diffusion / image / video artifacts are always excluded from
+this fallback search for a non-image slot, so a text slot can never silently
+come up serving an image-gen model it can't actually run.
 
 ## Persistence — `state.json`
 

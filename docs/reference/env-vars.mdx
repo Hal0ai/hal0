@@ -30,8 +30,9 @@ config by env-var name. Never commit a populated `api.env`.
 | `HAL0_ACTIVITY_RETENTION_DAYS` | Override the activity/audit store retention window.          | from `hal0.toml` |
 
 <Aside type="note">
-hal0 ships built-in auth via `--auth=basic` (Caddy + basic_auth + bearer tokens + automatic HTTPS). Without it (or your own reverse proxy), the API is open on the
-local network. To add auth, pass `--auth=basic` at install time; to add TLS and access control, put hal0 behind your own reverse proxy.
+hal0 ships with **no built-in auth or TLS** (ADR-0012). The API is open on the
+local network; put it behind your own reverse proxy for TLS and access control.
+There is no bearer-token or basic-auth flag to enable.
 </Aside>
 
 ## Paths
@@ -61,7 +62,7 @@ podman is not installed.
 
 | Variable                  | What it does                                                       | Default |
 |---------------------------|-------------------------------------------------------------------|---------|
-| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Hindsight / Cognee-backed, `/mcp/memory`, `/api/memory/*`). Memory is **opt-in**. | `0` (disabled) |
+| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Hindsight-backed, `/mcp/memory`, `/api/memory/*`). Memory is **opt-in**. | `0` (disabled) |
 | `HAL0_MCP_ALLOWED_HOSTS`  | Allowlist of `Host` headers accepted by the mounted MCP servers.  | unset   |
 | `HAL0_MCP_ALLOWED_ORIGINS`| Allowlist of origins for MCP transport requests.                  | unset   |
 

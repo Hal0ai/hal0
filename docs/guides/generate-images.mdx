@@ -109,6 +109,29 @@ return **503** (`comfyui.arbiter_unavailable`). See
 [Manage slots](/docs/guides/manage-slots) for how to add and enable the
 `img` slot.
 
+## Image models in the Models view
+
+The dashboard's Models view keeps image-gen models off the
+dispatcher-facing catalog entirely — a segmented toggle switches between
+**Models** (chat/embed/rerank/stt/tts, the models the dispatcher can
+route a request to) and **Image / ComfyUI**. There's no `image` filter
+chip on the Models tab any more; image lives on its own tab instead.
+
+The Image / ComfyUI tab only ever lists **installed** checkpoints — same
+rule as FLM/NPU models, an un-pulled image model is never advertised
+there — grouped by the ComfyUI models-tree subdirectory each one actually
+landed in (`checkpoints`, `loras`, `vae`, `upscale_models`, …), derived
+straight from the on-disk path under `.../comfyui/models/<subdir>/`.
+
+A model registers as ComfyUI (`owned_by: "comfyui"`, `comfyui` tagged
+into `backends`) no matter which path added it — a curated pull, "add by
+path", or a directory scan all tag it consistently. `GET /api/models`
+also self-heals any row an older hal0 build mis-tagged (for example
+`capabilities: ["chat"]` with empty `backends`) by re-deriving its
+ComfyUI category from the path on every list call — the fix isn't
+persisted back to the registry, it just re-applies on read, so no
+migration is needed.
+
 ## Generate an image
 
 The OpenAI-compatible endpoint translates your request into a ComfyUI

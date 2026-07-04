@@ -1,6 +1,6 @@
 ---
 title: Hardware matrix
-description: hal0 hardware reference — AMD GPU (ROCm/Vulkan), AMD XDNA NPU (FastFlowLM), CPU fallback, backend availability order, and why NVIDIA/CUDA is unsupported.
+description: hal0 hardware reference — AMD GPU (ROCm/Vulkan), NVIDIA GPU (CUDA, experimental), AMD XDNA NPU (FastFlowLM), CPU fallback, multi-GPU pinning, and the backend availability order.
 sidebar:
   order: 50
 ---
@@ -8,17 +8,19 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 hal0 targets AMD APU/GPU plus the AMD XDNA NPU, with a CPU fallback that is
-always available. This page lists what runs on each accelerator and the order
+always available. NVIDIA GPUs are also supported via an experimental CUDA
+path (see below). This page lists what runs on each accelerator and the order
 hal0 prefers them in.
 
 ## Hardware targets
 
-| Target              | Backend / runtime         | What runs there                                    |
-|---------------------|---------------------------|----------------------------------------------------|
-| AMD GPU (ROCm)      | llama.cpp ROCm            | chat / embed / rerank LLM inference (highest tps)  |
-| AMD GPU (Vulkan)    | llama.cpp Vulkan          | chat / embed / rerank LLM inference (broad-compat) |
-| AMD XDNA NPU        | FastFlowLM (FLM)          | chat + speech-to-text + embeddings (one process)   |
-| CPU                 | llama.cpp / ONNX          | fallback LLM inference; Kokoro TTS                 |
+| Target              | Backend / runtime               | What runs there                                    |
+|---------------------|-----------------------------------|----------------------------------------------------|
+| AMD GPU (ROCm)      | llama.cpp ROCm                    | chat / embed / rerank LLM inference (highest tps)  |
+| AMD GPU (Vulkan)    | llama.cpp Vulkan                  | chat / embed / rerank LLM inference (broad-compat) |
+| NVIDIA GPU (CUDA)   | llama.cpp CUDA — **experimental** | chat / embed / rerank LLM inference                |
+| AMD XDNA NPU        | FastFlowLM (FLM)                  | chat + speech-to-text + embeddings (one process)   |
+| CPU                 | llama.cpp / ONNX                  | fallback LLM inference; Kokoro TTS                 |
 
 The reference platform is AMD Strix Halo: an 8060S-class iGPU, an XDNA NPU, and
 a unified-memory pool the GPU shares with the host via GTT. hal0's profile flags
@@ -51,15 +53,37 @@ order:
 The NPU is **multiplex**: a single `flm serve` process answers chat, STT, and
 embeddings at once, so one NPU slot can back three capabilities.
 
+<Aside type="note">
+`gpu-cuda` is **not** part of this auto-advertised list — `/api/backends`
+(the dashboard's backend-availability footer) doesn't probe for CUDA yet, so
+an NVIDIA GPU still only shows up here as `gpu-vulkan`. `gpu-cuda` is chosen
+by the installer's hardware recommender on NVIDIA hosts where
+`nvidia-container-toolkit` (CDI) is detected, or set explicitly with
+`device = "gpu-cuda"` in a slot TOML.
+</Aside>
+
 ![The hal0 Slots view showing iGPU and FLM (NPU) slots in the Inference Engine, above the shared GTT memory carve-out](/screenshots/npu-occupancy.png)
 *The Inference Engine slot inventory — here `4 iGPU · 3 FLM` — with the shared iGPU GTT carve-out above it.*
 
-<Aside type="caution" title="NVIDIA / CUDA is not supported">
-hal0's device enum is `{gpu-rocm, gpu-vulkan, cpu, npu}` — there is no CUDA
-device. An NVIDIA GPU will only ever surface through the generic Vulkan path
-(`gpu-vulkan`); there is no ROCm/CUDA compute backend for it. hal0 is built and
-tested on Linux x86_64.
+<Aside type="caution" title="NVIDIA / CUDA is experimental">
+hal0's device enum is `{gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu}` — `gpu-cuda`
+runs NVIDIA GPUs through the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda`
+image via CDI GPU passthrough (`nvidia-container-toolkit` required). It's
+experimental: unbenched, not part of the AMD Strix Halo toolbox family, and
+not yet part of the `/api/backends` auto-probe above. Without
+`nvidia-container-toolkit`, an NVIDIA GPU still only surfaces through the
+generic Vulkan path (`gpu-vulkan`); there is no ROCm path for NVIDIA hardware.
+hal0 is built and tested on Linux x86_64.
 </Aside>
+
+## Multi-GPU hosts
+
+hal0's hardware probe enumerates every detected GPU additively (index + PCI
+bus id), for both AMD and NVIDIA hosts. A slot can pin itself to one GPU via
+the `gpu_index` field — see [Devices, providers &
+profiles](/docs/reference/providers-profiles-devices#multi-gpu-hosts) for the
+per-backend visibility-env mapping. Leaving `gpu_index` unset exposes all GPUs
+to the slot, unchanged from prior single-GPU behaviour.
 
 ## NPU host requirements
 

@@ -64,9 +64,10 @@ defaults (an empty file is valid).
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `max_slots` | int (≥0) | `0` | Max concurrent slots; `0` = unlimited. |
-| `port_range_start` | int | `8081` | First port in the slot pool. |
-| `port_range_end` | int | `8200` | Last port (inclusive); must be ≥ start. |
+| `port_range_start` | int | `8081` | First port in the auto-allocation pool for new slots. |
+| `port_range_end` | int | `8099` | Last port in the auto-allocation pool (inclusive); must be ≥ start. The pool stops below `8188` so a new slot never claims ComfyUI's port — this only bounds auto-*allocation*, not an individual slot's `port` field, which validates up to `8200` (see `[slot].port` below). |
 | `idle_timeout_s` | int (≥0) | `300` | Default idle-eviction TTL; `0` disables. Per-slot value overrides. |
+| `evict_pressure_mb` | int (≥0) | `8192` | Host free-RAM floor (MiB) for pressure-driven LRU eviction. When host `MemAvailable` drops below this, idle LRU-eligible slots are evicted in least-recently-used order until free RAM recovers; `0` disables pressure eviction. |
 
 ### `[dispatcher]`
 
@@ -103,6 +104,7 @@ fast disk / network mount to align pulls and slot bind-mounts on one path.
 |---|---|---|---|
 | `enabled` | bool | `false` | Off by default. On the Hindsight engine this is a reporting gate — Hindsight builds its graph natively; vector recall works either way. |
 | `extraction_slot` | str | `"utility"` | The local `type=llm` slot Hindsight uses for graph extraction. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_MODEL=hal0/<slot>` via a systemd drop-in. Validated against the live enabled-llm-slot set at set-time. Slot-name grammar (lowercase alnum/`-`/`_`, ≤32, leading alphanumeric). |
+| `llm_timeout_s` | int (30–3600) | `300` | Timeout for the Hindsight daemon's LLM calls — extraction, consolidation, and reflect. Covers cold slot starts and long reflects. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_TIMEOUT` via the same systemd drop-in as `extraction_slot`; the daemon restarts to pick it up. |
 
 <Aside type="note">
 ADR-0023 replaced the legacy `route` / `upstream` keys (the Cognee-era extraction
@@ -147,7 +149,7 @@ container provider.
 | `default` | str | `""` | Default model id from the registry. |
 | `context_size` | int (≥128) | `null (derived)` | When unset, hal0 derives the context window from the model's native size (capped) or a safe floor; never silently falls back to 4096. |
 | `n_gpu_layers` | int | `-1` | Layers offloaded to GPU; `-1` = all. |
-| `rope_freq_base` | float (≥0) | `0.0` | RoPE base override; `0.0` = model default. |
+| `rope_freq_base` | float (≥0) | `0.0` | Deprecated (accepted, ignored) — parsed and round-tripped but never emitted by the container launch path. Set `--rope-freq-base <n>` via `[server].extra_args` instead. |
 
 ### `[server]` section
 
