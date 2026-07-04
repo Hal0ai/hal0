@@ -24,7 +24,10 @@ import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useMemoryMapModel } from './memory-map'
+import { slotIndicatorFromPhase } from './slot-status.js'
 import { devKind } from '@/lib/deviceMeta'
+
+const { useState: useStateT, useRef: useRefT, useEffect: useEffectT, useMemo: useMemoT } = React
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10
 const fmt1 = (n) => (typeof n === 'number' ? n.toFixed(1) : '—')
@@ -405,21 +408,73 @@ function ThCellNpu({ slots }) {
   )
 }
 
+// Element width via ResizeObserver — drives "label only when the segment is
+// wide enough (~90px)" in the memory bar without clipping half a label
+// (same helper as the #1061 dashboard-redesign memory hero).
+function useMeasuredWidth() {
+  const ref = useRefT(null)
+  const [width, setWidth] = useStateT(0)
+  useEffectT(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setWidth(e.contentRect.width)
+    })
+    ro.observe(el)
+    setWidth(el.offsetWidth)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, width]
+}
+
+const SEG_LABEL_MIN_PX = 90
+
 // Memory rack ruler — full-width second row; replaces and absorbs the old
 // memory-map band. All attribution comes from useMemoryMapModel() verbatim
-// (pool cap, per-slot bytesGb + Okabe–Ito colors, headroom + limitedBy);
-// the legend list is replaced by in-segment labels. Segments are
-// border-box and drop their padding when too narrow for a label so widths
-// stay true to the GB scale.
-function ThRuler() {
+// (pool cap, per-slot bytesGb + Okabe–Ito colors, headroom + limitedBy).
+// Bar styling follows the #1061 memory hero: allocations live INSIDE the
+// bar as dim-tint segments with a solid top accent stripe, in-segment
+// labels only when ≥90 measured px (serving segments add the pulsing dot +
+// live tok/s), a 45° striped "system · KV + runtime" block for measured
+// GTT use beyond the named model weights, and click → slot. Widths stay
+// true to the GB scale (explicit % on border-box segments); the GB tick
+// row keeps the ruler's scale readable.
+function ThRuler({ slots }) {
   const model = useMemoryMapModel()
   const { pool, self, headroom } = model
   const total = pool.totalGb || 0
   const used = self.modelUsedGb
   const free = Math.max(0, round1(total - used))
-  const segs = self.slots.filter((s) => s.bytesGb > 0)
   const pct = (gb) => (total > 0 ? (gb / total) * 100 : 0)
   const ticks = total > 0 ? [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(total * f)) : null
+
+  const [barRef, barWidth] = useMeasuredWidth()
+  const slotByName = useMemoT(() => {
+    const m = {}
+    for (const s of slots || []) m[s.name] = s
+    return m
+  }, [slots])
+
+  const segs = self.slots
+    .filter((s) => s.bytesGb > 0)
+    .map((s) => {
+      const live = slotByName[s.name]
+      const ind = live ? slotIndicatorFromPhase(live) : null
+      const serving = ind?.cls === 'serving'
+      const toks = serving && typeof live?.metrics?.toks === 'number' && live.metrics.toks > 0
+        ? live.metrics.toks
+        : null
+      return { ...s, serving, toks, indLabel: ind ? ind.label : '—' }
+    })
+  // System block — measured GTT in use beyond the named model weights
+  // (KV + runtime + buffers). Honest: only renders when gtt_used reports
+  // more than the models hold; never a fabricated split.
+  const systemGb = Math.max(0, round1((self.gttUsedGb || 0) - used))
+  const barFree = Math.max(0, round1(total - used - systemGb))
+
+  const goSlot = (name) => {
+    window.location.hash = '#slots/' + name
+  }
 
   return (
     <div className="th-ruler">
@@ -431,26 +486,53 @@ function ThRuler() {
           <span className="lim">— limited by {headroom.limitedBy}</span>
         </span>
       </div>
-      <div className="th-ruler-wrap">
-        <div className="th-ruler-bar">
-          {segs.map((s) => {
-            const w = pct(s.bytesGb)
-            const labeled = w >= 4.5 // wide enough to carry a label + padding
-            return (
-              <div
-                key={s.name}
-                className={'th-ruler-seg' + (labeled ? ' pad' : '')}
-                style={{ width: w + '%', background: s.color }}
-                title={`${s.name} · ${fmt1(s.bytesGb)} GB`}
-              >
-                {labeled && <span className="nm">{s.name}</span>}
-                {w >= 9 && <span className="gb">{fmt1(s.bytesGb)} GB</span>}
-              </div>
-            )
-          })}
-          <div className="th-ruler-free">free</div>
-        </div>
-        <div className="th-ruler-marker" style={{ left: `${Math.min(100, pct(used))}%` }} />
+      <div className="th-ruler-bar" ref={barRef}>
+        {segs.map((s) => {
+          const w = pct(s.bytesGb)
+          const showLabel = (w / 100) * barWidth >= SEG_LABEL_MIN_PX
+          return (
+            <div
+              key={s.name}
+              className="th-ruler-seg"
+              style={{
+                width: w + '%',
+                background: `color-mix(in srgb, ${s.color} 18%, transparent)`,
+                boxShadow: `inset 0 2px 0 ${s.color}`,
+              }}
+              title={`${s.name} · ${fmt1(s.bytesGb)} GB · ${s.indLabel}`}
+              role="link"
+              tabIndex={0}
+              onClick={() => goSlot(s.name)}
+              onKeyDown={(e) => { if (e.key === 'Enter') goSlot(s.name) }}
+            >
+              {showLabel && (
+                <>
+                  <span className="nm" style={{ color: s.color }}>
+                    {s.name} · {s.bytesGb.toFixed(1)}G
+                  </span>
+                  {s.toks != null && (
+                    <span className="sub">
+                      <span className="dot serving th-ruler-dot" />
+                      {Math.round(s.toks)} tok/s
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        })}
+        {systemGb > 0 && (
+          <div
+            className="th-ruler-seg th-ruler-seg-system"
+            style={{ width: pct(systemGb) + '%' }}
+            title={`system · KV + runtime · ${fmt1(systemGb)} GB`}
+          >
+            {(pct(systemGb) / 100) * barWidth >= SEG_LABEL_MIN_PX && (
+              <span className="nm">system · {systemGb.toFixed(1)}G</span>
+            )}
+          </div>
+        )}
+        <div className="th-ruler-free">free · {fmt1(barFree)} GB</div>
       </div>
       {ticks && (
         <div className="th-ruler-ticks">
@@ -479,7 +561,7 @@ export function TelemetryHeader({ slots: slotsProp }) {
         <ThCellCpuMem />
         <ThCellNpu slots={slots} />
       </div>
-      <ThRuler />
+      <ThRuler slots={slots} />
     </div>
   )
 }

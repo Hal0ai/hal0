@@ -1778,58 +1778,66 @@
 }
 .th-ruler-h b.ok { color: var(--ok); }
 .th-ruler-h .lim { color: var(--fg-5); }
-.th-ruler-wrap { position: relative; }
+/* bar — #1061 memory-hero styling: allocations live inside the bar as
+   dim-tint segments with a solid top accent stripe; explicit % widths on
+   border-box segments keep the GB scale true */
 .th-ruler-bar {
   display: flex;
-  height: 28px;
-  border-radius: 3px;
+  height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
   overflow: hidden;
-  background: var(--bg-3);
-  border: 1px solid var(--line-soft);
+  background: var(--bg-sunken, var(--bg-3));
 }
-/* segments are border-box and only take padding when wide enough for a
-   label — tiny segments (embed, npu) stay true to the GB scale */
 .th-ruler-seg {
   box-sizing: border-box;
-  height: 100%;
   display: flex;
-  align-items: center;
-  padding: 0;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 10px;
+  border-right: 1px solid var(--bg);
+  min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
-  transition: width 0.5s var(--ease);
+  cursor: pointer;
+  transition: width 0.5s var(--ease), filter 0.15s var(--ease);
 }
-.th-ruler-seg.pad { padding: 0 8px; }
+.th-ruler-seg:hover { filter: brightness(1.55); }
+.th-ruler-seg:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* system + KV/runtime block — 45° stripes, not clickable */
+.th-ruler-seg-system {
+  background: repeating-linear-gradient(45deg, transparent 0 3px, rgba(156, 156, 149, 0.16) 3px 6px);
+  cursor: default;
+}
+.th-ruler-seg-system:hover { filter: none; }
+.th-ruler-seg-system .nm { color: var(--fg-4); }
 .th-ruler-seg .nm {
   font-family: var(--jbm);
-  font-size: 10px;
-  font-weight: 600;
-  color: rgba(0, 0, 0, 0.75);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
 }
-.th-ruler-seg .gb {
+.th-ruler-seg .sub {
   font-family: var(--jbm);
   font-size: 9.5px;
-  color: rgba(0, 0, 0, 0.55);
-  margin-left: 6px;
+  color: var(--accent);
+  font-feature-settings: 'tnum' 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
 }
+.th-ruler-dot { width: 5px; height: 5px; }
 .th-ruler-free {
-  height: 100%;
   flex: 1;
   display: flex;
   align-items: center;
-  padding: 0 8px;
+  padding: 0 12px;
+  min-width: 0;
   font-family: var(--jbm);
-  font-size: 10px;
-  color: var(--fg-5);
-}
-/* used marker — 2px amber line at used/cap %, 3px above/below the bar */
-.th-ruler-marker {
-  position: absolute;
-  top: -3px;
-  bottom: -3px;
-  width: 2px;
-  background: var(--accent);
-  transition: left 0.5s var(--ease);
+  font-size: 10.5px;
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
 }
 .th-ruler-ticks {
   display: flex;
