@@ -750,9 +750,7 @@ class ContainerProvider(Provider):
         """Run a subprocess synchronously (load/unload are blocking ops anyway)."""
         return subprocess.run(list(args), capture_output=True, text=True, check=check)
 
-    async def health(
-        self, port: int, slot_cfg: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         """Probe GET /health on the container port.
 
         For llama-server slots /health returns 200 when ready.

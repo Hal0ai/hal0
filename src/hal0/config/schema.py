@@ -275,9 +275,7 @@ class ServerConfig(BaseModel):
 
     @field_validator("env")
     @classmethod
-    def _env_keys_and_values_sane(
-        cls, v: dict[str, str] | None
-    ) -> dict[str, str] | None:
+    def _env_keys_and_values_sane(cls, v: dict[str, str] | None) -> dict[str, str] | None:
         """Reject non-env-var-name keys and multi-line values.
 
         A stray newline in a value would break the rendered ``--env=K=V``

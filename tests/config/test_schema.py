@@ -50,6 +50,7 @@ class TestServerConfigEnv:
         with pytest.raises(ValidationError):
             ServerConfig(env={"OK": "line1\nline2"})
 
+
 # ── SlotConfig ────────────────────────────────────────────────────────────────
 
 
