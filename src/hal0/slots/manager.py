@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
+from hal0.model_meta import SLOT_TYPES
 from hal0.slot_config import (
     fold_ctx_size_alias,
     merge_slot_config,
@@ -109,10 +110,10 @@ SLOT_ALIASES: dict[str, str] = {
     "agent-hermes": "agent",
 }
 
-#: Slot ``type`` vocabulary (plan §4.1).
-_VALID_SLOT_TYPES: frozenset[str] = frozenset(
-    {"llm", "embedding", "reranking", "transcription", "tts", "image"}
-)
+#: Slot ``type`` vocabulary (plan §4.1) — sourced from the canonical
+#: taxonomy (:data:`hal0.model_meta.SLOT_TYPES`) so validation, profiles,
+#: and /api/meta/enums can never drift.
+_VALID_SLOT_TYPES: frozenset[str] = frozenset(SLOT_TYPES)
 
 #: Slot-name policy: kebab-case, max 32 chars, leading alphanumeric.
 _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")

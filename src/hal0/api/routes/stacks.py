@@ -37,6 +37,7 @@ from hal0.api._audit import record_action
 from hal0.config import paths
 from hal0.config.schema import StackConfig
 from hal0.errors import BadRequest
+from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE
 from hal0.profiles import ProfileCatalog
 from hal0.stacks import ResolvedStack, StacksCatalog
 from hal0.stacks.apply import StackApplyEngine
@@ -145,13 +146,11 @@ def _registry(request: Request) -> Any:
 # A stack may name a slot that doesn't exist yet (e.g. a "quick" coder slot in a
 # cloned/imported stack). Apply must create it before the converge load, the way
 # the spec's seed copy expects. Without a profile a fresh slot fails to load
-# ("profile '' not found"), so default a coherent profile from the device.
-_PROFILE_BY_DEVICE = {
-    "gpu-rocm": "rocm",
-    "gpu-vulkan": "vulkan",
-    "npu": "flm",
-    "cpu": "",
-}
+# ("profile '' not found"), so default a coherent profile from the device via
+# the canonical map (hal0.model_meta.DEVICE_TO_DEFAULT_PROFILE) — this replaced
+# a local copy whose ``cpu`` entry was ``""``, which left a cpu-device stack
+# slot born broken with exactly that "profile '' not found" error; the
+# canonical ``cpu → "cpu-llm"`` seed profile is the deliberate unification.
 
 
 def _slot_toml_exists(slot: str) -> bool:
@@ -181,7 +180,7 @@ async def _create_missing_slots(
         if not entry.model or _slot_toml_exists(entry.slot):
             continue
         device = entry.device or "gpu-vulkan"
-        profile = entry.profile or _PROFILE_BY_DEVICE.get(device, "")
+        profile = entry.profile or DEVICE_TO_DEFAULT_PROFILE.get(device, "")
         body: dict[str, Any] = {
             "name": entry.slot,
             "type": "llm",

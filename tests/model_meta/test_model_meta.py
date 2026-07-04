@@ -309,3 +309,114 @@ def test_device_to_legacy_backend(device: str, expected: str) -> None:
 )
 def test_labels_of(cfg: dict[str, Any], expected: set[str]) -> None:
     assert labels_of(cfg) == expected
+
+
+# ── canonical taxonomy (Wave 2: model_meta as the single vocabulary home) ────
+#
+# The taxonomy constants feed /api/meta/enums and the schema re-exports;
+# these tests pin the cross-module sync points and the unified
+# unknown-value policy documented in the model_meta module docstring.
+
+
+def test_schema_reexports_alias_the_canonical_taxonomy() -> None:
+    """config.schema's public names are thin re-exports of model_meta."""
+    from hal0 import model_meta
+    from hal0.config import schema
+
+    assert schema.BACKEND_TO_DEVICE is model_meta.BACKEND_TO_DEVICE
+    assert schema.DEFAULT_DEVICE == model_meta.DEFAULT_DEVICE
+    assert schema.DEVICE_DEFAULT_PROFILES is model_meta.DEVICE_TO_DEFAULT_PROFILE
+    assert schema.map_backend_to_device is model_meta.map_backend_to_device
+    assert schema._VALID_DEVICES == model_meta.VALID_DEVICES
+    assert frozenset(model_meta.LEGACY_BACKENDS) == schema._VALID_BACKENDS
+
+
+def test_device_literal_matches_valid_devices() -> None:
+    from typing import get_args
+
+    from hal0.config.schema import DeviceLiteral
+    from hal0.model_meta import VALID_DEVICES
+
+    assert set(get_args(DeviceLiteral)) == set(VALID_DEVICES)
+
+
+def test_profiles_literals_match_model_meta() -> None:
+    """hal0.profiles' Literals mirror the canonical tuples (a Literal can't
+    be built from a runtime tuple, so sync is enforced here)."""
+    from typing import get_args
+
+    from hal0.model_meta import RUNTIME_FAMILIES, SLOT_TYPES
+    from hal0.profiles import RuntimeFamily, SlotType
+
+    assert set(get_args(RuntimeFamily)) == set(RUNTIME_FAMILIES)
+    assert set(get_args(SlotType)) == set(SLOT_TYPES)
+
+
+def test_slot_manager_valid_slot_types_match() -> None:
+    from hal0.model_meta import SLOT_TYPES
+    from hal0.slots.manager import _VALID_SLOT_TYPES
+
+    assert frozenset(SLOT_TYPES) == _VALID_SLOT_TYPES
+
+
+def test_device_metadata_is_internally_consistent() -> None:
+    from hal0.config.schema import SEED_PROFILES
+    from hal0.model_meta import (
+        BACKEND_TO_DEVICE,
+        CANONICAL_DEVICES,
+        DEVICE_CLASSES,
+        DEVICE_TO_DEFAULT_PROFILE,
+        LEGACY_BACKENDS,
+        VALID_DEVICES,
+    )
+
+    assert {d.id for d in CANONICAL_DEVICES} == VALID_DEVICES
+    for d in CANONICAL_DEVICES:
+        assert d.device_class in DEVICE_CLASSES
+        assert d.legacy_backend in LEGACY_BACKENDS
+        # Every default profile must be a real seed profile — "" would
+        # leave a fresh slot born broken ("profile '' not found").
+        assert d.default_profile in SEED_PROFILES, d.id
+        assert BACKEND_TO_DEVICE[d.legacy_backend] == d.id
+        assert BACKEND_TO_DEVICE[d.id] == d.id  # idempotent
+        assert DEVICE_TO_DEFAULT_PROFILE[d.id] == d.default_profile
+    recommended = [d.id for d in CANONICAL_DEVICES if d.recommended]
+    assert recommended == ["gpu-rocm"]  # CONTEXT.md: ROCm default, Vulkan fallback
+
+
+# ── unified unknown-value policy ─────────────────────────────────────────────
+
+
+def test_unknown_legacy_backend_warns_and_defaults_cpu(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Direction 1: unknown legacy backend → warn + safe 'cpu' default."""
+    from hal0.model_meta import map_backend_to_device
+
+    with caplog.at_level("WARNING", logger="hal0.model_meta"):
+        assert map_backend_to_device("vukan") == "cpu"
+    assert any("device_mapping_unknown_backend" in r.message for r in caplog.records)
+
+
+def test_unknown_device_warns_and_returns_no_opinion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Direction 2: unknown device → warn + (None, None) (callers default)."""
+    with caplog.at_level("WARNING", logger="hal0.model_meta"):
+        assert device_to_backend("quantum-annealer") == (None, None)
+    assert any("unknown_device" in r.message for r in caplog.records)
+
+
+def test_unknown_device_legacy_writeback_warns_and_passes_through(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Direction 3: unknown device on the legacy write-back path → warn +
+    UNCHANGED passthrough (load-bearing for downgrade legibility)."""
+    with caplog.at_level("WARNING", logger="hal0.model_meta"):
+        assert device_to_legacy_backend("weird-token") == "weird-token"
+    assert any("unknown_device_passthrough" in r.message for r in caplog.records)
+    # Empty input stays silent — "no opinion" is not an unknown value.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="hal0.model_meta"):
+        assert device_to_legacy_backend("") == ""
+    assert not caplog.records
