@@ -287,3 +287,28 @@ Qwen3.5/3.6 are 262k-native — no YaRN flags needed at our ctx sizes (only add
 6. `-fa on` syntax note: current upstream is `on|off|auto` (default auto) and
    old `-fa 1` still parses — our `-fa on` spelling is already correct for the
    fork images; keep it explicit.
+
+## 7. Measured results — matrix run 2026-07-04 (CT105, gfx1151)
+
+MoE=Qwen3.6-35B-A3B-HaloStrix-Dyn-MTP-v7, dense=Qwen3.6-27B-UD-Q5_K_XL. All
+cells GPU-exclusive (slots `enabled=false`), noise <1.1%. Raw JSON:
+`/var/lib/hal0/benchmarks/matrix-cells/` (Tier A), `.../server-ab/` (Tier B).
+
+| Cell | Question | Winner | Delta | Action |
+|---|---|---|---|---|
+| moe-batch | `-ub 4096` vs `2048`? | **`-ub 1024`** (neither) | pp **+30%** (1165 vs 895) | rocm-moe `-ub 1024` |
+| dense-batch | confirm `8192/2048`? | inconclusive (jagged) | — | keep seeded |
+| vulkan-ub | RADV sweet spot 1024? | **`-ub 256`** (not 1024) | pp +5.4% vs 512; 1024 −6% | vulkan `-ub 256` |
+| kv-rocm @32k | q8 vs f16 symmetric | f16 (tg 9.0 vs 8.0) | tg +12.5% | keep q8 (memory); note cost |
+| kv-vulkan @32k | q8 valid on RADV? | **q8** (pp 168 vs 116) | pp **+45%**, tg +4% | doc'd override; held (gemma) |
+| threads | `-t 8` vs `16` | tie (noise) | <3% | drop `--threads-batch 32` |
+| MTP n-max (dense) | 2 vs 4 | **4** | decode **+23%** (32.6 vs 26.4) | keep seeded n-max 4 |
+| cache-reuse (agent) | 256 vs 0 | tie (noise) | ~1.7% | don't adopt |
+| poll (agent) | poll vs none | tie | <0.1% | drop `--poll` |
+| embed / rerank | sanity | PASS | 1024-dim / spread 14.4 | — |
+
+**Gotchas hit (see memory `bench-profile-matrix-gotchas`):** the `sweep` verb
+collides on one filename per model+backend (skips cells); asymmetric KV at 32k
+depth falls back to CPU (2h hang) — run symmetric only; GPU slots auto-warm
+mid-run (disable them). MoE-MTP draft depth NOT run (no MoE-MTP slot; dense
+result + prior data corroborate n-max 4).

@@ -824,8 +824,11 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: let ``device_class`` drive display.
 SEED_PROFILES: dict[str, dict[str, object]] = {
     "rocm": {
+        # -ngl 999 explicit (GTT/unified free-mem autodetect is unreliable) and
+        # --jinja for correct chat templating — house-standard on all GPU LLM
+        # profiles (consolidation handoff §3).
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
@@ -833,8 +836,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "FP4",
     },
     "rocm-dnse": {
+        # Strix Halo matrix 2026-07-04: dense -b/-ub inconclusive (keep 8192/2048);
+        # --threads-batch 32 and --poll 100/--poll-batch 1 measured within noise at
+        # full offload → dropped (simpler flags win ties). +-ngl 999/--jinja.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --no-mmap --jinja",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -842,8 +848,12 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "FP4",
     },
     "rocm-moe": {
+        # Strix Halo matrix 2026-07-04 (Qwen3.6-35B-A3B-MTP): -ub 1024 beats the
+        # old -ub 2048 by +30% pp2048 (1165 vs 895 t/s), consistent across every
+        # -b; tg flat ~47. --threads-batch 32 and --poll 100/--poll-batch 1 within
+        # noise → dropped. +-ngl 999.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 1024 --parallel 1 --threads 16 --no-mmap --jinja",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -851,8 +861,12 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "FP4",
     },
     "vulkan": {
+        # Strix Halo matrix 2026-07-04 (RADV): -ub sweep monotonic — 256 is the
+        # sweet spot (pp2048 274.7 vs 260.7 @512 = +5.4%; 1024 is WORSE at 244.7),
+        # so -ub 512→256. +-ngl 999/--jinja. (Symmetric q8 KV measured +45% pp at
+        # 32k depth here but held back: gemma slots need f16 KV via registry.)
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -b 512 -ub 256 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
@@ -867,7 +881,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # tuning, no KV-quant assumptions); requires nvidia-container-toolkit
         # (CDI) for GPU passthrough — see providers/_gpu.nvidia_cdi_devices.
         "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
-        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "cuda",
@@ -943,7 +957,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # batch to limit peak RAM, and a thread count sensible for a typical
         # multi-core host.  backend=None keeps the #807 coherence check happy.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap",
+        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap --jinja",
         "mtp": False,
         "device_class": "cpu",
         "intent": "CPU-only LLM · llama-server",
@@ -963,6 +977,10 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: ``tps`` = tokens/sec (LLM throughput); ``rtf`` = real-time factor (synth,
 #: e.g. TTS).  Grounded in hal0-container-bench-2026-06-08.md.  Custom
 #: profiles have no entry → the card shows "—" until benched.
+#: Unchanged by the 2026-07-04 Strix Halo flag re-tune: every adopted change
+#: (rocm-moe -ub 1024, vulkan -ub 256, dropped threads-batch/poll) is a prefill
+#: (pp) win — token-generation throughput was flat across all matrix cells, so
+#: these decode-based hero numbers still hold.
 PROFILE_BENCH: dict[str, dict[str, float]] = {
     "rocm": {"tps": 52.8},
     "rocm-moe": {"tps": 90.0},

@@ -13,6 +13,22 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Changed
+
+- **Seed profiles: bench-driven flag re-tune (Strix Halo matrix, 2026-07-04).**
+  `rocm-moe` micro-batch `-ub 2048` → `-ub 1024` (+30% prompt-processing on
+  Qwen3.6-35B-A3B-MTP: 1165 vs 895 t/s pp2048, consistent across all `-b`;
+  token-gen flat ~47). `vulkan` `-ub 512` → `-ub 256` (+5.4% pp; the reported
+  1024 sweet spot measured *worse*). Dropped `--threads-batch 32` and
+  `--poll 100 --poll-batch 1` from the rocm chat profiles (measured within noise
+  at full offload — simpler flags win ties). Added explicit `-ngl 999` to all
+  GPU LLM profiles (GTT/unified free-mem autodetect is unreliable) and `--jinja`
+  to all LLM profiles. Decode throughput is unchanged (all wins are prefill), so
+  `PROFILE_BENCH` hero numbers stand. MTP draft depth measured `n-max 4` optimal
+  (+23% decode vs n-max 2 on dense MTP) — seeded default kept. Symmetric q8 KV
+  on Vulkan measured +45% pp at 32k depth but held back pending gemma f16
+  registry-override verification.
+
 ## [v0.8.5b2] — 2026-07-04
 
 Hotfix over v0.8.5b1, closing the three findings from the first live
