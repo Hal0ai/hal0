@@ -119,3 +119,119 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("s", stack)
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after["vision"] is False
+
+
+class TestGuardedReconcile:
+    """The stack write path shares SlotManager's guard pipeline.
+
+    Pre-fix ``_reconciled_stack_slot`` hand-rolled its merge, skipping the
+    ctx_size fold, device↔profile coherence, and the NPU/default guards —
+    a stack could persist a vulkan-device+rocm-profile pair that
+    ``update_config`` would refuse.
+    """
+
+    def _write_slot(self, home: str, name: str, lines: list[str]) -> Path:
+        path = _slots_dir(home) / f"{name}.toml"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_conflicting_device_profile_is_flagged_not_applied(self, tmp_hal0_home: str) -> None:
+        slot_path = _write_agent_slot(tmp_hal0_home)
+        stack = StackConfig(
+            name="Bad",
+            slots=[
+                StackSlotEntry(
+                    slot="agent",
+                    model="m",
+                    device="gpu-vulkan",
+                    profile="rocm-dnse",  # rocm profile under a vulkan device
+                )
+            ],
+        )
+        plan = StackApplyEngine().plan("bad", stack)
+        # Per-slot error recorded; whole plan not aborted.
+        assert plan.errors and plan.errors[0][0] == "agent"
+        assert "conflict" in plan.errors[0][1]
+        assert any("rejected" in line for line in plan.summary)
+        # The offending slot's after == before (nothing to commit).
+        after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
+        assert after == _read(slot_path)
+        assert plan.change_set.changed is False
+
+    def test_device_flip_repoints_stale_profile(self, tmp_hal0_home: str) -> None:
+        """A stack that moves device across backends heals the profile too."""
+        slot_path = self._write_slot(
+            tmp_hal0_home,
+            "agent",
+            [
+                'name = "agent"',
+                "port = 8087",
+                'device = "gpu-vulkan"',
+                'profile = "vulkan"',
+                "[model]",
+                'default = "old"',
+            ],
+        )
+        stack = StackConfig(
+            name="S",
+            slots=[StackSlotEntry(slot="agent", model="m", device="gpu-rocm")],
+        )
+        plan = StackApplyEngine().plan("s", stack)
+        assert plan.errors == []
+        after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
+        assert after["device"] == "gpu-rocm"
+        assert after["backend"] == "rocm"
+        # Pre-fix: profile stayed "vulkan" → rocm device under a vulkan image.
+        assert after["profile"] == "rocm"
+
+    def test_ctx_size_alias_folded_by_stack_write(self, tmp_hal0_home: str) -> None:
+        slot_path = self._write_slot(
+            tmp_hal0_home,
+            "agent",
+            [
+                'name = "agent"',
+                "port = 8087",
+                "[model]",
+                'default = "old"',
+                "ctx_size = 4096",
+            ],
+        )
+        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m")])
+        plan = StackApplyEngine().plan("s", stack)
+        after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
+        assert after["model"]["context_size"] == 4096
+        assert "ctx_size" not in after["model"]
+
+    def test_second_npu_anchor_is_flagged(self, tmp_hal0_home: str) -> None:
+        self._write_slot(
+            tmp_hal0_home,
+            "npu",
+            [
+                'name = "npu"',
+                "port = 8090",
+                'device = "npu"',
+                'type = "llm"',
+                "enabled = true",
+                "[model]",
+                'default = "qwen3.5:4b"',
+            ],
+        )
+        slot_path = self._write_slot(
+            tmp_hal0_home,
+            "npu2",
+            [
+                'name = "npu2"',
+                "port = 8091",
+                'device = "npu"',
+                'type = "llm"',
+                "enabled = true",
+                "[model]",
+                'default = "old"',
+            ],
+        )
+        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="npu2", model="gemma4-it:e2b")])
+        plan = StackApplyEngine().plan("s", stack)
+        assert plan.errors and plan.errors[0][0] == "npu2"
+        assert "NPU" in plan.errors[0][1]
+        after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
+        assert after == _read(slot_path)

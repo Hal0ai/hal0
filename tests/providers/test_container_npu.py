@@ -236,6 +236,9 @@ class TestLoadSyncNpuBranch:
                 "hal0.providers.container.resolve_gpu_device_paths",
                 return_value=["/dev/kfd", "/dev/dri/renderD128"],
             ),
+            # GPU device nodes are existence-filtered at the container_spec call
+            # site; force present so the CI host (no /dev/kfd) still renders them.
+            patch("hal0.providers.container.os.path.exists", return_value=True),
             patch.object(provider, "_run", side_effect=fake_run),
             patch.object(provider, "_unit_path", return_value=unit_file),
         ):
@@ -329,6 +332,56 @@ async def test_health_200_on_health_still_healthy() -> None:
 
     assert result["ok"] is True
     assert result["status"] == "healthy"
+
+
+@pytest.mark.anyio
+async def test_health_delegates_to_flm_tier1_when_slot_is_npu() -> None:
+    """When ContainerProvider.health is given an FLM slot_cfg, it delegates to
+    FLMProvider.health (the Tier-1 /v1/chat/completions probe) instead of the
+    weak /v1/models fallback."""
+    from hal0.providers.flm import FLMProvider
+
+    sentinel = {"ok": True, "status": "ready", "model": "qwen3:0.6b"}
+
+    async def fake_flm_health(self: Any, port: int) -> dict[str, Any]:
+        assert port == 8088
+        return sentinel
+
+    provider = ContainerProvider()
+    with (
+        patch.object(FLMProvider, "health", fake_flm_health),
+        # /health must NOT be probed on the delegation path.
+        patch(
+            "hal0.providers.container.httpx.AsyncClient",
+            side_effect=AssertionError("must not open an httpx client when delegating to FLM"),
+        ),
+    ):
+        result = await provider.health(8088, slot_cfg={"device": "npu"})
+
+    assert result is sentinel
+
+
+@pytest.mark.anyio
+async def test_health_no_delegation_without_slot_cfg() -> None:
+    """The legacy port-only call keeps the /health + /v1/models fallback path
+    (no FLM delegation, so existing manager call sites are unaffected)."""
+    provider = ContainerProvider()
+
+    health_resp = MagicMock()
+    health_resp.status_code = 200
+
+    async def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        return health_resp
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = fake_get
+
+    with patch("hal0.providers.container.httpx.AsyncClient", return_value=mock_client):
+        result = await provider.health(8095)
+
+    assert result["ok"] is True
 
 
 @pytest.mark.anyio

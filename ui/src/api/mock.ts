@@ -16,6 +16,8 @@
 // Ambient typing lives in `src/types/globals.d.ts` — no local
 // `declare global` here (it would conflict on `HAL0_DATA` modifiers).
 
+import { META_ENUMS_FALLBACK } from '../lib/deviceMeta'
+
 const FORCED = !!(import.meta.env && (import.meta.env as any).VITE_MOCK_HAL0 === '1')
 
 export function isMockForced() {
@@ -118,6 +120,185 @@ function buildNpuOccupancy() {
       gb: typeof s.gb === 'number' ? s.gb : 2.4,
     })),
   }
+}
+
+// ── Meta enums — static per-release taxonomy ──────────────────────
+// Mirrors GET /api/meta/enums exactly; the payload IS the typed fallback
+// (src/lib/deviceMeta.ts) so mock mode and fallback mode can't drift.
+function buildMetaEnums() {
+  return META_ENUMS_FALLBACK
+}
+
+// ── Profiles — mirrors GET /api/profiles (list of ProfileConfig rows) ──
+// Seed shapes match profiles.jsx expectations (name/image/flags/mtp/
+// resolved_flags/device_class/backend/seed/intent/quant/tps|rtf/used_by),
+// grounded in config/schema.py SEED_PROFILES + PROFILE_BENCH, plus one
+// custom profile so the "Custom profiles" section renders in mock mode.
+function buildProfiles() {
+  return [
+    {
+      name: 'rocm',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      flags: '-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
+      mtp: false,
+      resolved_flags: '-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
+      device_class: 'gpu',
+      backend: 'rocm',
+      seed: true,
+      cloned_from: null,
+      intent: 'MoE agents',
+      quant: 'FP4',
+      tps: 52.8,
+      rtf: null,
+      used_by: ['primary', 'embed', 'rerank'],
+    },
+    {
+      name: 'vulkan',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      flags: '-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
+      mtp: false,
+      resolved_flags: '-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
+      device_class: 'gpu',
+      backend: 'vulkan',
+      seed: true,
+      cloned_from: null,
+      intent: 'Vulkan std · fallback',
+      quant: 'Q4_K_M',
+      tps: 41.0,
+      rtf: null,
+      used_by: ['legacy'],
+    },
+    {
+      name: 'flm',
+      image: 'ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43',
+      flags: '',
+      mtp: false,
+      resolved_flags: '',
+      device_class: 'npu',
+      backend: null,
+      seed: true,
+      cloned_from: null,
+      intent: 'FLM NPU inference',
+      quant: 'W4ABF16',
+      tps: 38.6,
+      rtf: null,
+      used_by: ['agent', 'stt-npu', 'embed-npu'],
+    },
+    {
+      name: 'tts',
+      image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
+      flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
+      mtp: false,
+      resolved_flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
+      device_class: 'cpu',
+      backend: null,
+      seed: true,
+      cloned_from: null,
+      intent: 'TTS · Kokoro',
+      quant: '',
+      tps: null,
+      rtf: 0.18,
+      used_by: ['tts'],
+    },
+    {
+      name: 'cpu-llm',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      flags: '--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap',
+      mtp: false,
+      resolved_flags: '--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap',
+      device_class: 'cpu',
+      backend: null,
+      seed: true,
+      cloned_from: null,
+      intent: 'CPU-only LLM · llama-server',
+      quant: 'Q4_K_M',
+      tps: null,
+      rtf: null,
+      used_by: [],
+    },
+    {
+      name: 'comfyui',
+      image: 'docker.io/kyuz0/amd-strix-halo-comfyui:latest',
+      flags: '--disable-mmap --bf16-vae --cache-none',
+      mtp: false,
+      resolved_flags: '--disable-mmap --bf16-vae --cache-none',
+      device_class: 'img',
+      backend: null,
+      seed: true,
+      cloned_from: null,
+      intent: 'Image generation',
+      quant: '',
+      tps: null,
+      rtf: null,
+      used_by: ['img'],
+    },
+    {
+      name: 'rocm-fast',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      flags: '-fa on -b 8192 -ub 2048 --threads 16 --no-mmap',
+      mtp: true,
+      resolved_flags: '-fa on -b 8192 -ub 2048 --threads 16 --no-mmap',
+      device_class: 'gpu',
+      backend: 'rocm',
+      seed: false,
+      cloned_from: 'rocm',
+      intent: 'Dense + MTP · benched on this box',
+      quant: 'FP4',
+      tps: null,
+      rtf: null,
+      used_by: [],
+    },
+  ]
+}
+
+// ── Stacks — mirrors GET /api/stacks ({stacks, active, drift}) ─────
+// Slot entries reference HAL0_DATA model ids where possible so the
+// available/missing affordances exercise both paths in mock mode.
+function buildStacksList() {
+  return {
+    active: null,
+    drift: 'none',
+    stacks: [
+      {
+        slug: 'coding',
+        name: 'Coding',
+        description: 'Fast coder + repo retrieval',
+        author: 'hal0',
+        icon: '',
+        tags: ['coding', 'fast'],
+        seed: true,
+        slots: [
+          { slot: 'primary', model: 'qwen3-coder-30b', device: 'gpu-rocm', profile: 'rocm', mtp: false, capabilities: [] },
+          { slot: 'embed', model: 'nomic-v1.5', device: 'gpu-rocm', profile: 'rocm', mtp: false, capabilities: [] },
+        ],
+      },
+      {
+        slug: 'daily-driver',
+        name: 'Daily driver',
+        description: 'General chat + voice + image',
+        author: 'hal0',
+        icon: '',
+        tags: ['general'],
+        seed: false,
+        slots: [
+          { slot: 'primary', model: 'qwen3.6-27b-mtp', device: 'gpu-rocm', profile: 'rocm', mtp: true, capabilities: [] },
+          { slot: 'tts', model: 'kokoro-v1', device: 'cpu', profile: 'tts', mtp: false, capabilities: [] },
+          { slot: 'img', model: 'sd-turbo', device: 'img', profile: 'comfyui', mtp: false, capabilities: [] },
+          { slot: 'scribe', model: 'whisper-large-v3-missing', device: 'npu', profile: 'flm', mtp: false, capabilities: [] },
+        ],
+      },
+    ],
+  }
+}
+
+// ── Chat templates — mirrors GET /api/chat-templates ([{id,label,valid}]) ──
+function buildChatTemplates() {
+  return [
+    { id: 'chatml', label: 'ChatML', valid: true, error: null },
+    { id: 'llama3', label: 'Llama 3', valid: true, error: null },
+    { id: 'mistral', label: 'Mistral / [INST]', valid: true, error: null },
+    { id: 'gemma', label: 'Gemma', valid: true, error: null },
+  ]
 }
 
 function buildJournal() {
@@ -839,7 +1020,16 @@ function buildMemoryGraphStatus() {
 // ─── Allowlist (first match wins) ─────────────────────────────────
 type Builder = (url: string, match: RegExpMatchArray) => unknown
 
-export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Object.freeze([
+// `networkFirst` rows try the real network even in FORCED mock mode and only
+// substitute the baked payload when the GET fails (network error / 404 / a
+// dev-proxy 5xx). This keeps Playwright `page.route` overrides authoritative
+// for these endpoints (the e2e suite runs with VITE_MOCK_HAL0=1 and drives
+// /api/profiles, /api/stacks, /api/chat-templates via route fulfils), while
+// unrouted dev/preview builds still get a plausible payload. networkFirst
+// substitution is GET-only — mutations (POST/PUT/DELETE) always pass through.
+type AllowRow = { re: RegExp; build: Builder; networkFirst?: boolean }
+
+export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/status$/, build: buildStatus },
   { re: /^\/api\/slots$/, build: buildSlots },
   { re: /^\/api\/slots\/[^/]+$/, build: () => null }, // 404-style — Slot detail not in mock
@@ -853,6 +1043,10 @@ export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Obj
   { re: /^\/api\/auth\/token$/, build: buildAuthToken },
   { re: /^\/api\/auth\/allowed-origins$/, build: buildAllowedOrigins },
   { re: /^\/api\/secrets$/, build: buildSecrets },
+  { re: /^\/api\/meta\/enums$/, build: buildMetaEnums, networkFirst: true },
+  { re: /^\/api\/profiles$/, build: buildProfiles, networkFirst: true },
+  { re: /^\/api\/stacks$/, build: buildStacksList, networkFirst: true },
+  { re: /^\/api\/chat-templates$/, build: buildChatTemplates, networkFirst: true },
   // ── Memory (Hindsight) — engine + bank-scoped surface ────────────
   // Forced-mock + 404-fallback story for the Memory graph overhaul. The
   // bank id is captured as group 1. ORDER MATTERS: the more-specific
@@ -949,11 +1143,19 @@ export async function mockFetch(
   const path = parsePath(url)
   if (!path) return fetch(url as any, options)
 
+  const method = String(
+    options?.method ??
+      (typeof Request !== 'undefined' && url instanceof Request ? url.method : 'GET'),
+  ).toUpperCase()
+
   const hit = matchAllowlist(path)
   // builders receive the query-bearing path (subgraph/recall read params)
   const builderUrl = pathWithSearch(url) ?? path
+  // networkFirst substitution only ever applies to reads — a POST/PUT/DELETE
+  // to e.g. /api/profiles must reach the network (or a page.route) untouched.
+  const substitutable = !!hit && (!hit.row.networkFirst || method === 'GET')
 
-  if (FORCED && hit) {
+  if (FORCED && hit && substitutable && !hit.row.networkFirst) {
     return jsonResponse(hit.row.build(builderUrl, hit.match))
   }
 
@@ -961,14 +1163,23 @@ export async function mockFetch(
   try {
     res = await fetch(url as any, options)
   } catch (e) {
-    if (hit) {
+    if (hit && substitutable) {
       // network-level failure on a mocked path — fall back
       return jsonResponse(hit.row.build(builderUrl, hit.match))
     }
     throw e
   }
-  if (res.status === 404 && hit) {
-    return jsonResponse(hit.row.build(builderUrl, hit.match))
+  if (hit && substitutable) {
+    if (res.status === 404) {
+      return jsonResponse(hit.row.build(builderUrl, hit.match))
+    }
+    // Forced mock + networkFirst: an unrouted GET lands on the vite proxy
+    // (ECONNREFUSED → 5xx). Serve the baked payload for any failed read so
+    // dev/preview never renders an error shell, while a page.route-fulfilled
+    // 2xx stays authoritative.
+    if (FORCED && hit.row.networkFirst && !res.ok) {
+      return jsonResponse(hit.row.build(builderUrl, hit.match))
+    }
   }
   return res
 }

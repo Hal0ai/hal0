@@ -15,6 +15,8 @@ import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useProfiles } from '@/api/hooks/useProfiles'
+import { useMetaEnums } from '@/api/hooks/useMeta'
+import { canonicalCapabilities, modelDeviceClasses, profileDeviceClass } from '@/lib/deviceMeta'
 import { MODEL_TYPE_TAGS, splitModelTags, mergeModelTags } from '@/dash/model-types.js'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
@@ -33,6 +35,10 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 
   const inspect = useModelInspect();
   const pullJob = usePullJob();
+  // One canonical capability vocabulary for every add/edit surface —
+  // meta.model_capabilities (this modal used to carry its own ad-hoc list
+  // with legacy spellings: embeddings/reranking/transcription).
+  const enums = useMetaEnums();
 
   useEffectMM(() => {
     if (open) {
@@ -199,7 +205,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
               <span className="sub">drives OmniRouter eligibility</span>
             </div>
             <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-              {["chat", "tool-calling", "vision", "embeddings", "reranking", "transcription", "tts", "image", "edit"].map(l => (
+              {enums.model_capabilities.map(l => (
                 <label key={l} className="checkbox-row">
                   <input
                     type="checkbox"
@@ -253,11 +259,10 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   );
 }
 
-// Model.capabilities vocabulary (registry/model.py) — drives dispatch/omni
-// eligibility. Historically only settable at register time.
-const MODEL_CAPABILITIES = ["chat", "embed", "rerank", "vision", "asr", "tts"];
-// Model.backends vocabulary — drives slot-compat filtering in the slot form.
-const MODEL_BACKENDS = ["rocm", "vulkan", "cpu", "cuda", "flm", "moonshine", "kokoro"];
+// Model capability + backend vocabularies now come from GET /api/meta/enums
+// (useMetaEnums → meta.model_capabilities / meta.model_backends, with the
+// typed static fallback) — the hardcoded MODEL_CAPABILITIES / MODEL_BACKENDS
+// constants that used to live here are gone.
 
 // Order-insensitive set equality for the array fields (capabilities/backends),
 // so a defaults-only save doesn't spuriously report those as changed.
@@ -274,10 +279,10 @@ function RecipeEditorModal({ open, onClose, model }) {
   // so an ungated fetch would fire on the models list and detach row controls.
   const templates = useChatTemplates(open);
   const profilesQuery = useProfiles();
+  const enums = useMetaEnums();
   const init = model?.defaults || {};
   const [ctx, setCtx] = useStateMM("");
   const [ngl, setNgl] = useStateMM("");
-  const [rope, setRope] = useStateMM("");
   const [extra, setExtra] = useStateMM("");
   const [chatTemplate, setChatTemplate] = useStateMM("auto");
   // Preferred runtime profile that loads with this model (ModelDefaults.profile).
@@ -302,7 +307,6 @@ function RecipeEditorModal({ open, onClose, model }) {
     if (open && model) {
       setCtx(init.context_size != null ? String(init.context_size) : "");
       setNgl(init.n_gpu_layers != null ? String(init.n_gpu_layers) : "");
-      setRope(init.rope_freq_base != null ? String(init.rope_freq_base) : "");
       setExtra(init.extra_args || "");
       setChatTemplate(init.chat_template ?? "auto");
       setProfile(init.profile || "");
@@ -310,7 +314,9 @@ function RecipeEditorModal({ open, onClose, model }) {
       const split = splitModelTags(model.tags);
       setTypes(split.selected);
       setOtherTags(split.other);
-      setCaps(Array.isArray(model.capabilities) ? model.capabilities : []);
+      // Normalize legacy capability spellings (embeddings/reranking/…)
+      // through meta.capability_aliases so the toggles light up correctly.
+      setCaps(canonicalCapabilities(model.capabilities, enums));
       setBackends(Array.isArray(model.backends) ? model.backends : []);
       setMmproj(model.mmproj || "");
       setHfRepo(model.hf_repo || "");
@@ -332,9 +338,10 @@ function RecipeEditorModal({ open, onClose, model }) {
     // Preserve any ModelDefaults field the editor doesn't surface. The
     // registry PUT flat-merges `defaults` WHOLESALE, so we must start from the
     // stored defaults and only override the keys we render inputs for —
-    // otherwise siblings (e.g. a hand-set rope_freq_base) are silently cleared.
-    // Emptying a shown input clears just that one key (delete), keeping the
-    // "empty = launcher default" affordance intact.
+    // otherwise siblings (e.g. a legacy hand-set rope_freq_base, which no
+    // longer has an input here — deprecated backend-side, use extra_args)
+    // are silently cleared. Emptying a shown input clears just that one key
+    // (delete), keeping the "empty = launcher default" affordance intact.
     const defaults = { ...init };
     if (ctx.trim()) {
       const n = parseInt(ctx, 10);
@@ -344,10 +351,6 @@ function RecipeEditorModal({ open, onClose, model }) {
       const n = parseInt(ngl, 10);
       if (Number.isFinite(n)) defaults.n_gpu_layers = n; else delete defaults.n_gpu_layers;
     } else delete defaults.n_gpu_layers;
-    if (rope.trim()) {
-      const n = parseFloat(rope);
-      if (Number.isFinite(n)) defaults.rope_freq_base = n; else delete defaults.rope_freq_base;
-    } else delete defaults.rope_freq_base;
     if (extra.trim()) defaults.extra_args = extra; else delete defaults.extra_args;
     // Only persist a real template choice — 'auto' means GGUF-embedded, which
     // is the absence of an override, so don't pollute defaults with it.
@@ -370,8 +373,9 @@ function RecipeEditorModal({ open, onClose, model }) {
       [...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
     if (!sameTags) body.tags = nextTags;
     // Capabilities + backends: routing-critical top-level sets. Emit only when
-    // the set actually changed (order-insensitive).
-    const prevCaps = Array.isArray(model.capabilities) ? model.capabilities : [];
+    // the set actually changed (order-insensitive, compared through the
+    // canonical alias map so a legacy "embeddings" row isn't spuriously dirty).
+    const prevCaps = canonicalCapabilities(model.capabilities, enums);
     if (!sameStringSet(caps, prevCaps)) body.capabilities = caps;
     const prevBackends = Array.isArray(model.backends) ? model.backends : [];
     if (!sameStringSet(backends, prevBackends)) body.backends = backends;
@@ -455,10 +459,10 @@ function RecipeEditorModal({ open, onClose, model }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>capabilities</span>
-          <span className="sub">dispatch / omni eligibility · chat · embed · rerank · vision · asr · tts</span>
+          <span className="sub">dispatch / omni eligibility · canonical vocab from /api/meta/enums</span>
         </div>
         <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {MODEL_CAPABILITIES.map(cap => {
+          {enums.model_capabilities.map(cap => {
             const on = caps.includes(cap);
             return (
               <button
@@ -482,7 +486,7 @@ function RecipeEditorModal({ open, onClose, model }) {
           <span className="sub">runners this model can bind · drives slot-compat filtering</span>
         </div>
         <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {MODEL_BACKENDS.map(b => {
+          {enums.model_backends.map(b => {
             const on = backends.includes(b);
             return (
               <button
@@ -507,15 +511,6 @@ function RecipeEditorModal({ open, onClose, model }) {
         </div>
         <div className="form-ctl">
           <input className="input mono" inputMode="numeric" placeholder="e.g. 8192" value={ctx} onChange={e => setCtx(e.target.value)} />
-        </div>
-      </div>
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>rope_freq_base</span>
-          <span className="sub">float · empty = launcher / GGUF default</span>
-        </div>
-        <div className="form-ctl">
-          <input className="input mono" inputMode="decimal" placeholder="e.g. 10000" value={rope} onChange={e => setRope(e.target.value)} />
         </div>
       </div>
       <div className="form-row">
@@ -567,18 +562,23 @@ function RecipeEditorModal({ open, onClose, model }) {
           >
             <option value="">None (use slot default)</option>
             {(() => {
-              // Filter to profiles that fit this model: same slot type, and same
-              // device class where the model's device is known (rocm/vulkan→gpu).
-              const dc =
-                model.device === "rocm" || model.device === "vulkan" ? "gpu"
-                : model.device === "npu" ? "npu"
-                : model.device === "cpu" ? "cpu"
-                : null;
+              // Filter to profiles that fit this model, keyed on the profile's
+              // device_class/backend vs the model's backends set (the old code
+              // compared the brittle derived `model.device` string). A model
+              // with unknown backends matches every class; a profile with no
+              // class signal is likewise never filtered out.
               const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
-              const fit = all.filter(p =>
-                (!dc || !p.device_class || p.device_class === dc) &&
-                (!model.type || !Array.isArray(p.supported_slot_types) || p.supported_slot_types.includes(model.type))
-              );
+              const mClasses = modelDeviceClasses(model.backends, model.device, enums);
+              const mBackends = Array.isArray(model.backends) ? model.backends : [];
+              const fit = all.filter(p => {
+                const pc = profileDeviceClass(p);
+                const classOk = !pc || mClasses.size === 0 || mClasses.has(pc);
+                // GPU profiles pin a concrete runtime (rocm|vulkan) — require
+                // the model to actually list that backend when it lists any.
+                const backendOk = !p.backend || mBackends.length === 0 || mBackends.includes(p.backend);
+                const typeOk = !model.type || !Array.isArray(p.supported_slot_types) || p.supported_slot_types.includes(model.type);
+                return classOk && backendOk && typeOk;
+              });
               // Always include the current selection even if it doesn't pass the
               // filter, so an existing preference never silently disappears.
               const names = new Set(fit.map(p => p.name));
@@ -863,6 +863,9 @@ function AddByPathModal({ open, onClose }) {
   const [labelSel, setLabelSel] = useStateMM({ chat: true });
   const add = useAddModelFromPath();
   const settings = useSettings();
+  // Canonical capability vocabulary — same meta-driven list as the HF modal
+  // and the recipe editor (this surface used to hand-roll a third variant).
+  const enums = useMetaEnums();
 
   useEffectMM(() => {
     if (open) {
@@ -962,7 +965,7 @@ function AddByPathModal({ open, onClose }) {
           <span className="sub">empty → auto-detect from header / filename</span>
         </div>
         <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-          {["chat", "tool-calling", "vision", "embed", "rerank", "asr", "tts"].map(l => (
+          {enums.model_capabilities.map(l => (
             <label key={l} className="checkbox-row">
               <input
                 type="checkbox"

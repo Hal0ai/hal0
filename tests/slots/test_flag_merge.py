@@ -102,7 +102,7 @@ def test_unbalanced_quote_falls_back_to_dumb_concat(
 ) -> None:
     bad_model = '--threads 4 --prompt "oops'
     slot = "--threads 8"
-    caplog.set_level(logging.WARNING, logger="hal0.slots.flag_merge")
+    caplog.set_level(logging.WARNING, logger="hal0.slots.argv")
     out = merge_flags(bad_model, slot)
     # Dumb concat preserves both sides verbatim (trimmed).
     assert bad_model.strip() in out
@@ -120,7 +120,7 @@ def test_unbalanced_quote_on_one_side_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Malformed input on only the model side still warns + returns concat."""
-    caplog.set_level(logging.WARNING, logger="hal0.slots.flag_merge")
+    caplog.set_level(logging.WARNING, logger="hal0.slots.argv")
     out = merge_flags('--prompt "oops', None)
     # Falls back to the trimmed model defaults via the dumb-concat path.
     assert "--prompt" in out
@@ -158,3 +158,36 @@ def test_slot_can_remove_value_by_overriding_with_bare_flag() -> None:
     """Slot's bare --threads (no value) wins; model's value pair disappears."""
     out = merge_flags("--threads 4", "--threads")
     assert out.split() == ["--threads"]
+
+
+# ─── Short-flag handling (folded into hal0.slots.argv) ────────────────────────
+# The retired flag_merge tokenizer only understood ``--long`` flags — a
+# ``-b 8192`` slot override was mis-parsed as a stray positional and could not
+# dedup against the model's ``-b``. The argv-backed merge fixes this.
+
+
+def test_short_flag_dedups_last_wins() -> None:
+    """A short flag on both sides collapses to one, slot value last-wins."""
+    assert merge_flags("-b 512", "-b 8192") == "-b 8192"
+
+
+def test_short_flag_dedups_against_long_alias() -> None:
+    """``-b`` and ``--batch-size`` share a canonical key, so the slot's -b
+    overrides the model's --batch-size (impossible with the old --only lexer)."""
+    assert merge_flags("--batch-size 512", "-b 8192") == "-b 8192"
+
+
+def test_short_flag_negative_value_is_not_a_flag() -> None:
+    """``-ngl -1`` keeps -1 as the value (not mis-read as a flag)."""
+    assert merge_flags("", "-ngl -1") == "-ngl -1"
+
+
+def test_mixed_short_and_long_flags_merge() -> None:
+    out = merge_flags("-b 512 --threads 8", "-b 8192 -t 16")
+    tokens = out.split()
+    # -b collapsed to one, slot's 8192 wins
+    assert tokens.count("-b") == 1
+    assert tokens[tokens.index("-b") + 1] == "8192"
+    # --threads (model, long) vs -t (slot, short) share a key → -t wins
+    assert "--threads" not in tokens
+    assert tokens[tokens.index("-t") + 1] == "16"

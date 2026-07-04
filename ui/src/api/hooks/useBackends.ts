@@ -49,13 +49,9 @@ export function useBackendSnapshot(id: string | null | undefined) {
   })
 }
 
-export function useBackendInstall() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) => apiPost(ENDPOINTS.backendInstall(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['backends'] }),
-  })
-}
+// NOTE: there is no useBackendInstall — the backend exposes no generic
+// install route (see src/hal0/api/routes/backends.py). The NPU load/unload
+// hooks below are the only install-adjacent operations.
 
 export function useBackendUninstall() {
   const qc = useQueryClient()
@@ -67,12 +63,11 @@ export function useBackendUninstall() {
 
 // ── NPU load / unload (POST /api/backends/npu/{load,unload}) ──────────────
 // The only install-adjacent backend operations the server exposes today.
-// TODO endpoints.ts (ui-sweep-b owns) — inline paths for now.
 
 export function useNpuLoad() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => apiPost<unknown>('/api/backends/npu/load'),
+    mutationFn: () => apiPost<unknown>(ENDPOINTS.backendNpuLoad),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backends'] }),
   })
 }
@@ -80,7 +75,7 @@ export function useNpuLoad() {
 export function useNpuUnload() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => apiPost<unknown>('/api/backends/npu/unload'),
+    mutationFn: () => apiPost<unknown>(ENDPOINTS.backendNpuUnload),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backends'] }),
   })
 }

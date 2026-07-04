@@ -13,7 +13,7 @@
 // Seeds are immutable: Edit becomes "Edit a copy" (forks <seed>-custom with
 // cloned_from set); Delete is disabled. Custom profiles get Clone/Edit/Delete.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import {
   useProfiles,
   useProfileCreate,
@@ -22,35 +22,54 @@ import {
   useProfileExport,
   useProfileImport,
 } from '@/api/hooks/useProfiles'
+import { useMetaEnums } from '@/api/hooks/useMeta'
 import { prettyProfile } from './profile-names'
 
-// Backend runtime hue. Keys are the display backends shown on the card +
-// drawer; colors reference shared dashboard tokens. `backendField` is the
-// value persisted to ProfileConfig.backend (null for non-GPU paths, where
-// device_class carries the hardware intent — see #751).
-const BACKEND_META = {
-  rocm:   { label: 'ROCm',          color: 'var(--dev-rocm)',   device_class: 'gpu', backendField: 'rocm' },
-  vulkan: { label: 'Vulkan',        color: 'var(--dev-vulkan)', device_class: 'gpu', backendField: 'vulkan' },
-  npu:    { label: 'FLM · NPU',     color: 'var(--dev-npu)',    device_class: 'npu', backendField: null },
-  cpu:    { label: 'CPU',           color: 'var(--dev-cpu)',    device_class: 'cpu', backendField: null },
-  // ComfyUI image-gen path: no llama.cpp backend, device_class carries the
-  // 'img' intent. Present so an existing device_class='img' profile survives an
-  // edit (backendOf → 'img' → device_class:'img') instead of being silently
-  // rewritten to 'gpu'/'cpu'. Backend PUT /api/profiles accepts device_class ∈
-  // {gpu,cpu,npu,img}.
-  img:    { label: 'ComfyUI · IMG', color: 'var(--dev-img)',    device_class: 'img', backendField: null },
-};
+// Backend runtime hue map — built from meta.devices (GET /api/meta/enums via
+// useMetaEnums, static fallback when absent) instead of the old hardcoded
+// table. Keys stay the display backends shown on the card + drawer (rocm /
+// vulkan / npu / cpu / img); colors reference shared dashboard tokens.
+// `backendField` is the value persisted to ProfileConfig.backend (the GPU
+// devices' legacy_backend; null for non-GPU paths, where device_class carries
+// the hardware intent — see #751). PUT /api/profiles accepts device_class ∈
+// {gpu,cpu,npu,img}, so the img/ComfyUI entry keeps an existing
+// device_class='img' profile from being silently rewritten on edit.
+function buildBackendMeta(enums) {
+  const out = {};
+  for (const d of enums.devices) {
+    const key = d.legacy_backend
+      || (d.device_class && d.device_class !== 'gpu' ? d.device_class : String(d.id).replace(/^gpu-/, ''));
+    if (!key || out[key]) continue;
+    out[key] = {
+      label: d.label || key,
+      color: `var(--dev-${key})`,
+      device_class: d.device_class,
+      backendField: d.legacy_backend || null,
+      recommended: !!d.recommended,
+      description: d.description || '',
+    };
+  }
+  // Defensive floor — bk() falls back to `cpu`, so the key must exist even
+  // against a degenerate enums payload.
+  if (!out.cpu) out.cpu = { label: 'CPU', color: 'var(--dev-cpu)', device_class: 'cpu', backendField: null, recommended: false, description: '' };
+  return out;
+}
+
+function useBackendMeta() {
+  const enums = useMetaEnums();
+  return useMemo(() => buildBackendMeta(enums), [enums]);
+}
 
 // `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
 
 const BLANK = { name: '', intent: '', image: '', backend: 'rocm', quant: '', flags: '', mtp: false };
 
-function bk(name) { return BACKEND_META[name] || BACKEND_META.cpu; }
+function bk(name, meta) { return meta[name] || meta.cpu; }
 
 // Display backend for a profile: the explicit GPU backend (rocm|vulkan) when
 // set, otherwise mapped from device_class so npu/cpu/img still get a hue.
-function backendOf(p) {
-  if (p.backend && BACKEND_META[p.backend]) return p.backend;
+function backendOf(p, meta) {
+  if (p.backend && meta[p.backend]) return p.backend;
   if (p.device_class === 'img') return 'img';
   if (p.device_class === 'npu') return 'npu';
   if (p.device_class === 'cpu') return 'cpu';
@@ -93,7 +112,8 @@ function PfRow({ label, value, hue }) {
 // Profile card — adopts the Stacks library-card shell (.stk-lib-*) so the
 // Profiles and Stacks grids read as one family. Same data + actions as before.
 function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
-  const meta = bk(backendOf(p));
+  const BACKEND_META = useBackendMeta();
+  const meta = bk(backendOf(p, BACKEND_META), BACKEND_META);
   const isSeed = !!p.seed;
   const usedBy = p.used_by || [];
   const inUse = usedBy.length;
@@ -198,6 +218,7 @@ function warnForm(form) {
 // verbatim so the validation rules stay in this view.
 function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
+  const BACKEND_META = useBackendMeta();
 
   const deriveInitial = () => {
     if (mode === 'create') return { ...BLANK };
@@ -205,7 +226,7 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
       name: source.name,
       intent: source.intent || '',
       image: source.image || '',
-      backend: backendOf(source),
+      backend: backendOf(source, BACKEND_META),
       quant: source.quant || '',
       flags: source.flags || '',
       mtp: !!source.mtp,
@@ -234,7 +255,7 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const show = f.show;
   const set = f.set;
   const touch = f.touch;
-  const meta = bk(form.backend);
+  const meta = bk(form.backend, BACKEND_META);
   const nameValid = !errs.name && (form.name || '').trim().length > 0;
   const nameLen = (form.name || '').length;
 
@@ -247,7 +268,7 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
       return;
     }
     f.setSubmitting(true);
-    const choice = bk(form.backend);
+    const choice = bk(form.backend, BACKEND_META);
     const body = {
       name: form.name.trim(),
       image: form.image.trim(),
@@ -340,13 +361,28 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
         </FormRow>
 
         <FormRow label="Backend" sub="runtime path">
-          <div className="pf-seg" data-testid="pf-seg-backend">
-            {Object.keys(BACKEND_META).map(k => (
-              <button type="button" key={k} className={'pf-seg-btn' + (form.backend === k ? ' on' : '')}
-                style={{ '--bk': BACKEND_META[k].color }} onClick={() => set('backend', k)}>
-                <span className="pf-chip-dot" />{BACKEND_META[k].label}
-              </button>
-            ))}
+          <div>
+            <div className="pf-seg" data-testid="pf-seg-backend">
+              {Object.keys(BACKEND_META).map(k => (
+                <button type="button" key={k} className={'pf-seg-btn' + (form.backend === k ? ' on' : '')}
+                  style={{ '--bk': BACKEND_META[k].color }} onClick={() => set('backend', k)}
+                  title={BACKEND_META[k].description || BACKEND_META[k].label}>
+                  <span className="pf-chip-dot" />{BACKEND_META[k].label}
+                  {BACKEND_META[k].recommended && <span title="Recommended" aria-label="recommended"> ★</span>}
+                </button>
+              ))}
+            </div>
+            {/* Meta-driven guidance for the picked runtime path — the enums
+                endpoint flags gpu-rocm as recommended and labels vulkan as the
+                fallback; surface that at the moment of choice. */}
+            {(meta.recommended || meta.description) && (
+              <div className="mono" data-testid="pf-backend-hint" style={{
+                marginTop: 6, fontSize: 10.5, lineHeight: 1.5,
+                color: meta.recommended ? 'var(--ok)' : 'var(--fg-4)',
+              }}>
+                {meta.recommended ? '★ recommended · ' : ''}{meta.description}
+              </div>
+            )}
           </div>
         </FormRow>
 
@@ -538,6 +574,7 @@ function ProfilesView() {
   const query = useProfiles();
   const profiles = query.data ?? [];
   const exportMut = useProfileExport();
+  const BACKEND_META = useBackendMeta();
 
   const [drawer, setDrawer] = useState(null);   // {mode, source}
   const [confirm, setConfirm] = useState(null);

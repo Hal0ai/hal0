@@ -7,17 +7,273 @@ five sites (``routes/models.py``, ``routes/slots.py``,
 copy. They all import from here now.
 
 The module is **stateless** — no classes, no construction, just
-importable functions. ``classify`` and ``device_to_backend`` are pure;
-``is_resolvable`` takes the registry explicitly as an argument so the
-module stays importable everywhere without threading a handle through.
+importable functions and constants. ``classify`` and
+``device_to_backend`` are pure; ``is_resolvable`` takes the registry
+explicitly as an argument so the module stays importable everywhere
+without threading a handle through.
+
+Canonical vocabulary table (issue #695 follow-up — every identity
+vocabulary the backend speaks, defined ONCE here; ``config.schema``
+re-exports for compatibility, it no longer defines its own copies):
+
+========================  ====================================================
+Vocabulary                Purpose / members
+========================  ====================================================
+device                    v0.2 hardware-preference enum stored in slot TOMLs
+                          and the capabilities catalog:
+                          ``gpu-rocm | gpu-vulkan | cpu | npu``
+                          (:data:`CANONICAL_DEVICES` carries per-device
+                          metadata; :data:`VALID_DEVICES` is the id set).
+legacy backend            DEPRECATED v0.1 ``SlotConfig.backend`` enum, kept
+                          one release for TOML round-trip:
+                          ``rocm | vulkan | cpu | flm | moonshine | kokoro``
+                          (:data:`LEGACY_BACKENDS`). It overloaded hardware
+                          intent with provider identity — ``moonshine`` /
+                          ``kokoro`` were CPU runtimes, hence they map to
+                          ``cpu`` in :data:`BACKEND_TO_DEVICE`.
+selectable backend        The runtime-switch tokens POST /api/slots/{name}/
+                          backend accepts: ``rocm | vulkan | cpu | auto``
+                          (:data:`SELECTABLE_BACKENDS`). flm/npu are excluded
+                          — switching to NPU is a recipe change, not a
+                          backend flip.
+device_class              Coarse profile bucket driving container device
+                          passthrough + card display:
+                          ``gpu | cpu | npu | img`` (:data:`DEVICE_CLASSES`).
+runtime family            Which server process a profile launches:
+                          ``llama-server | flm | kokoro | qwen3tts | comfyui``
+                          (:data:`RUNTIME_FAMILIES`; mirrors
+                          ``hal0.profiles.RuntimeFamily``).
+slot type                 Dispatcher slot vocabulary:
+                          ``llm | embedding | reranking | transcription |
+                          tts | image`` (:data:`SLOT_TYPES`; the source for
+                          ``slots.manager._VALID_SLOT_TYPES`` and mirrored by
+                          ``hal0.profiles.SlotType``).
+model capability          Canonical registry ``model.capabilities`` spellings:
+                          ``chat | vision | embed | rerank | asr | tts |
+                          image | video`` (:data:`MODEL_CAPABILITIES`, with
+                          the tolerated synonyms in
+                          :data:`CAPABILITY_ALIASES`).
+model backend             Valid ``model.backends`` values in the registry:
+                          GGUF seeds vulkan/rocm/cuda/cpu (registry/detect
+                          already lists cuda as *compatible* — slot configs
+                          can't select it yet), plus the dedicated providers
+                          flm/moonshine/kokoro/comfyui
+                          (:data:`MODEL_BACKENDS`).
+========================  ====================================================
+
+Unknown-value policy — ONE documented rule per translation direction
+(previously three sites disagreed silently):
+
+* legacy backend → device (:func:`map_backend_to_device`, and
+  :func:`canonical_device` which routes through it): unknown → **warn +
+  ``"cpu"``**. Safety default — the runtime must load *somewhere*, and CPU
+  always exists; crashing at config load over a typo would brick the API.
+* device → runtime pair (:func:`device_to_backend`): unknown → **warn +
+  ``(None, None)``** ("no opinion"). Callers already handle ``None`` by
+  applying their own defaults, so inventing a backend tag here would
+  override deliberate downstream fallbacks.
+* device → legacy write-back (:func:`device_to_legacy_backend`): unknown →
+  **warn + passthrough unchanged**. Load-bearing for forward/backward
+  compat: this function feeds the deprecated ``SlotConfig.backend`` field,
+  and passing a hand-edited token through unchanged keeps the TOML legible
+  on downgrade (the orchestrator always preserved such tokens — see the
+  #695 shape audits). Do NOT unify this onto ``None``/``cpu`` semantics.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+# ── canonical device taxonomy ────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceMeta:
+    """Everything the backend (and /api/meta/enums) knows about one device."""
+
+    id: str
+    label: str
+    device_class: str
+    default_profile: str
+    legacy_backend: str
+    recommended: bool
+    description: str
+
+
+#: The four canonical devices (ADR-0006 §7), with per-device metadata.
+#: Ordering is presentation order for pickers: recommended first, then the
+#: fallback, then the non-GPU devices. Per CONTEXT.md (spike data):
+#: ``gpu-rocm`` is the recommended default on Strix Halo; ``gpu-vulkan`` is
+#: the slower fallback.
+CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
+    DeviceMeta(
+        id="gpu-rocm",
+        label="GPU (ROCm)",
+        device_class="gpu",
+        default_profile="rocm",
+        legacy_backend="rocm",
+        recommended=True,
+        description="Best throughput on Strix Halo — the recommended default.",
+    ),
+    DeviceMeta(
+        id="gpu-vulkan",
+        label="GPU (Vulkan)",
+        device_class="gpu",
+        default_profile="vulkan",
+        legacy_backend="vulkan",
+        recommended=False,
+        description="Runs anywhere Mesa Vulkan does; slower than ROCm on Strix Halo — fallback.",
+    ),
+    DeviceMeta(
+        id="cpu",
+        label="CPU",
+        device_class="cpu",
+        default_profile="cpu-llm",
+        legacy_backend="cpu",
+        recommended=False,
+        description="CPU-only inference — always available, slow but correct.",
+    ),
+    DeviceMeta(
+        id="npu",
+        label="NPU (FLM)",
+        device_class="npu",
+        default_profile="flm",
+        legacy_backend="flm",
+        recommended=False,
+        description="AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process.",
+    ),
+)
+
+#: Canonical device id set — the single source ``config.schema._VALID_DEVICES``
+#: now aliases.
+VALID_DEVICES: frozenset[str] = frozenset(d.id for d in CANONICAL_DEVICES)
+
+#: Default ``device`` for fresh installs (see the gpu-rocm entry above).
+DEFAULT_DEVICE: str = "gpu-rocm"
+
+#: DEPRECATED v0.1 ``SlotConfig.backend`` enum (whitelist source for
+#: ``config.schema._VALID_BACKENDS``). Tuple so JSON surfaces are ordered.
+LEGACY_BACKENDS: tuple[str, ...] = ("rocm", "vulkan", "cpu", "flm", "moonshine", "kokoro")
+
+#: Tokens POST /api/slots/{name}/backend accepts (``auto`` clears the device
+#: so the load path falls back to its default). flm/npu are deliberately not
+#: selectable — NPU needs a recipe/profile switch, not a backend flip.
+SELECTABLE_BACKENDS: tuple[str, ...] = ("rocm", "vulkan", "cpu", "auto")
+
+#: Coarse profile device buckets (``ProfileConfig.device_class``).
+DEVICE_CLASSES: tuple[str, ...] = ("gpu", "cpu", "npu", "img")
+
+#: Profile runtime families. MUST stay in sync with the
+#: ``hal0.profiles.RuntimeFamily`` Literal (a Literal can't be built from a
+#: runtime tuple; tests/model_meta assert the two match).
+RUNTIME_FAMILIES: tuple[str, ...] = ("llama-server", "flm", "kokoro", "qwen3tts", "comfyui")
+
+#: Legacy ``backend`` token → canonical ``device``. Used by the SlotConfig
+#: model-validator (auto-promote on load), the capabilities v1→v2 migration,
+#: and the capabilities on-load auto-migration. Keep aligned with ADR-0006 §7.
+#: moonshine/kokoro map to ``cpu`` because those toolboxes were always CPU
+#: runtimes — the legacy enum overloaded ``backend`` with provider identity.
+#: Canonical device ids are included idempotently so both SlotConfig.backend
+#: and CapabilitySelection.backend can flow through the same map.
+BACKEND_TO_DEVICE: dict[str, str] = {
+    **{d.legacy_backend: d.id for d in CANONICAL_DEVICES},
+    "moonshine": "cpu",
+    "kokoro": "cpu",
+    **{d.id: d.id for d in CANONICAL_DEVICES},
+}
+
+#: Device → seed profile that best represents it (create-modal preselect,
+#: legacy-slot migration defaults, stack apply's fresh-slot creation, and the
+#: installer's primary-slot recommendation). ``cpu`` maps to ``cpu-llm`` —
+#: a fresh slot with ``profile=""`` fails to load ("profile '' not found"),
+#: so an empty default is never correct here.
+DEVICE_TO_DEFAULT_PROFILE: dict[str, str] = {d.id: d.default_profile for d in CANONICAL_DEVICES}
+
+
+def map_backend_to_device(backend: str | None) -> str:
+    """Map a legacy ``backend`` value to the v0.2 ``device`` enum.
+
+    Unknown values (e.g. an operator hand-edited a slot TOML with a
+    bespoke backend tag) fall back to ``cpu`` so the runtime has a safe
+    default rather than crashing at load (module unknown-value policy,
+    direction 1). A warning is logged so the operator notices on the
+    next ``hal0-api`` boot.
+
+    Empty / None input is treated as "no opinion" and returns the
+    package-level default ``DEFAULT_DEVICE``.
+
+    Historically ``hal0.config.schema.map_backend_to_device`` — schema
+    still re-exports it; the log event name is kept for grep continuity.
+    """
+    if not backend:
+        return DEFAULT_DEVICE
+    mapped = BACKEND_TO_DEVICE.get(backend)
+    if mapped is not None:
+        return mapped
+    log.warning(
+        "config.device_mapping_unknown_backend",
+        extra={"backend": backend, "fallback": "cpu"},
+    )
+    return "cpu"
+
+
+# ── canonical model vocabulary ───────────────────────────────────────────────
+
+#: Dispatcher slot ``type`` vocabulary (plan §4.1). Single source for
+#: ``slots.manager._VALID_SLOT_TYPES``; mirrored by ``hal0.profiles.SlotType``
+#: (Literal — kept in sync by tests/model_meta).
+SLOT_TYPES: tuple[str, ...] = ("llm", "embedding", "reranking", "transcription", "tts", "image")
+
+#: Canonical ``model.capabilities`` spellings the registry stores:
+#: registry/model.py documents chat/embed/rerank/vision/asr/tts;
+#: registry/detect.py additionally emits ``image`` (ComfyUI tree) and the
+#: shared filename table (:func:`capability_from_filename`) can yield
+#: ``video`` via registry/discover (#940 diffusion hardening).
+MODEL_CAPABILITIES: tuple[str, ...] = (
+    "chat",
+    "vision",
+    "embed",
+    "rerank",
+    "asr",
+    "tts",
+    "image",
+    "video",
+)
+
+#: Tolerated capability synonyms → canonical spelling. Matches what the code
+#: actually accepts today: ``classify``'s ``_CAPABILITY_TO_TYPE`` folds
+#: stt→asr-bucket and img→image; the layout migration
+#: (cli/migrate_commands._CAPABILITY_TO_LEAF_CAP) additionally tolerates the
+#: slot-type-flavoured embedding/embeddings/reranking/transcription spellings.
+CAPABILITY_ALIASES: dict[str, str] = {
+    "embedding": "embed",
+    "embeddings": "embed",
+    "reranking": "rerank",
+    "transcription": "asr",
+    "stt": "asr",
+    "img": "image",
+}
+
+#: Valid ``model.backends`` values in the registry. The GGUF compatibility
+#: seed is registry/detect._GGUF_BACKENDS (vulkan/rocm/cuda/cpu — ``cuda`` is
+#: already listed there as *compatible*, though no slot config can select it
+#: until Wave 3 lands CUDA support); the rest are the dedicated providers
+#: detect assigns by filename/tree (moonshine, kokoro, comfyui) plus flm.
+MODEL_BACKENDS: tuple[str, ...] = (
+    "vulkan",
+    "rocm",
+    "cuda",
+    "cpu",
+    "flm",
+    "moonshine",
+    "kokoro",
+    "comfyui",
+)
 
 
 # ── classification ───────────────────────────────────────────────────────────
@@ -216,31 +472,26 @@ def canonical_device(value: str) -> str:
     is a near-identity. It still tolerates a legacy ``backend``-style
     input (``vulkan|rocm|flm|moonshine|kokoro``) for forward
     compatibility with hand-edited slot TOMLs by routing through
-    :func:`hal0.config.schema.map_backend_to_device`.
+    :func:`map_backend_to_device` (so a genuinely unknown token warns and
+    falls back to ``"cpu"`` — unknown-value policy, direction 1).
 
     Empty input means "no opinion" and returns ``""``.
     """
-    from hal0.config.schema import _VALID_DEVICES, map_backend_to_device
-
     if not value:
         return ""
-    if value in _VALID_DEVICES:
+    if value in VALID_DEVICES:
         return value
     return map_backend_to_device(value)
 
 
 # NOTE(#695): this is deliberately NOT expressed through
-# ``device_to_backend`` — the two sites disagreed on unknown input.
+# ``device_to_backend`` — the two directions differ on unknown input by
+# design (see the module docstring's unknown-value policy).
 # ``device_to_backend`` maps unknown devices to ``(None, None)`` ("no
-# opinion"), while the orchestrator's ``_slot_backend_for_catalog_id``
-# passed unknown tokens through UNCHANGED so hand-edited values stay
-# legible on downgrade. Both behaviours are preserved as-is.
-_DEVICE_TO_LEGACY_BACKEND: dict[str, str] = {
-    "gpu-vulkan": "vulkan",
-    "gpu-rocm": "rocm",
-    "npu": "flm",
-    "cpu": "cpu",
-}
+# opinion"), while this write-back path passes unknown tokens through
+# UNCHANGED so hand-edited values stay legible on downgrade. Derived from
+# :data:`CANONICAL_DEVICES` so it can never drift from the device table.
+_DEVICE_TO_LEGACY_BACKEND: dict[str, str] = {d.id: d.legacy_backend for d in CANONICAL_DEVICES}
 
 
 def device_to_legacy_backend(device: str) -> str:
@@ -249,9 +500,17 @@ def device_to_legacy_backend(device: str) -> str:
 
     Still used by code paths that write the deprecated SlotConfig.backend
     field (kept until the ``backend`` field is excised for downgrade
-    legibility). Unknown values pass through unchanged.
+    legibility). Unknown values warn and pass through unchanged
+    (unknown-value policy, direction 3 — load-bearing, see module
+    docstring).
     """
-    return _DEVICE_TO_LEGACY_BACKEND.get(device, device)
+    if not device or device in _DEVICE_TO_LEGACY_BACKEND:
+        return _DEVICE_TO_LEGACY_BACKEND.get(device, device)
+    log.warning(
+        "model_meta.unknown_device_passthrough",
+        extra={"device": device},
+    )
+    return device
 
 
 # ── resolvability ────────────────────────────────────────────────────────────
@@ -296,6 +555,20 @@ def labels_of(cfg: dict[str, Any]) -> set[str]:
 
 
 __all__ = [
+    "BACKEND_TO_DEVICE",
+    "CANONICAL_DEVICES",
+    "CAPABILITY_ALIASES",
+    "DEFAULT_DEVICE",
+    "DEVICE_CLASSES",
+    "DEVICE_TO_DEFAULT_PROFILE",
+    "LEGACY_BACKENDS",
+    "MODEL_BACKENDS",
+    "MODEL_CAPABILITIES",
+    "RUNTIME_FAMILIES",
+    "SELECTABLE_BACKENDS",
+    "SLOT_TYPES",
+    "VALID_DEVICES",
+    "DeviceMeta",
     "canonical_device",
     "capability_from_filename",
     "classify",
@@ -303,4 +576,5 @@ __all__ = [
     "device_to_legacy_backend",
     "is_resolvable",
     "labels_of",
+    "map_backend_to_device",
 ]
