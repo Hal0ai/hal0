@@ -1040,23 +1040,29 @@ function EditSlotDrawer({ open, slot, onClose }) {
           shows whether Auto is currently effective. Instant-apply via PUT
           /config + non-blocking restart. */}
       {(() => {
+        // ALWAYS visible on LLM slots (operator feedback): hiding the row when
+        // the model is ineligible left the state undiscoverable — you couldn't
+        // see WHY MTP was off, couldn't find Auto, and the force-on escape
+        // hatch (for models the eligibility heuristics miss) had no UI. The
+        // tri-state + reason line explains itself; only non-LLM slot types
+        // (embed/rerank/tts/…) skip the row, where MTP is meaningless.
+        if ((slot.type || "llm") !== "llm") return null;
         const cur = slot.model_id || slot.model || "";
         const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
         // Same eligibility rule as the server (`model_is_mtp_eligible`): the
-        // `mtp` tag OR a delimited MTP name marker — so an untagged local pull
-        // named "…-MTP-….gguf" (which the server WILL auto-speculate on an MTP
-        // profile) still surfaces the control here.
+        // `mtp` tag OR a delimited MTP name marker.
         const modelEligible = isMtpEligibleModel(m);
-        // Show for an eligible model, or when MTP is force-ON on a now-ineligible
-        // model so it stays adjustable. A force-OFF on an ineligible model needs
-        // no control (it's already off and would be off under Auto too).
-        const forcedOn = slot.mtp === true;
-        if (!modelEligible && !forcedOn) return null;
         // Auto is effective only when the model is eligible AND the slot's
         // profile opts into MTP — mirror the server's _effective_mtp rule so
         // the hint never disagrees with what actually launches.
         const prof = (profilesQuery.data ?? []).find(p => p.name === (selectedProfile || slot.profile));
-        const autoActive = modelEligible && !!prof?.mtp;
+        const profileOptsIn = !!prof?.mtp;
+        const autoActive = modelEligible && profileOptsIn;
+        const inactiveReason = !modelEligible && !profileOptsIn
+          ? "model has no MTP heads and profile doesn't enable MTP"
+          : !modelEligible
+            ? "model has no MTP heads"
+            : "profile doesn't enable MTP";
         return (
           <div className="form-row">
             <div className="form-lbl">
@@ -1067,6 +1073,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
               <MtpControl
                 value={mtp}
                 autoActive={autoActive}
+                inactiveReason={inactiveReason}
+                forceOnRisky={!modelEligible}
                 disabled={saving}
                 onChange={async (next) => {
                   // Optimistic — set local state before the PUT, revert on error.
