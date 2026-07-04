@@ -284,6 +284,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "set-imagegen",  label: "Image-gen",     route: "settings/imagegen", sub: "engine, model, generation defaults" },
     { id: "set-defaults",  label: "Default slots", route: "settings/defaults", sub: "per-modality default slot" },
     { id: "set-general",   label: "General",       route: "settings/general",  sub: "telemetry, appearance" },
+    { id: "set-advanced",  label: "Advanced",      route: "settings/advanced", sub: "slots runtime, dispatcher, memory, activity · restart hal0-api" },
     { id: "set-about",     label: "About",         route: "settings/about",    sub: "version, license, links" },
   ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings }));
 

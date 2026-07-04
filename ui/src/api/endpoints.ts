@@ -310,6 +310,13 @@ export const ENDPOINTS = {
   stackImport: '/api/stacks/import',
   stackSnapshot: '/api/stacks/snapshot',
 
+  // One-click unit repair/restart (design D5). Whitelisted units only —
+  // includes hal0-api.service itself, which is how the dashboard offers an
+  // API restart (the request connection drops mid-restart by design; callers
+  // poll /api/health until the service is back).
+  installServiceRepair: (unit: string) =>
+    `/api/install/services/${encodeURIComponent(unit)}/repair`,
+
   // Install state — backs the post-install banner and passive install-state hook.
   // Retained for useInstallState.ts (banner/status surface). The FirstRun picker
   // endpoints (apply, complete, curated-models, pick-default, services, etc.) were
