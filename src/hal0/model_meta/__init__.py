@@ -85,6 +85,8 @@ Unknown-value policy — ONE documented rule per translation direction
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -606,6 +608,34 @@ def is_resolvable(model_id: str, registry: Any) -> bool:
     return is_installed_flm_id(model_id)
 
 
+# ── MTP eligibility ───────────────────────────────────────────────────────────
+
+#: Matches an ``MTP`` marker delimited by a separator (or string edge) so it
+#: fires on ``…-MTP-…`` / ``…_mtp`` / ``….MTP`` filenames but not on an
+#: incidental ``mtp`` inside a longer word.
+_MTP_NAME_RE = re.compile(r"(?:^|[-_. ])mtp(?:[-_. ]|$)", re.IGNORECASE)
+
+
+def model_is_mtp_eligible(model_info: Mapping[str, Any]) -> bool:
+    """True when a model ships MTP / NextN speculative-decoding heads.
+
+    Gates **auto** MTP (``SlotConfig.mtp is None``): an MTP-opting profile only
+    speculates for an eligible model, so a non-MTP model on an MTP profile no
+    longer launches with dead ``--spec-draft-*`` flags — and an explicit slot
+    ``mtp=true`` still forces it regardless.  Eligibility is the registry
+    ``mtp`` tag, or (for uncurated local pulls that carry no tags) an ``MTP``
+    marker in the model id / GGUF name.  ``model_info`` is the registry
+    ``model_dump`` dict the container provider already resolves per launch.
+    """
+    tags = model_info.get("tags") or ()
+    if isinstance(tags, (list, tuple, set)) and any(
+        str(tag).strip().lower() == "mtp" for tag in tags
+    ):
+        return True
+    name = str(model_info.get("_model_key") or model_info.get("path") or "")
+    return bool(_MTP_NAME_RE.search(name))
+
+
 # ── label extraction ─────────────────────────────────────────────────────────
 
 
@@ -649,4 +679,5 @@ __all__ = [
     "is_resolvable",
     "labels_of",
     "map_backend_to_device",
+    "model_is_mtp_eligible",
 ]

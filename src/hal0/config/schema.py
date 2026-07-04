@@ -381,9 +381,11 @@ class SlotConfig(BaseModel):
         default=None,
         description=(
             "Per-slot MTP (multi-token-prediction speculative decoding) override. "
-            "true → force on; false → force off; None → inherit the profile's mtp. "
-            "Only effective on rocmfp4 profiles with an MTP-capable model. "
-            "See resolve_profile_flags and MTP_FLAG_BUNDLE."
+            "true → force on; false → force off; None → AUTO. Auto enables MTP only "
+            "when the profile opts in (profile.mtp) AND the model actually ships MTP "
+            "heads (registry `mtp` tag or an MTP name marker), so a non-MTP model on "
+            "an MTP profile no longer launches with dead --spec-draft-* flags. "
+            "See providers.container._effective_mtp and build_mtp_flag_bundle."
         ),
     )
     chat_template: str | None = Field(
@@ -773,24 +775,44 @@ class ProvidersConfig(BaseModel):
 
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
 
-#: MTP draft-speculation flag bundle, bench-tuned.  Appended verbatim after
-#: profile.flags when ``mtp=true``.  Keep in sync with the profiles.toml seed
-#: and the bench doc (hal0-container-bench-2026-06-08.md).
-MTP_FLAG_BUNDLE = (
-    "--spec-type draft-mtp"
-    " --spec-draft-device ROCm0"
-    " --spec-draft-ngl all"
-    " --spec-draft-n-max 4"
-    " --spec-draft-n-min 0"
-    " --spec-draft-p-min 0.0"
-    " --spec-draft-p-split 0.10"
-    " --spec-draft-type-k q8_0"
-    " --spec-draft-type-v q8_0"
-    " --spec-draft-threads 16"
-    " --spec-draft-threads-batch 32"
-    " --spec-draft-poll 1"
-    " --spec-draft-poll-batch 1"
-)
+#: MTP draft-speculation draft device, per profile backend.  The old bundle
+#: hardcoded ``ROCm0``, so a Vulkan/CUDA profile with MTP on drafted on a ROCm
+#: device.  Unknown / non-GPU / ``None`` backends keep the historical ``ROCm0``
+#: default (byte-identical to the old constant).
+_MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
+
+
+def build_mtp_flag_bundle(backend: str | None) -> str:
+    """Bench-tuned MTP draft-speculation flag bundle, with the draft device
+    derived from *backend*.
+
+    Appended after ``profile.flags`` when MTP is effective (see
+    :func:`resolve_profile_flags`).  Every ``--spec-draft-*`` value here is a
+    DEFAULT — a model may override any of them via its registry
+    ``defaults.extra_args`` (``merge_flags`` precedence).  Keep the values in
+    sync with the bench doc (hal0-container-bench-2026-06-08.md).
+    """
+    device = _MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0")
+    return (
+        "--spec-type draft-mtp"
+        f" --spec-draft-device {device}"
+        " --spec-draft-ngl all"
+        " --spec-draft-n-max 4"
+        " --spec-draft-n-min 0"
+        " --spec-draft-p-min 0.0"
+        " --spec-draft-p-split 0.10"
+        " --spec-draft-type-k q8_0"
+        " --spec-draft-type-v q8_0"
+        " --spec-draft-threads 16"
+        " --spec-draft-threads-batch 32"
+        " --spec-draft-poll 1"
+        " --spec-draft-poll-batch 1"
+    )
+
+
+#: Back-compat: the ROCm-flavoured bundle (the seed MTP profiles are all ROCm).
+#: Prefer :func:`build_mtp_flag_bundle` so the draft device tracks the backend.
+MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 
 #: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
 #: when ``/etc/hal0/profiles.toml`` is absent so ``GET /api/profiles`` is
@@ -1391,7 +1413,8 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
         # shares argv's tokenizer + short/long alias table.
         from hal0.slots.argv import merge_flags
 
-        return merge_flags(MTP_FLAG_BUNDLE, base)
+        bundle = build_mtp_flag_bundle(getattr(profile, "backend", None))
+        return merge_flags(bundle, base)
     return base
 
 
