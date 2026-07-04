@@ -6,7 +6,9 @@ import { useSecretSet } from '@/api/hooks/useSecrets'
 const { useState: useStateAS, useEffect: useEffectAS } = React;
 
 // ─── Add Secret modal ───────────────────────────────────────────
-const SECRET_PRESETS = [
+// Exported so the Settings → Secrets list can reuse the same per-key
+// descriptions instead of maintaining a second copy.
+export const SECRET_PRESETS = [
   { id: "HF_TOKEN",           desc: "Hugging Face — gated repo auth (used for model pulls)",        prefix: "hf_",       prefixLen: 37 },
   { id: "OPENAI_API_KEY",     desc: "Fallback provider — OpenAI",                                     prefix: "sk-",       prefixLen: 51 },
   { id: "ANTHROPIC_API_KEY",  desc: "Fallback provider — Anthropic",                                  prefix: "sk-ant-",   prefixLen: 95 },
@@ -16,16 +18,27 @@ const SECRET_PRESETS = [
   { id: "CUSTOM",             desc: "Custom — name it yourself",                                       prefix: "",          prefixLen: 0 },
 ];
 
-function AddSecretModal({ open, onClose }) {
+function AddSecretModal({ open, onClose, initialName }) {
   const [picked, setPicked] = useStateAS("HF_TOKEN");
   const [customName, setCustomName] = useStateAS("");
   const [value, setValue] = useStateAS("");
   const [show, setShow] = useStateAS(false);
   const secretSet = useSecretSet();
 
+  // `initialName` prefills the picker when the modal is opened from a
+  // specific row's Add/Update button; names outside the preset table
+  // land on CUSTOM with the name carried over.
   useEffectAS(() => {
-    if (open) { setPicked("HF_TOKEN"); setCustomName(""); setValue(""); setShow(false); }
-  }, [open]);
+    if (!open) return;
+    setValue(""); setShow(false);
+    if (initialName && SECRET_PRESETS.some(p => p.id === initialName)) {
+      setPicked(initialName); setCustomName("");
+    } else if (initialName) {
+      setPicked("CUSTOM"); setCustomName(initialName);
+    } else {
+      setPicked("HF_TOKEN"); setCustomName("");
+    }
+  }, [open, initialName]);
 
   // Auto-detect: if value matches a known prefix, snap the picker
   useEffectAS(() => {

@@ -16,8 +16,9 @@
 // params read from the body at inference time) are deferred (#554 follow-up).
 
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
-import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel } from '@/api/hooks/useUpdates'
-import { useCapabilities, useCapabilityPatch, useCapabilityApply } from '@/api/hooks/useCapabilities'
+import { SECRET_PRESETS } from './extra-modals.jsx'
+import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel, useUpdateRollback } from '@/api/hooks/useUpdates'
+import { useCapabilities, useCapabilityApply } from '@/api/hooks/useCapabilities'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import {
   useSettings,
@@ -475,15 +476,24 @@ function HfTokenField() {
   );
 }
 
+// Per-key descriptions shared with the Add-Secret modal. Anything not in
+// the preset table is a user-defined key — say so instead of mislabelling
+// it as a fallback provider.
+const SECRET_DESCRIPTIONS = Object.fromEntries(SECRET_PRESETS.map(p => [p.id, p.desc]));
+const secretDescription = (name) =>
+  SECRET_DESCRIPTIONS[name] || "Custom key · exported to hal0 services and slot containers as an env var";
+
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);
+  const [addTarget, setAddTarget] = useStateSet(null);
   const secretsQuery = useSecrets();
   const delSecret = useSecretDelete();
   const rows = secretsQuery.data ?? [];
+  const openAdd = (name) => { setAddTarget(name || null); setAddOpen(true); };
   return (
     <div className="s-section">
       <h2>Secrets</h2>
-      <p className="desc">Encrypted at rest. Used for gated HF repos and provider auth.</p>
+      <p className="desc">Stored encrypted at rest, never shown again after saving. Each key is exported to hal0 services and slot containers as an environment variable — model-pull auth, fallback providers, or your own custom keys.</p>
       <HfTokenField />
       {secretsQuery.isLoading && (
         <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading…</div>
@@ -501,14 +511,14 @@ function SecretsSection() {
           <SRow
             key={s.name}
             k={s.name}
-            sub={s.name === 'HF_TOKEN' ? 'Hugging Face — used for gated repos' : 'Optional · fallback provider'}
+            sub={secretDescription(s.name)}
             mono
             v={s.set
               ? <span style={{color: "var(--ok)"}}>{s.masked || '••• · set'}</span>
               : <span style={{color: "var(--fg-4)"}}>not set</span>}
             actions={s.set
               ? (<>
-                  <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Update</button>
+                  <button className="btn ghost sm" onClick={() => openAdd(s.name)}>Update</button>
                   <button
                     className="btn danger sm"
                     disabled={delSecret.isPending && delSecret.variables === s.name}
@@ -523,17 +533,17 @@ function SecretsSection() {
                     }}
                   >{delSecret.isPending && delSecret.variables === s.name ? "Removing…" : "Remove"}</button>
                 </>)
-              : <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Add</button>}
+              : <button className="btn ghost sm" onClick={() => openAdd(s.name)}>Add</button>}
           />
         ))}
       </div>
       <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
         <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-          {rows.length > 0 ? `${rows.length} key${rows.length === 1 ? "" : "s"} stored` : "add keys for gated repos and provider auth"}
+          {rows.length > 0 ? `${rows.length} key${rows.length === 1 ? "" : "s"} stored` : "add keys for model pulls, fallback providers, or custom env vars"}
         </span>
-        <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add secret</button>
+        <button className="btn" onClick={() => openAdd(null)}>{Icons.plus} Add secret</button>
       </div>
-      <AddSecretModal open={addOpen} onClose={() => setAddOpen(false)} />
+      <AddSecretModal open={addOpen} initialName={addTarget} onClose={() => setAddOpen(false)} />
     </div>
   );
 }
@@ -549,6 +559,8 @@ function UpdatesSection() {
   const checkM = useUpdateCheck();
   const applyM = useUpdateApply();
   const setChannelM = useSetUpdateChannel();
+  const rollbackM = useUpdateRollback();
+  const [rollbackConfirm, setRollbackConfirm] = useStateSet(false);
   const u = stateQuery.data || { hal0: {}, flm: {} };
 
   // The current channel lives on each per-component envelope (both
@@ -619,9 +631,24 @@ function UpdatesSection() {
                 },
               })}
             >{checkM.isPending ? "Checking…" : "Check"}</button>
+            <button
+              className="btn ghost sm"
+              disabled={rollbackM.isPending || !!jobBusy}
+              onClick={() => setRollbackConfirm(true)}
+            >{rollbackM.isPending ? "Rolling back…" : "Roll back"}</button>
             <a className="btn ghost sm" href="https://hal0.dev/changelog" target="_blank" rel="noreferrer">Changelog →</a>
           </>}
         />
+        {u.hal0?.revoked && (
+          <SRow
+            k="Release notice"
+            sub="The latest release on this channel was withdrawn"
+            v={<span style={{color: "var(--warn)"}}>
+              {u.hal0.revoked_version ? `${u.hal0.revoked_version} was revoked` : "latest release revoked"}
+              {u.hal0.revoked_reason ? ` — ${u.hal0.revoked_reason}` : ""}
+            </span>}
+          />
+        )}
         <SRow
           k="flm"
           sub="Manual deb · vendor-supplied"
@@ -657,6 +684,25 @@ function UpdatesSection() {
           }
         />
       </div>
+      <ConfirmDialog
+        open={rollbackConfirm}
+        onCancel={() => setRollbackConfirm(false)}
+        onConfirm={() => {
+          setRollbackConfirm(false);
+          rollbackM.mutate(undefined, {
+            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Rolled back to the previous version — services restarting", "warn"),
+            onError: (err) => window.__hal0Toast && window.__hal0Toast(`Rollback failed: ${err?.message || "no previous version retained"}`, "err"),
+          });
+        }}
+        title="Roll back hal0?"
+        message={
+          <span>
+            Reverts to the previous retained version{u.hal0?.current ? <> (currently on <b className="mono">{u.hal0.current}</b>)</> : null}.
+            Services restart during the swap — expect a brief outage. If no previous version is retained, nothing changes.
+          </span>
+        }
+        confirmLabel="Roll back"
+      />
     </div>
   );
 }
@@ -1200,7 +1246,7 @@ function AboutSection() {
         <SRow k="hal0" mono v={liveVersion ? `${liveVersion} — container slots` : "—"} />
         <SRow k="License" v="Apache-2.0" />
         <SRow k="Repository" mono v="github.com/Hal0ai/hal0" actions={<a className="btn ghost sm" href="https://github.com/Hal0ai/hal0" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
-        <SRow k="Docs" v="hal0.dev/docs/v0.2-upgrade" actions={<a className="btn ghost sm" href="https://hal0.dev/docs/v0.2-upgrade" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
+        <SRow k="Docs" v="hal0.dev/docs" actions={<a className="btn ghost sm" href="https://hal0.dev/docs/" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
         <SRow k="Discord" v="discord.gg/hal0" actions={<a className="btn ghost sm" href="https://discord.gg/hal0" target="_blank" rel="noreferrer">{Icons.ext} Join</a>} />
       </div>
       <div style={{marginTop: 14, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>

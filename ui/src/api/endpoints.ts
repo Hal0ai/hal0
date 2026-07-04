@@ -254,6 +254,8 @@ export const ENDPOINTS = {
   updateCheck: '/api/updates/check',
   updateApply: '/api/updates/apply',
   updateStatus: (jobId: string) => `/api/updates/status/${encodeURIComponent(jobId)}`,
+  // Revert to the retained previous version (/var/lib/hal0/hal0.previous).
+  updateRollback: '/api/updates/rollback',
   // Channel (stable | nightly) — GET reads hal0.toml telemetry.channel;
   // PUT persists the choice back so subsequent /check calls honour it.
   updateChannel: '/api/updates/channel',
