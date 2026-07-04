@@ -62,14 +62,15 @@ def test_registry_declares_three_apply_classes() -> None:
         # [telemetry]
         ("telemetry.enabled", "immediate", []),
         ("telemetry.channel", "immediate", []),
-        # [dispatcher] — prefetch_timeout_s is threaded into the Dispatcher
-        # at create_app time; a change lands on the next hal0-api restart.
+        # [dispatcher] — both knobs are threaded into the Dispatcher at
+        # create_app time; a change lands on the next hal0-api restart.
         ("dispatcher.prefetch_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         ("dispatcher.prefetch_parallel_cap", "service-restart", [SERVICE_HAL0_API]),
-        # [slots]
-        ("slots.max_slots", "service-restart", [SERVICE_HAL0_API]),
-        ("slots.port_range_start", "manual-restart", []),
-        ("slots.port_range_end", "manual-restart", []),
+        # [slots] — max_slots + the port pool are read from the live config
+        # on every POST /api/slots, so they apply immediately.
+        ("slots.max_slots", "immediate", []),
+        ("slots.port_range_start", "immediate", []),
+        ("slots.port_range_end", "immediate", []),
         ("slots.idle_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         ("slots.evict_pressure_mb", "service-restart", [SERVICE_HAL0_API]),
         # [models]
@@ -81,17 +82,16 @@ def test_registry_declares_three_apply_classes() -> None:
         # [memory] — engine is consumed once when the provider is built at
         # create_app; the rerank timeouts feed Hal0Reranker at startup.
         ("memory.engine", "service-restart", [SERVICE_HAL0_API]),
-        # [memory.embedding]
-        ("memory.embedding.model", "service-restart", [SERVICE_HAL0_API]),
-        ("memory.embedding.rerank_enabled", "service-restart", [SERVICE_HAL0_API]),
-        ("memory.embedding.rerank_url", "service-restart", [SERVICE_HAL0_API]),
-        ("memory.embedding.rerank_over_fetch_factor", "service-restart", [SERVICE_HAL0_API]),
-        ("memory.embedding.rerank_max_candidates", "service-restart", [SERVICE_HAL0_API]),
+        # [memory.embedding] — hindsight-era reranker knobs (the cognee-era
+        # keys were deleted from the schema with the cognee wrapper).
+        ("memory.embedding.rerank_gateway_url", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.embedding.rerank_model", "service-restart", [SERVICE_HAL0_API]),
         ("memory.embedding.rerank_connect_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         ("memory.embedding.rerank_read_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         # [memory.graph] — ADR-0023: route/upstream replaced by extraction_slot
         ("memory.graph.enabled", "immediate", []),
         ("memory.graph.extraction_slot", "immediate", []),
+        ("memory.graph.llm_timeout_s", "immediate", []),
         # [activity] — AuditStore is constructed once at create_app.
         ("activity.enabled", "service-restart", [SERVICE_HAL0_API]),
         ("activity.retention_days", "service-restart", [SERVICE_HAL0_API]),
@@ -174,16 +174,16 @@ def test_apply_plan_partitions_immediate_service_and_manual() -> None:
         [
             "telemetry.enabled",  # immediate
             "models.store",  # service-restart[slots]
-            "slots.max_slots",  # service-restart[hal0-api]
-            "slots.port_range_start",  # manual-restart
+            "slots.idle_timeout_s",  # service-restart[hal0-api]
+            "meta.schema_version",  # manual-restart
         ]
     )
     assert plan["immediate"] == ["telemetry.enabled"]
     assert plan["service_restart"] == {
         SERVICE_SLOTS: ["models.store"],
-        SERVICE_HAL0_API: ["slots.max_slots"],
+        SERVICE_HAL0_API: ["slots.idle_timeout_s"],
     }
-    assert plan["manual_restart"] == ["slots.port_range_start"]
+    assert plan["manual_restart"] == ["meta.schema_version"]
     assert plan["unknown"] == []
 
 
@@ -291,8 +291,10 @@ def test_get_apply_plan_returns_full_registry(isolated_client: TestClient) -> No
     assert registry["telemetry.enabled"]["apply_class"] == "immediate"
     assert registry["models.store"]["apply_class"] == "service-restart"
     assert registry["models.store"]["services"] == [SERVICE_SLOTS]
-    assert registry["slots.max_slots"]["services"] == [SERVICE_HAL0_API]
-    assert registry["slots.port_range_start"]["apply_class"] == "manual-restart"
+    assert registry["slots.idle_timeout_s"]["services"] == [SERVICE_HAL0_API]
+    # max_slots + the port pool are read live on every POST /api/slots.
+    assert registry["slots.max_slots"]["apply_class"] == "immediate"
+    assert registry["meta.schema_version"]["apply_class"] == "manual-restart"
 
     # Every entry has the right TypedDict shape.
     for key, entry in registry.items():

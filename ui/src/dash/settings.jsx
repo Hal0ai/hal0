@@ -1304,21 +1304,23 @@ function GeneralSection() {
 //
 // memory.engine is a plain string in the schema (validator-enforced), so
 // its options are pinned here to the backend's accepted set.
-// Keys deliberately NOT exposed even though they're in the schema, because
-// the backend doesn't consume them yet (verified against src/hal0):
-// slots.max_slots, slots.port_range_start/end (allocation is hardcoded
-// 8081-8099), dispatcher.prefetch_parallel_cap, memory.embedding.model,
-// and the cognee-era rerank knobs (rerank_enabled/url/over_fetch/
-// max_candidates). Add them back once the backend wires them.
+// Every key here is verified consumed by the backend: max_slots gates
+// POST /api/slots, the port pool feeds the auto-allocator (both read from
+// the live config — no restart), the dispatcher knobs bound the cold
+// prefetch fanout, and the memory rerank knobs configure Hal0Reranker.
+// (The cognee-era embedding keys were deleted from the schema.)
 const ADV_GROUPS = [
   { title: "Slots runtime", sub: "hal0.toml [slots]", keys: [
+    "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
     "slots.idle_timeout_s", "slots.evict_pressure_mb",
   ]},
   { title: "Dispatcher", sub: "hal0.toml [dispatcher]", keys: [
-    "dispatcher.prefetch_timeout_s",
+    "dispatcher.prefetch_timeout_s", "dispatcher.prefetch_parallel_cap",
   ]},
-  { title: "Memory", sub: "hal0.toml [memory] · engine + rerank timeouts; graph extraction below", keys: [
+  { title: "Memory", sub: "hal0.toml [memory] · engine + reranker; graph extraction below", keys: [
     "memory.engine",
+    "memory.embedding.rerank_gateway_url",
+    "memory.embedding.rerank_model",
     "memory.embedding.rerank_connect_timeout_s",
     "memory.embedding.rerank_read_timeout_s",
   ]},
@@ -1621,13 +1623,21 @@ function MemoryGraphPanel() {
 
   const [enabled, setEnabled] = useStateSet(false);
   const [slot, setSlot] = useStateSet("");
+  const [timeoutS, setTimeoutS] = useStateSet("300");
   useEffectSet(() => {
     if (!st) return;
     setEnabled(!!st.enabled);
     setSlot(st.extraction_slot || "");
-  }, [st?.enabled, st?.extraction_slot]);
+    if (st.llm_timeout_s != null) setTimeoutS(String(st.llm_timeout_s));
+  }, [st?.enabled, st?.extraction_slot, st?.llm_timeout_s]);
 
-  const dirty = !!st && (enabled !== !!st.enabled || slot !== (st.extraction_slot || ""));
+  const timeoutNum = parseInt(timeoutS, 10);
+  const timeoutValid = /^\d+$/.test(timeoutS.trim()) && timeoutNum >= 30 && timeoutNum <= 3600;
+  const dirty = !!st && (
+    enabled !== !!st.enabled
+    || slot !== (st.extraction_slot || "")
+    || (st.llm_timeout_s != null && timeoutS !== String(st.llm_timeout_s))
+  );
   const slots = st?.available_slots || [];
   // Keep the currently-configured slot pickable even when it no longer
   // resolves, so the operator can see (and move off) a stale value.
@@ -1637,6 +1647,7 @@ function MemoryGraphPanel() {
     try {
       const body = { enabled };
       if (slot) body.extraction_slot = slot;
+      if (timeoutValid) body.llm_timeout_s = timeoutNum;
       const resp = await updateGraph.mutateAsync(body);
       const perr = resp?.propagation?.error;
       window.__hal0Toast && window.__hal0Toast(
@@ -1695,6 +1706,19 @@ function MemoryGraphPanel() {
           )
         }
       />
+      <SRow
+        k="LLM timeout"
+        sub="Seconds the Hindsight daemon waits on extraction / consolidation / reflect calls (30–3600) · covers cold slot starts"
+        v={
+          <input
+            type="number" min={30} max={3600} value={timeoutS} disabled={!st}
+            onChange={e => setTimeoutS(e.target.value)}
+            placeholder="300"
+            className="mono"
+            style={{..._advInputStyle, width: 100, borderColor: timeoutValid || !timeoutS ? "var(--line)" : "var(--err)"}}
+          />
+        }
+      />
       {st && (
         <SRow
           k="Extraction health"
@@ -1710,9 +1734,13 @@ function MemoryGraphPanel() {
       )}
       <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
         {dirty && (
-          <button className="btn ghost sm" onClick={() => { setEnabled(!!st?.enabled); setSlot(st?.extraction_slot || ""); }}>Reset</button>
+          <button className="btn ghost sm" onClick={() => {
+            setEnabled(!!st?.enabled);
+            setSlot(st?.extraction_slot || "");
+            setTimeoutS(st?.llm_timeout_s != null ? String(st.llm_timeout_s) : "300");
+          }}>Reset</button>
         )}
-        <button className="btn sm" disabled={!dirty || updateGraph.isPending} onClick={doSave}>
+        <button className="btn sm" disabled={!dirty || !timeoutValid || updateGraph.isPending} onClick={doSave}>
           {updateGraph.isPending ? "Saving…" : "Save graph settings"}
         </button>
       </div>

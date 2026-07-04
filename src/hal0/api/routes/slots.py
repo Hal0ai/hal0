@@ -232,8 +232,9 @@ def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
 
     Walks ``/etc/hal0/slots/*.toml`` collecting both top-level ``port``
     and nested ``[server] port`` values. Returns the lowest port in
-    ``[start, end]`` not already claimed. The 8081-8099 range matches
-    PLAN.md §2 ports table.
+    ``[start, end]`` not already claimed. The default range matches
+    PLAN.md §2; callers thread ``[slots].port_range_start/end`` from the
+    live config so the pool is operator-tunable.
     """
     import tomllib
 
@@ -265,7 +266,12 @@ def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
     )
 
 
-def _normalize_create_body(body: dict[str, Any]) -> dict[str, Any]:
+def _normalize_create_body(
+    body: dict[str, Any],
+    *,
+    port_start: int = 8081,
+    port_end: int = 8099,
+) -> dict[str, Any]:
     """Normalize a POST /api/slots body to the canonical nested shape.
 
     Two compat hops (#275 bugs 1 + 2):
@@ -277,16 +283,17 @@ def _normalize_create_body(body: dict[str, Any]) -> dict[str, Any]:
        top-level string. The result was ``model_default`` MISSING from
        /api/slots responses for any slot created via POST.
     2. Missing or zero ``port`` → auto-assign via
-       :func:`_next_free_slot_port`. Without this, new slots persist
-       ``port=0`` and the dashboard card shows ``port=0`` instead of a
-       useable port.
+       :func:`_next_free_slot_port` over the configured
+       ``[slots].port_range_start/end`` pool. Without this, new slots
+       persist ``port=0`` and the dashboard card shows ``port=0``
+       instead of a useable port.
     """
     out = dict(body)
     model_val = out.get("model")
     if isinstance(model_val, str):
         out["model"] = {"default": model_val}
     if "port" not in out or not isinstance(out.get("port"), int) or out.get("port") in (0, None):
-        out["port"] = _next_free_slot_port()
+        out["port"] = _next_free_slot_port(port_start, port_end)
     return out
 
 
@@ -324,7 +331,26 @@ async def create_slot(request: Request) -> dict[str, object]:
             code="slot.name_required",
         )
 
-    body = _normalize_create_body(body)
+    # [slots] policy is read from the live config on every create, so a PUT
+    # /api/settings change applies to the next creation without a restart.
+    slots_cfg = getattr(getattr(request.app.state, "hal0_config", None), "slots", None)
+    max_slots = int(getattr(slots_cfg, "max_slots", 0) or 0)
+    if max_slots:
+        existing = await sm.list()
+        if len(existing) >= max_slots:
+            raise BadRequest(
+                f"slot budget reached: [slots].max_slots={max_slots} and "
+                f"{len(existing)} slots already exist (seeded slots count "
+                "toward the budget — raise max_slots or delete a slot)",
+                code="slot.capacity_exhausted",
+                details={"max_slots": max_slots, "existing_slots": len(existing)},
+            )
+
+    body = _normalize_create_body(
+        body,
+        port_start=int(getattr(slots_cfg, "port_range_start", 8081) or 8081),
+        port_end=int(getattr(slots_cfg, "port_range_end", 8099) or 8099),
+    )
     async with record_action(
         request,
         category="slot",
@@ -767,18 +793,27 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
 
 @router.get("/capacity")
 async def slot_capacity(request: Request) -> dict[str, object]:
-    """Per-slot resident memory for the dashboard memory map.
+    """Per-slot resident memory + slot-count budget for the dashboard.
 
     Returns ``{"per_slot": {slot_name: {vram_mb, ram_mb, mem_mb, state,
-    model_id}}}`` for slots in a resident state. Mirrors the ``per_slot``
-    block also stamped onto ``GET /api/stats/hardware``.
+    model_id}}, "slot_budget": {"used_slots", "max_slots"}}``. ``per_slot``
+    mirrors the block also stamped onto ``GET /api/stats/hardware``;
+    ``slot_budget`` reflects the ``[slots].max_slots`` creation gate
+    (max_slots 0 = unlimited).
     """
     from hal0.slots.capacity import build_per_slot
 
     sm = _get_slot_manager(request)
     slots = await sm.list()
     registry = getattr(request.app.state, "model_registry", None)
-    return {"per_slot": await build_per_slot(slots, registry=registry)}
+    slots_cfg = getattr(getattr(request.app.state, "hal0_config", None), "slots", None)
+    return {
+        "per_slot": await build_per_slot(slots, registry=registry),
+        "slot_budget": {
+            "used_slots": len(slots),
+            "max_slots": int(getattr(slots_cfg, "max_slots", 0) or 0),
+        },
+    }
 
 
 # ── per-slot ───────────────────────────────────────────────────────────────

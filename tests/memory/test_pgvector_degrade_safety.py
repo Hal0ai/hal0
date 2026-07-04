@@ -27,12 +27,8 @@ def _cfg(engine="hindsight"):
         memory=SimpleNamespace(
             engine=engine,
             embedding=SimpleNamespace(
-                model="BAAI/bge-small-en-v1.5",
-                rerank_enabled=False,
-                rerank_url="http://127.0.0.1:8086",
                 rerank_gateway_url="http://127.0.0.1:8080",
-                rerank_over_fetch_factor=5,
-                rerank_max_candidates=500,
+                rerank_model="builtin.jina-reranker-v1-tiny-en-q8",
                 rerank_connect_timeout_s=1.0,
                 rerank_read_timeout_s=8.0,
             ),

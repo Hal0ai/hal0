@@ -91,7 +91,8 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     from hal0.memory.hindsight_provider import Hal0Reranker
 
     reranker = Hal0Reranker(
-        base_url=str(getattr(embed, "rerank_gateway_url", None) or "http://127.0.0.1:8080"),
+        base_url=str(embed.rerank_gateway_url),
+        model=str(embed.rerank_model),
         connect_timeout_s=float(embed.rerank_connect_timeout_s),
         read_timeout_s=float(embed.rerank_read_timeout_s),
     )

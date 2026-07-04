@@ -269,6 +269,47 @@ async def test_prefetch_respects_configurable_timeout() -> None:
     assert exc.value.code == "dispatch.no_route"
 
 
+@pytest.mark.asyncio
+async def test_prefetch_respects_parallel_cap() -> None:
+    """[dispatcher].prefetch_parallel_cap bounds cold-prefetch concurrency.
+
+    Five cold remotes with a cap of 2: the recording fetcher must never
+    observe more than 2 legs in flight at once, while all legs still run
+    (the semaphore serialises, not drops).
+    """
+    remotes = [make_remote(f"r{i}", f"https://r{i}.example.com/v1") for i in range(5)]
+    upstreams = FakeUpstreamRegistry(remotes)
+    models = FakeModelRegistry(routes={})
+
+    in_flight = 0
+    max_in_flight = 0
+    legs_run = 0
+
+    async def recording_fetch(_u: Upstream) -> list[str]:
+        nonlocal in_flight, max_in_flight, legs_run
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        legs_run += 1
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return []
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda _name: [],
+        fetch_models=recording_fetch,
+        prefetch_timeout_s=5.0,
+        prefetch_parallel_cap=2,
+    )
+
+    with pytest.raises(NoRouteFound):
+        await dispatcher.dispatch(make_request(), body={"model": "nowhere"})
+
+    assert legs_run == 5, "every cold remote must still be prefetched"
+    assert max_in_flight <= 2, f"cap of 2 exceeded: saw {max_in_flight} concurrent legs"
+
+
 # ── 4. legacy fallback path ──────────────────────────────────────────────────
 
 
