@@ -13,13 +13,19 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+## [v0.8.5b1] — 2026-07-04
+
 Everything landed on `main` since the v0.8.4b1 cut. The headlines: hal0
 generalizes beyond the Strix Halo iGPU (experimental CUDA + multi-GPU
 pinning), companion services get one management surface (registry +
 `/api/services` + mDNS + dashboard page), the settings-completeness plan
 finishes (phases 3–5 + an Advanced section with full `hal0.toml` parity),
 and seed profiles go virtual with dedicated embed/rerank lanes and a
-proper model×profile×slot MTP decision (#1045).
+proper model×profile×slot MTP decision (#1045). **Safe upgrade from
+v0.8.4b1** — the one on-disk migration (virtual-seed prune) backs up
+`profiles.toml` first and rescues divergent operator content to `-custom`
+names; note the MTP auto behaviour below if you run untagged local MTP
+builds.
 
 ### Added
 - **GPU generalization — experimental CUDA + multi-GPU.** A dedicated
@@ -53,6 +59,14 @@ proper model×profile×slot MTP decision (#1045).
   (install path and picker/apply fit path both updated); Vulkan/CPU boxes
   keep falling back to the `vulkan` / `cpu-llm` profile until
   backend-specific variants ship.
+- **Profile bench matrix tooling (#1045).** `installer/bench/profile-matrix.sh`
+  scripts the seed-profile re-tune matrix as `hal0-benchctl` seam sweeps, and
+  `installer/bench/server_ab.py` measures the server-level levers llama-bench
+  can't see — MTP draft depth (with acceptance %), `--cache-reuse` on a
+  shared-prefix trace, poll, and embed/rerank endpoint sanity — via hal0-api
+  as the unprivileged user, always restoring the slot's original config.
+  Supersedes the ad-hoc `/root/bench_mtp.py`; an on-box runbook ships at
+  `handoffs/bench-profile-matrix-local-session-2026-07-04.md`.
 - **Catalog UX finish (#1042).** Sort / tag-filter / quant chip wiring in
   the Models view, and a chat-template pick at pull time.
 - **Canonical device/backend taxonomy.** One enum source at `GET
@@ -69,8 +83,12 @@ proper model×profile×slot MTP decision (#1045).
   copy, `save_profiles_config` strips seeds before writing, and the updater's
   `ensure_seed_profiles()` prunes any materialised seeds left by an older
   install (self-heal on upgrade). Seed profiles remain immutable — clone to
-  customise. Operator (non-seed) profiles are untouched. **Safe upgrade** — no
-  operator data is lost (seeds were never operator-editable through the API).
+  customise. Operator (non-seed) profiles are untouched. **Data-safe
+  migration**: the pre-prune file is backed up once
+  (`profiles.toml.pre-virtual-seeds.bak`) and any seed-named entry whose
+  content differs from the code seed (a hand-edited seed table, or an operator
+  profile whose name only became a seed in this release, e.g. `embed`) is
+  rescued to `<name>-custom` instead of deleted, with a loud log.
 - **MTP is now a model × profile × slot decision (#1045).** Model
   eligibility (`mtp` registry tag or name marker) × profile opt-in
   (`profile.mtp` now means "enable for eligible models", not "append the
@@ -80,7 +98,14 @@ proper model×profile×slot MTP decision (#1045).
   draft device tracks the profile backend (ROCm/Vulkan/CUDA) instead of
   hardcoded ROCm. The slot drawer swaps the binary MTP pill for the
   tri-state control with a live "Auto · active/inactive" hint; stack
-  editor rows default to Auto.
+  editor rows default to Auto, and an Auto row now clears a forced
+  override on apply (the config write layer treats an explicit `null` as
+  delete-key — TOML has no null — which is also what makes "back to
+  Auto" work from the dashboard instead of 500ing). **Behaviour note:**
+  an MTP-capable model that carries neither the registry `mtp` tag nor an
+  MTP name marker stops speculating under Auto after this upgrade — tag
+  the model or force the slot On; the launch log says
+  `mtp.auto_off_model_ineligible` when this bites.
 
 ### Fixed
 - **Upstream-advertised models are clearly identified as remote (#1035)**,
