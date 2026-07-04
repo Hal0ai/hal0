@@ -16,22 +16,28 @@
 // params read from the body at inference time) are deferred (#554 follow-up).
 
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
-import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel } from '@/api/hooks/useUpdates'
-import { useCapabilities, useCapabilityPatch, useCapabilityApply } from '@/api/hooks/useCapabilities'
+import { SECRET_PRESETS } from './extra-modals.jsx'
+import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel, useUpdateRollback } from '@/api/hooks/useUpdates'
+import { useCapabilities, useCapabilityApply } from '@/api/hooks/useCapabilities'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import {
   useSettings,
   useSettingsUpdate,
+  useSettingsReload,
+  useSettingsSchema,
   useModelStore,
   useModelStoreSet,
   useModelStoreMigrate,
   useApplyPlan,
 } from '@/api/hooks/useSettings'
+import { useServiceRepair } from '@/api/hooks/useServicesHealth'
+import { useMemoryGraphStatus, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
+import { useQueryClient } from '@tanstack/react-query'
 
 const { useState: useStateSet, useEffect: useEffectSet, useRef: useRefSet } = React;
 
 function SettingsView({ param }) {
-  const VALID_IDS = ["secrets", "storage", "updates", "voice", "imagegen", "defaults", "general", "about"];
+  const VALID_IDS = ["secrets", "storage", "updates", "voice", "imagegen", "defaults", "general", "advanced", "about"];
   const initialSection = param && VALID_IDS.includes(param) ? param : "secrets";
   const [section, setSection] = useStateSet(initialSection);
   const sections = [
@@ -42,6 +48,7 @@ function SettingsView({ param }) {
     { id: "imagegen",  label: "Image-gen" },
     { id: "defaults",  label: "Default slots" },
     { id: "general",   label: "General" },
+    { id: "advanced",  label: "Advanced" },
     { id: "about",     label: "About" },
   ];
 
@@ -74,6 +81,7 @@ function SettingsView({ param }) {
           {section === "imagegen" && <ImageGenSection />}
           {section === "defaults" && <DefaultSlotsSection />}
           {section === "general" && <GeneralSection />}
+          {section === "advanced" && <AdvancedSection />}
           {section === "about" && <AboutSection />}
         </div>
       </div>
@@ -164,6 +172,7 @@ function _fmtBytes(n) {
 function StorageSection() {
   const settings = useSettings();
   const update = useSettingsUpdate();
+  const reload = useSettingsReload();
   const storeQuery = useModelStore();
   const storeSet = useModelStoreSet();
   const storeMigrate = useModelStoreMigrate();
@@ -361,9 +370,18 @@ function StorageSection() {
           </div>
 
           <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
-            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)", display: "inline-flex", alignItems: "center", gap: 8}}>
               Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span>
-              {storeDirty && <span style={{marginLeft: 8, color: "var(--warn)"}}>· unsaved changes</span>}
+              <button
+                className="btn ghost sm"
+                title="Re-read hal0.toml from disk — use after editing it with hal0 config edit"
+                disabled={reload.isPending}
+                onClick={() => reload.mutate(undefined, {
+                  onSuccess: () => window.__hal0Toast && window.__hal0Toast("Config reloaded from disk", "ok"),
+                  onError: (err) => window.__hal0Toast && window.__hal0Toast(`Reload failed — ${err?.message || "see logs"}`, "err"),
+                })}
+              >{reload.isPending ? "Reloading…" : "Reload from disk"}</button>
+              {storeDirty && <span style={{color: "var(--warn)"}}>· unsaved changes</span>}
             </span>
             <div style={{display: "inline-flex", alignItems: "center", gap: 8}}>
               <ApplyBadge settingsKey="models.store" registry={registry} />
@@ -475,15 +493,24 @@ function HfTokenField() {
   );
 }
 
+// Per-key descriptions shared with the Add-Secret modal. Anything not in
+// the preset table is a user-defined key — say so instead of mislabelling
+// it as a fallback provider.
+const SECRET_DESCRIPTIONS = Object.fromEntries(SECRET_PRESETS.map(p => [p.id, p.desc]));
+const secretDescription = (name) =>
+  SECRET_DESCRIPTIONS[name] || "Custom key · exported to hal0 services and slot containers as an env var";
+
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);
+  const [addTarget, setAddTarget] = useStateSet(null);
   const secretsQuery = useSecrets();
   const delSecret = useSecretDelete();
   const rows = secretsQuery.data ?? [];
+  const openAdd = (name) => { setAddTarget(name || null); setAddOpen(true); };
   return (
     <div className="s-section">
       <h2>Secrets</h2>
-      <p className="desc">Encrypted at rest. Used for gated HF repos and provider auth.</p>
+      <p className="desc">Stored encrypted at rest, never shown again after saving. Each key is exported to hal0 services and slot containers as an environment variable — model-pull auth, fallback providers, or your own custom keys.</p>
       <HfTokenField />
       {secretsQuery.isLoading && (
         <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading…</div>
@@ -501,14 +528,14 @@ function SecretsSection() {
           <SRow
             key={s.name}
             k={s.name}
-            sub={s.name === 'HF_TOKEN' ? 'Hugging Face — used for gated repos' : 'Optional · fallback provider'}
+            sub={secretDescription(s.name)}
             mono
             v={s.set
               ? <span style={{color: "var(--ok)"}}>{s.masked || '••• · set'}</span>
               : <span style={{color: "var(--fg-4)"}}>not set</span>}
             actions={s.set
               ? (<>
-                  <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Update</button>
+                  <button className="btn ghost sm" onClick={() => openAdd(s.name)}>Update</button>
                   <button
                     className="btn danger sm"
                     disabled={delSecret.isPending && delSecret.variables === s.name}
@@ -523,17 +550,17 @@ function SecretsSection() {
                     }}
                   >{delSecret.isPending && delSecret.variables === s.name ? "Removing…" : "Remove"}</button>
                 </>)
-              : <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Add</button>}
+              : <button className="btn ghost sm" onClick={() => openAdd(s.name)}>Add</button>}
           />
         ))}
       </div>
       <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
         <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-          {rows.length > 0 ? `${rows.length} key${rows.length === 1 ? "" : "s"} stored` : "add keys for gated repos and provider auth"}
+          {rows.length > 0 ? `${rows.length} key${rows.length === 1 ? "" : "s"} stored` : "add keys for model pulls, fallback providers, or custom env vars"}
         </span>
-        <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add secret</button>
+        <button className="btn" onClick={() => openAdd(null)}>{Icons.plus} Add secret</button>
       </div>
-      <AddSecretModal open={addOpen} onClose={() => setAddOpen(false)} />
+      <AddSecretModal open={addOpen} initialName={addTarget} onClose={() => setAddOpen(false)} />
     </div>
   );
 }
@@ -549,6 +576,11 @@ function UpdatesSection() {
   const checkM = useUpdateCheck();
   const applyM = useUpdateApply();
   const setChannelM = useSetUpdateChannel();
+  const rollbackM = useUpdateRollback();
+  const [rollbackConfirm, setRollbackConfirm] = useStateSet(false);
+  // Optional version pin — parity with `hal0 update --target`. Empty
+  // installs the channel's latest.
+  const [pinVersion, setPinVersion] = useStateSet("");
   const u = stateQuery.data || { hal0: {}, flm: {} };
 
   // The current channel lives on each per-component envelope (both
@@ -595,9 +627,9 @@ function UpdatesSection() {
           actions={<>
             <button
               className="btn sm"
-              disabled={!u.hal0?.available || applyM.isPending || !!jobBusy}
+              disabled={(!u.hal0?.available && !pinVersion.trim()) || applyM.isPending || !!jobBusy}
               onClick={() => {
-                applyM.mutate(undefined, {
+                applyM.mutate(pinVersion.trim() || undefined, {
                   onSuccess: (snap) => {
                     setJobId(snap?.id || null);
                     window.__hal0Toast && window.__hal0Toast("Update started — brief outage during restart", "warn");
@@ -619,14 +651,49 @@ function UpdatesSection() {
                 },
               })}
             >{checkM.isPending ? "Checking…" : "Check"}</button>
+            <button
+              className="btn ghost sm"
+              disabled={rollbackM.isPending || !!jobBusy}
+              onClick={() => setRollbackConfirm(true)}
+            >{rollbackM.isPending ? "Rolling back…" : "Roll back"}</button>
             <a className="btn ghost sm" href="https://hal0.dev/changelog" target="_blank" rel="noreferrer">Changelog →</a>
           </>}
         />
+        {u.hal0?.revoked && (
+          <SRow
+            k="Release notice"
+            sub="The latest release on this channel was withdrawn"
+            v={<span style={{color: "var(--warn)"}}>
+              {u.hal0.revoked_version ? `${u.hal0.revoked_version} was revoked` : "latest release revoked"}
+              {u.hal0.revoked_reason ? ` — ${u.hal0.revoked_reason}` : ""}
+            </span>}
+          />
+        )}
         <SRow
           k="flm"
           sub="Manual deb · vendor-supplied"
           mono
           v={u.flm?.current || '—'}
+        />
+        <SRow
+          k="Pin version"
+          sub="Install a specific release instead of the channel's latest · CLI parity: hal0 update --target"
+          mono
+          v={
+            <input
+              value={pinVersion}
+              onChange={e => setPinVersion(e.target.value)}
+              placeholder="empty = latest"
+              className="mono"
+              style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", width: 160}}
+            />
+          }
+        />
+        <SRow
+          k="Auto-check"
+          sub="Background update checks by the daemon"
+          mono
+          v={stateQuery.data ? (u.autoCheck ? <span style={{color: "var(--ok)"}}>enabled</span> : <span style={{color: "var(--fg-4)"}}>disabled</span>) : "—"}
         />
         <SRow
           k="Channel"
@@ -657,6 +724,29 @@ function UpdatesSection() {
           }
         />
       </div>
+      <ConfirmDialog
+        open={rollbackConfirm}
+        onCancel={() => setRollbackConfirm(false)}
+        onConfirm={() => {
+          setRollbackConfirm(false);
+          rollbackM.mutate(undefined, {
+            // The backend swaps the version symlink but does NOT restart
+            // services — the running hal0-api keeps serving the current
+            // build until the operator bounces it.
+            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Rolled back — restart hal0-api (Settings → Advanced) to run the previous version", "warn"),
+            onError: (err) => window.__hal0Toast && window.__hal0Toast(`Rollback failed: ${err?.message || "no previous version retained"}`, "err"),
+          });
+        }}
+        title="Roll back hal0?"
+        message={
+          <span>
+            Reverts the installed tree to the previous retained version{u.hal0?.current ? <> (currently on <b className="mono">{u.hal0.current}</b>)</> : null}.
+            The running service keeps serving until you restart hal0-api (Settings → Advanced).
+            If no previous version is retained, nothing changes.
+          </span>
+        }
+        confirmLabel="Roll back"
+      />
     </div>
   );
 }
@@ -827,14 +917,28 @@ function VoiceSection() {
               className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
           )
         } sub={ttsCatalogItems.length === 0 ? "no installed TTS models — install one in the Models view" : undefined} />
-        <SRow k="Default voice" sub="applied when /v1/audio/speech omits the voice param · bundled voices (Kokoro v1)" v={
-          <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
-            style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
-            <option value="">— use server default (af_bella) —</option>
-            {KOKORO_VOICES.map(v => (
-              <option key={v.id} value={v.id}>{v.label}</option>
-            ))}
-          </select>
+        {/* The bundled voice list is Kokoro-specific. Kokoro is also the
+            bundled default TTS engine, so an unset model gets the list too;
+            only an explicitly-selected non-Kokoro model switches to a
+            free-form model-specific voice id. */}
+        <SRow k="Default voice" sub={
+          (!ttsModel || ttsModel.toLowerCase().includes("kokoro"))
+            ? "applied when /v1/audio/speech omits the voice param · bundled voices (Kokoro v1)"
+            : "applied when /v1/audio/speech omits the voice param · model-specific voice id"
+        } v={
+          (!ttsModel || ttsModel.toLowerCase().includes("kokoro")) ? (
+            <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
+              style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
+              <option value="">— use server default (af_bella) —</option>
+              {KOKORO_VOICES.map(v => (
+                <option key={v.id} value={v.id}>{v.label}</option>
+              ))}
+            </select>
+          ) : (
+            <input value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
+              placeholder="empty = server default"
+              className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 220}} />
+          )
         } />
         <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
           {ttsDirty && (
@@ -1187,6 +1291,518 @@ function GeneralSection() {
   );
 }
 
+// ─── AdvancedSection ─────────────────────────────────────────────────────────
+//
+// Closes the hal0.toml ↔ UI parity gap: every [slots] / [dispatcher] /
+// [memory] / [activity] key that previously required `hal0 config edit`.
+// Controls are rendered FROM THE SERVER SCHEMA (GET /api/settings/schema —
+// pydantic field types, bounds, and descriptions), so copy can't drift and
+// new constraints apply without frontend edits. Saves go through the same
+// deep-merging PUT /api/settings as the rest of the page; per-key effect
+// chips come from the apply-plan registry, and any dirty manual-restart key
+// routes through a confirm gate before the write.
+//
+// memory.engine is a plain string in the schema (validator-enforced), so
+// its options are pinned here to the backend's accepted set.
+// Keys deliberately NOT exposed even though they're in the schema, because
+// the backend doesn't consume them yet (verified against src/hal0):
+// slots.max_slots, slots.port_range_start/end (allocation is hardcoded
+// 8081-8099), dispatcher.prefetch_parallel_cap, memory.embedding.model,
+// and the cognee-era rerank knobs (rerank_enabled/url/over_fetch/
+// max_candidates). Add them back once the backend wires them.
+const ADV_GROUPS = [
+  { title: "Slots runtime", sub: "hal0.toml [slots]", keys: [
+    "slots.idle_timeout_s", "slots.evict_pressure_mb",
+  ]},
+  { title: "Dispatcher", sub: "hal0.toml [dispatcher]", keys: [
+    "dispatcher.prefetch_timeout_s",
+  ]},
+  { title: "Memory", sub: "hal0.toml [memory] · engine + rerank timeouts; graph extraction below", keys: [
+    "memory.engine",
+    "memory.embedding.rerank_connect_timeout_s",
+    "memory.embedding.rerank_read_timeout_s",
+  ]},
+  { title: "Activity log", sub: "hal0.toml [activity] · durable audit trail", keys: [
+    "activity.enabled", "activity.retention_days", "activity.max_rows",
+  ]},
+];
+// memory.engine's validator also accepts "cognee" and "mem0", but the
+// factory silently maps both to hindsight — offering them would lie.
+const ADV_OPTIONS = {
+  "memory.engine": ["hindsight", "pgvector"],
+};
+// Overrides replace the schema description where it's stale or missing.
+const ADV_DESC_OVERRIDE = {
+  "memory.engine":
+    "Active memory engine, applied on the next hal0-api restart. hindsight is the durable default. " +
+    "pgvector is an in-memory, NON-DURABLE fallback — existing memories are not migrated and won't be visible while selected.",
+  "activity.enabled": "Record config changes and state transitions to the durable activity log.",
+  "activity.retention_days": "Days of activity history to keep before pruning. The HAL0_ACTIVITY_RETENTION_DAYS env var, if set, overrides this value.",
+  "activity.max_rows": "Hard cap on stored activity rows (minimum 100).",
+};
+
+// Resolve $ref / single-allOf indirection in a pydantic JSON schema node.
+function _schemaResolve(schema, node) {
+  let guard = 0;
+  while (node && node.$ref && guard++ < 10) {
+    node = node.$ref.replace(/^#\//, "").split("/").reduce((o, k) => (o ? o[k] : null), schema);
+  }
+  if (node && Array.isArray(node.allOf) && node.allOf.length === 1) {
+    const inner = _schemaResolve(schema, node.allOf[0]) || {};
+    const { allOf, ...rest } = node;
+    return { ...inner, ...rest };
+  }
+  return node;
+}
+
+// Walk a dotted key ("slots.max_slots") to its field schema. Flattens
+// Optional[T] (anyOf [T, null]) into T + {nullable:true}.
+function _schemaField(schema, dotKey) {
+  if (!schema) return null;
+  let node = schema;
+  for (const part of dotKey.split(".")) {
+    node = _schemaResolve(schema, node);
+    node = node && node.properties ? node.properties[part] : null;
+    if (!node) return null;
+  }
+  const wrapper = node;
+  let f = { ..._schemaResolve(schema, node) };
+  if (Array.isArray(f.anyOf)) {
+    const nonNull = f.anyOf.find(a => a && a.type !== "null") || {};
+    const nullable = f.anyOf.some(a => a && a.type === "null");
+    const { anyOf, ...rest } = f;
+    f = { ...nonNull, ...rest, nullable };
+  }
+  if (!f.description && wrapper.description) f.description = wrapper.description;
+  return f;
+}
+
+const _getIn = (obj, dotKey) =>
+  dotKey.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+
+const _deepMergePatch = (a, b) => {
+  const out = { ...a };
+  for (const k of Object.keys(b)) {
+    const both = a && typeof a[k] === "object" && a[k] && !Array.isArray(a[k])
+      && typeof b[k] === "object" && b[k] && !Array.isArray(b[k]);
+    out[k] = both ? _deepMergePatch(a[k], b[k]) : b[k];
+  }
+  return out;
+};
+
+// Buffer string → typed value per the field schema. Returns {ok, value}.
+function _advCoerce(f, raw) {
+  if (!f) return { ok: true, value: raw };
+  if (f.type === "boolean") return { ok: true, value: !!raw };
+  if (f.type === "integer" || f.type === "number") {
+    const s = String(raw).trim();
+    // Empty → null only when null is the field's actual default: the TOML
+    // writer drops None values (exclude_none), so persisting null for a
+    // field with a non-null default silently reverts on the next reload.
+    if (s === "") return f.nullable && f.default == null ? { ok: true, value: null } : { ok: false };
+    if (f.type === "integer" && !/^-?\d+$/.test(s)) return { ok: false };
+    const n = f.type === "integer" ? parseInt(s, 10) : parseFloat(s);
+    if (isNaN(n)) return { ok: false };
+    if (f.minimum != null && n < f.minimum) return { ok: false };
+    if (f.maximum != null && n > f.maximum) return { ok: false };
+    if (f.exclusiveMinimum != null && n <= f.exclusiveMinimum) return { ok: false };
+    return { ok: true, value: n };
+  }
+  return { ok: true, value: String(raw) };
+}
+
+const _advInputStyle = {
+  fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)",
+  border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px",
+};
+
+function AdvRow({ dotKey, field, live, buf, onChange, registry }) {
+  const label = dotKey.split(".").slice(1).join(".");
+  const desc = ADV_DESC_OVERRIDE[dotKey] || field?.description || "";
+  const shortDesc = desc.length > 150 ? desc.slice(0, 147) + "…" : desc;
+  const options = ADV_OPTIONS[dotKey] || field?.enum || null;
+  const isBool = field?.type === "boolean";
+  const isNum = field?.type === "integer" || field?.type === "number";
+  const current = buf !== undefined ? buf : (isBool ? live === true : live == null ? "" : String(live));
+  let control;
+  if (isBool) {
+    control = (
+      <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
+        <input type="checkbox" checked={!!current} onChange={e => onChange(dotKey, e.target.checked)} style={{accentColor: "var(--accent)"}} />
+        <span>{current ? "enabled" : "disabled"}</span>
+      </label>
+    );
+  } else if (options) {
+    control = (
+      <select value={current} onChange={e => onChange(dotKey, e.target.value)} style={_advInputStyle}>
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  } else if (isNum) {
+    const bad = !_advCoerce(field, current).ok;
+    control = (
+      <input
+        type="number" value={current}
+        min={field.minimum} max={field.maximum}
+        step={field.type === "number" ? "any" : 1}
+        onChange={e => onChange(dotKey, e.target.value)}
+        placeholder={field.default != null ? String(field.default) : ""}
+        className="mono"
+        style={{..._advInputStyle, width: 120, borderColor: bad ? "var(--err)" : "var(--line)"}}
+      />
+    );
+  } else {
+    control = (
+      <input
+        value={current} onChange={e => onChange(dotKey, e.target.value)}
+        placeholder={field?.default != null ? String(field.default) : ""}
+        className="mono" style={{..._advInputStyle, width: 260}}
+      />
+    );
+  }
+  return (
+    <SRow
+      k={label}
+      sub={<span title={desc}>{shortDesc}</span>}
+      v={control}
+      actions={<ApplyBadge settingsKey={dotKey} registry={registry} />}
+    />
+  );
+}
+
+function AdvancedSection() {
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  // Edit buffer — dotKey → raw control value; only touched keys present.
+  const [buf, setBuf] = useStateSet({});
+  const [confirmKeys, setConfirmKeys] = useStateSet(null);
+  const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
+
+  const allKeys = ADV_GROUPS.flatMap(g => g.keys);
+  const fields = {};
+  for (const k of allKeys) fields[k] = _schemaField(schema, k);
+
+  // A key is dirty when its coerced buffer value differs from the live one.
+  const dirtyKeys = Object.keys(buf).filter(k => {
+    const { ok, value } = _advCoerce(fields[k], buf[k]);
+    if (!ok) return true; // invalid counts as dirty so Save stays visible (but disabled)
+    const cur = _getIn(live, k);
+    return value !== (cur === undefined ? (fields[k]?.default ?? null) : cur);
+  });
+  const invalidKeys = dirtyKeys.filter(k => !_advCoerce(fields[k], buf[k]).ok);
+  const canSave = dirtyKeys.length > 0 && invalidKeys.length === 0 && !update.isPending;
+
+  const doSave = async () => {
+    let patch = {};
+    for (const k of dirtyKeys) {
+      const { value } = _advCoerce(fields[k], buf[k]);
+      patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
+    }
+    // Restart hint comes from the client-side registry over the keys we're
+    // about to write — computed BEFORE the buffer clears. (The PUT response
+    // also carries _hal0.apply_plan, but deriving locally keeps the toast
+    // correct against older backends that only matched top-level body keys.)
+    const needsRestart = dirtyKeys.some(k => registry[k] && registry[k].apply_class !== "immediate");
+    try {
+      await update.mutateAsync(patch);
+      setBuf({});
+      window.__hal0Toast && window.__hal0Toast(
+        needsRestart ? "Saved — restart hal0-api (below) to apply the marked changes" : "Advanced settings saved",
+        needsRestart ? "warn" : "ok",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const onSaveClick = () => {
+    const manual = dirtyKeys.filter(k => registry[k]?.apply_class === "manual-restart");
+    if (manual.length > 0) { setConfirmKeys(manual); return; }
+    doSave();
+  };
+
+  const loading = settings.isPending || schemaQuery.isPending;
+
+  return (
+    <div className="s-section">
+      <h2>Advanced</h2>
+      <p className="desc">
+        Runtime tuning for hal0.toml sections that don't have a dedicated page. Descriptions and
+        bounds come from the server's config schema; effect chips show whether a change applies
+        live or needs a restart.
+      </p>
+
+      {loading && <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading config schema…</div>}
+      {(settings.isError || schemaQuery.isError) && (
+        <div className="err">{settings.error?.message || schemaQuery.error?.message || "Failed to load settings"}</div>
+      )}
+
+      {!loading && !settings.isError && !schemaQuery.isError && (
+        <>
+          {ADV_GROUPS.map(g => (
+            <React.Fragment key={g.title}>
+              <div className="s-panel" style={{marginBottom: 12}}>
+                <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+                  <div className="k"><span>{g.title}</span><span className="sub">{g.sub}</span></div>
+                </div>
+                {g.keys.map(k => (
+                  <AdvRow
+                    key={k}
+                    dotKey={k}
+                    field={fields[k]}
+                    live={_getIn(live, k)}
+                    buf={buf[k]}
+                    onChange={onChange}
+                    registry={registry}
+                  />
+                ))}
+              </div>
+              {g.title === "Memory" && <MemoryGraphPanel />}
+            </React.Fragment>
+          ))}
+
+          <div style={{marginTop: 2, marginBottom: 18, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+              Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span>
+              {dirtyKeys.length > 0 && (
+                <span style={{marginLeft: 8, color: invalidKeys.length ? "var(--err)" : "var(--warn)"}}>
+                  · {invalidKeys.length ? `${invalidKeys.length} invalid value${invalidKeys.length === 1 ? "" : "s"}` : `${dirtyKeys.length} unsaved change${dirtyKeys.length === 1 ? "" : "s"}`}
+                </span>
+              )}
+            </span>
+            <div style={{display: "inline-flex", gap: 8}}>
+              <button className="btn ghost sm" disabled={dirtyKeys.length === 0 || update.isPending} onClick={() => setBuf({})}>Reset</button>
+              <button className="btn" disabled={!canSave} onClick={onSaveClick}>{update.isPending ? "Saving…" : "Save changes"}</button>
+            </div>
+          </div>
+
+          <RestartApiPanel />
+
+          <ConfirmDialog
+            open={!!confirmKeys}
+            onCancel={() => setConfirmKeys(null)}
+            onConfirm={() => { setConfirmKeys(null); doSave(); }}
+            title="Manual restart required"
+            message={
+              <span>
+                {confirmKeys && confirmKeys.length === 1
+                  ? <>The setting <b className="mono">{confirmKeys[0]}</b> requires</>
+                  : <>These settings ({confirmKeys && confirmKeys.map(k => <b className="mono" key={k}>{k} </b>)}) require</>}{" "}
+                a <b>manual operator restart</b> to take effect. Values are persisted now — use the
+                restart control below (or <span className="mono">systemctl restart hal0-api</span>) to apply them.
+              </span>
+            }
+            confirmLabel="Save anyway"
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Memory graph extraction panel ──────────────────────────────────────────
+//
+// [memory.graph] gets a dedicated panel (not schema-driven rows) because the
+// dedicated PUT /api/memory/graph endpoint does what the generic settings PUT
+// can't: it validates the extraction slot against live enabled llm slots
+// (available_slots / slot_resolves) and propagates the change into the
+// hindsight-api drop-in + restart, reporting a propagation error if that
+// restart fails (ADR-0023 §3).
+function MemoryGraphPanel() {
+  const statusQuery = useMemoryGraphStatus();
+  const updateGraph = useUpdateMemoryGraph();
+  const st = statusQuery.data;
+
+  const [enabled, setEnabled] = useStateSet(false);
+  const [slot, setSlot] = useStateSet("");
+  useEffectSet(() => {
+    if (!st) return;
+    setEnabled(!!st.enabled);
+    setSlot(st.extraction_slot || "");
+  }, [st?.enabled, st?.extraction_slot]);
+
+  const dirty = !!st && (enabled !== !!st.enabled || slot !== (st.extraction_slot || ""));
+  const slots = st?.available_slots || [];
+  // Keep the currently-configured slot pickable even when it no longer
+  // resolves, so the operator can see (and move off) a stale value.
+  const slotOptions = slot && !slots.includes(slot) ? [slot, ...slots] : slots;
+
+  const doSave = async () => {
+    try {
+      const body = { enabled };
+      if (slot) body.extraction_slot = slot;
+      const resp = await updateGraph.mutateAsync(body);
+      const perr = resp?.propagation?.error;
+      window.__hal0Toast && window.__hal0Toast(
+        perr
+          ? `Saved, but hindsight-api restart failed — ${perr}`
+          : "Memory graph settings saved",
+        perr ? "err" : "ok",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const stateChip = !st
+    ? <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-4)"}}>—</span>
+    : st.enabled
+      ? (st.in_flight > 0
+          ? <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--warn)", borderColor: "var(--warn)"}}>extracting · {st.in_flight}</span>
+          : <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--ok)", borderColor: "var(--ok)"}}>on</span>)
+      : <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-4)"}}>off</span>;
+
+  return (
+    <div className="s-panel" style={{marginBottom: 12}}>
+      <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+        <div className="k">
+          <span>Memory graph extraction</span>
+          <span className="sub">hal0.toml [memory.graph] · builds a knowledge graph from stored memories via a local LLM slot</span>
+        </div>
+        <div className="v">{stateChip}</div>
+      </div>
+      {statusQuery.isError && (
+        <div className="s-row" style={{padding: "8px 12px"}}>
+          <span className="mono" style={{fontSize: 11, color: "var(--err)"}}>
+            Could not load graph status — {statusQuery.error?.message || "is memory enabled on this install?"}
+          </span>
+        </div>
+      )}
+      <SRow k="Enabled" sub="Extract entities/relations from new memories in the background" v={
+        <input type="checkbox" checked={enabled} disabled={!st} onChange={e => setEnabled(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+      } />
+      <SRow
+        k="Extraction slot"
+        sub={st && !st.slot_resolves
+          ? "⚠ configured slot doesn't match an enabled LLM slot — extraction is stalled until this points at a live slot"
+          : "Local LLM slot that runs the extraction prompts"}
+        v={
+          slotOptions.length > 0 ? (
+            <select value={slot} disabled={!st} onChange={e => setSlot(e.target.value)} style={_advInputStyle}>
+              {slotOptions.map(s => (
+                <option key={s} value={s}>{s}{slots.includes(s) ? "" : " (not running)"}</option>
+              ))}
+            </select>
+          ) : (
+            <input value={slot} disabled={!st} onChange={e => setSlot(e.target.value)} placeholder="slot name (e.g. utility)"
+              className="mono" style={{..._advInputStyle, width: 200}} />
+          )
+        }
+      />
+      {st && (
+        <SRow
+          k="Extraction health"
+          sub="Lifetime counters for graph builds on this install"
+          mono
+          v={<>
+            <span style={{color: "var(--ok)"}}>{st.builds_ok} built</span>
+            <span style={{color: st.errors > 0 ? "var(--err)" : "var(--fg-4)"}}> · {st.errors} error{st.errors === 1 ? "" : "s"}</span>
+            {st.last_built_at && <span style={{color: "var(--fg-4)"}}> · last {new Date(st.last_built_at).toLocaleString()}</span>}
+            {st.last_error && <span style={{color: "var(--err)"}} title={st.last_error}> · {st.last_error.slice(0, 80)}{st.last_error.length > 80 ? "…" : ""}</span>}
+          </>}
+        />
+      )}
+      <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+        {dirty && (
+          <button className="btn ghost sm" onClick={() => { setEnabled(!!st?.enabled); setSlot(st?.extraction_slot || ""); }}>Reset</button>
+        )}
+        <button className="btn sm" disabled={!dirty || updateGraph.isPending} onClick={doSave}>
+          {updateGraph.isPending ? "Saving…" : "Save graph settings"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Restart hal0-api panel ──────────────────────────────────────────────────
+//
+// Uses the whitelisted one-click repair endpoint (hal0-api.service is in
+// _REPAIRABLE_UNITS). The POST's connection is EXPECTED to drop — the API
+// restarts underneath the request — so both success and network error enter
+// a health-poll loop against /api/health until the service answers again.
+function RestartApiPanel() {
+  const repair = useServiceRepair();
+  const qc = useQueryClient();
+  const [confirmOpen, setConfirmOpen] = useStateSet(false);
+  const [waiting, setWaiting] = useStateSet(false);
+  const pollRef = useRefSet(null);
+  // Unmount guard: the tick may be awaiting fetch() when the component
+  // unmounts — clearing the timer alone wouldn't stop it from rescheduling
+  // or firing toasts/invalidation after navigation.
+  const cancelledRef = useRefSet(false);
+
+  useEffectSet(() => () => {
+    cancelledRef.current = true;
+    if (pollRef.current) clearTimeout(pollRef.current);
+  }, []);
+
+  const pollHealth = (deadline) => {
+    pollRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/health", { headers: { Accept: "application/json" } });
+        if (cancelledRef.current) return;
+        if (res.ok) {
+          setWaiting(false);
+          window.__hal0Toast && window.__hal0Toast("hal0-api is back online", "ok");
+          qc.invalidateQueries();
+          return;
+        }
+      } catch { /* still restarting */ }
+      if (cancelledRef.current) return;
+      if (Date.now() < deadline) pollHealth(deadline);
+      else {
+        setWaiting(false);
+        window.__hal0Toast && window.__hal0Toast("hal0-api didn't come back within 90s — check journalctl -u hal0-api", "err");
+      }
+    }, 1500);
+  };
+
+  const doRestart = () => {
+    setWaiting(true);
+    window.__hal0Toast && window.__hal0Toast("Restarting hal0-api — brief outage expected", "warn");
+    // The request racing the restart means BOTH outcomes are normal here.
+    repair.mutate("hal0-api.service", {
+      onSettled: () => pollHealth(Date.now() + 90_000),
+    });
+  };
+
+  return (
+    <div className="s-panel">
+      <SRow
+        k="hal0-api service"
+        sub="Control plane · dashboard, slot manager, /v1 proxy. Restart to apply settings marked ⟳ restart hal0-api or ⚠ manual restart."
+        v={waiting
+          ? <span className="mono" style={{color: "var(--warn)", fontSize: 11}}>restarting — waiting for /api/health…</span>
+          : <span className="mono" style={{color: "var(--fg-3)", fontSize: 11}}>running</span>}
+        actions={
+          <button className="btn danger sm" disabled={waiting || repair.isPending} onClick={() => setConfirmOpen(true)}>
+            {waiting ? "Restarting…" : "Restart hal0-api"}
+          </button>
+        }
+      />
+      <ConfirmDialog
+        open={confirmOpen}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => { setConfirmOpen(false); doRestart(); }}
+        title="Restart hal0-api?"
+        message={
+          <span>
+            In-flight requests (including chat completions) will drop while the service restarts —
+            typically a few seconds. Slot containers keep running; the dashboard reconnects automatically.
+          </span>
+        }
+        confirmLabel="Restart"
+      />
+    </div>
+  );
+}
+
 function AboutSection() {
   // #543: read hal0 version live from /api/updates/state instead of a
   // hardcoded literal that drifts from the running build. Empty until the
@@ -1200,7 +1816,7 @@ function AboutSection() {
         <SRow k="hal0" mono v={liveVersion ? `${liveVersion} — container slots` : "—"} />
         <SRow k="License" v="Apache-2.0" />
         <SRow k="Repository" mono v="github.com/Hal0ai/hal0" actions={<a className="btn ghost sm" href="https://github.com/Hal0ai/hal0" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
-        <SRow k="Docs" v="hal0.dev/docs/v0.2-upgrade" actions={<a className="btn ghost sm" href="https://hal0.dev/docs/v0.2-upgrade" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
+        <SRow k="Docs" v="hal0.dev/docs" actions={<a className="btn ghost sm" href="https://hal0.dev/docs/" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
         <SRow k="Discord" v="discord.gg/hal0" actions={<a className="btn ghost sm" href="https://discord.gg/hal0" target="_blank" rel="noreferrer">{Icons.ext} Join</a>} />
       </div>
       <div style={{marginTop: 14, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>

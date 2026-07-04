@@ -72,6 +72,17 @@ export function useUpdateApply() {
   })
 }
 
+// Rollback to the retained previous version. Synchronous on the backend
+// (no job id) — returns {rolled_back, channel} once the swap completes.
+export function useUpdateRollback() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiPost<{ rolled_back: boolean; channel: string }>(ENDPOINTS.updateRollback, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['updates'] }),
+  })
+}
+
 // Channel switch (issue #546). PUT /api/updates/channel with {channel:
 // "stable" | "nightly"} persists to hal0.toml; on success the updates/
 // state query is invalidated so the per-component channel fields (which

@@ -254,6 +254,8 @@ export const ENDPOINTS = {
   updateCheck: '/api/updates/check',
   updateApply: '/api/updates/apply',
   updateStatus: (jobId: string) => `/api/updates/status/${encodeURIComponent(jobId)}`,
+  // Revert to the retained previous version (/var/lib/hal0/hal0.previous).
+  updateRollback: '/api/updates/rollback',
   // Channel (stable | nightly) — GET reads hal0.toml telemetry.channel;
   // PUT persists the choice back so subsequent /check calls honour it.
   updateChannel: '/api/updates/channel',
@@ -307,6 +309,13 @@ export const ENDPOINTS = {
   stackExport: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}/export`,
   stackImport: '/api/stacks/import',
   stackSnapshot: '/api/stacks/snapshot',
+
+  // One-click unit repair/restart (design D5). Whitelisted units only —
+  // includes hal0-api.service itself, which is how the dashboard offers an
+  // API restart (the request connection drops mid-restart by design; callers
+  // poll /api/health until the service is back).
+  installServiceRepair: (unit: string) =>
+    `/api/install/services/${encodeURIComponent(unit)}/repair`,
 
   // Install state — backs the post-install banner and passive install-state hook.
   // Retained for useInstallState.ts (banner/status surface). The FirstRun picker
