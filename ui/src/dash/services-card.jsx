@@ -361,4 +361,5 @@ export function ServicesCard() {
   )
 }
 
-Object.assign(window, { ServicesCard })
+// ComfyJobQueue is shared with the dedicated Services page (services.jsx).
+Object.assign(window, { ServicesCard, ComfyJobQueue })

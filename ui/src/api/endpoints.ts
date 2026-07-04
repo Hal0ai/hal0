@@ -271,6 +271,18 @@ export const ENDPOINTS = {
   // ── Services health (§2d — NEW endpoint, fail soft on 404) ─────
   servicesHealth: '/api/services/health',
 
+  // ── Services management (dedicated Services page) ────────────────
+  // GET services → { services:[{id,name,up,detail,unit,unit_state,url,
+  // mdns_url,actions,...}], mdns:{...} }. Actions run allow-listed
+  // systemctl verbs (registry-driven — see hal0/services/registry.py).
+  // mdns GET/POST → avahi discovery status / advertise-withdraw toggle.
+  // Per-service logs reuse the generic journald tail: logsUnit(unit).
+  services: '/api/services',
+  serviceAction: (id: string) => `/api/services/${encodeURIComponent(id)}/action`,
+  servicesMdns: '/api/services/mdns',
+  logsUnit: (unit: string, n = 120) =>
+    `/api/logs?unit=${encodeURIComponent(unit)}&n=${n}`,
+
   // ── ComfyUI native queue + history (proxy-reachable via :8188) ──
   // These are NOT under /api — ComfyUI's own HTTP server at :8188 is
   // reachable directly from the browser (same LAN). Build the base URL
