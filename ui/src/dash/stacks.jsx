@@ -545,14 +545,15 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
             }
             // MTP is DERIVED (model-eligibility × profile opt-in) and defaults
             // to Auto — no stale boolean per row. Surface the tri-state control
-            // when the picked model is MTP-eligible, or when a force-ON was
-            // persisted (so it stays adjustable). The row's own model+profile
-            // pick drive whether Auto is actually effective.
+            // whenever EITHER side is MTP-relevant (eligible model OR an
+            // MTP-opting profile) or an explicit override is persisted — the
+            // drawer's always-show rationale, bounded so rows where MTP is
+            // meaningless stay compact.
             const rowModel = models.find(m => m.id === s.model);
             // Same eligibility rule as the server: `mtp` tag OR MTP name marker.
             const modelEligible = isMtpEligibleModel(rowModel);
             const profileOptsIn = !!profiles.find(p => p.name === s.profile)?.mtp;
-            const showMtp = modelEligible || s.mtp === true;
+            const showMtp = modelEligible || profileOptsIn || s.mtp != null;
             return (
               <div className="st-slot-card" key={i}>
                 <div className="st-slot-head">
@@ -618,6 +619,10 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
                       <MtpControl
                         value={s.mtp ?? null}
                         autoActive={modelEligible && profileOptsIn}
+                        inactiveReason={!modelEligible && !profileOptsIn
+                          ? 'model has no MTP heads and profile doesn\'t enable MTP'
+                          : !modelEligible ? 'model has no MTP heads' : 'profile doesn\'t enable MTP'}
+                        forceOnRisky={!modelEligible}
                         onChange={(next) => setSlot(i, 'mtp', next)}
                       />
                     </div>
