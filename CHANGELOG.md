@@ -15,6 +15,10 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ### Added
 
+- **`hal0 mcp` CLI surface** (#504) — `hal0 mcp {list,status,install,uninstall,restart,catalog}`
+  backed by the existing `/api/mcp/*` routes. Rich tables with `--json` flag for
+  machine output. The `restart` subcommand surfaces the 501 supervisor-stub
+  gracefully until ADR-0015 lands.
 - **`FAMILY_DEFAULTS` — per-model-family launcher-flag overrides.** A new
   resolution layer between a profile's generic flags and a slot's own
   `[model].defaults`, keyed on model family (matched from the id/filename).
