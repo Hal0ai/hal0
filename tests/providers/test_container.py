@@ -891,22 +891,22 @@ class TestFamilyDefaults:
         assert argv is not None
         assert argv[argv.index("-ctk") + 1] == "q4_0"  # slot override wins over family
 
-    def test_vulkan_seed_ships_q8_but_gemma_is_guarded(self) -> None:
-        """The vulkan seed adopts q8 KV (qwen +45% pp win) and RELIES on the
-        gemma family guard for safety — qwen-on-vulkan gets q8, gemma gets f16."""
+    def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
+        """The vulkan seed ships minimal flags with NO forced KV quant.
+
+        The 2026-07-05 seed cleanup reduced the plain ``vulkan`` seed to basic
+        flags, so f16 (the llama-server default) applies universally — it is
+        gemma-safe without relying on a family guard against a q8 vulkan seed,
+        and per-model KV tuning now lives in the model's ``defaults.extra_args``.
+        A slot on the basic vulkan seed therefore never gets a forced q8 KV.
+        """
         vseed = SEED_PROFILES["vulkan"]
-        assert "-ctk q8_0 -ctv q8_0" in vseed["flags"], "vulkan seed must ship q8 KV"
+        assert "-ctk" not in vseed["flags"] and "q8_0" not in vseed["flags"]
+        assert "-ngl 999" in vseed["flags"] and "-fa on" in vseed["flags"]
+
         profile = ProfileConfig(image=vseed["image"], flags=vseed["flags"], mtp=False)
-
-        def _resolve(model_default: str, path: str) -> list[str]:
-            cfg = {"profile": "vulkan", "port": 8096, "model": {"default": model_default}}
-            with patch("hal0.providers.container._resolve_profile", return_value=profile):
-                argv = resolved_command_for_slot(cfg, model_path=path)
-            assert argv is not None
-            return argv
-
-        qwen = _resolve("qwen3-27b", "/mnt/ai-models/qwen3-27b.gguf")
-        assert qwen[qwen.index("-ctk") + 1] == "q8_0"  # adopted win, no guard
-        gemma = _resolve("gemma-4-12b-it", "/mnt/ai-models/gemma-4-12b-it.gguf")
-        assert "q8_0" not in gemma  # family guard pins f16, q8 deduped away
-        assert gemma[gemma.index("-ctk") + 1] == "f16"
+        cfg = {"profile": "vulkan", "port": 8096, "model": {"default": "qwen3-27b"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
+        assert argv is not None
+        assert "q8_0" not in argv  # basic seed forces no KV quant

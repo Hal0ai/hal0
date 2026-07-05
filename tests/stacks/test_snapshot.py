@@ -73,7 +73,7 @@ class TestSnapshot:
             'type = "llm"\n'
             'device = "gpu-rocm"\n'
             'backend = "rocm"\n'
-            'profile = "rocm-moe"\n'
+            'profile = "rocm"\n'
             "port = 8082\n"
             "mtp = true\n\n"
             "[model]\n"
@@ -84,7 +84,7 @@ class TestSnapshot:
         agent = next(e for e in stack.slots if e.slot == "agent")
         assert agent.model == "ace-saber"
         assert agent.device == "gpu-rocm"
-        assert agent.profile == "rocm-moe"
+        assert agent.profile == "rocm"
         assert agent.mtp is True
 
     def test_legacy_backend_device_dropped(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:

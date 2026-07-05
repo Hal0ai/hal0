@@ -73,7 +73,7 @@ async def test_apply_preferred_profile_swaps_when_compatible(tmp_hal0_home: str)
     _register("v2", profile="vulkan")
     sm = SlotManager()
     cfg0 = _gpu_vulkan_cfg("g", "v2")
-    cfg0["profile"] = "rocm-moe"  # a stale profile that doesn't match device
+    cfg0["profile"] = "rocm"  # a stale profile that doesn't match device
     # create would reconcile; write directly via create with a coherent profile
     cfg0["profile"] = "vulkan"
     await sm.create("g", cfg0)
