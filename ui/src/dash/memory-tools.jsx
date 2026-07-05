@@ -66,7 +66,7 @@ function MemRecallConsole({ bank }) {
   }
 
   return (
-    <MtCard title="recall console" testid="mem-recall">
+    <MtCard title="Recall" testid="mem-recall">
       <div className="mt-row">
         <input
           className="input mono"
@@ -144,7 +144,7 @@ function MemReflectPlayground({ bank }) {
 
   const basedOn = out?.based_on || null;
   return (
-    <MtCard title="reflect playground" testid="mem-reflect">
+    <MtCard title="Reflect" testid="mem-reflect">
       <div className="mt-row">
         <input
           className="input mono"
@@ -175,15 +175,48 @@ function MemReflectPlayground({ bank }) {
 
 // ── Documents browser ─────────────────────────────────────────────────────────
 
+// Hindsight documents ship no title/filename — just an id + metadata/tags — so
+// compose the most identifiable label we can and keep a short id for
+// disambiguation, rather than showing a raw UUID.
+function mtDocTitle(d) {
+  const meta = d.document_metadata || {};
+  const rp = d.retain_params || {};
+  const rpMeta = rp.metadata || {};
+  const firstLine = String(d.original_text || d.text || d.summary || '').split('\n')[0].trim();
+  const named = meta.title || meta.filename || meta.name || meta.path || meta.uri || meta.url || d.title;
+  const source = meta.source || rpMeta.source || rp.context;
+  const label = named || firstLine || (source ? `${source} memory` : '') || 'document';
+  return label.length > 80 ? label.slice(0, 80) + '…' : label;
+}
+function mtDocWhen(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch { return ''; }
+}
+
+const MT_DOCS_PAGE = 10;
+
 function MemDocuments({ bank }) {
   const useBankDocuments = window.__hal0UseBankDocuments;
   const useDocumentDelete = window.__hal0UseDocumentDelete;
   const useDocumentReprocess = window.__hal0UseDocumentReprocess;
-  const docsQuery = useBankDocuments ? useBankDocuments(bank, { limit: 25 }) : { data: null };
+  const [page, setPage] = useStateMTl(0);
+  // Reset to the first page whenever the bank changes.
+  React.useEffect(() => { setPage(0); }, [bank]);
+  const docsQuery = useBankDocuments
+    ? useBankDocuments(bank, { limit: MT_DOCS_PAGE, offset: page * MT_DOCS_PAGE })
+    : { data: null };
   const del = useDocumentDelete ? useDocumentDelete() : null;
   const reprocess = useDocumentReprocess ? useDocumentReprocess() : null;
   const [confirmId, setConfirmId] = useStateMTl(null);
   const items = docsQuery.data?.items || [];
+  const total = docsQuery.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / MT_DOCS_PAGE));
+  // Clamp if a delete shrank the list past the current page.
+  React.useEffect(() => {
+    if (total && page > 0 && page >= pageCount) setPage(pageCount - 1);
+  }, [total, page, pageCount]);
 
   async function doDelete(id) {
     try {
@@ -206,32 +239,51 @@ function MemDocuments({ bank }) {
   }
 
   return (
-    <MtCard title={`documents · ${docsQuery.data?.total ?? '—'}`} testid="mem-documents">
+    <MtCard title={`documents · ${total || '—'}`} testid="mem-documents">
       {items.length === 0 ? (
         <div className="empty mono">No documents in this bank.</div>
       ) : (
-        items.map(d => (
-          <div className="mt-doc" key={d.id} data-testid={`mem-doc-${d.id}`}>
-            <span className="mt-doc-text">{(d.original_text || d.id).slice(0, 90)}</span>
-            <span className="mt-doc-meta mono">
-              {d.memory_unit_count ?? 0} facts{d.tags?.length ? ` · ${d.tags.join(', ')}` : ''}
-            </span>
-            <span className="mt-doc-actions">
-              <button className="btn ghost xs" onClick={() => doReprocess(d.id)} data-testid="mem-doc-reprocess" title="Reprocess">
-                <Icon name="refresh" size={12} />
+        <>
+          {items.map(d => (
+            <div className="mt-doc" key={d.id} data-testid={`mem-doc-${d.id}`}>
+              <span className="mt-doc-text" title={d.id}>
+                {mtDocTitle(d)}
+                <span className="mt-doc-id mono">#{String(d.id).slice(0, 8)}</span>
+              </span>
+              <span className="mt-doc-meta mono">
+                {d.memory_unit_count ?? 0} facts
+                {d.text_length != null ? ` · ${d.text_length} chars` : ''}
+                {mtDocWhen(d.created_at) ? ` · ${mtDocWhen(d.created_at)}` : ''}
+                {d.tags?.length ? ` · ${d.tags.join(', ')}` : ''}
+              </span>
+              <span className="mt-doc-actions">
+                <button className="btn ghost xs" onClick={() => doReprocess(d.id)} data-testid="mem-doc-reprocess" title="Reprocess">
+                  <Icon name="refresh" size={12} />
+                </button>
+                {confirmId === d.id ? (
+                  <button className="btn danger xs" onClick={() => doDelete(d.id)} data-testid="mem-doc-delete-confirm">
+                    Confirm
+                  </button>
+                ) : (
+                  <button className="btn ghost xs danger" onClick={() => setConfirmId(d.id)} data-testid="mem-doc-delete" title="Delete">
+                    <Icon name="trash" size={12} />
+                  </button>
+                )}
+              </span>
+            </div>
+          ))}
+          {pageCount > 1 && (
+            <div className="mt-pager mono">
+              <button className="btn ghost xs" disabled={page <= 0} onClick={() => setPage(p => Math.max(0, p - 1))} data-testid="mem-docs-prev">
+                Prev
               </button>
-              {confirmId === d.id ? (
-                <button className="btn danger xs" onClick={() => doDelete(d.id)} data-testid="mem-doc-delete-confirm">
-                  Confirm
-                </button>
-              ) : (
-                <button className="btn ghost xs danger" onClick={() => setConfirmId(d.id)} data-testid="mem-doc-delete" title="Delete">
-                  <Icon name="trash" size={12} />
-                </button>
-              )}
-            </span>
-          </div>
-        ))
+              <span className="mt-pager-lbl">page {page + 1} / {pageCount}</span>
+              <button className="btn ghost xs" disabled={page >= pageCount - 1} onClick={() => setPage(p => p + 1)} data-testid="mem-docs-next">
+                Next
+              </button>
+            </div>
+          )}
+        </>
       )}
     </MtCard>
   );
@@ -242,9 +294,15 @@ function MemDocuments({ bank }) {
 function MemMentalModels({ bank }) {
   const useMentalModels = window.__hal0UseMentalModels;
   const useMentalModelRefresh = window.__hal0UseMentalModelRefresh;
+  const useMentalModelCreate = window.__hal0UseMentalModelCreate;
   const query = useMentalModels ? useMentalModels(bank) : { data: null };
   const refresh = useMentalModelRefresh ? useMentalModelRefresh() : null;
+  const create = useMentalModelCreate ? useMentalModelCreate() : null;
   const items = query.data?.items || [];
+  const [creating, setCreating] = useStateMTl(false);
+  const [name, setName] = useStateMTl('');
+  const [sourceQuery, setSourceQuery] = useStateMTl('');
+  const [busy, setBusy] = useStateMTl(false);
 
   async function doRefresh(id) {
     try {
@@ -255,8 +313,72 @@ function MemMentalModels({ bank }) {
     }
   }
 
+  async function doCreate(e) {
+    e.preventDefault();
+    const nm = name.trim();
+    const sq = sourceQuery.trim();
+    if (!nm || !sq || !create) return;
+    setBusy(true);
+    try {
+      await create.mutateAsync({ bank, body: { name: nm, source_query: sq } });
+      mtToast(`Mental model "${nm}" created`, 'ok');
+      setName('');
+      setSourceQuery('');
+      setCreating(false);
+    } catch (err) {
+      mtToast(err?.message || 'Create failed', 'err');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const newBtn = (
+    <button
+      className="btn ghost xs"
+      onClick={() => setCreating(v => !v)}
+      disabled={!bank}
+      data-testid="mem-mm-new"
+    >
+      {creating ? 'Cancel' : '+ New'}
+    </button>
+  );
+
   return (
-    <MtCard title="mental models" testid="mem-mental-models">
+    <MtCard title="mental models" action={newBtn} testid="mem-mental-models">
+      <p className="mt-mm-about">
+        A mental model is a saved question the bank keeps answered — Hindsight synthesizes an
+        answer from your memories and re-runs it on demand (refresh) as new facts land.
+      </p>
+      {creating && (
+        <form className="mt-mm-form" onSubmit={doCreate} data-testid="mem-mm-form">
+          <input
+            className="input mono"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="name — e.g. deploy-prefs"
+            maxLength={80}
+            data-testid="mem-mm-name-input"
+          />
+          <textarea
+            className="input mono"
+            value={sourceQuery}
+            onChange={e => setSourceQuery(e.target.value)}
+            placeholder="source query — the question this model should keep answered"
+            rows={2}
+            data-testid="mem-mm-query-input"
+          />
+          <div className="mt-mm-form-foot">
+            <button
+              type="submit"
+              className="btn sm"
+              disabled={busy || !name.trim() || !sourceQuery.trim()}
+              data-testid="mem-mm-create"
+            >
+              {busy ? 'Creating…' : 'Create'}
+            </button>
+          </div>
+        </form>
+      )}
       {items.length === 0 ? (
         <div className="empty mono">No mental models defined.</div>
       ) : (
@@ -293,19 +415,23 @@ function MemDirectives({ bank }) {
   const [creating, setCreating] = useStateMTl(false);
   const [name, setName] = useStateMTl('');
   const [content, setContent] = useStateMTl('');
+  const [busy, setBusy] = useStateMTl(false);
   const items = query.data?.items || [];
 
   async function submit(e) {
     e.preventDefault();
-    if (!name.trim() || !content.trim()) return;
+    if (!name.trim() || !content.trim() || !create) return;
+    setBusy(true);
     try {
       await create.mutateAsync({ bank, body: { name: name.trim(), content: content.trim() } });
-      mtToast(`Directive ${name} created`, 'ok');
+      mtToast(`Directive "${name.trim()}" created`, 'ok');
       setCreating(false);
       setName('');
       setContent('');
     } catch (err) {
       mtToast(err?.message || 'Create failed', 'err');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -327,30 +453,50 @@ function MemDirectives({ bank }) {
   }
 
   const newBtn = (
-    <button className="btn ghost xs" onClick={() => setCreating(c => !c)} data-testid="mem-dir-new">
-      + New
+    <button
+      className="btn ghost xs"
+      onClick={() => setCreating(c => !c)}
+      disabled={!bank}
+      data-testid="mem-dir-new"
+    >
+      {creating ? 'Cancel' : '+ New'}
     </button>
   );
 
   return (
-    <MtCard title="directives" action={newBtn} wide testid="mem-directives">
+    <MtCard title="directives" action={newBtn} testid="mem-directives">
+      <p className="mt-mm-about">
+        A directive is a standing rule you author for the bank — injected into an agent's context
+        whenever it uses this bank, always on until you toggle it off.
+      </p>
       {creating && (
-        <form className="mt-row" onSubmit={submit} style={{ marginBottom: 8 }}>
+        <form className="mt-mm-form" onSubmit={submit} data-testid="mem-dir-form">
           <input
             className="input mono"
             value={name}
             onChange={e => setName(e.target.value)}
-            placeholder="name"
+            placeholder="name — e.g. tone"
+            maxLength={80}
             data-testid="mem-dir-name"
           />
-          <input
+          <textarea
             className="input mono"
             value={content}
             onChange={e => setContent(e.target.value)}
-            placeholder="always-injected rule…"
+            placeholder="the rule to always inject — e.g. Prefer podman over docker in examples."
+            rows={2}
             data-testid="mem-dir-content"
           />
-          <button type="submit" className="btn sm" data-testid="mem-dir-submit">Create</button>
+          <div className="mt-mm-form-foot">
+            <button
+              type="submit"
+              className="btn sm"
+              disabled={busy || !name.trim() || !content.trim()}
+              data-testid="mem-dir-submit"
+            >
+              {busy ? 'Creating…' : 'Create'}
+            </button>
+          </div>
         </form>
       )}
       {items.length === 0 ? (
@@ -375,7 +521,10 @@ function MemDirectives({ bank }) {
 
 // ── Tools panel ───────────────────────────────────────────────────────────────
 
-function MemToolsPanel() {
+// `embedded` renders just the tool grid against a caller-supplied bank (used
+// inside the Overview's primary bank display); standalone mode keeps its own
+// bank picker bar for the #memory/tools route.
+function MemToolsPanel({ bank: bankProp, embedded } = {}) {
   const useMemoryBanks = window.__hal0UseMemoryBanks;
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null };
   const banks = banksQuery.data?.banks || [];
@@ -385,7 +534,7 @@ function MemToolsPanel() {
     try { return localStorage.getItem('hal0.mem.bank') || null; } catch { return null; }
   });
   const bankValid = bankSel && banks.some(b => b.bank_id === bankSel);
-  const bank = (bankValid ? bankSel : banks[0]?.bank_id) || null;
+  const bank = embedded && bankProp ? bankProp : ((bankValid ? bankSel : banks[0]?.bank_id) || null);
 
   function chooseBank(id) {
     setBankSel(id);
@@ -393,28 +542,34 @@ function MemToolsPanel() {
   }
 
   return (
-    <div className="mt" data-testid="mem-tools">
-      <div className="mt-bankbar mono">
-        <span style={{ color: 'var(--fg-4)' }}>bank</span>
-        <select
-          className="input mono"
-          value={bank || ''}
-          onChange={e => chooseBank(e.target.value)}
-          data-testid="mem-tools-bank"
-          aria-label="Bank"
-        >
-          {banks.map(b => (
-            <option key={b.bank_id} value={b.bank_id}>{b.bank_id}</option>
-          ))}
-        </select>
-        <span className="mt-hint">recall &amp; reflect run against the live Hindsight bank</span>
-      </div>
-      <div className="mt-grid">
-        <MemRecallConsole bank={bank} />
-        <MemReflectPlayground bank={bank} />
-        <MemDocuments bank={bank} />
-        <MemMentalModels bank={bank} />
-        <MemDirectives bank={bank} />
+    <div className={'mt' + (embedded ? ' mt-embedded' : '')} data-testid="mem-tools">
+      {!embedded && (
+        <div className="mt-bankbar mono">
+          <span style={{ color: 'var(--fg-4)' }}>bank</span>
+          <select
+            className="input mono"
+            value={bank || ''}
+            onChange={e => chooseBank(e.target.value)}
+            data-testid="mem-tools-bank"
+            aria-label="Bank"
+          >
+            {banks.map(b => (
+              <option key={b.bank_id} value={b.bank_id}>{b.bank_id}</option>
+            ))}
+          </select>
+          <span className="mt-hint">recall &amp; reflect run against the live Hindsight bank</span>
+        </div>
+      )}
+      <div className="mt-cols">
+        <div className="mt-col">
+          <MemReflectPlayground bank={bank} />
+          <MemRecallConsole bank={bank} />
+          <MemDocuments bank={bank} />
+        </div>
+        <div className="mt-col">
+          <MemMentalModels bank={bank} />
+          <MemDirectives bank={bank} />
+        </div>
       </div>
     </div>
   );

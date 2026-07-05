@@ -1,0 +1,142 @@
+---
+title: Quick start — Ubuntu (bare metal)
+description: Install hal0 directly on a bare-metal Ubuntu host — prerequisites, the one-line install, optional Strix Halo GTT sizing, host GPU groups, and the optional FastFlowLM NPU path.
+sidebar:
+  order: 12
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Bare-metal Ubuntu is the simplest way to run hal0: the installer handles
+the container runtime and Python venv for you, and on a Strix Halo box the
+iGPU and NPU are already present as local device nodes — no passthrough to
+configure. This guide covers a clean Ubuntu 24.04 (or newer) x86_64 host.
+
+<Aside type="note" title="Linux + systemd only">
+hal0 v1 targets **Linux x86_64 with systemd**. That is the only hard
+platform requirement — ARM, macOS, and Windows are out of scope. (For
+Windows, see the [WSL2 quick start](/docs/getting-started/wsl/), but note
+it is experimental.)
+</Aside>
+
+## 1. Prerequisites
+
+The installer's pre-flight verifies each of these and installs what it can:
+
+| Requirement | Notes |
+|---|---|
+| **x86_64 / amd64** | Hard requirement — the toolbox images and FastFlowLM `.deb` are amd64-only. |
+| **systemd** | `systemctl` must be on `PATH`. Pre-flight fails hard without it. |
+| **Python 3.11–3.14** | 3.12+ recommended. Missing Python is fatal; a wrong version warns. |
+| **`python3-venv` + `pip`** | The Ubuntu base ships `python3` without `ensurepip`; the installer auto-installs these on apt. |
+| **A container runtime** | Auto-installs **podman** if none is found. |
+| **~20 GB free disk** | Under `/var/lib`, plus free ports `8080` (API) and `3001` (OpenWebUI). |
+
+Install the venv prerequisite up front so the first run is clean:
+
+```sh
+sudo apt-get update && sudo apt-get install -y python3-venv python3-pip
+```
+
+## 2. (Strix Halo) Size the GTT pool
+
+Skip this section on non-Strix-Halo hardware.
+
+On a Strix Halo APU the GPU's usable memory is the amdgpu **GTT** window,
+carved from unified system RAM. A model can only allocate up to the GTT
+cap — leave it at the small default and large models won't fit even with
+128 GB installed. hal0 measures the live GTT cap and sizes recommendations
+against it, but it does **not** set the kernel parameters. Configure them
+on the host kernel command line:
+
+```sh
+# /etc/default/grub — append to GRUB_CMDLINE_LINUX_DEFAULT
+amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856
+```
+
+```sh
+sudo update-grub && sudo reboot
+```
+
+`amdgpu.gttsize` is in **MiB** (`126976` ≈ 124 GiB); `ttm.pages_limit` is
+in **4 KiB pages** (`32505856` ≈ 124 GiB — keep it equal to `gttsize`);
+`amd_iommu=off` is worth ~5–12% on this workload. These reference values
+target a 128 GB box and leave only ~4 GB for the host — scale both down
+together to reserve more host RAM. After rebooting, confirm with
+`cat /proc/cmdline`.
+
+## 3. Install hal0
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+The bootstrap fetches the release manifest, SHA-256- and cosign-verifies
+the tarball, then hands off to the installer, which installs podman, builds
+the venv, writes systemd units, runs a hardware-recommended first-run
+setup, and starts `hal0-api` on port `8080`. The installer re-execs itself
+under `sudo` when piped through `bash`. See [Install hal0](/docs/getting-started/install/)
+for the full sequence and every environment variable and flag.
+
+<Aside type="tip" title="GPU device groups">
+On a GPU host the installer adds the `hal0` service user to the `render`
+and `video` groups so slot containers can open `/dev/kfd` and
+`/dev/dri/renderD*`. hal0 does **not** install amdgpu / ROCm / Vulkan on
+the host — ROCm and Vulkan ship inside the podman toolbox images. You only
+need the in-tree `amdgpu` kernel driver, which stock Ubuntu already has.
+</Aside>
+
+## 4. (Optional) Enable the NPU
+
+If the host has an AMD XDNA NPU and the `amdxdna` kernel driver is loaded
+(kernel ≥ 6.11, NPU firmware ≥ 1.1.0.0, `/dev/accel/accel0` present), the
+installer auto-installs the **FastFlowLM (FLM)** userspace on apt hosts:
+the pinned FastFlowLM `.deb` for your Ubuntu release, the runtime libraries,
+and `libxrt-npu2`. Verify:
+
+```sh
+flm validate       # → "flm validate ok — NPU runtime reachable"
+```
+
+A single `flm serve` process backs the **NPU trio** — a chat model plus
+opt-in embedding and speech-to-text passengers on the seeded `npu` slot
+(port `8088`). On non-apt distros (Fedora, Arch, openSUSE) the NPU path is
+skipped and you install FastFlowLM manually; the GPU and CPU paths are
+unaffected.
+
+## 5. Verify
+
+```sh
+hal0 status        # system + slot status
+hal0 doctor        # re-run the full pre-flight battery
+```
+
+`hal0 doctor` checks architecture, systemd, Python, the venv, writable
+install paths, network reachability, the container runtime, disk space,
+and that ports `8080`/`3001` are free. The API and dashboard are at
+`http://localhost:8080`; OpenWebUI at `:3001`.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="First-run setup"
+    href="/docs/getting-started/setup/"
+    description="Run the hal0 setup TUI to provision slots, models, and extensions."
+  />
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="Pull a model from Hugging Face and assign it to a slot."
+  />
+  <LinkCard
+    title="Send your first chat"
+    href="/docs/getting-started/first-chat/"
+    description="Chat from OpenWebUI or curl the OpenAI-compatible endpoint."
+  />
+  <LinkCard
+    title="Proxmox LXC"
+    href="/docs/getting-started/proxmox-lxc/"
+    description="Run hal0 as a privileged LXC with GPU + NPU passthrough."
+  />
+</CardGrid>

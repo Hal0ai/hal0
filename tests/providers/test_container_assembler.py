@@ -131,6 +131,72 @@ def test_ngl_precedence_model_default_beats_profile() -> None:
     assert _ngl(plan.command) == "20"
 
 
+def _parval(command: list[str]) -> str | None:
+    for flag in ("--parallel", "-np"):
+        if flag in command:
+            return command[command.index(flag) + 1]
+    return None
+
+
+def test_parallel_none_inherits_profile() -> None:
+    plan = _llama_launch_plan(
+        image="i:1",
+        port=8095,
+        model_path="/m.gguf",
+        flags_str="-fa on --parallel 1",
+        devices=[],
+        group_ids=[],
+        slot_parallel=None,
+    )
+    assert _parval(plan.command) == "1"  # profile's value untouched
+    assert "--kv-unified" not in plan.command
+
+
+def test_parallel_slot_overrides_profile_and_adds_kv_unified() -> None:
+    plan = _llama_launch_plan(
+        image="i:1",
+        port=8095,
+        model_path="/m.gguf",
+        flags_str="-fa on --parallel 1",
+        devices=[],
+        group_ids=[],
+        slot_parallel=8,
+    )
+    assert _parval(plan.command) == "8"
+    # deduped to one occurrence across the -np/--parallel alias
+    assert plan.command.count("--parallel") + plan.command.count("-np") == 1
+    assert "--kv-unified" in plan.command  # N>1 → unified pool
+
+
+def test_parallel_one_emits_no_kv_unified() -> None:
+    plan = _llama_launch_plan(
+        image="i:1",
+        port=8095,
+        model_path="/m.gguf",
+        flags_str="-fa on",
+        devices=[],
+        group_ids=[],
+        slot_parallel=1,
+    )
+    assert _parval(plan.command) == "1"
+    assert "--kv-unified" not in plan.command
+
+
+def test_parallel_extra_args_wins_over_slot() -> None:
+    plan = _llama_launch_plan(
+        image="i:1",
+        port=8095,
+        model_path="/m.gguf",
+        flags_str="--parallel 1",
+        devices=[],
+        group_ids=[],
+        slot_parallel=8,
+        extra_args="-np 2",
+    )
+    assert _parval(plan.command) == "2"  # hand-authored extra_args is highest precedence
+    assert plan.command.count("--parallel") + plan.command.count("-np") == 1
+
+
 def test_model_default_extra_args_emitted_and_overridable() -> None:
     plan = _llama_launch_plan(
         image="i:1",

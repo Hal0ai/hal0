@@ -46,7 +46,16 @@ and the generated text under `choices[].text` instead of `choices[].delta`. The
 
 The Content-Type of a streaming response is `text/event-stream`. hal0 measures
 per-chunk throughput on the streaming path (counting content deltas) to populate
-its slot tok/s metrics, but does not alter the bytes it forwards.
+its slot tok/s metrics, and records a one-shot time-to-first-token (TTFT) reading
+per response from the first content-bearing delta — both feed the dashboard's
+per-slot throughput history — but hal0 does not alter the bytes it forwards.
+
+<Aside type="caution">
+Setting `"omni": true` on a `/v1/chat/completions` request (opting into the
+OmniRouter tool-calling loop) forces `stream` to `false` for the duration of the
+loop, regardless of what the request body asked for — streaming through
+OmniRouter isn't implemented yet. A plain (non-`omni`) request streams normally.
+</Aside>
 
 ## Client example
 

@@ -7,8 +7,11 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-![The hal0 dashboard MCP tab showing connected servers and tool tiers](/screenshots/mcp-tab.png)
-*Dashboard MCP tab — lists connected servers, active tool tiers, and pending approvals.*
+![The hal0 dashboard's Agents → MCP tab, showing hosted MCP servers with live tool counts](/screenshots/mcp-tab.png)
+*Agents → MCP tab — lists hal0's hosted MCP servers (bundled + any installed) with live tool
+counts and one-click "add to Claude/Codex/Cursor" config; expand a server to see each tool's
+read-only / gated / destructive badge. Pending approvals live in the separate approval inbox
+reachable from the top bar, not on this tab.*
 
 hal0 hosts two Streamable-HTTP MCP servers that agents call: a focused
 **memory** server (`/mcp/memory`) and a full **admin** server (`/mcp/admin`).
@@ -69,6 +72,11 @@ Execute immediately; pure reads against the local REST or host surface.
 | `capability_list`    | Capability overlay state — backends + selections.              |
 | `provider_list`      | List configured providers.                                     |
 | `version_info`       | hal0 version + runtime status.                                 |
+| `stack_list`         | List every stack, with the active stack + drift status.       |
+| `stack_status`       | One stack's detail, active flag, and drift status.             |
+| `profile_list`       | List every profile in the catalog (seed + custom).             |
+| `profile_status`     | One profile's resolved detail (image, flags, backend, used-by). |
+| `profile_export`     | Export a profile to a portable `.hal0profile.json` envelope (no secrets/host paths). A `POST` under the hood, but read-shaped — no state change. |
 | `gpu_target_version` | Decode KFD's `gfx_target_version` to a `gfxNNNN` string.      |
 | `npu_status`         | XDNA NPU presence + driver binding.                            |
 | `env_report`         | Composite host snapshot (container, CPU, RAM, GPU, NPU, …).   |
@@ -101,8 +109,18 @@ Always enqueued for owner approval before execution. These are the members of
 | `capability_set`            | Assign a capability child to a slot.                  |
 | `config_write`              | Update `hal0.toml` top-level settings.                |
 | `provider_credential_write` | Write provider credentials (secrets never echoed).    |
+| `stack_apply`               | Apply a stack — commit its slot config and converge the running slot set to match. |
+| `stack_import`              | Import a stack from a `.hal0stack.json` envelope.     |
+| `stack_delete`              | Delete a custom stack from the catalog.               |
+| `profile_import`            | Import a profile from a `.hal0profile.json` envelope. |
+| `profile_delete`            | Delete a custom profile from the catalog.             |
 | `logs_tail`                 | Tail journald for one systemd unit.                   |
 | `memory_delete` (bulk)      | Delete more than one memory id in a single call.      |
+
+Stacks and profiles are gated the same way slots are: applying or importing a
+stack reconfigures the whole inference surface (it can load, swap, or unload
+every slot at once), and importing or deleting a profile mutates the shared
+catalog — both mirror the blast radius of `slot_create`/`capability_set`.
 
 <Aside type="note">
 `logs_tail` is gated as a defensive measure: journald lines can carry Bearer
@@ -119,3 +137,6 @@ owner approves or denies it from the dashboard approval inbox, the
 
 - [REST API index](/docs/reference/api/rest-api) — the `/api/*` routes each MCP tool forwards to.
 - [Devices, providers & profiles](/docs/reference/providers-profiles-devices).
+- [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) — what the `profile_*` tools operate on.
+- [Stacks](/docs/concepts/stacks) and [Manage slots — Stacks](/docs/guides/manage-slots#editing-multiple-slots-at-once-stacks) — what the `stack_*` tools operate on.
+- [Connect an MCP client](/docs/guides/connect-mcp) — connecting an external MCP client to these servers.

@@ -132,6 +132,49 @@ export function useActivityHistorical(opts: UseActivityHistoricalOptions = {}) {
   })
 }
 
+/**
+ * Recent-activity poll for the dashboard Activity card (dashboard-redesign).
+ *
+ * Deliberately NOT the SSE stream: the card shows only the most recent
+ * handful of records, and opening an EventSource against a backend (or
+ * mock) that answers non-`text/event-stream` logs a browser console error
+ * on every page mount. A polled GET is quieter and fail-soft: 404 /
+ * network error / bad shape → empty list, never a throw. Records are
+ * returned NEWEST-FIRST.
+ */
+export function useActivityRecent(limit = 20) {
+  return useQuery<ActivityRecord[]>({
+    queryKey: ['activity', 'recent', limit],
+    queryFn: async () => {
+      let res: Response
+      try {
+        res = await fetch(`${ENDPOINTS.activity}?limit=${limit}`, {
+          headers: { Accept: 'application/json' },
+        })
+      } catch {
+        return []
+      }
+      if (!res.ok) return []
+      try {
+        const body = (await res.json()) as unknown
+        const records = Array.isArray(body)
+          ? (body as ActivityRecord[])
+          : Array.isArray((body as Partial<ActivityEnvelope>)?.records)
+            ? (body as ActivityEnvelope).records
+            : []
+        // Defensive newest-first ordering (backend backfill is oldest→newest).
+        return [...records]
+          .filter((r) => r && r.ts != null && r.message != null)
+          .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))
+      } catch {
+        return []
+      }
+    },
+    refetchInterval: 5_000,
+    retry: false,
+  })
+}
+
 export interface UseActivityStreamOptions extends ActivityFilters {
   /** When false, no SSE connection is opened. Defaults to true. */
   follow?: boolean

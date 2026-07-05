@@ -70,7 +70,8 @@ backwards compatibility.
 |----------------|------------------------------------------|----------------------------------------|
 | `llama-server` | llama.cpp server (ROCm / Vulkan / CUDA / CPU) | chat, embed, rerank                     |
 | `flm`          | FastFlowLM on the NPU                     | chat / stt / embed (one process, trio) |
-| `kokoro`       | Kokoro-82M text-to-speech (ONNX)          | tts                                    |
+| `kokoro`       | Kokoro-82M text-to-speech (ONNX, CPU)     | tts                                    |
+| `qwen3tts`     | Qwen3-TTS-12Hz-1.7B multilingual TTS (ROCm, GPU) | tts                              |
 | `comfyui`      | ComfyUI image generation                  | image                                  |
 
 ## Seed profiles
@@ -87,11 +88,13 @@ model, context size, and port.
 | `rocm-dnse` | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense + MTP · q8 KV   |
 | `rocm-moe`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | MoE + MTP · q8 KV     |
 | `vulkan`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`         | off   | Vulkan std · fallback |
-| `cuda`      | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                             | off   | CUDA · NVIDIA (upstream, experimental) |
+| `cuda`      | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                             | off   | CUDA · NVIDIA (upstream llama.cpp, experimental) |
 | `embed`     | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | Embeddings · GPU      |
 | `rerank`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | Reranking · GPU       |
+| `tts-qwen3` | gpu            | `ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1`                            | off   | TTS · Qwen3 (multilingual GPU) |
 | `flm`       | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                             | off   | FLM NPU inference     |
 | `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS · Kokoro          |
+| `cpu-llm`   | cpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server` (no GPU passthrough) | off   | CPU-only LLM · llama-server |
 | `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`   | off   | Image generation      |
 
 ![The Profiles tab in the hal0 dashboard showing seed profile cards with device class, intent, and bench metrics](/screenshots/profiles-tab.png)
@@ -107,9 +110,9 @@ profile until backend-specific embed/rerank variants ship.
 <Aside type="note">
 GPU profiles also carry a `backend` field (`rocm`, `vulkan`, or `cuda`) — that
 field, not the slug, is the authoritative ROCm-vs-Vulkan-vs-CUDA choice.
-Non-GPU profiles (`flm`, `tts`, `comfyui`) omit it and let `device_class` drive
-display. Canonical image refs are pinned per release in `manifest.json` and may
-differ from these seed defaults.
+Non-GPU profiles (`flm`, `tts`, `cpu-llm`, `comfyui`) omit it and let
+`device_class` drive display. Canonical image refs are pinned per release in
+`manifest.json` and may differ from these seed defaults.
 </Aside>
 
 <Aside type="caution" title="`cuda` is experimental">
@@ -141,15 +144,36 @@ repointed to one of the current profiles.
 
 ### MTP flag bundle
 
-When a profile's effective MTP setting is on (profile `mtp = true`, or a slot's
-`mtp = true` override), `resolve_profile_flags` merges the multi-token-prediction
-draft-speculation flag bundle (`MTP_FLAG_BUNDLE`) into the profile's flags — as
-**defaults only**. A profile's own explicit `--spec-draft-*` flags win; the
-bundle just fills in whatever the profile left unset. Before v0.8.2b2 (#963)
-the bundle was appended verbatim and silently clobbered a profile's pinned
-spec-draft flags (e.g. a profile asking for `--spec-draft-type-k f16` still
-launched with the bundle's `q8_0`) — that's fixed now. A slot's `mtp` field
-(`true` / `false` / unset-to-inherit) overrides the profile default.
+A slot's `mtp` field is a tri-state: `true` forces MTP on, `false` forces it
+off, and unset (**Auto**) defers to the profile. Under Auto, MTP is effective
+only when **both** the profile opts in (`mtp = true` — only `rocm-dnse` and
+`rocm-moe` do among the seeds) **and** the model is MTP-eligible (a registry
+`mtp` tag, or an `mtp` marker in the model's id/filename). A profile opting in
+no longer means "always append the spec-draft bundle" — a non-MTP model
+sitting on `rocm-moe` under Auto launches clean, without dead
+`--spec-draft-*` flags. See [Capabilities and
+profiles](/docs/concepts/capabilities-and-profiles#mtp-a-model--profile--slot-decision)
+for the full model/profile/slot resolution.
+
+Whenever the effective setting is on, `resolve_profile_flags` merges the
+multi-token-prediction draft-speculation flag bundle (`MTP_FLAG_BUNDLE`) into
+the profile's flags — as **defaults only**. A profile's own explicit
+`--spec-draft-*` flags win; the bundle just fills in whatever the profile left
+unset. Before v0.8.2b2 (#963) the bundle was appended verbatim and silently
+clobbered a profile's pinned spec-draft flags (e.g. a profile asking for
+`--spec-draft-type-k f16` still launched with the bundle's `q8_0`) — that's
+fixed now. The bundle's draft device also tracks the profile's own backend
+(`ROCm0` / `Vulkan0` / `CUDA0`) instead of a hardcoded `ROCm0`.
+
+<Aside type="caution" title="Forcing MTP on an ineligible model">
+An explicit `mtp = true` pointed at a model with no MTP heads makes
+llama-server refuse to start ("context type MTP requested but model doesn't
+contain MTP layers"). Two independent guards defuse exactly that combination:
+an update-time migration clears a stale forced-on override left on an
+ineligible model, and a swap-time guard clears it if a model swap lands an
+ineligible model on a slot still forced On. Both leave force-off and
+eligible force-on alone — only unresolvable-ineligible force-on is cleared.
+</Aside>
 
 ## Device-to-default-profile map
 
@@ -186,7 +210,8 @@ preference.
 
 A profile can be exported to a self-contained, checksummed
 `.hal0profile.json` envelope and imported on another host — the same sharing
-model stacks use (no secrets, no host paths, an independent `schema_version`).
+model [stacks](/docs/concepts/stacks) use (no secrets, no host paths, an
+independent `schema_version`).
 
 - `GET /api/profiles/{name}` — resolve a single profile.
 - `POST /api/profiles/{name}/export` — build the envelope:
@@ -219,6 +244,7 @@ for that release and the runtime pulls by tag with a warning.
 | `rocm`      | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`                               | llama.cpp ROCm backend                 |
 | `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                                                         | FastFlowLM on AMD XDNA2 NPU            |
 | `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                                                          | Kokoro-82M TTS (CPU ONNX)              |
+| `qwen3tts`  | `ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1`                                                        | Qwen3-TTS-12Hz-1.7B multilingual TTS (ROCm) |
 | `comfyui`   | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2` | ComfyUI image generation               |
 
 ## See also

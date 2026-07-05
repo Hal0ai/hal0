@@ -155,9 +155,9 @@ Request fields honoured:
 
 | Field             | Default       | Notes |
 |-------------------|---------------|-------|
-| `model`           | `sdxl-turbo`  | Must be a **curated** image model. Built-ins: `sdxl-turbo`, `sd-1.5-pruned-emaonly`. |
+| `model`           | `sdxl-turbo`  | Must be a model in the **curated image-gen catalogue** — `sdxl-turbo`, `sd-1.5-pruned-emaonly`, and `sdxl-lightning` ship today. |
 | `prompt`          | —             | Required. Empty prompt → **422** (`image.prompt_required`). |
-| `n`               | `1`           | Batch size. |
+| `n`               | `1`           | Batch size, capped at 8. |
 | `size`            | slot default  | `WxH`, e.g. `1024x1024`. Falls back to the `img` slot's `[image] default_size`. |
 | `response_format` | `url`         | `url` or `b64_json`. |
 
@@ -188,8 +188,47 @@ The first generation after a cold start eats the checkpoint-load cost
 caps a single render at 10 minutes before it gives up.
 </Aside>
 
+To cancel an in-flight or queued render (clears ComfyUI's queue and
+interrupts the current job):
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/render/cancel
+```
+
+This is best-effort — network hiccups talking to ComfyUI are swallowed, so
+poll `/api/comfyui/status` to confirm the queue actually drained.
+
+## Quick-launch workflows
+
+The Image-Gen tab also ships a **workflow quick-launch strip**: a row of
+curated chips (text-to-image, image-to-image, a couple of video flows, an
+upscale placeholder) that deep-link straight into ComfyUI's own UI rather
+than going through `/v1/images/generations`. Any workflow JSON an operator
+drops into the bind-mounted workflows directory shows up next to the
+curated chips as a "custom" entry, no rebuild needed.
+
+```sh
+curl http://localhost:8080/api/comfyui/workflows
+```
+
+Returns `{"workflows": [{"name", "source"}, ...]}` for every `<name>.json`
+found under `/mnt/ai-models/comfyui/workflows` (the bind-mounted primary
+dir) or ComfyUI's own `user/default/workflows` fallback; a name present in
+both wins from the primary dir. Launch one of those custom workflows
+directly — this posts the saved graph straight to ComfyUI's own `/prompt`
+endpoint, independent of the OpenAI-shaped generations route above:
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/workflows/my-workflow/launch
+```
+
+Responds **202** with `{"status": "queued", "prompt_id": "..."}`, or
+**404** (`comfyui.workflow_not_found`) if no `<name>.json` exists in either
+directory.
+
 ## See also
 
 - [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
-- [Configure](/docs/guides/configure) — set `[image]` slot defaults (`default_size`, `default_steps`, `idle_restore_minutes`).
+- [Configure](/docs/guides/configure) — set `[image]` slot defaults (`default_size`, `default_steps`, `idle_restore_minutes` — the latter is now hot-reloadable, no `hal0-api` restart needed).
 - [Observe the system](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.
+- [Operate: services](/docs/operate/services) — restart the ComfyUI container, view its logs, and advertise it over mDNS from the Services page.

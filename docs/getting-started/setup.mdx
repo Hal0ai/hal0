@@ -1,6 +1,6 @@
 ---
 title: First-run setup
-description: Run the hal0 setup TUI — a terminal wizard that picks a hardware-anchored tier, configures model storage, selects extensions, and provisions your first slots.
+description: Run the hal0 setup TUI — a terminal wizard that picks hardware-fit models, configures model storage, selects extensions, and provisions your first slots.
 sidebar:
   order: 20
 ---
@@ -9,8 +9,8 @@ import { Steps, Aside, LinkCard } from '@astrojs/starlight/components';
 
 First-run setup is a **terminal TUI**: `hal0 setup`. It detects your hardware,
 picks a coherent set of slots, models, and extensions, and provisions them —
-no browser required. hal0 ships with no default model stack by design; setup is
-where you choose one (or skip and configure manually later).
+no browser required. hal0 ships with no models pre-loaded by design; setup is
+where you pick your first ones (or skip and configure manually later).
 
 ```sh
 hal0 setup
@@ -44,23 +44,26 @@ over an always-on context pane (detected RAM, GPU, NPU) on the right. It walks:
    | **Hermes** | agent (conversational, with memory) | on |
    | **Pi** | agent (coding) | off |
 
-3. **Main model** — the chat model for the `chat` slot, anchored to a
-   hardware-fit tier (see below).
+3. **Main model** — the chat model for the `chat` slot, picked from a
+   short list of curated suggestions ranked to fit your detected RAM (see
+   below).
 
 4. **Agent model** — the model backing the `coder` slot used by agent/coding
-   extensions (Hermes' coding tools, Pi).
+   extensions (Hermes' coding tools, Pi), from the same kind of ranked list,
+   biased toward coder-tagged picks.
 
-5. **NPU** — when an AMD XDNA NPU + FastFlowLM are present, enable the NPU trio
-   (chat + STT + embed passengers on one `flm serve`).
+5. **NPU** — when an AMD XDNA NPU + FastFlowLM are present, a yes/no prompt
+   records whether to opt in to NPU inference for this install.
 
 </Steps>
 
 <Aside type="note">
 The Main and Agent model steps provision dedicated `chat` and `coder` slots
-(distinct from the always-seeded `agent`/`utility` anchor roles — see
-[Slots](/docs/concepts/slots)). hal0's live-resolve virtuals still route
-correctly on a freshly-set-up box: `hal0/agent` falls back to a `chat`-named
-slot until you rename it or assign a model to `agent` directly.
+(distinct from the `agent`/`utility` anchor roles the dispatcher and eviction
+logic pin by default — see [Slots](/docs/concepts/slots)). hal0's live-resolve
+virtuals still route correctly on a freshly-set-up box: `hal0/agent` falls
+back to a `chat`-named slot until you rename it or assign a model to `agent`
+directly.
 </Aside>
 
 Setup then applies your selection — in-process when run at install time, or via
@@ -68,22 +71,26 @@ the running API (`POST /api/install/apply-selections`) when the daemon is up —
 creating the slot containers in `OFFLINE` and seeding background model pulls. It
 writes the first-run sentinel on completion.
 
-## Hardware-anchored tiers
+## Model suggestions
 
-The main-model step is anchored to five bundle tiers; the highest that fits
-your detected memory is recommended, and tiers that exceed your pool are
-flagged.
+The Main and Agent model steps each show up to three curated picks —
+largest-that-fits-your-RAM first, with one starred as recommended — filtered
+to hal0's curated model catalogue (so anything you pick already validates
+against the registry; nothing is invented on the fly):
 
-| Tier | Fits |
+| Column | Shows |
 |---|---|
-| **hal0-Lite** | 16 GB+ — a small chat model only |
-| **hal0-Default** | 32 GB+ — chat + embed + voice (STT/TTS) |
-| **hal0-Pro** | 64 GB+ — adds a coder model, rerank, and image generation |
-| **hal0-Max** | 100 GB+ Strix Halo — larger chat/coder models, same voice/embed/rerank/image set as Pro |
-| **LMX-Omni-52B-Halo** | 100 GB+ — AMD-curated, vendor-blessed Strix Halo bundle |
+| **Model** | Display name of the curated pick |
+| **Size** | On-disk size in GB |
+| **Ctx** | Native context length |
+| **Backend** | The runtime profile it launches with (e.g. `rocm-dnse`, `vulkan`, `cpu-llm`) |
 
-The NPU trio (step 5) is offered independently of tier whenever AMD XDNA +
-FastFlowLM hardware is detected, regardless of which tier you pick.
+The Agent model step ranks coder-tagged models first, falling back to
+general chat picks if none fit — the `coder` slot should never come up
+empty just because no dedicated coding model fits your RAM.
+
+The NPU step (step 5) is offered independently of these suggestions,
+whenever AMD XDNA + FastFlowLM hardware is detected.
 
 <Aside type="tip" title="GPU-less hosts">
 On a box with no detected GPU, the `cpu` device now defaults to the `cpu-llm`

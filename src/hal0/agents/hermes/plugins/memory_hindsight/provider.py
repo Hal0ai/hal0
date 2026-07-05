@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover — exercised inside Hermes venv only
         def get_tool_schemas(self) -> list[dict[str, Any]]: ...
 
 
-from ._client import Hal0MemoryClient, Hal0MemoryClientError
+from ._client import DEFAULT_AGENT_ID, Hal0MemoryClient, Hal0MemoryClientError
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
     # ── ABC: prompt + recall ───────────────────────────────────────────
 
     def system_prompt_block(self) -> str:
-        agent_id = self._client.agent_id if self._client else "hermes-agent"
+        agent_id = self._client.agent_id if self._client else DEFAULT_AGENT_ID
         return (
             "You have a durable memory store at hal0-memory "
             f"(private:{agent_id} namespace, resolved server-side). "

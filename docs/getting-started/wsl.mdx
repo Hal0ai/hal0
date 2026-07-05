@@ -1,0 +1,115 @@
+---
+title: Quick start — WSL2 (experimental)
+description: Running hal0 under WSL2 on Windows — what works, what doesn't, enabling systemd, and the accelerator limits (no ROCm, no NPU) you should expect.
+sidebar:
+  order: 13
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="Experimental and unsupported">
+Windows is **out of scope for hal0 v1**. hal0 can *detect* that it is
+running under WSL2, but nothing in the installer, pre-flight, or doctor
+accommodates or works around WSL's limitations. Expect **CPU-only**
+inference and a fair amount of manual setup. Use this path for
+experimentation only — for real hardware acceleration run hal0 on
+[bare-metal Ubuntu](/docs/getting-started/baremetal-ubuntu/) or in a
+[Proxmox LXC](/docs/getting-started/proxmox-lxc/).
+</Aside>
+
+## What to expect
+
+WSL2 runs a real Linux kernel, so the hal0 control plane, podman, and CPU
+inference can work — but the accelerator story does not translate:
+
+| Capability | Under WSL2 |
+|---|---|
+| **CPU inference** | Works (via the `cpu-llm` profile). |
+| **systemd** | Required by hal0, but **off by default** in WSL — you must enable it (below) or pre-flight fails. |
+| **ROCm** | Unavailable — WSL2 exposes no `/dev/kfd`. |
+| **Vulkan (iGPU)** | WSL2 presents the GPU through Microsoft's `/dev/dxg`, not the native `/dev/dri/renderD128` + `/dev/kfd` nodes hal0's slots expect. Untested; do not rely on it. |
+| **XDNA NPU / FastFlowLM** | Unavailable — no `/dev/accel/accel0` passthrough exists under WSL. |
+
+In practice, plan for a CPU-only appliance.
+
+## 1. Enable systemd
+
+hal0's pre-flight fails hard if `systemctl` is not on `PATH`, and WSL2 does
+not run systemd unless you opt in. Add this to `/etc/wsl.conf` inside your
+distro (requires WSL ≥ 0.67.6):
+
+```ini
+# /etc/wsl.conf
+[boot]
+systemd=true
+```
+
+Then restart the distro from Windows (PowerShell):
+
+```powershell
+wsl --shutdown
+```
+
+Reopen the distro and confirm systemd is up:
+
+```sh
+systemctl is-system-running   # "running" or "degraded" is fine; a hard error is not
+```
+
+## 2. Install prerequisites
+
+```sh
+sudo apt-get update && sudo apt-get install -y python3-venv python3-pip
+```
+
+hal0 needs Python 3.11–3.14 (Ubuntu 24.04 under WSL ships 3.12), the venv
+module, and a container runtime (the installer auto-installs podman).
+
+## 3. Install hal0
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+The bootstrap and installer run exactly as on bare metal — verify the
+tarball, install podman, build the venv, write systemd units, and start
+`hal0-api` on port `8080`. Because no GPU/NPU nodes are available, the
+hardware probe falls back to CPU and the `cpu` device is seeded with the
+`cpu-llm` chat profile, so you still get a working primary chat slot.
+
+<Aside type="note" title="Ports and reachability">
+`hal0-api` binds `0.0.0.0:8080` and OpenWebUI `:3001`. From Windows,
+`http://localhost:8080` is usually forwarded automatically by WSL2's
+localhost proxy. If not, use the distro's IP from `ip addr`.
+</Aside>
+
+## 4. Verify
+
+```sh
+hal0 status
+hal0 doctor
+```
+
+If `hal0 doctor` reports a systemd failure, re-check step 1 — that is the
+most common WSL stumbling block. GPU/NPU checks will show nothing, which
+is expected on this platform.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Ubuntu (bare metal)"
+    href="/docs/getting-started/baremetal-ubuntu/"
+    description="The supported path — full iGPU + NPU acceleration."
+  />
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="Pull a CPU-friendly model and assign it to a slot."
+  />
+  <LinkCard
+    title="Choose models"
+    href="/docs/guides/choose-models/"
+    description="Pick models that fit a CPU-only footprint."
+  />
+</CardGrid>

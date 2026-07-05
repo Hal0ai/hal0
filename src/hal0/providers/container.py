@@ -14,7 +14,12 @@ Container lifecycle → systemd template unit ``hal0-slot@<name>.service``:
 
 The slot's port is loopback-published (``-p 127.0.0.1:<port>:<port>``) so
 the dispatcher can proxy it via a ``kind="remote"`` upstream entry without
-exposing it on the LAN.
+exposing it on the LAN.  The publish host is configurable via
+``[slots].publish_host`` (``SlotsConfig.publish_host``) — an operator can set
+it to ``0.0.0.0`` to reach raw slot ports directly over the LAN
+(``http://<host>.local:<port>``); the loopback default is retained for every
+install that doesn't opt in.  ``load_sync`` reads the live value and passes it
+to :func:`_render_unit_from_plan`; the scalar shims keep the loopback default.
 
 Mount design (IDENTICAL path, design doc §2 gotcha):
   /mnt/ai-models → /mnt/ai-models:ro
@@ -50,7 +55,7 @@ from typing import Any
 import httpx
 
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
-from hal0.config.schema import resolve_chat_template, resolve_profile_flags
+from hal0.config.schema import family_flags, resolve_chat_template, resolve_profile_flags
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
@@ -158,6 +163,25 @@ def _effective_mtp(
     return profile_opts_in and eligible
 
 
+def _effective_parallel(slot_cfg: Mapping[str, Any]) -> int | None:
+    """Resolve the slot's ``--parallel`` (sequence-slot) override, or None.
+
+    A slot's ``parallel`` field carries continuous-batching intent (concurrent
+    requests share the once-loaded weights instead of serializing through one
+    sequence). ``None`` / absent / <1 means "inherit the profile flags" (today
+    every seed profile pins ``--parallel 1``); a value ≥1 is emitted as a slot
+    override that beats the profile but loses to hand-authored ``extra_args``.
+    """
+    raw = slot_cfg.get("parallel")
+    if raw is None:
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 1 else None
+
+
 log = logging.getLogger(__name__)
 
 # Path to the hal0-slot@ base template unit (installed by the package).
@@ -190,6 +214,24 @@ def _container_runtime() -> str:
     raise RuntimeError(
         "no container runtime found; install podman or docker or set HAL0_CONTAINER_RUNTIME"
     )
+
+
+def _slot_publish_host() -> str:
+    """Live ``[slots].publish_host`` — the address slot ports publish on.
+
+    Fail-soft to the loopback default: a malformed/unreadable hal0.toml must
+    never widen the bind (fail-open to 0.0.0.0) nor block a slot from
+    starting. Read fresh each render so a Settings change lands on the next
+    slot (re)start without an api process bounce.
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        host = (load_hal0_config().slots.publish_host or "").strip()
+        return host or "127.0.0.1"
+    except Exception:
+        log.warning("container.publish_host_load_failed", exc_info=True)
+        return "127.0.0.1"
 
 
 # Health-check tuning: poll GET /health on the slot port.
@@ -256,6 +298,7 @@ def _render_unit_from_plan(
     plan: RuntimeLaunchPlan,
     *,
     runtime_bin: str | None = None,
+    publish_host: str = "127.0.0.1",
 ) -> str:
     """Render a complete self-contained systemd unit from a launch plan.
 
@@ -274,6 +317,11 @@ def _render_unit_from_plan(
         runtime_bin: Override the container runtime binary.  Defaults to
                      :func:`_container_runtime`.  Pass explicitly in tests to
                      avoid requiring podman/docker in the test environment.
+        publish_host: Host address the slot port is published on
+                     (``--publish=<host>:<port>:<port>``).  Defaults to
+                     ``127.0.0.1`` (loopback-only); ``load_sync`` overrides it
+                     with the live ``[slots].publish_host`` so an operator can
+                     opt into ``0.0.0.0`` (LAN-exposed) or a specific address.
     """
     runtime = runtime_bin or _container_runtime()
     container_name = f"hal0-slot-{slot_name}"
@@ -315,11 +363,13 @@ def _render_unit_from_plan(
         argv.append(f"--volume={Mount.coerce(mount).render()}")
     for k, v in plan.env.items():
         argv.append(f"--env={k}={v}")
-    # Loopback publish derived from plan.port (declarative — plans no longer
-    # hand-roll "-p ..." in extra_args).  Skipped under host networking where
+    # Publish derived from plan.port (declarative — plans no longer
+    # hand-roll "-p ..." in extra_args).  ``publish_host`` defaults to
+    # loopback (127.0.0.1); an operator can widen it to 0.0.0.0 / a specific
+    # address via [slots].publish_host.  Skipped under host networking where
     # port publishing is meaningless.
     if plan.port and plan.network_mode != "host":
-        argv.append(f"--publish=127.0.0.1:{plan.port}:{plan.port}")
+        argv.append(f"--publish={publish_host}:{plan.port}:{plan.port}")
     # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK that
     # probes a hardcoded port, but a slot runs its server on its own port — so
     # the image check fails forever and `podman ps` shows a permanent
@@ -403,6 +453,7 @@ def _llama_argv_segments(
     chat_template_path: str | None = None,
     mmproj: str | None = None,
     slot_n_gpu_layers: int | None = None,
+    slot_parallel: int | None = None,
     extra_args: str | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Build the ordered, labelled llama-server argv segments (SINGLE SOURCE).
@@ -452,12 +503,21 @@ def _llama_argv_segments(
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
 
-    # Slot-level [model].n_gpu_layers (schema default -1 = unset). Emitted just
-    # before extra_args so it beats the model default but a manual -ngl in
-    # extra_args still wins.
+    # Slot-level overrides (schema fields), emitted just before extra_args so
+    # they beat the profile / model defaults but a hand-authored extra_args
+    # still wins. [model].n_gpu_layers (schema default -1 = unset) and the
+    # continuous-batching `parallel` field.
     slot_override_tokens: list[str] = []
     if slot_n_gpu_layers is not None and int(slot_n_gpu_layers) >= 0:
         slot_override_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
+    if slot_parallel is not None and int(slot_parallel) >= 1:
+        slot_override_tokens += ["--parallel", str(int(slot_parallel))]
+        if int(slot_parallel) > 1:
+            # Unified KV so --ctx-size stays a SHARED pool (each request may use
+            # up to the full context) instead of being silently split to ctx/N
+            # per sequence slot — the surprise the resolved-command work exists
+            # to prevent. See the concurrency-batching plan (D2).
+            slot_override_tokens += ["--kv-unified"]
 
     extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
@@ -487,6 +547,7 @@ def _llama_launch_plan(
     mmproj: str | None = None,
     model_defaults: dict[str, Any] | None = None,
     slot_n_gpu_layers: int | None = None,
+    slot_parallel: int | None = None,
     env: dict[str, str] | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
@@ -509,6 +570,7 @@ def _llama_launch_plan(
         chat_template_path=chat_template_path,
         mmproj=mmproj,
         slot_n_gpu_layers=slot_n_gpu_layers,
+        slot_parallel=slot_parallel,
         extra_args=extra_args,
     )
     # resolve_argv over the labelled segments is argv-equivalent to
@@ -662,10 +724,38 @@ def _resolve_llama_scalars(
     it only gates side-effects like the MTP auto-off breadcrumb; the RESOLVED
     VALUES are identical on both paths, preserving launch/preview parity.
     """
-    image, flags_str = _profile_image_and_flags(
-        profile,
-        _effective_mtp(slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch),
+    effective_mtp = _effective_mtp(
+        slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch
     )
+    image, flags_str = _profile_image_and_flags(profile, effective_mtp)
+
+    slot_parallel = _effective_parallel(slot_cfg)
+    if for_launch:
+        if effective_mtp and slot_parallel is not None and slot_parallel > 1:
+            # MTP x continuous batching runs on current llama.cpp master
+            # (parallel drafting merged 2026-05) but is perf-unproven on
+            # gfx1151 and needs a build new enough to allow n_parallel>1 with
+            # draft-mtp. Surface it; don't refuse (the plan's D3, bench-gated).
+            log.info(
+                "mtp.batched_speculation",
+                extra={
+                    "slot": str(slot_cfg.get("name") or ""),
+                    "parallel": slot_parallel,
+                    "hint": "batched slot — MTP speculation gain unverified here; "
+                    "requires a build that allows draft-mtp with --parallel>1",
+                },
+            )
+        workers = slot_cfg.get("workers")
+        if workers is not None and int(workers or 1) != 1:
+            log.warning(
+                "slot.workers_deprecated_inert",
+                extra={
+                    "slot": str(slot_cfg.get("name") or ""),
+                    "workers": workers,
+                    "hint": "the 'workers' field is inert (never emitted to argv); "
+                    "use the 'parallel' field for continuous batching",
+                },
+            )
 
     model_table = slot_cfg.get("model") or {}
     if not isinstance(model_table, dict):
@@ -697,7 +787,21 @@ def _resolve_llama_scalars(
         mmproj = None
 
     defaults = model_info.get("defaults")
-    model_defaults = defaults if isinstance(defaults, dict) else None
+    model_defaults = dict(defaults) if isinstance(defaults, dict) else None
+
+    # Family-architecture overrides (e.g. gemma → f16 KV): the middle layer
+    # between the profile's generic flags and the slot's own [model].defaults.
+    # Prepended INSIDE the model_defaults segment so it beats the profile
+    # (later segment, normalize_argv last-wins) but a per-slot extra_args in
+    # [model].defaults still wins over the family default.
+    fam = family_flags(
+        model_info.get("_model_key"), model_table.get("default"), model_info.get("path")
+    )
+    if fam:
+        if model_defaults is None:
+            model_defaults = {}
+        existing = model_defaults.get("extra_args") or ""
+        model_defaults["extra_args"] = f"{fam} {existing}".strip()
 
     slot_n_gpu_layers = model_table.get("n_gpu_layers")
 
@@ -722,6 +826,7 @@ def _resolve_llama_scalars(
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
         "slot_n_gpu_layers": slot_n_gpu_layers,
+        "slot_parallel": slot_parallel,
         "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
         # GPU vendor discriminator: the profile's declared backend (rocm /
         # vulkan / cuda / None) — configuration, not host probing.
@@ -838,6 +943,7 @@ class ContainerProvider(Provider):
             mmproj=scalars["mmproj"],
             model_defaults=scalars["model_defaults"],
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+            slot_parallel=scalars["slot_parallel"],
             env=merged_env or None,
         )
 
@@ -1020,8 +1126,45 @@ class ContainerProvider(Provider):
             slot_name,
             plan,
             runtime_bin=_container_runtime(),
+            publish_host=_slot_publish_host(),
         )
         self._write_and_start_unit(slot_name, unit_text)
+
+    def rerender_unit_sync(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
+        """Re-render an EXISTING unit file through current code — without
+        touching the running service.
+
+        The unit bakes the launch argv at load time, so after a hal0 update the
+        on-disk ExecStart still carries pre-update flags: a bare ``systemctl
+        restart`` (or a reboot!) re-runs stale config. This rewrites the unit
+        via the same plan path as :meth:`load_sync` but deliberately does NOT
+        enable/restart — serving is never bounced by an update; the new argv
+        applies on the next start from any path. Callers batch one
+        ``daemon_reload`` after a sweep.
+
+        Returns True when the unit file changed. No-ops (False) when the slot
+        has no unit on disk (never rendered → nothing stale) or the fresh
+        render is byte-identical.
+        """
+        slot_name: str = str(slot_cfg.get("name", ""))
+        unit_path = self._unit_path(slot_name)
+        if not unit_path.exists():
+            return False
+        provider = _spec_provider_for(slot_cfg) or self
+        plan = provider.container_spec(slot_cfg, model_info)
+        unit_text = _render_unit_from_plan(slot_name, plan, runtime_bin=_container_runtime())
+        if unit_path.read_text() == unit_text:
+            return False
+        unit_path.write_text(unit_text)
+        log.info(
+            "container.unit_rerendered",
+            extra={"slot": slot_name, "unit_path": str(unit_path)},
+        )
+        return True
+
+    def daemon_reload(self) -> None:
+        """``systemctl daemon-reload`` — public for the unit-rerender sweep."""
+        self._run("systemctl", "daemon-reload")
 
     def expected_argv(
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
@@ -1332,6 +1475,7 @@ def _resolve_slot_argv(
         chat_template_path=scalars["chat_template_path"],
         mmproj=scalars["mmproj"],
         slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+        slot_parallel=scalars["slot_parallel"],
         extra_args=scalars["extra_args"],
     )
     return str(scalars["image"]), resolve_argv(segments)

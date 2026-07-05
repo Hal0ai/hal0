@@ -32,6 +32,7 @@ from hal0.cli.agent_commands import app as agent_app
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
+from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
@@ -66,6 +67,9 @@ app.add_typer(capabilities_app, name="capabilities")
 app.add_typer(agent_app, name="agent")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(registry_app, name="registry")
+# Issue #504 — ``hal0 mcp {list,status,install,uninstall,restart,catalog}``
+# CLI over /api/mcp/*. Mounted after registry before setup.
+app.add_typer(mcp_app, name="mcp")
 app.add_typer(setup_app, name="setup", help="First-run setup")
 
 

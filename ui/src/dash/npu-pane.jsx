@@ -64,9 +64,9 @@ const isNpuSlot = (s) => s.device_class === 'npu' || devKind(s.device) === 'npu'
 // usually shows just the first. The hue fills the slot's claimed columns in the
 // grid AND its mini column strip; glow/line drive the active-tile halo.
 const HUES = [
-  { hue: 'var(--npu-s0)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)' },
-  { hue: 'var(--npu-s1)', glow: 'var(--npu-s1-glow)', line: 'var(--npu-s1-line)', dim: 'var(--npu-s1-dim)' },
-  { hue: 'var(--npu-s2)', glow: 'var(--npu-s2-glow)', line: 'var(--npu-s2-line)', dim: 'var(--npu-s2-dim)' },
+  { hue: 'var(--npu-s0)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
+  { hue: 'var(--npu-s1)', glow: 'var(--npu-s1-glow)', line: 'var(--npu-s1-line)', dim: 'var(--npu-s1-dim)', fg: 'var(--npu-s1-fg)' },
+  { hue: 'var(--npu-s2)', glow: 'var(--npu-s2-glow)', line: 'var(--npu-s2-line)', dim: 'var(--npu-s2-dim)', fg: 'var(--npu-s2-fg)' },
 ]
 
 // honour reduced-motion → frozen snapshot (no breathing, no glow pulse)
@@ -277,7 +277,7 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
   const gb = occ && typeof occ.gb === 'number' ? round1(occ.gb) : typeof m.mem === 'number' ? round1(m.mem) : null
   const model = String(slot.model_id || slot.model || occ?.model || '').replace(/-FLM$/, '')
   return (
-    <div className={'cslot' + (serving ? '' : ' dim')} style={{ '--slot-hue': hue.hue }}>
+    <div className={'cslot' + (serving ? '' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
       <div className="cslot-top">
         <span className={'ldot ' + (serving ? 'serving' : ind.cls === 'error' ? 'offline' : 'ready')} />
         <span className="nm">{slot.name}</span>
@@ -384,8 +384,12 @@ export function NpuOccupancyCard({ slots }) {
   }
 
   const dutySub = colsAvailable
-    ? `${colsUsed}/${colsTotal} columns claimed`
+    ? `${colsUsed}/${colsTotal} columns`
     : 'column probe unavailable'
+
+  // slots-live count = slots the occupancy probe reports as actually
+  // holding columns (a slot with an empty cols[] is resident but not live).
+  const liveCount = occSlots.filter((s) => (s.cols || []).length > 0).length
 
   return (
     <div className="npu-card">
@@ -402,7 +406,12 @@ export function NpuOccupancyCard({ slots }) {
           <span className="grow" />
           <span className="meta">
             <b>{colsUsed * NPU_ROWS}</b>/{tiles} tiles claimed · <b>{NPU_ROWS}×{NPU_COLS}</b> AIE-ML
-            {occ.single_tenant !== false && <span className="st"> · single-tenant</span>}
+            {/* telemetry-header handoff: the meta leads with how many slots
+                actually hold columns; single-tenant only shows when nothing
+                is live (once slots claim columns the free card carries it) */}
+            {liveCount > 0
+              ? <span className="st"> · {liveCount} slot{liveCount !== 1 ? 's' : ''} live</span>
+              : occ.single_tenant !== false && <span className="st"> · single-tenant</span>}
           </span>
         </div>
         <div className="wcard-b">
@@ -442,16 +451,22 @@ export function NpuOccupancyCard({ slots }) {
                   act={act}
                 />
               ))}
-              {colsUsed < colsTotal && (
-                <div className="cslot free">
-                  <div className="cslot-top">
-                    <span className="sw free" />
-                    <span className="nm">free</span>
-                    <span className="grow" />
-                    <span className="md">{colsTotal - colsUsed} columns · idle</span>
-                  </div>
+              {/* third owner hue stays reserved — the dashed free card
+                  renders even at 0 free columns ("array full") so the
+                  single-tenant ceiling stays visible (handoff screen 2) */}
+              <div className="cslot free">
+                <div className="cslot-top">
+                  <span className="sw free" />
+                  <span className="nm">free</span>
+                  <span className="grow" />
+                  <span className="md">
+                    {colsTotal - colsUsed} columns ·{' '}
+                    {colsUsed >= colsTotal && occ.single_tenant !== false
+                      ? 'single-tenant array full'
+                      : 'idle'}
+                  </span>
                 </div>
-              )}
+              </div>
             </div>
           </div>
         </div>

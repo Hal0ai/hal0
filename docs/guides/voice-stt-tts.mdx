@@ -87,10 +87,13 @@ directory for the MIOpen kernel DB and HuggingFace codec/tokenizer cache.
 Enabling `voice.stt` with `backend=npu` does **not** spawn a standalone
 process. It drives the **FLM trio** — one `flm serve` anchor process serving
 chat, transcription (whisper-v3:turbo), and embeddings together. The
-orchestrator toggles the anchor's `--asr 1` flag and writes a
-`type=transcription` slot record for dispatch gating; the live anchor is
-reloaded so the change takes effect immediately. NPU transcription requires the
-FLM chat anchor to be loaded.
+orchestrator toggles the anchor's `[npu].asr` flag (which renders as `--asr 1`
+on the FLM command line) and writes a `type=transcription` slot record for
+dispatch gating. The anchor is **not** auto-restarted — the response carries
+`pending_reload: true`, and the change only takes effect once you reload the
+FLM anchor yourself (Settings → NPU's restart control, or
+`hal0 slot restart <anchor-slot>`). NPU transcription requires the FLM chat
+anchor to be loaded.
 
 ## Transcribe audio (speech to text)
 

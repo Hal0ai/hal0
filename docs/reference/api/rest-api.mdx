@@ -29,7 +29,7 @@ ADR-0012 and are your reverse proxy's job. The OpenAPI spec is served live at
 | `/api/hf`               | Hugging Face Hub discovery (search proxy).                          |
 | `/api/hardware`, `/api/stats/hardware` | Hardware probe + live hardware stats.                |
 | `/api/stats/throughput` | Bucketed throughput history.                                        |
-| `/api/power`            | Power / GPU stats.                                                  |
+| `/api/stats/power`      | Power / GPU stats.                                                  |
 | `/api/services`         | Companion-service registry — full detail, lifecycle actions, mDNS discovery/advertisement. See [Services](/docs/operate/services). |
 | `/api/services/health`  | Health of dependent services.                                       |
 | `/api/user/dashboard-layout` | Persisted dashboard layout (file-backed).                      |
@@ -48,6 +48,7 @@ ADR-0012 and are your reverse proxy's job. The OpenAPI spec is served live at
 | `/api/config`           | Dashboard URLs discovery (`/api/config/urls`) + models list (public). |
 | `/api/meta`             | Canonical device/backend/capability taxonomy (`/api/meta/enums`), cached. |
 | `/api/profiles`         | Profile catalog (seeds + custom) — CRUD plus portable export/import. |
+| `/api/stacks`           | Stack catalog — CRUD, dry-run/commit apply (config + lifecycle convergence), portable export/import, snapshot-from-live. See [Stacks](/docs/guides/manage-slots#editing-multiple-slots-at-once-stacks). |
 | `/api/chat-templates`   | Chat-template catalog — bundled + operator-added.                   |
 | `/api/events`           | Dashboard footer event stream (SSE).                               |
 | `/api/activity`         | Durable activity / audit surface (config changes + transitions).    |
@@ -104,11 +105,28 @@ See [Services](/docs/operate/services) for the operator-facing guide (registry, 
   drift on a `2xx` response now surfaces as a loud `502 memory.engine_shape`
   instead of a silently-blank console panel.
 
-### `/api/slots` — resolved argv provenance
+### `/api/slots` — resolved argv provenance, voices proxy
 
 | Method & path | Purpose |
 |---|---|
 | `GET /api/slots/{name}/resolved` | The deduped, resolved llama-server argv plus per-flag provenance — which segment (`base` / `profile` / `model_defaults` / `chat_template` / `mmproj` / `slot_overrides` / `extra_args`) set each surviving flag's final value, and how many duplicate flags were collapsed (`removed`). Non-llama slots (no profile) return `{"argv": null, "provenance": [], "removed": 0}` rather than an error. |
+| `GET /api/slots/{name}/voices` | Proxies the slot's own `GET /v1/audio/voices` (Kokoro / qwen3tts containers expose it) so the dashboard's Voice settings default-voice picker lists whatever the running engine actually loaded, not a hardcoded pack. Fail-soft: a cold/unreachable slot or an engine without the route returns `{"name","voices":[],"source":"offline"}` rather than an error; a live slot returns `{"name","voices":[...],"source":"live"}`. 2s timeout. Unknown slot name still 404s. |
+
+### `/api/stacks`
+
+A **stack** is a named, portable bundle of slot assignments + embedded profiles + embedded model metadata (`[stack.<slug>]` in `stacks.toml`) — the declarative alternative to editing slots one at a time. See [Stacks](/docs/concepts/stacks) for the concept (row fields, plan/converge, drift) and [Manage slots](/docs/guides/manage-slots#editing-multiple-slots-at-once-stacks) for the operator-facing guide; there is no `hal0 stack` CLI command, this router is the only way to manage them.
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/stacks` | List every stack, with an `active` flag and drift status (`clean`/`degraded`/`modified`/`none`) for each. |
+| `POST /api/stacks` | Create a stack (hand-built body, or from a `snapshot` payload). `201`. |
+| `GET /api/stacks/{slug}` | Stack detail, with `active` + drift status. |
+| `PUT /api/stacks/{slug}` | Replace a custom stack. Seed stacks (`saber`, `forge`, `pi`) are immutable — clone under a new name instead. |
+| `DELETE /api/stacks/{slug}` | Delete a custom stack. `204`. |
+| `POST /api/stacks/{slug}/apply?dry_run=` | `dry_run=true` returns a diff preview; otherwise commits the config (guarded through the same device/profile-coherence and NPU-exclusivity checks every slot writer uses) and converges the live slot set — loads/swaps slots named in the stack, applies enabled capability children (embed/rerank/stt/tts), and **unloads every dispatchable slot not mentioned in the stack**. |
+| `POST /api/stacks/{slug}/export` | Serialize a stack into a portable `.hal0stack.json` envelope (no secrets, no host paths), stamped with a content checksum. |
+| `POST /api/stacks/import` | Import a stack envelope. `{dry_run?, slug?, envelope}` — a local profile always wins on a name collision; every referenced model is classified `present`/`pullable`/`unresolvable`. |
+| `POST /api/stacks/snapshot` | Build a stack from the current live slot + capability config. |
 
 ## Mounted MCP servers
 
@@ -127,3 +145,5 @@ See [MCP tools](/docs/reference/mcp-tools) for the per-tool catalog and gating.
 - [MCP tools](/docs/reference/mcp-tools) — what each MCP tool forwards to here.
 - [Environment variables](/docs/reference/env-vars) — `HAL0_PORT` and the rest.
 - [Services](/docs/operate/services) — the operator guide to the companion-service registry, dashboard page, and mDNS discovery behind `/api/services`.
+- [Manage slots](/docs/guides/manage-slots) — editing individual slots and the **Stacks** view behind `/api/stacks`.
+- [Stacks](/docs/concepts/stacks) — the concept behind `/api/stacks`: plan/converge, drift, and portable export/import.

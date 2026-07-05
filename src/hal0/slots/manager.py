@@ -1253,6 +1253,19 @@ class SlotManager:
                 "slot.preferred_profile_swap_failed",
                 extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
             )
+        # MTP defuse: a forced mtp=true pointing at a model with no MTP heads
+        # makes llama-server exit at load ("model doesn't contain MTP layers"),
+        # so a swap onto an ineligible model clears exactly that override
+        # (→ AUTO). Force-off and force-on-for-eligible survive swaps; an
+        # unresolvable model is left alone (can't judge). Soft-fails like the
+        # preferred-profile hook — a write failure must not block the swap.
+        try:
+            await self._defuse_stale_mtp_on_swap(slot_name, new_model_id)
+        except Exception as exc:
+            log.warning(
+                "slot.mtp_defuse_swap_failed",
+                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
+            )
         await self.unload(slot_name)
         slot = await self.load(slot_name, model_id=new_model_id)
         # Refresh Hermes's live-context files so a model swap is visible to
@@ -2263,6 +2276,52 @@ class SlotManager:
         log.info(
             "slot.preferred_profile_applied",
             extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
+        )
+        return True
+
+    async def _defuse_stale_mtp_on_swap(self, slot_name: str, model_id: str) -> bool:
+        """Clear a forced ``mtp = true`` when swapping onto a non-MTP model.
+
+        MTP is a model property, and a force-on pointing at a model with no MTP
+        heads makes llama-server exit at load ("context type MTP requested but
+        model doesn't contain MTP layers") — the override would down the slot
+        the moment the swapped container starts. Clears the override to AUTO
+        for exactly that combination; a force-off, a force-on for an eligible
+        model, and an unresolvable model (can't judge) all pass through
+        untouched. Returns True when the override was cleared.
+        """
+        from hal0.model_meta import model_is_mtp_eligible
+
+        with slot_write_lock():
+            cfg = await self._load_slot_config(slot_name)
+            cfg_dict = _cfg_to_dict(cfg)
+            if cfg_dict.get("mtp") is not True:
+                return False
+            try:
+                from hal0.registry.store import ModelRegistry
+
+                model = ModelRegistry().get(model_id)
+                info = model.model_dump() if hasattr(model, "model_dump") else dict(model)
+            except Exception:
+                return False  # unresolvable — leave the escape hatch alone
+            info.setdefault("_model_key", model_id)
+            if model_is_mtp_eligible(info):
+                return False
+            cfg_dict = dict(cfg_dict)
+            cfg_dict.pop("mtp", None)  # absent = AUTO (TOML has no null)
+            write_slot_toml(self._config_file(slot_name), cfg_dict)
+            self._invalidate_cfg_cache(slot_name)
+        log.warning(
+            "slot.mtp_force_on_cleared_on_swap",
+            extra={
+                "slot": slot_name,
+                "model_id": model_id,
+                "note": (
+                    "forced MTP would crash llama-server for this model (no MTP "
+                    "heads); override cleared to AUTO. Tag the model 'mtp' or "
+                    "re-force in the drawer if it really ships MTP layers."
+                ),
+            },
         )
         return True
 

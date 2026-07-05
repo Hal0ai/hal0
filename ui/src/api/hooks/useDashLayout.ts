@@ -1,156 +1,130 @@
-// hal0 dashboard — DashLayout hook + card registry (W3)
+// hal0 dashboard — DashLayout hook + fixed-band cell registry (v3).
 //
-// Implements §4 of CONTRACTS.md:
-//   - DashLayout type (v:2, order, enabled, spans, pinned)
-//   - CARD_REGISTRY table
-//   - reconcile(layout, slots) pure function
-//   - useDashLayout() — GET with fail-soft fallback to DEFAULT_LAYOUT
-//   - useSaveDashLayout() — PUT mutation → 204
+// Dashboard-redesign (design_handoff_dashboard_redesign): the free-form
+// 12-col grid (v:2 — order/enabled/spans/pinned, drag-reorder, resize,
+// card library) is replaced by a FIXED-BAND layout with swap-in-place
+// customization. Rows and cell widths are defined by the system; the user
+// can only (a) swap which widget occupies a swappable cell, from a curated
+// per-cell whitelist, and (b) toggle the quick-actions strip.
 //
-// FAIL-SOFT CONTRACT: if the backend endpoint 404s, returns empty {}, or
-// errors for any reason, we silently fall back to DEFAULT_LAYOUT. The whole
-// dashboard must never be blocked on a missing endpoint.
+// Schema:  { v: 3, cells: Record<cellId, widgetId>, quickActions: boolean }
+//
+// FAIL-SOFT CONTRACT (unchanged): if the backend endpoint 404s, returns
+// empty {}, an old v:2 payload, or errors for any reason, we silently fall
+// back to DEFAULT_LAYOUT. The dashboard must never block on the endpoint.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
-import type { Slot } from './useSlots'
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-export const GRID_COLS = 12
-export const ROW_UNIT = 8
-export const GRID_GAP = 16
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type LayoutKey = string  // a CardId or "pin:<slotName>"
-export type CardId = string
+export type CellId = string
+export type WidgetId = string
 
 export interface DashLayout {
-  v: 2
-  order: LayoutKey[]
-  enabled: Record<CardId, boolean>
-  spans: Record<LayoutKey, number>
-  pinned: string[]
+  v: 3
+  cells: Record<CellId, WidgetId>
+  quickActions: boolean
 }
 
-// ─── Card registry ────────────────────────────────────────────────────────────
-// Single source of truth for all cards: id, display name, default span,
-// min span, locked (cannot be disabled), and default-on status.
-// "icon" is an optional string key referencing the product icon set.
+// ─── Widget registry ──────────────────────────────────────────────────────────
+// Display names for everything a cell whitelist can offer. `built` gates the
+// swap picker: unbuilt widgets stay listed in the cell tooltip (design intent)
+// but cannot be selected until they ship.
 
-export interface CardDef {
-  id: CardId
+export interface WidgetDef {
+  id: WidgetId
   name: string
-  icon?: string
-  span: number
-  min: number
-  locked?: boolean
-  defaultOn: boolean
+  built: boolean
 }
 
-export const CARD_REGISTRY: CardDef[] = [
-  { id: 'slots',       name: 'Slots',              icon: 'slots',     span: 12, min: 8,  locked: true,  defaultOn: true  },
-  { id: 'memory',      name: 'Memory',             icon: 'gauge',     span: 8,  min: 4,  locked: false, defaultOn: true  },
-  { id: 'throughput',  name: 'Throughput',         icon: 'bolt',      span: 4,  min: 3,  locked: false, defaultOn: true  },
-  { id: 'quickchat',   name: 'Quick Chat',         icon: 'chat',      span: 6,  min: 4,  locked: false, defaultOn: true  },
-  { id: 'services',    name: 'Services',           icon: 'route',     span: 6,  min: 4,  locked: false, defaultOn: true  },
-  { id: 'utilization', name: 'Utilization',        icon: 'gauge',     span: 4,  min: 3,  locked: false, defaultOn: true  },
-  { id: 'attention',   name: 'Needs Attention',    icon: 'shield',    span: 4,  min: 3,  locked: false, defaultOn: true  },
-  { id: 'slottrack',   name: 'Per-Slot Throughput',icon: 'flow',      span: 4,  min: 3,  locked: false, defaultOn: true  },
-  { id: 'approvals',   name: 'Agent Approvals',    icon: 'shield',    span: 4,  min: 3,  locked: false, defaultOn: false },
-  { id: 'power',       name: 'Power & Thermal',    icon: 'thermo',    span: 4,  min: 3,  locked: false, defaultOn: true  },
-  { id: 'scheduler',   name: 'Scheduler',          icon: 'clock',     span: 4,  min: 3,  locked: false, defaultOn: false },
+export const WIDGET_DEFS: WidgetDef[] = [
+  { id: 'memorybar',   name: 'memory bar',          built: true  },
+  { id: 'memtreemap',  name: 'treemap',             built: false },
+  { id: 'memring',     name: 'ring',                built: false },
+  { id: 'throughput',  name: 'throughput',          built: true  },
+  { id: 'slottrack',   name: 'per-slot throughput', built: true  },
+  { id: 'power',       name: 'power & thermal',     built: true  },
+  { id: 'utilization', name: 'utilization',         built: true  },
+  { id: 'gauges',      name: 'gauges',              built: false },
+  { id: 'requests',    name: 'requests',            built: true  },
+  { id: 'clients',     name: 'clients',             built: false },
+  { id: 'slots',       name: 'slots',               built: true  },
+  { id: 'activity',    name: 'activity feed',       built: true  },
+  { id: 'heatmap',     name: '24h heatmap',         built: false },
+  { id: 'services',    name: 'services',            built: true  },
+  { id: 'quickchat',   name: 'quick chat',          built: true  },
+  { id: 'attention',   name: 'needs attention',     built: true  },
 ]
 
-// Map for fast lookup by id
-export const CARD_REGISTRY_MAP: Readonly<Record<CardId, CardDef>> = Object.fromEntries(
-  CARD_REGISTRY.map(c => [c.id, c])
+export const WIDGET_MAP: Readonly<Record<WidgetId, WidgetDef>> = Object.fromEntries(
+  WIDGET_DEFS.map(w => [w.id, w]),
+)
+
+// ─── Cell registry ────────────────────────────────────────────────────────────
+// One entry per fixed cell, top → bottom / left → right. `accepts` is the
+// swap whitelist (WIDGETS.md); locked cells never swap (slots, attention)
+// or accept only same-family visualizations not yet built (memory hero).
+
+export interface CellDef {
+  id: CellId
+  /** Cell whitelist — what the ⇄ picker offers, in display order. */
+  accepts: WidgetId[]
+  defaultWidget: WidgetId
+  /** Locked cells render no ⇄ affordance at all. */
+  locked?: boolean
+}
+
+export const CELL_DEFS: CellDef[] = [
+  { id: 'memory', accepts: ['memorybar', 'memtreemap', 'memring'], defaultWidget: 'memorybar' },
+  { id: 'a1', accepts: ['throughput', 'slottrack', 'power'], defaultWidget: 'throughput' },
+  { id: 'a2', accepts: ['utilization', 'power', 'gauges'], defaultWidget: 'utilization' },
+  { id: 'a3', accepts: ['requests', 'clients'], defaultWidget: 'requests' },
+  { id: 'slots', accepts: ['slots'], defaultWidget: 'slots', locked: true },
+  { id: 'c1', accepts: ['activity', 'heatmap'], defaultWidget: 'activity' },
+  { id: 'c2', accepts: ['services', 'quickchat'], defaultWidget: 'services' },
+  { id: 'c3', accepts: ['attention'], defaultWidget: 'attention', locked: true },
+]
+
+export const CELL_MAP: Readonly<Record<CellId, CellDef>> = Object.fromEntries(
+  CELL_DEFS.map(c => [c.id, c]),
 )
 
 // ─── Default layout ───────────────────────────────────────────────────────────
-// Built from CARD_REGISTRY: all defaultOn cards in order, default spans, no pins.
 
 function buildDefaultLayout(): DashLayout {
-  const defaultCards = CARD_REGISTRY.filter(c => c.defaultOn)
   return {
-    v: 2,
-    order: defaultCards.map(c => c.id),
-    enabled: Object.fromEntries(CARD_REGISTRY.map(c => [c.id, c.defaultOn])),
-    spans: Object.fromEntries(CARD_REGISTRY.map(c => [c.id, c.span])),
-    pinned: [],
+    v: 3,
+    cells: Object.fromEntries(CELL_DEFS.map(c => [c.id, c.defaultWidget])),
+    quickActions: true,
   }
 }
 
 export const DEFAULT_LAYOUT: DashLayout = buildDefaultLayout()
 
 // ─── reconcile ────────────────────────────────────────────────────────────────
-// Pure function — run on load, both FE and BE.
-// Rules (per CONTRACTS §4):
-//   1. Every name in layout.pinned has a "pin:<name>" key in order (insert
-//      right after "slots", after existing pin: keys).
-//   2. Drop "pin:<name>" keys in order for slots that no longer exist in the
-//      live slot list.
-//   3. Clamp spans to [card.min, 12]; for pin cards use min=3, max=12.
-//   4. Ensure locked cards are always enabled.
+// Pure function, run on load. Guarantees every cell exists and holds a
+// widget from its own whitelist that is actually built — an unknown /
+// unbuilt / out-of-whitelist assignment falls back to the cell default, so
+// a stale saved layout can never blank a band.
 
-export function reconcile(layout: DashLayout, slots: Slot[] | null | undefined): DashLayout {
-  const slotNames = new Set((slots ?? []).map(s => s.name))
-
-  // 1. Clean up pinned: remove entries for slots that no longer exist
-  const pinned = (layout.pinned ?? []).filter(name => slotNames.has(name))
-
-  // 2. Rebuild order: keep non-pin keys, re-insert pin:<name> after "slots"
-  const existingNonPin = (layout.order ?? []).filter(k => !k.startsWith('pin:'))
-  const newOrder: LayoutKey[] = []
-
-  for (const key of existingNonPin) {
-    newOrder.push(key)
-    // After "slots" entry, insert all currently-pinned slot keys
-    if (key === 'slots') {
-      for (const name of pinned) {
-        newOrder.push(`pin:${name}`)
-      }
-    }
+export function reconcile(layout: Partial<DashLayout> | null | undefined): DashLayout {
+  const rawCells = (layout && typeof layout.cells === 'object' && layout.cells) || {}
+  const cells: Record<CellId, WidgetId> = {}
+  for (const cell of CELL_DEFS) {
+    const assigned = rawCells[cell.id]
+    const valid =
+      typeof assigned === 'string' &&
+      cell.accepts.includes(assigned) &&
+      WIDGET_MAP[assigned]?.built
+    cells[cell.id] = valid ? assigned : cell.defaultWidget
   }
-
-  // If "slots" wasn't in order at all (shouldn't happen with valid layout),
-  // append pin keys at the front after slots is added
-  const hasSlotsKey = newOrder.some(k => k === 'slots')
-  if (!hasSlotsKey && pinned.length > 0) {
-    // Prepend: slots (locked), then pins
-    newOrder.unshift(...pinned.map(n => `pin:${n}`), 'slots')
+  return {
+    v: 3,
+    cells,
+    quickActions: layout?.quickActions !== false,
   }
-
-  // Ensure "slots" is always present (locked)
-  if (!newOrder.includes('slots')) {
-    newOrder.unshift('slots')
-  }
-
-  // 3. Clamp spans
-  const spans: Record<LayoutKey, number> = {}
-  for (const key of newOrder) {
-    const rawSpan = layout.spans?.[key] ?? 0
-    if (key.startsWith('pin:')) {
-      const pinMin = 3
-      spans[key] = Math.max(pinMin, Math.min(12, rawSpan || pinMin))
-    } else {
-      const def = CARD_REGISTRY_MAP[key]
-      const min = def?.min ?? 3
-      const defaultSpan = def?.span ?? 4
-      spans[key] = Math.max(min, Math.min(12, rawSpan || defaultSpan))
-    }
-  }
-
-  // 4. Ensure enabled reflects locked cards + keep existing enabled state
-  const enabled: Record<CardId, boolean> = { ...(layout.enabled ?? {}) }
-  for (const card of CARD_REGISTRY) {
-    if (card.locked) enabled[card.id] = true
-    if (!(card.id in enabled)) enabled[card.id] = card.defaultOn
-  }
-
-  return { v: 2, order: newOrder, enabled, spans, pinned }
 }
 
 // ─── useDashLayout ────────────────────────────────────────────────────────────
@@ -162,12 +136,14 @@ export function useDashLayout() {
     queryKey: LAYOUT_QUERY_KEY,
     queryFn: async () => {
       try {
-        const raw = await apiGet<DashLayout | Record<string, never>>(ENDPOINTS.dashboardLayout)
-        // Empty object {} means no layout saved yet → use default
-        if (!raw || typeof raw !== 'object' || !('v' in raw)) {
+        const raw = await apiGet<Partial<DashLayout> | Record<string, never>>(
+          ENDPOINTS.dashboardLayout,
+        )
+        // {} (nothing saved) or an old v:2 payload → defaults.
+        if (!raw || typeof raw !== 'object' || (raw as { v?: number }).v !== 3) {
           return DEFAULT_LAYOUT
         }
-        return raw as DashLayout
+        return reconcile(raw as Partial<DashLayout>)
       } catch {
         // 404, network error, or any other failure → fail soft to default
         return DEFAULT_LAYOUT
@@ -187,14 +163,14 @@ export function useSaveDashLayout() {
   return useMutation({
     mutationFn: (layout: DashLayout) =>
       api<void>(ENDPOINTS.dashboardLayout, { method: 'PUT', body: layout as unknown as Record<string, unknown>, raw: true }),
-    onSuccess: (_data, layout) => {
-      // Optimistically update the local cache so the saved state is immediately
-      // reflected without a round-trip re-fetch
+    onMutate: (layout) => {
+      // Optimistically update the local cache — a swap must reflect
+      // immediately even while the PUT is in flight (or 404s).
       qc.setQueryData(LAYOUT_QUERY_KEY, layout)
     },
     onError: () => {
-      // Backend not yet shipping this endpoint — silently swallow. The grid
-      // continues to work in-memory; persistence will activate when BE lands.
+      // Backend not yet shipping this endpoint — silently swallow. The view
+      // continues to work in-memory; persistence activates when BE lands.
     },
   })
 }

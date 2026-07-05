@@ -61,9 +61,12 @@ do and what will need sign-off.
 
 Privileged actions don't just execute. The MCP admin server classifies its tools
 into autonomous and **gated** sets — gated tools include model pulls and
-deletes, slot create/delete/restart, capability changes, config writes, and
-credential writes. When the agent invokes a gated tool, it doesn't run; instead
-it **enqueues an approval** and returns a "pending approval" result.
+deletes, slot create/delete/restart, capability changes, config writes,
+credential writes, and applying/importing/deleting a stack or profile (those
+last four reconfigure the whole inference surface or drop a saved catalog
+entry, so they're gated the same way slot and capability changes are). When
+the agent invokes a gated tool, it doesn't run; instead it **enqueues an
+approval** and returns a "pending approval" result.
 
 That queue is a single source of truth read by three surfaces: the dashboard's
 approval bell and inbox, the `hal0 agent approvals` CLI, and the approval REST
@@ -72,8 +75,8 @@ it. The queue de-duplicates — a repeated request for the same target bumps a
 counter rather than stacking entries — and every gated and autonomous invocation
 is audited so you can see exactly what the agent did and what's waiting on you.
 
-![The hal0 Operator Board — a Hermes-backed kanban tracking agent tasks across Triage, To-do, Scheduled, and Ready lanes](/screenshots/operator-board.png)
-*The Operator Board orchestrates agent tasks across lanes; gated tool calls still pause for human sign-off before they run.*
+![The hal0 Operator Board — a Hermes-backed kanban tracking agent tasks from Triage through Done, with an Archived lane hidden by default](/screenshots/operator-board.png)
+*The Operator Board orchestrates agent tasks across lanes (Triage, To-do, Scheduled, Ready, In-progress, Blocked, Review, Done); gated tool calls still pause for human sign-off before they run.*
 
 <Aside type="tip">
 Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads
@@ -82,14 +85,15 @@ while still routing anything destructive through a human.
 
 ## Spending budgets
 
-For agents that can make paid calls (such as routing to an external provider),
-each persona can carry a **budget**. The budget supports per-call, daily,
-monthly, and lifetime caps, and a `hard_cap` flag that decides whether
+For agents that can make paid calls (such as routing to an external provider —
+hal0's provider catalog already covers OpenAI, Anthropic, Google AI Studio, and
+OpenRouter), each persona can carry a **budget**. The budget supports per-call,
+daily, monthly, and lifetime caps, and a `hard_cap` flag that decides whether
 overshooting is denied or merely logged. Spend is recorded to an append-only
-per-persona ledger, and a pre-call check enforces the most-restrictive applicable
-cap before a paid request goes out — with a matching charge recorded after the
-response. This gives a paid upstream a real spending gate from day one rather
-than an unbounded bill.
+per-persona ledger, and a dedicated check/charge API lets a paid-call path
+consult the most-restrictive applicable cap before spending and record the real
+charge afterward — the gate a paid-upstream integration needs to avoid an
+unbounded bill.
 
 ## Agent memory
 

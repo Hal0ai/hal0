@@ -323,7 +323,7 @@ function MemOperations({ bank }) {
   }
 
   if (items.length === 0) {
-    return <div className="empty mono">No operations recorded.</div>;
+    return null;
   }
   return (
     <div className="mem-ops">
@@ -355,7 +355,7 @@ function MemOperations({ bank }) {
 
 // ── Bank detail panel ─────────────────────────────────────────────────────────
 
-function MemBankDetail({ bank, onClose, onDeleted }) {
+function MemBankDetail({ bank, period, setPeriod, graphInFlight, onClose, onDeleted }) {
   const useConsolidate = window.__hal0UseConsolidate;
   const useBankDelete = window.__hal0UseBankDelete;
   const consolidate = useConsolidate ? useConsolidate() : null;
@@ -393,21 +393,41 @@ function MemBankDetail({ bank, onClose, onDeleted }) {
   }
 
   return (
-    <div className="card mem-detail" data-testid="mem-bank-detail">
+    <div className="card mem-detail mo-main" data-testid="mem-bank-detail">
       <div className="mem-detail-head">
         <span className="mono">{bank.bank_id}</span>
         <div>
-          <button className="btn ghost xs" onClick={doConsolidate} data-testid="mem-btn-consolidate">
-            Consolidate now
-          </button>
           <button className="btn ghost sm pf-form-close" onClick={onClose} aria-label="Close">×</button>
         </div>
       </div>
+      {bank.mission && <div className="mo-main-mission">{bank.mission}</div>}
       {/* Live activity for this bank — spinner while ingest/extraction/
           consolidation is in flight, with failed-ops affordance. */}
       <div className="mem-detail-activity">
         <MemBankActivity bank={bank.bank_id} />
       </div>
+      {/* Memories-retained spark (narrow) sits beside the graph-extraction
+          panel — both track the selected bank. */}
+      <div className="mo-main-row">
+        <MemTimeseries bank={bank.bank_id} period={period} setPeriod={setPeriod} />
+        <div className="mo-graph-wrap">
+          {graphInFlight > 0 && (
+            <span className="mem-act-badge working" data-testid="mem-graph-inflight" title="graph extraction running">
+              <span className="mem-spin" aria-hidden="true" />
+              extracting… ({graphInFlight} in flight)
+            </span>
+          )}
+          {typeof MemoryGraphPanel === 'function' ? <MemoryGraphPanel /> : null}
+        </div>
+      </div>
+      {/* Full tools surface (recall · reflect · documents · models ·
+          directives) for this bank, embedded so it lives in the primary
+          bank display instead of a separate sub-tab. */}
+      <div className="sec">
+        <h2>Tools</h2>
+        <div className="rule" />
+      </div>
+      {typeof MemToolsPanel === 'function' ? <MemToolsPanel bank={bank.bank_id} embedded /> : null}
       {/* .sec is a flex title-row — keep only the heading in it; content
           (ops list, danger controls) must be siblings or they shrink-wrap. */}
       <div className="sec">
@@ -415,6 +435,11 @@ function MemBankDetail({ bank, onClose, onDeleted }) {
         <div className="rule" />
       </div>
       <MemOperations bank={bank.bank_id} />
+      <div className="mo-ops-actions">
+        <button className="btn ghost xs" onClick={doConsolidate} data-testid="mem-btn-consolidate">
+          Consolidate now
+        </button>
+      </div>
       <div className="sec mem-danger">
         <h2>Danger zone</h2>
         <div className="rule" />
@@ -512,7 +537,9 @@ function MemNewBankForm({ onClose }) {
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 function MemoryView({ param } = {}) {
-  const section = param === 'graph' ? 'graph' : param === 'tools' ? 'tools' : 'overview';
+  // Tools moved into the primary bank display, so #memory/tools falls back to
+  // Overview; only Overview + Graph remain as sub-sections.
+  const section = param === 'graph' ? 'graph' : 'overview';
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;
   const useMemoryGraphStatus = window.__hal0UseMemoryGraphStatus;
@@ -536,7 +563,6 @@ function MemoryView({ param } = {}) {
   }, [selectedId]);
 
   const selected = banks.find(b => b.bank_id === selectedId) || null;
-  const chartBank = selected?.bank_id || banks[0]?.bank_id || null;
 
   function selectBank(bankId) {
     const next = bankId === selectedId ? null : bankId;
@@ -563,79 +589,67 @@ function MemoryView({ param } = {}) {
         >
           Graph
         </button>
-        <button
-          className={'btn ghost xs' + (section === 'tools' ? ' active' : '')}
-          onClick={() => { window.location.hash = '#memory/tools'; }}
-          data-testid="mem-tab-tools"
-        >
-          Tools
-        </button>
       </div>
 
       {section === 'graph' ? (
         <MemGraphExplorer />
-      ) : section === 'tools' ? (
-        <MemToolsPanel />
       ) : (
       <div className="mo">
-      {/* Top row: engine identity · (shrunk) memories-retained spark ·
-          the graph-extraction gate/slot panel beside it. MemoryGraphPanel is
-          the canonical window global from agents/memory-tab.jsx so the
-          enabled/slot/builds_ok/errors/last_built_at controls live here on the
-          Overview, not just the #agent tab. */}
-      <div className="mo-top">
+      {/* Top row: engine identity beside the bank list, split by a hairline.
+          Selecting a bank swaps the combined main card below (memories-retained
+          spark · graph-extraction gate · operations · danger zone). */}
+      <div className="mo-top2">
         <MemEngineCard
           engine={engineQuery.data}
           isLoading={engineQuery.isLoading}
           graphEnabled={graphEnabled}
           onOpenGraph={() => { window.location.hash = '#memory/graph'; }}
         />
-        <MemTimeseries bank={chartBank} period={period} setPeriod={setPeriod} />
-        <div className="mo-graphcol">
-          {graphInFlight > 0 && (
-            <span className="mem-act-badge working" data-testid="mem-graph-inflight" title="graph extraction running">
-              <span className="mem-spin" aria-hidden="true" />
-              extracting… ({graphInFlight} in flight)
-            </span>
+        <div className="mo-banks-col">
+          {/* .sec is a flex title-row (h2 + flex:1 rule); content must be a
+              SIBLING, not a child, or it shrink-wraps into the heading row. */}
+          <div className="sec">
+            <h2>Banks {banks.length > 0 && <span className="ct">{banks.length}</span>}</h2>
+            <div className="rule" />
+            <button className="btn sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
+              + New bank
+            </button>
+          </div>
+          {banksQuery.isLoading ? (
+            <div className="empty mono">Loading banks…</div>
+          ) : banks.length === 0 ? (
+            <div className="empty mono">No memory banks yet.</div>
+          ) : (
+            <div className="mo-grid">
+              {banks.map(b => (
+                <MemBankCard
+                  key={b.bank_id}
+                  bank={b}
+                  selected={b.bank_id === selectedId}
+                  onSelect={(bank) => selectBank(bank.bank_id)}
+                />
+              ))}
+            </div>
           )}
-          {typeof MemoryGraphPanel === 'function' ? <MemoryGraphPanel /> : null}
         </div>
       </div>
-
-      {/* .sec is a flex title-row (h2 + flex:1 rule); content must be a SIBLING,
-          not a child, or it gets pinned into the heading row and shrink-wraps. */}
-      <div className="sec">
-        <h2>Banks {banks.length > 0 && <span className="ct">{banks.length}</span>}</h2>
-        <div className="rule" />
-        <button className="btn sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
-          + New bank
-        </button>
-      </div>
-      {banksQuery.isLoading ? (
-        <div className="empty mono">Loading banks…</div>
-      ) : banks.length === 0 ? (
-        <div className="empty mono">No memory banks yet.</div>
-      ) : (
-        <div className="mo-grid">
-          {banks.map(b => (
-            <MemBankCard
-              key={b.bank_id}
-              bank={b}
-              selected={b.bank_id === selectedId}
-              onSelect={(bank) => selectBank(bank.bank_id)}
-            />
-          ))}
-        </div>
-      )}
 
       {creating && <MemNewBankForm onClose={() => setCreating(false)} />}
 
-      {selected && (
+      {/* Combined main section — one card that updates as a bank is selected. */}
+      {selected ? (
         <MemBankDetail
           bank={selected}
+          period={period}
+          setPeriod={setPeriod}
+          graphInFlight={graphInFlight}
           onClose={() => setSelectedId(null)}
           onDeleted={() => setSelectedId(null)}
         />
+      ) : (
+        <div className="card mo-main mo-main-empty" data-testid="mem-main-empty">
+          <div className="empty mono">Select a bank above to see its memories, graph extraction, and operations.</div>
+        </div>
       )}
       </div>
       )}

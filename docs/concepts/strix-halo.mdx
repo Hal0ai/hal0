@@ -34,8 +34,10 @@ A Strix Halo machine gives hal0 three places to run a model:
   </Card>
 </CardGrid>
 
-These map directly to hal0's device enum: `gpu-rocm`, `gpu-vulkan`, `npu`, and
-`cpu`. See [Capabilities & profiles](/docs/concepts/capabilities-and-profiles)
+These map directly to four of hal0's five canonical devices: `gpu-rocm`,
+`gpu-vulkan`, `npu`, and `cpu`. (The fifth, `gpu-cuda`, exists too — see the
+note on NVIDIA below — but it has nothing to do with Strix Halo, which has no
+NVIDIA silicon.) See [Capabilities & profiles](/docs/concepts/capabilities-and-profiles)
 for how a slot picks one.
 
 ## ROCm or Vulkan on the iGPU
@@ -66,6 +68,8 @@ VRAM bank; instead it shares the system's RAM through a GTT pool. A single large
 memory pool can be handed to whichever engine needs it, so you can load models
 far larger than a typical discrete GPU's VRAM would allow.
 
+![The dashboard Unified Memory bar — one 128 GB pool with each slot's allocation colour-coded and the free headroom that actually remains](/screenshots/unified-memory-hero.png)
+
 This shapes how hal0 reports memory. It does **not** add system RAM to GPU VRAM,
 because on a unified-memory APU that would double-count — the GPU's memory *is*
 host RAM shared via GTT. Instead the probe derives a single
@@ -94,15 +98,23 @@ the rest of the system to read. It detects the CPU (model, cores, threads),
 system RAM and available memory, the GPU(s) and their ROCm/Vulkan capability,
 the NPU (presence, vendor, driver), the unified-memory pool, any cgroup memory
 cap, and free disk space. It also classifies the **platform** — `strix-halo` is
-its own value, alongside generic ones such as `bare-metal-amd-gpu`, `lxc`,
-`kvm`, `wsl2`, and `unknown` — and the dashboard uses that to label memory as
-"unified" only on the platforms where that's true.
+its own value, alongside generic ones such as `bare-metal-amd-gpu`,
+`bare-metal-nvidia-gpu`, `lxc`, `kvm`, `proxmox-kvm`, and `wsl2` — and the
+dashboard uses that to label memory as "unified" only on the platforms where
+that's true.
 
 <Aside type="caution">
-NVIDIA GPUs and CUDA are **not supported as a runtime device**. An NVIDIA card
-is detected and shown, but hal0 has no `cuda` device — it would run such a card
-through Vulkan. hal0 targets AMD APUs; Linux x86_64 with Python 3.12+ is the
-supported environment.
+CUDA has nothing to do with Strix Halo — there's no NVIDIA silicon on this
+chip, and the hardware probe classifies an NVIDIA-equipped host as
+`bare-metal-nvidia-gpu`, never `strix-halo`. But hal0 is not exclusively a
+Strix Halo tool: since v0.8.5b1 it also ships an **experimental** `gpu-cuda`
+device and matching `cuda` profile for discrete NVIDIA GPUs on *other* hosts
+(the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda` image, run via
+`nvidia-container-toolkit`/CDI; without CDI present the installer falls back
+to Vulkan on that same NVIDIA card). None of this changes the story on this
+page — hal0's reference platform, and the one every default and bench number
+here is tuned for, remains the AMD Strix Halo APU on Linux x86_64 with Python
+3.12+.
 </Aside>
 
 ## Where to go next

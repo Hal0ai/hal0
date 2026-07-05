@@ -7,9 +7,10 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-Every filesystem path hal0 uses flows through one resolver, so the four roots
-below are the whole story. Config and state are preserved across updates; code
-is replaced.
+Nearly every filesystem path hal0 uses flows through one resolver, so the four
+roots below are almost the whole story — the one exception (avahi's service
+directory) is called out further down. Config and state are preserved across
+updates; code is replaced.
 
 ## The four roots
 
@@ -24,9 +25,10 @@ is replaced.
 
 | Path                          | What it holds                                                        |
 |-------------------------------|---------------------------------------------------------------------|
-| `/etc/hal0/hal0.toml`         | Top-level config (`[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, …). |
+| `/etc/hal0/hal0.toml`         | Top-level config (`[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, `[activity]`, …). |
 | `/etc/hal0/slots/`            | One TOML per slot (`/etc/hal0/slots/<name>.toml`).                   |
-| `/etc/hal0/profiles.toml`     | Profile catalog. **Optional** — the built-in seeds are used when absent. |
+| `/etc/hal0/profiles.toml`     | Profile catalog. **Optional** — the built-in seed profiles are now *virtual*: they overlay from code on every load and are never written back here, so the file only ever holds operator-created (or cloned) profiles. |
+| `/etc/hal0/stacks.toml`       | Stack catalog — portable `[stack.<slug>]` bundles of slot + profile + model rows. **Optional**, empty until an operator saves one. |
 | `/etc/hal0/agents/`           | One TOML per agent (`/etc/hal0/agents/<name>.toml`): workspace, MCP servers, tool tiers. |
 | `/etc/hal0/hardware.json`     | Hardware probe result (written by `hal0 probe`).                     |
 | `/etc/hal0/manifest.json`     | Release manifest — toolbox image digests pinned per release.         |
@@ -40,6 +42,16 @@ logged. Upstream catalog config (`upstreams.toml`) and provider config
 (`providers.toml`) also live under `/etc/hal0`.
 </Aside>
 
+<Aside type="note">
+When the profile catalog migrates to virtual seeds on an update, the updater
+backs up the pre-migration file **once** to
+`/etc/hal0/profiles.toml.pre-virtual-seeds.bak` (never overwritten on later
+re-runs) before pruning stale seed materializations. Any seed-named entry
+whose on-disk content differs from the code seed — a hand-edited seed table,
+or an operator profile whose name only became a seed in a later release — is
+rescued to `<name>-custom` rather than deleted.
+</Aside>
+
 ## State paths (`/var/lib/hal0`)
 
 | Path                                    | What it holds                                                  |
@@ -47,9 +59,13 @@ logged. Upstream catalog config (`upstreams.toml`) and provider config
 | `/var/lib/hal0/models/`                 | Default model cache directory.                                 |
 | `/var/lib/hal0/registry/`               | Model registry (`registry.toml` and friends).                 |
 | `/var/lib/hal0/slots/<name>/`           | Per-slot working directory.                                    |
+| `/var/lib/hal0/stacks/state.json`       | Active-stack pointer — which stack is applied, plus a content hash used for drift detection. |
+| `/var/lib/hal0/model-pull-jobs/<id>.json` | Persisted pull-job snapshot, so a restart mid-download still resolves a status poll. |
 | `/var/lib/hal0/activity.db`             | Durable activity / audit store (SQLite, plus `-wal`/`-shm`).   |
 | `/var/lib/hal0/agents/<name>/workspace/`| Per-agent filesystem sandbox root.                            |
 | `/var/lib/hal0/openwebui/`              | OpenWebUI state directory.                                     |
+| `/var/lib/hal0/hal0.previous`           | Rollback breadcrumb written by an update — the prior code-symlink target. |
+| `/var/lib/hal0/cache/<version>/`        | Per-release download cache used by the updater.               |
 | `/var/lib/hal0/.first_run_done`         | First-run completion sentinel (written by the installer/wizard). |
 | `/var/lib/hal0/.first-run.lock`         | First-run claim lockfile (mode 0600, single-use OTP).         |
 | `/var/lib/hal0/.bundle-chosen`          | First-run bundle-picker completion marker.                   |
@@ -60,6 +76,20 @@ under `/var/lib/hal0`, so a single `rm -rf /var/lib/hal0` resets the whole
 first-run state.
 </Aside>
 
+## mDNS service files (outside the four roots)
+
+Companion-service discovery writes avahi service-group XML files directly
+under `/etc/avahi/services` — the one filesystem location hal0 touches
+outside the four roots above, since avahi owns that directory:
+
+| Path                                            | What it holds                                          |
+|--------------------------------------------------|--------------------------------------------------------|
+| `/etc/avahi/services/hal0.service`               | Installer-owned main dashboard mDNS announcement. Never touched by the addon-service writer. |
+| `/etc/avahi/services/hal0-addon-<id>.service`    | One file per advertised companion service (OpenWebUI, ComfyUI), written by `POST /api/services/mdns {"advertise": true}` and removed on withdraw. Only files matching this exact prefix are ever written or removed. |
+
+`HAL0_AVAHI_SERVICES_DIR` overrides the directory (tests); `HAL0_HOSTNAME`
+overrides the `<host>.local` name advertised in each file.
+
 ## The model store
 
 The directory slot containers bind-mount for model weights is resolved
@@ -67,11 +97,19 @@ separately from the model cache above, with this precedence:
 
 1. the `HAL0_MODEL_STORE` environment variable,
 2. `[models].store` in `hal0.toml`,
-3. the conventional default model-store mount.
+3. `/mnt/ai-models` — the conventional default model-store mount.
 
-This is the single source of truth shared by the pull engine and the container
-mounts, so the path the registry hands to the inference server can never drift
-from what the container actually mounts.
+Note that the default stays `/mnt/ai-models`, not `/var/lib/hal0/models`, so an
+install that has never set `[models].store` keeps mounting the same path it
+always has. This is the single source of truth shared by the pull engine and
+the container mounts, so the path the registry hands to the inference server
+can never drift from what the container actually mounts.
+
+A ComfyUI-specific subdirectory of the model store,
+`/mnt/ai-models/comfyui/workflows`, is the primary directory backing the
+dashboard's workflow-strip listing (`GET /api/comfyui/workflows`) — dropping a
+workflow JSON file there makes it appear as a launchable chip without a
+rebuild.
 
 ## HAL0_HOME remap
 
@@ -92,3 +130,4 @@ follows automatically because they are built on these roots.
 
 - [Environment variables](/docs/reference/env-vars) — `HAL0_HOME`, `HAL0_MODEL_STORE`, and the rest.
 - [Config schema](/docs/reference/config-schema) — the field-level reference for `hal0.toml` and slot TOMLs.
+- [Stacks](/docs/concepts/stacks) — what lives in `stacks.toml` and the active-stack pointer.

@@ -13,10 +13,11 @@ populate it through the `hal0 setup` TUI or directly from the CLI.
 
 ## Via `hal0 setup`
 
-If you ran [first-run setup](/docs/getting-started/setup/) and chose a
-tier, hal0 already seeded the registry and kicked off background pulls for
-each model in that tier. Re-run `hal0 setup` any time to pull more; when a
-pull completes, its slot is ready to start. Nothing more is required.
+If you ran [first-run setup](/docs/getting-started/setup/) and picked models
+for the Main and/or Agent slot, hal0 already seeded the registry and kicked
+off background pulls for each pick. Re-run `hal0 setup` any time to add more
+slots, models, or extensions; when a pull completes, its slot is ready to
+start. Nothing more is required.
 
 ## Via the CLI
 
@@ -48,7 +49,9 @@ flow is **list → pull → assign**.
    The pull runs as a background job on the daemon. The CLI polls
    `/api/models/<id>/pull/status` every 500 ms and prints a progress bar
    until the job reaches a terminal state, then reports the final path
-   and SHA-256.
+   and SHA-256. If the curated pick is a vision model, its `mmproj`
+   projector sidecar downloads automatically alongside the main GGUF —
+   no extra step needed.
 
 3. **Assign the model to a slot's default** (this does not start the
    slot):
