@@ -31,10 +31,12 @@ def _hw(*, platform="bare-metal-amd-gpu", compute=True, vulkan=True, npu=False):
     )
 
 
-def test_chat_on_rocm_box_picks_rocm_mtp():
+def test_chat_on_rocm_box_picks_rocm():
+    # derive no longer prefers the MTP image on ROCm — chat/coder derive to the
+    # plain `rocm` profile; MTP dense now lives on rocmfpx-rocm (opt-in only).
     hw = _hw(compute=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
-    assert derive_profile("chat", "gpu-rocm") == "rocm-dnse"
+    assert derive_profile("chat", "gpu-rocm") == "rocm"
 
 
 def test_chat_on_vulkan_only_box_picks_vulkan():

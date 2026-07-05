@@ -31,9 +31,9 @@ def test_validate_flags_unknown_profile() -> None:
 def test_validate_flags_unknown_model() -> None:
     stack = StackConfig(
         name="Forge",
-        slots=[StackSlotEntry(slot="agent", model="ghost-model", profile="rocm-moe")],
+        slots=[StackSlotEntry(slot="agent", model="ghost-model", profile="rocm")],
     )
-    warnings = _engine().validate(stack, known_profiles={"rocm-moe"}, known_models=set())
+    warnings = _engine().validate(stack, known_profiles={"rocm"}, known_models=set())
     assert any("model 'ghost-model' not in registry" in w for w in warnings)
 
 

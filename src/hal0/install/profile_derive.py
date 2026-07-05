@@ -108,8 +108,10 @@ def derive_profile(capability: str, device: str) -> str:
     GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
     """
     if device == "gpu-rocm" and capability in ("chat", "coder"):
-        # Dense chat/coder benefit from MTP; embed/rerank take their own lanes.
-        return "rocm-dnse"
+        # Plain ROCm GPU LLM. (The legacy MTP rocm-dnse profile was removed
+        # 2026-07-05; MTP dense now lives on the ROCmFPX profiles, which slots
+        # opt into explicitly — derivation never silently forces MTP.)
+        return "rocm"
     if device == "gpu-rocm" and capability == "embed":
         # Embeddings get the dedicated GPU embed profile (llama-server
         # --embedding, -ub 8192) rather than the chat-tuned plain `rocm` — the

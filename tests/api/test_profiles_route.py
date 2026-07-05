@@ -42,14 +42,14 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (14: the rocm/rocm-dnse/rocm-moe trio,
-        the rocmfpx-rocm/rocmfpx-moe ROCmFPX-runner pair, vulkan, the
-        experimental NVIDIA cuda profile, the dedicated embed and rerank GPU
-        lanes, flm NPU, the tts/tts-qwen3 pair, the cpu-llm CPU profile #834,
-        and Phase D comfyui)."""
+        """One entry per seed profile (12: the basic rocm profile, the
+        rocmfpx-rocm/vkfpx-moe ROCmFPX-runner pair, vulkan, the experimental
+        NVIDIA cuda profile, the dedicated embed and rerank GPU lanes, flm NPU,
+        the tts/tts-qwen3 pair, the cpu-llm CPU profile #834, and Phase D
+        comfyui)."""
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 14
+        assert len(data) == 12
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""
@@ -101,7 +101,7 @@ class TestListProfiles:
         data = client.get("/api/profiles").json()
         by_name = {item["name"]: item for item in data}
         assert by_name["rocm"]["backend"] == "rocm"
-        assert by_name["rocm-dnse"]["backend"] == "rocm"
+        assert by_name["rocmfpx-rocm"]["backend"] == "rocm"
         assert by_name["vulkan"]["backend"] == "vulkan"
         assert by_name["flm"]["backend"] is None
         assert by_name["tts"]["backend"] is None
@@ -114,7 +114,7 @@ class TestListProfiles:
 
     def test_dense_mtp_rocmfp4_mtp_true(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-dnse")
+        dense = next(item for item in data if item["name"] == "rocmfpx-rocm")
         assert dense["mtp"] is True
 
     def test_vulkan_std_image_contains_vulkan(self, client: TestClient) -> None:
@@ -124,12 +124,12 @@ class TestListProfiles:
 
     def test_mtp_true_resolved_flags_contains_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-dnse")
+        dense = next(item for item in data if item["name"] == "rocmfpx-rocm")
         assert "--spec-type draft-mtp" in dense["resolved_flags"]
 
     def test_mtp_true_resolved_flags_contains_bundle(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-dnse")
+        dense = next(item for item in data if item["name"] == "rocmfpx-rocm")
         assert MTP_FLAG_BUNDLE in dense["resolved_flags"]
 
     def test_mtp_false_resolved_flags_no_spec_type(self, client: TestClient) -> None:
@@ -176,7 +176,7 @@ class TestEnrichedFields:
         data = client.get("/api/profiles").json()
         by_name = {p["name"]: p for p in data}
         rocm = by_name["rocm"]
-        assert rocm["intent"] == "MoE agents"
+        assert rocm["intent"] == "ROCm · basic GPU LLM"
         assert rocm["quant"] == "FP4"
         assert rocm["tps"] == 52.8
         assert rocm["rtf"] is None

@@ -86,6 +86,36 @@ def _resolve_profile(name: str) -> Any:
     return ProfileCatalog().resolve(name)
 
 
+def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any:
+    """Resolve a slot's profile, falling back to the backend's basic seed
+    profile (``rocm`` / ``vulkan``) when the pinned profile no longer exists.
+
+    A seed cleanup (or a renamed seed) can leave an existing slot pinned to a
+    profile name that is gone from the catalog — e.g. the retired
+    ``rocm-dnse`` / ``rocm-moe``. Rather than hard-fail the launch, fall back to
+    the simple profile named after the slot's backend so the slot stays
+    launchable across an update. MTP-tuning is lost in the fallback (the base
+    profiles are non-MTP); operators re-pin an explicit profile if they want it.
+    """
+    from hal0.errors import NotFound
+
+    try:
+        return _resolve_profile(profile_name)
+    except NotFound:
+        from hal0.config.loader import load_profiles_config
+
+        backend = str(slot_cfg.get("backend") or "")
+        catalog = load_profiles_config().profile
+        base = backend if backend in catalog else "rocm"
+        log.warning(
+            "profile %r not found; falling back to base profile %r",
+            profile_name,
+            base,
+            extra={"event": "profile.fallback", "missing": profile_name, "base": base},
+        )
+        return _resolve_profile(base)
+
+
 def _profile_image_and_flags(profile: Any, mtp_override: bool | None = None) -> tuple[str, str]:
     """Extract ``(image, resolved_flags)`` from a profile object.
 
@@ -900,7 +930,7 @@ class ContainerProvider(Provider):
           nodes + permissions itself).
         """
         profile_name = slot_cfg.get("profile") or ""
-        profile = _resolve_profile(profile_name)
+        profile = _resolve_profile_or_base(profile_name, slot_cfg)
         # for_launch: this is the real container-spec build — side-effect logs
         # (MTP auto-off breadcrumb) fire here, never on preview/status renders.
         scalars = _resolve_llama_scalars(slot_cfg, model_info, profile, for_launch=True)
@@ -1456,7 +1486,7 @@ def _resolve_slot_argv(
     if not profile_name:
         return None
     try:
-        profile = _resolve_profile(profile_name)
+        profile = _resolve_profile_or_base(profile_name, slot_cfg)
         model_info = _best_effort_model_info(slot_cfg, model_path)
         scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
     except Exception:
