@@ -894,16 +894,18 @@ class ContainerProvider(Provider):
         ``model_loaded is True``. Bodies without the key (llama-server) keep
         the plain-200 behavior.
 
-        FLM Tier-1 delegation: when ``slot_cfg`` is supplied and the slot
-        resolves to :class:`~hal0.providers.flm.FLMProvider` (via
-        :func:`_spec_provider_for`), delegate to that provider's health probe —
-        a real ``/v1/chat/completions`` round-trip (non-empty /v1/models is a
-        known-insufficient check for a wedged NPU). The probe distinguishes
-        "up but still loading" (ok=False, status ``models_endpoint_empty`` /
-        ``sentinel_completion_*``) from "dead" (transport error), preserving
-        FLMProvider.health's semantics for the manager's strike-based
-        fail-watcher. Callers without slot context (the legacy port-only path)
-        keep the weak /v1/models fallback below.
+        FLM delegation: when ``slot_cfg`` is supplied and the slot resolves to
+        :class:`~hal0.providers.flm.FLMProvider` (via :func:`_spec_provider_for`),
+        delegate to that provider's CHEAP liveness probe — non-empty
+        ``/v1/models``, no NPU work. A real-inference sentinel must NOT run on
+        this path: it is the hot path (2s fail-watch + per-request readiness),
+        and a repeating/overlapping NPU completion double-frees the single NPU
+        context (status 134). Real inferability is verified once, out of band,
+        by ``FLMProvider.verify_inference`` at the warm→ready promotion. The
+        probe still distinguishes "up but still loading" (ok=False,
+        ``models_endpoint_empty``) from "dead" (transport error) for the
+        manager's strike-based fail-watcher. Callers without slot context (the
+        legacy port-only path) keep the weak /v1/models fallback below.
 
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to

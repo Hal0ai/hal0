@@ -235,3 +235,79 @@ async def test_await_ready_health_timeout_stays_non_dispatchable(
             "health-probe timeout must resolve to WARMING, not a lying READY"
         )
         assert mgr.is_ready_for_dispatch("npu") is False, "a WARMING slot must not be dispatchable"
+
+
+# ── Option A: one-shot FLM inference gate at warm→ready (NPU double-free) ─────
+
+
+@pytest.mark.anyio
+async def test_flm_inference_gate_runs_once_and_promotes_to_ready(
+    slot_root: Path,
+    tmp_hal0_home: str,
+) -> None:
+    """The warm→ready gate runs the real-inference sentinel EXACTLY ONCE and,
+    on success, promotes the FLM slot to READY.
+
+    Regression (NPU double-free): the sentinel must be a one-shot promotion
+    gate, NOT a repeating probe. The 2s fail-watch + per-request readiness use
+    the cheap /v1/models health probe instead — a repeating/overlapping NPU
+    completion double-frees FLM (status 134).
+    """
+    from hal0.providers.flm import FLMProvider
+    from hal0.slots.manager import SlotState
+
+    _write_npu_container_slot(slot_root, "npu")
+    fake_provider = _make_container_provider_mock()
+    gate = AsyncMock(return_value={"ok": True, "status": "ready", "model": "gemma3:4b"})
+
+    with (
+        patch("hal0.providers.container.container_provider", return_value=fake_provider),
+        patch.object(FLMProvider, "verify_inference", gate),
+        patch(
+            "hal0.providers.flm.flm_served_models",
+            return_value=[{"tag": "gemma3:4b", "installed": True}],
+        ),
+        patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
+    ):
+        mgr = SlotManager()
+        await mgr.load("npu", "gemma3:4b")
+
+        assert mgr.state("npu") == SlotState.READY
+        assert gate.call_count == 1, (
+            "the inference sentinel must fire exactly once at the warm→ready "
+            "gate — never on a repeating/concurrent path (that crashes the NPU)"
+        )
+
+
+@pytest.mark.anyio
+async def test_flm_inference_gate_wedged_npu_stays_warming(
+    slot_root: Path,
+    tmp_hal0_home: str,
+) -> None:
+    """A wedged NPU that lists a model but can't infer resolves to retryable
+    WARMING, not a lying READY (the preserved Tier-1 wedged-NPU check)."""
+    from hal0.providers.flm import FLMProvider
+    from hal0.slots.manager import SlotState
+
+    _write_npu_container_slot(slot_root, "npu")
+    fake_provider = _make_container_provider_mock()
+    gate = AsyncMock(
+        return_value={"ok": False, "status": "sentinel_completion_http_500"}
+    )
+
+    with (
+        patch("hal0.providers.container.container_provider", return_value=fake_provider),
+        patch.object(FLMProvider, "verify_inference", gate),
+        patch(
+            "hal0.providers.flm.flm_served_models",
+            return_value=[{"tag": "gemma3:4b", "installed": True}],
+        ),
+        patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
+    ):
+        mgr = SlotManager()
+        await mgr.load("npu", "gemma3:4b")
+
+        assert mgr.state("npu") == SlotState.WARMING, (
+            "a wedged-NPU inference failure must resolve to WARMING, not READY"
+        )
+        assert mgr.is_ready_for_dispatch("npu") is False
