@@ -376,7 +376,8 @@ zoom, mirroring llm.ciru.ai's useful parts:
    cause); MTP acceptance trend; links to every run.
 3. **Run detail drawer** (the deep zoom — the user's explicit ask) —
    for a `run_id`: full identity block rendered as chips (image@digest,
-   build, lane, KV main/draft, spec params, sampler, depth, np, ctx),
+   build, lane, KV main/draft, spec params, sampler, depth, np, ctx) plus
+   the environment chips (hal0 version, kernel, ROCm, exclusive flag),
    resolved argv/env in a copyable block, **per-rep table + scatter** (not
    just the median), TTFT p50/p95, telemetry strip (VRAM/GTT peak, temp,
    power, throttled flag), outcome + log link for failed cells, and a
@@ -401,7 +402,7 @@ the run detail the docs will now show**:
   "models": [ { "id": "…", "decode_ts": 99.0, "prefill_ts": 810.0, "accept": 0.71,
                 "caps": ["mtp","vision"], "spec": "draft-mtp", "kv": "q8/q8", "size_gb": 25.0,
                 "detail": { "run_id": "…", "measured": "2026-07-05", "lane": "vulkan_radv",
-                            "image": "…:rocm-7.2.4", "llamacpp_build": "b9438",
+                            "image": "…:rocm-7.2.4", "llamacpp_build": "b9438", "hal0": "0.9.0",
                             "depth": 2048, "sampler": "greedy", "reps": 3, "stddev": 0.8,
                             "ttft_ms_p50": 415, "argv_digest": "…", 
                             "history": [ {"date":"2026-06-01","decode_ts":97.2}, … ] } } ] }
