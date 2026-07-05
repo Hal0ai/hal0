@@ -55,6 +55,7 @@ def build_auto_selections(
     *,
     storage_dir: str,
     with_extensions: bool = True,
+    with_slots: bool = True,
     existing_slots: frozenset[str] = frozenset(),
 ) -> Selections:
     """Non-interactive defaults for ``--auto`` (install.sh path): recommended
@@ -64,6 +65,13 @@ def build_auto_selections(
     present, all values ``False``).  The coder/agent slot is gated on an agent
     extension being enabled, so it is skipped when extensions are off.  The
     chat slot is always included.
+
+    When *with_slots* is ``False`` NO model picks are seeded at all — the
+    returned selection has an empty slot list and no ComfyUI capability
+    defaults.  This is the installer's mode (Task: don't ship model picks): a
+    fresh box gets the first-run sentinel + extension wiring but zero model
+    selections, so the operator chooses everything later via the dashboard or
+    ``hal0 setup``.  Extensions still honour *with_extensions*.
 
     *existing_slots* is the set of slot names whose config files already exist
     on disk.  Any slot in this set is skipped so that ``--auto`` on an existing
@@ -76,28 +84,32 @@ def build_auto_selections(
     else:
         ext = {e.id: False for e in EXTENSIONS}
     slots: list[SlotSelection] = []
-    # Main (chat) is always provisioned in --auto (OWUI + Hermes default on)
-    # — unless it was already configured by a prior install.
-    if "chat" not in existing_slots:
-        chat = suggest_models("chat", hw, limit=1)
-        if chat:
-            name, port = _SETUP_SLOTS["chat"]
-            slots.append(SlotSelection("chat", name, port, chat[0].model_id))
-    # Agent slot only if an agent extension is enabled and not already present.
-    if (
-        any(_kind(eid) == "agent" and on for eid, on in ext.items())
-        and "coder" not in existing_slots
-    ):
-        coder = suggest_models("coder", hw, limit=1, prefer_coder=True)
-        if coder:
-            name, port = _SETUP_SLOTS["coder"]
-            slots.append(SlotSelection("coder", name, port, coder[0].model_id))
-    # Record ComfyUI default capability picks as (capability_id, family) pairs.
-    # No model pull at install — operator triggers downloads later via
-    # POST /api/comfyui/models/fetch.
-    from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
+    comfyui_defaults: tuple[tuple[str, str], ...] = ()
+    if with_slots:
+        # Main (chat) is always provisioned in --auto (OWUI + Hermes default on)
+        # — unless it was already configured by a prior install.
+        if "chat" not in existing_slots:
+            chat = suggest_models("chat", hw, limit=1)
+            if chat:
+                name, port = _SETUP_SLOTS["chat"]
+                slots.append(SlotSelection("chat", name, port, chat[0].model_id))
+        # Agent slot only if an agent extension is enabled and not already present.
+        if (
+            any(_kind(eid) == "agent" and on for eid, on in ext.items())
+            and "coder" not in existing_slots
+        ):
+            coder = suggest_models("coder", hw, limit=1, prefer_coder=True)
+            if coder:
+                name, port = _SETUP_SLOTS["coder"]
+                slots.append(SlotSelection("coder", name, port, coder[0].model_id))
+        # Record ComfyUI default capability picks as (capability_id, family) pairs.
+        # No model pull at install — operator triggers downloads later via
+        # POST /api/comfyui/models/fetch.
+        from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
 
-    comfyui_defaults = tuple((cap_id, cap.alternatives[0].family) for cap_id, cap in _CAPS.items())
+        comfyui_defaults = tuple(
+            (cap_id, cap.alternatives[0].family) for cap_id, cap in _CAPS.items()
+        )
     return Selections(
         storage_dir=storage_dir,
         slots=slots,
@@ -124,6 +136,11 @@ def setup(
         "--no-extensions",
         help="Skip extension install/wiring in --auto mode.",
     ),
+    no_slots: bool = typer.Option(
+        False,
+        "--no-slots",
+        help="Seed the sentinel + extensions but NO model-slot picks (installer default; operator chooses models later).",
+    ),
 ) -> None:
     hw = HardwareProbe().probe()
     if auto:
@@ -131,6 +148,7 @@ def setup(
             hw,
             storage_dir=storage_dir,
             with_extensions=not no_extensions,
+            with_slots=not no_slots,
             existing_slots=_existing_slot_names(),
         )
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
