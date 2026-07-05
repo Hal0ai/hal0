@@ -91,13 +91,17 @@ Each is a hypothesis to CONFIRM on our box, with the source that motivates it.
   slot may want the ROCm lane at high `-np`**. → Cell **LANE** (every model on
   BOTH lanes) and the LANE×NP crossover is the headline result.
 
-### 0.6 Restart-free MTP sweeps via per-request JSON
-- **Finding:** the fork accepts per-request `speculative.{n_max,n_min,p_min}`
-  in the `/completion` JSON (helper `scripts/rocmfpx-draft-profile.py`). MTP
-  param sweeps need **no server restart** — only KV-quant / batch-shape /
-  lane changes require a relaunch. This collapses Cell MTP from ~12 restarts
-  to a single warm server. `server_ab.py --mode batch` should pass these
-  through (small enhancement, see §4).
+### 0.6 Restart-free MTP sweeps via per-request JSON — DISPROVEN on this build
+- **Original hypothesis:** the fork's docs reference per-request
+  `speculative.{n_max,n_min,p_min}` (helper `scripts/rocmfpx-draft-profile.py`),
+  which would let Cell MTP run against one warm server (no restart per cell).
+- **BENCH RESULT (2026-07-05):** the ROCmFPX runner at **7aa484a silently
+  IGNORES** the per-request override — swept cells returned identical numbers.
+  So MTP param sweeps DO need a relaunch per value, same as KV/batch/lane.
+  `--mode mtp` relaunches by default; the per-request path is retained behind
+  `--per-request` only for a future build that honors it. Practical impact:
+  MTP sweeps are relaunch-bound (≤4 cells/session per the resume note, §6 of
+  the results handoff).
 
 ### 0.7 Env + build facts to pin before trusting any number
 - **HIP lane requires:** `HSA_OVERRIDE_GFX_VERSION=11.5.1`,
@@ -120,11 +124,14 @@ Two models × the axes below. Models: **27B** = `code-fpx`
 (CHADROCK3.6-35B-A3B ROCmFPX MoEQuality 7.08 BPW). Both ship mmproj (vision)
 and an MTP head. Froggeric template on the 35B; `--jinja` embedded on the 27B.
 
-**Depth axis (applies to every decode cell):** ctx-fill **2k / 32k / 128k**.
-Rationale: the model card's own sweep shows decode 21→12.5→7 t/s and PP
-316→201→142 across 4k→65k→130k with acceptance FLAT (~40%). Tuning at 2k and
-shipping for agents that run at 32k+ is how we mis-tune. Every "best" is
-reported per depth.
+**Depth axis (applies to every decode cell):** ctx-fill **2k / ~24k** (NOT
+128k). Rationale: the model card's own sweep shows decode 21→12.5→7 t/s and PP
+316→201→142 across 4k→65k→130k with acceptance FLAT (~40%), so depth matters —
+but the 2026-07-05 bench found **128k is memory-infeasible** for 27B+MTP on
+this box (cumulative-leak OOM, blocker #2 in the results appendix) and the FPX
+slots are bounded to `context_size = 40960`; a depth request >~24k returns HTTP
+400 against that bound. Sweep 2k and ~24k; treat deeper depths as blocked until
+the runner's per-request memory leak is fixed upstream.
 
 **Sampler axis (every MTP cell):** run **greedy** (temp 0, upper-bound
 acceptance) AND **production sampler** (27B: `temp 0.6 top-p 0.95 top-k 20`
@@ -225,11 +232,17 @@ today's seeds; the runbook either confirms → we ship, or rejects → we keep.
 Items 1–3 are DONE on `claude/llamacpp-strix-halo-flags-cyzyo8` (the box just
 runs; it does not build). Item 4 is box-side config.
 
-1. **DONE — `server_ab.py --mode mtp`** — restart-free per-request MTP sweep:
-   `--spec-nmax`/`--spec-pmin` (comma-lists) + `--spec-nmin` sent as
-   `speculative.*` in the `/completion` JSON (0.6). Depth axis via `--depth`
-   (2k/32k/128k); sampler axis via `--temp`/`--top-p`/`--top-k` (greedy vs
-   production). Reports decode t/s + draft acceptance per (n_max, p_min) cell.
+1. **DONE — `server_ab.py --mode mtp`** — MTP draft-param sweep:
+   `--spec-nmax`/`--spec-pmin` (comma-lists) + `--spec-nmin`. **CORRECTION
+   (post-bench):** finding 0.6's restart-free per-request override is DEAD on
+   this runner — the ROCmFPX build at 7aa484a **silently ignores** the
+   per-request `speculative.*` JSON, so every cell would read the launch-time
+   config. `--mode mtp` therefore **relaunches per value** (writes
+   `--spec-draft-*` into `[server].extra_args` + restart, like `--mode ab`);
+   `--per-request` opts back into the ignored path for a future build that
+   honors it. Depth axis via `--depth` (2k/32k/128k); sampler axis via
+   `--temp`/`--top-p`/`--top-k` (greedy vs production). Reports decode t/s +
+   draft acceptance per (n_max, p_min) cell.
 2. **DONE — `profile-matrix.sh` FPX cells** — `fpx-batch` (A-BATCH),
    `fpx-kv27`/`fpx-kv35` (A-KVQ three-way q4/q8/f16), `fpx-lane` (A-LANE), plus
    `FPX_DENSE`/`FPX_MOE` model vars and refreshed Tier B guidance (mtp mode,
