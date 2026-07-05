@@ -27,6 +27,11 @@ Modes
           input; sanity-checks vector dims + reports latency.
   rerank  No config change: N timed POST /v1/rerank calls (query + docs);
           sanity-checks score spread + reports latency.
+  batch   Continuous-batching sweep: for each --np value, set the slot's
+          `parallel` field (PUT /config {parallel}), restart, drive
+          --concurrency simultaneous /completion streams, and report aggregate
+          t/s, per-stream median, and p95 TTFT. The Tier C measurement behind
+          the concurrency-batching plan. Restores the original `parallel`.
 
 Results: JSON to --out (default /var/lib/hal0/benchmarks/server-ab/<stamp>.json).
 
@@ -46,7 +51,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +76,7 @@ def _http(method: str, url: str, body: dict | None = None, timeout: float = 600.
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — localhost only
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = resp.read()
     return json.loads(payload) if payload else {}
 
@@ -90,7 +95,7 @@ def _wait_ready(port: int, timeout_s: float = 300.0) -> None:
     url = f"http://127.0.0.1:{port}/health"
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310
+            with urllib.request.urlopen(url, timeout=3) as resp:
                 if resp.status == 200:
                     return
         except (urllib.error.URLError, OSError):
@@ -180,7 +185,10 @@ def mode_reuse(args: argparse.Namespace) -> dict:
 
     results: dict[str, Any] = {}
     try:
-        for label, flags in (("cache-reuse-256", "--cache-reuse 256"), ("cache-reuse-0", "--cache-reuse 0")):
+        for label, flags in (
+            ("cache-reuse-256", "--cache-reuse 256"),
+            ("cache-reuse-0", "--cache-reuse 0"),
+        ):
             merged = f"{original} {flags}".strip() if original else flags
             print(f"[reuse] {label}: extra_args = {merged!r}", flush=True)
             _apply_extra_args(args.api, args.slot, merged or None)
@@ -188,8 +196,12 @@ def mode_reuse(args: argparse.Namespace) -> dict:
             # Call 1 warms the cache with prefix+A; call 2 (prefix+B) is the
             # measurement — with reuse the shared prefix is KV-shifted, without
             # it the whole prompt reprocesses.
-            _completion(port, REUSE_PREFIX + "Summarize the first paragraph.", 32, cache_prompt=True)
-            second = _completion(port, REUSE_PREFIX + "List three key claims.", 32, cache_prompt=True)
+            _completion(
+                port, REUSE_PREFIX + "Summarize the first paragraph.", 32, cache_prompt=True
+            )
+            second = _completion(
+                port, REUSE_PREFIX + "List three key claims.", 32, cache_prompt=True
+            )
             print(f"  second-call timings: {second}", flush=True)
             results[label] = {"extra_args": merged, "second_call": second}
     finally:
@@ -229,7 +241,10 @@ def mode_rerank(args: argparse.Namespace) -> dict:
         out = _http(
             "POST",
             f"http://127.0.0.1:{port}/v1/rerank",
-            {"query": "How does unified memory change LLM inference trade-offs?", "documents": docs},
+            {
+                "query": "How does unified memory change LLM inference trade-offs?",
+                "documents": docs,
+            },
         )
         lat.append(round(time.monotonic() - t0, 3))
         scores = [r.get("relevance_score", 0.0) for r in out.get("results", [])]
@@ -244,14 +259,109 @@ def mode_rerank(args: argparse.Namespace) -> dict:
     return {"score_spread": spread, "latency_s": lat, "median_latency_s": _median(lat)}
 
 
+def _one_stream(port: int, prompt: str, n_predict: int) -> dict:
+    """A single concurrent /completion call (own prompt so slots don't collide
+    on identical prefixes); returns per-stream timings + wall."""
+    return _completion(port, prompt, n_predict, cache_prompt=True)
+
+
+def mode_batch(args: argparse.Namespace) -> dict:
+    """Continuous-batching sweep: for each --np value, set the slot's `parallel`
+    field (PUT /config {parallel}), restart, then drive C concurrent
+    /completion streams and report AGGREGATE t/s, per-stream median, and TTFT
+    spread — the numbers that decide whether a slot class should batch (plan
+    Tier C). Streams share a long common prefix with distinct suffixes to
+    exercise slot routing + prompt cache. Restores the original `parallel` at
+    the end.
+    """
+    import concurrent.futures as cf
+
+    slot = _get_slot(args.api, args.slot)
+    port = int(slot["port"])
+    original = slot.get("parallel")  # None = inherit profile
+    np_values = [int(x) for x in str(args.np).split(",") if x.strip()]
+
+    results: dict[str, Any] = {}
+    try:
+        for np in np_values:
+            conc = args.concurrency or np  # default: saturate the slots
+            print(f"[batch] parallel={np}, concurrency={conc}", flush=True)
+            _http("PUT", f"{args.api}/api/slots/{args.slot}/config", {"parallel": np})
+            _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {})
+            _wait_ready(port)
+            rounds: list[dict] = []
+            for r in range(args.n):
+                # Distinct suffix per stream so N sequences don't alias to one
+                # cached slot; shared LONG_PROMPT prefix mimics agents sharing a
+                # system prompt.
+                prompts = [
+                    f"{LONG_PROMPT} Request {i} round {r}: continue in one sentence."
+                    for i in range(conc)
+                ]
+                t0 = time.monotonic()
+                with cf.ThreadPoolExecutor(max_workers=conc) as ex:
+                    streams = list(ex.map(lambda p: _one_stream(port, p, args.max_tokens), prompts))
+                wall = time.monotonic() - t0
+                gen = sum(s.get("predicted_n") or args.max_tokens for s in streams)
+                rounds.append(
+                    {
+                        "wall_s": round(wall, 3),
+                        "aggregate_tps": round(gen / wall, 2) if wall else None,
+                        "per_stream_tps": [s.get("predicted_per_second") for s in streams],
+                        "ttft_s": [s.get("prompt_ms", 0) / 1000.0 for s in streams],
+                    }
+                )
+                print(
+                    f"  round {r + 1}/{args.n}: aggregate {rounds[-1]['aggregate_tps']} t/s",
+                    flush=True,
+                )
+            agg = [x["aggregate_tps"] for x in rounds]
+            per = [v for x in rounds for v in x["per_stream_tps"]]
+            ttft = [v for x in rounds for v in x["ttft_s"]]
+            results[f"np{np}"] = {
+                "parallel": np,
+                "concurrency": conc,
+                "rounds": rounds,
+                "median": {
+                    "aggregate_tps": _median(agg),
+                    "per_stream_tps": _median(per),
+                    "ttft_p95_s": round(sorted(ttft)[int(0.95 * (len(ttft) - 1))], 3)
+                    if ttft
+                    else None,
+                },
+            }
+    finally:
+        print(f"[batch] restoring parallel = {original!r}", flush=True)
+        _http("PUT", f"{args.api}/api/slots/{args.slot}/config", {"parallel": original})
+        _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {})
+    return results
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", required=True, choices=["ab", "reuse", "embed", "rerank"])
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--mode", required=True, choices=["ab", "reuse", "embed", "rerank", "batch"])
     ap.add_argument("--slot", required=True, help="slot name (must be loaded/running)")
     ap.add_argument("--api", default=DEFAULT_API, help=f"hal0-api base (default {DEFAULT_API})")
-    ap.add_argument("--variant", action="append", default=[],
-                    help='ab mode: "label:<extra llama-server args>" (repeatable)')
-    ap.add_argument("--n", type=int, default=3, help="timed runs per variant (default 3)")
+    ap.add_argument(
+        "--variant",
+        action="append",
+        default=[],
+        help='ab mode: "label:<extra llama-server args>" (repeatable)',
+    )
+    ap.add_argument(
+        "--np",
+        default="1,2,4,8",
+        help="batch mode: comma list of --parallel values to sweep (default 1,2,4,8)",
+    )
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=0,
+        help="batch mode: simultaneous streams per np (default 0 = match np)",
+    )
+    ap.add_argument("--n", type=int, default=3, help="timed runs/rounds (default 3)")
     ap.add_argument("--max-tokens", type=int, default=256, help="decode length per run")
     ap.add_argument("--out", default=None, help="result JSON path (default under server-ab/)")
     args = ap.parse_args()
@@ -259,10 +369,16 @@ def main() -> None:
     if args.mode == "ab" and len(args.variant) < 2:
         ap.error("--mode ab needs at least two --variant entries")
 
-    fn = {"ab": mode_ab, "reuse": mode_reuse, "embed": mode_embed, "rerank": mode_rerank}[args.mode]
+    fn = {
+        "ab": mode_ab,
+        "reuse": mode_reuse,
+        "embed": mode_embed,
+        "rerank": mode_rerank,
+        "batch": mode_batch,
+    }[args.mode]
     results = fn(args)
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out_path = Path(args.out) if args.out else RESULT_DIR / f"{stamp}-{args.mode}-{args.slot}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc = {
@@ -275,7 +391,12 @@ def main() -> None:
     }
     out_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"\nwrote {out_path}")
-    print(json.dumps({k: v.get("median", v) if isinstance(v, dict) else v for k, v in results.items()}, indent=2))
+    print(
+        json.dumps(
+            {k: v.get("median", v) if isinstance(v, dict) else v for k, v in results.items()},
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -158,6 +158,25 @@ def _effective_mtp(
     return profile_opts_in and eligible
 
 
+def _effective_parallel(slot_cfg: Mapping[str, Any]) -> int | None:
+    """Resolve the slot's ``--parallel`` (sequence-slot) override, or None.
+
+    A slot's ``parallel`` field carries continuous-batching intent (concurrent
+    requests share the once-loaded weights instead of serializing through one
+    sequence). ``None`` / absent / <1 means "inherit the profile flags" (today
+    every seed profile pins ``--parallel 1``); a value ≥1 is emitted as a slot
+    override that beats the profile but loses to hand-authored ``extra_args``.
+    """
+    raw = slot_cfg.get("parallel")
+    if raw is None:
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 1 else None
+
+
 log = logging.getLogger(__name__)
 
 # Path to the hal0-slot@ base template unit (installed by the package).
@@ -403,6 +422,7 @@ def _llama_argv_segments(
     chat_template_path: str | None = None,
     mmproj: str | None = None,
     slot_n_gpu_layers: int | None = None,
+    slot_parallel: int | None = None,
     extra_args: str | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Build the ordered, labelled llama-server argv segments (SINGLE SOURCE).
@@ -452,12 +472,21 @@ def _llama_argv_segments(
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
 
-    # Slot-level [model].n_gpu_layers (schema default -1 = unset). Emitted just
-    # before extra_args so it beats the model default but a manual -ngl in
-    # extra_args still wins.
+    # Slot-level overrides (schema fields), emitted just before extra_args so
+    # they beat the profile / model defaults but a hand-authored extra_args
+    # still wins. [model].n_gpu_layers (schema default -1 = unset) and the
+    # continuous-batching `parallel` field.
     slot_override_tokens: list[str] = []
     if slot_n_gpu_layers is not None and int(slot_n_gpu_layers) >= 0:
         slot_override_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
+    if slot_parallel is not None and int(slot_parallel) >= 1:
+        slot_override_tokens += ["--parallel", str(int(slot_parallel))]
+        if int(slot_parallel) > 1:
+            # Unified KV so --ctx-size stays a SHARED pool (each request may use
+            # up to the full context) instead of being silently split to ctx/N
+            # per sequence slot — the surprise the resolved-command work exists
+            # to prevent. See the concurrency-batching plan (D2).
+            slot_override_tokens += ["--kv-unified"]
 
     extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
@@ -487,6 +516,7 @@ def _llama_launch_plan(
     mmproj: str | None = None,
     model_defaults: dict[str, Any] | None = None,
     slot_n_gpu_layers: int | None = None,
+    slot_parallel: int | None = None,
     env: dict[str, str] | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
@@ -509,6 +539,7 @@ def _llama_launch_plan(
         chat_template_path=chat_template_path,
         mmproj=mmproj,
         slot_n_gpu_layers=slot_n_gpu_layers,
+        slot_parallel=slot_parallel,
         extra_args=extra_args,
     )
     # resolve_argv over the labelled segments is argv-equivalent to
@@ -662,10 +693,38 @@ def _resolve_llama_scalars(
     it only gates side-effects like the MTP auto-off breadcrumb; the RESOLVED
     VALUES are identical on both paths, preserving launch/preview parity.
     """
-    image, flags_str = _profile_image_and_flags(
-        profile,
-        _effective_mtp(slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch),
+    effective_mtp = _effective_mtp(
+        slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch
     )
+    image, flags_str = _profile_image_and_flags(profile, effective_mtp)
+
+    slot_parallel = _effective_parallel(slot_cfg)
+    if for_launch:
+        if effective_mtp and slot_parallel is not None and slot_parallel > 1:
+            # MTP x continuous batching runs on current llama.cpp master
+            # (parallel drafting merged 2026-05) but is perf-unproven on
+            # gfx1151 and needs a build new enough to allow n_parallel>1 with
+            # draft-mtp. Surface it; don't refuse (the plan's D3, bench-gated).
+            log.info(
+                "mtp.batched_speculation",
+                extra={
+                    "slot": str(slot_cfg.get("name") or ""),
+                    "parallel": slot_parallel,
+                    "hint": "batched slot — MTP speculation gain unverified here; "
+                    "requires a build that allows draft-mtp with --parallel>1",
+                },
+            )
+        workers = slot_cfg.get("workers")
+        if workers is not None and int(workers or 1) != 1:
+            log.warning(
+                "slot.workers_deprecated_inert",
+                extra={
+                    "slot": str(slot_cfg.get("name") or ""),
+                    "workers": workers,
+                    "hint": "the 'workers' field is inert (never emitted to argv); "
+                    "use the 'parallel' field for continuous batching",
+                },
+            )
 
     model_table = slot_cfg.get("model") or {}
     if not isinstance(model_table, dict):
@@ -722,6 +781,7 @@ def _resolve_llama_scalars(
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
         "slot_n_gpu_layers": slot_n_gpu_layers,
+        "slot_parallel": slot_parallel,
         "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
         # GPU vendor discriminator: the profile's declared backend (rocm /
         # vulkan / cuda / None) — configuration, not host probing.
@@ -838,6 +898,7 @@ class ContainerProvider(Provider):
             mmproj=scalars["mmproj"],
             model_defaults=scalars["model_defaults"],
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+            slot_parallel=scalars["slot_parallel"],
             env=merged_env or None,
         )
 
@@ -1368,6 +1429,7 @@ def _resolve_slot_argv(
         chat_template_path=scalars["chat_template_path"],
         mmproj=scalars["mmproj"],
         slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+        slot_parallel=scalars["slot_parallel"],
         extra_args=scalars["extra_args"],
     )
     return str(scalars["image"]), resolve_argv(segments)

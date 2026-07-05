@@ -388,6 +388,21 @@ class SlotConfig(BaseModel):
             "See providers.container._effective_mtp and build_mtp_flag_bundle."
         ),
     )
+    parallel: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-slot llama-server sequence slots (--parallel / -np) for continuous "
+            "batching: concurrent requests share the once-loaded weights instead of "
+            "serializing through a single sequence and thrashing one prompt cache. "
+            "None = inherit the profile flags (today: 1). When >1, --kv-unified is "
+            "emitted alongside so --ctx-size stays a SHARED pool (each request may "
+            "use up to the full context) instead of being silently split to ctx/N "
+            "per slot. Interactive slots want low N (per-stream speed ~= 1/N); agent "
+            "fan-in slots want 4-8 (bench-gated). See "
+            "providers.container._effective_parallel."
+        ),
+    )
     chat_template: str | None = Field(
         default=None,
         description=(
@@ -453,7 +468,13 @@ class SlotConfig(BaseModel):
     workers: int = Field(
         default=1,
         ge=1,
-        description="Number of parallel request workers.",
+        description=(
+            "DEPRECATED / inert — a haloai-era field that was never emitted to "
+            "llama-server argv (it did not mean sequence slots). Round-tripped for "
+            "one release; a non-default value logs a warning at launch and does "
+            "nothing. For continuous batching use the `parallel` field, which maps "
+            "to llama-server --parallel."
+        ),
     )
     idle_timeout_s: int = Field(
         default=300,
