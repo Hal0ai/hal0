@@ -1,6 +1,14 @@
 # hal0 benchmarking system — full design (batch runs, rich run detail, display, auto-update)
 
-**Status:** DESIGN — ready to implement in phases (§13). Companion to the
+**Status:** DESIGN — implementation lives **out-of-tree** in a standalone
+lab repo deployed to the box (not an official hal0 feature). It consumes
+only hal0's stable public surfaces: the `hal0-benchctl` seam, `hal0-api` on
+`:8080`, the installed `server_ab.py`, and the registry API. Its state lives
+under `/var/lib/hal0-bench/`, its display on its own port, its units under
+its own names — so §5's CLI, §7–8's API/dashboard, and §12's seam verbs are
+implemented lab-side (or skipped), not as hal0 PRs. This handoff stays in
+hal0 as the design record and the definition of that integration contract.
+Ready to implement in phases (§13, re-homed accordingly). Companion to the
 ROCmFPX runner bench runbook (2026-07-05) and the profile-matrix handoff
 (2026-07-04). Reference point: [llm.ciru.ai](https://llm.ciru.ai/) is the
 "overboard" version of this; we build the ~20% of it that matters for one
