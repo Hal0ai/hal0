@@ -21,7 +21,21 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-07-05
+
+ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
+
+### Highlights
+- ROCmFPX runner support: GGUF quant-family detection, `rocmfpx-rocm` / `vkfpx-moe` seed profiles, and a build/quantize agent skill.
+- `hal0 update` now shows cosign-verified release notes and asks before applying (staged prepare → commit).
+
 ### Added
+- **Updater `prepare` / `commit` split.** `hal0 update` downloads + cosign-verifies + extracts a release and shows its notes — with breaking/migration callouts — *before* activating anything; `--yes` skips the prompt for headless/cron. Adds `POST /api/updates/prepare` + `/commit` (#1075).
+- **Release notes in the update.** The release build bundles `RELEASE_NOTES.md` + `release.json` into the cosign-verified tarball; a CHANGELOG section's `### Highlights` / `### Breaking` / `### Migrations` subsections become the `hal0 update` callouts (#1078).
+- **ROCmFPX quant detection** — the registry classifies the `ROCmFPX` / `ROCmFP{3,4,6,8}` quant family from a GGUF filename so FPX slots resolve their launch command (#1068).
+- **ROCmFPX seed profiles** `rocmfpx-rocm` (ROCm0 dense) and `vkfpx-moe` (Vulkan0 MoE) for the custom ROCmFPX runner (#1069, renamed in #1076).
+- **`hal0-quantize` agent skill** — build the ROCmFPX toolchain and quantize a model to ROCmFP4/FPX (#1071).
+- ROCmFPX bench tooling: server-ab (MTP / concurrency) aggregation in the benchmark SUMMARY, FPX sweep cells, run provenance (#1072).
 - **Continuous batching — per-slot `parallel` field.** A slot can now set
   llama-server's `--parallel` / `-np` sequence-slot count so concurrent
   requests share the once-loaded weights instead of serializing through a
@@ -37,6 +51,21 @@ applying. Add those subsections to a version's section to surface them; see
   gfx1151, bench-gated). Seed-profile defaults stay `--parallel 1` pending the
   on-box `-np` sweep (`server_ab.py --mode batch`). See the
   concurrency-batching plan handoff.
+
+### Changed
+- The plain `rocm` / `vulkan` seed profiles are reduced to basic flags
+  (`-ngl 999 -fa on --jinja`); per-model KV/batch tuning now lives in the
+  model's `defaults.extra_args`. Their intent labels were cleaned up (#1076).
+- Slot units are re-rendered through the new code during an update's `commit`
+  step, so a subsequent restart uses current argv (#1075).
+
+### Removed
+- Legacy MTP toolbox seed profiles `rocm-moe` and `rocm-dnse` (superseded by the
+  ROCmFPX profiles); `rocmfpx-moe` renamed to `vkfpx-moe` to indicate its Vulkan
+  lane (#1076).
+
+### Migrations
+- Slots pinned to a removed/renamed seed profile (`rocm-moe`, `rocm-dnse`, `rocmfpx-moe`) auto-fall-back to the backend's basic profile (`rocm` / `vulkan`) on launch — existing slots keep working with no operator action (#1076).
 
 ## [v0.9.0] — 2026-07-04
 
