@@ -149,7 +149,8 @@ either. A few narrower gates exist inside hal0 itself:
   (default covers `http://hal0.local`, `http://localhost:5173`, and
   `http://127.0.0.1:8080`) on every upgrade, and require an HMAC-SHA256
   session cookie (`hal0_session`, `HttpOnly`, `SameSite=Lax`, ~8h TTL) that
-  is minted on first `GET /agents/` and verified on the WS upgrade. The
+  is minted by `GET /api/agents/{id}/session/handshake` and verified on
+  both the WS upgrade and the REST session endpoints. The
   signing secret is generated on first use at
   `/var/lib/hal0/agents/secret.bin` (mode `0600`) and never leaves the hal0
   service user. This stops a drive-by site from WebSocket-ing into the chat

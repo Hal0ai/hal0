@@ -1,6 +1,6 @@
 ---
 title: hal0 CLI reference
-description: "Complete reference for the hal0 CLI — top-level commands and every sub-app: slot, model, registry, memory, config, doctor, capabilities, agent, migrate."
+description: "Complete reference for the hal0 CLI — top-level commands and every sub-app: setup, slot, model, registry, memory, config, doctor, capabilities, agent, migrate."
 sidebar:
   order: 10
 ---
@@ -8,9 +8,10 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 The `hal0` command is a thin HTTP client over the `hal0-api` daemon. Almost
-every subcommand resolves the API base (`http://127.0.0.1:8080` by default),
-calls a `/api/*` route, and renders the result. Commands that need the daemon
-exit non-zero with a clear message when the API is unreachable.
+every subcommand resolves the API base (`http://127.0.0.1:8080` by default,
+override with the `HAL0_API_URL` env var), calls a `/api/*` route, and renders
+the result. Commands that need the daemon exit non-zero with a clear message
+when the API is unreachable.
 
 ```sh
 hal0 --help          # top-level help (no args also prints help)
@@ -31,6 +32,7 @@ directly so they work without a running daemon.
 | `hal0 --version` / `-V` | Print the version and exit. | — |
 | `hal0 status` | System + slot summary (name, version, slot/upstream counts, slot table). | — |
 | `hal0 probe` | Re-run hardware detection (`POST /api/hardware/probe`) and update `hardware.json`. | — |
+| `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
@@ -44,6 +46,33 @@ tree recorded at `/var/lib/hal0/hal0.previous`.
 `--purge` additionally deletes config, data, the hal0 system user, and all
 hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 `HAL0_FORCE=1`).
+
+## `hal0 setup` — first-run setup
+
+| Flag | Purpose |
+|---|---|
+| `--auto` | Non-interactive: apply recommended defaults instead of the Rich two-column TUI. |
+| `--storage-dir` | Model storage root (default `/var/lib/hal0/models`). |
+| `--no-pull` | Seed slot configs + sentinel without downloading any models. |
+| `--no-extensions` | Skip extension install/wiring in `--auto` mode. |
+
+`hal0 setup` has no further subcommands — it's a flags-only entry point.
+Without `--auto` it runs an interactive Rich TUI stepping through
+storage → extensions → main slot → agent → NPU → review → install. With
+`--auto` it always provisions a `chat` slot (port 8081) unless one already
+exists, adds a `coder` slot (port 8082) only if an agent-kind extension is
+enabled, and seeds capability defaults from the hardware probe — no model
+pull at install time if `--no-pull` is set.
+
+It runs in-process when the daemon isn't up yet (fresh install), or posts to
+`POST /api/install/apply` when `hal0-api` is already running, so re-running
+setup against a live install registers new slots without a restart.
+
+```sh
+hal0 setup                       # interactive TUI
+hal0 setup --auto
+hal0 setup --auto --no-pull --no-extensions
+```
 
 ## `hal0 slot` — inference slots
 
@@ -66,7 +95,7 @@ hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 - `--type` / `-t` — slot type, routes dispatch: `llm` (default), `embedding`,
   `reranking`, `transcription`, `tts`, `image`.
 - `--provider` — inference engine: `llama-server` (default), `flm`,
-  `kokoro`. (Since v0.2 the provider is normally implied by
+  `moonshine`, `kokoro`. (Since v0.2 the provider is normally implied by
   `--type`; kept for legacy slot TOMLs.)
   **Note:** `comfyui` is not a valid `--provider` value in the CLI; image
   slots are created by passing `--type image`, which implies the comfyui
@@ -80,6 +109,27 @@ hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 - `--ctx-size` — context window in tokens (minimum `128`, default `4096`).
   Pass the model's full native context size when you want to override this
   floor; the daemon may cap very large values to the model's trained limit.
+
+`slot create` does **not** take a `--profile` flag — it assigns a runtime
+profile automatically: a new slot bound to a model adopts that model's
+preferred profile (`[model].defaults.profile` in the registry) when it fits
+the slot's device/type, otherwise it falls back to the device's default
+profile. To pick a different profile by name, edit the slot afterwards from
+the dashboard's slot drawer, which does expose a profile picker.
+
+```sh
+hal0 slot create primary --model qwen3-4b-q4_k_m
+hal0 slot create embed --type embedding --model bge-m3 --port 8090 --ctx-size 8192
+hal0 slot create stt --type transcription --provider moonshine --model moonshine-base
+```
+
+<Aside type="note">
+`slot create`/`slot edit` also accept a hidden, deprecated `--backend`/`-b`
+flag — a back-compat alias for `--provider` (it names the *engine*, not the
+hardware target, despite the name). It emits a deprecation warning on stderr.
+`slot add` and `slot remove` are hidden aliases for `slot create`/`slot
+delete`, kept for older scripts and muted from `--help`.
+</Aside>
 
 `slot swap` does two steps: a runtime hot-swap (`POST /api/slots/{name}/swap`)
 and a persist of the on-disk default (`PUT /api/install/slots/{name}/model`).
@@ -100,6 +150,30 @@ default.
 `model pull` accepts a curated alias (e.g. `qwen3-4b`) or a registered model
 id. It starts a background pull on the daemon and polls
 `/api/models/<id>/pull/status` until it reaches a terminal state.
+
+## Profiles and stacks — no CLI command
+
+<Aside type="caution">
+There is no `hal0 profile` command and no `hal0 stack` command. Both are
+managed entirely through the dashboard and the API — do not look for (or
+script around) a CLI verb that doesn't exist.
+</Aside>
+
+**Profiles** are the bench-tuned llama-server flag bundles behind
+`--hardware`/`--type` (`rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`,
+`embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui`, plus any
+custom clones). `slot create`/`slot edit` never take a `--profile` flag;
+picking or editing one by name is done from the dashboard's **Profiles** tab
+(`GET/POST/PUT/DELETE /api/profiles/*`). See [Providers, profiles &
+devices](/docs/reference/providers-profiles-devices).
+
+**Stacks** are named, portable bundles of slot + profile + model assignments
+(`GET/POST/PUT/DELETE /api/stacks/*`, plus `apply`/`export`/`import`/
+`snapshot`) — the multi-slot alternative to editing one slot at a time. They
+have no CLI surface either; use the dashboard's **Stacks** view. See
+[Stacks](/docs/concepts/stacks) for the concept and [Manage slots →
+Stacks](/docs/guides/manage-slots#editing-multiple-slots-at-once-stacks) for
+the walkthrough.
 
 ## `hal0 registry` — registry repair
 

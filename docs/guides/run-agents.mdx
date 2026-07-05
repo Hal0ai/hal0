@@ -60,7 +60,12 @@ installed before installing this one.
 hal0 agent list                 # installed bundled agents
 hal0 agent list --json
 hal0 agent status hermes        # provisioning checkpoint, per phase
+hal0 agent peers                # every published agent identity card
 ```
+
+`list` only shows agents installed on this host; `peers` searches the
+`agents` memory dataset for every identity card any host has published
+(needs the memory API reachable — it dies with a clear error otherwise).
 
 </TabItem>
 <TabItem label="Logs">
@@ -80,6 +85,26 @@ hal0 agent reprovision hermes          # idempotent re-converge
 hal0 agent reprovision hermes --repair # force every phase
 hal0 agent upgrade hermes              # bump the version pin + repair
 hal0 agent upgrade hermes --to 0.15.3  # pin a specific version
+```
+
+`reprovision` is a stable wrapper over the same state machine that
+`install` runs. For finer control — skipping a phase, staging the
+`hermes-agent` wheel offline, or a dry run that doesn't persist the
+checkpoint — drop to the underlying command directly:
+
+```sh
+hal0 agent bootstrap hermes --dry-run
+hal0 agent bootstrap hermes --repair --verbose
+hal0 agent bootstrap hermes --skip-phase provision_venv --offline
+```
+
+To restart the running Hermes process without re-provisioning anything
+(no config re-render, no ownership reconcile), restart the systemd unit
+directly or hit its restart endpoint:
+
+```sh
+sudo systemctl restart hal0-agent@hermes
+curl -X POST http://localhost:8080/api/agents/hermes/restart
 ```
 
 </TabItem>
@@ -153,6 +178,16 @@ denies requests that would overshoot; `hard_cap = false` lets them through
 but still reports the breach so the caller can log a warning. Spend is
 tracked in an append-only ledger per persona, aggregated over `daily`,
 `monthly`, and `lifetime` windows.
+
+Check the configured caps plus running spend for a persona over the API
+(there's no dedicated CLI verb for this yet):
+
+```sh
+curl http://localhost:8080/api/agents/hermes/personas/hermes/budget
+```
+
+The same route accepts a `PUT` with a `{"daily_usd": ..., ...}` body to
+change the caps without hand-editing the persona TOML.
 
 ## Audit trail
 

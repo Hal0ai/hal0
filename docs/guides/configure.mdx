@@ -22,13 +22,13 @@ with it.
 
 | File | What it holds |
 |------|---------------|
-| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots] port_range_start/end`, `[dispatcher] prefetch_timeout_s`, `[telemetry] channel`. |
-| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — feature flags and env knobs like `HAL0_MODEL_STORE`, `HAL0_COMFYUI_SWITCHOVER_ENABLED`, `HAL0_MCP_ALLOWED_HOSTS`. |
+| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots]` (port range, `idle_timeout_s`, `evict_pressure_mb`, `publish_host`), `[dispatcher]` prefetch tuning, `[models]` roots/store, `[memory]` engine + `[memory.graph]` extraction, `[activity]` audit-log retention, `[telemetry] channel`. |
+| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — provider secrets plus env knobs like `HAL0_MODEL_STORE`, `HAL0_MCP_ALLOWED_HOSTS`, and the `HAL0_*_PUBLIC_URL` reverse-proxy overrides. |
 | `upstreams.toml` | External / upstream provider routing. |
 | `providers.toml` | Provider credential references (key **names**, never plaintext secrets). |
-| `profiles.toml` | Optional profile catalogue. Absent → built-in seed profiles are used. |
+| `profiles.toml` | Optional custom profile catalogue. The built-in seed profiles (`rocm`, `rocm-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui`, …) are always overlaid from code on load and are never written back here, even if the file exists. |
 | `capabilities.toml` | Persisted capability selections (embed / voice / img / vision). Carries its own `schema_version`. |
-| `slots/<name>.toml` | One file per slot — model, device, profile, port, and per-slot tables like `[image]`. |
+| `slots/<name>.toml` | One file per slot — `name`, `port`, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), `gpu_index` (multi-GPU pinning), `profile`, `mtp` (tri-state Auto/on/off), `vision` (mmproj toggle), the TTS request-default trio (`default_voice`/`default_speed`/`default_response_format`), plus nested `[model]`, `[server]`, `[npu]` (`asr`/`embed`), and — on the `img` slot only — `[image]`. |
 
 Other files the runtime drops here: `hardware.json` (cached hardware
 probe), `manifest.json` (release image pins), `openwebui.env`.
@@ -93,21 +93,41 @@ config edit`.
 ## The dashboard Settings page
 
 Beyond the files and CLI above, the dashboard's Settings view covers most of
-the same ground with a few operator conveniences:
+the same ground with a few operator conveniences. Sections, in nav order:
+Secrets, Storage, Updates, Voice, Image-gen, NPU, Default slots, General,
+Advanced, About.
 
-- **Anonymous telemetry** — an opt-in toggle for `[telemetry] enabled`
-  (off by default; see [Configuration schema reference](/docs/reference/config-schema)).
-- **Image-gen defaults** — `default_size`, `default_steps`, and
-  `idle_restore_minutes` for the `img`/ComfyUI slot's `[image]` table.
 - **Secrets** — provider API key presets (Hugging Face, OpenAI, Anthropic,
-  Google, Groq) plus a paired **AWS Bedrock** preset
-  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), or a custom key name.
+  Google, Groq) plus two paired **AWS Bedrock** presets
+  (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, cross-referenced in the
+  picker so you're reminded to set both), or a custom key name.
+- **Voice** — STT enable + model, and the **TTS request-default trio** for
+  the serving `tts` slot: **Default voice** (populated from the live voice
+  list where available), **Default speed** (`0.25`–`4.0`), and **Default
+  format** (`mp3`/`wav`/`opus`/`flac`/`pcm`). These persist to the same
+  `[slot]` keys as `slots/<name>.toml` and are applied to the next
+  `/v1/audio/speech` request with no restart — see
+  [Voice (STT/TTS)](/docs/guides/voice-stt-tts/).
+- **Image-gen** — `default_size`, `default_steps`, and `idle_restore_minutes`
+  for the `img`/ComfyUI slot's `[image]` table. `idle_restore_minutes` (how
+  long ComfyUI can sit idle before the GPU arbiter restores LLM slots) is
+  **hot-reloadable** — it takes effect on Save with no `hal0-api` restart.
+- **NPU** — for FastFlowLM (FLM) slots: **Context size** (`--ctx-len`),
+  **Load embeddings**, and **Load ASR** (all require restarting the slot),
+  plus a read-only **Occupancy** panel (TOPS, tile usage, per-slot
+  breakdown) when an NPU is present.
 - **Advanced** — schema-driven controls for every `[slots]`, `[dispatcher]`,
   `[memory]`, and `[activity]` key that previously required `hal0 config
-  edit` (including `slots.evict_pressure_mb`, the pressure-eviction floor),
-  plus a dedicated **memory graph** panel for `[memory.graph]`
-  (`extraction_slot`, `llm_timeout_s`) and a **Restart hal0-api** button for
-  settings marked "restart required".
+  edit` (including `slots.evict_pressure_mb`, the pressure-eviction floor;
+  the `memory.engine` picker only offers `hindsight`/`pgvector` even though
+  the schema also accepts `cognee`/`mem0`, since those two are silently
+  remapped to hindsight), plus a dedicated **memory graph** panel for
+  `[memory.graph]` (`extraction_slot`, `llm_timeout_s`) and a **Restart
+  hal0-api** button — a one-click restart-and-health-poll for
+  `hal0-api.service`, handy after any change flagged "restart required".
+- **General** — the **Anonymous telemetry** opt-in toggle for
+  `[telemetry] enabled` (off by default; see
+  [Configuration schema reference](/docs/reference/config-schema)).
 
 ## Migrate the schema forward
 
@@ -142,3 +162,4 @@ write never leaves a half-written, unparseable file in place.
 - [Paths and files](/docs/reference/paths-and-files) — the full FHS map.
 - [Environment variables](/docs/reference/env-vars) — the `api.env` keys.
 - [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`.
+- [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) — the TTS request-default trio in depth.

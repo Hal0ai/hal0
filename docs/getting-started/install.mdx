@@ -1,6 +1,6 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 and cosign, installs podman, seeds default slot config, and starts the API.
+description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), installs podman, seeds default slot config, and starts the API.
 sidebar:
   order: 10
 ---
@@ -40,9 +40,13 @@ Python venv stdlib): **apt** (Debian/Ubuntu), **dnf**/**yum** (Fedora),
 **pacman** (Arch), **zypper** (openSUSE), and **apk** (Alpine).
 
 <Aside type="caution" title="NVIDIA / CUDA">
-NVIDIA + CUDA is not a first-class target. hal0 is tuned for the AMD
-Strix Halo iGPU + XDNA NPU; GPU acceleration on other hardware runs
-through the Vulkan or ROCm container profiles.
+hal0 is tuned for the AMD Strix Halo iGPU + XDNA NPU; ROCm is AMD-only,
+so GPU acceleration on other hardware runs through the generic **Vulkan**
+profile (works on AMD/NVIDIA/Intel). An experimental `cuda` profile also
+ships (the upstream `llama.cpp:server-cuda` image, needs
+`nvidia-container-toolkit`/CDI on the host) — it isn't part of the
+one-line installer's automatic hardware seeding, so assign it to a slot
+manually from the dashboard after install.
 </Aside>
 
 ## What the bootstrap does
@@ -56,11 +60,14 @@ through the Vulkan or ROCm container profiles.
 2. **Download and SHA-256-verify the tarball** against the digest in the
    manifest. A mismatch aborts the install.
 
-3. **Cosign keyless verify** — the Fulcio-issued certificate and
-   signature are checked against the workflow OIDC identity declared in
-   the manifest. cosign is required; if it is not installed the install
-   refuses unless you explicitly set `HAL0_UPDATE_SKIP_COSIGN=1` (not
-   recommended).
+3. **Cosign keyless verify, when available** — if `cosign` is on `PATH`,
+   the Fulcio-issued certificate and signature are checked against the
+   workflow OIDC identity declared in the manifest; a failed check aborts
+   the install. If `cosign` is **not** installed, the bootstrap proceeds
+   on the SHA-256 check alone with a loud warning — cosign is no longer a
+   hard requirement for the one-line install. Set
+   `HAL0_INSTALL_REQUIRE_COSIGN=1` to restore the old strict behavior
+   (fail instead of warn when cosign is missing).
 
 4. **Unpack and hand off** to `installer/install.sh`, which runs
    pre-flight checks, installs podman + the Python venv, builds the
@@ -82,6 +89,7 @@ flags:
 | `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
 | `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (hardware-recommended slot seed) |
+| `HAL0_INSTALL_REQUIRE_COSIGN` | _(unset)_ | Set to `1` to make the bootstrap refuse the install outright when `cosign` isn't present, instead of warning and proceeding on the SHA-256 check alone |
 
 | Flag | Effect |
 |---|---|
@@ -103,11 +111,17 @@ Once the installer finishes, check system and slot status:
 hal0 status
 ```
 
-Re-run the full pre-flight set (systemd, Python, container runtime, disk,
-ports, NPU probe) any time:
+Re-run the full pre-flight set (architecture, systemd, Python, container
+runtime, disk, ports) any time:
 
 ```sh
 hal0 doctor
+```
+
+Re-run hardware detection (CPU, RAM, GPU, NPU) on its own with:
+
+```sh
+hal0 probe
 ```
 
 The API listens on `http://localhost:8080`. Service-level checks:
@@ -130,7 +144,8 @@ hal0 uninstall --purge  # clean slate: also wipe config, data, user, images
 The **conservative default** stops services and removes code, units,
 venvs, binaries, and every hal0 podman container, but keeps `/etc/hal0`
 (config) and the data directory (models, registry, OpenWebUI state) so a
-re-install reuses them.
+re-install reuses them. `--keep-data` is a legacy alias for this same
+default — it's kept for back-compat, not because the default changed.
 
 `--purge` (alias `--clean-slate`) additionally removes the config and
 data directories, the `hal0` system user and group, and all hal0/toolbox
@@ -142,3 +157,15 @@ podman images. It prompts for a typed `DELETE` confirmation unless you pass
 podman itself, `libxrt-npu2`, ffmpeg, and boost — since other software
 may depend on them.
 </Aside>
+
+## Next steps
+
+First-run setup already seeded a hardware-recommended slot and profile
+during install. From here:
+
+- Run the interactive **`hal0 setup`** TUI to pick real models and
+  extensions — see [First-run setup](/docs/getting-started/setup/).
+- Pull a model and assign it to a slot — see
+  [Load your first model](/docs/getting-started/first-model/).
+- Open the dashboard at `http://<host>:8080/` to manage slots, profiles,
+  and stacks.

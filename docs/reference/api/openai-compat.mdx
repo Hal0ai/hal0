@@ -37,12 +37,13 @@ probe the catalog before sending any `Authorization` header.
 | POST | `/v1/completions` | Legacy text completion. |
 | POST | `/v1/embeddings` | Text embeddings (routes to the NPU FLM trio when an embed-NPU slot is targeted). |
 | POST | `/v1/rerankings` | Document reranking. |
+| POST | `/v1/rerank` | Alias of `/v1/rerankings` for llama-server / Jina/Cohere-style clients that call `/rerank` directly. Same dispatch path. |
 | POST | `/v1/audio/transcriptions` | Speech-to-text. Multipart upload; the `model` field is required. |
 | POST | `/v1/audio/speech` | Text-to-speech. The `model` field is required. |
 | POST | `/v1/images/generations` | Image generation via the ComfyUI provider. |
 
-![The hal0 dashboard Endpoints tab showing all /v1 routes and their status](/screenshots/endpoints-tab.png)
-*Dashboard Endpoints tab — live status for every /v1 route.*
+![The hal0 dashboard Slots ▸ Endpoints tab listing every local slot's port, model, device, and current status](/screenshots/endpoints-tab.png)
+*Slots ▸ Endpoints tab — the gateway base URL plus a live per-slot port/model/device/tok-s table for everything reachable under `/v1/*`.*
 
 ## `GET /v1/models`
 
@@ -56,12 +57,14 @@ The list combines three kinds of entries:
 
 - **Per-slot alias entries** — every enabled, currently-served chat slot
   (`type == "llm"`) appears once, with `id` equal to the slot alias (the slot
-  name, e.g. `chat`), a human `name`, and the slot's `context_length`.
+  name, e.g. `agent`, the canonical default/anchor slot per ADR-0023, or
+  `utility`), a human `name`, and the slot's `context_length`.
   Unloaded/disabled slots are omitted.
 - **Upstream catalog entries** — the raw model ids each `advertise_models`
   upstream reports, so non-chat models (embed, rerank, image) keep their
   direct-addressing ids.
-- **Virtual `hal0/*` names** — the canonical live-resolve names so clients can
+- **Virtual `hal0/*` names** — the canonical live-resolve names (`hal0/agent`,
+  `hal0/utility`, `hal0/npu`, plus `hal0/<any-enabled-llm-slot>`) so clients can
   pin a role rather than a model. Each carries `context_length` and a `_hal0`
   metadata block describing what it resolves to.
 
@@ -83,7 +86,7 @@ The standard OpenAI chat body. hal0 adds two opt-in behaviours:
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "chat",
+    "model": "agent",
     "messages": [
       {"role": "user", "content": "Say hello in one word."}
     ]
@@ -97,7 +100,7 @@ curl http://localhost:8080/v1/chat/completions \
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "chat",
+    "model": "agent",
     "stream": true,
     "messages": [
       {"role": "user", "content": "Stream a short greeting."}
@@ -123,9 +126,13 @@ parser reads the audio. NPU `stt-npu` slots route directly to the FLM child.
 
 ## `POST /v1/audio/speech`
 
-JSON body: `{"model": "...", "input": "...", "voice": "..."}`. The `model`
-field is required (a missing model returns 400, `request.missing_model`). The
-response is the synthesised audio stream.
+JSON body: `{"model", "input", "voice", "speed", "response_format"}`. The
+`model` field is required (a missing model returns 400,
+`request.missing_model`). Any of `voice`, `speed`, or `response_format` that
+are **omitted** get filled in from the serving `tts` slot's persisted request
+defaults (Settings → Voice: `default_voice` / `default_speed` /
+`default_response_format`) before dispatch — explicit request params always
+win. The response is the synthesised audio stream.
 
 ## `POST /v1/images/generations`
 
@@ -145,7 +152,9 @@ Request (honoured subset):
 
 `prompt` is required; `model` must be a curated image model (built-ins:
 `sdxl-turbo`, `sd-1.5-pruned-emaonly`). Optional hal0 `extra_body` knobs:
-`seed`, `steps`, `cfg`, `negative_prompt`.
+`seed`, `steps`, `cfg`, `negative_prompt`. An omitted `size` or `extra_body.steps`
+is filled in from the img slot's own `[image]` request defaults (Settings →
+Image-gen → Generation defaults) before dispatch.
 
 Response:
 
