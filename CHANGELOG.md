@@ -13,8 +13,46 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+## [v0.9.0] — 2026-07-04
+
+**The first public-beta cut.** hal0 graduates from the b-tagged 0.8.x
+line: the dashboard gets its redesigned fixed-band layout and a live
+telemetry header, seed profiles carry flags from a measured Strix Halo
+bench matrix (plus a new per-model-family override layer), MCP servers
+are manageable from the CLI, and the Memory view becomes a per-bank
+workspace. **Safe upgrade from v0.8.5b2** — no on-disk migrations in
+this cut. Profile flag changes (re-tune, `FAMILY_DEFAULTS`) land on each
+slot's next restart; thanks to the v0.8.5b2 auto unit re-render, any
+restart path picks them up.
+
 ### Added
 
+- **Dashboard redesign — fixed-band layout with swap-in-place widgets
+  (#1061).** The free-form drag/resize grid is replaced by a fixed
+  vertical band stack: hero strip (steady-on + quick actions), 5-cell
+  health strip, a full-width **Unified Memory hero** (slot allocations
+  drawn inside the pool bar, striped system block, Proxmox-host block
+  when configured), Throughput / Utilization / Requests band, locked
+  dense slot rows, and an Activity / Services / Needs-Attention band
+  with inline actions. Customization is swap-in-place per cell (layout
+  v3 via the existing `PUT /api/user/dashboard-layout`, fail-soft to
+  defaults on old payloads). Ships a new **Requests & Latency** widget
+  against a new `/api/stats/requests` endpoint (gates to "source
+  pending" until the dispatcher rollup ships).
+- **Telemetry header on the Slots page (#1059, #1062, #1064).** One
+  combined live-metrics card replaces the old hero band: throughput
+  hero + 20-bucket spark, GPU semicircle gauge (sclk/temp/watts), CPU +
+  memory gauge, and the NPU 4×8 occupancy grid with per-slot owner
+  hues — above a full-width memory rack ruler in the #1061 memory-hero
+  style (in-bar allocations, live tok/s on serving segments, click-through
+  to the slot). Honest-data rules throughout: missing metric → em-dash,
+  measured zero renders as 0.0 with the serving count, GPU util captioned
+  "pinned" when forced high. Container queries keep the 4→3→2→1 column
+  wrap gap-free.
+- **`hal0 mcp` CLI surface** (#504) — `hal0 mcp {list,status,install,uninstall,restart,catalog}`
+  backed by the existing `/api/mcp/*` routes. Rich tables with `--json` flag for
+  machine output. The `restart` subcommand surfaces the 501 supervisor-stub
+  gracefully until ADR-0015 lands.
 - **`FAMILY_DEFAULTS` — per-model-family launcher-flag overrides.** A new
   resolution layer between a profile's generic flags and a slot's own
   `[model].defaults`, keyed on model family (matched from the id/filename).
@@ -26,9 +64,34 @@ tree is gitignored, #638) and referenced by number throughout the code.
   measured -28.5% pp on RADV / -10% tg on rocm, plus SWA+cache-reuse bugs
   #21468/#21749). This fixes the live gemma-on-`rocm-dnse` regression and makes
   adopting Vulkan q8 KV safe as a follow-up.
+- **Configurable slot publish host — `[slots].publish_host` (#1058).**
+  Slot containers published on 127.0.0.1 only; raw slot ports were
+  reachable solely through hal0-api/Traefik. A first-class, UI-settable
+  config key (default `127.0.0.1`, unchanged behavior) lets an operator
+  widen to `0.0.0.0` or a specific interface IP. Fail-soft: an
+  unresolvable value falls back to loopback, never opens the box. Baked
+  into ExecStart, so live slots re-bind on their next restart; the
+  Settings row carries a loud LAN-exposure warning.
 
 ### Changed
 
+- **Memory Overview is a per-bank workspace (#1057).** Selecting a bank
+  drives one combined primary card — retained-memories spark, graph
+  extraction panel, embedded Tools (recall · reflect · documents ·
+  mental models · directives), async operations, danger zone. The
+  standalone `#memory/tools` route is retired; documents paginate and
+  show composed titles instead of raw UUIDs; mental models and
+  directives gain create forms.
+- **The MTP control is always visible on llm slots (#1054).** Hiding the
+  row for ineligible models made the tri-state undiscoverable. The slot
+  drawer now always renders it, with a reason line for Auto·off ("model
+  has no MTP heads" / "profile doesn't enable MTP") and a
+  launch-will-fail warning when forcing On for a model without
+  advertised heads. Stack editor rows follow the same contract.
+- **Activity sidebar rework (#1063).** Taller pane, stacked
+  timestamp/actor meta reclaiming horizontal space, and the free-text
+  search replaced by a slot filter dropdown (exact target match,
+  server-side pre-narrowed).
 - **Seed profiles: bench-driven flag re-tune (Strix Halo matrix, 2026-07-04).**
   `rocm-moe` micro-batch `-ub 2048` → `-ub 1024` (+30% prompt-processing on
   Qwen3.6-35B-A3B-MTP: 1165 vs 895 t/s pp2048, consistent across all `-b`;
@@ -46,6 +109,29 @@ tree is gitignored, #638) and referenced by number throughout the code.
   no longer intrinsically gemma-safe — it relies on `FAMILY_DEFAULTS["gemma"]`
   pinning gemma slots back to f16 KV. (The upstream "~10x pp cliff" did NOT
   reproduce on this fork.)
+
+### Fixed
+
+- **OpenRouter OAuth callback route is gated behind
+  `HAL0_OPENROUTER_OAUTH_ENABLED` (#775).** The callback endpoint no
+  longer registers unless the flow is explicitly enabled, closing an
+  unauthenticated surface on installs that never use OpenRouter OAuth.
+- **Capability slot mini-cards regained Logs/Edit buttons (#1055).** The
+  utility-tier (embedding/reranking/tts/transcription) cards rendered
+  compact controls with no way to edit or tail a capability slot created
+  via the UI.
+- **Hermes memory identity defaults to `hermes` (#1056).** The upstream
+  plugin base defaulted to `hermes-agent` on env-less code paths,
+  spawning a stray duplicate `private:hermes-agent` bank alongside the
+  correct `private:hermes`. Reads/writes now consistently target
+  `private:hermes`.
+- **Telemetry throughput no longer flaps to "source pending" on an idle
+  box (#1062).** An empty 100-second history window is a measurement
+  (0.0 with the live serving count), and the spark keeps the last 20
+  measured buckets on screen; "source pending" is reserved for a
+  genuinely missing source.
+- Removed a dead duplicate `SELF_MANAGED_PROVIDERS` constant from
+  `kokoro.py` (#982).
 
 ## [v0.8.5b2] — 2026-07-04
 

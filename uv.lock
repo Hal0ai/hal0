@@ -1240,7 +1240,7 @@ wheels = [
 
 [[package]]
 name = "hal0"
-version = "0.8.5b2"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "cognee" },

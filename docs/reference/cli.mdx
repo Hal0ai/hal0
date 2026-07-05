@@ -214,6 +214,33 @@ There is no `rotate-token` subcommand. The daemon has no built-in auth
 sets from `$HAL0_AGENT_ID`.
 </Aside>
 
+## `hal0 mcp` — MCP servers
+
+A thin HTTP client over the daemon's `/api/mcp/*` routes — every command
+hits `127.0.0.1:8080`. Manage the bundled MCP servers (`hal0-admin`,
+`hal0-memory`) and any user-installed ones.
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `mcp list` | List all MCP servers (bundled + installed) with state. | `--json` |
+| `mcp status <id>` | Show detail for one MCP server. | `--json` |
+| `mcp install <url-spec>` | Install a user MCP server from a URL / spec (`oci://…`, `npm:…`, etc.). | `--json` |
+| `mcp uninstall <id>` | Uninstall a user-installed server. Bundled servers reject with `409`. | `--force`/`-f` |
+| `mcp restart <id>` | Restart an MCP server (bundled or installed). | — |
+
+### `hal0 mcp catalog`
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `mcp catalog list` | List installable MCP servers from the catalog. | `--json` |
+| `mcp catalog refresh` | Refresh the installable-MCP catalog (re-fetches from upstream). | — |
+
+<Aside type="note">
+`mcp restart` currently surfaces the `501` supervisor-stub gracefully — live
+MCP process restart lands with ADR-0015. Until then, `restart` reports the
+stub instead of bouncing the server.
+</Aside>
+
 ## `hal0 migrate` — config/state migrations
 
 The `migrate` sub-app houses one-shot upgrade helpers for moving older on-disk
