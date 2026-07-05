@@ -176,7 +176,7 @@ class TestEnrichedFields:
         data = client.get("/api/profiles").json()
         by_name = {p["name"]: p for p in data}
         rocm = by_name["rocm"]
-        assert rocm["intent"] == "ROCm · basic GPU LLM"
+        assert rocm["intent"] == "ROCm"
         assert rocm["quant"] == "FP4"
         assert rocm["tps"] == 52.8
         assert rocm["rtf"] is None

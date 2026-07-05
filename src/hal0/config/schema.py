@@ -856,7 +856,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "ROCm · basic GPU LLM",
+        "intent": "ROCm",
         "quant": "FP4",
     },
     "rocmfpx-rocm": {
@@ -871,7 +871,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "ROCmFPX · ROCmFP4 dense · ROCm0 + MTP",
+        "intent": "ROCmFPX · DENSE · MTP",
         "quant": "ROCmFP4",
     },
     # Renamed rocmfpx-moe -> vkfpx-moe (2026-07-05) so the name indicates the
@@ -887,7 +887,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
-        "intent": "VKFPX · ROCmFPX MoEQuality 35B-A3B · Vulkan0 + MTP",
+        "intent": "VULKFPX · MOE · MTP",
         "quant": "ROCmFPX",
     },
     "vulkan": {
@@ -900,7 +900,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
-        "intent": "Vulkan · basic GPU LLM (RADV)",
+        "intent": "Vulkan",
         "quant": "Q4_K_M",
     },
     "cuda": {
@@ -915,7 +915,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "cuda",
-        "intent": "CUDA · basic GPU LLM (NVIDIA, experimental)",
+        "intent": "CUDA · experimental",
         "quant": "Q4_K_M",
     },
     "embed": {
@@ -933,7 +933,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Embeddings · GPU",
+        "intent": "Embeddings",
         "quant": "",
     },
     "rerank": {
@@ -949,7 +949,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Reranking · GPU",
+        "intent": "Reranking",
         "quant": "",
     },
     "flm": {
@@ -957,7 +957,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "",
         "mtp": False,
         "device_class": "npu",
-        "intent": "FLM · NPU inference",
+        "intent": "FLM · NPU",
         "quant": "W4ABF16",
     },
     "tts": {
@@ -965,7 +965,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
         "device_class": "cpu",
-        "intent": "TTS · Kokoro (CPU)",
+        "intent": "TTS · CPU",
         "quant": "",
     },
     "tts-qwen3": {
@@ -977,7 +977,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "TTS · Qwen3 (GPU, multilingual)",
+        "intent": "TTS · GPU",
         "quant": "BF16",
     },
     "cpu-llm": {
@@ -990,7 +990,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap --jinja",
         "mtp": False,
         "device_class": "cpu",
-        "intent": "CPU · basic LLM (llama-server)",
+        "intent": "CPU",
         "quant": "Q4_K_M",
     },
     "comfyui": {
@@ -998,7 +998,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--disable-mmap --bf16-vae --cache-none",
         "mtp": False,
         "device_class": "img",
-        "intent": "ComfyUI · image generation",
+        "intent": "ComfyUI",
         "quant": "",
     },
 }

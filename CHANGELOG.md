@@ -55,7 +55,10 @@ ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
 ### Changed
 - The plain `rocm` / `vulkan` seed profiles are reduced to basic flags
   (`-ngl 999 -fa on --jinja`); per-model KV/batch tuning now lives in the
-  model's `defaults.extra_args`. Their intent labels were cleaned up (#1076).
+  model's `defaults.extra_args` (#1076).
+- Seed-profile `intent` labels normalised to terse structural tags
+  (e.g. `ROCmFPX · DENSE · MTP`, `VULKFPX · MOE · MTP`, `ROCm`, `Embeddings`) —
+  no served-model names, no filler.
 - Slot units are re-rendered through the new code during an update's `commit`
   step, so a subsequent restart uses current argv (#1075).
 
