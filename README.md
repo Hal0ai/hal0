@@ -66,6 +66,11 @@ curl -fsSL https://hal0.dev/install.sh | bash
 <td width="33%"><a href="https://hal0.dev/docs/guides/generate-images/"><img src="https://hal0.dev/screenshots/image-gen-comfyui.png" alt="Image generation" width="100%"></a><br><sub><b>Image generation</b> — ComfyUI queue and GPU gauges.</sub></td>
 <td width="33%"><a href="https://hal0.dev/docs/guides/enable-memory/"><img src="https://hal0.dev/screenshots/memory-graph.png" alt="Memory graph" width="100%"></a><br><sub><b>Memory</b> — Hindsight facts and graph extraction.</sub></td>
 </tr>
+<tr>
+<td width="33%"><a href="https://hal0.dev/docs/concepts/architecture/"><img src="https://hal0.dev/screenshots/services-page.png" alt="Services page" width="100%"></a><br><sub><b>Services</b> — Open WebUI, ComfyUI, Hermes, Hindsight, n8n with mDNS.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/concepts/slots/"><img src="https://hal0.dev/screenshots/stacks-tab.png" alt="Stacks" width="100%"></a><br><sub><b>Stacks</b> — declarative slot + profile + model bundles, applied atomically.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/manage-slots/"><img src="https://hal0.dev/screenshots/slots-inference.png" alt="Slots + telemetry" width="100%"></a><br><sub><b>Slots + telemetry</b> — live throughput, GPU/CPU/NPU, unified-memory rack.</sub></td>
+</tr>
 </table>
 
 <sub>More in the <a href="https://hal0.dev/docs/">docs</a>.</sub>
