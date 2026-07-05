@@ -94,7 +94,5 @@ def extract_structured(section_md: str) -> dict[str, list[str]]:
     for heading, body in zip(pairs, pairs, strict=False):
         key = heading.strip().lower()
         if key in out:
-            out[key] = [
-                line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")
-            ]
+            out[key] = [line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")]
     return out

@@ -221,9 +221,19 @@ def test_gen_release_notes_script_writes_both_files(tmp_path):
     out = tmp_path / "stage"
 
     r = subprocess.run(
-        [sys.executable, str(script), "--tag", "v0.10.0",
-         "--out-dir", str(out), "--changelog", str(changelog)],
-        capture_output=True, text=True, cwd=tmp_path,
+        [
+            sys.executable,
+            str(script),
+            "--tag",
+            "v0.10.0",
+            "--out-dir",
+            str(out),
+            "--changelog",
+            str(changelog),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
     )
     assert r.returncode == 0, r.stderr
     assert "Seed-profile cleanup" in (out / "RELEASE_NOTES.md").read_text(encoding="utf-8")
