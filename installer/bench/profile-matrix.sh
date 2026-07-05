@@ -148,9 +148,12 @@ embed/rerank endpoints. Use server_ab.py (same dir) against live slots:
   # MTP draft grid (ROCmFPX): restart-free per-request n_max x p_min sweep at
   # depth, greedy AND production sampler. The seeded bundle hardcodes n-max 4 /
   # p-min 0.0; the fork says these are model+depth-specific (runbook B-MTP).
-  ./server_ab.py --mode mtp --slot code-fpx --depth 2000  --spec-nmax 1,2,3,4 --spec-pmin 0.0,0.25,0.5,0.75
-  ./server_ab.py --mode mtp --slot code-fpx --depth 32768 --spec-nmax 1,2,3,4 --spec-pmin 0.0,0.25
-  ./server_ab.py --mode mtp --slot code-fpx --depth 2000  --temp 0.6 --top-p 0.95 --top-k 20  # production sampler
+  # mtp mode relaunches per (n_max,p_min) — 7aa484a ignores per-request override.
+  # Depth <=24k: the FPX slots are ctx-bounded to 40960 (OOM fix); 128k infeasible.
+  # Relaunch every <=4 cells (runner leaks GPU mem across MTP requests -> OOM).
+  ./server_ab.py --mode mtp --slot code-fpx --depth 2000  --spec-nmax 2,4 --spec-pmin 0.0,0.5
+  ./server_ab.py --mode mtp --slot code-fpx --depth 24000 --spec-nmax 2,4 --spec-pmin 0.0
+  ./server_ab.py --mode mtp --slot code-fpx --depth 2000  --temp 0.6 --top-p 0.95 --top-k 20 --spec-nmax 4 --spec-pmin 0.0  # production sampler
 
   # Draft-KV quant needs a relaunch (per-request can't change it) — use ab.
   # Fork: 27B wants q4 draft KV, 35B wants q4 draft + q8 main.
