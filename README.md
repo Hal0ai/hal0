@@ -56,9 +56,12 @@ curl -fsSL https://hal0.dev/install.sh | bash
 
 <div align="center">
 
-<a href="https://hal0.dev/docs/"><img src="https://hal0.dev/screenshots/dashboard-overview.png" alt="hal0 dashboard — unified-memory hero, health strip, live slot rows" width="820"></a>
-
-<em>The dashboard — unified-memory hero, at-a-glance health, and live slot rows.</em>
+<table>
+<tr>
+<td width="50%"><a href="https://hal0.dev/docs/"><img src="https://hal0.dev/screenshots/dashboard-overview.png" alt="hal0 dashboard" width="100%"></a><br><sub><b>Dashboard</b> — unified-memory hero, at-a-glance health, and live slot rows.</sub></td>
+<td width="50%"><a href="https://hal0.dev/docs/guides/manage-slots/"><img src="https://hal0.dev/screenshots/slots-inference.png" alt="Slots" width="100%"></a><br><sub><b>Slots</b> — the inference engine: per-slot models, devices, and live telemetry.</sub></td>
+</tr>
+</table>
 
 <table>
 <tr>
@@ -69,7 +72,7 @@ curl -fsSL https://hal0.dev/install.sh | bash
 <tr>
 <td width="33%"><a href="https://hal0.dev/docs/concepts/architecture/"><img src="https://hal0.dev/screenshots/services-page.png" alt="Services page" width="100%"></a><br><sub><b>Services</b> — Open WebUI, ComfyUI, Hermes, Hindsight, n8n with mDNS.</sub></td>
 <td width="33%"><a href="https://hal0.dev/docs/concepts/slots/"><img src="https://hal0.dev/screenshots/stacks-tab.png" alt="Stacks" width="100%"></a><br><sub><b>Stacks</b> — declarative slot + profile + model bundles, applied atomically.</sub></td>
-<td width="33%"><a href="https://hal0.dev/docs/guides/manage-slots/"><img src="https://hal0.dev/screenshots/slots-inference.png" alt="Slots + telemetry" width="100%"></a><br><sub><b>Slots + telemetry</b> — live throughput, GPU/CPU/NPU, unified-memory rack.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/configure/"><img src="https://hal0.dev/screenshots/settings-page.png" alt="Settings" width="100%"></a><br><sub><b>Settings</b> — full <code>hal0.toml</code> parity with an Advanced section.</sub></td>
 </tr>
 </table>
 
