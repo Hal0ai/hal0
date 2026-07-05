@@ -7,7 +7,7 @@
 
 ### Open-source home AI inference platform
 
-[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
+[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/#roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
 
 </div>
 
@@ -361,10 +361,23 @@ VM installs leave the panel off and the dashboard stays quiet.
 ## Roadmap
 
 No dates — items are direction. The closer to the left, the closer to
-running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap).
+running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadmap).
 
-### Shipped (v0.3 / container runtime)
+### Shipped (v0.9 / public beta)
 
+- **Dashboard redesign + live telemetry header** — fixed-band layout
+  with a unified-memory hero, and a combined throughput / GPU / CPU /
+  NPU-occupancy metrics card that reads only from live probes
+- **Companion services, one surface** — Open WebUI, ComfyUI, Hermes,
+  Hindsight, and n8n managed from a dashboard **Services** page with
+  mDNS discovery and allow-listed lifecycle actions
+- **GPU generalization** — experimental CUDA + per-slot `gpu_index`
+  pinning for multi-GPU hosts, alongside the ROCm/Vulkan defaults
+- **Virtual seed profiles** — code-defined and self-healing on upgrade,
+  with dedicated embed/rerank lanes and a model×profile×slot MTP
+  decision (tri-state Auto/On/Off)
+- **`hal0 mcp` CLI + two-way MCP** — manage MCP servers from the CLI;
+  hal0 hosts admin + memory servers and reaches external ones
 - **Per-slot podman containers** — every inference workload runs in
   its own `hal0-slot@<name>.service` container; `ContainerProvider` +
   `profiles.toml` replace the old single-daemon model
@@ -395,14 +408,12 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
 
 ### Soon
 
-- **Advanced memory** — MCP client side of hal0 (agents reach
-  external MCP servers), federated memory across local + remote
-  sources
+- **Federated memory** — recall across local + remote sources behind
+  one memory surface (the MCP-client side shipped in v0.9)
 - **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,
   plus curated loadout presets you can flash onto a fresh install
 - **AUR PKGBUILD & Ubuntu PPA** — native distro packages on top of
   the install script; pacman and apt as first-class install paths
-- `hal0.local` mDNS auto-discovery polish
 - Light mode toggle
 
 ### Exploring (v1.x +)
@@ -414,8 +425,6 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
   warm base model without unloading the underlying weights
 - **Per-model rate limits & budgets** — cost-style accounting for
   local inference — cap a chatty agent without taking the whole box down
-- **Voice mode end-to-end** — agent loop stitched into a hands-free
-  streaming conversation
 - **ChatOps adapters** — Slack and Matrix bridges as extensions —
   talk to hal0 from the rooms you already live in
 
