@@ -41,7 +41,7 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > portable export/import envelope. hal0 is **Strix Halo native, not
 > Strix-Halo-only**: experimental CUDA + multi-GPU pinning ride alongside
 > the ROCm/Vulkan defaults. Companion services (Open WebUI, ComfyUI,
-> Hermes, Hindsight, n8n) are managed from one **Services** dashboard
+> Hermes, Hindsight) are managed from one **Services** dashboard
 > page with mDNS discovery; the dashboard itself has a redesigned
 > fixed-band layout with a live telemetry header. Seed profiles are
 > virtual (code-defined, self-healing on upgrade) with dedicated
