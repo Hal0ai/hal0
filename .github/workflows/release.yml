@@ -176,6 +176,20 @@ jobs:
           echo "${VERSION}" > "${STAGE}/VERSION"
           echo "stage=${STAGE}"      >> "$GITHUB_OUTPUT"
 
+      # ── 2b. Stage release notes INTO the tarball ────────────────────────────
+      # The updater's prepare() reads RELEASE_NOTES.md + release.json from the
+      # extracted (cosign-verified) tree to show notes before commit
+      # (src/hal0/updater/updater.py::_read_release_notes). These must be inside
+      # the tarball root, so generate them here — before the tarball is built.
+      # Notes are optional: an un-noted release degrades to a one-liner + empty
+      # structured lists, which the CLI renders as no callouts.
+      - name: Stage release notes
+        run: |
+          python3 scripts/gen_release_notes.py \
+            --tag "${{ steps.ver.outputs.tag }}" \
+            --channel "${{ steps.ver.outputs.channel }}" \
+            --out-dir "${{ steps.stage.outputs.stage }}"
+
       - name: Build tarball
         id: tarball
         run: |

@@ -65,3 +65,36 @@ def extract_changelog_section(changelog: str, version: str) -> str:
     body_end = n.start() if n else len(changelog)
 
     return changelog[body_start:body_end].strip()
+
+
+#: The ``### `` subsections of a changelog version section that map to the
+#: structured ``release.json`` lists the updater CLI renders as callouts.
+_STRUCTURED_KEYS = ("highlights", "breaking", "migrations")
+
+
+def extract_structured(section_md: str) -> dict[str, list[str]]:
+    """Pull the optional ``### Highlights`` / ``### Breaking`` / ``### Migrations``
+    subsections of a changelog version section into structured lists.
+
+    Only **top-level** bullet headlines (a line beginning ``- `` or ``* `` with
+    no leading indent) are collected — nested/continuation lines are skipped so
+    each entry stays a concise one-liner suitable for a CLI callout. Subsection
+    headings are matched case-insensitively; any missing subsection yields an
+    empty list. This feeds ``release.json`` (consumed by
+    ``hal0.updater.updater._read_release_notes`` → the ``hal0 update`` notes
+    render). The full markdown section stays the human-facing RELEASE_NOTES.md;
+    this is just the machine-readable digest for the breaking/migration banner.
+    """
+    out: dict[str, list[str]] = {k: [] for k in _STRUCTURED_KEYS}
+    if not section_md:
+        return out
+    # Split on "### <heading>" lines → [pre, h1, body1, h2, body2, ...].
+    parts = re.split(r"^###\s+(.+?)\s*$", section_md, flags=re.MULTILINE)
+    pairs = iter(parts[1:])
+    for heading, body in zip(pairs, pairs, strict=False):
+        key = heading.strip().lower()
+        if key in out:
+            out[key] = [
+                line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")
+            ]
+    return out

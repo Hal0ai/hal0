@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hal0.release.notes import extract_changelog_section
+from hal0.release.notes import extract_changelog_section, extract_structured
 
 # ── Sample CHANGELOG document used across tests ────────────────────────────
 
@@ -155,3 +155,79 @@ def test_header_line_excluded():
     """The ## [vX.Y.Z] header line itself is not in the output."""
     body = extract_changelog_section(_CHANGELOG, "v0.5.1-alpha.1")
     assert "## [v0.5.1-alpha.1]" not in body
+
+
+# ── Structured extraction (release.json callouts) ────────────────────────────
+
+_CHANGELOG_STRUCTURED = """\
+## [v0.10.0] — 2026-07-05
+
+Seed-profile cleanup + updater notes.
+
+### Highlights
+- 12 seed profiles; simpler rocm/vulkan flags
+- release notes shown before commit
+
+### Breaking
+- removed rocm-moe / rocm-dnse
+- renamed rocmfpx-moe -> vkfpx-moe
+
+### Migrations
+- slots on removed profiles auto-fall-back to rocm/vulkan
+
+### Added
+- something unrelated
+"""
+
+
+def test_extract_structured_pulls_all_three_lists():
+    section = extract_changelog_section(_CHANGELOG_STRUCTURED, "v0.10.0")
+    s = extract_structured(section)
+    assert s["highlights"] == [
+        "12 seed profiles; simpler rocm/vulkan flags",
+        "release notes shown before commit",
+    ]
+    assert s["breaking"] == ["removed rocm-moe / rocm-dnse", "renamed rocmfpx-moe -> vkfpx-moe"]
+    assert s["migrations"] == ["slots on removed profiles auto-fall-back to rocm/vulkan"]
+
+
+def test_extract_structured_missing_subsections_are_empty():
+    """A section with only Keep-a-Changelog ### Added yields empty callout lists."""
+    section = extract_changelog_section(_CHANGELOG, "v0.5.0-alpha.1")
+    assert extract_structured(section) == {"highlights": [], "breaking": [], "migrations": []}
+
+
+def test_extract_structured_empty_input():
+    assert extract_structured("") == {"highlights": [], "breaking": [], "migrations": []}
+
+
+def test_extract_structured_case_insensitive_and_skips_nested_bullets():
+    md = "### BREAKING\n- top level\n  - nested is skipped\n- another top\n"
+    assert extract_structured(md)["breaking"] == ["top level", "another top"]
+
+
+# ── gen_release_notes.py script (produces the two tarball-root files) ─────────
+
+
+def test_gen_release_notes_script_writes_both_files(tmp_path):
+    import json as _json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "gen_release_notes.py"
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(_CHANGELOG_STRUCTURED, encoding="utf-8")
+    out = tmp_path / "stage"
+
+    r = subprocess.run(
+        [sys.executable, str(script), "--tag", "v0.10.0",
+         "--out-dir", str(out), "--changelog", str(changelog)],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "Seed-profile cleanup" in (out / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    data = _json.loads((out / "release.json").read_text(encoding="utf-8"))
+    assert data["version"] == "0.10.0"
+    assert data["breaking"] == ["removed rocm-moe / rocm-dnse", "renamed rocmfpx-moe -> vkfpx-moe"]
+    assert data["migrations"] == ["slots on removed profiles auto-fall-back to rocm/vulkan"]
