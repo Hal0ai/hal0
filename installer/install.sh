@@ -274,6 +274,18 @@ HAL0_VENV_REQUIRED=1 preflight_venv \
 HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
     || die "no container runtime — install podman (see above), then re-run install.sh"
 
+# The Hindsight memory engine (installed much later) builds its own venv and
+# pulls litellm, which gates out Python 3.14 via requires-python metadata.
+# Resolve the interpreter for that venv NOW — auto-installing a compatible
+# 3.11-3.13 when the default python is 3.14+ and the package manager can supply
+# one — so the memory-engine step builds cleanly instead of dumping a wall of
+# pip resolver errors mid-install. Sets HINDSIGHT_PY / HINDSIGHT_PY_FALLBACK,
+# consumed in the Hindsight block below. Never fatal (the metadata-gate bypass
+# is the backstop). Skipped in dev mode and when HAL0_SKIP_HINDSIGHT=1.
+if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 ]]; then
+    HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python
+fi
+
 # Disk + port-collision checks only matter for the live install — dev
 # mode lays files under $PWD/.hal0ai and never binds 8080/3001. We
 # aggregate both check results (so the operator sees *both* failures
@@ -1367,21 +1379,40 @@ else
         info "setting up Hindsight memory engine (venv + daemon) — this can take a few minutes…"
         mkdir -p "${HS_DIR}/hf-cache" "${HS_DIR}/.cache"
         if [[ ! -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
-            "${PY}" -m venv "${HS_DIR}/.venv"
+            # Interpreter + gate decision were made up front by
+            # resolve_hindsight_python (preflight). HINDSIGHT_PY is a 3.11-3.13
+            # when one was found/installed; otherwise the default ${PY} with
+            # HINDSIGHT_PY_FALLBACK=1 (litellm's requires-python gate must be
+            # bypassed). Default to ${PY} if the resolver didn't run.
+            hs_py="${HINDSIGHT_PY:-${PY}}"
+            hs_fallback="${HINDSIGHT_PY_FALLBACK:-0}"
+            "${hs_py}" -m venv "${HS_DIR}/.venv"
             hs_pip="${HS_DIR}/.venv/bin/pip"
             "${hs_pip}" install --upgrade pip wheel -q 2>/dev/null || true
-            if ! "${hs_pip}" install "hindsight-api==0.7.2" -q; then
-                # Newer distros (Ubuntu 25.10+/26.04) ship Python 3.14, which
-                # litellm>=1.83.14 (a hindsight-api dep) gates out via its
-                # requires-python metadata — even though the pinned stack runs
-                # fine on 3.14 (litellm dropped the 3.14 classifier over a
-                # since-resolved fastuuid wheel gap; BerriAI/litellm#26343).
-                # Retry past the metadata gate; the hindsight-api /health poll
-                # below is the real gate on whether the engine actually came up.
-                hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
-                warn "hindsight-api hit a requires-python gate on Python ${hs_pyver}; retrying with --ignore-requires-python"
-                if ! "${hs_pip}" install --ignore-requires-python "hindsight-api==0.7.2" -q; then
+
+            # On a Python litellm rejects by metadata (3.14+ with no compatible
+            # interpreter available) skip the doomed first attempt — it spews a
+            # wall of "Could not find a version" resolver output — and bypass the
+            # gate directly. litellm runs fine on 3.14 (classifier dropped over a
+            # since-resolved fastuuid wheel gap; BerriAI/litellm#26343); the
+            # /health poll below is the real gate on whether the engine came up.
+            hs_installed=0
+            if [[ "${hs_fallback}" -ne 1 ]]; then
+                if "${hs_pip}" install "hindsight-api==0.7.2" -q; then
+                    hs_installed=1
+                else
+                    hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
+                    warn "hindsight-api install failed on Python ${hs_pyver}; retrying past the requires-python gate"
+                fi
+            fi
+            if [[ "${hs_installed}" -ne 1 ]]; then
+                [[ "${hs_fallback}" -eq 1 ]] && \
+                    info "installing hindsight-api with --ignore-requires-python (no Python 3.11-3.13 available; litellm's 3.14 gate is metadata-only)"
+                if "${hs_pip}" install --ignore-requires-python "hindsight-api==0.7.2" -q; then
+                    hs_installed=1
+                else
                     warn "hindsight-api install failed — memory engine will be unavailable"
+                    warn "  install a Python 3.11-3.13 and re-run, or set HAL0_HINDSIGHT_PYTHON=python3.12"
                 fi
             fi
         else
