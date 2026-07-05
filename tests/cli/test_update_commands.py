@@ -60,7 +60,9 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
         captured["put_json"] = json
         return {"channel": json.get("channel") if isinstance(json, dict) else None}
 
-    def fake_poll(job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object) -> dict:
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
         # prepare poll → 'prepared' + resolved version + notes; commit poll → 'applied'.
         if "prepared" in terminal:
             return {
@@ -112,7 +114,9 @@ def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatc
     assert stub_api["commit_json"] == {"version": "0.1.1"}
 
 
-def test_yes_flag_present_and_skips_confirm(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_yes_flag_present_and_skips_confirm(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``--yes`` is a real flag and drives straight to commit without prompting."""
     assert "yes" in inspect.signature(uc.update).parameters
     monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
@@ -120,7 +124,9 @@ def test_yes_flag_present_and_skips_confirm(stub_api: dict, monkeypatch: pytest.
     # were reached it would flip the flag, so a clean commit proves it skipped.
     monkeypatch.setattr(uc, "_interactive", lambda: True)
     called = {"confirm": False}
-    monkeypatch.setattr(uc.typer, "confirm", lambda *a, **k: called.__setitem__("confirm", True) or True)
+    monkeypatch.setattr(
+        uc.typer, "confirm", lambda *a, **k: called.__setitem__("confirm", True) or True
+    )
     result = runner.invoke(app, ["update", "--target", "0.1.1", "--yes"])
     assert result.exit_code == 0, result.output
     assert called["confirm"] is False

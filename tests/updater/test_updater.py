@@ -538,9 +538,7 @@ def test_apply_repip_failure_rolls_back_symlink(
 # ── prepare / commit split ─────────────────────────────────────────────────────
 
 
-def test_prepare_stages_without_swap(
-    synthetic_release: dict[str, Any], cosign_skip: None
-) -> None:
+def test_prepare_stages_without_swap(synthetic_release: dict[str, Any], cosign_skip: None) -> None:
     """prepare() downloads + verifies + extracts but activates nothing.
 
     The staged tree lands under /usr/lib/hal0-<version>/ yet the `current`
@@ -558,14 +556,10 @@ def test_prepare_stages_without_swap(
 
     # … but nothing was activated: the `current` symlink does not resolve to it.
     link = _current_symlink()
-    assert not link.is_symlink() or (
-        Path(os.readlink(link)).resolve() != install.resolve()
-    )
+    assert not link.is_symlink() or (Path(os.readlink(link)).resolve() != install.resolve())
 
 
-def test_commit_without_prepare_raises(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_commit_without_prepare_raises(tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """commit() with nothing staged for the version raises UpdateError.
 
     A fresh HAL0_HOME means no prepare() has run, so `_versioned_install_dir`
@@ -578,9 +572,7 @@ def test_commit_without_prepare_raises(
         asyncio.run(Updater().commit("0.0.1"))
 
 
-def test_prepare_then_commit_swaps(
-    synthetic_release: dict[str, Any], cosign_skip: None
-) -> None:
+def test_prepare_then_commit_swaps(synthetic_release: dict[str, Any], cosign_skip: None) -> None:
     """prepare() then commit() reaches the same end state as apply()."""
     asyncio.run(Updater().prepare())
     # Not yet activated after prepare.
@@ -613,9 +605,7 @@ def test_prepare_reads_release_notes(
         "site-packages/hal0/__init__.py": f'__version__ = "{version}"\n',
         "VERSION": version,
         "RELEASE_NOTES.md": "# 0.0.1\n- did xyz\n",
-        "release.json": json.dumps(
-            {"highlights": ["h"], "breaking": ["b"], "migrations": ["m"]}
-        ),
+        "release.json": json.dumps({"highlights": ["h"], "breaking": ["b"], "migrations": ["m"]}),
     }
     tarball = _build_release_tarball(tmp=artifacts, version=version, contents=contents)
     sig = artifacts / f"hal0-{version}.tar.gz.sig"

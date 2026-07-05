@@ -185,9 +185,7 @@ def _render_notes(notes: dict | None) -> None:
     if breaking or migrations:
         lines = [f"[red]⚠ {b}[/red]" for b in breaking]
         lines += [f"[yellow]↻ {m}[/yellow]" for m in migrations]
-        console.print(
-            Panel("\n".join(lines), title="Breaking / migrations", border_style="yellow")
-        )
+        console.print(Panel("\n".join(lines), title="Breaking / migrations", border_style="yellow"))
     if highlights:
         console.print("[bold]Highlights[/bold]")
         for h in highlights:
