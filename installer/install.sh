@@ -835,18 +835,20 @@ ui_step "Hardware probe"
 if [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_NO_PROBE:-0}" == "1" ]]; then
     info "Skipping first-run setup (HAL0_SKIP_SETUP/HAL0_NO_PROBE set)."
 else
-    info "Running first-run setup (recommended defaults; models download later)"
-    # --auto: non-interactive, hardware-recommended Main slot. --no-pull seeds
-    # the slot config + first-run sentinel WITHOUT downloading models (the
-    # curl|bash installer must stay fast). --no-extensions: OpenWebUI + Hermes
-    # are installed by the dedicated stages below, not here. Interactive
-    # `hal0 setup` (post-install) handles model downloads + extension choices.
+    info "Running first-run setup (sentinel + wiring; no model picks, no downloads)"
+    # --auto: non-interactive first-run seeding. --no-slots seeds the first-run
+    # sentinel + wiring but ZERO model-slot picks — the installer no longer ships
+    # a hardware-recommended chat/coder/ComfyUI selection; the operator chooses
+    # every model later via the dashboard or `hal0 setup`. --no-pull keeps the
+    # path download-free regardless (belt-and-suspenders; with no slots there is
+    # nothing to pull anyway). --no-extensions: OpenWebUI + Hermes are installed
+    # by the dedicated stages below, not here.
     # Build argv as an array so --storage-dir and its value stay TWO separate
     # tokens. The old `${MODELS_DIR:+--storage-dir "${MODELS_DIR}"}` collapsed
     # into a single arg ("--storage-dir /mnt/ai-models") that typer rejected
     # with "No such option", silently skipping --auto seeding on --models-dir
     # installs.
-    _setup_args=(--auto --no-pull --no-extensions)
+    _setup_args=(--auto --no-pull --no-slots --no-extensions)
     [[ -n "${MODELS_DIR}" ]] && _setup_args+=(--storage-dir "${MODELS_DIR}")
     "${HAL0_BIN}" setup "${_setup_args[@]}" \
         || warn "first-run setup failed; run 'hal0 setup' after install"
