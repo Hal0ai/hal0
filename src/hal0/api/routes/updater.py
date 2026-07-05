@@ -257,6 +257,75 @@ async def _run_apply_job(
         _persist_job(job)
 
 
+async def _run_prepare_job(
+    jobs: dict[str, dict[str, Any]],
+    job_id: str,
+    channel: str,
+    version: str | None,
+) -> None:
+    """Background task that STAGES an update via ``Updater.prepare()``.
+
+    Downloads + cosign-verifies + extracts the release without touching the
+    running system, then attaches the (verified) release notes + resolved
+    version to the job and transitions it to the terminal ``prepared`` state.
+    Does NOT restart hal0-api — nothing is active yet. The caller reviews the
+    notes and then POSTs ``/commit`` to activate.
+    """
+    job = jobs[job_id]
+    job["state"] = "running"
+    job["updated_at"] = time.time()
+    _persist_job(job)
+    try:
+        updater = Updater(channel=channel)
+        result = await updater.prepare(version)
+    except Exception as exc:
+        job["state"] = "failed"
+        job["error"] = str(exc)
+        job["error_code"] = type(exc).__name__
+    else:
+        job["resolved_version"] = result.get("version")
+        job["notes"] = result.get("notes")
+        job["cosign_skipped"] = result.get("cosign_skipped")
+        job["state"] = "prepared"
+    finally:
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
+
+async def _run_commit_job(
+    jobs: dict[str, dict[str, Any]],
+    job_id: str,
+    channel: str,
+    version: str,
+) -> None:
+    """Background task that ACTIVATES a prepared version via ``Updater.commit()``.
+
+    Runs the migrations + symlink swap + venv re-pip, then try-restarts
+    ``hal0-api.service`` fail-soft (same policy as ``_run_apply_job``). Requires
+    that ``/prepare`` staged ``version`` first; ``commit()`` raises otherwise and
+    the job goes to ``failed``.
+    """
+    job = jobs[job_id]
+    job["state"] = "running"
+    job["updated_at"] = time.time()
+    _persist_job(job)
+    try:
+        updater = Updater(channel=channel)
+        await updater.commit(version)
+    except Exception as exc:
+        job["state"] = "failed"
+        job["error"] = str(exc)
+        job["error_code"] = type(exc).__name__
+    else:
+        restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
+        job["restarted"] = restarted
+        job["restart_error"] = restart_error
+        job["state"] = "applied"
+    finally:
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
+
 # ── /state ─────────────────────────────────────────────────────────────────
 
 
@@ -527,6 +596,98 @@ async def apply_update(request: Request) -> dict[str, Any]:
     task = asyncio.create_task(_run_apply_job(jobs, job_id, channel, version))
     bg_tasks.add(task)
     task.add_done_callback(bg_tasks.discard)
+    return dict(jobs[job_id])
+
+
+def _spawn_update_task(request: Request, coro: Any) -> None:
+    """Track a fire-and-forget update background task on app.state (RUF006)."""
+    bg_tasks = getattr(request.app.state, "_update_bg_tasks", None)
+    if bg_tasks is None:
+        bg_tasks = set()
+        request.app.state._update_bg_tasks = bg_tasks
+    task = asyncio.create_task(coro)
+    bg_tasks.add(task)
+    task.add_done_callback(bg_tasks.discard)
+
+
+def _body_version(body: Any) -> str | None:
+    """Extract a normalised ``version`` from a request body (strip a leading v)."""
+    if isinstance(body, dict):
+        v = body.get("version")
+        if isinstance(v, str) and v.strip():
+            return v.strip().lstrip("v") or None
+    return None
+
+
+@router.post("/prepare", status_code=202)
+async def prepare_update(request: Request) -> dict[str, Any]:
+    """Stage an update (download + cosign-verify + extract) WITHOUT activating it.
+
+    Returns a queued-job snapshot (202). Poll ``/api/updates/status/{job_id}``
+    until state ``prepared`` — the job then carries ``resolved_version`` and
+    ``notes`` (release notes read from the *verified* tree) — then POST
+    ``/api/updates/commit`` with that version to activate. Nothing about the
+    running system changes until commit, so an abandoned prepare is harmless.
+
+    Body (optional): ``{"version": "0.1.0"}`` — pin a version; omit for latest.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    version = _body_version(body)
+    channel = _current_channel(request)
+    jobs = _update_jobs(request)
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {
+        "id": job_id,
+        "state": "queued",
+        "phase": "prepare",
+        "channel": channel,
+        "version": version,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "error": None,
+    }
+    _persist_job(jobs[job_id])
+    _spawn_update_task(request, _run_prepare_job(jobs, job_id, channel, version))
+    return dict(jobs[job_id])
+
+
+@router.post("/commit", status_code=202)
+async def commit_update(request: Request) -> dict[str, Any]:
+    """Activate a previously ``/prepare``d version.
+
+    Body (required): ``{"version": "0.1.0"}`` — the ``resolved_version`` returned
+    by the prepare job. Returns a queued-job snapshot (202); poll
+    ``/status/{job_id}`` until ``applied`` | ``failed``. The daemon try-restarts
+    hal0-api fail-soft after a successful commit.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    version = _body_version(body)
+    if not version:
+        raise BadRequest(
+            "commit requires a 'version' — the resolved_version from /prepare",
+            details={"hint": "POST /api/updates/prepare first, then commit its resolved_version"},
+        )
+    channel = _current_channel(request)
+    jobs = _update_jobs(request)
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {
+        "id": job_id,
+        "state": "queued",
+        "phase": "commit",
+        "channel": channel,
+        "version": version,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "error": None,
+    }
+    _persist_job(jobs[job_id])
+    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version))
     return dict(jobs[job_id])
 
 

@@ -27,13 +27,18 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     Returns a captured-calls dict so assertions can inspect what the CLI
     sent to /api/updates/apply.
     """
-    captured: dict = {"apply_json": None, "get_paths": [], "put_json": None}
+    captured: dict = {
+        "prepare_json": None,
+        "commit_json": None,
+        "get_paths": [],
+        "put_json": None,
+    }
 
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
 
     def fake_get(path: str, **kwargs: object) -> dict:
         captured["get_paths"].append(path)
-        # /api/updates/check - advertise an available update so apply runs.
+        # /api/updates/check - advertise an available update so the flow runs.
         return {
             "current": "0.0.0",
             "latest": "9.9.9",
@@ -43,16 +48,29 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
         }
 
     def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
-        if path == "/api/updates/apply":
-            captured["apply_json"] = json
-            return {"id": "job123", "state": "queued"}
+        if path == "/api/updates/prepare":
+            captured["prepare_json"] = json
+            return {"id": "prep123", "state": "queued"}
+        if path == "/api/updates/commit":
+            captured["commit_json"] = json
+            return {"id": "commit123", "state": "queued"}
         return {}
 
     def fake_put(path: str, *, json: object = None, **kwargs: object) -> dict:
         captured["put_json"] = json
         return {"channel": json.get("channel") if isinstance(json, dict) else None}
 
-    def fake_poll(job_id: str, **kwargs: object) -> dict:
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        # prepare poll → 'prepared' + resolved version + notes; commit poll → 'applied'.
+        if "prepared" in terminal:
+            return {
+                "id": job_id,
+                "state": "prepared",
+                "resolved_version": "0.1.1",
+                "notes": {"markdown": "", "highlights": [], "breaking": [], "migrations": []},
+            }
         return {"id": job_id, "state": "applied"}
 
     monkeypatch.setattr(uc, "api_get", fake_get)
@@ -71,11 +89,11 @@ def test_restart_slots_flag_removed() -> None:
 
 
 def test_target_strips_leading_v(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``--target v0.1.1`` is normalized to ``0.1.1`` before hitting the API."""
+    """``--target v0.1.1`` is normalized to ``0.1.1`` before hitting /prepare."""
     monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     result = runner.invoke(app, ["update", "--target", "v0.1.1"])
     assert result.exit_code == 0, result.output
-    assert stub_api["apply_json"] == {"version": "0.1.1"}
+    assert stub_api["prepare_json"] == {"version": "0.1.1"}
 
 
 def test_target_without_v_is_unchanged(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +101,69 @@ def test_target_without_v_is_unchanged(stub_api: dict, monkeypatch: pytest.Monke
     monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     result = runner.invoke(app, ["update", "--target", "0.1.1"])
     assert result.exit_code == 0, result.output
-    assert stub_api["apply_json"] == {"version": "0.1.1"}
+    assert stub_api["prepare_json"] == {"version": "0.1.1"}
+
+
+def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI stages via /prepare, then activates via /commit with the resolved version."""
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    result = runner.invoke(app, ["update", "--target", "0.1.1"])
+    assert result.exit_code == 0, result.output
+    # prepare got the (normalized) target; commit got the resolved_version from the poll.
+    assert stub_api["prepare_json"] == {"version": "0.1.1"}
+    assert stub_api["commit_json"] == {"version": "0.1.1"}
+
+
+def test_yes_flag_present_and_skips_confirm(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--yes`` is a real flag and drives straight to commit without prompting."""
+    assert "yes" in inspect.signature(uc.update).parameters
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    # Force an interactive TTY so only --yes can suppress the prompt; if confirm
+    # were reached it would flip the flag, so a clean commit proves it skipped.
+    monkeypatch.setattr(uc, "_interactive", lambda: True)
+    called = {"confirm": False}
+    monkeypatch.setattr(
+        uc.typer, "confirm", lambda *a, **k: called.__setitem__("confirm", True) or True
+    )
+    result = runner.invoke(app, ["update", "--target", "0.1.1", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert called["confirm"] is False
+    assert stub_api["commit_json"] == {"version": "0.1.1"}
+
+
+def test_tty_decline_stages_without_commit(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a TTY without --yes, declining the prompt stages but never commits."""
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    monkeypatch.setattr(uc, "_interactive", lambda: True)
+    monkeypatch.setattr(uc.typer, "confirm", lambda *a, **k: False)
+    result = runner.invoke(app, ["update", "--target", "0.1.1"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["prepare_json"] == {"version": "0.1.1"}
+    assert stub_api["commit_json"] is None  # declined → no commit
+
+
+def test_render_notes_shows_breaking_and_migrations(capsys: pytest.CaptureFixture[str]) -> None:
+    """_render_notes surfaces breaking/migration callouts and highlights."""
+    uc._render_notes(
+        {
+            "markdown": "# 0.1.1\nbody",
+            "highlights": ["new profiles"],
+            "breaking": ["removed rocm-moe"],
+            "migrations": ["slots fall back to rocm"],
+        }
+    )
+    out = capsys.readouterr().out
+    assert "removed rocm-moe" in out
+    assert "slots fall back to rocm" in out
+    assert "new profiles" in out
+
+
+def test_render_notes_none_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """No notes → nothing rendered (older releases without a notes payload)."""
+    uc._render_notes(None)
+    assert capsys.readouterr().out == ""
 
 
 def test_editable_drift_warns_when_source_ahead(
