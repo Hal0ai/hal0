@@ -178,6 +178,29 @@ _FLM_DISPATCH_TYPE: dict[str, str] = {
     "image": "image",
 }
 
+# ``classify()`` returns a coarse MODALITY bucket (chat/embed/rerank/stt/tts/
+# img — the ``_TYPE_PRIORITY`` vocab), but every ``type`` we emit on an
+# /api/models row must speak the DISPATCHER vocabulary (llm/embedding/…), the
+# same one FLM rows carry above and slots use — the UI joins models↔slots on
+# ``model.type === slot.type`` (ui/lib/normalizeApiModel + slot pickers). Emit
+# the modality bucket verbatim and the picker matches nothing ("chat" ≠ "llm"),
+# collapsing every slot's model dropdown to just its current default. Map every
+# classify() output through here; ``img`` (classify) → ``image`` (dispatcher).
+_MODALITY_TO_SLOT_TYPE: dict[str, str] = {
+    "chat": "llm",
+    "embed": "embedding",
+    "rerank": "reranking",
+    "stt": "transcription",
+    "tts": "tts",
+    "img": "image",
+}
+
+
+def _dispatch_type(model_id: str = "", capabilities: Any = None) -> str:
+    """Dispatcher-vocab slot type for a row (classify → dispatcher)."""
+    modality = classify(model_id, capabilities=capabilities)
+    return _MODALITY_TO_SLOT_TYPE.get(modality, "llm")
+
 
 def _comfyui_category(path: Any) -> str | None:
     """ComfyUI models subdir for a path under ``.../comfyui/models/<subdir>/``.
@@ -216,7 +239,9 @@ async def list_models(request: Request) -> dict[str, Any]:
         dumped.setdefault("object", "model")
         dumped.setdefault("created", now)
         dumped.setdefault("owned_by", "local")
-        dumped["type"] = classify(dumped.get("id", ""), capabilities=dumped.get("capabilities"))
+        dumped["type"] = _dispatch_type(
+            dumped.get("id", ""), capabilities=dumped.get("capabilities")
+        )
         # ComfyUI discriminator + category for the dashboard's dedicated
         # image-gen surface. Path-derived so it self-heals rows an older pull
         # mis-tagged (capabilities=["chat"], backends=[]) with no migration:
@@ -293,7 +318,7 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "ns": "pulled",
                     # Upstream rows carry no capabilities; classify from
                     # the id so W7 still counts embed/rerank/voice/img.
-                    "type": classify(mid),
+                    "type": _dispatch_type(mid),
                 }
             )
     # Installed FLM/NPU models — surfaced straight from the host-flm probe so

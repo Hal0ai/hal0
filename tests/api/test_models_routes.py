@@ -125,6 +125,35 @@ def test_get_model_attaches_ns(inspect_client: TestClient, tmp_hal0_home: str) -
     assert row["ns"] == "pulled"
 
 
+def test_list_models_type_is_dispatcher_vocab_for_local_rows(
+    inspect_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    """Local registry rows expose ``type`` in the DISPATCHER vocabulary
+    (llm/embedding/reranking), NOT ``classify()``'s modality bucket
+    (chat/embed/rerank). The UI joins slots↔models on ``model.type ===
+    slot.type`` (dispatcher vocab), so a modality value hides every model from
+    the slot pickers — the 0.9.1 regression where local rows leaked "chat"
+    (line-219 stamp) collapsed every slot's model dropdown to its current
+    default. The FLM path was already correct; only the local/upstream stamps
+    leaked modality, so this guards the local path specifically."""
+    cases = (
+        ("chatty", ["chat"], "llm"),
+        ("visionary", ["chat", "vision"], "llm"),  # multimodal → still llm
+        ("ranker", ["rerank"], "reranking"),
+        ("embedder", ["embed"], "embedding"),
+    )
+    for mid, caps, _want in cases:
+        fp = Path(tmp_hal0_home) / f"{mid}.gguf"
+        fp.write_bytes(b"\x00" * 8)
+        inspect_client.post("/api/models", json={"id": mid, "path": str(fp)})
+        inspect_client.put(f"/api/models/{mid}", json={"capabilities": caps})
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    for mid, _caps, want in cases:
+        assert rows[mid]["type"] == want, f"{mid}: {rows[mid]['type']!r} != {want!r}"
+
+
 # ── POST /api/models/inspect ───────────────────────────────────────────────
 
 
