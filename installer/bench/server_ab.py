@@ -32,6 +32,12 @@ Modes
           --concurrency simultaneous /completion streams, and report aggregate
           t/s, per-stream median, and p95 TTFT. The Tier C measurement behind
           the concurrency-batching plan. Restores the original `parallel`.
+  mtp     Restart-free MTP draft-param sweep. The ROCmFPX fork accepts
+          per-request `speculative.{n_max,n_min,p_min}`, so the --spec-nmax x
+          --spec-pmin grid runs against ONE warm server (no restart per cell).
+          Depth via --depth (2k/32k/128k); greedy vs production sampler via
+          --temp/--top-p/--top-k. Reports decode t/s + draft acceptance per
+          cell (runbook B-MTP). Slot must already be running with MTP on.
 
 Results: JSON to --out (default /var/lib/hal0/benchmarks/server-ab/<stamp>.json).
 
@@ -71,6 +77,18 @@ _PARA = (
 LONG_PROMPT = _PARA * 40  # ≈ 2k tokens
 REUSE_PREFIX = _PARA * 60  # ≈ 3k tokens shared prefix for the reuse trace
 
+# _PARA is ~50 tokens; used to synthesize a prompt of an approximate token
+# depth for the depth axis (runbook: tune at 2k AND 32k/128k, not just 2k).
+_PARA_TOKENS = 50
+
+
+def _build_prompt(depth_tokens: int) -> str:
+    """A deterministic prompt of roughly *depth_tokens* tokens (repeated _PARA,
+    at least one rep). Lets the same cell run at 2k / 32k / 128k fill so a
+    'best' flag is reported per depth, not just at the shallow default."""
+    reps = max(1, round(depth_tokens / _PARA_TOKENS))
+    return _PARA * reps
+
 
 def _http(method: str, url: str, body: dict | None = None, timeout: float = 600.0) -> Any:
     data = json.dumps(body).encode() if body is not None else None
@@ -104,19 +122,57 @@ def _wait_ready(port: int, timeout_s: float = 300.0) -> None:
     sys.exit(f"slot port {port} did not become healthy within {timeout_s:.0f}s")
 
 
-def _completion(port: int, prompt: str, n_predict: int, cache_prompt: bool) -> dict:
-    """One /completion call; returns llama-server's timings dict (+ our wall)."""
+def _sampler_body(args: argparse.Namespace) -> dict:
+    """The sampler half of a /completion body, from the CLI axis. temp 0 =
+    greedy (upper-bound MTP acceptance); a production sampler (e.g. temp 0.6
+    top-p 0.95 top-k 20) is what agents actually see — the runbook runs both."""
+    body: dict[str, Any] = {"temperature": float(getattr(args, "temp", 0.0) or 0.0)}
+    top_p = getattr(args, "top_p", None)
+    top_k = getattr(args, "top_k", None)
+    if top_p is not None:
+        body["top_p"] = float(top_p)
+    if top_k is not None:
+        body["top_k"] = int(top_k)
+    return body
+
+
+def _spec_override(n_max: int | None, p_min: float | None, n_min: int | None) -> dict:
+    """Per-request `speculative.*` override (fork accepts n_max/n_min/p_min in
+    the /completion JSON — MTP param sweeps run WITHOUT a server restart)."""
+    spec: dict[str, Any] = {}
+    if n_max is not None:
+        spec["n_max"] = int(n_max)
+    if n_min is not None:
+        spec["n_min"] = int(n_min)
+    if p_min is not None:
+        spec["p_min"] = float(p_min)
+    return {"speculative": spec} if spec else {}
+
+
+def _completion(
+    port: int,
+    prompt: str,
+    n_predict: int,
+    cache_prompt: bool,
+    *,
+    sampler: dict | None = None,
+    speculative: dict | None = None,
+) -> dict:
+    """One /completion call; returns llama-server's timings dict (+ our wall).
+
+    ``sampler`` defaults to greedy (temp 0) for reproducibility; pass
+    ``_sampler_body(args)`` for a production sampler. ``speculative`` carries a
+    per-request MTP override (``_spec_override(...)['speculative']``)."""
+    body: dict[str, Any] = {
+        "prompt": prompt,
+        "n_predict": n_predict,
+        "cache_prompt": cache_prompt,
+    }
+    body.update(sampler or {"temperature": 0})
+    if speculative:
+        body["speculative"] = speculative
     t0 = time.monotonic()
-    out = _http(
-        "POST",
-        f"http://127.0.0.1:{port}/completion",
-        {
-            "prompt": prompt,
-            "n_predict": n_predict,
-            "temperature": 0,
-            "cache_prompt": cache_prompt,
-        },
-    )
+    out = _http("POST", f"http://127.0.0.1:{port}/completion", body)
     wall = time.monotonic() - t0
     t = dict(out.get("timings") or {})
     t["wall_s"] = round(wall, 3)
@@ -337,11 +393,85 @@ def mode_batch(args: argparse.Namespace) -> dict:
     return results
 
 
+def _csv_ints(raw: str) -> list[int]:
+    return [int(x) for x in str(raw).split(",") if x.strip()]
+
+
+def _csv_floats(raw: str) -> list[float]:
+    return [float(x) for x in str(raw).split(",") if x.strip()]
+
+
+def mode_mtp(args: argparse.Namespace) -> dict:
+    """Restart-free MTP draft-param sweep. The ROCmFPX fork accepts
+    `speculative.{n_max,n_min,p_min}` per /completion request, so the whole
+    n-max x p-min grid runs against ONE warm server — no PUT/restart per cell
+    (runbook cell B-MTP, finding 0.6). Draft-KV quant is NOT swept here (that
+    needs a relaunch — do it with --mode ab). Reports decode t/s + draft
+    acceptance per (n_max, p_min) so the per-model/per-depth winner is picked
+    on NET decode, not acceptance alone (greedy acceptance is a ceiling)."""
+    slot = _get_slot(args.api, args.slot)
+    port = int(slot["port"])
+    prompt = _build_prompt(args.depth)
+    sampler = _sampler_body(args)
+    n_maxes = _csv_ints(args.spec_nmax)
+    p_mins = _csv_floats(args.spec_pmin)
+    n_min = int(args.spec_nmin)
+
+    _wait_ready(port)  # no config change — server must already be MTP-on
+    results: dict[str, Any] = {}
+    for n_max in n_maxes:
+        for p_min in p_mins:
+            spec = _spec_override(n_max, p_min, n_min)["speculative"]
+            label = f"nmax{n_max}_pmin{p_min}"
+            print(f"[mtp] {label} (depth~{args.depth}, temp {sampler['temperature']})", flush=True)
+            runs = []
+            for i in range(args.n):
+                t = _completion(
+                    port,
+                    prompt,
+                    args.max_tokens,
+                    cache_prompt=False,
+                    sampler=sampler,
+                    speculative=spec,
+                )
+                print(f"  run {i + 1}/{args.n}: {t}", flush=True)
+                runs.append(t)
+            results[label] = {
+                "n_max": n_max,
+                "p_min": p_min,
+                "n_min": n_min,
+                "runs": runs,
+                "median": _summarize_runs(runs),
+            }
+    return results
+
+
+def _provenance(args: argparse.Namespace, slot: dict | None) -> dict:
+    """Reproducibility header (plan risk 6): the local-only runner image, its
+    decode-tune profile, and the slot's resolved argv/env — without these the
+    numbers can't be reproduced on a rebuilt box."""
+    prov: dict[str, Any] = {}
+    if args.runner_image:
+        prov["runner_image"] = args.runner_image
+    if args.decode_tune:
+        prov["decode_tune"] = args.decode_tune
+    if args.note:
+        prov["note"] = args.note
+    prov["depth_tokens"] = args.depth
+    prov["sampler"] = _sampler_body(args)
+    if slot is not None:
+        prov["slot_resolved_args"] = slot.get("llamacpp_args")
+        prov["slot_env"] = slot.get("env") or (slot.get("server") or {}).get("env")
+    return prov
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--mode", required=True, choices=["ab", "reuse", "embed", "rerank", "batch"])
+    ap.add_argument(
+        "--mode", required=True, choices=["ab", "reuse", "embed", "rerank", "batch", "mtp"]
+    )
     ap.add_argument("--slot", required=True, help="slot name (must be loaded/running)")
     ap.add_argument("--api", default=DEFAULT_API, help=f"hal0-api base (default {DEFAULT_API})")
     ap.add_argument(
@@ -364,6 +494,40 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=3, help="timed runs/rounds (default 3)")
     ap.add_argument("--max-tokens", type=int, default=256, help="decode length per run")
     ap.add_argument("--out", default=None, help="result JSON path (default under server-ab/)")
+    # Depth axis — approximate prompt-fill in tokens (runbook: 2k/32k/128k).
+    ap.add_argument(
+        "--depth",
+        type=int,
+        default=2000,
+        help="mtp mode: approximate prompt-fill in tokens (default 2000; runbook sweeps 2k/32k/128k)",
+    )
+    # Sampler axis — greedy (temp 0, acceptance ceiling) vs production sampler.
+    ap.add_argument(
+        "--temp", type=float, default=0.0, help="mtp mode: sampling temperature (0=greedy)"
+    )
+    ap.add_argument(
+        "--top-p", dest="top_p", type=float, default=None, help="mtp mode: top-p (optional)"
+    )
+    ap.add_argument(
+        "--top-k", dest="top_k", type=int, default=None, help="mtp mode: top-k (optional)"
+    )
+    # MTP draft-param grid (per-request; restart-free).
+    ap.add_argument(
+        "--spec-nmax", default="1,2,3,4", help="mtp mode: comma list of speculative n_max"
+    )
+    ap.add_argument(
+        "--spec-pmin", default="0.0,0.25,0.5,0.75", help="mtp mode: comma list of speculative p_min"
+    )
+    ap.add_argument(
+        "--spec-nmin", type=int, default=0, help="mtp mode: speculative n_min (default 0)"
+    )
+    # Provenance (plan risk 6) — the local-only runner image is not reproducible
+    # without capturing what built it.
+    ap.add_argument("--runner-image", default=None, help="runner image ref for the results header")
+    ap.add_argument(
+        "--decode-tune", default=None, help="ROCMFP4_DECODE_TUNE profile for the header"
+    )
+    ap.add_argument("--note", default=None, help="free-text note for the results header")
     args = ap.parse_args()
 
     if args.mode == "ab" and len(args.variant) < 2:
@@ -375,6 +539,7 @@ def main() -> None:
         "embed": mode_embed,
         "rerank": mode_rerank,
         "batch": mode_batch,
+        "mtp": mode_mtp,
     }[args.mode]
     results = fn(args)
 
@@ -387,6 +552,7 @@ def main() -> None:
         "slot": args.slot,
         "n": args.n,
         "max_tokens": args.max_tokens,
+        "provenance": _provenance(args, _get_slot(args.api, args.slot)),
         "results": results,
     }
     out_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")

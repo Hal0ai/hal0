@@ -220,20 +220,31 @@ today's seeds; the runbook either confirms → we ship, or rejects → we keep.
 
 ---
 
-## 4. Tooling deltas needed before the run
+## 4. Tooling deltas
 
-1. **`server_ab.py` MTP param passthrough** — add `--spec-nmax`, `--spec-pmin`
-   (comma-lists) to `mode_ab`/a new `mode_mtp`, sent as `speculative.*` in the
-   `/completion` JSON so B-MTP sweeps run restart-free (0.6). Small, additive.
-2. **`profile-matrix.sh` FPX cells** — add `MOE_MODEL`/`DENSE_MODEL` overrides
-   pointing at the FPX GGUFs and the A-KVQ three-way (q4/q8/f16). The seam
-   whitelist must allow `f16` KV and `q4_0` KV values.
-3. **Provenance capture** — record `hal0-rocmfpx:7aa484a` + the SPIR-V
-   include fix + the decode-tune profile (`ROCMFP4_DECODE_TUNE`) in the results
-   header (plan risk 6). The image is local-only; numbers are irreproducible
-   without it.
-4. **`--mode batch` env** — ensure the HIP env vars (0.7) are in the slot's
-   `[server].env` before C-* runs, or ROCm-lane numbers are wrong.
+Items 1–3 are DONE on `claude/llamacpp-strix-halo-flags-cyzyo8` (the box just
+runs; it does not build). Item 4 is box-side config.
+
+1. **DONE — `server_ab.py --mode mtp`** — restart-free per-request MTP sweep:
+   `--spec-nmax`/`--spec-pmin` (comma-lists) + `--spec-nmin` sent as
+   `speculative.*` in the `/completion` JSON (0.6). Depth axis via `--depth`
+   (2k/32k/128k); sampler axis via `--temp`/`--top-p`/`--top-k` (greedy vs
+   production). Reports decode t/s + draft acceptance per (n_max, p_min) cell.
+2. **DONE — `profile-matrix.sh` FPX cells** — `fpx-batch` (A-BATCH),
+   `fpx-kv27`/`fpx-kv35` (A-KVQ three-way q4/q8/f16), `fpx-lane` (A-LANE), plus
+   `FPX_DENSE`/`FPX_MOE` model vars and refreshed Tier B guidance (mtp mode,
+   draft-KV ab, backend-sampling ab, batch). **Opt-in via `--cell fpx-*`.**
+   ⚠ The seam whitelist (`hal0-benchctl`) must ALLOW `f16` and `q4_0` KV values
+   for `fpx-kv27`/`fpx-kv35` — verify on-box or those cells no-op.
+3. **DONE — provenance header** — `server_ab.py` records `--runner-image`,
+   `--decode-tune`, `--note`, the depth/sampler, and the slot's resolved
+   argv/env in the result JSON (plan risk 6). Pass
+   `--runner-image hal0-rocmfpx:7aa484a` on every run.
+4. **BOX-SIDE — `--mode batch`/ROCm-lane env** — ensure the HIP env vars (0.7,
+   `HSA_OVERRIDE_GFX_VERSION=11.5.1`, `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`) are
+   in the `rocmfpx-rocm` profile's `[server].env` before any ROCm-lane cell, or
+   those numbers are invalid. This is a slot/profile config on the box (the FPX
+   profiles are custom, not in hal0's shipped seeds).
 
 ---
 
