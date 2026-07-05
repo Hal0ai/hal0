@@ -11,6 +11,14 @@ page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 ADR-level architecture decisions are kept internal (the `docs/internal/`
 tree is gitignored, #638) and referenced by number throughout the code.
 
+**Release automation.** On a tagged release the matching `## [<version>]`
+section below is bundled into the release tarball as `RELEASE_NOTES.md`, and its
+optional `### Highlights`, `### Breaking`, and `### Migrations` subsections are
+extracted into `release.json`. `hal0 update` shows both — rendering
+breaking/migrations as callouts — from the cosign-verified tarball, before
+applying. Add those subsections to a version's section to surface them; see
+`scripts/gen_release_notes.py`.
+
 ## [Unreleased]
 
 ### Added
