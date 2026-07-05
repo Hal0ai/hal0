@@ -153,6 +153,16 @@ whichever slot is actually loaded — `hal0/agent`, `hal0/utility`, and
 custom slot named `research` is addressable as `hal0/research` even though
 it isn't one of the three advertised names.
 
+## Stacks — declarative slot bundles
+
+A **stack** is a preconfigured slot + profile + model bundle you can apply
+atomically: activate a "Daily driver" (chat + voice + image) in one move, and
+hal0 reconciles the running slots to match. Stacks carry the same portable
+export / import envelope as profiles, so you can snapshot a working layout and
+move it to another box. Missing models are flagged before you apply.
+
+![The Stacks tab — a "Daily driver" stack bundling primary, tts, img, and scribe slots, with active state, a missing-model flag, and import / snapshot / re-apply actions](/screenshots/stacks-tab.png)
+
 ## Where to go next
 
 <CardGrid>

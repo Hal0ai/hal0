@@ -66,6 +66,8 @@ VRAM bank; instead it shares the system's RAM through a GTT pool. A single large
 memory pool can be handed to whichever engine needs it, so you can load models
 far larger than a typical discrete GPU's VRAM would allow.
 
+![The dashboard Unified Memory bar — one 128 GB pool with each slot's allocation colour-coded and the free headroom that actually remains](/screenshots/unified-memory-hero.png)
+
 This shapes how hal0 reports memory. It does **not** add system RAM to GPU VRAM,
 because on a unified-memory APU that would double-count — the GPU's memory *is*
 host RAM shared via GTT. Instead the probe derives a single

@@ -9,7 +9,10 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 gives you three observation surfaces: **journald** per systemd unit,
 the **API log tail** (a thin wrapper over journald with filters), and the
-**durable Activity / Audit log** that survives restarts.
+**durable Activity / Audit log** that survives restarts. The dashboard also
+rolls request traffic up live:
+
+![The dashboard Requests widget — per-endpoint request volume with p50 / p95 latency over the last 60 seconds](/screenshots/requests-latency-widget.png)
 
 ## journald per unit
 
