@@ -299,13 +299,12 @@ def update(
     # headless/piped invocations (cron, scripts) proceed as before so unattended
     # updates never block. Nothing is active yet — declining just leaves the
     # staged tree, which is harmless.
-    if not yes and _interactive():
-        if not typer.confirm(f"Apply hal0 {resolved}?", default=True):
-            console.print(
-                "[dim]staged but not applied — re-run `hal0 update` to apply, "
-                "or `hal0 update --yes`.[/dim]"
-            )
-            return
+    if not yes and _interactive() and not typer.confirm(f"Apply hal0 {resolved}?", default=True):
+        console.print(
+            "[dim]staged but not applied — re-run `hal0 update` to apply, "
+            "or `hal0 update --yes`.[/dim]"
+        )
+        return
 
     try:
         cjob = api_post("/api/updates/commit", json={"version": resolved})

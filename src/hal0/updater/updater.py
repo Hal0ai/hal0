@@ -1284,7 +1284,7 @@ class Updater:
     async def prepare(self, version: str | None = None) -> dict[str, Any]:
         """Download, verify, and STAGE ``version`` (or latest) — without activating.
 
-        Runs §9 steps **1–6** only:
+        Runs §9 steps **1-6** only:
 
           1. Fetch + schema-validate the release manifest.
           2. Confirm the target version (caller-pinned or manifest.version).
@@ -1413,7 +1413,7 @@ class Updater:
         }
 
     async def commit(self, version: str) -> dict[str, Any]:
-        """Activate a previously :meth:`prepare`d ``version`` (§9 steps 7–9+).
+        """Activate a previously :meth:`prepare`d ``version`` (§9 steps 7-9+).
 
         Runs forward config migrations, prunes materialised seed profiles, clears
         stale mtp overrides, atomic-swaps the ``current`` symlink, re-pips the
