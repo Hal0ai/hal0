@@ -881,6 +881,35 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "MoE + MTP · q8 KV",
         "quant": "FP4",
     },
+    "rocmfpx-rocm": {
+        # hal0 ROCmFPX runner (llama.cpp fork, ghcr.io/hal0ai/hal0-rocmfpx —
+        # HIP+Vulkan, Strix Halo gfx1151). ROCm0/HIP lane for the custom ROCmFP4
+        # dense weight format (NOT stock Q4 / MXFP4 / NVFP4). mtp=True is gated by
+        # model_is_mtp_eligible, so it only activates for MTP heads. Per-model KV
+        # and spec-draft tuning come from the model's defaults.extra_args (e.g.
+        # the 27B Coder card pins -ctk q4_0 / draft-type q4_0).
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "ROCmFPX · ROCmFP4 dense · ROCm0 + MTP",
+        "quant": "ROCmFP4",
+    },
+    "rocmfpx-moe": {
+        # hal0 ROCmFPX runner — Vulkan0 lane for the ROCmFPX MoEQuality weight
+        # format (35B-A3B). Vulkan0 gives the best decode t/s for the MoE (ROCm0
+        # wins prefill if a slot overrides -dev). -sm none (single GPU) and
+        # --no-context-shift per the validated Tool-Eval card. The external chat
+        # template (Froggeric Qwen fixed) is set per-slot via [server].extra_args.
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "ROCmFPX · MoEQuality 35B-A3B · Vulkan0 + MTP",
+        "quant": "ROCmFPX",
+    },
     "vulkan": {
         # Strix Halo matrix 2026-07-04 (RADV): -ub sweep monotonic — 256 is the
         # sweet spot (pp2048 274.7 vs 260.7 @512 = +5.4%; 1024 is WORSE at 244.7),
