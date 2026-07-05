@@ -16,6 +16,7 @@ Surface:
 
 from __future__ import annotations
 
+import sys
 import time
 import tomllib
 from enum import StrEnum
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
@@ -131,8 +133,13 @@ def _print_check(body: dict) -> None:
         console.print(table)
 
 
-def _poll_job(job_id: str, *, timeout_s: float = 600.0) -> dict:
-    """Poll /api/updates/status/<id> until it leaves the queued/running states."""
+def _poll_job(
+    job_id: str,
+    *,
+    terminal: tuple[str, ...] = ("applied", "failed"),
+    timeout_s: float = 600.0,
+) -> dict:
+    """Poll /api/updates/status/<id> until it reaches a terminal state."""
     deadline = time.monotonic() + timeout_s
     last_state: str | None = None
     while time.monotonic() < deadline:
@@ -145,11 +152,48 @@ def _poll_job(job_id: str, *, timeout_s: float = 600.0) -> dict:
         if state != last_state:
             console.print(f"[dim]· job {job_id} → {state}[/dim]")
             last_state = state
-        if state in ("applied", "failed"):
+        if state in terminal:
             return job
         time.sleep(0.5)
     die(f"update job {job_id} timed out after {timeout_s:.0f}s")
     return {}
+
+
+def _interactive() -> bool:
+    """True on an interactive TTY — the gate for the pre-commit confirm prompt.
+
+    Factored out so headless/piped runs (cron, scripts, ``|`` pipelines) skip the
+    prompt, and so tests can force either path deterministically.
+    """
+    return sys.stdout.isatty()
+
+
+def _render_notes(notes: dict | None) -> None:
+    """Render the release notes from a prepared update job.
+
+    ``breaking`` / ``migrations`` get a loud panel; ``highlights`` a bullet
+    list; the full markdown (if any) is rendered below. All fields optional —
+    a release without notes renders nothing.
+    """
+    if not isinstance(notes, dict):
+        return
+    highlights = notes.get("highlights") or []
+    breaking = notes.get("breaking") or []
+    migrations = notes.get("migrations") or []
+    markdown = (notes.get("markdown") or "").strip()
+
+    if breaking or migrations:
+        lines = [f"[red]⚠ {b}[/red]" for b in breaking]
+        lines += [f"[yellow]↻ {m}[/yellow]" for m in migrations]
+        console.print(
+            Panel("\n".join(lines), title="Breaking / migrations", border_style="yellow")
+        )
+    if highlights:
+        console.print("[bold]Highlights[/bold]")
+        for h in highlights:
+            console.print(f"  • {h}")
+    if markdown:
+        console.print(Markdown(markdown))
 
 
 def update(
@@ -172,6 +216,12 @@ def update(
         None,
         "--target",
         help="Pin a specific version (e.g. v0.1.1). Overrides the latest manifest version.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt after reviewing release notes.",
     ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
@@ -222,9 +272,12 @@ def update(
         console.print("[dim]nothing to apply.[/dim]")
         return
 
+    # ── Stage → review notes → confirm → activate (prepare/commit split) ────────
+    # prepare downloads + cosign-verifies + extracts WITHOUT touching the running
+    # system, so we can show verified release notes and confirm before activating.
     try:
         job = api_post(
-            "/api/updates/apply", json={"version": target_version} if target_version else {}
+            "/api/updates/prepare", json={"version": target_version} if target_version else {}
         )
     except CliApiError as exc:
         die(str(exc))
@@ -233,9 +286,39 @@ def update(
     if not job_id:
         die("server returned no job id")
         return
-    console.print(f"[cyan]apply job:[/cyan] {job_id}")
+    console.print(f"[cyan]staging update:[/cyan] {job_id}")
+    prepared = _poll_job(job_id, terminal=("prepared", "failed"))
+    if prepared.get("state") != "prepared":
+        die(f"prepare failed: {prepared.get('error') or 'unknown error'}")
+        return
 
-    final = _poll_job(job_id)
+    resolved = prepared.get("resolved_version") or target_version
+    _render_notes(prepared.get("notes"))
+
+    # Confirm before activating. Prompt only on an interactive TTY without --yes;
+    # headless/piped invocations (cron, scripts) proceed as before so unattended
+    # updates never block. Nothing is active yet — declining just leaves the
+    # staged tree, which is harmless.
+    if not yes and _interactive():
+        if not typer.confirm(f"Apply hal0 {resolved}?", default=True):
+            console.print(
+                "[dim]staged but not applied — re-run `hal0 update` to apply, "
+                "or `hal0 update --yes`.[/dim]"
+            )
+            return
+
+    try:
+        cjob = api_post("/api/updates/commit", json={"version": resolved})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    cjob_id = cjob.get("id")
+    if not cjob_id:
+        die("server returned no commit job id")
+        return
+    console.print(f"[cyan]applying:[/cyan] {cjob_id}")
+
+    final = _poll_job(cjob_id, terminal=("applied", "failed"))
     state = final.get("state")
     if state == "applied":
         console.print(Panel("[green]update applied.[/green]", border_style="green"))

@@ -862,6 +862,69 @@ def _cache_dir(version: str) -> Path:
     return paths.var_lib() / "cache" / version
 
 
+def _manifest_cache_path(version: str) -> Path:
+    """Where :meth:`Updater.prepare` stashes the verified manifest for commit()."""
+    return _cache_dir(version) / "manifest.json"
+
+
+def _load_cached_manifest(version: str) -> dict[str, Any]:
+    """Read the manifest cached by :meth:`Updater.prepare`.
+
+    ``commit()`` needs ``min_data_version`` without re-fetching (a re-fetch could
+    resolve a *newer* release than the one that was prepared+verified). Raises
+    ``UpdateError`` if the cache is missing — i.e. commit was called without a
+    prior prepare for this version.
+    """
+    path = _manifest_cache_path(version)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise UpdateError(
+            f"no staged manifest for {version} — call prepare() before commit()",
+            details={"version": version, "path": str(path), "error": str(exc)},
+        ) from exc
+
+
+#: Cap release-notes markdown so a hostile/oversized tree can't blow up the job
+#: record or the CLI render. Notes are informational, not a transport.
+_MAX_NOTES_BYTES = 64 * 1024
+
+
+def _read_release_notes(install_dir: Path) -> dict[str, Any]:
+    """Read release notes shipped INSIDE the (cosign-verified) release tree.
+
+    ``RELEASE_NOTES.md`` (markdown) and an optional ``release.json``
+    (``{highlights, breaking, migrations}``) at the tree root. Both are optional
+    — older releases without them yield empty notes (graceful). Because they live
+    in the extracted tarball, they are covered by the sha256 + cosign
+    verification, unlike a manifest ``notes_url`` fetched over plain TLS — so what
+    the operator reviews before commit is exactly what was signed.
+    """
+    markdown = ""
+    md_path = install_dir / "RELEASE_NOTES.md"
+    if md_path.is_file():
+        with contextlib.suppress(OSError):
+            markdown = md_path.read_text(encoding="utf-8", errors="replace")[:_MAX_NOTES_BYTES]
+
+    highlights: list[str] = []
+    breaking: list[str] = []
+    migrations: list[str] = []
+    json_path = install_dir / "release.json"
+    if json_path.is_file():
+        with contextlib.suppress(OSError, ValueError):
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                highlights = [str(x) for x in (data.get("highlights") or [])][:50]
+                breaking = [str(x) for x in (data.get("breaking") or [])][:50]
+                migrations = [str(x) for x in (data.get("migrations") or [])][:50]
+    return {
+        "markdown": markdown,
+        "highlights": highlights,
+        "breaking": breaking,
+        "migrations": migrations,
+    }
+
+
 # ── Seed-profile merge helpers ─────────────────────────────────────────────────
 
 
@@ -1218,10 +1281,10 @@ class Updater:
 
     # ── apply ──────────────────────────────────────────────────────────────────
 
-    async def apply(self, version: str | None = None) -> dict[str, Any]:
-        """Download, verify, install, and activate ``version`` (or latest).
+    async def prepare(self, version: str | None = None) -> dict[str, Any]:
+        """Download, verify, and STAGE ``version`` (or latest) — without activating.
 
-        Implements the full §9 update sequence:
+        Runs §9 steps **1–6** only:
 
           1. Fetch + schema-validate the release manifest.
           2. Confirm the target version (caller-pinned or manifest.version).
@@ -1229,17 +1292,15 @@ class Updater:
           4. SHA-256 verify against the manifest digest.
           5. Cosign verify-blob against the GH Actions OIDC identity.
           6. Extract to ``/usr/lib/hal0-<version>/`` (refuse non-empty).
-          7. Run forward config migrations if ``min_data_version`` advanced.
-          8. Atomic-swap the ``/usr/lib/hal0/current`` symlink.
-          9. Record the prior target in ``/var/lib/hal0/hal0.previous``.
 
-        Slot units are NOT restarted; the ``hal0-api.service`` restart is
-        the route layer's responsibility (``routes/updater._run_apply_job``
-        try-restarts it fail-soft after a successful apply).
+        Nothing about the running system changes: the ``current`` symlink, the
+        venv, and ``/etc/hal0`` are untouched, so an abandoned prepare is
+        discarded by deleting the staged tree. The verified manifest is cached
+        (``<cache>/manifest.json``) so :meth:`commit` reads ``min_data_version``
+        without a re-fetch, and release notes are read from the *verified* tree
+        so what the operator reviews before commit is exactly what was signed.
 
-        Returns a breadcrumb dict the route layer can attach to the job
-        record (``version``, ``previous``, ``installed_at``,
-        ``cosign_skipped``).
+        Returns ``{version, install_dir, cache_dir, cosign_skipped, notes}``.
 
         Raises:
             UpdateError + subclasses on any step failure. Partial-state
@@ -1258,7 +1319,7 @@ class Updater:
             )
 
         # Step 1: fetch + validate manifest.
-        log.info("updater.apply_start", job_id=self.job_id, channel=self.channel, pinned=version)
+        log.info("updater.prepare_start", job_id=self.job_id, channel=self.channel, pinned=version)
         try:
             raw = await fetch_release_manifest(self.channel)
         except (OSError, ValueError) as exc:
@@ -1335,6 +1396,58 @@ class Updater:
         # after a half-failed apply isn't permanently wedged.
         install_dir = _versioned_install_dir(target_version)
         await asyncio.to_thread(_extract_tarball, tarball_path, install_dir, job_id=self.job_id)
+
+        # Cache the verified manifest so commit() reads min_data_version without a
+        # re-fetch (which could resolve a *newer* release than the one just
+        # verified), then read release notes from the *verified* tree — so what an
+        # operator reviews before commit is exactly what cosign signed.
+        _write_atomic_text(_manifest_cache_path(target_version), json.dumps(raw))
+        notes = _read_release_notes(install_dir)
+        log.info("updater.prepare_ok", job_id=self.job_id, version=target_version)
+        return {
+            "version": target_version,
+            "install_dir": str(install_dir),
+            "cache_dir": str(cache),
+            "cosign_skipped": _cosign_skip(),
+            "notes": notes,
+        }
+
+    async def commit(self, version: str) -> dict[str, Any]:
+        """Activate a previously :meth:`prepare`d ``version`` (§9 steps 7–9+).
+
+        Runs forward config migrations, prunes materialised seed profiles, clears
+        stale mtp overrides, atomic-swaps the ``current`` symlink, re-pips the
+        tree into the running venv, and re-renders slot units. Requires that
+        :meth:`prepare` already staged this version (its ``install_dir`` and
+        cached manifest must exist) — otherwise raises ``UpdateError``.
+
+        Slot units are NOT restarted and ``hal0-api`` is not bounced here; the
+        route layer (``routes/updater._run_commit_job``) try-restarts hal0-api
+        fail-soft after a successful commit. Returns the same breadcrumb dict
+        shape as the old single-step apply.
+        """
+        if _is_editable_install():
+            raise UpdateError(
+                "update is not supported on an editable (dev) install — "
+                "run 'git pull && pip install -e .' to update",
+                details={"hint": "editable install detected via hal0.__file__ outside sys.prefix"},
+            )
+        target_version = (version or "").strip()
+        if not target_version:
+            raise UpdateManifestInvalid(
+                "commit requires an explicit prepared version",
+                details={"channel": self.channel},
+            )
+        install_dir = _versioned_install_dir(target_version)
+        cache = _cache_dir(target_version)
+        if not install_dir.exists():
+            raise UpdateError(
+                f"nothing staged for {target_version} — call prepare() before commit()",
+                details={"version": target_version, "install_dir": str(install_dir)},
+            )
+        # Manifest cached by prepare(); needed for min_data_version below.
+        manifest = _parse_manifest(_load_cached_manifest(target_version))
+        log.info("updater.commit_start", job_id=self.job_id, version=target_version)
 
         # Step 7: config migrations.
         migration_info: tuple[int, int]
@@ -1477,6 +1590,17 @@ class Updater:
             "cosign_skipped": _cosign_skip(),
             "installed_at": time.time(),
         }
+
+    async def apply(self, version: str | None = None) -> dict[str, Any]:
+        """Prepare + commit in one call — the back-compat single-step update.
+
+        Equivalent to the pre-split ``apply()``: stages the release
+        (:meth:`prepare`) and immediately activates it (:meth:`commit`). Callers
+        that want to show release notes / gate on confirmation between the two
+        phases call :meth:`prepare` then :meth:`commit` directly instead.
+        """
+        prepared = await self.prepare(version)
+        return await self.commit(str(prepared["version"]))
 
     # ── rollback ───────────────────────────────────────────────────────────────
 

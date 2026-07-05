@@ -42,6 +42,7 @@ from hal0.updater.updater import (
     _is_pre_release,
     _parse_manifest,
     _previous_record,
+    _read_release_notes,
     _version_tuple,
     _versioned_install_dir,
 )
@@ -532,6 +533,121 @@ def test_apply_repip_failure_rolls_back_symlink(
 
     # Rolled back: current still points at the prior (0.0.1) tree.
     assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+
+
+# ── prepare / commit split ─────────────────────────────────────────────────────
+
+
+def test_prepare_stages_without_swap(
+    synthetic_release: dict[str, Any], cosign_skip: None
+) -> None:
+    """prepare() downloads + verifies + extracts but activates nothing.
+
+    The staged tree lands under /usr/lib/hal0-<version>/ yet the `current`
+    symlink is untouched — an abandoned prepare is discarded by deleting the
+    staged dir.
+    """
+    res = asyncio.run(Updater().prepare())
+    assert res["version"] == "0.0.1"
+    assert "notes" in res
+
+    # The versioned tree is staged …
+    install = _versioned_install_dir("0.0.1")
+    assert install.exists()
+    assert (install / "VERSION").read_text().strip() == "0.0.1"
+
+    # … but nothing was activated: the `current` symlink does not resolve to it.
+    link = _current_symlink()
+    assert not link.is_symlink() or (
+        Path(os.readlink(link)).resolve() != install.resolve()
+    )
+
+
+def test_commit_without_prepare_raises(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """commit() with nothing staged for the version raises UpdateError.
+
+    A fresh HAL0_HOME means no prepare() has run, so `_versioned_install_dir`
+    and the cached manifest are both absent.
+    """
+    # Pretend prod (non-editable) so we reach the staged-manifest guard rather
+    # than the editable-install refusal.
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    with pytest.raises(UpdateError):
+        asyncio.run(Updater().commit("0.0.1"))
+
+
+def test_prepare_then_commit_swaps(
+    synthetic_release: dict[str, Any], cosign_skip: None
+) -> None:
+    """prepare() then commit() reaches the same end state as apply()."""
+    asyncio.run(Updater().prepare())
+    # Not yet activated after prepare.
+    assert not _current_symlink().is_symlink()
+
+    res = asyncio.run(Updater().commit("0.0.1"))
+    assert res["version"] == "0.0.1"
+
+    link = _current_symlink()
+    assert link.is_symlink()
+    install = _versioned_install_dir("0.0.1")
+    assert Path(os.readlink(link)).resolve() == install.resolve()
+
+
+def test_prepare_reads_release_notes(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
+) -> None:
+    """prepare() reads RELEASE_NOTES.md + release.json from the verified tree.
+
+    Both files ship at the tarball ROOT (so they're covered by the sha256 +
+    cosign verification) and surface on the returned ``notes`` dict.
+    """
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    version = "0.0.1"
+    contents = {
+        "site-packages/hal0/__init__.py": f'__version__ = "{version}"\n',
+        "VERSION": version,
+        "RELEASE_NOTES.md": "# 0.0.1\n- did xyz\n",
+        "release.json": json.dumps(
+            {"highlights": ["h"], "breaking": ["b"], "migrations": ["m"]}
+        ),
+    }
+    tarball = _build_release_tarball(tmp=artifacts, version=version, contents=contents)
+    sig = artifacts / f"hal0-{version}.tar.gz.sig"
+    sig.write_bytes(b"sig\n")
+    cert = artifacts / f"hal0-{version}.tar.gz.crt"
+    cert.write_bytes(b"cert\n")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        sig=sig,
+        cert=cert,
+        version=version,
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+    res = asyncio.run(Updater().prepare())
+    notes = res["notes"]
+    assert "did xyz" in notes["markdown"]
+    assert notes["highlights"] == ["h"]
+    assert notes["breaking"] == ["b"]
+    assert notes["migrations"] == ["m"]
+
+
+def test_read_release_notes_missing_is_empty(tmp_path: Path) -> None:
+    """A tree with no notes files yields all-empty lists + empty markdown."""
+    notes = _read_release_notes(tmp_path)
+    assert notes["markdown"] == ""
+    assert notes["highlights"] == []
+    assert notes["breaking"] == []
+    assert notes["migrations"] == []
 
 
 # ── apply error paths ──────────────────────────────────────────────────────────
