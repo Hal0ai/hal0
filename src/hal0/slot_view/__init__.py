@@ -318,6 +318,9 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         entry["vision"] = cfg.get("vision")
         entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
         entry["workers"] = cfg.get("workers")
+        # Continuous batching: --parallel sequence slots (absent → null so the
+        # drawer dirty-tracks "inherit the profile" vs an explicit override).
+        entry["parallel"] = cfg.get("parallel")
         server_cfg = cfg.get("server")
         if server_cfg is None:
             extra_args: Any = None

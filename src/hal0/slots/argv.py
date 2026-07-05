@@ -59,6 +59,7 @@ FLAG_ALIASES: dict[str, str] = {
     "-ts": "--tensor-split",
     "-mg": "--main-gpu",
     "-np": "--parallel",
+    "-kvu": "--kv-unified",
     "-ngld": "--n-gpu-layers-draft",
 }
 

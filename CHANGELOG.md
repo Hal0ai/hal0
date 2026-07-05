@@ -13,6 +13,23 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Added
+- **Continuous batching — per-slot `parallel` field.** A slot can now set
+  llama-server's `--parallel` / `-np` sequence-slot count so concurrent
+  requests share the once-loaded weights instead of serializing through a
+  single sequence and thrashing one prompt cache (the win the shared-slot
+  architecture already earns but never harvested — every seed profile pins
+  `--parallel 1`). `None` inherits the profile; a value >1 also emits
+  `--kv-unified` so `--ctx-size` stays a SHARED pool (each request may use the
+  full context) rather than being silently split to ctx/N per slot. Emitted as
+  a slot override (beats the profile, loses to hand-authored `extra_args`);
+  surfaced in the slot drawer with a shared-pool hint. The dead haloai
+  `workers` field is deprecated (inert; a non-default value now logs at
+  launch). MTP x batching runs but logs `mtp.batched_speculation` (unproven on
+  gfx1151, bench-gated). Seed-profile defaults stay `--parallel 1` pending the
+  on-box `-np` sweep (`server_ab.py --mode batch`). See the
+  concurrency-batching plan handoff.
+
 ## [v0.9.0] — 2026-07-04
 
 **The first public-beta cut.** hal0 graduates from the b-tagged 0.8.x
