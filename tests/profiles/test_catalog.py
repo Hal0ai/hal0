@@ -131,7 +131,7 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
-    assert by_name["rocm"].intent == "ROCm · basic GPU LLM"
+    assert by_name["rocm"].intent == "ROCm"
     assert by_name["rocm"].quant == "FP4"
     assert by_name["vulkan"].quant == "Q4_K_M"
 

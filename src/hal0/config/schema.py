@@ -856,7 +856,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "ROCm · basic GPU LLM",
+        "intent": "ROCm",
         "quant": "FP4",
     },
     "rocmfpx-rocm": {
@@ -871,7 +871,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "ROCmFPX · ROCmFP4 dense · ROCm0 + MTP",
+        "intent": "ROCmFPX · DENSE · MTP",
         "quant": "ROCmFP4",
     },
     # Renamed rocmfpx-moe -> vkfpx-moe (2026-07-05) so the name indicates the
@@ -887,8 +887,25 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
-        "intent": "VKFPX · ROCmFPX MoEQuality 35B-A3B · Vulkan0 + MTP",
+        "intent": "VULKFPX · MOE · MTP",
         "quant": "ROCmFPX",
+    },
+    "vkfpx-dense": {
+        # hal0 ROCmFPX runner — Vulkan0 lane for a DENSE ROCmFP4 weight format.
+        # Complements rocmfpx-rocm (ROCm0 dense): the ROCm lane wins sustained
+        # decode, the Vulkan lane wins prefill (~+24% PP), so a prefill-bound
+        # dense workload (RAG / long-context reads / re-prefill after a cache
+        # miss) belongs here. Small ubatch wins on gfx1151; per-model KV +
+        # spec-draft tuning come from the model's defaults.extra_args. mtp=True
+        # is the runner-capability gate (auto-on for MTP-head models, model-
+        # gated + slot-overridable) — the MTP *params* stay on the model.
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "VULKFPX · DENSE · MTP",
+        "quant": "ROCmFP4",
     },
     "vulkan": {
         # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
@@ -900,7 +917,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
-        "intent": "Vulkan · basic GPU LLM (RADV)",
+        "intent": "Vulkan",
         "quant": "Q4_K_M",
     },
     "cuda": {
@@ -915,7 +932,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "cuda",
-        "intent": "CUDA · basic GPU LLM (NVIDIA, experimental)",
+        "intent": "CUDA · experimental",
         "quant": "Q4_K_M",
     },
     "embed": {
@@ -933,7 +950,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Embeddings · GPU",
+        "intent": "Embeddings",
         "quant": "",
     },
     "rerank": {
@@ -949,7 +966,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Reranking · GPU",
+        "intent": "Reranking",
         "quant": "",
     },
     "flm": {
@@ -957,7 +974,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "",
         "mtp": False,
         "device_class": "npu",
-        "intent": "FLM · NPU inference",
+        "intent": "FLM · NPU",
         "quant": "W4ABF16",
     },
     "tts": {
@@ -965,7 +982,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
         "device_class": "cpu",
-        "intent": "TTS · Kokoro (CPU)",
+        "intent": "TTS · CPU",
         "quant": "",
     },
     "tts-qwen3": {
@@ -977,7 +994,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "TTS · Qwen3 (GPU, multilingual)",
+        "intent": "TTS · GPU",
         "quant": "BF16",
     },
     "cpu-llm": {
@@ -990,7 +1007,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap --jinja",
         "mtp": False,
         "device_class": "cpu",
-        "intent": "CPU · basic LLM (llama-server)",
+        "intent": "CPU",
         "quant": "Q4_K_M",
     },
     "comfyui": {
@@ -998,7 +1015,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--disable-mmap --bf16-vae --cache-none",
         "mtp": False,
         "device_class": "img",
-        "intent": "ComfyUI · image generation",
+        "intent": "ComfyUI",
         "quant": "",
     },
 }
