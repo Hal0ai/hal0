@@ -45,16 +45,17 @@ import './dash/npu.css'
 import './dash/memory-overhaul.css'
 import './dash/activity-log.css'
 import './dash/overhaul.css'
+import './dash/redesign.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
 import './dash/cards-shell.jsx'
-// Dashboard-overhaul card modules — each registers a window global the grid
-// (dash-grid.jsx) wires by name (SlotList, ThroughputCard2, UtilizationCard,
-// QuickChatCard, ServicesCard). MUST load after cards-shell (they use DCard/
-// StatusDot) and before dash-grid so the globals exist when the grid renders.
+// Board card modules — each registers a window global (SlotList,
+// ThroughputCard2, UtilizationCard, QuickChatCard, ServicesCard, PowerCard,
+// SlotTrackCard, …). MUST load after cards-shell (they use DCard/StatusDot);
+// the redesign view offers slottrack/power/quickchat as swap-in widgets.
 import './dash/slot-list.jsx'
 import './dash/metric-cards.jsx'
 import './dash/quickchat-card.jsx'
@@ -64,11 +65,12 @@ import './dash/command-palette.jsx'
 import './dash/flow-modals.jsx'
 import './dash/extra-modals.jsx'
 import './dash/dashboard.jsx'
-// W3: masonry grid + edit mode + layout persistence (DashGrid, DashboardOverhaulView)
-// Bridge must come BEFORE dash-grid.jsx so window.__hal0Use* are set when the
-// .jsx module evaluates. dash-grid.jsx must come after cards-shell (W1).
-import './dash/dash-grid-hook-bridge'
-import './dash/dash-grid.jsx'
+// Dashboard redesign (design_handoff_dashboard_redesign): fixed-band layout
+// with swap-in-place customization (DashboardRedesignView). Replaces the
+// free-form DashGrid / DashboardOverhaulView board. Must load after
+// cards-shell and the card modules above (slottrack / power / quickchat
+// window globals are offered as swap-in widgets).
+import './dash/dashboard-redesign.jsx'
 import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 import './dash/models.jsx'

@@ -99,13 +99,15 @@ MCP allowlist above: every WS upgrade is checked against an **origin
 allowlist** (`HAL0_ALLOWED_ORIGINS`, comma-separated; the default covers
 `http://hal0.local`, `http://localhost:5173`, and `http://127.0.0.1:8080`),
 and an **HMAC-SHA256 session cookie** (`hal0_session`, `HttpOnly`,
-`SameSite=Lax`) is minted on first `GET /agents/` and verified on every
+`SameSite=Lax`) is minted the first time the dashboard calls
+`GET /api/agents/{agent_id}/session/handshake` and verified on every
 WebSocket upgrade after that. The signing secret lives at
-`/var/lib/hal0/agents/secret.bin` (mode `0600`), generated on first use and
-never leaves the hal0 service user. This closes off drive-by sites
-WebSocket-ing into the chat proxy from a browser that already has a session
-open elsewhere — it is not a general-purpose auth system, and caller identity
-still flows on `X-hal0-Agent` underneath it.
+`/var/lib/hal0/agents/secret.bin` (mode `0600`, overridable via
+`HAL0_AGENT_SECRET_PATH`), generated on first use and never leaves the hal0
+service user. This closes off drive-by sites WebSocket-ing into the chat
+proxy from a browser that already has a session open elsewhere — it is not a
+general-purpose auth system, and caller identity still flows on
+`X-hal0-Agent` underneath it.
 
 ## Agent identity and gated actions
 

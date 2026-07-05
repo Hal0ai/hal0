@@ -31,9 +31,9 @@ marketing figures.
 - **Decode t/s** — single-stream token generation throughput (greedy, 256-token
   completion, median of 3 runs). This is the number you feel during a chat.
 - **Prefill t/s** — prompt-ingestion throughput on a ~2k-token prompt.
-- **MTP acc%** — for [multi-token-prediction](/docs/concepts/) models, the share
-  of speculatively-drafted tokens the target model accepted. Higher acceptance =
-  more of the speedup is real.
+- **MTP acc%** — for [multi-token-prediction](/docs/concepts/capabilities-and-profiles/#mtp-a-model--profile--slot-decision)
+  models, the share of speculatively-drafted tokens the target model accepted.
+  Higher acceptance = more of the speedup is real.
 - **Caps** — capability tags that drive routing and slot features (MTP, vision,
   tool-calling, coding, reasoning).
 - **Spec / KV / Size** — the speculative-decode mode, KV-cache quantization, and
@@ -41,19 +41,25 @@ marketing figures.
 
 ## What the data shows
 
-- **MTP A3B models dominate.** The sparse 35B-A3B models with self-speculative
-  draft-mtp lead the board — `chadrock-35b-ace-saber` tops it at ~100 t/s decode.
+- **MTP wins at every comparable size.** Among the 30B+ chat models, the
+  sparse MoE builds running self-speculative `draft-mtp` clearly lead —
+  `chadrock3-6-35b-uncensored-mtp-strix-lean` and `chadrock-35b-ace-saber` both
+  decode near 100 t/s, more than double the ~46 t/s a same-class 35B MoE model
+  manages without MTP (`qwen3.6-35b-a3b-q4kxl`). The single fastest row in the
+  whole table, tiny `qwen3.5-0.8b` at ~170 t/s, isn't an MTP result at all — a
+  0.8B dense model just has little enough compute per token that draft-and-
+  verify has nothing to add.
 - **Acceptance matters more than raw size.** A model with weak MTP acceptance
   (drafted tokens getting rejected) gives back most of the speculative speedup —
   watch the acc% column, not just the decode figure.
-- **The curated default is the slowest real model.** Dense `qwen3.6-27b` lands
-  at ~10 t/s — an A3B-MTP model is several times faster for the same class of
-  work.
+- **Dense loses badly at scale.** Dense `qwen3.6-27b` is the slowest model in
+  the sweep at ~10 t/s — an MTP-enabled model in the same size class is
+  several times faster for the same class of work.
 
 <Aside type="note" title="Methodology & caveats">
 Every model was measured the same way: greedy 256-token decode (median of 3),
 ~2k-token prefill, native `llama-server` `/completion` timings read directly
-from the slot port, with the `util` slot locked out so nothing else contended
+from the slot port, with the `utility` slot locked out so nothing else contended
 for the GPU. MTP-tagged models ran with `--spec-type draft-mtp` (self
 speculation). Because the sweep is **uniform** (fixed context, one profile), a
 model's number here can differ from its tuned production-slot figure — this

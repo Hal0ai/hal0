@@ -287,3 +287,76 @@ Qwen3.5/3.6 are 262k-native — no YaRN flags needed at our ctx sizes (only add
 6. `-fa on` syntax note: current upstream is `on|off|auto` (default auto) and
    old `-fa 1` still parses — our `-fa on` spelling is already correct for the
    fork images; keep it explicit.
+
+## 7. Measured results — matrix run 2026-07-04 (CT105, gfx1151)
+
+MoE=Qwen3.6-35B-A3B-HaloStrix-Dyn-MTP-v7, dense=Qwen3.6-27B-UD-Q5_K_XL. All
+cells GPU-exclusive (slots `enabled=false`), noise <1.1%. Raw JSON:
+`/var/lib/hal0/benchmarks/matrix-cells/` (Tier A), `.../server-ab/` (Tier B).
+
+| Cell | Question | Winner | Delta | Action |
+|---|---|---|---|---|
+| moe-batch | `-ub 4096` vs `2048`? | **`-ub 1024`** (neither) | pp **+30%** (1165 vs 895) | rocm-moe `-ub 1024` |
+| dense-batch | confirm `8192/2048`? | inconclusive (jagged) | — | keep seeded |
+| vulkan-ub | RADV sweet spot 1024? | **`-ub 256`** (not 1024) | pp +5.4% vs 512; 1024 −6% | vulkan `-ub 256` |
+| kv-rocm @32k | q8 vs f16 symmetric | f16 (tg 9.0 vs 8.0) | tg +12.5% | keep q8 (memory); note cost |
+| kv-vulkan @32k | q8 valid on RADV? | **q8** (pp 168 vs 116) | pp **+45%**, tg +4% | HELD — gemma f16 guard missing (§7.1) |
+| threads | `-t 8` vs `16` | tie (noise) | <3% | drop `--threads-batch 32` |
+| MTP n-max (dense) | 2 vs 4 | **4** | decode **+23%** (32.6 vs 26.4) | keep seeded n-max 4 |
+| cache-reuse (agent) | 256 vs 0 | tie (noise) | ~1.7% | don't adopt |
+| poll (agent) | poll vs none | tie | <0.1% | drop `--poll` |
+| embed / rerank | sanity | PASS | 1024-dim / spread 14.4 | — |
+
+**Gotchas hit (see memory `bench-profile-matrix-gotchas`):** the `sweep` verb
+collides on one filename per model+backend (skips cells); asymmetric KV at 32k
+depth falls back to CPU (2h hang) — run symmetric only; GPU slots auto-warm
+mid-run (disable them). MoE-MTP draft depth NOT run (no MoE-MTP slot; dense
+result + prior data corroborate n-max 4).
+
+### 7.1 Vulkan q8 KV verify — the gemma f16 guard does NOT exist (2026-07-04)
+
+Fact #3 assumes gemma stays f16 via "per-MODEL registry defaults"; the vulkan q8
+adoption was gated on that. **Verified false:**
+- `CuratedModel` (registry/curated.py) has NO launcher-default field — it is pure
+  download metadata (hf_repo/hf_file/size/license). No catalog entry can carry
+  `-ctk f16`.
+- The only launcher-default mechanism is `ModelDefaults.extra_args` on the SLOT
+  `[model].defaults` (manual, per-slot). Precedence
+  (`container._llama_argv_segments`) is `profile < model_defaults < … < extra_args`
+  last-wins, so a slot-level `-ctk f16` WOULD override a profile `-ctk q8_0` — but
+  nothing auto-populates it per model/family.
+- Live proof: the `explore` slot (gemma4-v2-q4-k-m on `rocm-dnse`, which already
+  ships `-ctk q8_0 -ctv q8_0`) resolves to `-ctk q8_0` with no override — **gemma
+  is already on quantized KV today, unguarded** (pre-existing, independent of the
+  vulkan change).
+
+**Trap validated + magnitude corrected (gemma-4-12B @32k, 2026-07-04):**
+
+| backend | pp f16 | pp q8 | Δpp | tg f16 | tg q8 | Δtg |
+|---|---|---|---|---|---|---|
+| ROCm | 379.1 | 369.1 | −2.6% | 20.4 | 18.3 | **−10.4%** |
+| Vulkan | 394.4 | 281.9 | **−28.5%** | 23.3 | 23.6 | +1.3% |
+
+The upstream "~10x pp cliff" (#12352/#23978) did NOT reproduce on this
+ROCm-7.2.4/RADV fork — q8 stayed GPU-resident (87% CPU, no fallback). But q8 KV
+still clearly regresses gemma, the **mirror image** of qwen's +45% vulkan gain.
+So the guard is justified at a −28% pp (vulkan) magnitude, not 10x.
+
+**Consequences:** (1) vulkan q8 KV stays OUT of the seed. (2) gemma-on-rocm-dnse
+today pays only ~10% tg (pp fine) — a real but mild regression, not a fire.
+
+**Fix — IMPLEMENTED as `FAMILY_DEFAULTS` (config/schema.py).** Rather than a
+one-off gemma KV guard, a general per-family override layer: a `{family: flags}`
+table injected into the `model_defaults` argv segment at slot resolution (family
+matched from the model id/filename via `model_family()`). Precedence
+`profile < FAMILY_DEFAULTS < [model].defaults < … < [server].extra_args`, riding
+the existing `normalize_argv` last-wins dedup — so the family override beats the
+profile but a per-slot override still beats the family. First entry
+`"gemma": "-ctk f16 -ctv f16 --cache-reuse 0"` auto-protects every gemma slot
+(catalog or scanned) on any profile, fixing the live rocm-dnse regression. GGUF
+`general.architecture` is the future family-detection hardening (not persisted on
+rows today). **Follow-up — DONE:** with gemma auto-guarded, the vulkan seed now
+ships `-ctk q8_0 -ctv q8_0` for the +45% qwen-at-depth pp win (and half KV mem);
+gemma-on-vulkan is pinned back to f16 by the family guard. The vulkan profile is
+therefore no longer intrinsically gemma-safe — do not drop `FAMILY_DEFAULTS`
+without reverting vulkan to f16 (a test pins this coupling).

@@ -25,8 +25,9 @@ manifest), so you can never land on a stale pick list.
 ## Chat picks
 
 These are surfaced first by the FirstRun wizard, ordered roughly largest
-to smallest. The headline picks are quantized to UD-Q4_K_XL / Q5_K_XL for
-the quality margin a large unified pool affords.
+to smallest. Most of the headline picks use Unsloth's UD-Q4_K_XL dynamic
+quant or plain Q4_K_M for the size/quality sweet spot; `qwen3.6-27b` ships
+a ROCmFP4 pre-quantized build tuned specifically for Strix Halo instead.
 
 | Id | Model | Size | Min memory | License | Notes |
 |---|---|---|---|---|---|
@@ -45,10 +46,40 @@ verifies the whole slot lifecycle (pull → load → serve) in seconds before
 you commit to downloading a 20+ GB pick.
 </Aside>
 
+### Community MTP builds behind the seed Stacks
+
+The catalogue also carries exact HF coordinates for about a dozen
+community MTP builds that don't show up as FirstRun wizard cards. Five of
+them are the agent/utility model pairs baked into hal0's three built-in
+[Stacks](/docs/concepts/stacks) — `saber`, `forge`, and `pi` — so those
+Stacks resolve their models and pull
+them by id instead of failing on a coordinate-less registry row; the rest
+come from the same Strix-Halo bench roster those Stacks were tuned
+against. They're still ordinary catalogue entries — `hal0 model pull <id>`
+works on any of them — just not curated for the first-run experience.
+
+| Id | Model | Size |
+|---|---|---|
+| `qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean` | Qwen3.6 35B-A3B NSC ACE SABER (ROCmFP4 STRIX) | ~19 GB |
+| `chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean` | CHADROCK3.6 27B Pi-Agent (ROCmFP4 STRIX) | ~14.8 GB |
+| `chadrock3-6-35b-uncensored-mtp-strix-lean` | CHADROCK3.6 35B Uncensored (MTP STRIX) | ~19 GB |
+| `qwen3-6-35b-a3b-halostrix-dyn-mtp-v7` | Qwen3.6 35B-A3B HaloStrix Dyn (MTP v7) | ~22.6 GB |
+| `qwopus3-6-27b-v2-mtp-bf16-to-rocmfp4-strix-lean` | Qwopus3.6 27B v2 (ROCmFP4 STRIX) | ~14.8 GB |
+| `qwopus3-6-27b-coder-mtp-q6-k` | Qwopus3.6 27B Coder (MTP Q6_K) | ~22.4 GB |
+| `qwopus3-5-9b-coder-mtp-q6-k` | Qwopus3.5 9B Coder (MTP Q6_K) | ~7.6 GB |
+| `qwopus3-5-4b-coder-mtp-q6-k` | Qwopus3.5 4B Coder (MTP Q6_K) | ~3.6 GB |
+| `qwen3-5-9b-deepseek-v4-flash-mtp-q6-k` | Qwen3.5 9B DeepSeek V4 Flash (MTP Q6_K) | ~7.6 GB |
+| `gemma-4-12b-it-ud-q4-k-xl` | Gemma 4 12B IT (UD Q4_K_XL) | ~7.4 GB |
+
+All ten carry the `mtp` tag. The Gemma pick is also the reason hal0 pins
+any Gemma model on any q8-KV profile back to f16 KV automatically — see
+[`FAMILY_DEFAULTS`](/docs/concepts/capabilities-and-profiles#family_defaults--pinning-quirky-model-architectures)
+for why.
+
 ## Embed and rerank picks
 
 llama.cpp-compatible GGUFs that fan out to `gpu-vulkan` / `gpu-rocm` /
-`cpu`. Assign these to an embedding or reranking slot.
+`gpu-cuda` / `cpu`. Assign these to an embedding or reranking slot.
 
 | Id | Model | Capability | Size | License |
 |---|---|---|---|---|
@@ -72,7 +103,7 @@ directly.
 | Id | Model | Size | License |
 |---|---|---|---|
 | `sdxl-turbo` | SDXL Turbo | ~6.5 GB | SAI-NC-Research-Community (research only) |
-| `sdxl-lightning` | SDXL Lightning (8-step) | ~6.8 GB | CreativeML-OpenRAIL++-M |
+| `sdxl-lightning` | SDXL Lightning (8-step) | ~6.8 GB | CreativeML-OpenRAIL++ |
 | `sd-1.5-pruned-emaonly` | Stable Diffusion 1.5 | ~4.3 GB | CreativeML-Open-RAIL-M |
 
 <Aside type="caution">
@@ -105,11 +136,14 @@ dashboard renders as chips. The check runs three gates in order:
    registry. An unresolvable id is `blocked` (`model.not_resolvable`).
 
 3. **Profile + device class.** The slot's profile must support the slot
-   type, and the device must agree with the profile's device class
-   (`gpu-rocm`/`gpu-vulkan` → `gpu`, `cpu` → `cpu`, `npu` → `npu`). NPU and
-   image mismatches are hard `blocked` failures — they route to different
-   runtime families. A GPU↔CPU mismatch is `degraded` instead: a custom
-   image may still run, but it needs operator attention before launch.
+   type — a mismatch (e.g. a `tts`-only profile on an `llm` slot) is
+   `blocked` (`profile.unsupported_slot_type`) — and the device must agree
+   with the profile's device class (`gpu-rocm`/`gpu-vulkan` → `gpu`,
+   `cpu` → `cpu`, `npu` → `npu`). NPU and image mismatches are hard
+   `blocked` failures (`profile.device_class_mismatch`) — they route to
+   different runtime families. A GPU↔CPU mismatch reports the same reason
+   string but as `degraded` instead: a custom image may still run, but it
+   needs operator attention before launch.
 
 </Steps>
 

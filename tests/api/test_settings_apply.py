@@ -73,6 +73,9 @@ def test_registry_declares_three_apply_classes() -> None:
         ("slots.port_range_end", "immediate", []),
         ("slots.idle_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         ("slots.evict_pressure_mb", "service-restart", [SERVICE_HAL0_API]),
+        # publish_host is baked into each slot's rendered --publish; the slot
+        # units must be restarted to re-render with the new bind address.
+        ("slots.publish_host", "service-restart", [SERVICE_SLOTS]),
         # [models]
         ("models.roots", "service-restart", [SERVICE_HAL0_API]),
         ("models.auto_scan_on_start", "immediate", []),

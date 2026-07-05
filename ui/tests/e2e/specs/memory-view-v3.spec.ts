@@ -202,6 +202,8 @@ test.describe('Memory view — Hindsight surface', () => {
 
   test('timeseries renders stacked spark bars per bucket', async ({ page }) => {
     await gotoMemory(page)
+    // The timeseries moved into the selected-bank main card, so pick a bank.
+    await page.click('[data-testid="mem-bank-primary"]')
     const chart = page.locator('[data-testid="mem-timeseries"] .mo-spark')
     await expect(chart).toBeVisible()
     // one bar (<i>) per bucket — the chart is now stacked spark bars, not an

@@ -94,6 +94,10 @@ export const ENDPOINTS = {
   statsThroughputHistory: '/api/stats/throughput/history',
   // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
   statsPower: '/api/stats/power',
+  // Dashboard-redesign Requests widget: dispatcher-side /v1 rollup
+  // (req/min, p50/p95, per-endpoint counts over 60s). NEW endpoint —
+  // useRequestsRollup fails soft to "—" until it ships.
+  statsRequests: '/api/stats/requests',
   // W6: agent approvals SSE stream (polled list hook is primary; SSE for future).
   agentApprovalsStream: '/api/agent/approvals/events',
 

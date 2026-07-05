@@ -23,12 +23,12 @@ import { ComfyuiPane } from './comfyui-pane.jsx'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
-  InferenceHeroBand,
   SlotScard,
   ModelPicker,
   SlotControls,
   slotCtrlPhase,
 } from './inference-pane.jsx'
+import { TelemetryHeader } from './telemetry-header.jsx'
 import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 
@@ -882,10 +882,12 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
       </div>
 
-      {/* Memory map + combined-throughput band — lifted out of the Inference
-          engine shell to the top of the page, above the tabs, so iGPU GTT usage
-          and live throughput stay visible regardless of which tab is active. */}
-      <InferenceHeroBand />
+      {/* Telemetry header — the combined live-metrics card (throughput / GPU /
+          CPU·memory / NPU cells + memory rack ruler) at the top of the page,
+          above the tabs, so system load stays visible regardless of which tab
+          is active. Replaces the old InferenceHeroBand (memory map +
+          combined-throughput band). */}
+      <TelemetryHeader />
 
       {/* Inference ⇄ Image Gen tabs. Tab 1 holds every non-image slot; tab 2 is
           the ComfyUI generation engine pane (one container, not per-model

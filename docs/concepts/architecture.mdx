@@ -26,14 +26,20 @@ understanding the rest of these docs.
     `hal0-slot@<name>.service` systemd unit. The `SlotManager` owns their
     lifecycle and state.
   </Card>
+  <Card title="Stacks" icon="seti:db">
+    A named, portable bundle of slot assignments plus the profiles and model
+    metadata they reference — apply one to load, swap, and unload a whole
+    slot lineup as a unit. See [Stacks](/docs/concepts/stacks).
+  </Card>
   <Card title="Dispatcher" icon="random">
     The registry-aware router that resolves every incoming `/v1` request to a
     slot or an external upstream, then forwards it — wrapping the slot in its
     serving state for the duration of the call.
   </Card>
   <Card title="Front ends" icon="laptop">
-    The React dashboard (served by hal0-api itself) for operating the platform,
-    plus optional OpenWebUI as a chat front end pointed at the `/v1` surface.
+    The React dashboard (served by hal0-api itself) for operating the platform
+    and its companion services, plus optional OpenWebUI as a chat front end
+    pointed at the `/v1` surface.
   </Card>
 </CardGrid>
 
@@ -46,8 +52,9 @@ surface area:
   (`GET /v1/models`) is intentionally separate from the inference writer
   surface, because OpenAI clients commonly list models before sending an
   `Authorization` header.
-- **`/api/*`** — the operator control plane: slots, models, capabilities,
-  profiles, providers, hardware, health, settings, activity, updates, and more.
+- **`/api/*`** — the operator control plane: slots, stacks, models,
+  capabilities, profiles, providers, companion services, hardware, health,
+  settings, activity, updates, and more.
 - **`/mcp/admin`** and **`/mcp/memory`** — Model Context Protocol servers
   mounted as sub-applications so agents and tools can drive hal0 directly.
 - **`/`** — the built dashboard SPA, mounted last so it never shadows an API
@@ -80,6 +87,29 @@ capabilities and profiles describe how to configure them. The
 [Slots](/docs/concepts/slots) concept covers the lifecycle, single-flight
 dispatch, and the GPU arbiter in depth.
 
+## Stacks: applying a slot set as one unit
+
+Editing slots one at a time works, but swapping an entire lineup — the
+`agent` model, the `utility` model, their profiles, MTP settings — is
+tedious to do by hand. A **stack** is a single `[stack.<slug>]` entry in
+`stacks.toml` that bundles a set of slot assignments together with the
+profiles and model metadata they reference, so the whole bundle is portable
+to another machine.
+
+Applying a stack is two phases: it's first **planned** and committed as an
+atomic write through the same guarded slot-config pipeline every other slot
+edit goes through (a stack can't write anything a manual edit would be
+refused), then **converged** against the live slot set — loading, swapping,
+or skipping each slot and its capability children, and unloading anything
+running that the stack doesn't mention. hal0 ships three seed stacks
+(`saber`, `forge`, `pi`) tuned to the reference Strix Halo roster; seeds are
+immutable, so customizing one means cloning it under a new name. The
+dashboard's **Stacks** view is where you load, edit, export, and import
+them, and it tracks which stack is active and whether the running
+configuration has drifted from what was last applied. See
+[Stacks](/docs/concepts/stacks) for the full model — row fields, the
+plan/converge phases, drift states, and portable export/import.
+
 ## The dispatcher: routing a request
 
 The `Dispatcher` reads the model registry and the list of upstreams to decide
@@ -104,9 +134,10 @@ in a fixed order so behaviour is predictable:
    call), then re-check passthrough.
 
 5. **Capability / path routing** — last-resort heuristics: `/embeddings` →
-   the embed slot, `/audio/speech` → the TTS slot, `/images/generations` → the
+   the embed slot, `/rerankings` (and its `/rerank` alias) → the dedicated
+   rerank slot, `/audio/speech` → the TTS slot, `/images/generations` → the
    image slot, an FLM `name:tag` model → the NPU slot, and explicit slot-name
-   addressing. Falls back to the `chat` slot.
+   addressing. Falls back to the `agent` slot.
 
 </Steps>
 
@@ -118,7 +149,8 @@ a request went where it did.
 <Steps>
 
 1. A client `POST`s to `/v1/chat/completions` with a `model` field — that can
-   be a model id, or a **slot alias** such as `chat` or `agent`.
+   be a model id, or a **slot alias**: the name of any enabled llm slot, such
+   as `agent` or `utility`.
 
 2. The route layer translates a slot alias to the slot's configured model id,
    then asks the dispatcher to resolve the request to an `UpstreamCall`.
@@ -139,9 +171,9 @@ a request went where it did.
 </Steps>
 
 <Aside type="tip">
-Addressing a slot by its **alias** (`chat`, `agent`, `utility`) is the stable
-way to pin a co-resident model: the alias doesn't change when you swap the
-underlying model. See [Slots](/docs/concepts/slots).
+Addressing a slot by its **alias** — its slot name, such as `agent` or
+`utility` — is the stable way to pin a co-resident model: the alias doesn't
+change when you swap the underlying model. See [Slots](/docs/concepts/slots).
 </Aside>
 
 ## The front ends
@@ -163,6 +195,7 @@ OpenAI talks to hal0.
 <CardGrid>
   <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the GPU arbiter." />
   <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How capabilities, profiles, and devices shape a slot." />
+  <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Applying a whole slot lineup as one declarative unit." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The reference hardware and why it's the tuning target." />
   <LinkCard title="Security" href="/docs/concepts/security" description="The LAN-open posture and the reverse-proxy pattern." />
 </CardGrid>

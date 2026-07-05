@@ -13,7 +13,7 @@ or a **virtual role name**. hal0 rewrites it to the backing model id and
 ensures the right slot is loaded — all before the dispatcher routes the
 request.
 
-This lets a client pin a co-resident slot (e.g. always talk to the `chat`
+This lets a client pin a co-resident slot (e.g. always talk to the `agent`
 slot) without knowing or hard-coding which model it currently serves. The alias
 is stable across model swaps.
 
@@ -21,18 +21,27 @@ is stable across model swaps.
 
 | `model` value | Resolution |
 |---|---|
-| A chat-slot **alias** (`chat`, `agent`, `utility`; legacy `primary`, `agent-hermes`) | Rewritten to the slot's configured model id. |
-| A virtual `hal0/*` role name | Live-resolved to whichever model the role currently maps to. |
+| A chat-slot **alias** — any enabled `type=llm` slot, addressed by its own name (canonically `agent`, the default anchor, and `utility`, the helper role; legacy `agent-hermes` still redirects to `agent`) | Rewritten to the slot's configured model id. |
+| A virtual `hal0/*` role name (`hal0/agent`, `hal0/utility`, `hal0/npu`, or the generalized `hal0/<any-enabled-llm-slot>`) | Live-resolved to whichever model the role currently maps to. Chat-completions only. |
 | A raw **registry model id** | Used directly; routed to whichever upstream serves it. |
+
+<Aside type="note">
+ADR-0023 retired the old `chat` and `primary` aliases — the canonical roles
+are `agent` (default anchor) and `utility` (helper). A custom slot named
+`chat` today is just addressed by that name; it isn't a magic alias.
+</Aside>
 
 ## How the rewrite works
 
-The chat route applies two steps before dispatch, both in `routes/v1.py`:
+Three steps run before dispatch, all in `routes/v1.py`:
 
 ### 1. Alias rewrite — `_rewrite_chat_slot_alias`
 
-The request's `model` is checked against the chat-slot alias map (slot name →
-configured model id). On a match, hal0:
+Runs for every `/v1` request that reaches `_dispatch_and_forward` (chat,
+completions, embeddings, rerankings, audio). The request's `model` is checked
+against the chat-slot alias map (slot name → configured model id, one entry
+per enabled `type=llm` slot, plus the `agent-hermes` back-compat redirect). On
+a match, hal0:
 
 - replaces `body["model"]` with the slot's model id, and
 - rewrites the request's cached body bytes, so any downstream consumer that
@@ -43,7 +52,19 @@ It is a no-op when the value isn't a known alias, already equals its own model
 id, the slot manager is absent, or the config read fails (best-effort — it
 never blocks the request).
 
-### 2. Backend-aware load — `_ensure_backend_for_model`
+### 2. Virtual-name live-resolve — `_normalize_chat_body` (chat completions only)
+
+`POST /v1/chat/completions` alone also resolves a `hal0/*` role name against
+the currently-*loaded* slots (`LiveSlotResolver`), before the thinking-policy
+injection. Each virtual name carries an ordered fallback chain — `hal0/agent`
+tries the `agent` role; `hal0/utility` tries `utility` then falls back to
+`agent`; `hal0/npu` tries `npu`, then `utility`, then `agent` — and `hal0/<any
+enabled llm slot>` resolves to `(<slot>, agent)`. If nothing in the chain is
+loaded yet, resolution falls back to the configured anchor slot so the caller
+can still ensure-load it. This step doesn't run for `/v1/completions`,
+`/v1/embeddings`, or the other non-chat endpoints.
+
+### 3. Backend-aware load — `_ensure_backend_for_model`
 
 After the alias rewrite, hal0 finds the chat slot that owns the resolved model
 id and calls `SlotManager.load(slot)` **before** dispatch. This is idempotent
@@ -61,10 +82,24 @@ corrected via the slot's backend control, not silently inside a chat call.
 
 - **Slot name / alias** — addresses *the slot* and follows whatever model the
   slot is configured to serve. Best for clients that want a stable handle.
-- **Registry model id** — addresses *the model*. The dispatcher routes it to a
-  serving upstream; if no upstream serves it, the request surfaces the
-  dispatcher's `NoRouteFound` envelope (404). There is no catch-all
-  fall-through.
+- **Registry model id** — addresses *the model*. The dispatcher checks the
+  registry binding, then warm upstream caches, then a cold-cache prefetch; a
+  known id is routed straight to the upstream serving it.
+
+<Aside type="caution">
+An id none of those steps recognize does **not** 404 outright. It falls
+through to the dispatcher's last-resort capability/path heuristics
+(`resolve_by_capability`), and that step's own final rule is a catch-all: an
+unmatched, non-path-pinned model name is silently dispatched to the `agent`
+slot (ADR-0023's default anchor) with the original model name still in the
+forwarded body — not rewritten to what `agent` actually has loaded. The
+`dispatch.no_route` `NoRouteFound` 404 only surfaces when even that fallback
+target isn't a registered/enabled slot, or when a path-pinned capability
+(`/embeddings`, `/rerankings` or `/rerank`, `/audio/speech`,
+`/images/*`) names a slot with no matching upstream. In practice: a typo'd
+`model` on `/v1/chat/completions` or `/v1/completions` usually reaches the
+`agent` slot instead of failing loudly — don't rely on a bad id 404ing.
+</Aside>
 
 ## Interaction with the GPU arbiter
 

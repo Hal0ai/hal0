@@ -1392,15 +1392,17 @@ def create_app() -> FastAPI:
         tags=["mcp"],
     )
 
-    # OpenRouter OAuth callback scaffold (ADR-0020, Phase 0). The route
-    # is registered so V1 (the OpenRouter-as-Hermes-upstream PR) inherits
-    # the loopback guard from day 1; the handler currently returns 501
-    # with a pointer to ADR-0020. Router declares absolute paths so no
-    # prefix is needed here.
-    app.include_router(
-        openrouter_auth_router,
-        tags=["openrouter", "auth"],
-    )
+    # OpenRouter OAuth callback scaffold (ADR-0020, Phase 0).  The route
+    # is gated behind HAL0_OPENROUTER_OAUTH_ENABLED so the 501 placeholder
+    # does not appear in the API surface while the linked-account PKCE flow
+    # is unimplemented (#775).  Set the env var to "1" or "true" to mount
+    # the callback route so V1 (the OpenRouter-as-Hermes-upstream PR) can
+    # inherit the loopback guard from day 1.
+    if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
+        app.include_router(
+            openrouter_auth_router,
+            tags=["openrouter", "auth"],
+        )
 
     # Hermes dashboard plugin host (v0.3 PR-7). hal0-api proxies the
     # upstream manifest list + the per-plugin static-asset surface so
