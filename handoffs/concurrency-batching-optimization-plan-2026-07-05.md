@@ -128,6 +128,24 @@ per-image fork-vintage matrix, fact 3 / risk 1) down to one known artifact.
 | New vs old Vulkan | parity |
 | MTP on vs off (27B) | **24.95 vs 11.73 tg = 2.13x** |
 
+**Live-slot quick bench (2026-07-05, both slots enabled, MTP active,
+~2k prefill + greedy 256 decode) — the current np1 production anchors:**
+
+| Slot | Model | Lane | Prefill | Decode |
+|---|---|---|---|---|
+| `code-fpx` | 27B ROCmFP4 (dense) | ROCm0 | 289.8 t/s | 30.6 t/s |
+| `moe-fpx` | 35B-A3B ROCmFPX (MoE) | Vulkan0 | 688.5 t/s | 69.3 t/s |
+
+Two bench-design signals in these numbers:
+- 27B decode 30.6 vs the earlier 24.95 MTP-on figure — **greedy decode
+  inflates draft acceptance**. Tier B/C MUST run each MTP cell twice: a
+  greedy lane (upper bound) and a production-sampler lane (temp/top-p as the
+  slot actually serves), else we tune to a ceiling agents never reach.
+- MoE 69.3 tg vs the 49.7 initial validation figure suggests **MTP also pays
+  on the A3B MoE, on the Vulkan lane** (~1.4x if 49.7 was MTP-off — the run
+  conditions differ, so this is UNPINNED). An explicit MTP on/off A/B on
+  `moe-fpx` is a required Tier B cell before trusting it.
+
 **Implications for this plan:**
 
 - **P2.0 shrinks from a fleet sweep to a one-commit check.** Fact 3's ⚠
