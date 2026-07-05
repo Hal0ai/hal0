@@ -1,9 +1,14 @@
 # Concurrency & continuous-batching optimization plan
 
-**Status:** EXECUTION PLAN — researched, not yet implemented. Grounded in (a) a
-source-read of the dispatch/config/argv pipeline on main (post-v0.8.5b2), and
-(b) a web-research pass verified against llama.cpp master source (fetched
-2026-07-05) plus the only published Strix Halo `-np` sweep data
+**Status:** IN PROGRESS. **P1 plumbing landed** (PR #1067: per-slot `parallel`
+field + `--kv-unified` emission + `server_ab.py --mode batch` + `workers`
+deprecation; behavior-neutral by default). P2/P3 remain bench-gated on a box
+GPU window. As of 2026-07-05 the on-box execution substrate changed: a custom
+**ROCmFPX superset runner** now backs the FPX slots and resolves the plan's
+fork-vintage unknown — see **§1a**. Grounded in (a) a source-read of the
+dispatch/config/argv pipeline on main (post-v0.8.5b2), and (b) a web-research
+pass verified against llama.cpp master source (fetched 2026-07-05) plus the
+only published Strix Halo `-np` sweep data
 (hogeheer499-commits/strix-halo-guide, raw CSVs). Companion to the
 seed-profile consolidation handoff (2026-07-04); shares its bench-gated
 shipping discipline.
@@ -37,9 +42,11 @@ Verified against llama.cpp master (2026-07-05) unless marked measured/inferred:
    master runs `--spec-type draft-mtp -np 8`. Upstream's own May caveat:
    correct but "highly suboptimal" pending refactor. **No gfx1151 benchmark
    of batched MTP exists — ours would be the first.** ⚠ Applies only to
-   builds ≥ ~late-May 2026: whether OUR toolbox images (fork of
-   rocm-7.2.4-rocmfp4-server vintage) carry the parallel-drafting commits
-   must be checked per image before relying on it (runbook step P2.0).
+   builds ≥ ~late-May 2026. As of 2026-07-05 this per-image check narrows to
+   ONE runner: the ROCmFPX superset image `localhost/hal0-rocmfpx:7aa484a`
+   (§1a). MTP single-stream is already proven on it (2.13x tg, 27B ROCmFP4);
+   P2.0 now only needs the `-np>1` acceptance check on that one commit, not a
+   sweep across the toolbox fleet.
 4. **Measured Strix Halo scaling (MoE A3B, 4096 ctx/slot, 128 tok/req):**
    aggregate t/s at np1→2→4→8→16: Vulkan/RADV 58.8→96.1→138.8→170.9→189.7;
    ROCm 48.6→82.2→127.0→177.2→207.8. Qwen3-Coder-30B on Vulkan REGRESSED at
@@ -80,6 +87,75 @@ In-tree facts:
 13. The bench stack has no concurrency dimension anywhere: PROFILE_BENCH,
     the roster board, llama-bench cells, and server_ab.py are all
     single-stream; the roster page explicitly says "one model at a time".
+
+---
+
+## 1a. Execution substrate update (2026-07-05): the ROCmFPX superset runner
+
+Between the plan being written and P1 landing, the box session built and
+proved a **single custom runner that supersedes both the ROCm and Vulkan
+llama.cpp lanes**. This is not a side quest — it changes what the P2/P3
+bench cells run *on*, and it collapses the plan's messiest dimension (the
+per-image fork-vintage matrix, fact 3 / risk 1) down to one known artifact.
+
+**What landed on the box:**
+
+- **Runner image** — `ciru-ai/ROCmFPX @7aa484a`, built twice (HIP-only, then
+  HIP+Vulkan after a 1-line SPIR-V include fix), packaged as
+  `localhost/hal0-rocmfpx:7aa484a` (7.5 GB, **one image serves both lanes**).
+  Backups at `/mnt/lab/ROCmFPX/build-*`. Image is **local-only — not pushed
+  to a registry.**
+- **Models** — `/mnt/ai-models/chadrock3.6-27b-coder-rocmfp4-mtp/` (45 GB:
+  27B ROCmFP4 dense + 35B ROCmFPX MoE + both mmproj), registered & tagged in
+  `registry.toml` with quant/arch/MTP/KV/template metadata. Both are MTP,
+  both carry vision sidecars.
+- **Quant detector** — ROCmFP3/4/6/8 + ROCmFPX family resolver added to repo
+  `src` (3 tests passing) and hot-deployed to the live venv.
+- **Wiring** — profiles `rocmfpx-rocm` + `rocmfpx-moe`; slots `code-fpx`
+  (dense 27B → ROCm lane) + `moe-fpx` (35B MoE → Vulkan lane), currently
+  **disabled/staged**. Froggeric chat template sourced; a `-ngl` emission bug
+  fixed. Live service resolves both slot commands correctly; custom profiles
+  confirmed to survive updates (updater analysis).
+
+**Single-stream numbers already measured (the np1 baseline for Tier C):**
+
+| Test | Result |
+|---|---|
+| 27B ROCmFP4 → ROCm lane | ✅ correct output |
+| 35B MoE ROCmFPX → Vulkan lane | ✅ 49.7 tg |
+| Standard Q4_K_M → Vulkan lane | ✅ (superset of the old vulkan runner) |
+| New vs old ROCm | **+10.8% prefill**, decode = |
+| New vs old Vulkan | parity |
+| MTP on vs off (27B) | **24.95 vs 11.73 tg = 2.13x** |
+
+**Implications for this plan:**
+
+- **P2.0 shrinks from a fleet sweep to a one-commit check.** Fact 3's ⚠
+  ("check per image") had assumed N toolbox images of unknown vintage. There
+  is now ONE runner behind the FPX slots; P2.0 is a single `-np 4
+  --spec-type draft-mtp` startup probe against `hal0-rocmfpx:7aa484a`. If it
+  starts, batched-MTP is unblocked on the box outright and D3's hard branch
+  is dead code for these slots.
+- **The Tier C backend dimension is now "lane," not "image."** Because one
+  image serves both ROCm (HIP) and Vulkan lanes, the `{rocm, vulkan_radv}`
+  axis of the D5 matrix is a launch-flag toggle on the *same* binary — no
+  cross-image variance to control for. This is the cleanest possible A/B for
+  fact 4's "Vulkan for 1–4, ROCm for 8–16" split.
+- **`code-fpx` / `moe-fpx` are the concrete Tier C targets.** The matrix's
+  `{MoE A3B, dense 27B}` × `{MTP on/off}` cells map 1:1 onto these two
+  staged slots. `moe-fpx` needs ~31 GB GTT free — batching adds only KV-pool
+  growth on top (fact 6), so Tier C's `-np` sweep must watch GTT headroom
+  against `hal0-slot-agent` contention (see risk 5).
+- **The 2.13x MTP win is single-stream.** It is the np1 anchor, not a
+  batching result. The open question the runbook answers is whether that 2.13x
+  *survives* `-np>1` on this runner, or whether batching's per-step
+  expert-streaming (fact 5) erodes the speculation gain — precisely the
+  gfx1151-first datapoint fact 3 flags as unmeasured anywhere.
+- **Reproducibility gap (risk 6).** The runner image is local-only and the
+  venv detector patch is overwritten on the next hal0 release (it lives in
+  repo `src`, so it returns on the next build). Before Tier C numbers get
+  published as roster/PROFILE_BENCH cells, the image provenance (`@7aa484a` +
+  the SPIR-V fix) must be captured so the numbers are reproducible.
 
 ---
 
@@ -170,11 +246,18 @@ gains a batched-throughput column once Tier C numbers exist.
 - Tests: argv goldens, MtpControl reason line, schema round-trip.
 
 **P2 — measurement (on-box, GPU windows needed):**
-- P2.0: per-image capability check — does the pinned toolbox build accept
-  `--spec-type draft-mtp -np 4`? (Startup succeeds vs the #22673-era error.)
-  Record per image in the bench notes; gate D3's soft-vs-hard behavior.
+- P2.0: capability check — does `localhost/hal0-rocmfpx:7aa484a` (§1a, the
+  one runner behind the FPX slots) accept `--spec-type draft-mtp -np 4`?
+  (Startup succeeds vs the #22673-era error.) One probe, not a fleet sweep;
+  records the result that gates D3's soft-vs-hard branch for `code-fpx`/
+  `moe-fpx`. If any legacy toolbox images still back other MTP slots, they
+  keep the per-image caveat.
 - server_ab.py `--mode batch` + runbook Tier C matrix + acceptance criteria
-  (D5). Feeds PROFILE_BENCH's future batched metric and the roster column.
+  (D5), run against `code-fpx` (dense 27B ROCmFP4) and `moe-fpx` (35B MoE)
+  with the ROCm/Vulkan lane as a launch-flag toggle on the same binary (§1a).
+  The measured single-stream numbers (§1a table) are the np1 anchors; the
+  headline question is whether the 2.13x MTP win survives `-np>1`. Feeds
+  PROFILE_BENCH's future batched metric and the roster column.
 
 **P3 — adoption (bench-gated):**
 - Apply winning `parallel` values to the box's agent-class slot configs;
@@ -190,9 +273,11 @@ context), adopting upstream router mode (watch item only).
 
 ## 4. Risks / open questions
 
-1. **Fork build vintage** (P2.0) — if the rocmfp4 images predate parallel
-   drafting, MTP slots must keep `--parallel 1` until an image rebase; the
-   plan degrades gracefully (D3 hard branch).
+1. **Fork build vintage** (P2.0) — LARGELY RETIRED for the FPX slots: they
+   run one known runner (`hal0-rocmfpx:7aa484a`, §1a), so vintage is a single
+   yes/no probe, not a fleet unknown. Residual risk only for any legacy
+   toolbox-image MTP slots still in service; those keep `--parallel 1` until
+   rebased (D3 hard branch).
 2. **Vulkan np16 regression + CPU-sampling bound** — expect Tier C to show a
    knee; acceptance criteria exist so a knee produces a number, not a debate.
 3. **`--fit` interplay** — explicit `-c` + `-np` on a tight box could OOM
@@ -202,3 +287,13 @@ context), adopting upstream router mode (watch item only).
    agent's VRAM KV is correct for memory but adds a restore hiccup on its
    next turn; `--cache-ram` sizing (D2) is the mitigation; Tier C's
    shared-prefix trace measures the hiccup.
+5. **GTT contention on `moe-fpx`** — the MoE slot needs ~31 GB GTT free at
+   `-np 1`; a batched `-kvu` pool grows KV on top (fact 6). Tier C's sweep
+   must run with `hal0-slot-agent` accounted for, and the acceptance gate
+   should reject an `-np` that only wins by starving a co-resident slot.
+6. **Runner reproducibility** — `hal0-rocmfpx:7aa484a` is local-only (backups
+   at `/mnt/lab/ROCmFPX/build-*`) and the quant-detector venv patch is
+   overwritten each release (returns from repo `src` on rebuild). Capture
+   image provenance (commit + the SPIR-V include fix) before any Tier C
+   number is published as a roster/PROFILE_BENCH cell, else the numbers are
+   irreproducible.
