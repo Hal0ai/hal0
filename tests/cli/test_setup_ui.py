@@ -48,7 +48,7 @@ def test_suggestion_table_stars_recommended():
             0.0,
             32768,
             "gpu-rocm",
-            "rocm-dnse",
+            "rocm",
             "chat",
             False,
             recommended=True,

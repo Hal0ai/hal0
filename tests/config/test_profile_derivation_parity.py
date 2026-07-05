@@ -3,8 +3,9 @@
 The platform review found three parallel ``(capability, device) → profile``
 derivations that drifted apart across #834's churn:
 
-  1. :func:`hal0.install.profile_derive.derive_profile` — the install-flavoured,
-     MTP-preferring resolver (gpu-rocm + dense chat/coder → ``rocm-dnse``).
+  1. :func:`hal0.install.profile_derive.derive_profile` — the install-flavoured
+     resolver (gpu-rocm + dense chat/coder → plain ``rocm``; the legacy MTP
+     ``rocm-dnse`` preference was removed 2026-07-05).
   2. :data:`hal0.config.schema.DEVICE_DEFAULT_PROFILES` — the canonical, plain
      device-class-representative base table (never MTP).
   3. The verbatim-twin ``_profile_for_fit`` blocks in ``capabilities/catalog.py``
@@ -13,9 +14,10 @@ derivations that drifted apart across #834's churn:
 
 The consolidation in PS-4 is a literal-dedup + shared-helper refactor with ZERO
 behaviour change. These tests pin the CURRENT matrix so a future unification
-cannot silently drift — critically they lock in the deliberate split between the
-MTP-preferring install path and the non-MTP picker/reconcile path (the naive
-three-way merge the finding proposed would break this).
+cannot silently drift. Since the MTP ``rocm-dnse`` seed was removed
+(2026-07-05), all three paths now resolve dense chat/coder on ROCm to the plain
+non-MTP ``rocm`` base — MTP dense lives on the opt-in ``rocmfpx-rocm`` profile,
+which nothing forces silently.
 """
 
 from __future__ import annotations
@@ -33,12 +35,13 @@ from hal0.install.profile_derive import derive_profile
 _CAPABILITIES = ("chat", "coder", "embed", "rerank", "utility", "tts", "agent", "image")
 _DEVICES = ("gpu-rocm", "gpu-vulkan", "cpu", "npu")
 
-# derive_profile (install path): MTP-preferring on ROCm for dense chat/coder.
+# derive_profile (install path): plain rocm base on ROCm (the legacy MTP
+# rocm-dnse preference was removed 2026-07-05).
 _DERIVE_MATRIX: dict[tuple[str, str], str] = {
-    # gpu-rocm — dense chat/coder get MTP rocm-dnse; embed/rerank take their
-    # dedicated GPU lanes; everything else plain rocm.
-    ("chat", "gpu-rocm"): "rocm-dnse",
-    ("coder", "gpu-rocm"): "rocm-dnse",
+    # gpu-rocm — dense chat/coder get the plain rocm base; embed/rerank take
+    # their dedicated GPU lanes; everything else plain rocm.
+    ("chat", "gpu-rocm"): "rocm",
+    ("coder", "gpu-rocm"): "rocm",
     ("embed", "gpu-rocm"): "embed",
     ("rerank", "gpu-rocm"): "rerank",
     ("utility", "gpu-rocm"): "rocm",
@@ -83,11 +86,11 @@ def test_derive_profile_matrix_is_pinned(capability: str, device: str) -> None:
     assert derive_profile(capability, device) == _DERIVE_MATRIX[(capability, device)]
 
 
-def test_derive_profile_rocm_prefers_mtp_for_dense_chat_coder() -> None:
-    # The install-path specialisations on ROCm: MTP for dense chat/coder, and
-    # the dedicated embed/rerank lanes for those capabilities.
-    assert derive_profile("chat", "gpu-rocm") == "rocm-dnse"
-    assert derive_profile("coder", "gpu-rocm") == "rocm-dnse"
+def test_derive_profile_rocm_dense_chat_coder_and_lanes() -> None:
+    # dense chat/coder derive to the plain rocm base (no MTP preference since
+    # rocm-dnse was removed 2026-07-05); embed/rerank take their dedicated lanes.
+    assert derive_profile("chat", "gpu-rocm") == "rocm"
+    assert derive_profile("coder", "gpu-rocm") == "rocm"
     assert derive_profile("embed", "gpu-rocm") == "embed"
     assert derive_profile("rerank", "gpu-rocm") == "rerank"
 
@@ -139,14 +142,14 @@ def test_profile_for_fit_matches_shared_helper(
 
 
 def test_fit_helper_is_non_mtp_on_rocm() -> None:
-    """The picker/apply fit path NEVER prefers the MTP rocm-dnse image —
-    that is the install path's job only. This is the guard the naive
-    three-way merge would break.
+    """The picker/apply fit path NEVER forces an MTP image on ROCm — dense
+    chat/coder resolve to the plain non-MTP ``rocm`` base (MTP lives only on
+    the opt-in rocmfpx-rocm profile).
     """
     assert profile_name_for_fit("chat", "gpu-rocm") == "rocm"
     assert profile_name_for_fit("coder", "gpu-rocm") == "rocm"
     # embed/rerank resolve to their dedicated lanes — still non-MTP, so the
-    # "never force rocm-dnse" guarantee holds.
+    # "never force MTP" guarantee holds.
     assert profile_name_for_fit("embed", "gpu-rocm") == "embed"
     assert profile_name_for_fit("rerank", "gpu-rocm") == "rerank"
     assert profile_name_for_fit("chat", "gpu-vulkan") == "vulkan"
@@ -165,13 +168,13 @@ def test_base_profile_for_backend_is_non_mtp(tmp_hal0_home: str) -> None:
 
 
 def test_reconcile_device_flip_stays_non_mtp(tmp_hal0_home: str) -> None:
-    """Flipping a chat slot gpu-rocm → gpu-vulkan yields "vulkan", never the
-    MTP "rocm-dnse" — locks in the deliberate non-MTP reconcile semantics.
+    """Flipping a chat slot gpu-rocm → gpu-vulkan yields "vulkan", never a
+    ROCm MTP profile — locks in the deliberate non-MTP reconcile semantics.
     """
     from hal0.slots.manager import _reconcile_device_profile
 
-    # Slot was on the rocm-dnse (MTP) profile; operator flips the device only.
-    cfg_dict: dict[str, object] = {"device": "gpu-vulkan", "profile": "rocm-dnse"}
+    # Slot was on the rocmfpx-rocm (MTP) profile; operator flips the device only.
+    cfg_dict: dict[str, object] = {"device": "gpu-vulkan", "profile": "rocmfpx-rocm"}
     _reconcile_device_profile(cfg_dict, changed={"device"})
     assert cfg_dict["profile"] == "vulkan"
-    assert cfg_dict["profile"] != "rocm-dnse"
+    assert cfg_dict["profile"] != "rocmfpx-rocm"

@@ -144,7 +144,7 @@ class TestGuardedReconcile:
                     slot="agent",
                     model="m",
                     device="gpu-vulkan",
-                    profile="rocm-dnse",  # rocm profile under a vulkan device
+                    profile="rocm",  # rocm profile under a vulkan device
                 )
             ],
         )

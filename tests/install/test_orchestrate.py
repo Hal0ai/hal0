@@ -73,7 +73,7 @@ async def test_apply_setup_creates_chat_slot_and_plans_pull():
         write_sentinel=False,
     )
     assert sm.created["chat"]["device"] == "gpu-rocm"
-    assert sm.created["chat"]["profile"] == "rocm-dnse"
+    assert sm.created["chat"]["profile"] == "rocm"
     out = res.slots[0]
     assert out.created is True and out.skipped is None
     assert "qwen3-4b" in res.model_ids
