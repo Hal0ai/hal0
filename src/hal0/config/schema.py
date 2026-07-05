@@ -890,6 +890,23 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "VULKFPX · MOE · MTP",
         "quant": "ROCmFPX",
     },
+    "vkfpx-dense": {
+        # hal0 ROCmFPX runner — Vulkan0 lane for a DENSE ROCmFP4 weight format.
+        # Complements rocmfpx-rocm (ROCm0 dense): the ROCm lane wins sustained
+        # decode, the Vulkan lane wins prefill (~+24% PP), so a prefill-bound
+        # dense workload (RAG / long-context reads / re-prefill after a cache
+        # miss) belongs here. Small ubatch wins on gfx1151; per-model KV +
+        # spec-draft tuning come from the model's defaults.extra_args. mtp=True
+        # is the runner-capability gate (auto-on for MTP-head models, model-
+        # gated + slot-overridable) — the MTP *params* stay on the model.
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "VULKFPX · DENSE · MTP",
+        "quant": "ROCmFP4",
+    },
     "vulkan": {
         # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
         # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
