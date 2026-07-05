@@ -42,13 +42,14 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (12: the rocm/rocm-dnse/rocm-moe trio,
-        vulkan, the experimental NVIDIA cuda profile, the dedicated embed and
-        rerank GPU lanes, flm NPU, the tts/tts-qwen3 pair, the cpu-llm CPU
-        profile #834, and Phase D comfyui)."""
+        """One entry per seed profile (14: the rocm/rocm-dnse/rocm-moe trio,
+        the rocmfpx-rocm/rocmfpx-moe ROCmFPX-runner pair, vulkan, the
+        experimental NVIDIA cuda profile, the dedicated embed and rerank GPU
+        lanes, flm NPU, the tts/tts-qwen3 pair, the cpu-llm CPU profile #834,
+        and Phase D comfyui)."""
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 12
+        assert len(data) == 14
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""

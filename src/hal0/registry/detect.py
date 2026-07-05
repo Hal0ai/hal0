@@ -115,6 +115,65 @@ def quant_from_filename(name: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
+# ── ROCmFPX family (ciru-ai/ROCmFPX fork of llama.cpp) ─────────────────────
+#
+# ROCmFPX ships custom AMD GGUF *weight* formats — not stock Q4, MXFP4, or
+# NVFP4 — with their own kernels and a custom ``general.file_type`` code that
+# is NOT an upstream LLAMA_FTYPE value. So the header maps to ``None`` via
+# quant_from_file_type(), and the standard Q<n>_K / F16 filename regex above
+# misses their ``ROCmFP4`` / ``ROCmFPX`` tokens. We resolve them to the
+# canonical *family* label from the filename's quant-preset or family token.
+#
+#   Family     GGUF preset(s)                     Role
+#   ROCmFP3    Q3_0_ROCMFPX                        smallest experimental ROCmFPX weight format
+#   ROCmFP4    Q4_0_ROCMFP4, Q4_0_ROCMFP4_FAST    promoted 4-bit ROCm family baseline
+#   ROCmFP6    Q6_0_ROCMFPX                        middle quality/size ROCmFPX weight format
+#   ROCmFP8    Q8_0_ROCMFPX                        high-quality ROCmFPX reference format
+#
+# Explicit presets are checked most-specific-first (``…_FAST`` before its base)
+# and win over the bare umbrella name; ``ROCmFPX`` with no family digit stays
+# the umbrella label.
+_ROCMFPX_PRESET_TO_FAMILY: dict[str, str] = {
+    "Q4_0_ROCMFP4_FAST": "ROCmFP4",
+    "Q4_0_ROCMFP4": "ROCmFP4",
+    "Q3_0_ROCMFPX": "ROCmFP3",
+    "Q6_0_ROCMFPX": "ROCmFP6",
+    "Q8_0_ROCMFPX": "ROCmFP8",
+}
+
+_ROCMFPX_FAMILY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(ROCmFP[3468]|ROCmFPX)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_ROCMFPX_FAMILY_CANON: dict[str, str] = {
+    "rocmfp3": "ROCmFP3",
+    "rocmfp4": "ROCmFP4",
+    "rocmfp6": "ROCmFP6",
+    "rocmfp8": "ROCmFP8",
+    "rocmfpx": "ROCmFPX",
+}
+
+
+def quant_from_rocmfpx_filename(name: str) -> str | None:
+    """ROCmFPX-family quant label from a filename, or ``None`` when no hit.
+
+    Prefers an explicit GGUF preset token (``Q4_0_ROCMFP4``, ``Q8_0_ROCMFPX``)
+    and falls back to a bare, boundary-anchored family token (``ROCmFP4``,
+    ``ROCmFPX``). Returns the canonical family label (``ROCmFP4``, ``ROCmFP8``,
+    …) so the roster shows the real weight family rather than ``None`` for
+    these custom-file_type repacks.
+    """
+    text = name or ""
+    upper = text.upper()
+    for preset, family in _ROCMFPX_PRESET_TO_FAMILY.items():
+        if preset in upper:
+            return family
+    m = _ROCMFPX_FAMILY_RE.search(text)
+    if m:
+        return _ROCMFPX_FAMILY_CANON[m.group(1).lower()]
+    return None
+
+
 def quant_from_file_type(code: Any) -> str | None:
     """Map a GGUF ``general.file_type`` value to a quant label.
 
@@ -258,7 +317,7 @@ def _heuristic_only(path: Path) -> DetectionResult:
         suggested_name=_hf_repo_name_from_path(path),
         kind=kind,
         raw_hints={"source": "filename", "stem": path.stem, "suffix": path.suffix.lower()},
-        quant=quant_from_filename(path.name),
+        quant=quant_from_rocmfpx_filename(path.name) or quant_from_filename(path.name),
     )
 
 
@@ -311,9 +370,16 @@ def detect(path: str | Path) -> DetectionResult:
         if not suggested_name:
             suggested_name = _hf_repo_name_from_path(p)
 
-        # Quant: header file_type is authoritative; filename token is the
-        # fallback for converters that drop general.file_type.
-        quant = quant_from_file_type(header.get("general.file_type")) or quant_from_filename(p.name)
+        # Quant: a ROCmFPX-family filename token wins first — those repacks
+        # carry a custom general.file_type code that quant_from_file_type()
+        # can't map (and might collide with an upstream ftype int). Otherwise
+        # the header file_type is authoritative, with the generic filename
+        # token as the last fallback for converters that drop it.
+        quant = (
+            quant_from_rocmfpx_filename(p.name)
+            or quant_from_file_type(header.get("general.file_type"))
+            or quant_from_filename(p.name)
+        )
 
         return DetectionResult(
             suggested_backends=list(_GGUF_BACKENDS),
@@ -344,4 +410,5 @@ __all__ = [
     "detect",
     "quant_from_file_type",
     "quant_from_filename",
+    "quant_from_rocmfpx_filename",
 ]

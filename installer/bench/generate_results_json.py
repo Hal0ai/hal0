@@ -13,11 +13,12 @@ benchmark history so the datasets can later merge.
 
 Results dir resolution: argv[1] > $HAL0_BENCH_RESULTS > /var/lib/hal0/benchmarks
 """
+
 import json
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 if len(sys.argv) > 1:
     RESULT_DIR = sys.argv[1]
@@ -100,9 +101,7 @@ def collect():
         if not fname.endswith(".json") or fname.endswith(".meta.json"):
             continue
         path = os.path.join(RUNS_DIR, fname)
-        mtime_iso = datetime.fromtimestamp(
-            os.path.getmtime(path), tz=timezone.utc
-        ).isoformat()
+        mtime_iso = datetime.fromtimestamp(os.path.getmtime(path), tz=UTC).isoformat()
         try:
             with open(path) as fh:
                 rows = json.load(fh)
@@ -167,12 +166,14 @@ def write_summary(records):
     lines.append("# Strix Halo Benchmark Summary")
     lines.append("")
     lines.append(
-        f"Generated {datetime.now(tz=timezone.utc).isoformat()} · "
+        f"Generated {datetime.now(tz=UTC).isoformat()} · "
         f"{len(records)} measurements · backends: {', '.join(backends) or 'none'}"
     )
     lines.append("")
-    lines.append("Throughput in tokens/sec (avg±stddev). "
-                 "**pp** = prompt processing, **tg** = token generation.")
+    lines.append(
+        "Throughput in tokens/sec (avg±stddev). "
+        "**pp** = prompt processing, **tg** = token generation."
+    )
     lines.append("")
 
     lines.append("## Tier A — llama-bench (single-stream kernel shape)")
@@ -235,8 +236,9 @@ def _fnum(x):
 def _cell_metrics(val):
     """Pull the display metrics out of one label's result block, whatever the
     mode. `median` (ab/batch/mtp) or `second_call` (reuse) or the block itself."""
-    empty = {k: None for k in
-             ("prefill", "decode", "accept", "aggregate", "per_stream", "ttft_p95")}
+    empty = {
+        k: None for k in ("prefill", "decode", "accept", "aggregate", "per_stream", "ttft_p95")
+    }
     if not isinstance(val, dict):
         return empty
     m = val.get("median") or val.get("second_call") or val
@@ -312,7 +314,7 @@ def main():
 
     index_path = os.path.join(RESULT_DIR, "index.json")
     out = {
-        "generated": datetime.now(tz=timezone.utc).isoformat(),
+        "generated": datetime.now(tz=UTC).isoformat(),
         "count": len(records),
         "records": records,
         "server_ab": server_ab,
@@ -326,8 +328,7 @@ def main():
         fh.write("\n")
         fh.write(write_server_ab_section(server_ab))
 
-    print(f"Wrote {index_path} ({len(records)} measurements, "
-          f"{len(server_ab)} server-ab files)")
+    print(f"Wrote {index_path} ({len(records)} measurements, {len(server_ab)} server-ab files)")
     print(f"Wrote {summary_path}")
 
 
