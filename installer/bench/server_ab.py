@@ -32,12 +32,12 @@ Modes
           --concurrency simultaneous /completion streams, and report aggregate
           t/s, per-stream median, and p95 TTFT. The Tier C measurement behind
           the concurrency-batching plan. Restores the original `parallel`.
-  mtp     Restart-free MTP draft-param sweep. The ROCmFPX fork accepts
-          per-request `speculative.{n_max,n_min,p_min}`, so the --spec-nmax x
-          --spec-pmin grid runs against ONE warm server (no restart per cell).
-          Depth via --depth (2k/32k/128k); greedy vs production sampler via
-          --temp/--top-p/--top-k. Reports decode t/s + draft acceptance per
-          cell (runbook B-MTP). Slot must already be running with MTP on.
+  mtp     MTP draft-param sweep over --spec-nmax x --spec-pmin at --depth
+          (2k/32k/128k) and a chosen sampler (--temp/--top-p/--top-k: greedy vs
+          production). Relaunches per cell so the draft params take effect —
+          the ROCmFPX runner at 7aa484a IGNORES the per-request speculative.*
+          override (--per-request opts into it anyway, for a future build that
+          honors it). Reports decode t/s + draft acceptance per cell (B-MTP).
 
 Results: JSON to --out (default /var/lib/hal0/benchmarks/server-ab/<stamp>.json).
 
@@ -157,16 +157,24 @@ def _completion(
     *,
     sampler: dict | None = None,
     speculative: dict | None = None,
+    ignore_eos: bool = True,
 ) -> dict:
     """One /completion call; returns llama-server's timings dict (+ our wall).
 
     ``sampler`` defaults to greedy (temp 0) for reproducibility; pass
     ``_sampler_body(args)`` for a production sampler. ``speculative`` carries a
-    per-request MTP override (``_spec_override(...)['speculative']``)."""
+    per-request MTP override (``_spec_override(...)['speculative']``).
+
+    ``ignore_eos`` defaults True: a decode-throughput measurement needs the full
+    ``n_predict`` tokens, but a strict chat template (e.g. the 35B's Froggeric)
+    emits EOS after ~1 token on a raw /completion prompt, collapsing
+    ``predicted_n`` to 1 and making the t/s meaningless. Off only for the reuse
+    trace, where the natural stop is fine."""
     body: dict[str, Any] = {
         "prompt": prompt,
         "n_predict": n_predict,
         "cache_prompt": cache_prompt,
+        "ignore_eos": ignore_eos,
     }
     body.update(sampler or {"temperature": 0})
     if speculative:
@@ -253,10 +261,18 @@ def mode_reuse(args: argparse.Namespace) -> dict:
             # measurement — with reuse the shared prefix is KV-shifted, without
             # it the whole prompt reprocesses.
             _completion(
-                port, REUSE_PREFIX + "Summarize the first paragraph.", 32, cache_prompt=True
+                port,
+                REUSE_PREFIX + "Summarize the first paragraph.",
+                32,
+                cache_prompt=True,
+                ignore_eos=False,
             )
             second = _completion(
-                port, REUSE_PREFIX + "List three key claims.", 32, cache_prompt=True
+                port,
+                REUSE_PREFIX + "List three key claims.",
+                32,
+                cache_prompt=True,
+                ignore_eos=False,
             )
             print(f"  second-call timings: {second}", flush=True)
             results[label] = {"extra_args": merged, "second_call": second}
@@ -402,47 +418,81 @@ def _csv_floats(raw: str) -> list[float]:
 
 
 def mode_mtp(args: argparse.Namespace) -> dict:
-    """Restart-free MTP draft-param sweep. The ROCmFPX fork accepts
-    `speculative.{n_max,n_min,p_min}` per /completion request, so the whole
-    n-max x p-min grid runs against ONE warm server — no PUT/restart per cell
-    (runbook cell B-MTP, finding 0.6). Draft-KV quant is NOT swept here (that
-    needs a relaunch — do it with --mode ab). Reports decode t/s + draft
-    acceptance per (n_max, p_min) so the per-model/per-depth winner is picked
-    on NET decode, not acceptance alone (greedy acceptance is a ceiling)."""
+    """MTP draft-param sweep over the --spec-nmax x --spec-pmin grid at a given
+    --depth and sampler, reporting decode t/s + draft acceptance per cell so the
+    winner is picked on NET decode (greedy acceptance is a ceiling, not a ship
+    metric). Draft-KV quant is NOT swept here (use --mode ab).
+
+    Default is RELAUNCH-PER-VALUE: each cell writes `--spec-draft-n-max/-n-min/
+    -p-min` into [server].extra_args and restarts (like mode_ab). The
+    per-request `speculative.*` JSON override was tried first (it would let the
+    whole grid run against one warm server) but the ROCmFPX runner at 7aa484a
+    SILENTLY IGNORES it — every cell then reads the launch-time config and the
+    sweep is meaningless. --per-request opts back into that path for a future
+    runner build that honors it (with a loud caveat)."""
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
+    original = slot.get("llamacpp_args") or None
     prompt = _build_prompt(args.depth)
     sampler = _sampler_body(args)
     n_maxes = _csv_ints(args.spec_nmax)
     p_mins = _csv_floats(args.spec_pmin)
     n_min = int(args.spec_nmin)
 
-    _wait_ready(port)  # no config change — server must already be MTP-on
+    if args.per_request:
+        print(
+            "[mtp] WARNING: --per-request sends speculative.* in the /completion "
+            "JSON; the ROCmFPX runner at 7aa484a IGNORES it (all cells read "
+            "identical). Only use on a runner build known to honor it.",
+            flush=True,
+        )
+
     results: dict[str, Any] = {}
-    for n_max in n_maxes:
-        for p_min in p_mins:
-            spec = _spec_override(n_max, p_min, n_min)["speculative"]
-            label = f"nmax{n_max}_pmin{p_min}"
-            print(f"[mtp] {label} (depth~{args.depth}, temp {sampler['temperature']})", flush=True)
-            runs = []
-            for i in range(args.n):
-                t = _completion(
-                    port,
-                    prompt,
-                    args.max_tokens,
-                    cache_prompt=False,
-                    sampler=sampler,
-                    speculative=spec,
+    try:
+        for n_max in n_maxes:
+            for p_min in p_mins:
+                label = f"nmax{n_max}_pmin{p_min}"
+                if args.per_request:
+                    spec = _spec_override(n_max, p_min, n_min)["speculative"]
+                    _wait_ready(port)
+                else:
+                    # Relaunch so the draft params actually take effect.
+                    flags = (
+                        f"--spec-draft-n-max {n_max} --spec-draft-n-min {n_min} "
+                        f"--spec-draft-p-min {p_min}"
+                    )
+                    merged = f"{original} {flags}".strip() if original else flags
+                    _apply_extra_args(args.api, args.slot, merged)
+                    _wait_ready(port)
+                    spec = None
+                print(
+                    f"[mtp] {label} (depth~{args.depth}, temp {sampler['temperature']}, "
+                    f"{'per-request' if args.per_request else 'relaunch'})",
+                    flush=True,
                 )
-                print(f"  run {i + 1}/{args.n}: {t}", flush=True)
-                runs.append(t)
-            results[label] = {
-                "n_max": n_max,
-                "p_min": p_min,
-                "n_min": n_min,
-                "runs": runs,
-                "median": _summarize_runs(runs),
-            }
+                runs = []
+                for i in range(args.n):
+                    t = _completion(
+                        port,
+                        prompt,
+                        args.max_tokens,
+                        cache_prompt=False,
+                        sampler=sampler,
+                        speculative=spec,
+                    )
+                    print(f"  run {i + 1}/{args.n}: {t}", flush=True)
+                    runs.append(t)
+                results[label] = {
+                    "n_max": n_max,
+                    "p_min": p_min,
+                    "n_min": n_min,
+                    "runs": runs,
+                    "median": _summarize_runs(runs),
+                }
+    finally:
+        if not args.per_request:
+            print(f"[mtp] restoring original extra_args = {original!r}", flush=True)
+            _apply_extra_args(args.api, args.slot, original)
     return results
 
 
@@ -511,7 +561,8 @@ def main() -> None:
     ap.add_argument(
         "--top-k", dest="top_k", type=int, default=None, help="mtp mode: top-k (optional)"
     )
-    # MTP draft-param grid (per-request; restart-free).
+    # MTP draft-param grid. Relaunch-per-value by default (7aa484a ignores the
+    # per-request override — see --per-request).
     ap.add_argument(
         "--spec-nmax", default="1,2,3,4", help="mtp mode: comma list of speculative n_max"
     )
@@ -520,6 +571,12 @@ def main() -> None:
     )
     ap.add_argument(
         "--spec-nmin", type=int, default=0, help="mtp mode: speculative n_min (default 0)"
+    )
+    ap.add_argument(
+        "--per-request",
+        action="store_true",
+        help="mtp mode: send speculative.* per request instead of relaunching "
+        "(IGNORED by the ROCmFPX runner at 7aa484a — only for a build that honors it)",
     )
     # Provenance (plan risk 6) — the local-only runner image is not reproducible
     # without capturing what built it.
