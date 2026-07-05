@@ -169,6 +169,13 @@ Two bench-design signals in these numbers:
   *survives* `-np>1` on this runner, or whether batching's per-step
   expert-streaming (fact 5) erodes the speculation gain — precisely the
   gfx1151-first datapoint fact 3 flags as unmeasured anywhere.
+- **Where Vulkan wins (fork's own 27B bench, same binary, 262k ctx):** Vulkan
+  **123.3 pp / 24.9 tg** vs ROCm **99.8 pp / 27.6 tg** — Vulkan takes
+  prompt-processing (+24%), ROCm takes sustained decode (+11%). So the lane is
+  a per-workload choice: Vulkan for prefill-bound / burst / small-n-max-MTP /
+  low-np; ROCm for sustained long decode and high concurrency (fact 4). One
+  binary serves both, so this is two slot configs, not two images. Fully
+  worked through in the bench runbook (§0.5, cells A-LANE / C-LANExNP).
 - **Reproducibility gap (risk 6).** The runner image is local-only and the
   venv detector patch is overwritten on the next hal0 release (it lives in
   repo `src`, so it returns on the next build). Before Tier C numbers get
@@ -263,19 +270,21 @@ gains a batched-throughput column once Tier C numbers exist.
 - Deprecate `workers` (drawer removal + log-on-nondefault).
 - Tests: argv goldens, MtpControl reason line, schema round-trip.
 
-**P2 — measurement (on-box, GPU windows needed):**
-- P2.0: capability check — does `localhost/hal0-rocmfpx:7aa484a` (§1a, the
-  one runner behind the FPX slots) accept `--spec-type draft-mtp -np 4`?
-  (Startup succeeds vs the #22673-era error.) One probe, not a fleet sweep;
-  records the result that gates D3's soft-vs-hard branch for `code-fpx`/
-  `moe-fpx`. If any legacy toolbox images still back other MTP slots, they
-  keep the per-image caveat.
-- server_ab.py `--mode batch` + runbook Tier C matrix + acceptance criteria
-  (D5), run against `code-fpx` (dense 27B ROCmFP4) and `moe-fpx` (35B MoE)
-  with the ROCm/Vulkan lane as a launch-flag toggle on the same binary (§1a).
-  The measured single-stream numbers (§1a table) are the np1 anchors; the
-  headline question is whether the 2.13x MTP win survives `-np>1`. Feeds
-  PROFILE_BENCH's future batched metric and the roster column.
+**P2 — measurement (on-box, GPU windows needed):** the full explorative bench
+is now written as its own runbook: **`rocmfpx-runner-bench-runbook-2026-07-05.md`**
+(Tier A/B/C matrix, acceptance criteria, pre-registered profile-delta
+hypotheses grounded in the model-card + fork-source research).
+- P2.0 RESOLVED WITHOUT A PROBE: source inspection of the fork at 7aa484a
+  confirms parallel drafting is present (`common_speculative_init(params,
+  n_seq)` is n_seq-aware; `-np 1` fast-path was prototyped and rejected). So
+  `--spec-type draft-mtp -np>1` runs; only its *perf* is unmeasured (runbook
+  cell C-MTPxNP). D3's hard branch is dead code for the FPX slots.
+- Key research deltas the runbook sweeps (several CONTRADICT today's seeds):
+  `-b 512 -ub 512` likely beats our `8192/2048`; 27B wants **q4** main KV
+  (q8 regressed it) while the 35B wants q8 main + q4 draft; MTP `n-max`/`p-min`
+  are model+depth-specific (not our hardcoded `n-max 4`); HIP env vars
+  (`HSA_OVERRIDE_GFX_VERSION=11.5.1`, `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`) are
+  required on the ROCm lane. Feeds PROFILE_BENCH's batched metric + roster.
 
 **P3 — adoption (bench-gated):**
 - Apply winning `parallel` values to the box's agent-class slot configs;
