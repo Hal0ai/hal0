@@ -1701,6 +1701,17 @@ class NPUInfo(BaseModel):
             "0 = unknown; consumers fall back to the Strix Halo constant 8."
         ),
     )
+    validated: bool | None = Field(
+        default=None,
+        description=(
+            "Functional NPU validation result from `flm validate`, run at "
+            "install/setup time (not by the fast presence probe). None = not "
+            "yet validated (presence is node-detection only); True = the NPU "
+            "runtime is reachable; False = flm validate ran but failed (NPU "
+            "absent or libxrt-npu2 mismatched). Distinct from `present`, which "
+            "only reflects device-node detection."
+        ),
+    )
 
 
 class HardwareInfo(BaseModel):

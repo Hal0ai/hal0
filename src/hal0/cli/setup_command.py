@@ -15,7 +15,7 @@ import typer
 from hal0.cli._shared import _api_base
 from hal0.config import paths
 from hal0.config.schema import HardwareInfo
-from hal0.hardware.probe import HardwareProbe
+from hal0.hardware.probe import HardwareProbe, HardwareProbeError
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
 
@@ -179,7 +179,18 @@ def setup(
         help="Resolve + print the plan; write nothing (no slots, sentinel, pulls, or extensions).",
     ),
 ) -> None:
-    hw = HardwareProbe().probe()
+    # Persist an authoritative hardware.json at install/setup time so slots
+    # and the FLM container spec read REAL device facts (not the Strix-Halo
+    # constant fallbacks). validate_npu=True records the functional
+    # `flm validate` result (npu.validated) before any slot launches.
+    probe = HardwareProbe()
+    hw = probe.probe(validate_npu=True)
+    try:
+        probe.write(hw)
+    except HardwareProbeError as exc:
+        # Non-fatal: a non-root `hal0 setup` can't write /etc/hal0. The probe
+        # result still drives this run; the daemon persists it later.
+        typer.echo(f"warning: could not persist hardware.json ({exc})", err=True)
     if plan:
         from hal0.cli.setup_plan import run_plan
 

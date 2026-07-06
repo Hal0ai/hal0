@@ -878,7 +878,7 @@ class HardwareProbe:
     runs in a threadpool when called from an async context.
     """
 
-    def probe(self) -> HardwareInfo:
+    def probe(self, *, validate_npu: bool = False) -> HardwareInfo:
         """Run hardware detection and return a HardwareInfo snapshot.
 
         Detects: GPU (NVIDIA / AMD / Vulkan / lspci fallbacks), NPU
@@ -888,6 +888,12 @@ class HardwareProbe:
         Never raises for individual probe failures — each detector returns
         an empty result and logs a warning. Only catastrophic failures
         (e.g. /proc not mounted) raise HardwareProbeError.
+
+        ``validate_npu`` (install/setup only): when True and an NPU node was
+        detected, additionally run ``flm validate`` (which touches the XDNA
+        runtime and can take seconds) and record the functional result in
+        ``npu.validated``. The default keeps the presence probe fast + pure —
+        node detection only — for the many callers that run it hot.
         """
         try:
             cpu_model, cpu_cores, cpu_threads = _parse_cpuinfo()
@@ -897,6 +903,12 @@ class HardwareProbe:
             # detection, unified-memory derivation, card rendering).
             gpu = gpus[0] if gpus else GPUInfo(vendor="unknown")
             npu = _detect_npu()
+            if validate_npu and npu.present:
+                # Functional check — the ONLY place the probe touches the NPU
+                # runtime. Lazy import avoids a hardware→providers cycle.
+                from hal0.providers.flm import flm_validate
+
+                npu = npu.model_copy(update={"validated": flm_validate()})
             disk_mb = _disk_free_mb(_paths.var_lib())
 
             uname = ""
