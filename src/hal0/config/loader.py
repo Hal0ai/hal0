@@ -410,9 +410,15 @@ def load_upstreams_config(path: Path | None = None) -> UpstreamsConfig:
 
 
 def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> None:
-    """Atomically write upstreams.toml."""
+    """Atomically write upstreams.toml.
+
+    Uses ``exclude_none=True`` so optional fields that were never set
+    (``slot_name`` on remote-kind entries) don't surface as TOML-incompatible
+    ``None`` values. The round-trip through ``load_upstreams_config`` is
+    unaffected: any field omitted on write is re-defaulted on read.
+    """
     target = path if path is not None else paths.etc() / "upstreams.toml"
-    write_toml_atomic(target, cfg.model_dump(mode="python"))
+    write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
 
 
 # ── profiles.toml ─────────────────────────────────────────────────────────────
