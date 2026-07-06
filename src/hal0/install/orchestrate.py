@@ -132,6 +132,40 @@ def mark_first_run_done() -> None:
     tmp.replace(p)  # atomic
 
 
+def _persist_store_dir(storage_dir: str) -> None:
+    """Persist a chosen model-store directory to ``[models].store`` in hal0.toml.
+
+    ``Selections.storage_dir`` (WS-A, issue #1095) is the operator's pull
+    destination pick from ``/apply``, ``/apply-selections`` and
+    ``hal0 setup --storage-dir``. The pull engine resolves its destination from
+    ``[models].store`` *lazily at pull time*
+    (``registry.pull._pull_root`` → ``ModelsConfig.effective_store``), so
+    writing the pick here — before the planned pulls run — is what makes a
+    custom store actually land pulls in that directory rather than silently
+    no-op'ing the field.
+
+    Best-effort per ADR-0010: an empty or relative value is ignored (the pull
+    engine keeps its default store), and a config-write failure is swallowed so
+    a bad storage pick never aborts the slot/extension walk. Idempotent — skips
+    the rewrite when ``[models].store`` already points at the chosen path.
+    """
+    s = (storage_dir or "").strip()
+    if not s or not Path(s).is_absolute():
+        return
+    try:
+        from hal0.config.loader import load_hal0_config, save_hal0_config
+
+        cfg = load_hal0_config()
+        if (cfg.models.store or "").strip() == s:
+            return
+        cfg.models.store = s
+        save_hal0_config(cfg)
+    except Exception:
+        # Config persistence is best-effort: pulls fall back to the default
+        # store and the rest of setup must proceed regardless.
+        pass
+
+
 def install_extension(ext_id: str) -> ExtensionOutcome:
     """Install + wire one extension. Delegates to extensions.install_extension
     (Task 1.2); imported lazily to avoid a cycle."""
@@ -172,6 +206,11 @@ async def apply_setup(
     slot_outcomes: list[SlotOutcome] = []
     model_ids: list[str] = []
     pulls: list[PullPlan] = []
+
+    # Honour the operator's chosen store BEFORE planning pulls: the pull engine
+    # reads ``[models].store`` lazily at pull time, so persisting it here is
+    # what threads ``storage_dir`` all the way to the pull destination (#1095).
+    _persist_store_dir(selections.storage_dir)
 
     for s in selections.slots:
         rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id or "")

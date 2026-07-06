@@ -53,7 +53,7 @@ def _strix_hw():
     )
 
 
-async def test_apply_setup_creates_chat_slot_and_plans_pull():
+async def test_apply_setup_creates_chat_slot_and_plans_pull(tmp_hal0_home):
     from hal0.install import orchestrate
 
     sm = _FakeSlotManager()
@@ -80,7 +80,7 @@ async def test_apply_setup_creates_chat_slot_and_plans_pull():
     assert len(res.pulls) == 1 and res.pulls[0].model_id == "qwen3-4b"
 
 
-async def test_apply_setup_scaffolds_modelless_slot_without_pull():
+async def test_apply_setup_scaffolds_modelless_slot_without_pull(tmp_hal0_home):
     """A SlotSelection with model_id=None creates an empty slot (device/profile
     wired, model.default unset) and plans NO pull."""
     from hal0.install import orchestrate
@@ -108,7 +108,7 @@ async def test_apply_setup_scaffolds_modelless_slot_without_pull():
     assert res.pulls == [] and res.model_ids == []  # pick-free: no downloads
 
 
-async def test_apply_setup_skips_uncurated_model():
+async def test_apply_setup_skips_uncurated_model(tmp_hal0_home):
     from hal0.install import orchestrate
 
     sel = Selections(
@@ -127,6 +127,83 @@ async def test_apply_setup_skips_uncurated_model():
     )
     assert res.slots[0].skipped == "needs_upstream_routing"
     assert res.slots[0].created is False
+
+
+async def test_apply_setup_persists_custom_store_dir(tmp_hal0_home, tmp_path):
+    """A non-empty absolute ``storage_dir`` is written to ``[models].store`` so
+    the pull engine (which reads it lazily at pull time) lands pulls there
+    (issue #1095 threading decision)."""
+    from hal0.config.loader import load_hal0_config
+    from hal0.install import orchestrate
+    from hal0.registry import pull as pull_mod
+
+    custom = tmp_path / "custom-store"
+    sel = Selections(
+        storage_dir=str(custom),
+        # scaffold slot — exercises the store write without needing a curated
+        # model or a network pull.
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=_FakeSlotManager(),
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    # Persisted to config …
+    assert load_hal0_config().models.store == str(custom)
+    # … and the pull engine now resolves its destination root to it.
+    assert pull_mod._pull_root() == custom
+
+
+async def test_apply_setup_ignores_relative_storage_dir(tmp_hal0_home):
+    """A relative ``storage_dir`` is not persisted (best-effort guard); the
+    store stays at its default so a bad pick never corrupts config."""
+    from hal0.config.loader import load_hal0_config
+    from hal0.install import orchestrate
+
+    sel = Selections(
+        storage_dir="relative/models",
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=_FakeSlotManager(),
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    assert load_hal0_config().models.store == ""  # untouched
+
+
+async def test_apply_setup_empty_storage_dir_is_noop(tmp_hal0_home):
+    """An empty ``storage_dir`` leaves ``[models].store`` unset (the default
+    store keeps applying)."""
+    from hal0.config.loader import load_hal0_config
+    from hal0.install import orchestrate
+
+    sel = Selections(
+        storage_dir="",
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=_FakeSlotManager(),
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    assert load_hal0_config().models.store == ""
 
 
 def test_mark_first_run_done_writes_sentinel(tmp_path, monkeypatch):
