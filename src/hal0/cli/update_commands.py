@@ -16,6 +16,7 @@ Surface:
 
 from __future__ import annotations
 
+import sys
 import time
 import tomllib
 from enum import StrEnum
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
@@ -131,8 +133,13 @@ def _print_check(body: dict) -> None:
         console.print(table)
 
 
-def _poll_job(job_id: str, *, timeout_s: float = 600.0) -> dict:
-    """Poll /api/updates/status/<id> until it leaves the queued/running states."""
+def _poll_job(
+    job_id: str,
+    *,
+    terminal: tuple[str, ...] = ("applied", "failed"),
+    timeout_s: float = 600.0,
+) -> dict:
+    """Poll /api/updates/status/<id> until it reaches a terminal state."""
     deadline = time.monotonic() + timeout_s
     last_state: str | None = None
     while time.monotonic() < deadline:
@@ -145,11 +152,117 @@ def _poll_job(job_id: str, *, timeout_s: float = 600.0) -> dict:
         if state != last_state:
             console.print(f"[dim]· job {job_id} → {state}[/dim]")
             last_state = state
-        if state in ("applied", "failed"):
+        if state in terminal:
             return job
         time.sleep(0.5)
     die(f"update job {job_id} timed out after {timeout_s:.0f}s")
     return {}
+
+
+def _interactive() -> bool:
+    """True on an interactive TTY — the gate for the pre-commit confirm prompt.
+
+    Factored out so headless/piped runs (cron, scripts, ``|`` pipelines) skip the
+    prompt, and so tests can force either path deterministically.
+    """
+    return sys.stdout.isatty()
+
+
+def _render_notes(notes: dict | None) -> None:
+    """Render the release notes from a prepared update job.
+
+    ``breaking`` / ``migrations`` get a loud panel; ``highlights`` a bullet
+    list; the full markdown (if any) is rendered below. All fields optional —
+    a release without notes renders nothing.
+    """
+    if not isinstance(notes, dict):
+        return
+    highlights = notes.get("highlights") or []
+    breaking = notes.get("breaking") or []
+    migrations = notes.get("migrations") or []
+    markdown = (notes.get("markdown") or "").strip()
+
+    if breaking or migrations:
+        lines = [f"[red]⚠ {b}[/red]" for b in breaking]
+        lines += [f"[yellow]↻ {m}[/yellow]" for m in migrations]
+        console.print(Panel("\n".join(lines), title="Breaking / migrations", border_style="yellow"))
+    if highlights:
+        console.print("[bold]Highlights[/bold]")
+        for h in highlights:
+            console.print(f"  • {h}")
+    if markdown:
+        console.print(Markdown(markdown))
+
+
+def _fetch_slot_drift() -> dict:
+    """Return the /api/updates/slot-drift payload, or an empty summary on error.
+
+    Best-effort: the drift banner is a courtesy on top of the update flow, so
+    a probe failure must never turn a successful update into a hard error.
+    """
+    try:
+        body = api_get("/api/updates/slot-drift")
+    except CliApiError:
+        return {"count": 0, "slots": []}
+    return body if isinstance(body, dict) else {"count": 0, "slots": []}
+
+
+def _print_drift_banner(drift: dict) -> None:
+    """Post-update ``N slots need restart`` banner (or a clean all-good line).
+
+    ``rerender_slot_units`` refreshed each unit file on disk but never bounced
+    the running process, so drifted slots are still serving the pre-update
+    launch command. We surface that prominently and point at
+    ``hal0 update --restart-slots`` — we never bounce automatically, because a
+    slot may be mid-inference.
+    """
+    count = int(drift.get("count") or 0)
+    if count == 0:
+        console.print("[dim]no slots need restart.[/dim]")
+        return
+    slots = drift.get("slots") or []
+    names = ", ".join(str(s.get("slot")) for s in slots if isinstance(s, dict) and s.get("slot"))
+    plural = "s" if count != 1 else ""
+    console.print(
+        Panel(
+            f"[bold yellow]{count} slot{plural} need restart[/bold yellow]\n"
+            f"[dim]{names}[/dim]\n\n"
+            "These slots are still running the pre-update launch command. Run "
+            "[bold]hal0 update --restart-slots[/bold] to bounce only the drifted "
+            "slots (this briefly interrupts any in-flight request on them).",
+            title="Slots need restart",
+            border_style="yellow",
+        )
+    )
+
+
+def _restart_drifted_slots() -> None:
+    """POST /api/updates/restart-slots and report the outcome.
+
+    Clean-path message when nothing is drifted; otherwise restarts only the
+    drifted slots and lists successes + per-slot failures.
+    """
+    drift = _fetch_slot_drift()
+    if int(drift.get("count") or 0) == 0:
+        console.print(Panel("[green]no slots need restart.[/green]", border_style="green"))
+        return
+    try:
+        body = api_post("/api/updates/restart-slots")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    restarted = body.get("restarted") or []
+    failed = body.get("failed") or []
+    if restarted:
+        console.print(
+            Panel(
+                f"[green]restarted {len(restarted)} slot(s):[/green] {', '.join(restarted)}",
+                border_style="green",
+            )
+        )
+    for f in failed:
+        if isinstance(f, dict):
+            console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
 def update(
@@ -173,6 +286,20 @@ def update(
         "--target",
         help="Pin a specific version (e.g. v0.1.1). Overrides the latest manifest version.",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt after reviewing release notes.",
+    ),
+    restart_slots: bool = typer.Option(
+        False,
+        "--restart-slots",
+        help=(
+            "Restart only the slots still running the pre-update launch command "
+            "(post-update drift). Never bounces a slot unless you pass this flag."
+        ),
+    ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
 
@@ -192,6 +319,13 @@ def update(
             die(str(exc))
             return
         console.print(f"[green]channel set to {channel.value}[/green]")
+
+    # Standalone action: bounce drifted slots on demand, then stop. Kept
+    # separate from the check/apply flow so an operator can clear post-update
+    # drift at any later time (e.g. once in-flight requests have drained).
+    if restart_slots:
+        _restart_drifted_slots()
+        return
 
     if rollback:
         try:
@@ -222,9 +356,12 @@ def update(
         console.print("[dim]nothing to apply.[/dim]")
         return
 
+    # ── Stage → review notes → confirm → activate (prepare/commit split) ────────
+    # prepare downloads + cosign-verifies + extracts WITHOUT touching the running
+    # system, so we can show verified release notes and confirm before activating.
     try:
         job = api_post(
-            "/api/updates/apply", json={"version": target_version} if target_version else {}
+            "/api/updates/prepare", json={"version": target_version} if target_version else {}
         )
     except CliApiError as exc:
         die(str(exc))
@@ -233,9 +370,38 @@ def update(
     if not job_id:
         die("server returned no job id")
         return
-    console.print(f"[cyan]apply job:[/cyan] {job_id}")
+    console.print(f"[cyan]staging update:[/cyan] {job_id}")
+    prepared = _poll_job(job_id, terminal=("prepared", "failed"))
+    if prepared.get("state") != "prepared":
+        die(f"prepare failed: {prepared.get('error') or 'unknown error'}")
+        return
 
-    final = _poll_job(job_id)
+    resolved = prepared.get("resolved_version") or target_version
+    _render_notes(prepared.get("notes"))
+
+    # Confirm before activating. Prompt only on an interactive TTY without --yes;
+    # headless/piped invocations (cron, scripts) proceed as before so unattended
+    # updates never block. Nothing is active yet — declining just leaves the
+    # staged tree, which is harmless.
+    if not yes and _interactive() and not typer.confirm(f"Apply hal0 {resolved}?", default=True):
+        console.print(
+            "[dim]staged but not applied — re-run `hal0 update` to apply, "
+            "or `hal0 update --yes`.[/dim]"
+        )
+        return
+
+    try:
+        cjob = api_post("/api/updates/commit", json={"version": resolved})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    cjob_id = cjob.get("id")
+    if not cjob_id:
+        die("server returned no commit job id")
+        return
+    console.print(f"[cyan]applying:[/cyan] {cjob_id}")
+
+    final = _poll_job(cjob_id, terminal=("applied", "failed"))
     state = final.get("state")
     if state == "applied":
         console.print(Panel("[green]update applied.[/green]", border_style="green"))
@@ -243,6 +409,10 @@ def update(
             console.print(
                 f"[yellow]hal0-api restart did not complete:[/yellow] {final['restart_error']}"
             )
+        # The unit files were re-rendered but slots were NOT bounced (a restart
+        # could kill a mid-inference request). Surface which slots are still
+        # running the pre-update command so the operator can opt into a restart.
+        _print_drift_banner(_fetch_slot_drift())
     else:
         err = final.get("error") or "unknown error"
         die(f"update {state}: {err}")

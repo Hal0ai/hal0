@@ -143,13 +143,30 @@ default.
 | `model list` | List registry + upstream models. | `--json` |
 | `model show <ref>` | Show a model's metadata. | `--json` |
 | `model pull <ref>` | Download a model from Hugging Face into the registry (with progress). | — |
-| `model register <id>` | Register a model already on disk. | `--path`/`-p` (required), `--name`, `--license` |
+| `model add <path>` | Register an already-downloaded file; id/capabilities auto-detected from the header. | `--id`, `--name`, `--overwrite` |
+| `model scan` | Walk the configured roots + store and register new files (no api restart needed). | — |
+| `model store [path]` | Show — or change — the single directory hal0 pulls to, scans, and mounts into slots. | `--migrate` |
+| `model run <ref>` | Assign to a slot, load it, and wait until it serves — the one-command first-run path. | `--slot`/`-s`, `--timeout` |
+| `model register <id>` | Register a model already on disk (explicit id; prefer `model add`). | `--path`/`-p` (required), `--name`, `--license` |
 | `model rm <ref>` | Remove a model from the registry. | `--force`/`-f` |
 | `model assign <ref>` | Assign a model to a slot's default (does not load). | `--slot`/`-s` (required) |
 
 `model pull` accepts a curated alias (e.g. `qwen3-4b`) or a registered model
 id. It starts a background pull on the daemon and polls
 `/api/models/<id>/pull/status` until it reaches a terminal state.
+
+The typical first-model flow is two commands:
+
+```bash
+hal0 model pull qwen3-4b     # or: hal0 model add /mnt/ai-models/my-model.gguf
+hal0 model run  qwen3-4b     # assigns, loads, waits ready, prints a curl example
+```
+
+If files you placed on disk don't show up in `model list`, run `hal0 model
+scan`; if the scan roots don't cover where the files live, `hal0 model store`
+shows (and can move) the store path. `hal0 doctor models` audits the whole
+pipeline — dangling registry paths, unregistered files in the store, and the
+NPU/FLM store directory — and names the exact fix command for each finding.
 
 ## Profiles and stacks — no CLI command
 
@@ -231,6 +248,7 @@ The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
 | `doctor` | Re-run the installer's preflight battery (systemd, python, container runtime, disk, ports). | `--plain`, `--ports "8080 3001"` |
 | `doctor toolbox-pull` | Verify each pinned toolbox image is anonymously pullable from ghcr.io. | `--json`, `--manifest` |
 | `doctor perms` | Audit ownership for the editable-checkout root-clobber regression (group-share drift). | `--fix` (repair in place; needs root) |
+| `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability. | — |
 
 `hal0 doctor` shells out to `installer/lib/preflight.sh` and preserves its exit
 code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
@@ -247,11 +265,17 @@ Walks `/etc/hal0/capabilities.toml`: selections whose backend can't serve the
 model are snapped to the model's first legal backend; selections whose model
 left the catalog are cleared. Idempotent.
 
+## `hal0 app` — optional apps
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `app install <name>` | Install + enable an app skipped at install time (currently: `openwebui`). Runs the identical wiring as the install-time path (`HAL0_SKIP_OPENWEBUI=1`), so "skip now, install later" is lossless. | — |
+
 ## `hal0 agent` — bundled agents
 
 | Command | Purpose | Key options |
 |---|---|---|
-| `agent install <name>` | Install a bundled agent (`hermes` provisions a managed venv in the foreground). | `--switch` |
+| `agent install <name>` | Install a bundled agent (`hermes` provisions a managed venv in the foreground, including the Telegram/Discord gateway). | `--switch`, `--gateway`/`--no-gateway` |
 | `agent uninstall <name>` | Uninstall a bundled agent. | `--keep-memory` |
 | `agent list` | List installed bundled agents. | `--json` |
 | `agent peers` | List discoverable agent identity cards from the `agents` memory dataset. | — |

@@ -98,6 +98,11 @@ def _locate_preflight() -> Path | None:
 @app.callback(invoke_without_command=True)
 def doctor(
     ctx: typer.Context,
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Render the post-setup report card (checks + live URLs + doc links) against the live API.",
+    ),
     plain: bool = typer.Option(
         False,
         "--plain",
@@ -109,13 +114,23 @@ def doctor(
         help="Space-separated TCP ports for the port collision check (default: '8080 3001').",
     ),
 ) -> None:
-    """Re-run pre-flight checks (systemd, python, docker, disk, ports)."""
+    """Re-run pre-flight checks (systemd, python, docker, disk, ports).
+
+    ``--verify`` instead renders the WS-K report card: a pass/warn/fail summary
+    over the live health seams (API, runners, capability slots, hindsight,
+    OpenWebUI, Hermes) plus the computed URLs + help links. Non-blocking; exits
+    2 only on a critical (no reachable URL / zero healthy runners).
+    """
     # When a sub-command (e.g. ``toolbox-pull``) is invoked, Typer still
     # calls the callback first. Bail out without running preflight so the
     # sub-command handles the request on its own — preflight is the
     # "default" only when no sub-command is given.
     if ctx.invoked_subcommand is not None:
         return
+    if verify:
+        from hal0.cli.doctor_verify import run_verify
+
+        raise typer.Exit(run_verify(console=console))
     preflight = _locate_preflight()
     if preflight is None:
         console.print(
@@ -689,3 +704,110 @@ def perms(
         raise typer.Exit(1)
     console.print("[green]✓[/green]  ownership clean.")
     raise typer.Exit(0)
+
+
+# ── hal0 doctor models ────────────────────────────────────────────────────────
+
+
+@app.command("models")
+def doctor_models() -> None:
+    """Audit the model pipeline: registry paths, store/roots agreement, FLM dir.
+
+    Catches the classic install failures in one pass:
+
+      * registry entries whose file no longer exists (slot dies with
+        "gguf_init_from_file: ... No such file or directory")
+      * model files on disk in the store that were never registered
+        (pull_root/store not scanned on older installs)
+      * an FLM (NPU) store dir that is missing or not writable by the
+        container uid (podman exit 125 statfs after a reboot)
+
+    Exits non-zero when anything actionable is found.
+    """
+    from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get
+    from hal0.config import paths as cfg_paths
+    from hal0.config.loader import load_hal0_config
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    problems = 0
+
+    # 1. Registry entries → file existence.
+    try:
+        data = api_get("/api/models")
+    except CliApiError as exc:
+        console.print(f"[red]✗[/red]  cannot list models: {exc}")
+        raise typer.Exit(2) from exc
+    rows = data.get("models", data) if isinstance(data, dict) else data
+    local = [m for m in rows if isinstance(m, dict) and m.get("path")]
+    dangling = [m for m in local if not Path(str(m["path"])).exists()]
+    if dangling:
+        problems += len(dangling)
+        console.print(f"[red]✗[/red]  {len(dangling)} registry entr(y/ies) point at missing files:")
+        for m in dangling:
+            console.print(f"      {m.get('id')} → {m.get('path')}")
+        console.print(
+            "      Fix: hal0 model rm <id> && hal0 model scan   (re-register from disk)\n"
+            "      or point the store at the real location: hal0 model store <dir>"
+        )
+    else:
+        console.print(f"[green]✓[/green]  all {len(local)} registered model file(s) exist on disk.")
+
+    # 2. Store/roots agreement + unregistered files in the store.
+    try:
+        cfg = load_hal0_config()
+        scan_roots = cfg.models.scan_roots()
+        effective = cfg.models.effective_store()
+        exts = {e.lower() for e in cfg.models.file_extensions}
+    except Exception as exc:  # config unreadable — report, keep going
+        console.print(f"[yellow]![/yellow]  could not read hal0.toml: {exc}")
+        scan_roots, effective, exts = [], "", {".gguf", ".safetensors"}
+    if effective:
+        registered_paths = {str(m.get("path")) for m in local}
+        store_dir = Path(effective)
+        unregistered: list[str] = []
+        if store_dir.is_dir():
+            for f in store_dir.rglob("*"):
+                if (
+                    f.is_file()
+                    and f.suffix.lower() in exts
+                    and not f.name.startswith(".")
+                    and str(f) not in registered_paths
+                ):
+                    unregistered.append(str(f))
+        else:
+            problems += 1
+            console.print(f"[red]✗[/red]  effective store {effective} does not exist.")
+        if unregistered:
+            problems += 1
+            console.print(
+                f"[yellow]![/yellow]  {len(unregistered)} model file(s) in the store are "
+                f"not registered — run: hal0 model scan"
+            )
+            for f in unregistered[:10]:
+                console.print(f"      {f}")
+        console.print(f"[dim]store: {effective}  ·  scan roots: {', '.join(scan_roots)}[/dim]")
+
+    # 3. FLM (NPU) store: exists + writable by the container uid (1000).
+    flm_dir = Path(cfg_paths.flm_models_dir())
+    if flm_dir.exists():
+        st = flm_dir.stat()
+        world_or_group_w = bool(st.st_mode & 0o020) or bool(st.st_mode & 0o002)
+        if st.st_uid != 1000 and not world_or_group_w:
+            problems += 1
+            console.print(
+                f"[yellow]![/yellow]  FLM store {flm_dir} is not writable by the FLM "
+                f"container uid (1000): owner uid {st.st_uid}, mode {oct(st.st_mode & 0o7777)}.\n"
+                f"      Fix: sudo chown 1000:hal0 {flm_dir} && sudo chmod 2775 {flm_dir}"
+            )
+        else:
+            console.print(f"[green]✓[/green]  FLM store {flm_dir} present.")
+    else:
+        console.print(
+            f"[dim]FLM store {flm_dir} absent (fine unless you use the NPU slot — "
+            f"it is created on the next NPU slot start).[/dim]"
+        )
+
+    raise typer.Exit(1 if problems else 0)

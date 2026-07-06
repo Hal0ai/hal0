@@ -523,6 +523,22 @@ async def _apply_store_change(
         ) from exc
     request.app.state.hal0_config = merged
 
+    # A store change usually means model files already live at the new path
+    # (that's why the operator pointed hal0 there). Register them NOW —
+    # auto_scan_on_start was the only other automatic trigger, so without
+    # this the settings change silently did nothing until the next api
+    # restart and slots kept failing with "model file not found" against
+    # stale registry paths.
+    scan_result: dict[str, Any] | None = None
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is not None:
+        try:
+            from hal0.registry.discover import scan_and_register
+
+            scan_result = scan_and_register(registry, merged.models)
+        except Exception:
+            log.warning("settings.store_rescan_failed", exc_info=True)
+
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         await event_bus.emit(
@@ -535,6 +551,7 @@ async def _apply_store_change(
                 "migrated_files": len(migration_result_dict["moved"])
                 if migration_result_dict
                 else 0,
+                "scan_added": len((scan_result or {}).get("added", [])),
             },
         )
 
@@ -543,4 +560,5 @@ async def _apply_store_change(
         "config": _config_to_dict(merged),
         "state": _store_state_payload(merged),
         "migration": migration_result_dict,
+        "scan": scan_result,
     }

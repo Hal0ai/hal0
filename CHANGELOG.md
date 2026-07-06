@@ -11,9 +11,42 @@ page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 ADR-level architecture decisions are kept internal (the `docs/internal/`
 tree is gitignored, #638) and referenced by number throughout the code.
 
+**Release automation.** On a tagged release the matching `## [<version>]`
+section below is bundled into the release tarball as `RELEASE_NOTES.md`, and its
+optional `### Highlights`, `### Breaking`, and `### Migrations` subsections are
+extracted into `release.json`. `hal0 update` shows both — rendering
+breaking/migrations as callouts — from the cosign-verified tarball, before
+applying. Add those subsections to a version's section to surface them; see
+`scripts/gen_release_notes.py`.
+
 ## [Unreleased]
 
+## [0.9.2] — 2026-07-05
+
+Hotfix: restore the full model listing in every slot's model picker.
+
+### Highlights
+- Fix collapsed slot model dropdowns — `/api/models` rows again advertise the dispatcher-vocab `type` (`llm`/`embedding`/`reranking`) the pickers join on.
+
+### Fixed
+- **Slot model dropdowns (and the model→slot compatibility list) showed only the currently-assigned model.** `/api/models` stamped local- and upstream-registry rows' `type` with `classify()`'s coarse modality bucket (`chat` / `embed` / `rerank`) instead of the dispatcher vocabulary (`llm` / `embedding` / `reranking`) that the FLM path already emitted and that the UI joins on (`model.type === slot.type`), so every local model failed the picker filter and each dropdown collapsed to its default. Map the modality bucket → dispatcher type at both stamp sites; adds a local-row regression test (the FLM path was already covered, which is how this slipped through).
+
+## [0.9.1] — 2026-07-05
+
+ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
+
+### Highlights
+- ROCmFPX runner support: GGUF quant-family detection, `rocmfpx-rocm` / `vkfpx-moe` seed profiles, and a build/quantize agent skill.
+- `hal0 update` now shows cosign-verified release notes and asks before applying (staged prepare → commit).
+
 ### Added
+- **Updater `prepare` / `commit` split.** `hal0 update` downloads + cosign-verifies + extracts a release and shows its notes — with breaking/migration callouts — *before* activating anything; `--yes` skips the prompt for headless/cron. Adds `POST /api/updates/prepare` + `/commit` (#1075).
+- **Release notes in the update.** The release build bundles `RELEASE_NOTES.md` + `release.json` into the cosign-verified tarball; a CHANGELOG section's `### Highlights` / `### Breaking` / `### Migrations` subsections become the `hal0 update` callouts (#1078).
+- **ROCmFPX quant detection** — the registry classifies the `ROCmFPX` / `ROCmFP{3,4,6,8}` quant family from a GGUF filename so FPX slots resolve their launch command (#1068).
+- **ROCmFPX seed profiles** `rocmfpx-rocm` (ROCm0 dense) and `vkfpx-moe` (Vulkan0 MoE) for the custom ROCmFPX runner (#1069, renamed in #1076).
+- `vkfpx-dense` seed profile — the Vulkan0 lane for DENSE ROCmFP4, for prefill-bound dense workloads (Vulkan wins prompt-processing); complements the decode-optimal ROCm0 `rocmfpx-rocm`.
+- **`hal0-quantize` agent skill** — build the ROCmFPX toolchain and quantize a model to ROCmFP4/FPX (#1071).
+- ROCmFPX bench tooling: server-ab (MTP / concurrency) aggregation in the benchmark SUMMARY, FPX sweep cells, run provenance (#1072).
 - **Continuous batching — per-slot `parallel` field.** A slot can now set
   llama-server's `--parallel` / `-np` sequence-slot count so concurrent
   requests share the once-loaded weights instead of serializing through a
@@ -29,6 +62,24 @@ tree is gitignored, #638) and referenced by number throughout the code.
   gfx1151, bench-gated). Seed-profile defaults stay `--parallel 1` pending the
   on-box `-np` sweep (`server_ab.py --mode batch`). See the
   concurrency-batching plan handoff.
+
+### Changed
+- The plain `rocm` / `vulkan` seed profiles are reduced to basic flags
+  (`-ngl 999 -fa on --jinja`); per-model KV/batch tuning now lives in the
+  model's `defaults.extra_args` (#1076).
+- Seed-profile `intent` labels normalised to terse structural tags
+  (e.g. `ROCmFPX · DENSE · MTP`, `VULKFPX · MOE · MTP`, `ROCm`, `Embeddings`) —
+  no served-model names, no filler.
+- Slot units are re-rendered through the new code during an update's `commit`
+  step, so a subsequent restart uses current argv (#1075).
+
+### Removed
+- Legacy MTP toolbox seed profiles `rocm-moe` and `rocm-dnse` (superseded by the
+  ROCmFPX profiles); `rocmfpx-moe` renamed to `vkfpx-moe` to indicate its Vulkan
+  lane (#1076).
+
+### Migrations
+- Slots pinned to a removed/renamed seed profile (`rocm-moe`, `rocm-dnse`, `rocmfpx-moe`) auto-fall-back to the backend's basic profile (`rocm` / `vulkan`) on launch — existing slots keep working with no operator action (#1076).
 
 ## [v0.9.0] — 2026-07-04
 

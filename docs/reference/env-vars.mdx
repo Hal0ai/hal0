@@ -41,6 +41,7 @@ There is no bearer-token or basic-auth flag to enable.
 |----------------------|----------------------------------------------------------------------|---------|
 | `HAL0_HOME`          | Relocate all four roots (code/config/state/log) under one prefix.     | unset (use FHS) |
 | `HAL0_MODEL_STORE`   | Model-store directory slot containers bind-mount (highest precedence).| `[models].store`, then the conventional mount |
+| `HAL0_FLM_MODELS_DIR` | FLM (NPU) model-store directory the npu slot bind-mounts (highest precedence). | `[models].flm_store`, then FLM's default HOME cache |
 
 ## Runtime
 

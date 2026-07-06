@@ -1,5 +1,23 @@
-from hal0.cli.setup_command import _api_reachable, build_auto_selections
+from typer.testing import CliRunner
+
+from hal0.cli.setup_command import _api_reachable, app, build_auto_selections
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
+
+
+def test_headless_interactive_prints_stage2_command(monkeypatch):
+    """Two-stage handoff (issue #1112): a piped / non-TTY `hal0 setup` (no
+    --auto) must NOT launch rich prompts — it prints the command to run and
+    exits 0 without probing hardware or applying anything."""
+    monkeypatch.delenv("HAL0_FORCE_INTERACTIVE", raising=False)
+
+    def boom(*a, **k):  # would blow up if the probe were reached
+        raise AssertionError("hardware probe should not run on the headless guard path")
+
+    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", boom)
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0
+    assert "hal0 setup" in result.output
+    assert "--auto" in result.output
 
 
 def _hw(ram_gb=96):
@@ -21,15 +39,24 @@ def test_api_reachable_false_on_connection_error(monkeypatch):
     assert _api_reachable(timeout=0.01) is False
 
 
-def test_auto_selections_pick_recommended_and_default_extensions():
+def test_auto_selections_scaffolds_capability_slots_empty():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
-    chat = next(s for s in sel.slots if s.slot_name == "chat")
-    assert chat.model_id  # a recommended model id was chosen
+    names = {s.slot_name for s in sel.slots}
+    # the capability slot STRUCTURE is scaffolded (device/profile/port), but no
+    # model is chosen — pick-free: slots yes, models no.
+    assert {"chat", "embed", "rerank", "stt", "tts", "vision"} <= names
+    assert all(s.model_id is None for s in sel.slots)  # every slot empty
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True
     assert sel.extensions["pi"] is False
-    # an agent is enabled by default → agent slot is seeded
-    assert any(s.slot_name == "coder" for s in sel.slots)
+    # an agent is enabled by default → coder slot is scaffolded too
+    assert "coder" in names
+
+
+def test_auto_selections_no_slots_seeds_nothing():
+    sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models", with_slots=False)
+    assert sel.slots == []
+    assert sel.comfyui_defaults == ()
 
 
 def test_auto_selections_no_extensions_disables_all_and_skips_agent_slot():

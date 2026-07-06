@@ -414,13 +414,48 @@ def test_probe_returns_none_when_binary_missing() -> None:
         assert flm._probe_flm_catalog() is None
 
 
+def test_flm_validate_true_on_rc0() -> None:
+    """flm_validate() returns True when host `flm validate` exits 0."""
+    import hal0.providers.flm as flm
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> Any:
+        captured["argv"] = argv
+        return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+    with patch("subprocess.run", _fake_run):
+        assert flm.flm_validate() is True
+    assert captured["argv"] == [flm._HOST_FLM_BIN, "validate"]
+    assert "docker" not in captured["argv"]
+
+
+def test_flm_validate_false_on_nonzero_rc() -> None:
+    """A non-zero exit means the binary ran but validation failed (NPU absent)."""
+    import hal0.providers.flm as flm
+
+    with patch("subprocess.run", lambda *a, **k: MagicMock(returncode=1)):
+        assert flm.flm_validate() is False
+
+
+def test_flm_validate_none_when_binary_missing() -> None:
+    """Unknown functional state (flm not installed) is None, distinct from False."""
+    import hal0.providers.flm as flm
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise FileNotFoundError
+
+    with patch("subprocess.run", _boom):
+        assert flm.flm_validate() is None
+
+
 def test_pull_command_is_host_flm_and_real_cache_dir() -> None:
     import hal0.providers.flm as flm
 
     argv, host_dir = flm.flm_pull_command("gemma4-it:e4b")
     assert argv == [flm._HOST_FLM_BIN, "pull", "gemma4-it:e4b"]
     assert "docker" not in argv
-    assert host_dir == flm._HOST_FLM_MODELS_DIR
+    assert host_dir == flm._host_flm_models_dir()
     assert host_dir.endswith("/.config/flm/models")
 
 

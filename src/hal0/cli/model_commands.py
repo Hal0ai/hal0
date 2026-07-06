@@ -225,3 +225,230 @@ def model_assign(
         die(str(exc))
         return
     console.print(f"Assigned [bold]{ref}[/bold] → slot [bold]{slot}[/bold]")
+
+
+@app.command("scan")
+def model_scan() -> None:
+    """Walk the configured model roots + store and register new files.
+
+    Use after hand-placing GGUF/safetensors files (or mounting a drive of
+    them) so they show up in ``hal0 model list`` without an api restart.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        from hal0.cli._shared import api_post
+
+        result = api_post("/api/models/scan")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    added = result.get("added", []) or []
+    skipped = result.get("skipped", 0)
+    roots = result.get("scanned_roots", []) or []
+    console.print(f"Scanned: {', '.join(roots) or '—'}")
+    for mid in added:
+        console.print(f"  [green]+[/green] {mid}")
+    console.print(f"[bold]{len(added)}[/bold] added, {skipped} skipped.")
+    if not added:
+        console.print(
+            "[dim]Nothing new. If your files live elsewhere, check the scanned "
+            "roots above against the actual directory — `hal0 model store` shows "
+            "and moves the store path; `hal0 model add <path>` registers a single "
+            "file from anywhere.[/dim]"
+        )
+
+
+@app.command("add")
+def model_add(
+    path: str = typer.Argument(..., help="Absolute path to a model file (.gguf/.safetensors)"),
+    model_id: str = typer.Option("", "--id", help="Explicit registry id (default: derived)"),
+    name: str = typer.Option("", "--name", help="Display name."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing entry."),
+) -> None:
+    """Register an already-downloaded model file — capabilities auto-detected.
+
+    Unlike ``register`` this reads the file header to derive id,
+    capabilities and backends; the file stays where it is (no copy).
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    payload: dict[str, object] = {"path": path, "overwrite": overwrite}
+    if model_id:
+        payload["id"] = model_id
+    if name:
+        payload["name"] = name
+    try:
+        from hal0.cli._shared import api_post
+
+        m = api_post("/api/models/add-from-path", json=payload)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    mid = m.get("id", model_id or "?")
+    console.print(f"Registered [bold]{mid}[/bold] → {m.get('path', path)}")
+    caps = ", ".join(m.get("capabilities", []) or []) or "—"
+    console.print(f"  capabilities: {caps}")
+    console.print(
+        f"[dim]Next: hal0 model run {mid}   (or: hal0 model assign {mid} --slot <slot>)[/dim]"
+    )
+
+
+@app.command("store")
+def model_store(
+    path: str | None = typer.Argument(
+        None, help="New store directory (omit to show the current state)"
+    ),
+    migrate: bool = typer.Option(
+        False, "--migrate", help="Move existing model files into the new store."
+    ),
+) -> None:
+    """Show or change the model store — the ONE directory hal0 pulls to,
+    scans, and bind-mounts into slot containers.
+
+    A mismatch here is the classic "the file exists but the slot says No
+    such file or directory" failure: weights on one path, registry/slot
+    pointing at another.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    from hal0.cli._shared import api_post
+
+    if path is None:
+        try:
+            state = api_get("/api/settings/models/store")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        eff = state.get("effective", "?")
+        if state.get("fallback_active"):
+            console.print(
+                f"store: [yellow]unset[/yellow] → effective [bold]{eff}[/bold] (fallback)"
+            )
+        else:
+            console.print(f"store: [bold]{eff}[/bold]")
+        for s in state.get("suggestions", []) or []:
+            console.print(f"  [dim]candidate:[/dim] {s.get('path')}  {s.get('note', '')}")
+        return
+
+    try:
+        result = api_post(
+            "/api/settings/models/store",
+            json={"path": path, "migrate": migrate},
+        )
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if result.get("status") == "needs_migration":
+        plan = result.get("plan", {})
+        console.print(
+            f"[yellow]Files exist at the current store.[/yellow] "
+            f"Re-run with [bold]--migrate[/bold] to move them "
+            f"({len(plan.get('files', []) or [])} file(s))."
+        )
+        raise typer.Exit(1)
+    console.print(f"[green]Store set →[/green] [bold]{path}[/bold]")
+    mig = result.get("migration")
+    if mig:
+        console.print(
+            f"  moved {len(mig.get('moved', []))} file(s), {len(mig.get('failed', []))} failed"
+        )
+    scan = result.get("scan") or {}
+    added = scan.get("added", []) or []
+    if added:
+        console.print(f"  registered {len(added)} model(s) found at the new path:")
+        for mid in added:
+            console.print(f"    [green]+[/green] {mid}")
+    console.print("[dim]Running slots pick up the new mount on their next restart.[/dim]")
+
+
+@app.command("run")
+def model_run(
+    ref: str = typer.Argument(..., help="Model ref (registered id or curated alias)"),
+    slot: str = typer.Option(
+        "", "--slot", "-s", help="Slot to run on (default: the first compatible slot)"
+    ),
+    timeout_s: int = typer.Option(
+        300, "--timeout", help="Seconds to wait for the slot to become ready."
+    ),
+) -> None:
+    """Get a model serving: pull if needed, assign to a slot, load, wait ready.
+
+    The one-command first-run path::
+
+        hal0 model pull qwen3-4b     # or drop a file + `hal0 model add`
+        hal0 model run  qwen3-4b
+    """
+    import time
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    from hal0.cli._shared import api_post
+
+    # 1. Model must exist (registered local file or an installed FLM tag).
+    try:
+        api_get(f"/api/models/{ref}")
+    except CliApiError:
+        die(
+            f"model {ref!r} is not registered. Pull it first (hal0 model pull {ref}), "
+            f"register a local file (hal0 model add /path/to/file.gguf), or rescan "
+            f"(hal0 model scan)."
+        )
+        return
+
+    # 2. Resolve the target slot.
+    target = slot
+    if not target:
+        try:
+            slots = api_get("/api/slots")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        rows = slots.get("slots", slots) if isinstance(slots, dict) else slots
+        names = [r.get("name", "") for r in rows if isinstance(r, dict)]
+        if not names:
+            die(
+                "no slots configured — create one first: "
+                "hal0 slot create chat  (then re-run this command)"
+            )
+            return
+        target = "chat" if "chat" in names else names[0]
+        console.print(f"[dim]No --slot given; using slot [bold]{target}[/bold].[/dim]")
+
+    # 3. Load with the model assigned.
+    try:
+        api_post(f"/api/slots/{target}/load", json={"model_id": ref})
+    except CliApiError as exc:
+        die(f"{exc}\nCheck compatibility with: hal0 slot show {target}")
+        return
+
+    # 4. Poll until ready (or failed/timeout).
+    deadline = time.monotonic() + max(timeout_s, 1)
+    state = "unknown"
+    while time.monotonic() < deadline:
+        try:
+            snap = api_get(f"/api/slots/{target}")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        state = str(snap.get("status") or snap.get("state") or "unknown")
+        if state.lower() in ("ready", "running", "loaded"):
+            port = snap.get("port")
+            console.print(f"[green]Ready.[/green] {ref} serving on slot [bold]{target}[/bold]")
+            if port:
+                console.print(
+                    f"  Try it: curl -s http://127.0.0.1:{port}/v1/chat/completions "
+                    f'-H "Content-Type: application/json" '
+                    f'-d \'{{"model":"{ref}","messages":[{{"role":"user","content":"hi"}}]}}\''
+                )
+            return
+        if state.lower() in ("failed", "error", "dead"):
+            die(f"slot {target} entered state {state!r} — inspect with: hal0 slot logs {target}")
+            return
+        console.print(f"  [dim]{state}…[/dim]", end="\r")
+        time.sleep(2.0)
+    die(f"timed out after {timeout_s}s waiting for slot {target} (last state: {state})")

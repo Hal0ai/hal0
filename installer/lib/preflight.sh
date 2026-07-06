@@ -24,8 +24,25 @@
 #                                flag so a fresh box never finishes with every
 #                                slot dead ("no container runtime found").
 #                                `preflight_docker` is a back-compat alias.
+#   preflight_gpu              — GPU/NPU device nodes visible + group wiring
+#                                sane. Soft by default (always returns 0;
+#                                CPU-only is a valid install) but prints the
+#                                exact Proxmox LXC dev0/gid fix when devices
+#                                are missing or mis-mapped inside a container.
+#                                Set HAL0_GPU_GATE=1 to flip it into the
+#                                install-time GATE: same detection + messages,
+#                                but the return code classifies the platform so
+#                                install.sh can smart-block a broken passthrough
+#                                (HAL0_GPU_RC_BROKEN_GID / HAL0_GPU_RC_NO_DEVICE)
+#                                instead of installing "successfully" and then
+#                                silently running CPU-only.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
+#   preflight_bootstrap_prereqs — Linux host + curl/tar/sha256sum on PATH,
+#                                mirroring bootstrap.sh's own preflight() so
+#                                the direct `sudo bash install.sh` path
+#                                enforces the same floor as the curl|bash
+#                                one-liner (#1098)
 #   preflight_all              — run all of the above; aggregate non-zero
 #
 # Globals honoured
@@ -41,6 +58,10 @@
 #                        manager) and hard-fails (returns non-zero) when it
 #                        can't. Default empty → soft mode for `hal0 doctor`.
 #                        Legacy HAL0_DOCKER_REQUIRED is still honoured.
+#   HAL0_GPU_GATE      — when "1", preflight_gpu returns a classification code
+#                        (see HAL0_GPU_RC_*) instead of always 0, so install.sh
+#                        can smart-block a broken LXC passthrough. Default 0 →
+#                        soft/advisory mode for `hal0 doctor`.
 
 # shellcheck shell=bash
 
@@ -91,6 +112,130 @@ preflight_python() {
     fi
     warn "python: ${py} (${ver}) — hal0 is tested on 3.11-3.14"
     return 1
+}
+
+# ── Hindsight interpreter selection ─────────────────────────────────────────
+# The Hindsight memory engine runs in its OWN venv (${VAR_DIR}/memory/hindsight)
+# and pulls litellm, which publishes `requires-python >=3.10,<3.14`. The main
+# hal0 venv is happy on 3.14, but litellm's *metadata* gate makes
+# `pip install hindsight-api` fail with a wall of "Could not find a version"
+# resolver noise on a 3.14 host before the install can fall back. We resolve a
+# compatible interpreter (3.11-3.13) up front — auto-installing one when asked —
+# so the Hindsight venv builds clean; only when none exists do we fall back to
+# the default interpreter + --ignore-requires-python (litellm actually runs fine
+# on 3.14 — the classifier was dropped over a since-resolved fastuuid wheel gap,
+# BerriAI/litellm#26343).
+#
+# Range kept as constants so bumping the supported band is a one-line change.
+HINDSIGHT_PY_MIN_MINOR=11
+HINDSIGHT_PY_MAX_MINOR=13
+
+# Echo the 3.x minor (e.g. "14") of an interpreter; nothing + non-zero on error.
+_py_minor() { "${1}" -c 'import sys; print(sys.version_info[1])' 2>/dev/null; }
+
+# Is $1 an interpreter whose (3.x) minor is inside the Hindsight-supported band?
+_py_hindsight_ok() {
+    local m; m="$(_py_minor "${1}")" || return 1
+    [[ -n "${m}" ]] || return 1
+    (( m >= HINDSIGHT_PY_MIN_MINOR && m <= HINDSIGHT_PY_MAX_MINOR ))
+}
+
+# Best-effort: install a Hindsight-compatible Python (3.13→3.11) via the
+# detected package manager and set HINDSIGHT_PY to it. Returns 0 on success,
+# 1 otherwise (nothing installed / not resolvable). Only fires when
+# HAL0_HINDSIGHT_AUTOINSTALL=1 (install.sh sets it) so `hal0 doctor` and
+# read-only preflight never mutate the system. Never fatal — the caller falls
+# back to --ignore-requires-python.
+_hindsight_py_autoinstall() {
+    [[ "${HAL0_HINDSIGHT_AUTOINSTALL:-0}" == "1" ]] || return 1
+    pkg_mgr >/dev/null 2>&1 || return 1
+    local fam v cand; fam="$(distro_family)"
+    info "no Python 3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR} found for the Hindsight venv — attempting to install one (${fam})"
+    for v in 13 12 11; do
+        cand="python3.${v}"
+        case "${fam}" in
+            debian)
+                DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || continue ;;
+            fedora) "$(pkg_mgr)" install -y "${cand}" >/dev/null 2>&1 || continue ;;
+            # Arch/openSUSE/Alpine ship a single rolling python; a pinned older
+            # minor isn't reliably in the base repos. Skip — the metadata-gate
+            # bypass covers these.
+            *) return 1 ;;
+        esac
+        if command -v "${cand}" >/dev/null 2>&1 && _py_hindsight_ok "${cand}"; then
+            info "installed ${cand} for the Hindsight memory engine"
+            HINDSIGHT_PY="${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Resolve the interpreter the Hindsight venv should be built with into the
+# globals HINDSIGHT_PY and HINDSIGHT_PY_FALLBACK (1 = the chosen interpreter is
+# OUTSIDE litellm's supported band, so the caller must pass
+# --ignore-requires-python). Selection order:
+#   1. HAL0_HINDSIGHT_PYTHON override (honoured verbatim)
+#   2. the default ${PY} when it's already in-band (the common clean case)
+#   3. python3.13 → python3.11 already on PATH
+#   4. auto-install one (only when HAL0_HINDSIGHT_AUTOINSTALL=1)
+#   5. give up → default ${PY} with the metadata gate bypassed
+# Read-only unless step 4 fires; always returns 0 (it never blocks the install).
+resolve_hindsight_python() {
+    local def="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
+    HINDSIGHT_PY=""
+    HINDSIGHT_PY_FALLBACK=0
+
+    if [[ -n "${HAL0_HINDSIGHT_PYTHON:-}" ]]; then
+        HINDSIGHT_PY="${HAL0_HINDSIGHT_PYTHON}"
+        if _py_hindsight_ok "${HINDSIGHT_PY}"; then
+            info "hindsight python: ${HINDSIGHT_PY} (HAL0_HINDSIGHT_PYTHON)"
+        else
+            HINDSIGHT_PY_FALLBACK=1
+            warn "hindsight python: ${HINDSIGHT_PY} is outside 3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR}; will bypass litellm's requires-python gate"
+        fi
+        return 0
+    fi
+
+    if _py_hindsight_ok "${def}"; then
+        HINDSIGHT_PY="${def}"
+        info "hindsight python: ${def} ($("${def}" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null))"
+        return 0
+    fi
+
+    local v cand
+    for v in 13 12 11; do
+        cand="python3.${v}"
+        if command -v "${cand}" >/dev/null 2>&1 && _py_hindsight_ok "${cand}"; then
+            HINDSIGHT_PY="${cand}"
+            info "hindsight python: ${cand} (default ${def} is out of litellm's 3.10-3.13 range)"
+            return 0
+        fi
+    done
+
+    if _hindsight_py_autoinstall; then
+        return 0
+    fi
+
+    HINDSIGHT_PY="${def}"
+    HINDSIGHT_PY_FALLBACK=1
+    warn "hindsight python: no Python 3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR} available — will build the memory-engine venv on ${def} and bypass litellm's requires-python gate"
+    warn "  for a clean install: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12') and re-run, or set HAL0_HINDSIGHT_PYTHON=python3.12"
+    return 0
+}
+
+# Read-only wrapper for preflight_all / `hal0 doctor`: report the Hindsight
+# interpreter decision without mutating the system (auto-install suppressed).
+# Always returns 0 — the metadata-gate bypass means a 3.14 host is not a
+# failure, just a heads-up.
+preflight_hindsight_python() {
+    if [[ "${HAL0_SKIP_HINDSIGHT:-0}" == "1" ]]; then
+        info "hindsight memory engine: skipped (HAL0_SKIP_HINDSIGHT=1)"
+        return 0
+    fi
+    HAL0_HINDSIGHT_AUTOINSTALL=0 resolve_hindsight_python
+    return 0
 }
 
 # CPU architecture — hal0 ships x86_64-only binaries (FastFlowLM .deb,
@@ -330,6 +475,130 @@ preflight_podman_forward() {
     return 0
 }
 
+# GPU / NPU device visibility.
+#
+# Two modes, selected by HAL0_GPU_GATE:
+#   unset / 0 (default — `hal0 doctor`, preflight_all): SOFT. Always returns 0;
+#     prints device visibility + the Proxmox LXC dev0/gid remedy as advisories
+#     so the full report never aborts.
+#   1 (install.sh Stage-1 gate, #1104): GATED. Identical detection + messages,
+#     but the return code classifies the platform so install.sh can smart-block
+#     the single most common broken-install shape — a Proxmox LXC with the GPU
+#     forwarded but the render-node gid mis-mapped, which otherwise installs
+#     "successfully" and then silently runs every slot CPU-only:
+#       0                         → GPU present + wired, or a genuine bare-metal
+#                                    CPU box: proceed.
+#       HAL0_GPU_RC_BROKEN_GID(3) → render device visible but its gid maps to
+#                                    NO group inside this LXC (dev0 miswire):
+#                                    caller HARD STOPS with the printed remedy.
+#       HAL0_GPU_RC_NO_DEVICE(4)  → no GPU devices inside an LXC: caller allows
+#                                    an EXPLICIT CPU-only opt-in.
+# Test seams (only consulted here, never set in production): HAL0_GPU_DRI_GLOB,
+# HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE.
+# See docs/guides/proxmox.md for the full walkthrough.
+HAL0_GPU_RC_BROKEN_GID=3
+HAL0_GPU_RC_NO_DEVICE=4
+preflight_gpu() {
+    local gate="${HAL0_GPU_GATE:-0}"
+
+    local in_container=""
+    if [[ -f /run/systemd/container ]] || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+        in_container="lxc"
+    fi
+    # Test seam: force the container classification (unit tests can't fake
+    # /proc/1/environ). Never set in production.
+    [[ -n "${HAL0_GPU_CONTAINER_OVERRIDE:-}" ]] && in_container="${HAL0_GPU_CONTAINER_OVERRIDE}"
+
+    local dri_glob="${HAL0_GPU_DRI_GLOB:-/dev/dri/renderD*}"
+    local have_render="" have_kfd="" have_accel=""
+    compgen -G "${dri_glob}" >/dev/null 2>&1 && have_render=1
+    [[ -e /dev/kfd ]] && have_kfd=1
+    [[ -e /dev/accel/accel0 ]] && have_accel=1
+
+    if [[ -n "${have_render}" ]]; then
+        info "gpu: $(compgen -G "${dri_glob}" 2>/dev/null | tr '\n' ' ')present"
+    fi
+    [[ -n "${have_kfd}"   ]] && info "gpu: /dev/kfd present (ROCm compute)"
+    [[ -n "${have_accel}" ]] && info "npu: /dev/accel/accel0 present (AMD XDNA)"
+
+    if [[ -z "${have_render}" ]]; then
+        if [[ "${in_container}" == "lxc" ]]; then
+            warn "gpu: no /dev/dri/renderD* inside this container — GPU slots will run CPU-only"
+            warn "  Forward the devices from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf, PVE 8.2+):"
+            warn "    dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>"
+            warn "    dev1: /dev/kfd                    # ROCm compute (optional)"
+            warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
+            warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: docs/guides/proxmox.md"
+            # Gated install: no devices in an LXC is the opt-in CPU-only case.
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
+        else
+            warn "gpu: no /dev/dri/renderD* — no GPU driver bound (CPU-only install?)"
+            warn "  AMD: check 'lspci -nnk' shows 'Kernel driver in use: amdgpu'; very new"
+            warn "  silicon (Strix Halo) needs kernel >= 6.14 + current firmware."
+            # Bare-metal CPU box → proceed silently even when gated.
+        fi
+        return 0
+    fi
+
+    # Node group wiring: the render node's gid should map to a named group
+    # (usually 'render') that hal0/containers can be given. In a Proxmox LXC
+    # a dev0 entry with the HOST's gid leaves the node owned by an unmapped
+    # gid inside the container — userspace then gets Permission denied.
+    local node gid grpname
+    node="$(compgen -G "${dri_glob}" 2>/dev/null | head -1)"
+    if [[ -n "${node}" ]]; then
+        gid="${HAL0_GPU_RENDER_GID_OVERRIDE:-$(stat -c '%g' "${node}" 2>/dev/null)}"
+        grpname="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)"
+        if [[ -z "${grpname}" ]]; then
+            warn "gpu: ${node} is owned by gid ${gid}, which maps to NO group in this container"
+            if [[ "${in_container}" == "lxc" ]]; then
+                local want_gid
+                want_gid="$(getent group render 2>/dev/null | cut -d: -f3)"
+                warn "  Fix on the Proxmox host: dev0: ${node},gid=${want_gid:-<render gid>}"
+                warn "  (gid= must be the group id INSIDE the container, not the host's)"
+                # Gated install: devices present but a mis-mapped gid → silent
+                # CPU-only fallback. This is the #1 broken-install shape.
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
+            fi
+        else
+            info "gpu: ${node} → group ${grpname} (gid ${gid})"
+        fi
+    fi
+    return 0
+}
+
+# ── Bootstrap-prereq parity (#1098) ────────────────────────────────────────
+# bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
+# curl/tar/sha256sum in its own preflight() before it ever fetches the
+# release tarball. install.sh leans on all three later in its own run
+# (preflight_network's curl probe, the rsync-fallback tar copy, the FLM
+# .deb sha256 check) but a direct `sudo bash install.sh` — no bootstrap in
+# front — never checked for them up front: a minimal host missing one
+# would sail past "Pre-flight checks" and die deep in the run with a bare
+# "command not found" instead of an actionable message. This mirrors
+# bootstrap.sh's preflight() (same checks, same die-style message) so both
+# entry points enforce the same floor. python3 is deliberately NOT
+# re-checked here — preflight_python (below) already does a stricter,
+# version-aware check with a better error message; duplicating a bare
+# `command -v python3` here would just produce a redundant, less useful
+# failure.
+preflight_bootstrap_prereqs() {
+    local rc=0
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        err "hal0 only supports Linux right now (got $(uname -s))"
+        rc=1
+    fi
+    local dep
+    for dep in curl tar sha256sum; do
+        if ! command -v "${dep}" >/dev/null 2>&1; then
+            err "missing dependency: ${dep} — install it and re-run"
+            rc=1
+        fi
+    done
+    [[ "${rc}" -eq 0 ]] && info "bootstrap prereqs: curl, tar, sha256sum present (Linux)"
+    return "${rc}"
+}
+
 preflight_disk() {
     local min_gb="${1:-${HAL0_DISK_MIN_GB:-20}}"
     local target="${2:-${HAL0_DISK_TARGET:-/var/lib}}"
@@ -414,14 +683,17 @@ preflight_ports() {
 # picture, not the first failure.
 preflight_all() {
     local rc=0
+    preflight_bootstrap_prereqs || rc=$?
     preflight_arch    || rc=$?
     preflight_systemd || rc=$?
     preflight_python  || rc=$?
     preflight_venv    || rc=$?
+    preflight_hindsight_python || rc=$?
     preflight_writable || rc=$?
     preflight_network || rc=$?
     preflight_container_runtime || rc=$?
     preflight_podman_forward || rc=$?
+    preflight_gpu     || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then

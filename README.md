@@ -47,9 +47,9 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > virtual (code-defined, self-healing on upgrade) with dedicated
 > embed/rerank lanes and a model×profile×slot MTP decision; models carry
 > a preferred runtime profile, interrupted pulls resume, and voice runs
-> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner seeds the
-> recommended Main slot non-interactively; run `hal0 setup` anytime to
-> configure models, extensions, and NPU interactively. See
+> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner writes the
+> first-run sentinel only — no model picks, no downloads; run `hal0 setup`
+> anytime to configure models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
 ## Screenshots
@@ -201,9 +201,9 @@ be evicted out from under a streaming request.
   stable|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
 - **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
-  seeds the recommended Main slot and writes the first-run sentinel
-  automatically (no synchronous model download, no interaction needed).
-  Run `hal0 setup` afterward to customize models, apps, and agents.
+  writes the first-run sentinel and wiring automatically — no model picks,
+  no download, no interaction needed. Run `hal0 setup` afterward to choose
+  models and configure apps and agents.
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects model pulls
   off `/var/lib/hal0/models`). The bootstrap fetches the release
   manifest, sha256-verifies the tarball, cosign-verifies the signature
@@ -403,8 +403,8 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
   AMDXDNA hardware context; toggle via `[npu]` in the slot TOML
 - **OmniRouter client-side tool-calling** — 8 tools, dynamic
   per-request filtering, `route_to_chat` cross-slot delegation
-- **`hal0 setup` TUI** — replaces the web FirstRun picker; seeds the
-  recommended Main slot on install (`--auto --no-pull`); interactive
+- **`hal0 setup` TUI** — replaces the web FirstRun picker; the installer
+  seeds no model picks (`--auto --no-pull --no-slots`); the interactive
   post-install flow covers storage, Extensions, models, and NPU opt-in
 - **`hal0 registry import`** — one-shot v0.1.x → v0.3 registry
   recovery from a backup tarball
