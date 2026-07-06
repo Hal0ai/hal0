@@ -39,6 +39,12 @@ _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 
 
 def _write_exe(path: Path, body: str = "#!/usr/bin/env bash\nexit 0\n") -> None:
+    # Replace any existing entry (full_bin_dir seeds tools as symlinks to the
+    # real binaries) rather than writing THROUGH it: write_text() follows a
+    # symlink, so overwriting the seeded `uname` symlink would try to rewrite
+    # the host's /usr/bin/uname — PermissionError on a locked-down CI runner,
+    # or silent mutation of the real binary when the test runs as root.
+    path.unlink(missing_ok=True)
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
