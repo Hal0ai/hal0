@@ -243,6 +243,56 @@ class TestSlotConfigRoundTrip:
             data = tomllib.load(f)
         assert data["defaults"]["threads"] == 12
 
+    # ── flat vs nested slot TOML shape (#1087) ───────────────────────────
+
+    def test_load_flat_top_level_slot_toml(self, tmp_hal0_home: str) -> None:
+        """Flat slot TOMLs (top-level name/port/profile/device/runtime) load."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "primary.toml").write_text(
+            'name = "primary"\n'
+            "port = 8081\n"
+            'profile = "chat-gpu"\n'
+            'device = "gpu-vulkan"\n'
+            'runtime = "container"\n'
+            "[model]\n"
+            'default = "qwen3-4b"\n'
+        )
+        cfg = load_slot_config("primary")
+        assert cfg.name == "primary"
+        assert cfg.port == 8081
+        assert cfg.profile == "chat-gpu"
+        assert cfg.device == "gpu-vulkan"
+        assert cfg.runtime == "container"
+        assert cfg.model.default == "qwen3-4b"
+
+    def test_load_flat_slot_toml_hoists_sibling_tables(self, tmp_hal0_home: str) -> None:
+        """Flat slot files keep sibling tables typed ([server]) or in extra."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "primary.toml").write_text(
+            'name = "primary"\n'
+            "port = 8081\n"
+            'profile = "chat-gpu"\n'
+            "[server]\n"
+            'extra_args = "--foo"\n'
+            "[defaults]\n"
+            "threads = 12\n"
+        )
+        cfg = load_slot_config("primary")
+        assert cfg.profile == "chat-gpu"
+        assert cfg.server.extra_args == "--foo"
+        assert cfg.extra.get("defaults", {}).get("threads") == 12
+
+    def test_load_flat_slot_toml_infers_name_from_filename(self, tmp_hal0_home: str) -> None:
+        """A flat TOML omitting `name` still names the slot from its stem."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "embed.toml").write_text(
+            "port = 8082\n" 'profile = "embed-cpu"\n'
+        )
+        cfg = load_slot_config("embed")
+        assert cfg.name == "embed"
+        assert cfg.port == 8082
+        assert cfg.profile == "embed-cpu"
+
     # ── Phase 1 A3: [server].extra_args ──────────────────────────────────
 
     def test_server_extra_args_missing_defaults_to_none(self, tmp_hal0_home: str) -> None:

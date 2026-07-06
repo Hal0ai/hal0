@@ -247,9 +247,11 @@ def list_slots() -> list[str]:
 
 
 def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
-    """Hoist [slot] keys to top-level so SlotConfig.model_validate works.
+    """Normalise both slot-TOML shapes into the flat SlotConfig shape.
 
-    The on-disk shape (haloai-compatible) is::
+    Two on-disk shapes exist and must both load:
+
+    Legacy nested (haloai-compatible) — slot fields under a ``[slot]`` table::
 
         [slot]
         name = "primary"
@@ -261,18 +263,45 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
 
         [defaults]
         threads = 12
-        ...
 
-    SlotConfig expects ``name`` and ``port`` at the top level, ``model``
-    as a nested key, and stashes anything else under ``extra``.
+    Current flat — slot fields as top-level scalars alongside sibling tables::
+
+        name = "primary"
+        port = 8081
+        profile = "chat-gpu"
+        device = "gpu-vulkan"
+
+        [model]
+        default = "qwen3-4b-q4_k_m"
+
+        [server]
+        extra_args = "--foo"
+
+    In both shapes, slot fields are *scalars* while sibling sections
+    (``[model]``, ``[server]``, ``[npu]``, ``[image]``, ``[defaults]``, …)
+    are *tables*. We therefore hoist every top-level scalar plus any
+    ``[slot]`` table to the top level, keep ``[model]`` nested, and stash
+    the remaining tables under ``extra`` for lossless round-tripping.
     """
-    slot_section = raw.get("slot", {}) if isinstance(raw, dict) else {}
-    if not isinstance(slot_section, dict):
-        slot_section = {}
+    if not isinstance(raw, dict):
+        raw = {}
 
-    # Hoist [slot] keys; fall back to the on-disk filename for `name` if
-    # the TOML omits it.
-    out: dict[str, Any] = {**slot_section}
+    slot_section = raw.get("slot")
+    out: dict[str, Any] = {}
+    if isinstance(slot_section, dict):
+        # Legacy nested shape: slot fields live under [slot]. Preserve the
+        # original behaviour (every top-level sibling → extra) so stray
+        # top-level scalars still round-trip untouched.
+        out.update(slot_section)
+    else:
+        # Flat shape: slot fields are top-level scalars alongside sibling
+        # tables. Hoist the scalars; tables are handled below.
+        for k, v in raw.items():
+            if k in ("slot", "model") or isinstance(v, dict):
+                continue
+            out[k] = v
+
+    # Fall back to the on-disk filename for `name` if the TOML omits it.
     out.setdefault("name", slot_name)
 
     # Nested [model] section.
@@ -280,11 +309,12 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
     if isinstance(model_section, dict):
         out["model"] = model_section
 
-    # Anything else (e.g. [defaults], [server], custom sections) lands in
-    # `extra` so we don't lose it on round-trip.
+    # Anything not already hoisted (sibling tables like [defaults],
+    # [server], [npu], [image]; and, in the legacy shape, stray top-level
+    # scalars) lands in `extra` so we don't lose it on round-trip.
     extra: dict[str, Any] = {}
     for k, v in raw.items():
-        if k in ("slot", "model"):
+        if k in ("slot", "model") or k in out:
             continue
         extra[k] = v
     if extra:
