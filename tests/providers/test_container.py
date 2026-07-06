@@ -28,6 +28,7 @@ from hal0.config.schema import (
     model_family,
     resolve_profile_flags,
 )
+from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
@@ -193,6 +194,58 @@ class TestRenderUnit:
         tokens = shlex.split(self._get_exec_start(unit))
         assert f"--volume={custom}:{custom}:ro,z" in tokens, tokens
         assert not any(t.startswith("--volume=/mnt/ai-models") for t in tokens), tokens
+
+    def test_requires_mounts_for_bind_sources(self, monkeypatch) -> None:
+        """Every bind source lands in RequiresMountsFor so a slot on an
+        external store (/mnt/...) orders after — and pulls in — the backing
+        mount at boot instead of racing it (podman exit 125 statfs)."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        req_lines = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
+        assert req_lines and _MODEL_STORE_MOUNT in req_lines[0], unit
+
+    def test_readonly_mount_not_auto_created(self, monkeypatch) -> None:
+        """The read-only model store must NOT get an ExecStartPre mkdir —
+        silently creating an empty store would mask a broken mount behind a
+        model-not-found error."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        assert "ExecStartPre" not in unit, unit
+
+    def test_writable_mount_gets_execstartpre_mkdir(self) -> None:
+        """Writable bind sources (FLM cache & co) get a tolerant
+        ExecStartPre=-mkdir -p so a source dir that vanished across a reboot
+        can't fail every start with podman exit 125."""
+        plan = RuntimeLaunchPlan(
+            image="ghcr.io/hal0ai/hal0-toolbox-flm:test",
+            command=["serve", "x"],
+            mounts=[("/mnt/ai-models/flm/models", "/var/lib/hal0/.config/flm/models")],
+            port=8088,
+            network_mode="",
+        )
+        unit = _render_unit_from_plan("npu", plan, runtime_bin=_TEST_RUNTIME)
+        pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
+        assert pre == ["ExecStartPre=-/usr/bin/mkdir -p /mnt/ai-models/flm/models"], unit
+        req = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
+        assert req == ["RequiresMountsFor=/mnt/ai-models/flm/models"], unit
 
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
