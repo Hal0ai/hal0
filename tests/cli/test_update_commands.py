@@ -3,7 +3,7 @@
 The CLI is a thin client over /api/updates/*; these tests stub the
 ``api_*`` helpers (imported into the update_commands namespace) so the
 command logic - target-version normalization, the apply trigger, and the
-absence of the retired ``--restart-slots`` flag - is exercised without a
+drift-aware ``--restart-slots`` flag (WS-J, #1111) - is exercised without a
 running daemon.
 """
 
@@ -80,12 +80,111 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     return captured
 
 
-def test_restart_slots_flag_removed() -> None:
-    """The retired ``--restart-slots`` flag is gone from the command signature."""
+def test_restart_slots_flag_present_and_drift_aware() -> None:
+    """``--restart-slots`` is back — but drift-aware, via the API (WS-J, #1111).
+
+    The retired flag bounced ``hal0-slot@*.service`` unconditionally over
+    systemd; the new one restarts only drifted slots through
+    /api/updates/restart-slots. The old systemd-bouncing helper stays gone.
+    """
     sig = inspect.signature(uc.update)
-    assert "restart_slots" not in sig.parameters
-    # And the helper that bounced hal0-slot@*.service is removed too.
+    assert "restart_slots" in sig.parameters
+    # The retired systemd-bouncing helper must NOT come back.
     assert not hasattr(uc, "_restart_slots")
+    # The new drift-aware helpers exist instead.
+    assert hasattr(uc, "_restart_drifted_slots")
+    assert hasattr(uc, "_fetch_slot_drift")
+    assert hasattr(uc, "_print_drift_banner")
+
+
+def test_restart_slots_bounces_only_drifted_and_skips_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``hal0 update --restart-slots`` POSTs restart-slots and never runs apply."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    calls: dict = {"get": [], "post": []}
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        calls["get"].append(path)
+        if path == "/api/updates/slot-drift":
+            return {"count": 1, "slots": [{"slot": "chat", "diffs": []}]}
+        return {}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        calls["post"].append(path)
+        if path == "/api/updates/restart-slots":
+            return {"restarted": ["chat"], "failed": [], "count": 1}
+        return {}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+    # It restarted drifted slots …
+    assert "/api/updates/restart-slots" in calls["post"]
+    assert "restarted 1 slot" in result.output
+    # … and never touched the check / prepare / commit apply path.
+    assert "/api/updates/check" not in calls["get"]
+    assert "/api/updates/prepare" not in calls["post"]
+    assert "/api/updates/commit" not in calls["post"]
+
+
+def test_restart_slots_clean_message_when_nothing_drifted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean box prints an explicit 'no slots need restart' and skips POST."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    posted: list[str] = []
+    monkeypatch.setattr(uc, "api_get", lambda path, **k: {"count": 0, "slots": []})
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: posted.append(path) or {})
+    result = runner.invoke(app, ["update", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+    assert "no slots need restart" in result.output
+    assert posted == []  # nothing drifted → no restart POST
+
+
+def test_post_apply_shows_drift_banner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a successful apply the 'N slots need restart' banner is surfaced."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {"count": 2, "slots": [{"slot": "chat"}, {"slot": "code"}]}
+        return {
+            "current": "0.0.0",
+            "latest": "9.9.9",
+            "channel": "stable",
+            "update_available": True,
+            "manifest": {},
+        }
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/prepare":
+            return {"id": "p1", "state": "queued"}
+        if path == "/api/updates/commit":
+            return {"id": "c1", "state": "queued"}
+        return {}
+
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        if "prepared" in terminal:
+            return {"id": job_id, "state": "prepared", "resolved_version": "9.9.9", "notes": {}}
+        return {"id": job_id, "state": "applied"}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(uc, "_poll_job", fake_poll)
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0, result.output
+    assert "2 slots need restart" in result.output
+    # Panel word-wraps at the runner's 80-col width, so match the flag token
+    # (which never splits) rather than the full "hal0 update --restart-slots".
+    assert "--restart-slots" in result.output
 
 
 def test_target_strips_leading_v(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:

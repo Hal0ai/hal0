@@ -194,6 +194,77 @@ def _render_notes(notes: dict | None) -> None:
         console.print(Markdown(markdown))
 
 
+def _fetch_slot_drift() -> dict:
+    """Return the /api/updates/slot-drift payload, or an empty summary on error.
+
+    Best-effort: the drift banner is a courtesy on top of the update flow, so
+    a probe failure must never turn a successful update into a hard error.
+    """
+    try:
+        body = api_get("/api/updates/slot-drift")
+    except CliApiError:
+        return {"count": 0, "slots": []}
+    return body if isinstance(body, dict) else {"count": 0, "slots": []}
+
+
+def _print_drift_banner(drift: dict) -> None:
+    """Post-update ``N slots need restart`` banner (or a clean all-good line).
+
+    ``rerender_slot_units`` refreshed each unit file on disk but never bounced
+    the running process, so drifted slots are still serving the pre-update
+    launch command. We surface that prominently and point at
+    ``hal0 update --restart-slots`` — we never bounce automatically, because a
+    slot may be mid-inference.
+    """
+    count = int(drift.get("count") or 0)
+    if count == 0:
+        console.print("[dim]no slots need restart.[/dim]")
+        return
+    slots = drift.get("slots") or []
+    names = ", ".join(str(s.get("slot")) for s in slots if isinstance(s, dict) and s.get("slot"))
+    plural = "s" if count != 1 else ""
+    console.print(
+        Panel(
+            f"[bold yellow]{count} slot{plural} need restart[/bold yellow]\n"
+            f"[dim]{names}[/dim]\n\n"
+            "These slots are still running the pre-update launch command. Run "
+            "[bold]hal0 update --restart-slots[/bold] to bounce only the drifted "
+            "slots (this briefly interrupts any in-flight request on them).",
+            title="Slots need restart",
+            border_style="yellow",
+        )
+    )
+
+
+def _restart_drifted_slots() -> None:
+    """POST /api/updates/restart-slots and report the outcome.
+
+    Clean-path message when nothing is drifted; otherwise restarts only the
+    drifted slots and lists successes + per-slot failures.
+    """
+    drift = _fetch_slot_drift()
+    if int(drift.get("count") or 0) == 0:
+        console.print(Panel("[green]no slots need restart.[/green]", border_style="green"))
+        return
+    try:
+        body = api_post("/api/updates/restart-slots")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    restarted = body.get("restarted") or []
+    failed = body.get("failed") or []
+    if restarted:
+        console.print(
+            Panel(
+                f"[green]restarted {len(restarted)} slot(s):[/green] {', '.join(restarted)}",
+                border_style="green",
+            )
+        )
+    for f in failed:
+        if isinstance(f, dict):
+            console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
+
+
 def update(
     channel: UpdateChannel | None = typer.Option(
         None,
@@ -221,6 +292,14 @@ def update(
         "-y",
         help="Skip the confirmation prompt after reviewing release notes.",
     ),
+    restart_slots: bool = typer.Option(
+        False,
+        "--restart-slots",
+        help=(
+            "Restart only the slots still running the pre-update launch command "
+            "(post-update drift). Never bounces a slot unless you pass this flag."
+        ),
+    ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
 
@@ -240,6 +319,13 @@ def update(
             die(str(exc))
             return
         console.print(f"[green]channel set to {channel.value}[/green]")
+
+    # Standalone action: bounce drifted slots on demand, then stop. Kept
+    # separate from the check/apply flow so an operator can clear post-update
+    # drift at any later time (e.g. once in-flight requests have drained).
+    if restart_slots:
+        _restart_drifted_slots()
+        return
 
     if rollback:
         try:
@@ -323,6 +409,10 @@ def update(
             console.print(
                 f"[yellow]hal0-api restart did not complete:[/yellow] {final['restart_error']}"
             )
+        # The unit files were re-rendered but slots were NOT bounced (a restart
+        # could kill a mid-inference request). Surface which slots are still
+        # running the pre-update command so the operator can opt into a restart.
+        _print_drift_banner(_fetch_slot_drift())
     else:
         err = final.get("error") or "unknown error"
         die(f"update {state}: {err}")
