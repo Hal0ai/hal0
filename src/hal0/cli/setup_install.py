@@ -33,12 +33,31 @@ from hal0.cli._shared import _api_base
 # call-site only) so tests can monkeypatch ``hal0.cli.setup_install._api_reachable``.
 from hal0.cli.setup_command import _api_reachable
 
-_DASHBOARD_URL = "https://hal0.thinmint.dev"
-
-
 def choose_apply_mode() -> str:
     """Return ``"api"`` when hal0-api is reachable, else ``"in_process"``."""
     return "api" if _api_reachable() else "in_process"
+
+
+async def _dashboard_url() -> str:
+    """Best-effort canonical dashboard URL for the completion banner.
+
+    The live service's ``GET /api/config/urls`` is the single source of
+    truth the dashboard itself reads (it derives the host from the bind
+    address / forwarded proxy headers), so we prefer it. When the service
+    isn't up yet (install-time in-process path) we fall back to the local
+    API base — always a valid link, never a hardcoded public host.
+    """
+    base = _api_base()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            resp = await client.get(f"{base}/api/config/urls")
+            resp.raise_for_status()
+            api = str(resp.json().get("api") or "").strip()
+            if api:
+                return api
+    except Exception:
+        pass
+    return base
 
 
 async def run_install(sel, hw, *, no_pull: bool = False) -> None:
@@ -84,9 +103,10 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
     await _run_pulls_with_progress(result.pulls)
 
     n_slots = sum(1 for s in result.slots if getattr(s, "created", False))
+    dashboard = await _dashboard_url()
     typer.echo(
         f"hal0 setup complete: {len(result.model_ids)} model(s), {n_slots} slot(s). "
-        f"Dashboard: {_DASHBOARD_URL}"
+        f"Dashboard: {dashboard}"
     )
 
 
@@ -175,7 +195,8 @@ async def _apply_via_api(sel) -> None:
         data = resp.json()
     n_models = len(data.get("model_ids", []))
     n_slots = len(data.get("slots", []))
+    dashboard = await _dashboard_url()
     typer.echo(
         f"hal0 setup applied via API: {n_models} model(s), {n_slots} slot(s) "
-        f"(downloads run on the service). Dashboard: {_DASHBOARD_URL}"
+        f"(downloads run on the service). Dashboard: {dashboard}"
     )
