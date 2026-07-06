@@ -21,6 +21,90 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-07-06
+
+**The Guided Setup.** hal0 setup grows a review-gated TUI, headless answer
+files, hardware preflight, and a pick-free first-run workflow. The installer
+no longer ships model recommendations — every box starts clean and the
+operator chooses models interactively.
+
+### Highlights
+- **Guided Stage-2 setup TUI** with a review gate and two-stage handoff:
+  hardware detection, model selection, capability scaffolding — all
+  reviewed before writing config.
+- **Headless answer files** — `hal0 setup --emit-answers` captures
+  selections as JSON; `hal0 setup --answers <file>` replays them on
+  another box. Combine with `--yes` for fully automated provisioning.
+- **Pick-free install.** The installer no longer seeds model slots.
+  Instead, the guided TUI (or headless answers) scaffolds capability
+  slots and walks the operator through model selection interactively.
+- **Hardware preflight.** GPU detection runs during install with an
+  LXC smart-block and dev0 remedy; NPU functional state is persisted
+  in a hardware.json written at install time.
+- **hal0 doctor --verify** — a structured report card checking config,
+  slots, models, and service health.
+
+### Added
+- **Guided Stage-2 setup TUI** with review gate + two-stage handoff (#1144).
+- **Headless answer files** — `hal0 setup --answers` / `--emit-answers`
+  round-trip (#1119, #1120).
+- **`hal0 setup --plan` / `--dry-run` preview** (#1121).
+- **GPU preflight during install** — LXC smart-block + dev0 remedy (#1135).
+- **Authoritative hardware.json** persisted at install incl. NPU functional
+  result (#1118).
+- **Network coherence** — one `HAL0_BIND_HOST` + seeded origins (#1130).
+- **HF_TOKEN gathered + persisted** to `secrets/` EnvironmentFile, threaded
+  through in-process apply_setup (#1136, #1122).
+- **`hal0 doctor --verify` report card** — config, slots, models, service
+  health (#1145).
+- **Post-update drift surfacing** + `hal0 update --restart-slots` (#1142).
+- **Slot-render reconcile seam** shared by install + update (#1138).
+- **Safe slot activation** — enable-on-pull-success + clamp context (#1137).
+- **Clean seeded slots** — no model pins, derived device (#1140).
+- **NPU opt-in** threaded through suggest+apply; NPU introduction gated on
+  hardware present + healthy (#1134).
+- **Capability + NPU slot scaffolding** — pick-free, guide models
+  interactively (#1091).
+- **ComfyUI gen branch** — scaffold-only default + per-variant download
+  picker; repaired model fetch + shipped curated workflow JSONs (#1146,
+  #1128).
+- **First-run model workflow** — `hal0 models scan` / `add` / `store` /
+  `run` + `hal0 doctor models`.
+- **Pick-free install** — installer seeds zero model slots; the operator
+  chooses via the guided TUI or headless answers (#1104, #1140).
+- **Co-locate `[models].flm_store`** + free-space validation (#1132).
+- **Honor `Selections.storage_dir`** — thread to `[models].store` (#1127).
+- **Close `/api/install/*` provisioning** after first-run sentinel (#1126).
+- **Apps skip/defer parity** — `openwebui` install verb + gateway in
+  deferred hermes (#1125).
+- **Converge `/apply` onto `/apply-selections`** + write first-run sentinel
+  from endpoint (#1124).
+- **Platform-gate hardening** — bootstrap-prereq parity, disk-on-store,
+  early hal0 user (#1139).
+- **Runtime `advertise_models` toggle** for upstream catalog entries (#1152).
+
+### Fixed
+- Dashboard URL no longer leaks `hal0.thinmint.dev` as default (#1092).
+- Advertise all enabled LLM slots in `/v1/models` discovery, not just loaded
+  ones (#1153).
+- Support flat slot TOML shape in profile in-use scanning (#1129).
+- Don't persist hardware.json on `--plan`/`--emit` preview paths (#1131).
+- Delete stale `avahi/hal0.service` systemd unit (#1123).
+- HF vision mmproj sidecars (`.mmproj`) + remove backend-switch surface (#1089).
+- Seed `[models].store`, create FLM cache dir, add GPU/NPU preflight.
+- Rescan models immediately when the store path changes.
+- Honor `[models].flm_store` config + make NPU slot bind source
+  reboot-durable.
+- Auto-resolve a Hindsight-compatible Python instead of a raw pip wall.
+- Don't write through the seeded uname symlink in prereq-parity tests (#1143).
+- **HERMES.md.j2 rendering** — fix crash on empty env snapshots (Jinja2
+  `Undefined.__getattr__` raises immediately, bypassing `|default` filters).
+
+### Migrations
+- First-run sentinel closes `/api/install/*` — a one-way gate at install
+  time. The guided TUI or headless answer files are the canonical path
+  for future configuration changes.
+
 ## [0.9.2] — 2026-07-05
 
 Hotfix: restore the full model listing in every slot's model picker.
