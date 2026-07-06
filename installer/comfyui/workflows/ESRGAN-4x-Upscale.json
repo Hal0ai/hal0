@@ -1,0 +1,49 @@
+{
+    "1": {
+        "inputs": {
+            "image": "example.png"
+        },
+        "class_type": "LoadImage",
+        "_meta": {
+            "title": "Load Image"
+        }
+    },
+    "2": {
+        "inputs": {
+            "model_name": "4x-UltraSharp.pth"
+        },
+        "class_type": "UpscaleModelLoader",
+        "_meta": {
+            "title": "Load Upscale Model"
+        }
+    },
+    "3": {
+        "inputs": {
+            "upscale_model": [
+                "2",
+                0
+            ],
+            "image": [
+                "1",
+                0
+            ]
+        },
+        "class_type": "ImageUpscaleWithModel",
+        "_meta": {
+            "title": "Upscale Image (using Model)"
+        }
+    },
+    "4": {
+        "inputs": {
+            "filename_prefix": "ESRGAN-4x",
+            "images": [
+                "3",
+                0
+            ]
+        },
+        "class_type": "SaveImage",
+        "_meta": {
+            "title": "Save Image"
+        }
+    }
+}
