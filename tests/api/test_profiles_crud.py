@@ -31,6 +31,18 @@ def _seed_slot_toml(home: str, name: str, profile: str, port: int = 8090) -> Pat
     return path
 
 
+def _seed_flat_slot_toml(home: str, name: str, profile: str, port: int = 8090) -> Path:
+    """Write a flat (top-level, no [slot] table) slot TOML (#1087)."""
+    root = Path(home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{name}.toml"
+    path.write_text(
+        f'name = "{name}"\nport = {port}\nprofile = "{profile}"\ndevice = "gpu-vulkan"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
 def _seed_corrupt_slot_toml(home: str, name: str) -> Path:
     """Write a slot TOML that fails to parse."""
     root = Path(home) / "etc" / "hal0" / "slots"
@@ -294,6 +306,33 @@ def test_delete_in_use_409(tmp_hal0_home: str) -> None:
     err = r.json()["error"]
     assert err["code"] == "profiles.in_use"
     assert "gpu-slot" in err["details"]["slots"]
+
+
+def test_delete_in_use_409_flat_slot_toml(tmp_hal0_home: str) -> None:
+    """Flat-shape slot TOML references a profile → DELETE blocked (#1087).
+
+    Regression: profile in-use scanning must load flat top-level slot files
+    (no [slot] table), not just the legacy nested shape, so the in-use guard
+    still fires and no profiles.in_use_scan_error is logged.
+    """
+    _seed_flat_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan")
+
+    app = create_app()
+    with TestClient(app) as c:
+        c.post(
+            "/api/profiles",
+            json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+        )
+        listed = c.get("/api/profiles").json()
+        r = c.delete("/api/profiles/my-vulkan")
+    # In-use guard fires for the flat slot.
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["code"] == "profiles.in_use"
+    assert "gpu-slot" in err["details"]["slots"]
+    # used_by is populated from the flat slot in the listing too.
+    item = next(p for p in listed if p["name"] == "my-vulkan")
+    assert "gpu-slot" in item["used_by"]
 
 
 def test_delete_in_use_409_despite_corrupt_sibling_toml(tmp_hal0_home: str) -> None:
