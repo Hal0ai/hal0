@@ -175,6 +175,50 @@ def model_store_root() -> str:
     return DEFAULT_MODEL_STORE
 
 
+def default_flm_models_dir() -> str:
+    """Return FLM's default model cache (/var/lib/hal0/.config/flm/models).
+
+    The FLM binary hardcodes ``~/.config/flm/models`` (not configurable in
+    FLM itself); the hal0 service HOME is ``var_lib()``, so this is both the
+    default store and the in-container mount target for NPU slots.
+    """
+    return str(var_lib() / ".config" / "flm" / "models")
+
+
+def flm_models_dir() -> str:
+    """Resolve the FLM (NPU) model-store directory.
+
+    Single source of truth shared by the FLM container mount, the host
+    ``flm`` probe/pull bookkeeping, and the installer, so the directory the
+    NPU slot bind-mounts can never drift from where pulls land. Precedence
+    mirrors :func:`model_store_root`:
+
+      1. ``HAL0_FLM_MODELS_DIR`` env var — explicit operator / CI override,
+      2. ``[models].flm_store`` from hal0.toml — the persistent, settings-
+         editable field (``ModelsConfig.flm_store``),
+      3. :func:`default_flm_models_dir` — FLM's own ``~/.config/flm/models``
+         cache under the hal0 service HOME.
+
+    Operators relocating the store off the root filesystem (e.g. onto
+    ``/mnt/ai-models/flm/models``) should prefer the TOML field: unlike the
+    env var it survives api.env rewrites and shows up in config tooling.
+    Config is read lazily so provider code can call this without an import
+    cycle, degrading to the default during early bootstrap.
+    """
+    env = os.environ.get("HAL0_FLM_MODELS_DIR", "").strip()
+    if env:
+        return env
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        store = (load_hal0_config().models.flm_store or "").strip()
+        if store:
+            return store
+    except Exception:
+        pass
+    return default_flm_models_dir()
+
+
 def slot_data_dir(slot_name: str) -> Path:
     """Return the per-slot working directory (/var/lib/hal0/slots/<name>/)."""
     return var_lib() / "slots" / slot_name

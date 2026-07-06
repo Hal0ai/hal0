@@ -2,7 +2,8 @@
 
 from typing import Any
 
-from hal0.providers.flm import _DEFAULT_FLM_MODELS_DIR, FLMProvider
+from hal0.config import paths as cfg_paths
+from hal0.providers.flm import FLMProvider
 
 
 def _slot_cfg(**overrides: Any) -> dict[str, Any]:
@@ -49,12 +50,52 @@ def test_npu_table_overrides_legacy_defaults() -> None:
 
 
 def test_default_models_dir_is_flm_cache() -> None:
-    assert _DEFAULT_FLM_MODELS_DIR == "/var/lib/hal0/.config/flm/models"
     spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
+    # Source follows the resolver default (HAL0_HOME-aware); the target is
+    # FLM's hardcoded in-container HOME cache and never moves.
     assert (
-        "/var/lib/hal0/.config/flm/models",
+        cfg_paths.default_flm_models_dir(),
         "/var/lib/hal0/.config/flm/models",
     ) in spec.mounts
+
+
+def test_env_var_overrides_flm_models_dir(monkeypatch, tmp_path) -> None:
+    custom = str(tmp_path / "flm-store")
+    monkeypatch.setenv("HAL0_FLM_MODELS_DIR", custom)
+    spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
+    assert (custom, "/var/lib/hal0/.config/flm/models") in spec.mounts
+
+
+def test_models_flm_store_config_drives_mount(monkeypatch, tmp_path) -> None:
+    """[models].flm_store must reach the container mount without the env var.
+
+    Regression: the pre-config chain read only HAL0_FLM_MODELS_DIR, so a
+    store relocated via hal0.toml was silently ignored and the slot kept
+    bind-mounting the root-subvolume default (live repro on CT105 — dir gone
+    after reboot, podman exit 125).
+    """
+    import hal0.config.loader as loader
+
+    custom = str(tmp_path / "flm-relocated")
+    monkeypatch.delenv("HAL0_FLM_MODELS_DIR", raising=False)
+
+    class _Models:
+        flm_store = custom
+
+    class _Cfg:
+        models = _Models()
+
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: _Cfg())
+    spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
+    assert (custom, "/var/lib/hal0/.config/flm/models") in spec.mounts
+
+
+def test_spec_build_creates_missing_store_dir(monkeypatch, tmp_path) -> None:
+    """Spec build must mkdir the bind source so podman never sees ENOENT."""
+    custom = tmp_path / "nested" / "flm-store"
+    monkeypatch.setenv("HAL0_FLM_MODELS_DIR", str(custom))
+    FLMProvider().container_spec(_slot_cfg(), _model_info())
+    assert custom.is_dir()
 
 
 def test_model_table_context_size_drives_ctx_len() -> None:

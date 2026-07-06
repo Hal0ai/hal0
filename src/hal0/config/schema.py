@@ -2442,6 +2442,34 @@ class ModelsConfig(BaseModel):
             "deployments are unaffected until ``store`` is set."
         ),
     )
+    flm_store: str = Field(
+        default="",
+        description=(
+            "Where FLM (NPU backend) model weights live. The NPU slot container "
+            "bind-mounts this directory over FLM's hardcoded ~/.config/flm/models "
+            "cache, and the host ``flm`` probe/pull bookkeeping points at it. "
+            "Empty falls back to the HAL0_FLM_MODELS_DIR env var, then to FLM's "
+            "default cache under the hal0 HOME (/var/lib/hal0/.config/flm/models). "
+            "Set an absolute path (e.g. /mnt/ai-models/flm/models) to keep NPU "
+            "weights off the root filesystem; hal0 creates the directory "
+            "(container-uid-writable) at slot-spec build time and the generated "
+            "unit orders after the backing mount, so a reboot with a late or "
+            "missing mount no longer kills the slot with podman exit 125."
+        ),
+    )
+
+    @field_validator("flm_store")
+    @classmethod
+    def flm_store_is_absolute_when_set(cls, v: str) -> str:
+        """Empty means "env var / FLM default cache"; non-empty must be absolute."""
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        if not Path(s).is_absolute():
+            raise ValueError(
+                f"models.flm_store {s!r} must be an absolute path (or empty for the default cache)"
+            )
+        return s
 
     def scan_roots(self) -> list[str]:
         """Roots the discovery scan actually walks: declared ``roots`` plus the

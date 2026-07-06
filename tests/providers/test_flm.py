@@ -420,7 +420,7 @@ def test_pull_command_is_host_flm_and_real_cache_dir() -> None:
     argv, host_dir = flm.flm_pull_command("gemma4-it:e4b")
     assert argv == [flm._HOST_FLM_BIN, "pull", "gemma4-it:e4b"]
     assert "docker" not in argv
-    assert host_dir == flm._HOST_FLM_MODELS_DIR
+    assert host_dir == flm._host_flm_models_dir()
     assert host_dir.endswith("/.config/flm/models")
 
 

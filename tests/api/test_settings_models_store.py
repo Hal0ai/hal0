@@ -66,10 +66,11 @@ def test_set_store_happy_path_no_prior_data(
     assert body["state"]["effective"] == str(target)
     # No migration needed → migration block is None.
     assert body["migration"] is None
-    # The response envelope is exactly the four documented keys — the
+    # The response envelope is exactly the five documented keys — the
     # old external-propagation block is gone (slot containers pick up
-    # the new mount on their next restart; nothing else to report).
-    assert set(body.keys()) == {"status", "config", "state", "migration"}
+    # the new mount on their next restart); ``scan`` reports the
+    # immediate post-change discovery pass.
+    assert set(body.keys()) == {"status", "config", "state", "migration", "scan"}
 
     # hal0.toml persisted.
     toml_path = cfg_paths.hal0_toml()
@@ -100,7 +101,35 @@ def test_set_store_emits_config_save_event_with_store_data(
     ]
     assert saves, f"expected a system.config_save event for the store change, got {events}"
     data = saves[-1]["data"]
-    assert data == {"store": str(target), "migrated_files": 0}
+    assert data == {"store": str(target), "migrated_files": 0, "scan_added": 0}
+
+
+def test_set_store_registers_models_already_at_new_path(
+    isolated_client: TestClient, tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """Changing the store must rescan immediately, not wait for a restart.
+
+    Regression: model files hand-placed at the new store (the usual reason
+    an operator changes the setting) stayed unregistered until the next
+    api restart — auto_scan_on_start was the only trigger — so slots kept
+    resolving stale paths and llama-server died with 'No such file or
+    directory' (live repro on CT105: weights on /mnt/ai-models, registry
+    entry pointing into /var/lib/hal0/models).
+    """
+    target = tmp_path / "relocated-store"
+    target.mkdir()
+    (target / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"x" * 128)
+
+    r = isolated_client.post("/api/settings/models/store", json={"path": str(target)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["scan"] is not None, "store change must run a discovery scan"
+    assert body["scan"]["added"], f"expected the on-disk GGUF to register: {body['scan']}"
+
+    listed = isolated_client.get("/api/models").json()
+    rows = listed.get("models", listed if isinstance(listed, list) else [])
+    all_ids = {m.get("id", "") for m in rows}
+    assert any("qwen3-4b" in mid for mid in all_ids), all_ids
 
 
 def test_set_store_dry_run_when_prior_path_has_data(
