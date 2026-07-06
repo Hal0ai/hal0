@@ -574,3 +574,13 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
 
     # 11-13. apply → sentinel → verify
     _apply(plan)
+
+    # 14. WS-K report card (#1114): pass/warn/fail over the live health seams +
+    # computed URLs + help links. A SINGLE localized, best-effort call — the
+    # report is non-blocking, so a failure here must never abort a good setup.
+    try:
+        from hal0.cli.doctor_verify import run_verify
+
+        run_verify(console=_con)
+    except Exception as exc:  # pragma: no cover — defensive, never fail setup
+        _con.print(f"[dim]setup verify skipped ({exc})[/dim]")
