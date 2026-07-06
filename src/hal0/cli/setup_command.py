@@ -8,6 +8,8 @@ spec §11)."""
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 
 import httpx
 import typer
@@ -183,6 +185,21 @@ def setup(
         help="Resolve + print the plan; write nothing (no slots, sentinel, pulls, or extensions).",
     ),
 ) -> None:
+    # Two-stage handoff (issue #1112): the guided Stage-2 flow is interactive
+    # (rich prompts on a real TTY). When it is requested (no --auto / --answers /
+    # --plan / --emit-answers) but stdin is NOT a terminal — a piped/headless
+    # `curl … | hal0 setup` or CI run — DON'T launch rich prompts (they would
+    # EOF immediately). Print the exact command to run instead, mirroring what
+    # install.sh's Stage-1 tail prints on a headless install. HAL0_FORCE_INTERACTIVE
+    # bypasses the guard so tests can drive the flow over a pipe.
+    interactive = not (auto or plan or answers is not None or emit_answers is not None)
+    if interactive and not sys.stdin.isatty() and not os.environ.get("HAL0_FORCE_INTERACTIVE"):
+        typer.echo("hal0 setup is interactive — run it from a terminal:")
+        typer.echo("  hal0 setup")
+        typer.echo("or run non-interactively with recommended defaults:")
+        typer.echo("  hal0 setup --auto")
+        return
+
     probe = HardwareProbe()
     # --plan / --emit-answers are side-effect-free preview paths: a light probe
     # (no NPU validation, no hardware.json write) so they honour their

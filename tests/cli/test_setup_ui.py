@@ -140,3 +140,154 @@ def test_present_but_broken_npu_shows_remedy_not_offer():
 
 def test_pane_copy_has_npu_broken_remedy():
     assert "npu_broken" in PANE_COPY and PANE_COPY["npu_broken"].body
+
+
+# ── WS-F guided flow (issue #1112) ──────────────────────────────────────────
+
+
+def _hw(npu=False, validated=None, ram_gb=96):
+    from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
+
+    return HardwareInfo(
+        platform="strix-halo",
+        ram_mb=ram_gb * 1024,
+        unified_memory_mb=ram_gb * 1024,
+        gpus=[GPUInfo(vendor="amd", vram_mb=512, compute_capable=True)],
+        npu=NPUInfo(present=npu, validated=validated),
+    )
+
+
+def test_pane_copy_has_new_flow_steps():
+    for key in ("network", "hf", "gen", "verify"):
+        assert key in PANE_COPY and PANE_COPY[key].body
+
+
+def test_validate_store_gate():
+    from hal0.cli import setup_ui
+
+    ok, reason = setup_ui._validate_store("")
+    assert not ok and "required" in reason
+    ok, _ = setup_ui._validate_store("relative/path")
+    assert not ok  # must be absolute
+
+
+def test_validate_store_accepts_writable_dir(tmp_path):
+    from hal0.cli import setup_ui
+
+    ok, reason = setup_ui._validate_store(str(tmp_path))
+    assert ok and reason == ""
+
+
+def test_step_gen_mode_mapping(monkeypatch):
+    from hal0.cli import setup_ui
+
+    monkeypatch.setattr(setup_ui, "_draw", lambda *a, **k: None)
+    for pick, expected in (("1", "off"), ("2", "scaffold_only"), ("3", "scaffold_and_download")):
+        monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, _p=pick, **k: _p)
+        assert setup_ui._step_gen(_hw()) == expected
+
+
+def test_port_issues_flags_duplicates_and_reserved(monkeypatch):
+    from hal0.cli import setup_ui
+    from hal0.install.orchestrate import SlotSelection
+
+    monkeypatch.setattr(setup_ui, "_port_in_use", lambda p: False)
+    dupes = setup_ui._port_issues(
+        [SlotSelection("chat", "chat", 9000, "m"), SlotSelection("embed", "embed", 9000, None)]
+    )
+    assert any("both claim it" in m for m in dupes)
+    reserved = setup_ui._port_issues([SlotSelection("chat", "chat", 8080, "m")])
+    assert any("reserved" in m for m in reserved)
+
+
+def test_setup_plan_selections_roundtrip():
+    from hal0.cli.setup_ui import NetworkChoice, SetupPlan
+    from hal0.install.orchestrate import SlotSelection
+
+    plan = SetupPlan(
+        hw=_hw(),
+        network=NetworkChoice("0.0.0.0", "box", None),
+        storage_dir="/srv/models",
+        hf_token="tok",
+        extensions={"openwebui": True, "comfyui": False},
+        slots=[SlotSelection("chat", "chat", 8081, "m1")],
+        npu_opt_in=False,
+        gen_mode="scaffold_only",
+        comfyui_defaults=(("txt2img", "sdxl"),),
+    )
+    sel = plan.selections()
+    assert sel.storage_dir == "/srv/models"
+    assert sel.comfyui_defaults == (("txt2img", "sdxl"),)
+    assert sel.extensions == {"openwebui": True, "comfyui": False}
+    assert [s.model_id for s in sel.slots] == ["m1"]
+
+
+def test_render_review_shows_slots_store_bind_and_download(monkeypatch):
+    from rich.console import Console
+
+    from hal0.cli import setup_ui
+    from hal0.cli.setup_ui import NetworkChoice, SetupPlan
+    from hal0.install.orchestrate import SlotSelection
+
+    monkeypatch.setattr(setup_ui, "_port_in_use", lambda p: False)
+    monkeypatch.setattr(setup_ui, "_free_space_gib", lambda p: 512.0)
+    monkeypatch.setattr(setup_ui, "_slot_size_gb", lambda mid: 4.0 if mid else 0.0)
+
+    plan = SetupPlan(
+        hw=_hw(),
+        network=NetworkChoice("0.0.0.0", "mybox", None),
+        storage_dir="/mnt/ai-models",
+        hf_token="tok",
+        extensions={"openwebui": True, "comfyui": True},
+        slots=[
+            SlotSelection("chat", "chat", 8081, "qwen3-4b"),
+            SlotSelection("embed", "embed", 8083, None),
+        ],
+        npu_opt_in=False,
+        gen_mode="scaffold_only",
+    )
+    con = Console(width=120, record=True)
+    con.print(setup_ui.render_review(plan))
+    text = con.export_text()
+    assert "/mnt/ai-models" in text and "512.0 GiB free" in text
+    assert "LAN (0.0.0.0)" in text and "mybox.local" in text
+    assert "qwen3-4b" in text and "8081" in text
+    assert "scaffold — choose later" in text  # the empty embed slot
+    assert "set" in text  # HF token
+    assert "~4.0 GB" in text  # total download
+
+
+def _stub_flow(monkeypatch, *, build: bool):
+    """Stub every interactive step so run_interactive is deterministic. Returns
+    a dict recording whether _apply ran."""
+    from hal0.cli import setup_ui
+    from hal0.cli.setup_ui import NetworkChoice
+
+    rec: dict = {"applied": None}
+    monkeypatch.setattr(setup_ui, "_draw", lambda *a, **k: None)
+    monkeypatch.setattr(setup_ui, "_step_network", lambda hw: NetworkChoice("127.0.0.1", "h", None))
+    monkeypatch.setattr(setup_ui, "_step_store", lambda hw, d: "/var/lib/hal0/models")
+    monkeypatch.setattr(setup_ui, "_step_hf_token", lambda hw: None)
+    monkeypatch.setattr(setup_ui, "_toggle_extensions", lambda state, hw: None)
+    monkeypatch.setattr(setup_ui, "_provision_slot", lambda *a, **k: None)
+    monkeypatch.setattr(setup_ui, "_step_gen", lambda hw: "off")
+    monkeypatch.setattr(setup_ui.Confirm, "ask", lambda *a, **k: build)
+    monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, **k: "")
+    monkeypatch.setattr(setup_ui, "_apply", lambda plan: rec.__setitem__("applied", plan))
+    return setup_ui, rec
+
+
+def test_review_no_writes_nothing(monkeypatch):
+    # Build? == No → _apply is never called (no slots, sentinel, or pulls).
+    setup_ui, rec = _stub_flow(monkeypatch, build=False)
+    setup_ui.run_interactive(_hw(), storage_dir="/var/lib/hal0/models")
+    assert rec["applied"] is None
+
+
+def test_review_yes_applies_plan(monkeypatch):
+    # Build? == Yes → _apply runs with the resolved plan.
+    setup_ui, rec = _stub_flow(monkeypatch, build=True)
+    setup_ui.run_interactive(_hw(), storage_dir="/var/lib/hal0/models")
+    assert rec["applied"] is not None
+    assert rec["applied"].storage_dir == "/var/lib/hal0/models"
+    assert rec["applied"].gen_mode == "off"
