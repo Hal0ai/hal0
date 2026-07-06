@@ -12,8 +12,45 @@ from hal0.install.suggest import Suggestion
 
 
 def test_pane_copy_has_every_step():
-    for key in ("welcome", "storage", "extensions", "main", "agent", "npu", "review", "install"):
+    for key in (
+        "welcome",
+        "storage",
+        "extensions",
+        "main",
+        "agent",
+        "npu",
+        "capabilities",
+        "review",
+        "install",
+    ):
         assert key in PANE_COPY and PANE_COPY[key].body
+
+
+def test_capabilities_step_always_planned():
+    steps = plan_steps(extensions={"openwebui": True}, npu_present=False)
+    assert "capabilities" in steps
+
+
+def test_provision_slot_pick_scaffold_and_skip(monkeypatch):
+    from hal0.cli import setup_ui
+    from hal0.install.suggest import Suggestion
+
+    sugg = [
+        Suggestion("m1", "M1", 1.0, 0.0, 4096, "gpu-rocm", "embed", "embed", False, recommended=True)
+    ]
+    monkeypatch.setattr(setup_ui, "suggest_models", lambda *a, **k: sugg)
+    monkeypatch.setattr(setup_ui, "_draw", lambda *a, **k: None)
+
+    monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, **k: "x")
+    assert setup_ui._provision_slot("capabilities", "embed", None, "embed", 8083) is None
+
+    monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, **k: "s")
+    scaffold = setup_ui._provision_slot("capabilities", "embed", None, "embed", 8083)
+    assert scaffold is not None and scaffold.slot_name == "embed" and scaffold.model_id is None
+
+    monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, **k: "1")
+    picked = setup_ui._provision_slot("capabilities", "embed", None, "embed", 8083)
+    assert picked.model_id == "m1"
 
 
 def test_render_shell_includes_step_and_pane_text():
