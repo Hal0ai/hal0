@@ -274,6 +274,13 @@ def _stub_flow(monkeypatch, *, build: bool):
     monkeypatch.setattr(setup_ui.Confirm, "ask", lambda *a, **k: build)
     monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, **k: "")
     monkeypatch.setattr(setup_ui, "_apply", lambda plan: rec.__setitem__("applied", plan))
+    # WS-K auto-run (#1114): stub the report card so run_interactive stays offline
+    # + deterministic; record that the hook fired.
+    from hal0.cli import doctor_verify
+
+    monkeypatch.setattr(
+        doctor_verify, "run_verify", lambda **k: rec.__setitem__("verified", True) or 0
+    )
     return setup_ui, rec
 
 
@@ -291,3 +298,17 @@ def test_review_yes_applies_plan(monkeypatch):
     assert rec["applied"] is not None
     assert rec["applied"].storage_dir == "/var/lib/hal0/models"
     assert rec["applied"].gen_mode == "off"
+
+
+def test_apply_auto_runs_verify_report(monkeypatch):
+    # WS-K (#1114): after a Yes-apply, the verify report card auto-runs.
+    setup_ui, rec = _stub_flow(monkeypatch, build=True)
+    setup_ui.run_interactive(_hw(), storage_dir="/var/lib/hal0/models")
+    assert rec.get("verified") is True
+
+
+def test_no_apply_skips_verify_report(monkeypatch):
+    # Aborting at the REVIEW gate must not auto-run the report either.
+    setup_ui, rec = _stub_flow(monkeypatch, build=False)
+    setup_ui.run_interactive(_hw(), storage_dir="/var/lib/hal0/models")
+    assert rec.get("verified") is None
