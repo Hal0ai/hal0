@@ -687,42 +687,14 @@ async def list_models(
                     "owned_by": u.name,
                 }
             )
-    # Advertise live-resolve virtual names so Hermes' /model picker discovers them.
-    # context_length is mandatory: without it Hermes assumes a 256K window.
-    from hal0.normalize.resolver import DEFAULT_CHAINS, LiveSlotResolver
-
-    views = await _normalize_slot_views(request)
-    resolver = LiveSlotResolver(
-        slot_views_provider=lambda: views,
-        loaded_models_provider=lambda: _normalize_loaded_models(request),
-    )
-    # The canonical names (hal0/agent, hal0/utility, hal0/npu) are advertised
-    # whenever they resolve. hal0/npu and hal0/utility fall back to the agent
-    # anchor when no npu/utility slot is loaded (ADR-0023) — intentional: the
-    # name always routes (see resolve_chain's fallback contract).
-    for vname in DEFAULT_CHAINS:  # canonical names only (aliases excluded from the picker)
-        if vname in seen:
-            continue
-        res = await resolver.resolve(vname)
-        if res is None or not res.model_id:
-            continue
-        seen.add(vname)
-        device = next((v.device for v in views if v.model_id == res.model_id), "")
-        data.append(
-            {
-                "id": vname,
-                "object": "model",
-                "created": now,
-                "owned_by": "hal0",
-                "context_length": res.context_length,
-                "_hal0": {
-                    "virtual": True,
-                    "kind": "live-resolve",
-                    "resolves_to": res.model_id,
-                    "device": device,
-                },
-            }
-        )
+    # Canonical virtual names (hal0/agent, hal0/utility, hal0/npu) are
+    # no longer advertised here — the per-slot alias entries above already
+    # cover every enabled llm slot, and dispatch resolves the canonical
+    # names on-demand via the LiveSlotResolver.  Keeping them would
+    # double-list the same slot (once as its alias, once as hal0/<alias>).
+    #
+    # If restoring: iterate DEFAULT_CHAINS and append a live-resolve model
+    # object per resolved virtual name.
 
     return {"object": "list", "data": data}
 
