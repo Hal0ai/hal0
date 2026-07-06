@@ -1,8 +1,13 @@
 # Qwen3-TTS slot — multilingual GPU TTS in a podman container
 # (hal0-slot@qwen3tts). The GPU sibling of the cpu `tts`/kokoro slot; both
-# implement the OpenAI /v1/audio/speech contract. Disabled by default so a
-# fresh install boots with the lighter CPU Kokoro slot; enable this to make
-# the GPU multilingual engine available.
+# implement the OpenAI /v1/audio/speech contract.
+#
+# EXPLICITLY OUT of the installer's seed loop (WS-E, #1107): install.sh only
+# copies `npu tts rerank utility img` into /etc/hal0/slots. This file is an
+# opt-in TEMPLATE the operator drops in by hand (or a future picker enables) to
+# add the GPU multilingual engine alongside the lighter default CPU Kokoro slot.
+# Like the seeded slots it ships DISABLED with no `[model].default` pin, so
+# copying it in never triggers a surprise download or a crash-loop.
 name = "qwen3tts"
 type = "tts"
 device = "gpu-rocm"
@@ -10,6 +15,3 @@ runtime = "container"
 profile = "tts-qwen3"
 enabled = false
 port = 8095
-
-[model]
-default = "qwen3-tts"

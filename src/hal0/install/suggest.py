@@ -53,13 +53,26 @@ def _is_coder(m: CuratedModel) -> bool:
 
 
 def suggest_models(
-    capability: str, hw: HardwareInfo, *, limit: int = 3, prefer_coder: bool = False
+    capability: str,
+    hw: HardwareInfo,
+    *,
+    limit: int = 3,
+    prefer_coder: bool = False,
+    npu_opt_in: bool = False,
 ) -> list[Suggestion]:
     """Return up to ``limit`` curated picks for ``capability`` that fit the
-    detected RAM, largest-first, with exactly one marked ``recommended``."""
+    detected RAM, largest-first, with exactly one marked ``recommended``.
+
+    ``npu_opt_in`` is threaded straight into :func:`derive_device` — the SAME
+    value ``apply_setup`` uses — so the ``device`` a suggestion advertises is
+    exactly the lane the slot will land on. It defaults to ``False`` (never
+    advertise an NPU lane) because an NPU device is only ever offered once the
+    operator has opted in via a present-AND-healthy NPU step. This closes the
+    old mismatch where the picker hardcoded ``npu_opt_in=True`` and advertised
+    an NPU slot that ``apply_setup`` then skipped."""
     wanted = _CAP_MATCH.get(capability, (capability,))
     ram = _ram_gb(hw)
-    device = derive_device(capability, hw, npu_opt_in=True)
+    device = derive_device(capability, hw, npu_opt_in=npu_opt_in)
     profile = derive_profile(capability, device) if device else None
 
     cands = [

@@ -231,6 +231,18 @@ fi
 
 info "system: $(uname -srm)"
 
+# ── Bootstrap-prereq parity (#1098) ─────────────────────────────────────────
+# bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
+# curl/tar/sha256sum in its own preflight() before it ever fetches the
+# release tarball (installer/bootstrap.sh). install.sh itself leans on all
+# three later in this same run (preflight_network's curl probe, the
+# rsync-fallback tar copy below, the FLM .deb sha256 check) — but a direct
+# `sudo bash install.sh`, with no bootstrap in front, never checked for
+# them up front. Run the same check bootstrap.sh does so a minimal host
+# missing one of them fails here with an actionable message instead of a
+# bare "command not found" deep in the install.
+preflight_bootstrap_prereqs || die "missing base prereqs — see above (installer/bootstrap.sh's one-liner preflight requires the same tools)"
+
 # Architecture is a hard requirement in every mode — all shipped binaries
 # (FastFlowLM .deb, toolbox container images) are amd64-only.
 preflight_arch || die "hal0 requires an x86_64 host (see the message above)"
@@ -274,6 +286,52 @@ HAL0_VENV_REQUIRED=1 preflight_venv \
 HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
     || die "no container runtime — install podman (see above), then re-run install.sh"
 
+# ── GPU / NPU device gate (WS-B, #1104) ─────────────────────────────────────
+# preflight_gpu detects GPU/NPU device visibility and, inside an LXC, whether
+# the render node's gid maps to a real group. In `hal0 doctor` it is
+# advisory-only; run here in GATE mode (HAL0_GPU_GATE=1) it returns a code we
+# smart-block on, so a box with broken Proxmox passthrough never installs
+# "successfully" and then silently runs every slot CPU-only:
+#   HAL0_GPU_RC_BROKEN_GID → devices visible but the render gid maps to no group
+#     inside this container (the #1 broken-install shape). HARD STOP with the
+#     dev0 remedy preflight_gpu just printed; the operator fixes the host dev0
+#     line and re-runs.
+#   HAL0_GPU_RC_NO_DEVICE  → no GPU devices inside an LXC. Allow an EXPLICIT
+#     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1, or a y/N confirm on a real TTY;
+#     otherwise stop with the passthrough remedy.
+#   0 → GPU present + wired, or a genuine bare-metal CPU box: proceed silently.
+# Skipped in dev mode (no system slots there). This block is self-contained so
+# later install.sh edits merge around it cleanly.
+_confirm_cpu_only() {
+    # y/N confirm read from the controlling terminal, so it works even when
+    # stdin is the piped install script (`curl … | bash`). Default No; any
+    # read failure (no TTY) also means No.
+    local reply=""
+    printf '%s' "Continue with a CPU-only install anyway? [y/N] " >/dev/tty 2>/dev/null || return 1
+    IFS= read -r reply </dev/tty 2>/dev/null || return 1
+    [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    gpu_rc=0
+    HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
+    if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
+        err "GPU passthrough is broken: the render device is visible but its gid maps to no group in this container."
+        err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
+        exit 1
+    elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
+        if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
+            warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
+        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+            warn "Proceeding with a CPU-only install (confirmed at the prompt)."
+        else
+            err "No GPU devices inside this container. Forward them from the Proxmox host (remedy above), then re-run install.sh."
+            err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+            exit 1
+        fi
+    fi
+fi
+
 # The Hindsight memory engine (installed much later) builds its own venv and
 # pulls litellm, which gates out Python 3.14 via requires-python metadata.
 # Resolve the interpreter for that venv NOW — auto-installing a compatible
@@ -297,9 +355,77 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     preflight_writable "${PREFIX}" /usr/lib/hal0 "${ETC_DIR}" "${UNIT_DIR}" \
         "${VAR_DIR}" /usr/local/bin || pf_rc=$?
     preflight_disk 20 "${VAR_DIR}"            || pf_rc=$?
+    # Model-store disk check (#1098): the probe above only measures
+    # VAR_DIR's own mount (venv, container images, config, registry). Model
+    # weights land at MODELS_DIR, which is frequently a *different* mount
+    # (--models-dir=/data/models, a mounted NAS/NVMe) that the VAR_DIR probe
+    # never touches — a box could sail through pre-flight with 20 GB free on
+    # / while the actual model store is nearly full. Measure it too, but
+    # non-fatal (warn only, per the Q4 posture in
+    # handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
+    # yet at install time, so an undersized store shouldn't hard-block the
+    # rest of the platform gate the way a genuinely full root disk should —
+    # `hal0 setup` / the pull gate re-validates before any download lands.
+    preflight_disk "${HAL0_MODELS_DISK_MIN_GB:-20}" "${MODELS_DIR}" \
+        || warn "model store ${MODELS_DIR} is low on free space — model pulls may fail until freed"
     preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
     if (( pf_rc != 0 )); then
         false
+    fi
+fi
+
+# ── hal0 system user (early, #1098) ─────────────────────────────────────────
+# A dedicated `hal0` system user/group runs the non-root hal0 services:
+# hal0-agent@<id> (the Hermes runner), hermes-gateway, and the shared
+# hindsight-api memory engine. It also owns the HF cache under
+# ${VAR_DIR}/.cache so agent-side HuggingFace pulls work without
+# escalating. Slot inference itself runs in podman containers supervised
+# by hal0-slot@<name>.service — no daemon user needed there.
+#
+# Created here, immediately after pre-flight and BEFORE any filesystem
+# mutation (was previously created much later, after directories/units/
+# config were already written — handoffs/installer-setup-plan-2026-07-05.md
+# Q1), so the render/video group membership below is settled before any
+# later step that depends on group membership or on the user existing
+# (the FLM cache / HF cache / STATE.md ownership work further down).
+ui_step "System user"
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    # Dev installs never create system users or touch systemd.
+    info "dev mode — skipping hal0 system user creation"
+else
+    # hal0 system user/group. System user (UID < 1000), no login shell,
+    # home at ${VAR_DIR} so any stray `~`-relative writes from agent
+    # processes land somewhere sane. ${VAR_DIR} itself doesn't need to
+    # exist yet — useradd only records the home path (no -m flag).
+    # Idempotent via `getent`.
+    if ! getent group hal0 >/dev/null 2>&1; then
+        groupadd --system hal0
+        info "created group hal0"
+    fi
+    if ! getent passwd hal0 >/dev/null 2>&1; then
+        useradd --system --gid hal0 --home-dir "${VAR_DIR}" \
+            --shell /usr/sbin/nologin \
+            --comment "hal0 service user" \
+            hal0
+        info "created user hal0 (system, no login)"
+    fi
+
+    # GPU device access (issue #420). Keeps hal0-user processes (agents,
+    # diagnostics) able to read /dev/kfd + /dev/dri/renderD* when they
+    # probe the GPU. Slot containers get their devices from podman
+    # directly and don't depend on this. Idempotent; only adds groups
+    # that actually exist on the host (a non-GPU box / CI runner simply
+    # has neither).
+    KFD_GROUPS=""
+    for _g in render video; do
+        if getent group "${_g}" >/dev/null 2>&1; then
+            KFD_GROUPS="${KFD_GROUPS:+${KFD_GROUPS},}${_g}"
+        fi
+    done
+    if [[ -n "${KFD_GROUPS}" ]]; then
+        usermod -aG "${KFD_GROUPS}" hal0
+        info "added hal0 to groups: ${KFD_GROUPS}"
     fi
 fi
 
@@ -540,11 +666,35 @@ else
 fi
 
 API_ENV="${ETC_DIR}/api.env"
+# Network coherence (WS-C): derive HAL0_BIND_HOST + HAL0_HOSTNAME +
+# HAL0_ALLOWED_ORIGINS from ONE bind choice so the hal0-api unit, `hal0
+# serve`, mDNS, and the chat-proxy WS origin gate all agree. The unit's
+# ExecStart no longer passes --host — it reads HAL0_BIND_HOST from this
+# file, the same var `hal0 serve` honours (main.py). HAL0_ALLOWED_ORIGINS
+# is seeded with the hostname + every LAN IP + localhost on the API port
+# so whatever URL /api/config/urls advertises passes the WS gate (no 4403
+# mismatch). All derivation lives in src/hal0/install/network.py (single
+# source), invoked via the just-installed venv; a failure degrades to a
+# bare bind var rather than aborting the install.
+NETWORK_ENV_LINES="$(
+    HAL0_BIND_HOST="${API_BIND_HOST}" \
+    HAL0_PORT="${HAL0_PORT}" \
+    HAL0_LAN_IPS="$(hostname -I 2>/dev/null || true)" \
+    "${VENV_DIR}/bin/python" -c 'from hal0.install.network import main; raise SystemExit(main())' 2>/dev/null
+)" || NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
+if [[ -z "${NETWORK_ENV_LINES}" ]]; then
+    NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
+fi
 if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
 HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
+# Network shape — derived from one bind choice (WS-C). HAL0_BIND_HOST is
+# read by BOTH this file's consumer (\`hal0 serve\`) and the hal0-api unit;
+# HAL0_HOSTNAME feeds mDNS; HAL0_ALLOWED_ORIGINS gates the chat-proxy WS
+# upgrade. Regenerate with: hal0 doctor / rerun installer.
+${NETWORK_ENV_LINES}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
 # is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
@@ -553,13 +703,67 @@ HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 HAL0_MEMORY_ENABLED=1
 # HF_TOKEN — HuggingFace token for gated / large model pulls. Easiest path:
 # set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,
-# no-restart update. Or uncomment below and \`systemctl restart hal0-api\`.
+# no-restart update. If HF_TOKEN/HUGGING_FACE_HUB_TOKEN was present in the
+# installer's own environment it was already gathered and persisted to a
+# root-only secrets/ EnvironmentFile below (NOT here — api.env is 0644,
+# world-readable). Uncommenting below also works, but lands the token in
+# that world-readable file; prefer the secrets file or the dashboard.
+# \`systemctl restart hal0-api\` either way.
 # HF_TOKEN=
 # HAL0_TOOLBOX_IMAGE_VULKAN / HAL0_TOOLBOX_IMAGE_ROCM — optional overrides for
 # the per-backend container image refs used by providers/llama_server.py.
 # Unset = use the image pinned in the provider at release time.
 EOF
     info "wrote ${API_ENV}"
+fi
+
+# ── HF_TOKEN gather + persist (WS-D, #1106) ─────────────────────────────────
+# Gather: pre-fill from the installer's own env — HF_TOKEN first, falling
+# back to HUGGING_FACE_HUB_TOKEN — the same precedence already used by the
+# `hal0 setup` in-process apply path and the /api/install/* + /api/models
+# pull routes (#1094). install.sh is non-interactive (see the file header),
+# so there is no TTY prompt here; a headless `HF_TOKEN=hf_xxx sudo -E bash
+# install.sh` run IS the "prompt". No token in either var is a clean,
+# silent skip — public model pulls need none.
+HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+SECRETS_DIR="${VAR_DIR}/secrets"
+HF_SECRETS_ENV="${SECRETS_DIR}/hal0-api.env"
+if [[ -n "${HF_TOKEN_VAL}" ]]; then
+    # Optional `hf whoami` validation — warns on a bad/expired token but
+    # NEVER hard-fails the install (acceptance criterion). Guarded on the
+    # venv's `hf` console script (shipped by the huggingface-hub dependency,
+    # already installed by the "Python environment" step above) existing.
+    HF_CLI="${VENV_DIR}/bin/hf"
+    if [[ -x "${HF_CLI}" ]]; then
+        if HF_TOKEN="${HF_TOKEN_VAL}" "${HF_CLI}" auth whoami >/dev/null 2>&1; then
+            info "HuggingFace token validated (hf auth whoami)"
+        else
+            warn "hf auth whoami could not validate the HuggingFace token — continuing anyway (gated/large model pulls may fail until it's fixed)"
+        fi
+    fi
+
+    # Persist: root:root 0600, under secrets/ — NOT api.env (0644). Re-running
+    # install.sh with HF_TOKEN set rewrites this file (an explicit env var is
+    # an explicit rotate signal); with no token set, any existing file here is
+    # left untouched — never deleted just because the env var was omitted on
+    # a later run.
+    mkdir -p "${SECRETS_DIR}"
+    HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
+    cat > "${HF_SECRETS_TMP}" <<EOF
+# HuggingFace token for gated / large model pulls — gathered at install time
+# from HF_TOKEN / HUGGING_FACE_HUB_TOKEN. Root-only (0600); loaded by
+# hal0-api.service as an EnvironmentFile (see the "Systemd units" step).
+# Rotate by re-running install.sh with a new HF_TOKEN in env, or:
+#   sudo install -m 0600 -o root -g root /dev/stdin ${HF_SECRETS_ENV} <<<"HF_TOKEN=..."
+#   sudo systemctl restart hal0-api
+HF_TOKEN=${HF_TOKEN_VAL}
+EOF
+    chown root:root "${HF_SECRETS_TMP}" 2>/dev/null || true
+    chmod 0600 "${HF_SECRETS_TMP}"
+    mv -f "${HF_SECRETS_TMP}" "${HF_SECRETS_ENV}"
+    info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
+else
+    info "no HF_TOKEN / HUGGING_FACE_HUB_TOKEN in env — skipping (gated model pulls will need one later via the dashboard Settings -> Secrets tab, or rerun install.sh with HF_TOKEN set)"
 fi
 
 UPSTREAMS_TOML="${ETC_DIR}/upstreams.toml"
@@ -619,7 +823,14 @@ User=root
 UMask=0002
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
-ExecStart=${HAL0_BIN} serve --host ${API_BIND_HOST} --port \${HAL0_PORT}
+# Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
+# on a fresh box with no token gathered at install time, and a missing
+# EnvironmentFile= target must not block the unit from starting.
+EnvironmentFile=-${HF_SECRETS_ENV}
+# No --host here (WS-C): the bind host comes from HAL0_BIND_HOST in the
+# EnvironmentFile above — the SAME var \`hal0 serve\` reads — so the unit
+# and the CLI can never disagree on the bind address.
+ExecStart=${HAL0_BIN} serve --port \${HAL0_PORT}
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
@@ -1219,51 +1430,16 @@ else
     fi
 fi
 
-# ── hal0 system user ────────────────────────────────────────────────────────
-# A dedicated `hal0` system user/group runs the non-root hal0 services:
-# hal0-agent@<id> (the Hermes runner), hermes-gateway, and the shared
-# hindsight-api memory engine. It also owns the HF cache under
-# ${VAR_DIR}/.cache so agent-side HuggingFace pulls work without
-# escalating. Slot inference itself runs in podman containers supervised
-# by hal0-slot@<name>.service — no daemon user needed there.
-ui_step "System user"
-
+# ── hal0 system user: device/dir-dependent follow-up (#1098) ───────────────
+# The user/group + render/video membership themselves are created MUCH
+# earlier now (see "── hal0 system user (early, #1098) ──" right after
+# pre-flight, before any filesystem mutation). What's left here needs
+# directories that only exist from this point on (VAR_DIR's tree, created
+# in "Filesystem layout" above) — the hal0 user's HF cache, the FLM (NPU)
+# cache, and the shared STATE.md.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    # Dev installs never create system users or touch systemd.
-    info "dev mode — skipping hal0 system user creation"
+    : # dev mode never created the hal0 user above; nothing to follow up.
 else
-    # 1. hal0 system user/group. System user (UID < 1000), no login
-    #    shell, home at ${VAR_DIR} so any stray `~`-relative writes from
-    #    agent processes land somewhere sane. Idempotent via `getent`.
-    if ! getent group hal0 >/dev/null 2>&1; then
-        groupadd --system hal0
-        info "created group hal0"
-    fi
-    if ! getent passwd hal0 >/dev/null 2>&1; then
-        useradd --system --gid hal0 --home-dir "${VAR_DIR}" \
-            --shell /usr/sbin/nologin \
-            --comment "hal0 service user" \
-            hal0
-        info "created user hal0 (system, no login)"
-    fi
-
-    # GPU device access (issue #420). Keeps hal0-user processes (agents,
-    # diagnostics) able to read /dev/kfd + /dev/dri/renderD* when they
-    # probe the GPU. Slot containers get their devices from podman
-    # directly and don't depend on this. Idempotent; only adds groups
-    # that actually exist on the host (a non-GPU box / CI runner simply
-    # has neither).
-    KFD_GROUPS=""
-    for _g in render video; do
-        if getent group "${_g}" >/dev/null 2>&1; then
-            KFD_GROUPS="${KFD_GROUPS:+${KFD_GROUPS},}${_g}"
-        fi
-    done
-    if [[ -n "${KFD_GROUPS}" ]]; then
-        usermod -aG "${KFD_GROUPS}" hal0
-        info "added hal0 to groups: ${KFD_GROUPS}"
-    fi
-
     # FLM (NPU) model cache. The npu slot bind-mounts this dir into the FLM
     # container, which runs as uid 1000 — NOT the host hal0 uid (a system
     # uid < 1000). If the dir is missing at container start podman fails
@@ -1488,13 +1664,20 @@ else
         fi
     fi
 
+    # Escape hatch: HAL0_SKIP_OPENWEBUI=1 for operators who don't want the
+    # bundled chat UI — same "skip now, install later" contract as
+    # HAL0_SKIP_HERMES above. `hal0 app install openwebui` (issue #1102 / Q9)
+    # runs the identical enable+guard logic below, so skipping here is
+    # lossless.
     if [[ -f "${OPENWEBUI_UNIT_DST}" ]]; then
+        if [[ "${HAL0_SKIP_OPENWEBUI:-0}" -eq 1 ]]; then
+            info "skipping OpenWebUI (HAL0_SKIP_OPENWEBUI=1) — run '${HAL0_BIN} app install openwebui' later"
         # OpenWebUI runs as a podman container (ExecStart=podman run …) — the
         # same runtime as the slots, so the preflight that installed podman
         # already satisfies it. Without a usable runtime the unit would
         # restart-loop with status=203/EXEC, so guard the enable anyway — the
         # dashboard/API are unaffected and the built-in chat works without it.
-        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+        elif command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             systemctl enable --now hal0-openwebui
             # OpenWebUI can take a moment to come up while it pulls the
             # image / initialises its sqlite db. Don't fail the installer
@@ -1738,3 +1921,30 @@ SUMMARY_LINES+=(
 )
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
+
+# ── Stage-2 guided setup handoff (issue #1112) ──────────────────────────────
+# Stage-1 (everything above) did system prep + the platform/GPU gate + the
+# --auto slot/sentinel seed. Stage-2 is the INTERACTIVE `hal0 setup` flow
+# (network → store → HF token → slots → NPU → gen → apps → review → apply).
+# On a real terminal, offer to drop the operator straight into it; on a piped
+# / headless (`curl … | bash`) run there is no interactive stdin, so just
+# print the command. Self-contained so later install.sh edits merge around it.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "1" ]]; then
+    _confirm_launch_setup() {
+        # y/N read from the controlling terminal so it works even when stdin is
+        # the piped installer. Default Yes; any read failure (no TTY) → No, and
+        # the caller falls through to just printing the command.
+        local reply=""
+        printf '\n%s' "Launch the guided hal0 setup now? [Y/n] " >/dev/tty 2>/dev/null || return 1
+        IFS= read -r reply </dev/tty 2>/dev/null || return 1
+        [[ -z "${reply}" || "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
+    }
+    if [[ -r /dev/tty ]] && _confirm_launch_setup; then
+        "${HAL0_BIN}" setup \
+            || warn "guided setup exited non-zero — re-run '${BOLD}hal0 setup${RST}' anytime"
+    else
+        printf '\n'
+        info "Finish setup any time from a terminal: ${BOLD}hal0 setup${RST}"
+        info "  (guided: network, model store, slots, NPU, image gen, apps)"
+    fi
+fi

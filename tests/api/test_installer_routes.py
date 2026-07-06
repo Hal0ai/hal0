@@ -115,9 +115,81 @@ def test_install_complete_writes_sentinel_atomically(
     assert sentinel.exists()
     assert sentinel.read_text(encoding="utf-8").strip() == "first_run_done"
 
-    # Idempotent: a second call is fine.
+    # WS-C (#1105): first-run install endpoints close once the sentinel
+    # exists — a second call is a safe typed refusal, not a silent no-op.
     r2 = isolated_client.post("/api/install/complete")
-    assert r2.status_code == 200
+    assert r2.status_code == 409, r2.text
+    assert r2.json()["error"]["code"] == "install.closed"
+
+
+# ── WS-C (#1105): close /api/install/* provisioning endpoints post-setup ────
+
+
+def _write_sentinel(tmp_hal0_home: str) -> Path:
+    var_lib = Path(tmp_hal0_home) / "var-lib" / "hal0"
+    var_lib.mkdir(parents=True, exist_ok=True)
+    sentinel = var_lib / ".first_run_done"
+    sentinel.write_text("first_run_done\n", encoding="utf-8")
+    return sentinel
+
+
+def test_install_complete_closed_when_sentinel_present(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """A sentinel written by another path (e.g. /apply) also closes /complete."""
+    _write_sentinel(tmp_hal0_home)
+
+    r = isolated_client.post("/api/install/complete")
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["error"]["code"] == "install.closed"
+
+    # GET /state keeps working and still reports first_run: false.
+    state = isolated_client.get("/api/install/state")
+    assert state.status_code == 200
+    assert state.json()["first_run"] is False
+
+
+def test_install_apply_closed_when_sentinel_present(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """POST /apply refuses fast (before any tier/hardware work) once closed."""
+    _write_sentinel(tmp_hal0_home)
+
+    r = isolated_client.post(
+        "/api/install/apply",
+        json={"tier": "hal0-Default", "storage_dir": tmp_hal0_home, "npu_opt_in": False},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "install.closed"
+
+
+def test_install_apply_selections_closed_when_sentinel_present(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """POST /apply-selections refuses once closed, same as /apply."""
+    _write_sentinel(tmp_hal0_home)
+
+    r = isolated_client.post(
+        "/api/install/apply-selections",
+        json={"storage_dir": tmp_hal0_home, "npu_opt_in": False, "extensions": {}, "slots": []},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "install.closed"
+
+
+def test_install_apply_open_without_sentinel_still_validates_body(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Without a sentinel, /apply is unaffected — normal validation still runs."""
+    r = isolated_client.post(
+        "/api/install/apply",
+        json={"tier": "not-a-real-tier", "storage_dir": tmp_hal0_home},
+    )
+    # Unknown tier still 404s (not closed) — the endpoint behaves as before
+    # first-run.
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] != "install.closed"
 
 
 def test_install_probe_writes_hardware_json(

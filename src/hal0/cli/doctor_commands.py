@@ -98,6 +98,11 @@ def _locate_preflight() -> Path | None:
 @app.callback(invoke_without_command=True)
 def doctor(
     ctx: typer.Context,
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Render the post-setup report card (checks + live URLs + doc links) against the live API.",
+    ),
     plain: bool = typer.Option(
         False,
         "--plain",
@@ -109,13 +114,23 @@ def doctor(
         help="Space-separated TCP ports for the port collision check (default: '8080 3001').",
     ),
 ) -> None:
-    """Re-run pre-flight checks (systemd, python, docker, disk, ports)."""
+    """Re-run pre-flight checks (systemd, python, docker, disk, ports).
+
+    ``--verify`` instead renders the WS-K report card: a pass/warn/fail summary
+    over the live health seams (API, runners, capability slots, hindsight,
+    OpenWebUI, Hermes) plus the computed URLs + help links. Non-blocking; exits
+    2 only on a critical (no reachable URL / zero healthy runners).
+    """
     # When a sub-command (e.g. ``toolbox-pull``) is invoked, Typer still
     # calls the callback first. Bail out without running preflight so the
     # sub-command handles the request on its own — preflight is the
     # "default" only when no sub-command is given.
     if ctx.invoked_subcommand is not None:
         return
+    if verify:
+        from hal0.cli.doctor_verify import run_verify
+
+        raise typer.Exit(run_verify(console=console))
     preflight = _locate_preflight()
     if preflight is None:
         console.print(
