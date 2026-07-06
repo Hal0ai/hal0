@@ -358,44 +358,56 @@ if [[ "${DEV_MODE}" -eq 0 && -n "${CURRENT_LINK}" ]]; then
     info "current → ${PREFIX}"
 fi
 
-# Seed hal0.toml's [models].pull_root when the operator picked a non-default
-# directory, so the API and CLI both read the same value from the
-# canonical config without an extra dashboard step. Idempotent: a
-# previous run with the same value is a no-op; a different value
-# overwrites (operator just re-ran the installer with a new path).
+# Seed hal0.toml's [models].store (single source of truth: pulls, scans,
+# and slot container mounts all resolve through it) when the operator
+# picked a non-default directory, so the API and CLI both read the same
+# value from the canonical config without an extra dashboard step. The
+# deprecated pull_root is written too so a downgrade still reads the same
+# path. Idempotent: a previous run with the same value is a no-op; a
+# different value overwrites (operator just re-ran the installer with a
+# new path). Historically only pull_root was seeded and NOT added to the
+# scan roots — models pulled to a custom dir were never registered and
+# slots died with "gguf ... No such file or directory".
 HAL0_TOML="${ETC_DIR}/hal0.toml"
 if [[ "${MODELS_DIR}" != "/var/lib/hal0/models" ]]; then
-    if ! grep -qE "^\\s*pull_root\\s*=\\s*\"${MODELS_DIR//\//\\/}\"" "${HAL0_TOML}" 2>/dev/null; then
+    if ! grep -qE "^\\s*store\\s*=\\s*\"${MODELS_DIR//\//\\/}\"" "${HAL0_TOML}" 2>/dev/null; then
         if [[ -f "${HAL0_TOML}" ]] && grep -q "^\\[models\\]" "${HAL0_TOML}"; then
-            # [models] table exists — patch pull_root in place (or append
-            # under the existing table). Cheap awk pass; no toml parser
-            # so we accept the limitation that nested tables under
+            # [models] table exists — patch store + pull_root in place (or
+            # append under the existing table). Cheap regex pass; no toml
+            # parser so we accept the limitation that nested tables under
             # [models.xxx] aren't supported (the schema has none).
             python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
 import sys, re, pathlib
 path = pathlib.Path(sys.argv[1])
 new_root = sys.argv[2]
 text = path.read_text(encoding="utf-8")
-# Replace existing pull_root inside [models], else append before the next [section]
-m = re.search(r"^\[models\][^\[]*", text, flags=re.MULTILINE)
+# Replace existing store/pull_root inside [models], else append before the
+# next [section]. The section body is "every following line that does not
+# START with '['" — NOT `[^\[]*`, which the old patcher used and which
+# stopped at the first '[' of a list value like roots = ["/x"], splicing
+# the table in half and corrupting the TOML.
+m = re.search(r"^\[models\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
 if m:
     block = m.group(0)
-    if re.search(r"^\s*pull_root\s*=", block, flags=re.MULTILINE):
-        new_block = re.sub(r"^\s*pull_root\s*=.*$",
-                           f'pull_root = "{new_root}"',
+    for key in ("store", "pull_root"):
+        if re.search(rf"^\s*{key}\s*=", block, flags=re.MULTILINE):
+            block = re.sub(rf"^\s*{key}\s*=.*$",
+                           f'{key} = "{new_root}"',
                            block, count=1, flags=re.MULTILINE)
-    else:
-        new_block = block.rstrip() + f'\npull_root = "{new_root}"\n\n'
-    text = text[:m.start()] + new_block + text[m.end():]
+        else:
+            block = block.rstrip() + f'\n{key} = "{new_root}"\n'
+    if not block.endswith("\n"):
+        block += "\n"
+    text = text[:m.start()] + block + text[m.end():]
 else:
-    text = text.rstrip() + f'\n\n[models]\npull_root = "{new_root}"\n'
+    text = text.rstrip() + f'\n\n[models]\nstore = "{new_root}"\npull_root = "{new_root}"\n'
 path.write_text(text, encoding="utf-8")
 PYEOF
         else
             mkdir -p "${ETC_DIR}"
-            printf '\n[models]\npull_root = "%s"\n' "${MODELS_DIR}" >> "${HAL0_TOML}"
+            printf '\n[models]\nstore = "%s"\npull_root = "%s"\n' "${MODELS_DIR}" "${MODELS_DIR}" >> "${HAL0_TOML}"
         fi
-        info "wrote [models].pull_root → ${HAL0_TOML}"
+        info "wrote [models].store (+pull_root) → ${HAL0_TOML}"
     fi
 fi
 
@@ -1249,6 +1261,23 @@ else
     if [[ -n "${KFD_GROUPS}" ]]; then
         usermod -aG "${KFD_GROUPS}" hal0
         info "added hal0 to groups: ${KFD_GROUPS}"
+    fi
+
+    # FLM (NPU) model cache. The npu slot bind-mounts this dir into the FLM
+    # container, which runs as uid 1000 — NOT the host hal0 uid (a system
+    # uid < 1000). If the dir is missing at container start podman fails
+    # with exit 125 (statfs ... no such file or directory); if it's owned
+    # hal0:hal0 only, the container gets Permission denied creating model
+    # subdirs on `flm pull`. uid 1000 + hal0 group + setgid 2775 satisfies
+    # both writers (container via owner, host flm probe/pull via group).
+    # Honours HAL0_FLM_MODELS_DIR / [models].flm_store relocations; created
+    # whenever an XDNA NPU node is present (harmless otherwise).
+    if [[ -e /dev/accel/accel0 ]]; then
+        FLM_CACHE_DIR="${HAL0_FLM_MODELS_DIR:-${VAR_DIR}/.config/flm/models}"
+        mkdir -p "${FLM_CACHE_DIR}"
+        chown 1000:hal0 "${FLM_CACHE_DIR}" 2>/dev/null || chown hal0:hal0 "${FLM_CACHE_DIR}" || true
+        chmod 2775 "${FLM_CACHE_DIR}" || true
+        info "FLM model cache: ${FLM_CACHE_DIR} (container-uid writable, setgid hal0)"
     fi
 
     # HuggingFace hub cache (#275 bug 4). The hal0 user's HOME is

@@ -24,6 +24,11 @@
 #                                flag so a fresh box never finishes with every
 #                                slot dead ("no container runtime found").
 #                                `preflight_docker` is a back-compat alias.
+#   preflight_gpu              — GPU/NPU device nodes visible + group wiring
+#                                sane. Soft (always returns 0; CPU-only is a
+#                                valid install) but prints the exact Proxmox
+#                                LXC dev0/gid fix when devices are missing
+#                                inside a container.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #   preflight_all              — run all of the above; aggregate non-zero
@@ -454,6 +459,68 @@ preflight_podman_forward() {
     return 0
 }
 
+# GPU / NPU device visibility. Soft check (always returns 0): CPU-only
+# installs are valid, but a Proxmox LXC with the GPU forwarded wrong is the
+# single most common broken-install shape — so when devices are missing or
+# their group wiring is off, print the exact host-side fix instead of a
+# generic warning. See docs/guides/proxmox.md for the full walkthrough.
+preflight_gpu() {
+    local in_container=""
+    if [[ -f /run/systemd/container ]] || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+        in_container="lxc"
+    fi
+
+    local have_render="" have_kfd="" have_accel=""
+    compgen -G "/dev/dri/renderD*" >/dev/null 2>&1 && have_render=1
+    [[ -e /dev/kfd ]] && have_kfd=1
+    [[ -e /dev/accel/accel0 ]] && have_accel=1
+
+    if [[ -n "${have_render}" ]]; then
+        info "gpu: $(ls /dev/dri/renderD* 2>/dev/null | tr '\n' ' ')present"
+    fi
+    [[ -n "${have_kfd}"   ]] && info "gpu: /dev/kfd present (ROCm compute)"
+    [[ -n "${have_accel}" ]] && info "npu: /dev/accel/accel0 present (AMD XDNA)"
+
+    if [[ -z "${have_render}" ]]; then
+        if [[ "${in_container}" == "lxc" ]]; then
+            warn "gpu: no /dev/dri/renderD* inside this container — GPU slots will run CPU-only"
+            warn "  Forward the devices from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf, PVE 8.2+):"
+            warn "    dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>"
+            warn "    dev1: /dev/kfd                    # ROCm compute (optional)"
+            warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
+            warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: docs/guides/proxmox.md"
+        else
+            warn "gpu: no /dev/dri/renderD* — no GPU driver bound (CPU-only install?)"
+            warn "  AMD: check 'lspci -nnk' shows 'Kernel driver in use: amdgpu'; very new"
+            warn "  silicon (Strix Halo) needs kernel >= 6.14 + current firmware."
+        fi
+        return 0
+    fi
+
+    # Node group wiring: the render node's gid should map to a named group
+    # (usually 'render') that hal0/containers can be given. In a Proxmox LXC
+    # a dev0 entry with the HOST's gid leaves the node owned by an unmapped
+    # gid inside the container — userspace then gets Permission denied.
+    local node gid grpname
+    node="$(ls /dev/dri/renderD* 2>/dev/null | head -1)"
+    if [[ -n "${node}" ]]; then
+        gid="$(stat -c '%g' "${node}" 2>/dev/null)"
+        grpname="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)"
+        if [[ -z "${grpname}" ]]; then
+            warn "gpu: ${node} is owned by gid ${gid}, which maps to NO group in this container"
+            if [[ "${in_container}" == "lxc" ]]; then
+                local want_gid
+                want_gid="$(getent group render 2>/dev/null | cut -d: -f3)"
+                warn "  Fix on the Proxmox host: dev0: ${node},gid=${want_gid:-<render gid>}"
+                warn "  (gid= must be the group id INSIDE the container, not the host's)"
+            fi
+        else
+            info "gpu: ${node} → group ${grpname} (gid ${gid})"
+        fi
+    fi
+    return 0
+}
+
 preflight_disk() {
     local min_gb="${1:-${HAL0_DISK_MIN_GB:-20}}"
     local target="${2:-${HAL0_DISK_TARGET:-/var/lib}}"
@@ -547,6 +614,7 @@ preflight_all() {
     preflight_network || rc=$?
     preflight_container_runtime || rc=$?
     preflight_podman_forward || rc=$?
+    preflight_gpu     || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then
