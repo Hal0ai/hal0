@@ -4,6 +4,12 @@
 # holds GPU memory — LLM slots are unloaded while generation is active, and
 # ComfyUI's models are freed (POST /free) when LLM slots come back after
 # [image].idle_restore_minutes with no jobs (spec §7).
+#
+# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
+# box boots a grey tile — no surprise multi-GB checkpoint download (the previous
+# `sdxl-turbo` pin) and no crash-loop. ComfyUI capability picks land via the
+# guided setup's `comfyui_defaults` sidecar → POST /api/comfyui/models/fetch; the
+# operator enables this slot once a checkpoint is present.
 
 name = "img"
 type = "image"
@@ -11,11 +17,8 @@ provider = "comfyui"
 device = "gpu-rocm"
 runtime = "container"
 profile = "comfyui"
-enabled = true
+enabled = false
 port = 8188
-
-[model]
-default = "sdxl-turbo"
 
 [image]                       # persisted image-gen settings (#599)
 idle_restore_minutes = 60

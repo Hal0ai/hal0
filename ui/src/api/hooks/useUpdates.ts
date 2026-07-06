@@ -102,6 +102,56 @@ export function useSetUpdateChannel() {
 // Poll an apply job until it lands in a terminal state. Polling stops on
 // applied/failed, on null jobId, or on unmount. Returns the latest job
 // snapshot plus a terminal flag so callers can fire toasts once.
+// ── Post-update slot drift (WS-J, #1111) ────────────────────────────────────
+//
+// After a self-update the slot unit files are re-rendered on disk, but the
+// running containers are NOT bounced (a restart could kill a mid-inference
+// request). Drifted slots therefore keep serving the pre-update launch
+// command until an operator opts into a restart. `useSlotDrift` backs the
+// dashboard "N slots need restart" banner; `useRestartDriftedSlots` bounces
+// only the drifted slots on demand.
+
+export interface SlotDriftEntry {
+  slot: string
+  diffs: Array<{ key: string; running: string | null; rendered: string | null }>
+}
+
+export interface SlotDrift {
+  count: number
+  slots: SlotDriftEntry[]
+}
+
+export function useSlotDrift() {
+  return useQuery({
+    queryKey: ['updates', 'slot-drift'],
+    queryFn: () => apiGet<SlotDrift>(ENDPOINTS.updateSlotDrift),
+    // Cheap live probe (podman inspect per slot) — a slow refetch keeps the
+    // banner honest after a background update without hammering the runtime.
+    refetchInterval: 30_000,
+  })
+}
+
+export interface RestartSlotsResult {
+  restarted: string[]
+  failed: Array<{ slot: string; error: string }>
+  count: number
+}
+
+export function useRestartDriftedSlots() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (slots?: string[]) =>
+      apiPost<RestartSlotsResult>(
+        ENDPOINTS.updateRestartSlots,
+        slots && slots.length ? { slots } : {},
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['updates', 'slot-drift'] })
+      qc.invalidateQueries({ queryKey: ['slots'] })
+    },
+  })
+}
+
 export function useUpdateJob(jobId: string | null): {
   job: UpdateJob | null
   terminal: boolean

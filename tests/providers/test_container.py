@@ -728,6 +728,74 @@ class TestLoadSync:
 
         assert "--alias chadrock-35b-ace-saber" in unit_file.read_text()
 
+    def test_install_and_update_render_byte_identical_units(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """WS-J (#1103): install (``load_sync``) and update
+        (``rerender_unit_sync``) render **byte-identical** unit files for the
+        same slot config, because both go through the one renderer
+        ``_render_unit_text``.
+
+        Regression guard for the specific divergence WS-J removes: on a
+        LAN-exposed box (``[slots].publish_host = 0.0.0.0``) the pre-fix update
+        path dropped ``publish_host`` and silently narrowed the bind back to
+        loopback — so a fresh box and an updated box ended up with different
+        units for the same slot.
+        """
+        profile = _moe_profile()
+        slot_cfg = {
+            "name": "test-container",
+            "port": 8095,
+            "profile": "rocm",
+            "model": {"default": "m", "context_size": 131072},
+            "server": {"extra_args": "--override-kv k=bool:false"},
+        }
+        model_info = {"path": "/mnt/ai-models/model.gguf", "_model_key": "m"}
+
+        # LAN-exposed box: the operator widened the publish bind. Both render
+        # paths must honour it identically.
+        monkeypatch.setattr("hal0.providers.container._slot_publish_host", lambda: "0.0.0.0")
+
+        def fake_run(*args: str, check: bool = True) -> MagicMock:
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        # ── fresh install: load_sync writes the unit (systemctl mocked) ──
+        fresh_provider = ContainerProvider()
+        fresh_unit = tmp_path / "fresh.service"
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(fresh_provider, "_run", side_effect=fake_run),
+            patch.object(fresh_provider, "_unit_path", return_value=fresh_unit),
+        ):
+            fresh_provider.load_sync(slot_cfg, model_info)
+        fresh_text = fresh_unit.read_text()
+        # Sanity: the widened bind actually rendered on the fresh install.
+        assert "--publish=0.0.0.0:8095:8095" in fresh_text
+
+        # ── updated box: a STALE unit already exists; rerender rewrites it ──
+        upd_provider = ContainerProvider()
+        upd_unit = tmp_path / "updated.service"
+        upd_unit.write_text("# stale pre-update unit — forces a rewrite\n")
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(upd_provider, "_unit_path", return_value=upd_unit),
+        ):
+            changed = upd_provider.rerender_unit_sync(slot_cfg, model_info)
+
+        assert changed is True
+        # The WS-J guarantee: byte-for-byte identical units.
+        assert upd_unit.read_text() == fresh_text
+
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
         what actually launches."""

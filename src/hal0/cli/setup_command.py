@@ -8,6 +8,8 @@ spec §11)."""
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 
 import httpx
 import typer
@@ -15,9 +17,10 @@ import typer
 from hal0.cli._shared import _api_base
 from hal0.config import paths
 from hal0.config.schema import HardwareInfo
-from hal0.hardware.probe import HardwareProbe
+from hal0.hardware.probe import HardwareProbe, HardwareProbeError
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
+from hal0.install.profile_derive import npu_healthy
 
 #: capability → (slot_name, port) for the slots first-run provisions. Mirrors
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
@@ -135,7 +138,10 @@ def build_auto_selections(
         storage_dir=storage_dir,
         slots=slots,
         extensions=ext,
-        npu_opt_in=bool(hw.npu.present),
+        # NPU routing on ONLY when present AND healthy (#1109): a present-but-
+        # broken NPU (npu.validated False/None) must not auto-advertise a lane
+        # apply_setup would skip. Same single npu_opt_in the picker + apply use.
+        npu_opt_in=npu_healthy(hw),
         comfyui_defaults=comfyui_defaults,
     )
 
@@ -162,8 +168,98 @@ def setup(
         "--no-slots",
         help="Seed the sentinel + extensions but NO model-slot picks (installer default; operator chooses models later).",
     ),
+    answers: str | None = typer.Option(
+        None,
+        "--answers",
+        help="Path to a hal0-setup.yaml answer file for a fully non-interactive run.",
+    ),
+    emit_answers: str | None = typer.Option(
+        None,
+        "--emit-answers",
+        help="Write the resolved choices to a hal0-setup.yaml and exit.",
+    ),
+    plan: bool = typer.Option(
+        False,
+        "--plan",
+        "--dry-run",
+        help="Resolve + print the plan; write nothing (no slots, sentinel, pulls, or extensions).",
+    ),
 ) -> None:
-    hw = HardwareProbe().probe()
+    # Two-stage handoff (issue #1112): the guided Stage-2 flow is interactive
+    # (rich prompts on a real TTY). When it is requested (no --auto / --answers /
+    # --plan / --emit-answers) but stdin is NOT a terminal — a piped/headless
+    # `curl … | hal0 setup` or CI run — DON'T launch rich prompts (they would
+    # EOF immediately). Print the exact command to run instead, mirroring what
+    # install.sh's Stage-1 tail prints on a headless install. HAL0_FORCE_INTERACTIVE
+    # bypasses the guard so tests can drive the flow over a pipe.
+    interactive = not (auto or plan or answers is not None or emit_answers is not None)
+    if interactive and not sys.stdin.isatty() and not os.environ.get("HAL0_FORCE_INTERACTIVE"):
+        typer.echo("hal0 setup is interactive — run it from a terminal:")
+        typer.echo("  hal0 setup")
+        typer.echo("or run non-interactively with recommended defaults:")
+        typer.echo("  hal0 setup --auto")
+        return
+
+    probe = HardwareProbe()
+    # --plan / --emit-answers are side-effect-free preview paths: a light probe
+    # (no NPU validation, no hardware.json write) so they honour their
+    # "writes nothing" contract.
+    if plan:
+        from hal0.cli.setup_plan import run_plan
+
+        hw = probe.probe()
+        raise typer.Exit(
+            code=run_plan(
+                hw,
+                answers=answers,
+                storage_dir=storage_dir,
+                no_extensions=no_extensions,
+                no_slots=no_slots,
+            )
+        )
+    if emit_answers is not None:
+        from hal0.install.answers import load_answers, write_answers
+
+        hw = probe.probe()
+        sel = (
+            load_answers(answers, hw)
+            if answers is not None
+            else build_auto_selections(
+                hw,
+                storage_dir=storage_dir,
+                with_extensions=not no_extensions,
+                with_slots=not no_slots,
+                existing_slots=_existing_slot_names(),
+            )
+        )
+        write_answers(sel, emit_answers)
+        typer.echo(f"Wrote resolved setup answers to {emit_answers}")
+        return
+    # Real-apply paths only: persist an authoritative hardware.json so slots and
+    # the FLM container spec read REAL device facts (not the Strix-Halo constant
+    # fallbacks). validate_npu=True records the functional `flm validate` result
+    # (npu.validated) before any slot launches.
+    hw = probe.probe(validate_npu=True)
+    try:
+        probe.write(hw)
+    except HardwareProbeError as exc:
+        # Non-fatal: a non-root `hal0 setup` can't write /etc/hal0. The probe
+        # result still drives this run; the daemon persists it later.
+        typer.echo(f"warning: could not persist hardware.json ({exc})", err=True)
+    if answers is not None:
+        from hal0.install.answers import gen_download_requested, load_answers
+
+        sel = load_answers(answers, hw)
+        asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
+        # WS-G (#1113): gen.mode: scaffold_and_download opts into the ComfyUI
+        # per-variant fetch. The loader records the picks in comfyui_defaults;
+        # perform the working download here (skipped under --no-pull, matching
+        # the LLM-slot pull deferral). The img slot activates on the first land.
+        if not no_pull and gen_download_requested(answers) and sel.comfyui_defaults:
+            from hal0.comfyui.provision import provision_comfyui_downloads
+
+            provision_comfyui_downloads(sel.comfyui_defaults)
+        return
     if auto:
         sel = build_auto_selections(
             hw,

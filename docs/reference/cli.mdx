@@ -265,11 +265,17 @@ Walks `/etc/hal0/capabilities.toml`: selections whose backend can't serve the
 model are snapped to the model's first legal backend; selections whose model
 left the catalog are cleared. Idempotent.
 
+## `hal0 app` — optional apps
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `app install <name>` | Install + enable an app skipped at install time (currently: `openwebui`). Runs the identical wiring as the install-time path (`HAL0_SKIP_OPENWEBUI=1`), so "skip now, install later" is lossless. | — |
+
 ## `hal0 agent` — bundled agents
 
 | Command | Purpose | Key options |
 |---|---|---|
-| `agent install <name>` | Install a bundled agent (`hermes` provisions a managed venv in the foreground). | `--switch` |
+| `agent install <name>` | Install a bundled agent (`hermes` provisions a managed venv in the foreground, including the Telegram/Discord gateway). | `--switch`, `--gateway`/`--no-gateway` |
 | `agent uninstall <name>` | Uninstall a bundled agent. | `--keep-memory` |
 | `agent list` | List installed bundled agents. | `--json` |
 | `agent peers` | List discoverable agent identity cards from the `agents` memory dataset. | — |

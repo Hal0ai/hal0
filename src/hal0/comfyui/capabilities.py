@@ -17,6 +17,12 @@ class ModelVariant:
     # Each inner tuple = positional/flag args for ONE subprocess invocation.
     # Empty tuple = one call with no extra args (e.g. get_esrgan.sh).
     fetch_steps: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    # Approximate on-disk download size in GB, surfaced (with est_seconds) by the
+    # guided-setup variant picker (WS-G, #1113) so the operator sees the cost
+    # before opting into a large pull. These are rough estimates of the total
+    # weights the fetch_steps download (diffusion/checkpoint + LoRA), NOT exact
+    # byte counts — sibling encoders/VAE are shared across variants.
+    approx_gb: float = 0.0
 
 
 @dataclass
@@ -48,6 +54,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_qwen_image.sh",
                 "Qwen-Image-2512-BF16-4-Step-LoRA.json",
                 fetch_steps=(("1", "bf16"), ("3", "bf16")),
+                approx_gb=41.0,
             ),
             ModelVariant(
                 "qwen-image",
@@ -57,6 +64,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_qwen_image.sh",
                 "Qwen-Image-2512-BF16-20-Steps.json",
                 fetch_steps=(("1", "bf16"),),
+                approx_gb=41.0,
             ),
             ModelVariant(
                 "sdxl",
@@ -66,6 +74,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_sdxl.sh",
                 "SDXL-Lightning-8step.json",
                 fetch_steps=(("--precision", "fp16"),),
+                approx_gb=7.0,
             ),
         ],
     ),
@@ -82,6 +91,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_qwen_image.sh",
                 "Qwen-Image-Edit-2511-BF16-4-Step-LoRA.json",
                 fetch_steps=(("2", "bf16"), ("4", "bf16")),
+                approx_gb=54.0,
             ),
             ModelVariant(
                 "qwen-image-edit",
@@ -91,6 +101,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_qwen_image.sh",
                 "Qwen-Image-Edit-2511-BF16-20-Steps.json",
                 fetch_steps=(("2", "bf16"),),
+                approx_gb=54.0,
             ),
         ],
     ),
@@ -107,6 +118,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_ltx2.sh",
                 "LTX2-T2V-BF16.json",
                 fetch_steps=(("common",), ("checkpoint", "bf16"), ("lora",)),
+                approx_gb=32.0,
             ),
             ModelVariant(
                 "hunyuan15",
@@ -116,6 +128,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_hunyuan15.sh",
                 "Hunyuan-Video-1.5_720p_t2v-4-step-lora.json",
                 fetch_steps=(("common",), ("720p-t2v",), ("lora",)),
+                approx_gb=48.0,
             ),
             ModelVariant(
                 "wan22",
@@ -125,6 +138,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_wan22.sh",
                 "Wan2.2-T2V-A14B-FP16-4steps-lora-rank64-Seko-V2.json",
                 fetch_steps=(("common", "fp16"), ("14b-t2v", "fp16"), ("lora",)),
+                approx_gb=62.0,
             ),
         ],
     ),
@@ -141,6 +155,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_ltx2.sh",
                 "LTX2-I2V-BF16.json",
                 fetch_steps=(("common",), ("checkpoint", "bf16"), ("lora",)),
+                approx_gb=32.0,
             ),
             ModelVariant(
                 "hunyuan15",
@@ -150,6 +165,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_hunyuan15.sh",
                 "Hunyuan-Video-1.5_720p_i2v-4-step-lora.json",
                 fetch_steps=(("common",), ("720p-i2v",), ("lora",)),
+                approx_gb=48.0,
             ),
             ModelVariant(
                 "wan22",
@@ -159,6 +175,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_wan22.sh",
                 "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1-FP16.json",
                 fetch_steps=(("common", "fp16"), ("14b-i2v", "fp16"), ("lora",)),
+                approx_gb=62.0,
             ),
         ],
     ),
@@ -175,6 +192,7 @@ CAPABILITIES: dict[str, Capability] = {
                 "get_esrgan.sh",
                 "ESRGAN-4x-Upscale.json",
                 fetch_steps=((),),
+                approx_gb=0.1,
             ),
         ],
     ),

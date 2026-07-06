@@ -1141,43 +1141,26 @@ class ContainerProvider(Provider):
             extra={"slot": slot_name, "unit": self._unit_name(slot_name)},
         )
 
-    def load_sync(
-        self,
-        slot_cfg: dict[str, Any],
-        model_info: dict[str, Any],
-    ) -> None:
-        """Write systemd unit, daemon-reload, enable, start (synchronous).
+    def _render_unit_text(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> str:
+        """Render the desired systemd unit text for a slot — the ONE renderer.
 
-        Called from ``_spawn_locked`` (which is already inside an
-        asyncio.to_thread-friendly path — SlotManager awaits the slot spawn
-        via ``await self._spawn_locked(...)``).
+        Sole producer of slot-unit text: both :meth:`load_sync` (first install)
+        and :meth:`rerender_unit_sync` (update) render through here, so a fresh
+        box and an updated box emit **byte-identical** units for the same slot
+        config (#1103). Resolves the slot's runtime family to a provider via
+        :func:`_spec_provider_for` (FLM/NPU, Kokoro/TTS, ComfyUI/img — else this
+        GPU/llama-server provider), builds its :class:`RuntimeLaunchPlan` via
+        ``container_spec``, and turns it into ``hal0-slot@<name>.service`` text
+        via the one adapter :func:`_render_unit_from_plan`.
 
-        Single launch path: :func:`_spec_provider_for` resolves the slot's
-        runtime family to a provider (FLM/NPU, Kokoro/TTS, ComfyUI/img, or this
-        provider for GPU/llama-server); the provider builds a
-        :class:`RuntimeLaunchPlan` via ``container_spec``; and the one renderer
-        :func:`_render_unit_from_plan` turns it into the systemd unit.  GPU is
-        no longer a special argv branch here.
+        Crucially it threads the live ``[slots].publish_host`` into every
+        render. The update path used to drop that argument and fall back to the
+        loopback default, so re-rendering a slot on a LAN-exposed box
+        (``publish_host = 0.0.0.0``) silently narrowed the bind back to
+        ``127.0.0.1`` — the exact fresh-vs-updated divergence WS-J removes.
         """
         slot_name: str = str(slot_cfg.get("name", ""))
-
-        provider = _spec_provider_for(slot_cfg)
-        if provider is None:
-            provider = self  # GPU / llama-server
-        elif str(slot_cfg.get("device", "")) == "npu":
-            # Loud-fail for NPU slots only: a missing FLM tag must not silently
-            # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
-            # self-managed and need no registry tag — the check fires ONLY when
-            # device == "npu".
-            model_table = slot_cfg.get("model") or {}
-            tag = (
-                model_info.get("flm_tag")
-                or model_info.get("_model_key")
-                or (model_table.get("default") if isinstance(model_table, dict) else None)
-            )
-            if not tag:
-                raise ValueError("npu slot has no FLM model tag — set [model].default")
-
+        provider = _spec_provider_for(slot_cfg) or self
         plan = provider.container_spec(slot_cfg, model_info)
         log.info(
             "container.unit_render",
@@ -1189,12 +1172,46 @@ class ContainerProvider(Provider):
                 "provider": getattr(provider, "name", type(provider).__name__),
             },
         )
-        unit_text = _render_unit_from_plan(
+        return _render_unit_from_plan(
             slot_name,
             plan,
             runtime_bin=_container_runtime(),
             publish_host=_slot_publish_host(),
         )
+
+    def load_sync(
+        self,
+        slot_cfg: dict[str, Any],
+        model_info: dict[str, Any],
+    ) -> None:
+        """Write systemd unit, daemon-reload, enable, start (synchronous).
+
+        Called from ``_spawn_locked`` (which is already inside an
+        asyncio.to_thread-friendly path — SlotManager awaits the slot spawn
+        via ``await self._spawn_locked(...)``).
+
+        Single launch path: unit text comes from the one renderer
+        :meth:`_render_unit_text` (shared with the update-time re-render), and
+        this method layers on the install-only steps — the NPU loud-fail guard
+        plus writing the file and enabling/starting the service.
+        """
+        slot_name: str = str(slot_cfg.get("name", ""))
+
+        # Loud-fail for NPU slots only: a missing FLM tag must not silently
+        # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
+        # self-managed and need no registry tag — the check fires ONLY when
+        # device == "npu" and the slot resolves to a spec provider.
+        if str(slot_cfg.get("device", "")) == "npu" and _spec_provider_for(slot_cfg) is not None:
+            model_table = slot_cfg.get("model") or {}
+            tag = (
+                model_info.get("flm_tag")
+                or model_info.get("_model_key")
+                or (model_table.get("default") if isinstance(model_table, dict) else None)
+            )
+            if not tag:
+                raise ValueError("npu slot has no FLM model tag — set [model].default")
+
+        unit_text = self._render_unit_text(slot_cfg, model_info)
         self._write_and_start_unit(slot_name, unit_text)
 
     def rerender_unit_sync(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
@@ -1204,10 +1221,15 @@ class ContainerProvider(Provider):
         The unit bakes the launch argv at load time, so after a hal0 update the
         on-disk ExecStart still carries pre-update flags: a bare ``systemctl
         restart`` (or a reboot!) re-runs stale config. This rewrites the unit
-        via the same plan path as :meth:`load_sync` but deliberately does NOT
-        enable/restart — serving is never bounced by an update; the new argv
+        via the same renderer as :meth:`load_sync` — :meth:`_render_unit_text`,
+        the sole producer of slot-unit text — but deliberately does NOT
+        enable/restart: serving is never bounced by an update; the new argv
         applies on the next start from any path. Callers batch one
         ``daemon_reload`` after a sweep.
+
+        Because both paths render through :meth:`_render_unit_text`, the unit an
+        update writes is byte-identical to the one a fresh install would write
+        for the same slot config — the WS-J guarantee (#1103).
 
         Returns True when the unit file changed. No-ops (False) when the slot
         has no unit on disk (never rendered → nothing stale) or the fresh
@@ -1217,9 +1239,7 @@ class ContainerProvider(Provider):
         unit_path = self._unit_path(slot_name)
         if not unit_path.exists():
             return False
-        provider = _spec_provider_for(slot_cfg) or self
-        plan = provider.container_spec(slot_cfg, model_info)
-        unit_text = _render_unit_from_plan(slot_name, plan, runtime_bin=_container_runtime())
+        unit_text = self._render_unit_text(slot_cfg, model_info)
         if unit_path.read_text() == unit_text:
             return False
         unit_path.write_text(unit_text)

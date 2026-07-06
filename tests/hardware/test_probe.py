@@ -859,3 +859,79 @@ def test_probe_cgroup_max_mb_none_when_unlimited(
 
     info = HardwareProbe().probe()
     assert info.cgroup_max_mb is None
+
+
+# ── NPU functional validation (validate_npu, issue #1097) ──────────────────────
+
+
+def _stub_probe_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the heavy detectors so probe() is hermetic; NPU is left to the test."""
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("Test CPU", 4, 8))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (16384, 8192))
+    monkeypatch.setattr(probe_mod, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(probe_mod, "_gpu_group_gids", lambda: {})
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    monkeypatch.setattr(probe_mod, "_detect_platform", lambda *_: "bare-metal")
+    monkeypatch.setattr(probe_mod, "_read_cgroup_memory_max_mb", lambda: None)
+
+
+def test_probe_validate_npu_records_functional_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """probe(validate_npu=True) runs flm validate and records npu.validated."""
+    import hal0.providers.flm as flm_mod
+
+    _stub_probe_env(monkeypatch)
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=True))
+    monkeypatch.setattr(flm_mod, "flm_validate", lambda: True)
+
+    info = probe_mod.HardwareProbe().probe(validate_npu=True)
+    assert info.npu.present is True
+    assert info.npu.validated is True
+
+
+def test_probe_validate_npu_records_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing flm validate is recorded as validated=False (distinct from None)."""
+    import hal0.providers.flm as flm_mod
+
+    _stub_probe_env(monkeypatch)
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=True))
+    monkeypatch.setattr(flm_mod, "flm_validate", lambda: False)
+
+    info = probe_mod.HardwareProbe().probe(validate_npu=True)
+    assert info.npu.validated is False
+
+
+def test_probe_default_does_not_validate_npu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default (fast) probe never touches the NPU runtime; validated stays None."""
+    import hal0.providers.flm as flm_mod
+
+    _stub_probe_env(monkeypatch)
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=True))
+
+    def _boom() -> bool:
+        raise AssertionError("flm_validate must not run in the default probe")
+
+    monkeypatch.setattr(flm_mod, "flm_validate", _boom)
+
+    info = probe_mod.HardwareProbe().probe()
+    assert info.npu.present is True
+    assert info.npu.validated is None
+
+
+def test_probe_validate_npu_skipped_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """validate_npu=True with no NPU node present must not run flm validate."""
+    import hal0.providers.flm as flm_mod
+
+    _stub_probe_env(monkeypatch)
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+
+    def _boom() -> bool:
+        raise AssertionError("flm_validate must not run when NPU is absent")
+
+    monkeypatch.setattr(flm_mod, "flm_validate", _boom)
+
+    info = probe_mod.HardwareProbe().probe(validate_npu=True)
+    assert info.npu.present is False
+    assert info.npu.validated is None
