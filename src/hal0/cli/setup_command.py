@@ -172,8 +172,26 @@ def setup(
         "--emit-answers",
         help="Write the resolved choices to a hal0-setup.yaml and exit.",
     ),
+    plan: bool = typer.Option(
+        False,
+        "--plan",
+        "--dry-run",
+        help="Resolve + print the plan; write nothing (no slots, sentinel, pulls, or extensions).",
+    ),
 ) -> None:
     hw = HardwareProbe().probe()
+    if plan:
+        from hal0.cli.setup_plan import run_plan
+
+        raise typer.Exit(
+            code=run_plan(
+                hw,
+                answers=answers,
+                storage_dir=storage_dir,
+                no_extensions=no_extensions,
+                no_slots=no_slots,
+            )
+        )
     if emit_answers is not None:
         from hal0.install.answers import load_answers, write_answers
 
