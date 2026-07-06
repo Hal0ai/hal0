@@ -34,7 +34,6 @@ export const ENDPOINTS = {
   // {voices: [], source: "offline"} when the slot is cold.
   slotVoices: (name: string) => `/api/slots/${encodeURIComponent(name)}/voices`,
   slotDefaults: (name: string) => `/api/slots/${encodeURIComponent(name)}/defaults`,
-  slotBackend: (name: string) => `/api/slots/${encodeURIComponent(name)}/backend`,
   slotRestart: (name: string) => `/api/slots/${encodeURIComponent(name)}/restart`,
   slotLoad: (name: string) => `/api/slots/${encodeURIComponent(name)}/load`,
   slotUnload: (name: string) => `/api/slots/${encodeURIComponent(name)}/unload`,

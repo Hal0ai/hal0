@@ -80,6 +80,34 @@ async def test_apply_setup_creates_chat_slot_and_plans_pull():
     assert len(res.pulls) == 1 and res.pulls[0].model_id == "qwen3-4b"
 
 
+async def test_apply_setup_scaffolds_modelless_slot_without_pull():
+    """A SlotSelection with model_id=None creates an empty slot (device/profile
+    wired, model.default unset) and plans NO pull."""
+    from hal0.install import orchestrate
+
+    sm = _FakeSlotManager()
+    sel = Selections(
+        storage_dir="/var/lib/hal0/models",
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    res = await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=sm,
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    assert sm.created["embed"]["device"] == "gpu-rocm"
+    assert sm.created["embed"]["profile"] == "embed"
+    assert sm.created["embed"]["model"]["default"] == ""  # empty scaffold
+    out = res.slots[0]
+    assert out.created is True and out.skipped is None
+    assert res.pulls == [] and res.model_ids == []  # pick-free: no downloads
+
+
 async def test_apply_setup_skips_uncurated_model():
     from hal0.install import orchestrate
 

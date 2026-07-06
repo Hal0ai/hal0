@@ -31,7 +31,6 @@ import {
   useSlotUnload,
   useSlotLoad,
   useSlotSwap,
-  useSlotBackend,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
@@ -186,82 +185,33 @@ function DevCell({ s, onProfile }) {
   )
 }
 
-// Backend-mismatch remediation (ADR-0022) — mirrors slots.jsx SlotCard: when
-// the slot reports backend_mismatch + actual_backend, render an amber chip
-// surfacing the ACTUAL runtime backend plus a "Switch to <declared>" action.
-// Confirming POSTs /api/slots/{name}/backend (useSlotBackend) — a container
-// restart — via the shared ConfirmDialog (primitives.jsx window global).
-function BackendMismatch({ s }) {
-  const backendMut = useSlotBackend()
-  const [open, setOpen] = useStateI(false)
+// Backend-mismatch chip — mirrors slots.jsx SlotCard: when the slot reports
+// backend_mismatch + actual_backend, render an amber chip surfacing the ACTUAL
+// runtime backend. Backend identity is owned by the slot's profile, so the chip
+// opens the slot editor's profile picker (via onEdit) rather than a one-click
+// switch — the legacy backend-switch endpoint was removed in WS-5.
+function BackendMismatch({ s, onEdit }) {
   if (!s.backend_mismatch || !s.actual_backend) return null
   const declared = s.declared_backend || s.backend || s.device
-  const onConfirm = () => {
-    setOpen(false)
-    backendMut.mutate(
-      { name: s.name, backend: declared },
-      {
-        onSuccess: (resp) => {
-          const effective = resp?.effective_backend || resp?.actual_backend || declared
-          toast(`${s.name} backend → ${effective}`, 'ok')
-        },
-        onError: (err) =>
-          toast(`${s.name}: backend switch failed — ${err?.message || 'see logs'}`, 'warn'),
-      },
-    )
-    toast(`Switching ${s.name} to ${declared} — restarting…`, 'info')
-  }
   return (
-    <>
-      <button
-        type="button"
-        className="tag-chip"
-        style={{
-          color: 'var(--warn)',
-          borderColor: 'var(--warn-line)',
-          background: 'var(--warn-soft)',
-          cursor: 'pointer',
-        }}
-        title={`Declared ${declared} but running ${s.actual_backend} — click to switch back to ${declared} (restarts the container)`}
-        disabled={backendMut.isPending}
-        onClick={(e) => {
-          e.stopPropagation()
-          setOpen(true)
-        }}
-        data-testid={`infer-backend-mismatch-${s.name}`}
-      >
-        {s.actual_backend} ≠ declared
-      </button>
-      <button
-        type="button"
-        className="rbtn"
-        style={{ fontSize: 10, padding: '1px 6px' }}
-        disabled={backendMut.isPending}
-        onClick={(e) => {
-          e.stopPropagation()
-          setOpen(true)
-        }}
-        data-testid={`infer-backend-switch-${s.name}`}
-      >
-        {backendMut.isPending ? 'Switching…' : `Switch to ${declared}`}
-      </button>
-      <ConfirmDialog
-        open={open}
-        onCancel={() => setOpen(false)}
-        onConfirm={onConfirm}
-        title={`Switch ${s.name} to ${declared}?`}
-        message={
-          <span>
-            <span className="mono" style={{ color: 'var(--fg)' }}>{s.name}</span> is running
-            on <span className="mono">{s.actual_backend}</span> but is declared
-            as <span className="mono">{declared}</span>. Switching restarts the
-            container to reload on the declared backend (~model-load seconds); the slot
-            is unavailable while it reloads.
-          </span>
-        }
-        confirmLabel="Switch backend"
-      />
-    </>
+    <button
+      type="button"
+      className="tag-chip"
+      style={{
+        color: 'var(--warn)',
+        borderColor: 'var(--warn-line)',
+        background: 'var(--warn-soft)',
+        cursor: 'pointer',
+      }}
+      title={`Declared ${declared} but running ${s.actual_backend} — edit the slot's profile to change its backend`}
+      onClick={(e) => {
+        e.stopPropagation()
+        onEdit && onEdit()
+      }}
+      data-testid={`infer-backend-mismatch-${s.name}`}
+    >
+      {s.actual_backend} ≠ declared
+    </button>
   )
 }
 
@@ -408,7 +358,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
         )}
         <div className={'scard-foot' + (full ? '' : ' bare')}>
           <DevCell s={s} onProfile={onEdit} />
-          <BackendMismatch s={s} />
+          <BackendMismatch s={s} onEdit={onEdit} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
           <span className="grow" />
           {controls}

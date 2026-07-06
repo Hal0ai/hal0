@@ -847,20 +847,21 @@ ui_step "Hardware probe"
 if [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_NO_PROBE:-0}" == "1" ]]; then
     info "Skipping first-run setup (HAL0_SKIP_SETUP/HAL0_NO_PROBE set)."
 else
-    info "Running first-run setup (sentinel + wiring; no model picks, no downloads)"
-    # --auto: non-interactive first-run seeding. --no-slots seeds the first-run
-    # sentinel + wiring but ZERO model-slot picks — the installer no longer ships
-    # a hardware-recommended chat/coder/ComfyUI selection; the operator chooses
-    # every model later via the dashboard or `hal0 setup`. --no-pull keeps the
-    # path download-free regardless (belt-and-suspenders; with no slots there is
-    # nothing to pull anyway). --no-extensions: OpenWebUI + Hermes are installed
-    # by the dedicated stages below, not here.
+    info "Running first-run setup (sentinel + wiring + empty capability slots; no model picks, no downloads)"
+    # --auto: non-interactive first-run seeding. It scaffolds the capability +
+    # NPU slot STRUCTURE (chat/embed/rerank/stt/tts/vision, device+profile+port)
+    # with NO model picks — every slot's model is left unset for the operator to
+    # choose later via the dashboard or `hal0 setup`. Pick-free: slots yes,
+    # models no. --no-pull keeps the path download-free regardless (redundant
+    # with modelless scaffolds, but belt-and-suspenders). --no-extensions:
+    # OpenWebUI + Hermes are installed by the dedicated stages below, not here.
+    # (Pass --no-slots to seed truly zero slots instead.)
     # Build argv as an array so --storage-dir and its value stay TWO separate
     # tokens. The old `${MODELS_DIR:+--storage-dir "${MODELS_DIR}"}` collapsed
     # into a single arg ("--storage-dir /mnt/ai-models") that typer rejected
     # with "No such option", silently skipping --auto seeding on --models-dir
     # installs.
-    _setup_args=(--auto --no-pull --no-slots --no-extensions)
+    _setup_args=(--auto --no-pull --no-extensions)
     [[ -n "${MODELS_DIR}" ]] && _setup_args+=(--storage-dir "${MODELS_DIR}")
     "${HAL0_BIN}" setup "${_setup_args[@]}" \
         || warn "first-run setup failed; run 'hal0 setup' after install"
@@ -1727,7 +1728,7 @@ fi
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 setup%s          guided first-run: pick a bundle + pull models' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 setup%s          guided first-run: provision slots + choose models' "${BOLD}" "${RST}")"
     "$(printf '  %shal0 model pull <id>%s download a model (browse with %shal0 model list%s)' "${BOLD}" "${RST}" "${BOLD}" "${RST}")"
     "$(printf '  %shal0 status%s         system + slot + memory summary' "${BOLD}" "${RST}")"
     "$(printf '  %shal0 slot list%s      inspect configured slots' "${BOLD}" "${RST}")"
