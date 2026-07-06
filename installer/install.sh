@@ -231,6 +231,18 @@ fi
 
 info "system: $(uname -srm)"
 
+# ── Bootstrap-prereq parity (#1098) ─────────────────────────────────────────
+# bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
+# curl/tar/sha256sum in its own preflight() before it ever fetches the
+# release tarball (installer/bootstrap.sh). install.sh itself leans on all
+# three later in this same run (preflight_network's curl probe, the
+# rsync-fallback tar copy below, the FLM .deb sha256 check) — but a direct
+# `sudo bash install.sh`, with no bootstrap in front, never checked for
+# them up front. Run the same check bootstrap.sh does so a minimal host
+# missing one of them fails here with an actionable message instead of a
+# bare "command not found" deep in the install.
+preflight_bootstrap_prereqs || die "missing base prereqs — see above (installer/bootstrap.sh's one-liner preflight requires the same tools)"
+
 # Architecture is a hard requirement in every mode — all shipped binaries
 # (FastFlowLM .deb, toolbox container images) are amd64-only.
 preflight_arch || die "hal0 requires an x86_64 host (see the message above)"
@@ -343,9 +355,77 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     preflight_writable "${PREFIX}" /usr/lib/hal0 "${ETC_DIR}" "${UNIT_DIR}" \
         "${VAR_DIR}" /usr/local/bin || pf_rc=$?
     preflight_disk 20 "${VAR_DIR}"            || pf_rc=$?
+    # Model-store disk check (#1098): the probe above only measures
+    # VAR_DIR's own mount (venv, container images, config, registry). Model
+    # weights land at MODELS_DIR, which is frequently a *different* mount
+    # (--models-dir=/data/models, a mounted NAS/NVMe) that the VAR_DIR probe
+    # never touches — a box could sail through pre-flight with 20 GB free on
+    # / while the actual model store is nearly full. Measure it too, but
+    # non-fatal (warn only, per the Q4 posture in
+    # handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
+    # yet at install time, so an undersized store shouldn't hard-block the
+    # rest of the platform gate the way a genuinely full root disk should —
+    # `hal0 setup` / the pull gate re-validates before any download lands.
+    preflight_disk "${HAL0_MODELS_DISK_MIN_GB:-20}" "${MODELS_DIR}" \
+        || warn "model store ${MODELS_DIR} is low on free space — model pulls may fail until freed"
     preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
     if (( pf_rc != 0 )); then
         false
+    fi
+fi
+
+# ── hal0 system user (early, #1098) ─────────────────────────────────────────
+# A dedicated `hal0` system user/group runs the non-root hal0 services:
+# hal0-agent@<id> (the Hermes runner), hermes-gateway, and the shared
+# hindsight-api memory engine. It also owns the HF cache under
+# ${VAR_DIR}/.cache so agent-side HuggingFace pulls work without
+# escalating. Slot inference itself runs in podman containers supervised
+# by hal0-slot@<name>.service — no daemon user needed there.
+#
+# Created here, immediately after pre-flight and BEFORE any filesystem
+# mutation (was previously created much later, after directories/units/
+# config were already written — handoffs/installer-setup-plan-2026-07-05.md
+# Q1), so the render/video group membership below is settled before any
+# later step that depends on group membership or on the user existing
+# (the FLM cache / HF cache / STATE.md ownership work further down).
+ui_step "System user"
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    # Dev installs never create system users or touch systemd.
+    info "dev mode — skipping hal0 system user creation"
+else
+    # hal0 system user/group. System user (UID < 1000), no login shell,
+    # home at ${VAR_DIR} so any stray `~`-relative writes from agent
+    # processes land somewhere sane. ${VAR_DIR} itself doesn't need to
+    # exist yet — useradd only records the home path (no -m flag).
+    # Idempotent via `getent`.
+    if ! getent group hal0 >/dev/null 2>&1; then
+        groupadd --system hal0
+        info "created group hal0"
+    fi
+    if ! getent passwd hal0 >/dev/null 2>&1; then
+        useradd --system --gid hal0 --home-dir "${VAR_DIR}" \
+            --shell /usr/sbin/nologin \
+            --comment "hal0 service user" \
+            hal0
+        info "created user hal0 (system, no login)"
+    fi
+
+    # GPU device access (issue #420). Keeps hal0-user processes (agents,
+    # diagnostics) able to read /dev/kfd + /dev/dri/renderD* when they
+    # probe the GPU. Slot containers get their devices from podman
+    # directly and don't depend on this. Idempotent; only adds groups
+    # that actually exist on the host (a non-GPU box / CI runner simply
+    # has neither).
+    KFD_GROUPS=""
+    for _g in render video; do
+        if getent group "${_g}" >/dev/null 2>&1; then
+            KFD_GROUPS="${KFD_GROUPS:+${KFD_GROUPS},}${_g}"
+        fi
+    done
+    if [[ -n "${KFD_GROUPS}" ]]; then
+        usermod -aG "${KFD_GROUPS}" hal0
+        info "added hal0 to groups: ${KFD_GROUPS}"
     fi
 fi
 
@@ -1350,51 +1430,16 @@ else
     fi
 fi
 
-# ── hal0 system user ────────────────────────────────────────────────────────
-# A dedicated `hal0` system user/group runs the non-root hal0 services:
-# hal0-agent@<id> (the Hermes runner), hermes-gateway, and the shared
-# hindsight-api memory engine. It also owns the HF cache under
-# ${VAR_DIR}/.cache so agent-side HuggingFace pulls work without
-# escalating. Slot inference itself runs in podman containers supervised
-# by hal0-slot@<name>.service — no daemon user needed there.
-ui_step "System user"
-
+# ── hal0 system user: device/dir-dependent follow-up (#1098) ───────────────
+# The user/group + render/video membership themselves are created MUCH
+# earlier now (see "── hal0 system user (early, #1098) ──" right after
+# pre-flight, before any filesystem mutation). What's left here needs
+# directories that only exist from this point on (VAR_DIR's tree, created
+# in "Filesystem layout" above) — the hal0 user's HF cache, the FLM (NPU)
+# cache, and the shared STATE.md.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    # Dev installs never create system users or touch systemd.
-    info "dev mode — skipping hal0 system user creation"
+    : # dev mode never created the hal0 user above; nothing to follow up.
 else
-    # 1. hal0 system user/group. System user (UID < 1000), no login
-    #    shell, home at ${VAR_DIR} so any stray `~`-relative writes from
-    #    agent processes land somewhere sane. Idempotent via `getent`.
-    if ! getent group hal0 >/dev/null 2>&1; then
-        groupadd --system hal0
-        info "created group hal0"
-    fi
-    if ! getent passwd hal0 >/dev/null 2>&1; then
-        useradd --system --gid hal0 --home-dir "${VAR_DIR}" \
-            --shell /usr/sbin/nologin \
-            --comment "hal0 service user" \
-            hal0
-        info "created user hal0 (system, no login)"
-    fi
-
-    # GPU device access (issue #420). Keeps hal0-user processes (agents,
-    # diagnostics) able to read /dev/kfd + /dev/dri/renderD* when they
-    # probe the GPU. Slot containers get their devices from podman
-    # directly and don't depend on this. Idempotent; only adds groups
-    # that actually exist on the host (a non-GPU box / CI runner simply
-    # has neither).
-    KFD_GROUPS=""
-    for _g in render video; do
-        if getent group "${_g}" >/dev/null 2>&1; then
-            KFD_GROUPS="${KFD_GROUPS:+${KFD_GROUPS},}${_g}"
-        fi
-    done
-    if [[ -n "${KFD_GROUPS}" ]]; then
-        usermod -aG "${KFD_GROUPS}" hal0
-        info "added hal0 to groups: ${KFD_GROUPS}"
-    fi
-
     # FLM (NPU) model cache. The npu slot bind-mounts this dir into the FLM
     # container, which runs as uid 1000 — NOT the host hal0 uid (a system
     # uid < 1000). If the dir is missing at container start podman fails
