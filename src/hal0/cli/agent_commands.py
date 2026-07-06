@@ -66,6 +66,16 @@ def agent_install(
             "installing this one (single-pick enforced; ADR-0004 §2)."
         ),
     ),
+    gateway: bool = typer.Option(
+        True,
+        "--gateway/--no-gateway",
+        help=(
+            "Hermes only: also install + enable the Telegram/Discord gateway "
+            "(hermes-gateway.service), matching install-time wiring "
+            "(installer/install.sh). Use --no-gateway to provision Hermes "
+            "without the messaging bridge."
+        ),
+    ),
 ) -> None:
     """Install a bundled agent.
 
@@ -75,9 +85,14 @@ def agent_install(
     bootstrap pipeline locally in the foreground (streaming progress) and
     only consults the daemon at the end to honour ``--switch``. Other
     agents keep the thin API-driven path.
+
+    The Telegram/Discord gateway is enabled by default (``--gateway``) so
+    this "deferred" path (run after ``HAL0_SKIP_HERMES=1`` at install time,
+    or standalone) has NO downside vs. the install-time provision — issue
+    #1102 / decision Q9.
     """
     if name == "hermes":
-        _install_hermes(switch=switch)
+        _install_hermes(switch=switch, gateway=gateway)
         return
 
     url = _api_base()
@@ -98,10 +113,10 @@ def agent_install(
     )
 
 
-def _install_hermes(*, switch: bool) -> None:
+def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
-    Three steps, all local + foreground:
+    Four steps, all local + foreground:
 
     1. **Toolchain** — ``installer/agents/hermes-prereqs.sh`` ensures
        python3 (>=3.11), python3-venv (the clean-Ubuntu trap), python3-pip
@@ -113,6 +128,11 @@ def _install_hermes(*, switch: bool) -> None:
     3. **Switch** — best-effort daemon call so ``--switch`` still does the
        atomic single-pick swap; provisioning already registered hermes, so
        a daemon hiccup here doesn't un-provision it.
+    4. **Gateway** — (``gateway=True``, the default) install + enable the
+       Telegram/Discord gateway, the same wiring installer/install.sh runs
+       inline at install time. This is what makes the DEFERRED path (run
+       manually after ``HAL0_SKIP_HERMES=1``) lossless vs. install-time
+       (issue #1102 / Q9): whichever path runs, the gateway ends up wired.
     """
     import subprocess as _subprocess
 
@@ -160,6 +180,14 @@ def _install_hermes(*, switch: bool) -> None:
 
     # Bring the unit up so the agent actually runs (and survives reboot).
     _enable_and_start_hermes_unit()
+
+    # Telegram/Discord gateway — installer/install.sh runs this inline at
+    # install time; folding it in here means the DEFERRED path (this
+    # command, run after HAL0_SKIP_HERMES=1 or standalone) wires it too
+    # (issue #1102 / Q9). Best-effort: a gateway hiccup doesn't undo an
+    # otherwise-successful Hermes install.
+    if gateway:
+        _install_hermes_gateway()
 
     console.print(
         Panel(
@@ -266,6 +294,116 @@ def _enable_and_start_hermes_unit() -> None:
             "[yellow]Hermes provisioned, but the agent unit didn't start cleanly — "
             "check `systemctl status hal0-agent@hermes` / `hal0 agent log hermes`.[/yellow]"
         )
+
+
+# ── Gateway (Telegram/Discord) — issue #1102 / Q9 ────────────────────────────
+#
+# installer/install.sh wires the gateway inline (only reached when THAT run
+# just provisioned or already-provisioned Hermes). A box that skipped Hermes
+# at install time (HAL0_SKIP_HERMES=1) and installs it later via this CLI
+# never hit that bash block, so the gateway silently stayed unconfigured.
+# Porting the same steps here closes that gap — "install now" and "install
+# later" converge on identical wiring.
+
+_HERMES_BIN = f"{_HERMES_AGENT_TREES[0]}/bin/hermes"
+_HERMES_GATEWAY_UNIT = "/etc/systemd/system/hermes-gateway.service"
+
+
+def _hermes_venv_ready() -> bool:
+    """``-x /var/lib/hal0/venvs/hermes/bin/hermes`` — install.sh's own gate
+    for whether Hermes is actually provisioned before touching the gateway."""
+    from pathlib import Path as _Path
+
+    return _Path(_HERMES_BIN).is_file()
+
+
+def _install_hermes_gateway() -> None:
+    """`hermes gateway install --system --run-as-user hal0` + enable the unit.
+
+    Ports installer/install.sh's post-provision gateway block
+    (``env -u HERMES_HOME ... hermes gateway install --system ...`` through
+    the ``systemctl enable --now hermes-gateway`` + wait_active check).
+    Best-effort throughout: every failure mode here warns and returns rather
+    than raising, matching install.sh's ``|| warn ... continuing`` posture —
+    a broken gateway must never be reported as a failed Hermes install.
+    """
+    import os as _os
+    import shutil as _shutil
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+
+    if not _hermes_venv_ready():
+        # Provisioning didn't complete (or failed upstream) — nothing to
+        # wire the gateway onto. The caller already surfaced that failure.
+        return
+
+    console.print("[bold]Installing hermes gateway[/bold] (Telegram/Discord bridge)…")
+    # HERMES_HOME is unset so the generator bakes the hal0 default
+    # (~/.hermes) rather than a value inherited from the invoking shell.
+    env = dict(_os.environ)
+    env.pop("HERMES_HOME", None)
+    # `hermes gateway install` prompts interactively with no bypass flag;
+    # stdin=DEVNULL gives a clean EOF so it falls back to its built-in
+    # defaults (install + enable on boot + start now) instead of blocking.
+    rc = _subprocess.run(  # nosec B603 — fixed argv, known path
+        [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"],
+        stdin=_subprocess.DEVNULL,
+        env=env,
+        check=False,
+    ).returncode
+    if rc != 0:
+        console.print(
+            "[yellow]hermes gateway install failed — Telegram/Discord bridge "
+            "unavailable; continuing.[/yellow]"
+        )
+
+    if not _Path(_HERMES_GATEWAY_UNIT).is_file():
+        console.print(
+            f"[yellow]hermes-gateway unit not installed ({_HERMES_GATEWAY_UNIT} missing) — "
+            "Telegram/Discord bridge unavailable.[/yellow]\n"
+            "[dim]retry with: sudo -u hal0 env -u HERMES_HOME "
+            f"{_HERMES_BIN} gateway install --system --run-as-user hal0 </dev/null[/dim]"
+        )
+        return
+
+    if _shutil.which("systemctl") is None:
+        return
+
+    _subprocess.run(["systemctl", "daemon-reload"], check=False)  # nosec B603 B607
+    rc = _subprocess.run(  # nosec B603 B607
+        ["systemctl", "enable", "--now", "hermes-gateway.service"], check=False
+    ).returncode
+    if rc != 0:
+        console.print(
+            "[yellow]hermes-gateway enable returned non-zero — continuing "
+            "(check `journalctl -u hermes-gateway -n 40`).[/yellow]"
+        )
+        return
+
+    if _wait_active_unit("hermes-gateway.service", timeout=20.0):
+        console.print("[dim]hermes-gateway is running (Telegram/Discord)[/dim]")
+    else:
+        console.print(
+            "[yellow]hermes-gateway not yet active; check "
+            "`journalctl -u hermes-gateway -n 40`.[/yellow]"
+        )
+
+
+def _wait_active_unit(unit: str, timeout: float = 15.0) -> bool:
+    """Poll ``systemctl is-active --quiet <unit>`` — Python port of
+    installer/install.sh's ``wait_active`` bash helper."""
+    import subprocess as _subprocess
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        rc = _subprocess.run(  # nosec B603 B607
+            ["systemctl", "is-active", "--quiet", unit], check=False
+        ).returncode
+        if rc == 0:
+            return True
+        _time.sleep(0.5)
+    return False
 
 
 @app.command("uninstall")

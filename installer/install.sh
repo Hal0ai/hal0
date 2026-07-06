@@ -1488,13 +1488,20 @@ else
         fi
     fi
 
+    # Escape hatch: HAL0_SKIP_OPENWEBUI=1 for operators who don't want the
+    # bundled chat UI — same "skip now, install later" contract as
+    # HAL0_SKIP_HERMES above. `hal0 app install openwebui` (issue #1102 / Q9)
+    # runs the identical enable+guard logic below, so skipping here is
+    # lossless.
     if [[ -f "${OPENWEBUI_UNIT_DST}" ]]; then
+        if [[ "${HAL0_SKIP_OPENWEBUI:-0}" -eq 1 ]]; then
+            info "skipping OpenWebUI (HAL0_SKIP_OPENWEBUI=1) — run '${HAL0_BIN} app install openwebui' later"
         # OpenWebUI runs as a podman container (ExecStart=podman run …) — the
         # same runtime as the slots, so the preflight that installed podman
         # already satisfies it. Without a usable runtime the unit would
         # restart-loop with status=203/EXEC, so guard the enable anyway — the
         # dashboard/API are unaffected and the built-in chat works without it.
-        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+        elif command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             systemctl enable --now hal0-openwebui
             # OpenWebUI can take a moment to come up while it pulls the
             # image / initialises its sqlite db. Don't fail the installer

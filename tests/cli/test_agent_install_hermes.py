@@ -56,7 +56,10 @@ def test_install_hermes_runs_prereqs_then_bootstrap_then_register(
     monkeypatch.setattr("shutil.which", lambda _n: None)
     monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
 
-    ac._install_hermes(switch=True)
+    # Gateway wiring is its own concern (tested in the "gateway" section
+    # below) — disable it here so this test exercises only the
+    # toolchain->bootstrap->register sequence.
+    ac._install_hermes(switch=True, gateway=False)
 
     kinds = [e[0] for e in rec.events]
     # Toolchain prereqs run BEFORE provisioning; provisioning BEFORE register.
@@ -101,7 +104,7 @@ def test_install_hermes_aborts_when_provisioning_fails(monkeypatch) -> None:
     monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
 
     with pytest.raises((SystemExit, typer.Exit)):
-        ac._install_hermes(switch=False)
+        ac._install_hermes(switch=False, gateway=False)
 
     assert rec.events == [], "must not register after a failed provision"
 
@@ -192,3 +195,104 @@ def test_install_hermes_guard_noop_when_writable(monkeypatch) -> None:
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     monkeypatch.setattr("hal0.agents.hermes_provision.path_is_writable", lambda _p: True)
     ac._ensure_hermes_writable_or_die()  # no raise
+
+
+# ── Gateway (Telegram/Discord) fold-in — issue #1102 / Q9 ────────────────────
+#
+# installer/install.sh only wires the gateway when THAT run just provisioned
+# (or found already-provisioned) Hermes — a box that deferred Hermes at
+# install time (HAL0_SKIP_HERMES=1) and installs it later via this CLI never
+# hit that bash block. These tests pin the deferred path to the same wiring.
+
+
+def test_install_hermes_runs_gateway_by_default(monkeypatch) -> None:
+    """`hal0 agent install hermes` (no flags) enables the gateway — parity
+    with install-time provisioning, no opt-in required."""
+    rec = _Rec()
+
+    def _fake_subprocess_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(subprocess, "run", _fake_subprocess_run)
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", lambda **_k: 0, raising=True)
+    monkeypatch.setattr(ac, "api_post", lambda *_a, **_k: {})
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    monkeypatch.setattr(ac, "_install_hermes_gateway", lambda: rec.events.append(("gateway", None)))
+
+    ac._install_hermes(switch=False)  # gateway defaults to True
+
+    assert ("gateway", None) in rec.events
+
+
+def test_install_hermes_no_gateway_flag_skips_it(monkeypatch) -> None:
+    rec = _Rec()
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 0})())
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", lambda **_k: 0, raising=True)
+    monkeypatch.setattr(ac, "api_post", lambda *_a, **_k: {})
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    monkeypatch.setattr(ac, "_install_hermes_gateway", lambda: rec.events.append(("gateway", None)))
+
+    ac._install_hermes(switch=False, gateway=False)
+
+    assert rec.events == []
+
+
+def test_install_hermes_gateway_noop_when_venv_missing(monkeypatch) -> None:
+    """No provisioned hermes binary → nothing to wire the gateway onto."""
+    monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: False)
+    called = {"ran": False}
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: called.__setitem__("ran", True))
+
+    ac._install_hermes_gateway()
+
+    assert called["ran"] is False
+
+
+def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path) -> None:
+    """Happy path: gateway install runs, the unit file lands, systemctl
+    enables + confirms it active — mirrors installer/install.sh's block."""
+    gateway_unit = tmp_path / "hermes-gateway.service"
+
+    calls: list[list[str]] = []
+
+    def _fake_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        calls.append(list(argv))
+        # The real `hermes gateway install` writes the unit file as a side
+        # effect; simulate that here so the "unit landed" branch runs.
+        if argv[0] == ac._HERMES_BIN:
+            gateway_unit.write_text("[Unit]\n")
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
+    monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
+
+    ac._install_hermes_gateway()
+
+    assert [ac._HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"] in calls
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "enable", "--now", "hermes-gateway.service"] in calls
+
+
+def test_install_hermes_gateway_warns_without_raising_when_unit_missing(monkeypatch) -> None:
+    """`hermes gateway install` failing to lay down the unit must not raise —
+    best-effort, matches install.sh's `|| warn ... continuing` posture."""
+    monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
+    monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", "/nonexistent/hermes-gateway.service")
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 1})())
+
+    ac._install_hermes_gateway()  # must not raise
