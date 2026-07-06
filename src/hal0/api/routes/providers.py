@@ -119,6 +119,83 @@ async def get_upstream(name: str, request: Request) -> dict[str, Any]:
     return _serialize_upstream(u, last_models=model_cache.get(name))
 
 
+class UpstreamPatchBody(BaseModel):
+    """Body for ``PATCH /api/upstreams/{name}``.
+
+    Only mutable, runtime-tunable fields are accepted. Structural fields
+    (``name``, ``kind``, ``url``, ``auth_*``, ``slot_name``,
+    ``warmup_strategy``) are intentionally absent — those stay
+    ``upstreams.toml``-authored per the deferred-write design called out
+    in this module's module docstring. ``advertise_models`` is the first
+    exception because catalog visibility is a runtime concern, not a
+    config-time one.
+    """
+
+    advertise_models: bool | None = Field(
+        default=None,
+        description="Whether this upstream's /v1/models appears in the aggregate catalog.",
+    )
+
+
+@router.patch("/upstreams/{name}")
+async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -> dict[str, Any]:
+    """Mutate runtime-tunable fields on a registered upstream.
+
+    The first reactive write against ``upstreams.toml`` (the module's
+    docstring notes write paths were deferred; this slice is the scoped
+    exception for ``advertise_models``). On success:
+
+    - the in-memory :class:`Upstream` is updated,
+    - ``upstreams.toml`` is rewritten atomically via
+      :func:`hal0.config.loader.save_upstreams_config`,
+    - the per-upstream model cache (``app.state.upstream_models[name]``)
+      is punched so the next ``/api/upstreams`` and ``/v1/models``
+      request sees the change without an API restart,
+    - the change is audit-logged.
+
+    Dispatch/routing to the upstream is unaffected — ``advertise_models``
+    is purely a catalog-visibility flag, not a routing flag.
+    """
+    upstreams = request.app.state.upstreams
+    try:
+        u = upstreams.get(name)
+    except Exception:  # UpstreamRegistry.get never raises; defensive.
+        u = None
+    if u is None:
+        raise UpstreamNotFoundHTTP(f"upstream {name!r} not found", {"name": name})
+
+    if body.advertise_models is None:
+        # Nothing to do — but echo the current state so a no-op PATCH
+        # remains idempotent and useful as a probe.
+        model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {})
+        return _serialize_upstream(u, last_models=model_cache.get(name))
+
+    new_value = body.advertise_models
+    updated = upstreams.set_advertise(name, new_value)
+
+    # Punch the per-upstream model cache so the next /api/upstreams and
+    # /v1/models request reflects the toggle without an API restart.
+    # The composite ``hal0`` upstream's module-level cache lives in
+    # hal0.api and is unaffected by per-upstream flips.
+    model_cache = getattr(request.app.state, "upstream_models", None)
+    if model_cache is not None and name in model_cache:
+        if new_value:
+            # Re-enabling: drop the stale snapshot so the next call refetches.
+            model_cache.pop(name, None)
+        else:
+            # Disabling: drop the catalog rows immediately so /v1/models
+            # never serves stale entries from the in-memory cache.
+            model_cache[name] = []
+
+    _audit_log.info(
+        "upstream.patch",
+        name=name,
+        advertise_models=new_value,
+        source=request.client.host if request.client else None,
+    )
+    return _serialize_upstream(updated, last_models=(model_cache or {}).get(name))
+
+
 @router.post("/upstreams/{name}/test")
 async def test_upstream(name: str, request: Request) -> dict[str, Any]:
     """Probe ``/v1/models`` on ``name`` and return a reachability report.
