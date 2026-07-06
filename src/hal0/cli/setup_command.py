@@ -179,21 +179,14 @@ def setup(
         help="Resolve + print the plan; write nothing (no slots, sentinel, pulls, or extensions).",
     ),
 ) -> None:
-    # Persist an authoritative hardware.json at install/setup time so slots
-    # and the FLM container spec read REAL device facts (not the Strix-Halo
-    # constant fallbacks). validate_npu=True records the functional
-    # `flm validate` result (npu.validated) before any slot launches.
     probe = HardwareProbe()
-    hw = probe.probe(validate_npu=True)
-    try:
-        probe.write(hw)
-    except HardwareProbeError as exc:
-        # Non-fatal: a non-root `hal0 setup` can't write /etc/hal0. The probe
-        # result still drives this run; the daemon persists it later.
-        typer.echo(f"warning: could not persist hardware.json ({exc})", err=True)
+    # --plan / --emit-answers are side-effect-free preview paths: a light probe
+    # (no NPU validation, no hardware.json write) so they honour their
+    # "writes nothing" contract.
     if plan:
         from hal0.cli.setup_plan import run_plan
 
+        hw = probe.probe()
         raise typer.Exit(
             code=run_plan(
                 hw,
@@ -206,6 +199,7 @@ def setup(
     if emit_answers is not None:
         from hal0.install.answers import load_answers, write_answers
 
+        hw = probe.probe()
         sel = (
             load_answers(answers, hw)
             if answers is not None
@@ -220,6 +214,17 @@ def setup(
         write_answers(sel, emit_answers)
         typer.echo(f"Wrote resolved setup answers to {emit_answers}")
         return
+    # Real-apply paths only: persist an authoritative hardware.json so slots and
+    # the FLM container spec read REAL device facts (not the Strix-Halo constant
+    # fallbacks). validate_npu=True records the functional `flm validate` result
+    # (npu.validated) before any slot launches.
+    hw = probe.probe(validate_npu=True)
+    try:
+        probe.write(hw)
+    except HardwareProbeError as exc:
+        # Non-fatal: a non-root `hal0 setup` can't write /etc/hal0. The probe
+        # result still drives this run; the daemon persists it later.
+        typer.echo(f"warning: could not persist hardware.json ({exc})", err=True)
     if answers is not None:
         from hal0.install.answers import load_answers
 
