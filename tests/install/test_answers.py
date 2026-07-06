@@ -349,3 +349,61 @@ def test_npu_opt_in_auto_off_when_absent(tmp_path):
     path = _write(tmp_path, _AUTO_NPU)
     sel = load_answers(path, _hw(npu_present=False))
     assert sel.npu_opt_in is False
+
+
+# ── slots[].device / profile passthrough (WS-E, #1107) ───────────────────────
+
+
+def test_slot_device_and_profile_pass_through(tmp_path):
+    """Explicit slots[].device / profile on an answer-file entry ride onto the
+    resulting SlotSelection verbatim (clean-seed derivation override, #1107).
+
+    apply_setup honours these via ``s.device or derive_device(...)`` /
+    ``s.profile or derive_profile(...)``, so an operator can pin a lane the
+    preflight would otherwise derive differently."""
+    path = _write(
+        tmp_path,
+        """
+        version: 1
+        model_store: { path: /var/lib/hal0/models }
+        slots:
+          - capability: chat
+            name: chat
+            port: 8081
+            model_id: null
+            device: gpu-vulkan
+            profile: vulkan
+        npu: { opt_in: false }
+        gen: { mode: off }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        """,
+    )
+    sel = load_answers(path, _hw())
+    (slot,) = sel.slots
+    assert slot.slot_name == "chat"
+    assert slot.device == "gpu-vulkan"
+    assert slot.profile == "vulkan"
+    # model_id: null → a grey scaffold slot (no pick, no pull).
+    assert slot.model_id is None
+
+
+def test_slot_device_profile_omitted_and_auto_derive(tmp_path):
+    """Omitted or ``auto`` device/profile leave the SlotSelection fields None so
+    apply_setup derives them from the preflight (clean-seed default path)."""
+    path = _write(
+        tmp_path,
+        """
+        version: 1
+        model_store: { path: /var/lib/hal0/models }
+        slots:
+          - { capability: chat, name: chat, port: 8081, model_id: null }
+          - { capability: coder, name: coder, port: 8082, model_id: null, device: auto, profile: auto }
+        npu: { opt_in: false }
+        gen: { mode: off }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        """,
+    )
+    sel = load_answers(path, _hw())
+    for slot in sel.slots:
+        assert slot.device is None
+        assert slot.profile is None

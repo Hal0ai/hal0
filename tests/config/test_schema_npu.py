@@ -77,7 +77,11 @@ def test_seed_npu_toml_validates() -> None:
     # chat-only utility: no [npu] trio table, role aliased to utility
     assert slot.npu is None
     assert slot.role == "utility"
-    assert slot.model is not None and slot.model.default == "gemma4-it-e2b-FLM"
+    # Clean seed (WS-E, #1107): no FLM model pin — boots grey, no surprise
+    # download, no crash-loop. context_size is a tuning default for later.
+    assert slot.model is not None and slot.model.default == ""
+    assert slot.model.context_size == 16384
+    assert slot.enabled is False
 
 
 def test_seed_tts_toml_validates() -> None:

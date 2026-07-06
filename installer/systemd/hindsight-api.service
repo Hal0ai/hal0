@@ -31,11 +31,17 @@ Environment=HINDSIGHT_API_LLM_PROVIDER=openai
 Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 # [Q5''] Moved NPU -> utility slot. The [Q5'] NPU rationale (below) predates
 # the podman container runtime: it freed a Lemonade-era iGPU that evicted
-# models on contention. Slots are resident containers now — `utility`
-# (gemma-4-12b-it, iGPU) is always loaded, so routing Hindsight there adds
-# no GTT pressure, and the Memory dashboard (#748) made reflect / mental
+# models on contention. Slots are resident containers now — the `utility`
+# slot (iGPU) carries chat + Hindsight extraction, so routing Hindsight there
+# adds no GTT pressure, and the Memory dashboard (#748) made reflect / mental
 # models / consolidation user-facing: ~2s/turn on utility vs 77-160s on the
 # NPU (FLM serializes, so memory ops also queued behind NPU chat traffic).
+# NOTE (WS-E, #1107): the utility slot now SEEDS GREY — model-less and disabled
+# until the operator assigns one (the old `gemma-4-12b-it` pin was a ghost id
+# that crash-looped a model-less box). Hindsight tolerates that: extraction /
+# reflection run lazily and fall back to the agent anchor when utility is
+# unloaded (see the startup-verification note below), so a fresh box never
+# blocks on a not-yet-loaded utility model.
 # [Q5'] history, kept for the record:
 #  - qwen3-it-4b-FLM (NPU): ignores response_format -> bare JSON *list* -> rejected.
 #  - gemma-4-26b-a4b-it-q4kxl (iGPU GGUF): {"facts":[...]} ok but Lemonade-era
