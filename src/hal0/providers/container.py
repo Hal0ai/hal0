@@ -32,8 +32,9 @@ GID resolution (reuses providers/_gpu.py):
 
 ABC compliance:
   Provider ABC has docker/systemd-shaped methods (build_env, start_cmd,
-  container_spec, render_systemd_override).  ContainerProvider implements
-  container_spec() and reuses the inherited render_systemd_override().
+  container_spec).  ContainerProvider implements container_spec(); unit
+  rendering is owned by the module-level ``_render_unit_from_plan`` adapter
+  (the legacy ``render_systemd_override`` default was deleted in WS-15).
   build_env / start_cmd / health / infer are implemented as informational
   stubs or thin implementations — the real work is load/unload/status/health.
 """
