@@ -7,6 +7,7 @@ post-install. Deps are injected so there is no hidden ``app.state`` coupling.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -89,11 +90,21 @@ class ExtensionOutcome:
 @dataclass
 class PullPlan:
     """A registered-but-not-yet-run pull. The caller decides how to run it
-    (``background.add_task`` for the route; ``await`` with progress for the TUI)."""
+    (``background.add_task`` for the route; ``await`` with progress for the TUI).
+
+    ``slot_names`` are the slots created DISABLED for this model (WS-E, #1108).
+    The caller MUST drive each plan through :func:`run_pull_and_activate` so the
+    slot(s) flip ``enabled=True`` only after the bytes land — never before the
+    model exists on disk (the start-before-model race). A FAILED pull leaves the
+    slot(s) disabled and marked (``[meta].pull_failed``), so a half-provisioned
+    box parks the slot instead of crash-looping a container against a missing
+    model.
+    """
 
     model_id: str
     job: Any  # registry.pull.PullJob
     kwargs: dict[str, Any]
+    slot_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -107,16 +118,140 @@ class SetupResult:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096):
-    """Podman-aware slot config dict (device+profile, NOT backend — #807)."""
+def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096, enabled=False):
+    """Podman-aware slot config dict (device+profile, NOT backend — #807).
+
+    Born DISABLED by default (WS-E, #1108): the guided apply path creates the
+    slot, THEN queues the pull, and only flips ``enabled=True`` once the pull
+    completes (:func:`run_pull_and_activate`). Seeding ``enabled=True`` here
+    would let the slot start before its model exists on disk.
+    """
     return {
         "name": slot,
         "port": port,
         "device": device,
         "profile": profile,
-        "enabled": True,
+        "enabled": enabled,
         "model": {"default": model_id, "context_size": context_size},
     }
+
+
+# ── Context budget (WS-E / #1108) ───────────────────────────────────────────────
+
+# Conservative KV-cache cost per context token (bytes): fp16 K+V for a mid-size
+# dense GGUF (~32 layers, GQA 8 kv-heads, head_dim 128):
+#   2 (K+V) * 32 * 8 * 128 * 2 bytes ≈ 128 KiB / token.
+# Over-estimating KV clamps HARDER → strictly safer against first-warm OOM. MoE/
+# MTP primaries have a far smaller hybrid KV, so this only ever under-fits (more
+# headroom), never OOMs.
+_KV_BYTES_PER_TOKEN = 128 * 1024
+# Server + activation/compute-buffer headroom held back off the memory pool
+# before any of it funds KV cache.
+_RUNTIME_RESERVE_GB = 1.0
+# Never clamp below this — a sub-2K window slot is useless.
+_MIN_CONTEXT = 2048
+# Round the derived budget down to a whole multiple of this (llama.cpp likes
+# power-of-two-ish windows; keeps the number legible in the TOML).
+_CTX_ALIGN = 1024
+_BYTES_PER_GB = 1024**3
+
+
+def _memory_budget_gb(hw: HardwareInfo) -> float:
+    """GB of host memory available to load a model (weights + KV).
+
+    Derived from the authoritative ``hardware.json`` facts (#1097), NOT a Strix
+    constant. Mirrors ``hardware.recommend._vram_budget_gb`` but ALSO honours a
+    cgroup memory cap (#372) so an LXC/container-capped host — the box that
+    produced the ``oom`` artifact — clamps against its real ceiling:
+
+      * AMD UMA (Strix Halo): the model pool is host RAM shared via GTT, so a
+        cgroup cap binds it. Half the pool — leave RAM for the OS + the rest of
+        the stack (OpenWebUI, FastAPI, ...).
+      * discrete GPU: dedicated VRAM, which a host cgroup does not cap.
+      * CPU-only / GPU with no usable VRAM: half of MemAvailable, itself capped
+        by any cgroup limit.
+    """
+    if hw.gpus:
+        g = hw.gpus[0]
+        if g.vendor == "amd" and hw.unified_memory_mb >= hw.ram_mb * 0.95:
+            pool_gb = hw.unified_memory_mb / 1024
+            if hw.cgroup_max_mb:
+                pool_gb = min(pool_gb, hw.cgroup_max_mb / 1024)
+            return max(pool_gb * 0.5, 0.0)
+        if g.vram_mb > 0:
+            return g.vram_mb / 1024
+    avail_gb = max(hw.ram_available_mb / 1024, 1.0)
+    if hw.cgroup_max_mb:
+        avail_gb = min(avail_gb, hw.cgroup_max_mb / 1024)
+    return max(avail_gb * 0.5, 0.0)
+
+
+def _clamp_context_size(requested: int, hw: HardwareInfo, *, weights_gb: float = 0.0) -> int:
+    """Clamp a requested context window to what host memory can actually fund.
+
+    Model weights + a runtime reserve come off the memory budget first; the
+    remainder funds the KV cache at a conservative bytes-per-token rate. Returns
+    ``min(requested, budget)`` floored at ``_MIN_CONTEXT``. A falsy/zero
+    ``requested`` means "use the whole budget". This replaces blindly trusting
+    ``curated.context_length`` (which is the model's *native* window, not a
+    hardware budget — the first-warm OOM, #1108).
+    """
+    budget_gb = _memory_budget_gb(hw)
+    kv_gb = budget_gb - max(weights_gb, 0.0) - _RUNTIME_RESERVE_GB
+    if kv_gb <= 0:
+        return _MIN_CONTEXT
+    budget_tokens = int(kv_gb * _BYTES_PER_GB / _KV_BYTES_PER_TOKEN)
+    budget_tokens = (budget_tokens // _CTX_ALIGN) * _CTX_ALIGN
+    budget_tokens = max(budget_tokens, _MIN_CONTEXT)
+    if not requested or requested <= 0:
+        return budget_tokens
+    return max(min(int(requested), budget_tokens), _MIN_CONTEXT)
+
+
+# ── Enable-on-pull-success (WS-E / #1108) ───────────────────────────────────────
+
+
+async def _set_slot_enabled(slot_manager, slot_name: str, enabled: bool, *, failed: bool) -> None:
+    """Best-effort flip of a slot's ``enabled`` flag after its pull settles.
+
+    Non-aborting per ADR-0010: a failed config rewrite must not crash the pull
+    driver. On a FAILED pull we also stamp ``[meta].pull_failed`` so the parked
+    slot is clearly marked (the dashboard / ``hal0 doctor`` can surface it).
+    """
+    updates: dict[str, Any] = {"enabled": enabled}
+    if failed:
+        updates["meta"] = {"pull_failed": True}
+    # Activation is best-effort — the model still downloaded; the operator can
+    # enable the slot by hand. Never let this abort the pull driver (ADR-0010).
+    with contextlib.suppress(Exception):
+        await slot_manager.update_config(slot_name, updates)
+
+
+async def run_pull_and_activate(plan: PullPlan, *, slot_manager) -> None:
+    """Run one planned pull, then activate its slot(s) — WS-E (#1108).
+
+    On SUCCESS: flip every ``plan.slot_names`` slot to ``enabled=True`` (the
+    model now exists on disk, so a start is safe). On FAILURE (``run_pull``
+    raised, or the job settled ``state == "failed"``): leave the slot(s)
+    disabled and mark them, so nothing crash-loops against a missing model.
+
+    Re-raises the original exception after marking, so callers that inspect
+    ``gather(..., return_exceptions=True)`` results still see the failure.
+    """
+    from hal0.registry.pull import run_pull
+
+    try:
+        await run_pull(plan.job, **plan.kwargs)
+    except BaseException:
+        for name in plan.slot_names:
+            await _set_slot_enabled(slot_manager, name, False, failed=True)
+        raise
+    if getattr(plan.job, "state", None) == "failed":
+        for name in plan.slot_names:
+            await _set_slot_enabled(slot_manager, name, False, failed=True)
+        return
+    for name in plan.slot_names:
+        await _set_slot_enabled(slot_manager, name, True, failed=False)
 
 
 def _ensure_registry_entry(registry, model_id) -> None:
@@ -334,6 +469,11 @@ async def apply_setup(
     slot_outcomes: list[SlotOutcome] = []
     model_ids: list[str] = []
     pulls: list[PullPlan] = []
+    # WS-E (#1108): map model_id → the plan WE created this run, so two slots
+    # sharing one model_id (e.g. chat + coder on the same pick) both get
+    # enabled off the single pull rather than the second slot being stranded
+    # disabled.
+    plans_by_model: dict[str, PullPlan] = {}
 
     # Honour the operator's chosen store BEFORE planning pulls: the pull engine
     # reads ``[models].store`` lazily at pull time, so persisting it here is
@@ -375,7 +515,16 @@ async def apply_setup(
             continue
 
         _ensure_registry_entry(registry, s.model_id)
-        ctx = int(curated.context_length or 0) or 4096
+        # WS-E (#1108): clamp the native curated window to a VRAM/RAM-aware
+        # budget derived from hardware.json (#1097), not the raw
+        # curated.context_length that produced the first-warm ``oom``. Model
+        # weights come off the budget first; the remainder funds the KV cache.
+        ctx = _clamp_context_size(
+            int(curated.context_length or 0),
+            hardware,
+            weights_gb=float(getattr(curated, "size_gb", 0.0) or 0.0),
+        )
+        # Born DISABLED — flipped to enabled only after the pull completes.
         cfg = _build_slot_cfg(
             slot=s.slot_name,
             model_id=s.model_id,
@@ -383,6 +532,7 @@ async def apply_setup(
             profile=profile,
             port=s.port,
             context_size=ctx,
+            enabled=False,
         )
         try:
             await slot_manager.create(s.slot_name, cfg)
@@ -393,25 +543,36 @@ async def apply_setup(
             continue
 
         existing = get_job(jobs, s.model_id)
-        if existing is not None and getattr(existing, "state", None) in ("queued", "running"):
+        own_plan = plans_by_model.get(s.model_id)
+        if own_plan is not None:
+            # Second slot for a model WE already planned this run — ride the
+            # same pull so it, too, gets enabled on success.
+            own_plan.slot_names.append(s.slot_name)
+            job = own_plan.job
+        elif existing is not None and getattr(existing, "state", None) in ("queued", "running"):
+            # A pull for this model is already in flight from elsewhere; don't
+            # double-run it. The slot stays disabled (safer than the old
+            # enabled-before-model default) for the operator to enable once the
+            # in-flight pull lands.
             job = existing
         else:
             job = make_job(s.model_id)
             jobs[s.model_id] = job
-            pulls.append(
-                PullPlan(
-                    model_id=s.model_id,
-                    job=job,
-                    kwargs=dict(
-                        hf_repo=curated.hf_repo,
-                        hf_file=curated.hf_file,
-                        registry=registry,
-                        hf_token=hf_token,
-                        comfyui_subdir=curated.comfyui_subdir or None,
-                        capability=s.capability,
-                    ),
-                )
+            plan = PullPlan(
+                model_id=s.model_id,
+                job=job,
+                kwargs=dict(
+                    hf_repo=curated.hf_repo,
+                    hf_file=curated.hf_file,
+                    registry=registry,
+                    hf_token=hf_token,
+                    comfyui_subdir=curated.comfyui_subdir or None,
+                    capability=s.capability,
+                ),
+                slot_names=[s.slot_name],
             )
+            plans_by_model[s.model_id] = plan
+            pulls.append(plan)
         rec.pull_job_id = job.job_id
         model_ids.append(s.model_id)
         slot_outcomes.append(rec)
