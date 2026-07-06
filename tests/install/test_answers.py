@@ -6,7 +6,7 @@ import pytest
 
 from hal0.cli.setup_command import build_auto_selections
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
-from hal0.install.answers import AnswersError, load_answers
+from hal0.install.answers import AnswersError, gen_download_requested, load_answers
 
 
 def _hw(ram_gb=96, npu_present=True, npu_validated=True):
@@ -173,6 +173,45 @@ def test_gen_mode_off_disables_comfyui(tmp_path):
     sel = load_answers(path, _hw())
     assert sel.extensions["comfyui"] is False
     assert sel.comfyui_defaults == ()
+
+
+def test_gen_download_requested_only_for_scaffold_and_download(tmp_path):
+    base = """
+        version: 1
+        model_store: {{ path: /var/lib/hal0/models }}
+        slots: []
+        npu: {{ opt_in: false }}
+        gen: {{ mode: {mode}, capabilities: {{ txt2img: auto }} }}
+        apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }}, pi: {{ enabled: false }} }}
+    """
+    off = _write(tmp_path, base.format(mode="off"))
+    assert gen_download_requested(off) is False
+    scaffold = _write(tmp_path, base.format(mode="scaffold_only"))
+    assert gen_download_requested(scaffold) is False
+    download = _write(tmp_path, base.format(mode="scaffold_and_download"))
+    assert gen_download_requested(download) is True
+    # A missing / unreadable file degrades to False (never raises here).
+    assert gen_download_requested(str(tmp_path / "nope.yaml")) is False
+
+
+def test_scaffold_and_download_no_longer_warns_and_records_defaults(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+        version: 1
+        model_store: { path: /var/lib/hal0/models }
+        slots: []
+        npu: { opt_in: false }
+        gen: { mode: scaffold_and_download, capabilities: { txt2img: sdxl } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        """,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning → failure
+        sel = load_answers(path, _hw())
+    assert sel.extensions["comfyui"] is True
+    assert sel.comfyui_defaults == (("txt2img", "sdxl"),)
+    assert gen_download_requested(path) is True
 
 
 def test_gen_mode_scaffold_only_enables_comfyui_and_populates_defaults(tmp_path):
