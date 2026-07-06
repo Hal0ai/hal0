@@ -30,16 +30,17 @@ def _load(name: str) -> list[dict]:
 @pytest.mark.parametrize(
     ("fixture", "expected_aliases"),
     [
-        ("slots_cold.json", []),
-        ("slots_primary_ready.json", ["primary"]),
+        ("slots_cold.json", ["agent-hermes", "primary"]),
+        ("slots_primary_ready.json", ["agent-hermes", "primary"]),
         ("slots_all_ready.json", ["agent-hermes", "primary"]),
     ],
 )
 def test_collect_chat_slots_against_real_lxc_payload(
     fixture: str, expected_aliases: list[str]
 ) -> None:
-    """For each scenario, ``_collect_chat_slots`` returns exactly the
-    expected aliases — and never an embed/rerank/stt/tts slot."""
+    """For each scenario, ``_collect_chat_slots`` returns all enabled
+    llm slots with a model — both warm and cold — because dispatch
+    cold-loads on demand."""
     slots = _load(fixture)
     collected = hp._collect_chat_slots(slots)
     got_aliases = sorted(s["alias"] for s in collected)
@@ -96,15 +97,18 @@ def test_collect_chat_slots_skips_non_llm_capabilities() -> None:
     assert aliases == {"primary", "agent-hermes"}
 
 
-def test_collect_chat_slots_skips_non_ready_llm_slots() -> None:
-    """Even ``type==llm`` slots must be ``_is_ready`` to be advertised."""
+def test_collect_chat_slots_includes_cold_llm_slots() -> None:
+    """Cold/unready llm slots ARE collected — dispatch cold-loads them
+    on demand."""
     slots = _load("slots_cold.json")
-    # Every slot is offline → no aliases.
-    assert hp._collect_chat_slots(slots) == []
+    collected = hp._collect_chat_slots(slots)
+    aliases = {s["alias"] for s in collected}
+    assert aliases == {"primary", "agent-hermes"}
 
-    # Flip just primary to a non-ready intermediate state — still excluded.
+    # Even intermediate non-ready states don't hide the slot.
     for s in slots:
         if s["name"] == "primary":
             s["state"] = "starting"
             s["status"] = "starting"
-    assert hp._collect_chat_slots(slots) == []
+    collected2 = hp._collect_chat_slots(slots)
+    assert {s["alias"] for s in collected2} == {"primary", "agent-hermes"}

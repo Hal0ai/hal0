@@ -136,6 +136,9 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "models.file_extensions": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "models.store": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     "models.pull_root": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
+    # The NPU slot bind-mounts this dir; the unit re-renders (and the dir is
+    # created) on the next slot load, so a restart of the slot picks it up.
+    "models.flm_store": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     # [memory]
     # engine is consumed once at create_app when the memory provider is
     # constructed (api/__init__.py) — a change only lands on restart.

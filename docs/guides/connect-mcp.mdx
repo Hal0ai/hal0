@@ -12,9 +12,9 @@ servers, mounted on the API as Streamable-HTTP sub-apps:
 
 - **`/mcp/memory`** — long-term memory tools (search, add, recall, list,
   delete). Only mounted when the memory subsystem is initialised.
-- **`/mcp/admin`** — operate hal0: slots, models, capabilities, config,
-  hardware probes. Its `memory_*` tools route in-process to the memory
-  server.
+- **`/mcp/admin`** — operate hal0: slots, models, capabilities, profiles,
+  stacks, config, hardware probes. Its `memory_*` tools route in-process
+  to the memory server.
 
 <Aside type="caution">
 hal0 has **no built-in network auth** (ADR-0012). The MCP mounts are
@@ -97,8 +97,13 @@ executing.
 ### Autonomous — read
 
 `slot_list`, `slot_status`, `model_list`, `hardware_probe`,
-`capability_list`, `provider_list`, `version_info`, `gpu_target_version`,
-`npu_status`, `env_report`, `model_store_probe`.
+`capability_list`, `provider_list`, `version_info`, `stack_list`,
+`stack_status`, `profile_list`, `profile_status`, `profile_export`,
+`gpu_target_version`, `npu_status`, `env_report`, `model_store_probe`.
+
+`profile_export` is a `POST` under the hood — it builds a portable,
+checksummed profile envelope from existing catalog data — but makes no
+state change, so it's classified read-shaped like the others.
 
 ### Autonomous — write (reversible, low blast radius)
 
@@ -110,7 +115,14 @@ id) routes to the gated tier at call time.
 
 `model_pull`, `model_delete`, `slot_create`, `slot_delete`,
 `slot_restart`, `capability_set`, `config_write`,
-`provider_credential_write`, and `logs_tail`.
+`provider_credential_write`, `stack_apply`, `stack_import`,
+`stack_delete`, `profile_import`, `profile_delete`, and `logs_tail`.
+
+Stacks and profiles are gated the same way slots are: applying or
+importing a stack reconfigures the whole inference surface (it can
+load, swap, or unload every slot at once), and importing or deleting a
+profile mutates the shared catalog — both mirror the blast radius of
+`slot_create`/`capability_set`.
 
 <Aside type="note">
 `logs_tail` is gated (not autonomous-read) on purpose: until the log
@@ -141,3 +153,4 @@ When a gated tool is called:
 - [Memory](/docs/concepts/memory) — what the memory subsystem powers.
 - [Security](/docs/concepts/security) — the LAN-open posture, MCP allowlist, and origin gate.
 - [MCP tools reference](/docs/reference/mcp-tools) — the complete tool catalogue.
+- [Stacks](/docs/concepts/stacks) — what the `stack_*` admin tools operate on.

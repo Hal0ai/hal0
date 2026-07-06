@@ -19,7 +19,16 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig, resolve_profile_flags
+from hal0.config.schema import (
+    FAMILY_DEFAULTS,
+    MTP_FLAG_BUNDLE,
+    SEED_PROFILES,
+    ProfileConfig,
+    family_flags,
+    model_family,
+    resolve_profile_flags,
+)
+from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
@@ -185,6 +194,58 @@ class TestRenderUnit:
         tokens = shlex.split(self._get_exec_start(unit))
         assert f"--volume={custom}:{custom}:ro,z" in tokens, tokens
         assert not any(t.startswith("--volume=/mnt/ai-models") for t in tokens), tokens
+
+    def test_requires_mounts_for_bind_sources(self, monkeypatch) -> None:
+        """Every bind source lands in RequiresMountsFor so a slot on an
+        external store (/mnt/...) orders after — and pulls in — the backing
+        mount at boot instead of racing it (podman exit 125 statfs)."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        req_lines = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
+        assert req_lines and _MODEL_STORE_MOUNT in req_lines[0], unit
+
+    def test_readonly_mount_not_auto_created(self, monkeypatch) -> None:
+        """The read-only model store must NOT get an ExecStartPre mkdir —
+        silently creating an empty store would mask a broken mount behind a
+        model-not-found error."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        assert "ExecStartPre" not in unit, unit
+
+    def test_writable_mount_gets_execstartpre_mkdir(self) -> None:
+        """Writable bind sources (FLM cache & co) get a tolerant
+        ExecStartPre=-mkdir -p so a source dir that vanished across a reboot
+        can't fail every start with podman exit 125."""
+        plan = RuntimeLaunchPlan(
+            image="ghcr.io/hal0ai/hal0-toolbox-flm:test",
+            command=["serve", "x"],
+            mounts=[("/mnt/ai-models/flm/models", "/var/lib/hal0/.config/flm/models")],
+            port=8088,
+            network_mode="",
+        )
+        unit = _render_unit_from_plan("npu", plan, runtime_bin=_TEST_RUNTIME)
+        pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
+        assert pre == ["ExecStartPre=-/usr/bin/mkdir -p /mnt/ai-models/flm/models"], unit
+        req = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
+        assert req == ["RequiresMountsFor=/mnt/ai-models/flm/models"], unit
 
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
@@ -667,6 +728,74 @@ class TestLoadSync:
 
         assert "--alias chadrock-35b-ace-saber" in unit_file.read_text()
 
+    def test_install_and_update_render_byte_identical_units(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """WS-J (#1103): install (``load_sync``) and update
+        (``rerender_unit_sync``) render **byte-identical** unit files for the
+        same slot config, because both go through the one renderer
+        ``_render_unit_text``.
+
+        Regression guard for the specific divergence WS-J removes: on a
+        LAN-exposed box (``[slots].publish_host = 0.0.0.0``) the pre-fix update
+        path dropped ``publish_host`` and silently narrowed the bind back to
+        loopback — so a fresh box and an updated box ended up with different
+        units for the same slot.
+        """
+        profile = _moe_profile()
+        slot_cfg = {
+            "name": "test-container",
+            "port": 8095,
+            "profile": "rocm",
+            "model": {"default": "m", "context_size": 131072},
+            "server": {"extra_args": "--override-kv k=bool:false"},
+        }
+        model_info = {"path": "/mnt/ai-models/model.gguf", "_model_key": "m"}
+
+        # LAN-exposed box: the operator widened the publish bind. Both render
+        # paths must honour it identically.
+        monkeypatch.setattr("hal0.providers.container._slot_publish_host", lambda: "0.0.0.0")
+
+        def fake_run(*args: str, check: bool = True) -> MagicMock:
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        # ── fresh install: load_sync writes the unit (systemctl mocked) ──
+        fresh_provider = ContainerProvider()
+        fresh_unit = tmp_path / "fresh.service"
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(fresh_provider, "_run", side_effect=fake_run),
+            patch.object(fresh_provider, "_unit_path", return_value=fresh_unit),
+        ):
+            fresh_provider.load_sync(slot_cfg, model_info)
+        fresh_text = fresh_unit.read_text()
+        # Sanity: the widened bind actually rendered on the fresh install.
+        assert "--publish=0.0.0.0:8095:8095" in fresh_text
+
+        # ── updated box: a STALE unit already exists; rerender rewrites it ──
+        upd_provider = ContainerProvider()
+        upd_unit = tmp_path / "updated.service"
+        upd_unit.write_text("# stale pre-update unit — forces a rewrite\n")
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(upd_provider, "_unit_path", return_value=upd_unit),
+        ):
+            changed = upd_provider.rerender_unit_sync(slot_cfg, model_info)
+
+        assert changed is True
+        # The WS-J guarantee: byte-for-byte identical units.
+        assert upd_unit.read_text() == fresh_text
+
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
         what actually launches."""
@@ -827,3 +956,78 @@ class TestContextSizeDerive:
         cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
         mi = _model_info(metadata={"context_length": 262144})
         assert self._ctx(self._spec(cfg, mi).command) == "131072"
+
+
+class TestFamilyDefaults:
+    """FAMILY_DEFAULTS — the per-family override layer (gemma → f16 KV)."""
+
+    def test_model_family_token_scan(self) -> None:
+        assert model_family("gemma-4-12b-it-ud-q4-k-xl") == "gemma"
+        assert model_family("Qwen3.6-27B-UD-Q5_K_XL.gguf") == "qwen"
+        assert model_family(None, "/mnt/ai-models/gemma4-v2/gemma4-v2-Q4_K_M.gguf") == "gemma"
+        assert model_family("chadrock-35b-ace-saber") is None
+        assert model_family(None) is None
+
+    def test_family_flags_lookup(self) -> None:
+        assert "gemma" in FAMILY_DEFAULTS
+        assert family_flags("gemma-4-12b-it") == FAMILY_DEFAULTS["gemma"]
+        assert "-ctk f16" in family_flags("gemma-4-12b-it")
+        assert family_flags("qwen3-27b") == ""  # no qwen entry today
+        assert family_flags(None) == ""
+
+    def test_gemma_on_q8_profile_pins_f16_kv(self) -> None:
+        """A gemma model on a q8 profile resolves to f16 KV — profile's
+        -ctk q8_0 is overridden and deduped away by the family layer."""
+        profile = _moe_profile()  # ships -ctk q8_0 -ctv q8_0
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "gemma-4-12b-it"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
+        assert argv is not None
+        assert "q8_0" not in argv  # deduped: family f16 wins, no stale q8 dup
+        assert argv[argv.index("-ctk") + 1] == "f16"
+        assert argv[argv.index("-ctv") + 1] == "f16"
+        assert "--cache-reuse" in argv and argv[argv.index("--cache-reuse") + 1] == "0"
+
+    def test_non_gemma_on_q8_profile_keeps_q8(self) -> None:
+        """A qwen model on the same profile is untouched — no family entry."""
+        profile = _moe_profile()
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "qwen3-27b"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
+        assert argv is not None
+        assert argv[argv.index("-ctk") + 1] == "q8_0"
+        assert "f16" not in argv
+
+    def test_slot_extra_args_still_beats_family(self) -> None:
+        """A hand-authored [server].extra_args overrides the family default."""
+        profile = _moe_profile()
+        cfg = {
+            "profile": "rocm",
+            "port": 8095,
+            "model": {"default": "gemma-4-12b-it"},
+            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},
+        }
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
+        assert argv is not None
+        assert argv[argv.index("-ctk") + 1] == "q4_0"  # slot override wins over family
+
+    def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
+        """The vulkan seed ships minimal flags with NO forced KV quant.
+
+        The 2026-07-05 seed cleanup reduced the plain ``vulkan`` seed to basic
+        flags, so f16 (the llama-server default) applies universally — it is
+        gemma-safe without relying on a family guard against a q8 vulkan seed,
+        and per-model KV tuning now lives in the model's ``defaults.extra_args``.
+        A slot on the basic vulkan seed therefore never gets a forced q8 KV.
+        """
+        vseed = SEED_PROFILES["vulkan"]
+        assert "-ctk" not in vseed["flags"] and "q8_0" not in vseed["flags"]
+        assert "-ngl 999" in vseed["flags"] and "-fa on" in vseed["flags"]
+
+        profile = ProfileConfig(image=vseed["image"], flags=vseed["flags"], mtp=False)
+        cfg = {"profile": "vulkan", "port": 8096, "model": {"default": "qwen3-27b"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
+        assert argv is not None
+        assert "q8_0" not in argv  # basic seed forces no KV quant

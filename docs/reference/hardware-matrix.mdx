@@ -16,7 +16,7 @@ hal0 prefers them in.
 
 | Target              | Backend / runtime               | What runs there                                    |
 |---------------------|-----------------------------------|----------------------------------------------------|
-| AMD GPU (ROCm)      | llama.cpp ROCm                    | chat / embed / rerank LLM inference (highest tps)  |
+| AMD GPU (ROCm)      | llama.cpp ROCm / Qwen3-TTS         | chat / embed / rerank LLM inference (highest tps); multilingual TTS |
 | AMD GPU (Vulkan)    | llama.cpp Vulkan                  | chat / embed / rerank LLM inference (broad-compat) |
 | NVIDIA GPU (CUDA)   | llama.cpp CUDA — **experimental** | chat / embed / rerank LLM inference                |
 | AMD XDNA NPU        | FastFlowLM (FLM)                  | chat + speech-to-text + embeddings (one process)   |

@@ -396,25 +396,6 @@ _INVALID_JSON_BODY = b"this is not json {{{"
             "request.not_an_object",
             id="slots_defaults_not_an_object",
         ),
-        # ── slots.py POST /api/slots/{name}/backend ────────────────────
-        # 602: invalid JSON
-        pytest.param(
-            "POST",
-            "/api/slots/primary/backend",
-            _INVALID_JSON_BODY,
-            400,
-            "request.invalid_json",
-            id="slots_backend_invalid_json",
-        ),
-        # 605: missing/blank backend
-        pytest.param(
-            "POST",
-            "/api/slots/primary/backend",
-            _json.dumps({}).encode("utf-8"),
-            400,
-            "backend.missing",
-            id="slots_backend_missing_field",
-        ),
         # ── slots.py POST /api/slots/{name}/swap ───────────────────────
         # 680: missing model_id
         pytest.param(

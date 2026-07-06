@@ -1629,7 +1629,7 @@ def test_config_profile_change_drives_device_via_route(
 ) -> None:
     """PUT /config with a new profile re-derives device (drawer path).
 
-    Re-points a vulkan slot at the rocm-dnse profile; the device must follow
+    Re-points a vulkan slot at the rocm profile; the device must follow
     to gpu-rocm so the slot no longer reports vulkan under a ROCm profile.
     """
     _seed_slot_toml(
@@ -1648,43 +1648,9 @@ def test_config_profile_change_drives_device_via_route(
         ],
     )
 
-    r = isolated_client.put("/api/slots/utility/config", json={"profile": "rocm-dnse"})
+    r = isolated_client.put("/api/slots/utility/config", json={"profile": "rocm"})
     assert r.status_code == 200, r.text
 
     cfg = isolated_client.get("/api/slots/utility/config").json()
-    assert cfg["profile"] == "rocm-dnse"
+    assert cfg["profile"] == "rocm"
     assert cfg["device"] == "gpu-rocm"
-
-
-def test_backend_flip_reconciles_profile_via_route(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """POST /backend (writes device only) re-points an incompatible profile.
-
-    Flipping a rocm-dnse slot to the vulkan backend must drop the rocm-only
-    profile rather than persist a vulkan device under rocm-dnse.
-    """
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "utility",
-        [
-            'name = "utility"',
-            "port = 8081",
-            'device = "gpu-rocm"',
-            'provider = "llama-server"',
-            'runtime = "container"',
-            'profile = "rocm-dnse"',
-            "enabled = true",
-            "[model]",
-            'default = "m"',
-        ],
-    )
-
-    r = isolated_client.post("/api/slots/utility/backend", json={"backend": "vulkan"})
-    assert r.status_code == 200, r.text
-
-    cfg = isolated_client.get("/api/slots/utility/config").json()
-    assert cfg["device"] == "gpu-vulkan"
-    assert cfg["profile"] == "vulkan"

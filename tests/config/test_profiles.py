@@ -182,13 +182,14 @@ class TestLoadProfilesConfig:
 
     def test_seed_count(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        # rocm, rocm-dnse, rocm-moe, vulkan, flm, tts, tts-qwen3, comfyui, cpu-llm
+        # rocm, rocmfpx-rocm, vkfpx-moe, vulkan, cuda, embed, rerank, flm, tts,
+        # tts-qwen3, cpu-llm, comfyui
         assert len(cfg.profile) == len(SEED_PROFILES)
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
         assert "rocm" in cfg.profile
-        assert "rocm-dnse" in cfg.profile
+        assert "rocmfpx-rocm" in cfg.profile
         assert "vulkan" in cfg.profile
 
     def test_seed_rocm_mtp_false(self, tmp_path: Path) -> None:
@@ -197,7 +198,7 @@ class TestLoadProfilesConfig:
 
     def test_seed_rocm_mtp_mtp_true(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["rocm-dnse"].mtp is True
+        assert cfg.profile["rocmfpx-rocm"].mtp is True
 
     def test_seed_vulkan_correct_image(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
@@ -206,7 +207,7 @@ class TestLoadProfilesConfig:
     def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
         assert cfg.profile["rocm"].backend == "rocm"
-        assert cfg.profile["rocm-dnse"].backend == "rocm"
+        assert cfg.profile["rocmfpx-rocm"].backend == "rocm"
         assert cfg.profile["vulkan"].backend == "vulkan"
         assert cfg.profile["flm"].backend is None
         assert cfg.profile["tts"].backend is None
@@ -387,7 +388,7 @@ def test_profile_device_class_defaults_gpu() -> None:
 def test_seed_device_classes() -> None:
     assert SEED_PROFILES["vulkan"]["device_class"] == "gpu"
     assert SEED_PROFILES["rocm"]["device_class"] == "gpu"
-    assert SEED_PROFILES["rocm-dnse"]["device_class"] == "gpu"
+    assert SEED_PROFILES["rocmfpx-rocm"]["device_class"] == "gpu"
     assert SEED_PROFILES["flm"]["device_class"] == "npu"
     assert SEED_PROFILES["tts"]["device_class"] == "cpu"
     assert SEED_PROFILES["comfyui"]["device_class"] == "img"
@@ -395,7 +396,7 @@ def test_seed_device_classes() -> None:
 
 def test_seed_backends() -> None:
     assert SEED_PROFILES["rocm"]["backend"] == "rocm"
-    assert SEED_PROFILES["rocm-dnse"]["backend"] == "rocm"
+    assert SEED_PROFILES["rocmfpx-rocm"]["backend"] == "rocm"
     assert SEED_PROFILES["vulkan"]["backend"] == "vulkan"
     # non-GPU profiles carry no backend (device_class drives display)
     assert SEED_PROFILES["flm"].get("backend") is None

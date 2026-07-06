@@ -74,11 +74,48 @@ The happy path is `offline → pulling → starting → warming → ready`, then
 `unloading → offline` on teardown. `error` can recover back into `offline`,
 `pulling`, or `starting`.
 
+## Failure detection — the fail-watcher
+
+While a slot sits in `warming`, `ready`, `serving`, or `idle`, a background
+per-slot task polls the container unit's `systemctl is-active` every 2
+seconds:
+
+- **`warming`** is judged purely on unit liveness — a big model load can
+  legitimately hold `/health` down for minutes, so `/health` is never
+  consulted here. Three consecutive inactive polls flip the slot to `error`
+  with message `"container unit died while warming"`.
+- **`ready` / `serving` / `idle`** are judged on unit liveness *and*
+  `/health`: an active-but-unhealthy unit (two consecutive failed `/health`
+  probes) flips to `error` with message `"model server failed /health
+  probe"`.
+- A unit that goes inactive cleanly — a GPU-arbiter handoff, a plain
+  `systemctl stop`, an OOM-kill pending restart — is reflected as `offline`
+  (message `"container stopped (auto-reloads on next request)"`), not
+  `error`. The red `error` dot is reserved for genuine spawn/health/load
+  failures; a clean stop is a normal condition the dispatcher lazily
+  reloads on the next request.
+
+Detection latency is therefore up to a few poll intervals (roughly 4-6
+seconds), never instant.
+
+## Reaching `ready` without an explicit model
+
 <Aside type="note">
-Some providers serve a baked-in model and need no explicit `model_id` to reach
-`ready`: `kokoro` and `vibevoice`. Other providers require a loaded model before
-they can serve.
+Some providers are self-managed and need no explicit `model_id` to reach
+`ready`: `kokoro`, `qwen3tts`, `moonshine`, and `vibevoice`. Other providers
+require a loaded model before they can serve.
 </Aside>
+
+An NPU FLM slot of `type = "transcription"` or `type = "embedding"` is a
+different case: a **trio shadow**. The NPU runs a single FLM process — the
+`device = "npu", type = "llm"` anchor — which also serves transcription/
+embedding when the anchor's `[npu]` toggles are on. A shadow slot is not
+independently loadable (a standalone load call on it 500s the single-tenant
+NPU), so `load()` skips both the spawn and the readiness probe for it and
+transitions it straight to `READY` with message `"served by NPU FLM anchor
+(trio shadow)"`. Its live state is otherwise derived from the anchor, and
+inference requests are dispatched to the anchor's FLM process, never to the
+shadow slot's own (non-existent) port.
 
 ## Idle eviction and wake-on-request
 

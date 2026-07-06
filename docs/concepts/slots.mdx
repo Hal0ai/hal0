@@ -33,6 +33,23 @@ The container runtime is podman. A docker fallback exists, but podman is the
 supported path — slot units are generated for it.
 </Aside>
 
+### Pinning a slot to one GPU
+
+On a multi-GPU host, a slot's `gpu_index` (an integer, `0` and up) pins it to a
+single card instead of the default "all GPUs" behaviour. The env or device
+mapping it emits is backend-specific:
+
+| Device | What `gpu_index` does |
+|---|---|
+| `gpu-rocm` | Sets `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES` to the index. |
+| `gpu-vulkan` | Sets `GGML_VK_VISIBLE_DEVICES` to the index. |
+| `gpu-cuda` | Maps only that GPU in via CDI (`--device nvidia.com/gpu=<n>`) and sets `CUDA_VISIBLE_DEVICES=0` inside the container, since the CDI mapping already exposes just the one card as ordinal 0. |
+
+Leaving `gpu_index` unset (the default) targets every GPU the backend can see,
+unchanged from single-GPU behaviour. Any explicit `[server].env` entry you set
+still wins over the derived visibility variables — they're merged underneath,
+never over.
+
 ## The lifecycle state machine
 
 A slot moves through an explicit set of states. The `SlotState` values are also
@@ -94,6 +111,33 @@ The effect is that a burst of requests for a model that isn't loaded yet
 produces exactly one load, and everyone waits on that load rather than starting
 their own.
 
+## Keeping the launch command honest across updates
+
+A slot's systemd unit bakes its launch argv **at load time** — updating hal0
+changes the code that would render a slot's command, but not the unit file
+that already rendered it. Left alone, a slot that was running before an
+update keeps running the pre-update flags through `systemctl restart`,
+crash-restarts, and even reboots, until something forces a fresh render.
+
+hal0 now closes most of that gap automatically: after an update finishes (and
+during `install.sh`'s update flow), it re-renders every existing slot's unit
+file through current code and issues one `daemon-reload`. Crucially, it
+**never bounces a running unit** to do this — a slot that's already serving
+keeps serving on its old argv; the fresh command only takes effect the next
+time that slot starts, whether that's a manual restart, a crash-restart, or a
+reboot. A slot whose fresh render is byte-identical to what's on disk is
+skipped as a no-op, and a per-slot render failure is logged and skipped rather
+than aborting the update.
+
+That still leaves a window — a slot that hasn't restarted since the update
+is running old argv and there's no way to tell just by looking at it. The
+dashboard closes that window with a **resolved-command drift indicator**:
+each slot card compares the container's actual, live `podman inspect` argv
+against a fresh render from current config across the flags that matter most
+(context size, model, alias, batch/ubatch size) and flags a mismatch. Seeing
+drift on a slot you haven't touched is the cue that it's still running an
+older command and could use a restart.
+
 ## The GPU arbiter
 
 The reference hardware has a single iGPU sharing one unified memory pool, so two
@@ -120,6 +164,52 @@ XDNA hardware context admits exactly one NPU LLM at a time. hal0 enforces this �
 enabling a second `device=npu` chat slot is rejected.
 </Aside>
 
+## Dedicated embed and rerank lanes
+
+`embed` and `rerank` each get their own bench-tuned profile and their own
+podman container — they are never combined on one llama-server instance.
+That's a hard constraint, not a style choice: passing both `--embedding` and
+`--reranking` to the same llama-server yields all-zero scores. Reranking is
+provisioned as its own slot, internally named `embed-rerank`, distinct from
+the `embed` slot it's paired with in the capability catalogue.
+
+Both lanes are tuned for how pooled scoring actually works: `-ub 8192`
+matches their batch size because a pooled embedding or rerank pass has to run
+the whole input in one physical micro-batch — a smaller ubatch truncates or
+fails on longer inputs. On a `gpu-rocm` box, the `embed` and `rerank`
+capabilities derive onto these dedicated lanes automatically, whether you're
+running the fresh-install picker or reconciling a capability change later;
+Vulkan and CPU boxes still fall back to the generic `vulkan`/`cpu-llm`
+profile until backend-specific embed/rerank variants ship.
+
+## MTP: an Auto / On / Off decision, not a switch
+
+Multi-token prediction (speculative decoding against the model's own draft
+heads) is resolved from three independent signals, in this order:
+
+1. **Model eligibility** — does the model actually ship MTP heads? hal0 checks
+   the registry's `mtp` tag or an `mtp` marker in the model's id/filename.
+2. **Profile opt-in** — does the slot's profile enable MTP at all? Only the
+   `rocm-dnse` and `rocm-moe` seed profiles do.
+3. **Slot override** — the slot's own `mtp` setting, a tri-state: forced
+   **On**, forced **Off**, or **Auto** (the default, shown as the middle
+   position of the dashboard's Auto/On/Off control in the slot drawer).
+
+An explicit slot override always wins. Left on **Auto**, MTP only turns on
+when the profile opts in *and* the model is actually eligible — so a plain
+chat model dropped onto an MTP profile no longer launches with dead
+speculative-decoding flags. Because eligibility now gates Auto, a real
+MTP-capable model that isn't tagged and has no name marker won't speculate
+until you tag it or force the slot **On**.
+
+Forcing **On** for a model that turns out to have no MTP heads is a launch
+crash waiting to happen (`context type MTP requested but model doesn't
+contain MTP layers`), so hal0 defuses that specific combination rather than
+letting it recur: swapping a forced-on slot onto an ineligible model clears
+the override back to Auto, and an update sweeps existing slot configs for the
+same stale combination. A forced **Off**, or a forced **On** that's actually
+eligible, is left alone either way.
+
 ## Seeded slots, roles, and aliases
 
 Every install starts with a set of **seeded slots** so the common capabilities
@@ -139,8 +229,10 @@ slot/role names — the `chat` *capability* itself is unaffected, since any
 `type: llm` slot can serve it.
 
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
-`tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`, `cpu`,
-or `npu`). hal0 keeps one back-compat **alias** so older callers keep working:
+`tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`,
+`gpu-cuda`, `cpu`, or `npu` — `gpu-cuda` is the experimental path for
+non-Strix-Halo NVIDIA hosts). hal0 keeps one back-compat **alias** so older
+callers keep working:
 `agent-hermes` resolves to `agent`. Aliases are never written to disk and
 never appear in slot listings — they're a transparent translation at dispatch
 time.
@@ -153,10 +245,21 @@ whichever slot is actually loaded — `hal0/agent`, `hal0/utility`, and
 custom slot named `research` is addressable as `hal0/research` even though
 it isn't one of the three advertised names.
 
+## Stacks — declarative slot bundles
+
+A **stack** is a preconfigured slot + profile + model bundle you can apply
+atomically: activate a "Daily driver" (chat + voice + image) in one move, and
+hal0 reconciles the running slots to match. Stacks carry the same portable
+export / import envelope as profiles, so you can snapshot a working layout and
+move it to another box. Missing models are flagged before you apply. See
+[Stacks](/docs/concepts/stacks) for the full model — the TOML shape, apply
+semantics, and the portable export/import envelope.
+
 ## Where to go next
 
 <CardGrid>
   <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How a slot gets its image, flags, and device." />
+  <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Applying a whole set of slots as one named, portable unit." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How slots sit under the dispatcher and API." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The unified-memory hardware the arbiter coordinates." />
 </CardGrid>

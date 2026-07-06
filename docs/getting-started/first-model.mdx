@@ -8,24 +8,55 @@ sidebar:
 import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Models in hal0 live in a local registry, the single source of truth for
-Hugging Face coordinates, SHA-256 digests, and curated filenames. You can
-populate it through the `hal0 setup` TUI or directly from the CLI.
+Hugging Face coordinates, SHA-256 digests, and curated filenames. A fresh
+install seeds **zero** model slots — you pick the first model yourself,
+and the fastest path is two commands.
+
+## The two-command path
+
+```sh
+hal0 model pull qwen3-4b      # download from Hugging Face (curated alias)
+hal0 model run  qwen3-4b      # assign to a slot, load, wait until serving
+```
+
+`model run` picks the first compatible slot (or takes `--slot`), loads it,
+polls until the server answers, and prints a copy-paste `curl` smoke test
+against the slot port. That's a working chat endpoint.
+
+## Already have the files on disk?
+
+Many installs start from a disk full of GGUFs, not a download. Point hal0
+at them instead of re-pulling:
+
+```sh
+# the whole directory is your model store (persists to hal0.toml,
+# registers everything it finds immediately):
+hal0 model store /mnt/ai-models
+
+# ...or register files where they already are:
+hal0 model scan                              # sweep the configured roots
+hal0 model add /any/path/my-model.gguf       # one file, auto-detected
+
+hal0 model run my-model
+```
+
+If something doesn't show up, `hal0 doctor models` audits the pipeline —
+dangling registry entries, unregistered files, store mismatches — and
+prints the exact fix for each finding.
 
 ## Via `hal0 setup`
 
-If you ran [first-run setup](/docs/getting-started/setup/) and chose a
-tier, hal0 already seeded the registry and kicked off background pulls for
-each model in that tier. Re-run `hal0 setup` any time to pull more; when a
-pull completes, its slot is ready to start. Nothing more is required.
+Re-run `hal0 setup` any time for the guided TUI: it can provision slots,
+pick curated models sized to your hardware, and kick off the pulls for
+you.
 
-## Via the CLI
+## The CLI, step by step
 
 ![Models registry](/screenshots/models-registry.png)
 
 *The Models view — registry, pull progress, and curated loadouts.*
 
-The `hal0 model` subcommand is a thin HTTP client to the API. The common
-flow is **list → pull → assign**.
+The `hal0 model` subcommand is a thin HTTP client to the API.
 
 <Steps>
 
@@ -48,24 +79,38 @@ flow is **list → pull → assign**.
    The pull runs as a background job on the daemon. The CLI polls
    `/api/models/<id>/pull/status` every 500 ms and prints a progress bar
    until the job reaches a terminal state, then reports the final path
-   and SHA-256.
+   and SHA-256. If the curated pick is a vision model, its `mmproj`
+   projector sidecar downloads automatically alongside the main GGUF —
+   no extra step needed.
 
-3. **Assign the model to a slot's default** (this does not start the
-   slot):
+3. **Run it** — or assign without loading:
 
    ```sh
-   hal0 model assign qwen3-4b --slot agent
+   hal0 model run qwen3-4b --slot agent      # assign + load + wait ready
+   hal0 model assign qwen3-4b --slot agent   # assign only (slot not started)
    ```
 
-   This writes `model.default` into the slot's configuration. `agent` is the
+   Both write `model.default` into the slot's configuration. `agent` is the
    always-seeded default/anchor slot (see [Slots](/docs/concepts/slots)); swap
-   in `utility` or any other slot name you've created instead. Start the
-   slot afterward (see [Manage slots](/docs/guides/manage-slots/)).
+   in `utility` or any other slot name you've created instead. For
+   assign-only, start the slot afterward (see
+   [Manage slots](/docs/guides/manage-slots/)).
 
 </Steps>
 
-Other `hal0 model` commands: `register` (record an on-disk file in the
-registry), `show` (inspect metadata), and `rm` (remove a registry row).
+Other `hal0 model` commands: `add` (register an on-disk file,
+auto-detected), `scan` (sweep the roots + store), `store` (show/move the
+model store), `register` (record an on-disk file with an explicit id),
+`show` (inspect metadata), and `rm` (remove a registry row).
+
+<Aside type="note" title="NPU (FLM) models">
+On Strix Halo NPU installs, FLM models use Ollama-style tags
+(`qwen3:0.6b`, `gemma3:4b`) rather than HF coordinates. `hal0 model pull
+<tag>` routes them to the FLM puller automatically, and the loaded tag
+serves through the `npu` slot. See the
+[Proxmox quick start](/docs/getting-started/proxmox-lxc/) for the NPU
+trio setup.
+</Aside>
 
 <Aside type="tip" title="Gated or large models">
 Pulls that need a Hugging Face token read `HF_TOKEN` from the API

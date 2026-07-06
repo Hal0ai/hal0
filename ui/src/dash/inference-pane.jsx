@@ -4,12 +4,11 @@
 // (comfyui-pane.jsx). Where ComfyUI models ONE containerized generation
 // engine, this pane is a summary engine-shell over the iGPU/CPU slot stack,
 // implementing the P2 *card* direction from the design handoff
-// (design_handoff_inference_slots/P2-inference-pane.html):
-//   · collapsed = compact hero — iGPU GTT memory map + combined-throughput
-//     tile + the active (serving/ready) slots as compact cards
-//   · expanded  = the same hero pinned on top, then ALL pane slots as full
-//     cards (model picker · tok/s · ttft · ctx · per-slot controls) and a
-//     right-aligned status line
+// (design_handoff_inference_slots/P2-inference-pane.html): ALL pane slots
+// as full cards (model picker · tok/s · ttft · ctx · per-slot controls)
+// and a right-aligned status line. The page-level memory + throughput hero
+// now lives in the TelemetryHeader card (telemetry-header.jsx), mounted by
+// SlotsView above the tabs.
 //
 // NPU/FLM slots are cordoned off to the NPU · FLM stack pane below — they
 // live on the NPU budget, not the GTT carve-out, so they appear in neither
@@ -21,9 +20,7 @@
 //   - useModels()          → the per-slot model picker (full cards)
 //   - useMemoryMapModel()  → per-slot resident memory (real mem_mb) + GTT pool
 //   - useSlot{Restart,Unload,Load,Swap} → real lifecycle mutations
-// Throughput history is a client ring buffer (the ThroughputCard pattern) —
-// the backend exposes no rolling-60s series. Absent metrics render an
-// em-dash; the pane never fabricates a number.
+// Absent metrics render an em-dash; the pane never fabricates a number.
 //
 // Per the design voice: lowercase mono labels, no emoji in the chrome,
 // em-dash for any metric the backend hasn't reported.
@@ -34,11 +31,9 @@ import {
   useSlotUnload,
   useSlotLoad,
   useSlotSwap,
-  useSlotBackend,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
-import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -46,7 +41,7 @@ import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 // and npu-pane.jsx).
 import { devKind } from '@/lib/deviceMeta'
 
-const { useState: useStateI, useRef: useRefI, useEffect: useEffectI } = React
+const { useState: useStateI } = React
 
 // ── icons (16×16, thin-line family — ported from the design's infer-core) ──
 const II = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -159,230 +154,6 @@ function SubLabel({ icon, note, children }) {
   )
 }
 
-// ── memory — the iGPU GTT carve-out track (P2's MemDual, iGPU-only) ────────
-// Reuses useMemoryMapModel()'s real per-slot resident memory (mem_mb) and
-// colours. The frame is the GTT pool ceiling (~80 GB carve-out on the
-// appliance); NPU/FLM models are NOT in this bar — they live on the NPU
-// budget. A single honest "system" segment accounts for GTT in use beyond
-// the named model weights (KV cache + runtime + buffers) — no fabricated
-// KV/OS split. Each segment carries a native title (name · GB).
-function MemGtt({ mm, full }) {
-  const pool = mm.pool || {}
-  const self = mm.self || {}
-  const capGb = pool.totalGb || 0
-  const frame = capGb || 1
-  const gpuSegs = (self.slots || [])
-    .filter((s) => (s.device === 'rocm' || s.device === 'vulkan') && s.bytesGb > 0)
-    .sort((a, b) => b.bytesGb - a.bytesGb)
-  const gpuModelGb = gpuSegs.reduce((a, s) => a + s.bytesGb, 0)
-  const gttUsedGb = self.gttUsedGb || 0
-  const systemGb = Math.max(0, round1(gttUsedGb - gpuModelGb))
-  const usedGb = round1(Math.max(gttUsedGb, gpuModelGb))
-  const segs = [
-    ...gpuSegs.map((s) => ({ key: s.name, label: s.name, gb: s.bytesGb, color: s.color })),
-    ...(systemGb > 0
-      ? [{ key: '__sys', label: 'system · KV + runtime', gb: systemGb, color: 'var(--fg-5)' }]
-      : []),
-  ]
-  const freeGb = Math.max(0, round1(frame - usedGb))
-  const pct = (gb) => (gb / frame) * 100
-
-  return (
-    <div className="mem">
-      <SubLabel icon="mem" note={capGb ? `${Math.round(capGb)} GB carve-out` : '—'}>
-        memory · iGPU GTT
-      </SubLabel>
-      <div className="mtrack">
-        <div className="mt-h">
-          <span className="lbl">
-            <span className="dchip vulkan">
-              <span className="d" />
-              iGPU
-            </span>{' '}
-            GTT carve-out
-          </span>
-          <span className="val">
-            <b>{usedGb.toFixed(1)}</b> / {Math.round(capGb)} GB
-          </span>
-        </div>
-        <div className="membar tall" data-testid="infer-membar">
-          {segs.map((s) => (
-            <i
-              key={s.key}
-              className="seg-gap"
-              style={{ width: pct(s.gb) + '%', background: s.color }}
-              title={`${s.label} · ${s.gb} GB`}
-            />
-          ))}
-          <i className="free" style={{ width: Math.max(0, 100 - pct(usedGb)) + '%' }} />
-        </div>
-      </div>
-      {/* Legend is always visible — the memory bar is meaningless without it,
-          even in the collapsed pane (was previously gated on `full`). */}
-      {(
-        <div className="mem-legend">
-          {segs.map((s) => (
-            <div className="ln" key={s.key}>
-              <span className="sw" style={{ background: s.color }} />
-              <span className="nm">{s.label}</span>
-              <span className="gb">
-                <b>{s.gb}</b> GB
-              </span>
-            </div>
-          ))}
-          <div className="ln">
-            <span className="sw free" />
-            <span className="nm">free</span>
-            <span className="gb">
-              <b>{freeGb.toFixed(1)}</b> GB
-            </span>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── throughput tile (P2's TpTile) ──────────────────────────────────────────
-function SparkBars({ data = [], hotN = 4 }) {
-  const max = Math.max(...data, 1)
-  if (!data.length) return <div className="spark2" />
-  return (
-    <div className="spark2">
-      {data.map((v, i) => (
-        <i
-          key={i}
-          className={i >= data.length - hotN ? 'hot' : ''}
-          style={{ height: (v / max) * 100 + '%' }}
-        />
-      ))}
-    </div>
-  )
-}
-
-function TpTile({ value, ticks, peak, servingN, prefillMs }) {
-  return (
-    <div className="tp-tile" data-testid="infer-tp">
-      <div className="blk-h" style={{ margin: 0 }}>
-        <span className="ic">
-          <Ic name="activity" size={13} />
-        </span>{' '}
-        combined throughput
-      </div>
-      <div className="tp-row">
-        <div className="tp tp-mid">
-          <div className="tp-num">
-            {value == null ? '—' : value}
-            <span className="u">tok/s</span>
-          </div>
-        </div>
-        <div className="tp-aside">
-          <span>{peak == null ? 'peak —' : `peak ${peak}`}</span>
-          <span className="pk">{servingN} serving</span>
-        </div>
-      </div>
-      <SparkBars data={ticks} />
-      <div className="tp-prefill" data-testid="infer-prefill">
-        <span className="pf-lbl">prefill</span>
-        <span className="pf-val">
-          {prefillMs == null ? '—' : prefillMs}
-          {prefillMs != null && <span className="u">ms ttft</span>}
-        </span>
-      </div>
-    </div>
-  )
-}
-
-// ── iGPU usage gauge (270° radial) ──────────────────────────────────────
-// Same SVG semicircle as the NPU (purple) and ComfyUI (blue) panes; here it
-// carries the iGPU device hue (--dev-rocm) and reads live GPU usage off
-// /api/stats/hardware. `pct` null → renders an em-dash (never a fake 0).
-function Gauge({ pct, label, sub, size = 132 }) {
-  const sw = Math.round(size * 0.065)
-  const r = size / 2 - sw - 4
-  const cx = size / 2
-  const cy = size / 2
-  const C = 2 * Math.PI * r
-  const arc = C * 0.75 // 270° sweep
-  const p = Math.max(0, Math.min(1, (pct || 0) / 100))
-  const fill = p * arc
-  return (
-    <div className="gauge" style={{ width: size, height: size }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle
-          className="gtrack"
-          cx={cx}
-          cy={cy}
-          r={r}
-          strokeWidth={sw}
-          strokeDasharray={`${arc} ${C}`}
-          strokeLinecap="round"
-          transform={`rotate(135 ${cx} ${cy})`}
-        />
-        <circle
-          className="gfill"
-          cx={cx}
-          cy={cy}
-          r={r}
-          strokeWidth={sw}
-          strokeDasharray={`${fill} ${C}`}
-          transform={`rotate(135 ${cx} ${cy})`}
-        />
-      </svg>
-      <div className="gc">
-        <div className="pct">
-          {pct == null ? '—' : Math.round(pct)}
-          {pct != null && <span className="s">%</span>}
-        </div>
-        <div className="lbl">{label}</div>
-        {sub ? <div className="sub">{sub}</div> : null}
-      </div>
-    </div>
-  )
-}
-
-// iGPU usage tile for the hero band — gauge of GPU compute %, captioned with
-// the live shader clock (MHz) and edge temperature (°C). Forced-high perf
-// pinning (gpu-compute.service) makes the % unreliable; we tag it "pinned"
-// so the reading is captioned, not silently trusted (mirrors the backend
-// util_is_forced_high contract).
-function GpuGauge() {
-  const hw = useStatsHardware()
-  const d = hw.data || {}
-  const util = typeof d.gpu_util === 'number' ? d.gpu_util : null
-  const pct = util == null ? null : util * 100
-  const mhz = typeof d.gpu_clock_mhz === 'number' && d.gpu_clock_mhz > 0 ? d.gpu_clock_mhz : null
-  const temp = typeof d.gpu_temp_c === 'number' ? d.gpu_temp_c : null
-  const forced = !!d.util_is_forced_high
-  return (
-    <div className="gpu-gauge-tile" data-testid="infer-gpu-gauge">
-      <div className="blk-h" style={{ margin: 0 }}>
-        <span className="ic">
-          <Ic name="mem" size={13} />
-        </span>{' '}
-        igpu usage{forced ? ' · pinned' : ''}
-      </div>
-      <Gauge pct={pct} label="igpu" />
-      <div className="gpu-readout">
-        <div className="st">
-          <div className="sv">
-            {mhz == null ? '—' : mhz}
-            {mhz != null && <span className="u">MHz</span>}
-          </div>
-          <div className="sl">clock</div>
-        </div>
-        <div className="st">
-          <div className="sv">
-            {temp == null ? '—' : Math.round(temp)}
-            {temp != null && <span className="u">°C</span>}
-          </div>
-          <div className="sl">temp</div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ── slot cards ──────────────────────────────────────────────────────────
 // provider tag — a joined [ device | PROFILE ] control. The profile pill
 // surfaces the slot's runtime profile (slot.profile, resolved from
@@ -414,82 +185,33 @@ function DevCell({ s, onProfile }) {
   )
 }
 
-// Backend-mismatch remediation (ADR-0022) — mirrors slots.jsx SlotCard: when
-// the slot reports backend_mismatch + actual_backend, render an amber chip
-// surfacing the ACTUAL runtime backend plus a "Switch to <declared>" action.
-// Confirming POSTs /api/slots/{name}/backend (useSlotBackend) — a container
-// restart — via the shared ConfirmDialog (primitives.jsx window global).
-function BackendMismatch({ s }) {
-  const backendMut = useSlotBackend()
-  const [open, setOpen] = useStateI(false)
+// Backend-mismatch chip — mirrors slots.jsx SlotCard: when the slot reports
+// backend_mismatch + actual_backend, render an amber chip surfacing the ACTUAL
+// runtime backend. Backend identity is owned by the slot's profile, so the chip
+// opens the slot editor's profile picker (via onEdit) rather than a one-click
+// switch — the legacy backend-switch endpoint was removed in WS-5.
+function BackendMismatch({ s, onEdit }) {
   if (!s.backend_mismatch || !s.actual_backend) return null
   const declared = s.declared_backend || s.backend || s.device
-  const onConfirm = () => {
-    setOpen(false)
-    backendMut.mutate(
-      { name: s.name, backend: declared },
-      {
-        onSuccess: (resp) => {
-          const effective = resp?.effective_backend || resp?.actual_backend || declared
-          toast(`${s.name} backend → ${effective}`, 'ok')
-        },
-        onError: (err) =>
-          toast(`${s.name}: backend switch failed — ${err?.message || 'see logs'}`, 'warn'),
-      },
-    )
-    toast(`Switching ${s.name} to ${declared} — restarting…`, 'info')
-  }
   return (
-    <>
-      <button
-        type="button"
-        className="tag-chip"
-        style={{
-          color: 'var(--warn)',
-          borderColor: 'var(--warn-line)',
-          background: 'var(--warn-soft)',
-          cursor: 'pointer',
-        }}
-        title={`Declared ${declared} but running ${s.actual_backend} — click to switch back to ${declared} (restarts the container)`}
-        disabled={backendMut.isPending}
-        onClick={(e) => {
-          e.stopPropagation()
-          setOpen(true)
-        }}
-        data-testid={`infer-backend-mismatch-${s.name}`}
-      >
-        {s.actual_backend} ≠ declared
-      </button>
-      <button
-        type="button"
-        className="rbtn"
-        style={{ fontSize: 10, padding: '1px 6px' }}
-        disabled={backendMut.isPending}
-        onClick={(e) => {
-          e.stopPropagation()
-          setOpen(true)
-        }}
-        data-testid={`infer-backend-switch-${s.name}`}
-      >
-        {backendMut.isPending ? 'Switching…' : `Switch to ${declared}`}
-      </button>
-      <ConfirmDialog
-        open={open}
-        onCancel={() => setOpen(false)}
-        onConfirm={onConfirm}
-        title={`Switch ${s.name} to ${declared}?`}
-        message={
-          <span>
-            <span className="mono" style={{ color: 'var(--fg)' }}>{s.name}</span> is running
-            on <span className="mono">{s.actual_backend}</span> but is declared
-            as <span className="mono">{declared}</span>. Switching restarts the
-            container to reload on the declared backend (~model-load seconds); the slot
-            is unavailable while it reloads.
-          </span>
-        }
-        confirmLabel="Switch backend"
-      />
-    </>
+    <button
+      type="button"
+      className="tag-chip"
+      style={{
+        color: 'var(--warn)',
+        borderColor: 'var(--warn-line)',
+        background: 'var(--warn-soft)',
+        cursor: 'pointer',
+      }}
+      title={`Declared ${declared} but running ${s.actual_backend} — edit the slot's profile to change its backend`}
+      onClick={(e) => {
+        e.stopPropagation()
+        onEdit && onEdit()
+      }}
+      data-testid={`infer-backend-mismatch-${s.name}`}
+    >
+      {s.actual_backend} ≠ declared
+    </button>
   )
 }
 
@@ -636,7 +358,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
         )}
         <div className={'scard-foot' + (full ? '' : ' bare')}>
           <DevCell s={s} onProfile={onEdit} />
-          <BackendMismatch s={s} />
+          <BackendMismatch s={s} onEdit={onEdit} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
           <span className="grow" />
           {controls}
@@ -741,64 +463,9 @@ function MiniCards({ rows, busyName, handlers }) {
   )
 }
 
-// Page-level hero band — the iGPU GTT memory map + combined-throughput tile,
-// lifted out of the Inference engine shell so it sits at the very top of the
-// Slots page (above the Inference ⇄ Image Gen tabs) and stays visible across
-// tabs. Self-contained: owns its own slots/memory queries + throughput ring
-// buffer, so SlotsView can drop it in without threading any state down. Wrapped
-// in `.infer-pane .proto` so it inherits the pane's accent vars + box-sizing
-// and reuses the existing .hero-band / .mem / .tp styling verbatim.
-export function InferenceHeroBand() {
-  const slotsQuery = useSlots()
-  const mm = useMemoryMapModel()
-
-  const allSlots = slotsQuery.data || []
-  const nonImg = allSlots.filter((s) => String(s?.type) !== 'image')
-  const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
-  const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
-  const servingN = rows.filter((r) => r.ind.cls === 'serving').length
-
-  // Combined throughput — summed tok/s across this pane's serving slots, with a
-  // client ring buffer for the spark (the backend exposes no rolling series).
-  const toksVals = slots
-    .map((s) => s?.metrics?.toks)
-    .filter((t) => typeof t === 'number' && t > 0)
-  const value = toksVals.length ? Math.round(toksVals.reduce((a, b) => a + b, 0)) : null
-  const historyRef = useRefI([])
-  const lastRef = useRefI(null)
-  const [, force] = useStateI(0)
-  useEffectI(() => {
-    if (value == null) return
-    if (lastRef.current === value) return
-    lastRef.current = value
-    historyRef.current = [...historyRef.current, value].slice(-21)
-    force((n) => n + 1)
-  }, [value])
-  const ticks = historyRef.current
-  const peak = ticks.length ? Math.max(...ticks) : null
-
-  // Combined prefill — avg TTFT (ms) across this pane's serving slots. The
-  // backend deliberately doesn't scrape a prompt-eval rate, so TTFT is the
-  // available prefill signal (slot.metrics.ttft). null → em-dash, never 0.
-  const ttftVals = slots
-    .map((s) => s?.metrics?.ttft)
-    .filter((t) => typeof t === 'number' && t > 0)
-  const prefillMs = ttftVals.length
-    ? Math.round(ttftVals.reduce((a, b) => a + b, 0) / ttftVals.length)
-    : null
-
-  return (
-    <div className="infer-pane infer-hero-top" data-testid="infer-hero-band">
-      <div className="proto">
-        <div className="hero-band">
-          <MemGtt mm={mm} full />
-          <GpuGauge />
-          <TpTile value={value} ticks={ticks} peak={peak} servingN={servingN} prefillMs={prefillMs} />
-        </div>
-      </div>
-    </div>
-  )
-}
+// The page-level hero band (iGPU GTT memory map + combined-throughput tile)
+// was replaced by the TelemetryHeader card (telemetry-header.jsx) at the top
+// of SlotsView — its MemGtt / GpuGauge / TpTile tiles went with it.
 
 export function InferencePane() {
   const slotsQuery = useSlots()
@@ -928,7 +595,7 @@ export function InferencePane() {
 
           {/* All slots as full cards — always visible (freed from the old
               collapse/expand accordion). The memory + throughput hero now lives
-              in the page-level InferenceHeroBand above the tabs. */}
+              in the page-level TelemetryHeader card above the tabs. */}
           <div className="engine-b" data-testid="infer-slots">
             <div>
               <SubLabel
@@ -988,4 +655,4 @@ export function InferencePane() {
   )
 }
 
-Object.assign(window, { InferencePane, InferenceHeroBand })
+Object.assign(window, { InferencePane })

@@ -13,7 +13,6 @@ import {
   useSlotLoad,
   useSlotSwap,
   useSlotEdit,
-  useSlotBackend,
   useSlotImagePull,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
@@ -23,12 +22,12 @@ import { ComfyuiPane } from './comfyui-pane.jsx'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
-  InferenceHeroBand,
   SlotScard,
   ModelPicker,
   SlotControls,
   slotCtrlPhase,
 } from './inference-pane.jsx'
+import { TelemetryHeader } from './telemetry-header.jsx'
 import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 
@@ -149,29 +148,11 @@ function SlotCard({
   busy,
 }) {
   const { type, device, model, state, isDefault, coresident, metrics } = slot;
-  // ADR-0022: backend-mismatch remediation. The amber "≠ declared" chip now
-  // has a real affordance — a "Switch to <declared>" button that confirms
-  // (container restart) then POSTs /api/slots/{name}/backend with the
-  // declared backend. Fire-and-forget (mutate): the hook invalidates
-  // ['slots'] and the 5s poll reflects the restart.
-  const backendMut = useSlotBackend();
-  const [switchOpen, setSwitchOpen] = useStateS(false);
+  // Backend-mismatch chip: backend identity is owned by the slot's profile,
+  // so the amber "≠ declared" chip is a diagnostic that opens the slot editor
+  // (profile picker) rather than a one-click switch. The legacy backend-switch
+  // endpoint was removed in WS-5 — changing the profile is the way to switch.
   const declaredBackend = slot.declared_backend || slot.backend || device;
-  const onSwitchBackendConfirm = () => {
-    setSwitchOpen(false);
-    backendMut.mutate({ name: slot.name, backend: declaredBackend }, {
-      onSuccess: (resp) => {
-        const effective = resp?.effective_backend || resp?.actual_backend || declaredBackend;
-        window.__hal0Toast && window.__hal0Toast(
-          `${slot.name} backend → ${effective}`, "ok");
-      },
-      onError: (err) =>
-        window.__hal0Toast && window.__hal0Toast(
-          `${slot.name}: backend switch failed — ${err?.message || "see logs"}`, "warn"),
-    });
-    window.__hal0Toast && window.__hal0Toast(
-      `Switching ${slot.name} to ${declaredBackend} — restarting…`, "info");
-  };
   // Spec 1 / C3: a slot is enabled unless explicitly off. Disabled slots fade,
   // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
   const enabled = slot.enabled !== false;
@@ -235,7 +216,6 @@ function SlotCard({
   })();
 
   return (
-    <>
     <div className={"slot" + statusClass + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled") + (liveWhileDisabled ? " slot--live" : "")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
@@ -332,34 +312,20 @@ function SlotCard({
             </span>
           );
         })()}
-        {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL runtime
-            backend when it differs from the declared one. Container slots are
-            the only real slots, so this now renders alongside the image-tag
-            chip (previously trapped in the dead non-container branch).
-            Clicking the chip or the paired button opens the switch-backend
-            confirm (container restart) — the chip is no longer advice-only. */}
+        {/* Backend mismatch: amber chip surfaces the ACTUAL runtime backend
+            when it differs from the declared one. Backend identity is owned by
+            the slot's profile, so clicking opens the slot editor's profile
+            picker (there is no dedicated backend-switch — WS-5). */}
         {slot.backend_mismatch && slot.actual_backend && (
-          <>
-            <button
-              type="button"
-              className={"chip dev-" + String(slot.actual_backend)}
-              style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)", cursor: "pointer"}}
-              title={`Declared ${declaredBackend} but running ${slot.actual_backend} — click to switch back to ${declaredBackend} (restarts the container)`}
-              disabled={backendMut.isPending}
-              onClick={() => setSwitchOpen(true)}
-            >
-              {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
-            </button>
-            <button
-              type="button"
-              className="btn ghost sm"
-              style={{fontSize: 10, padding: "1px 6px"}}
-              disabled={backendMut.isPending}
-              onClick={() => setSwitchOpen(true)}
-            >
-              {backendMut.isPending ? "Switching…" : `Switch to ${declaredBackend}`}
-            </button>
-          </>
+          <button
+            type="button"
+            className={"chip dev-" + String(slot.actual_backend)}
+            style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)", cursor: "pointer"}}
+            title={`Declared ${declaredBackend} but running ${slot.actual_backend} — edit the slot's profile to change its backend`}
+            onClick={onEdit}
+          >
+            {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
+          </button>
         )}
         {(() => {
           // Colour aligned to the slotIndicatorFromPhase() vocabulary
@@ -421,23 +387,6 @@ function SlotCard({
       </div>
       {errorMsg && <div style={{marginTop: 4}}><ErrorSlotCardBanner slot={slot} message={errorMsg} /></div>}
     </div>
-    <ConfirmDialog
-      open={switchOpen}
-      onCancel={() => setSwitchOpen(false)}
-      onConfirm={onSwitchBackendConfirm}
-      title={`Switch ${slot.name} to ${declaredBackend}?`}
-      message={
-        <span>
-          <span className="mono" style={{color: "var(--fg)"}}>{slot.name}</span> is running
-          on <span className="mono">{slot.actual_backend}</span> but is declared
-          as <span className="mono">{declaredBackend}</span>. Switching restarts the
-          container to reload on the declared backend (~model-load seconds); the slot
-          is unavailable while it reloads.
-        </span>
-      }
-      confirmLabel="Switch backend"
-    />
-    </>
   );
 }
 
@@ -882,10 +831,12 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
       </div>
 
-      {/* Memory map + combined-throughput band — lifted out of the Inference
-          engine shell to the top of the page, above the tabs, so iGPU GTT usage
-          and live throughput stay visible regardless of which tab is active. */}
-      <InferenceHeroBand />
+      {/* Telemetry header — the combined live-metrics card (throughput / GPU /
+          CPU·memory / NPU cells + memory rack ruler) at the top of the page,
+          above the tabs, so system load stays visible regardless of which tab
+          is active. Replaces the old InferenceHeroBand (memory map +
+          combined-throughput band). */}
+      <TelemetryHeader />
 
       {/* Inference ⇄ Image Gen tabs. Tab 1 holds every non-image slot; tab 2 is
           the ComfyUI generation engine pane (one container, not per-model

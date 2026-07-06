@@ -170,3 +170,57 @@ class TestMissingFile:
         assert r.confidence == "low"
         assert set(r.suggested_backends) == {"vulkan", "rocm", "cuda", "cpu"}
         assert r.suggested_capabilities == ["chat"]
+
+
+class TestRocmfpxQuant:
+    """ROCmFPX-family quant detection (ciru-ai/ROCmFPX custom GGUF formats).
+
+    These repacks carry a custom general.file_type code that is not an
+    upstream LLAMA_FTYPE value, so quant must come from the filename's
+    preset/family token and resolve to the canonical family label.
+    """
+
+    def test_pure_resolver_presets_and_families(self) -> None:
+        from hal0.registry.detect import quant_from_rocmfpx_filename as q
+
+        # Explicit GGUF presets → family label.
+        assert q("model-Q4_0_ROCMFP4.gguf") == "ROCmFP4"
+        assert q("model-Q4_0_ROCMFP4_FAST.gguf") == "ROCmFP4"
+        assert q("model-Q3_0_ROCMFPX.gguf") == "ROCmFP3"
+        assert q("model-Q6_0_ROCMFPX.gguf") == "ROCmFP6"
+        assert q("model-Q8_0_ROCMFPX.gguf") == "ROCmFP8"
+        # Bare family tokens (no explicit preset).
+        assert q("CHADROCK3.6-27B-Coder-MTP-ROCmFP4-STRIX_LEAN.gguf") == "ROCmFP4"
+        assert q("CHADROCK3.6-35B-A3B-Coder-MTP-ROCmFPX-MoEQuality-7.08BPW.gguf") == "ROCmFPX"
+        # Non-ROCmFPX names → None (defer to the standard resolver).
+        assert q("llama-7b-Q4_K_M.gguf") is None
+        assert q("qwen3-embedding.gguf") is None
+
+    def test_detect_prefers_family_over_unmapped_file_type(self, tmp_path: Path) -> None:
+        # Custom/unknown file_type (1001) that quant_from_file_type can't map;
+        # filename carries the ROCmFP4 family token → quant == "ROCmFP4".
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen35")),
+            ("general.file_type", _GGUF_TYPE_UINT32, struct.pack("<I", 1001)),
+            ("qwen35.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 262144)),
+        ]
+        p = _write_fixture(
+            tmp_path,
+            "CHADROCK3.6-27B-Coder-MTP-ROCmFP4-STRIX_LEAN.gguf",
+            _build_gguf(3, kvs),
+        )
+        r = detect(p)
+        assert r.confidence == "high"
+        assert r.quant == "ROCmFP4"
+
+    def test_detect_moe_rocmfpx_umbrella(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen35moe")),
+            ("qwen35moe.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 65536)),
+        ]
+        p = _write_fixture(
+            tmp_path,
+            "CHADROCK3.6-35B-A3B-Coder-MTP-ROCmFPX-MoEQuality-7.08BPW.gguf",
+            _build_gguf(3, kvs),
+        )
+        assert detect(p).quant == "ROCmFPX"

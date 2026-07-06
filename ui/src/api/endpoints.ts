@@ -34,7 +34,6 @@ export const ENDPOINTS = {
   // {voices: [], source: "offline"} when the slot is cold.
   slotVoices: (name: string) => `/api/slots/${encodeURIComponent(name)}/voices`,
   slotDefaults: (name: string) => `/api/slots/${encodeURIComponent(name)}/defaults`,
-  slotBackend: (name: string) => `/api/slots/${encodeURIComponent(name)}/backend`,
   slotRestart: (name: string) => `/api/slots/${encodeURIComponent(name)}/restart`,
   slotLoad: (name: string) => `/api/slots/${encodeURIComponent(name)}/load`,
   slotUnload: (name: string) => `/api/slots/${encodeURIComponent(name)}/unload`,
@@ -94,6 +93,10 @@ export const ENDPOINTS = {
   statsThroughputHistory: '/api/stats/throughput/history',
   // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
   statsPower: '/api/stats/power',
+  // Dashboard-redesign Requests widget: dispatcher-side /v1 rollup
+  // (req/min, p50/p95, per-endpoint counts over 60s). NEW endpoint —
+  // useRequestsRollup fails soft to "—" until it ships.
+  statsRequests: '/api/stats/requests',
   // W6: agent approvals SSE stream (polled list hook is primary; SSE for future).
   agentApprovalsStream: '/api/agent/approvals/events',
 
@@ -259,6 +262,10 @@ export const ENDPOINTS = {
   // Channel (stable | nightly) — GET reads hal0.toml telemetry.channel;
   // PUT persists the choice back so subsequent /check calls honour it.
   updateChannel: '/api/updates/channel',
+  // Post-update drift (WS-J, #1111): slots whose running process still uses
+  // the pre-update launch command. GET reports; POST restarts only those.
+  updateSlotDrift: '/api/updates/slot-drift',
+  updateRestartSlots: '/api/updates/restart-slots',
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,

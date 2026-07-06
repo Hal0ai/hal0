@@ -216,10 +216,12 @@ test.describe('ApprovalModal live wiring', () => {
 
 test.describe('Dashboard hero strip', () => {
   test('renders status metadata without the old greeting copy', async ({ page }) => {
+    // dashboard-redesign: the hero strip is .rd-hero ("steady on <host> ·
+    // N slots up …" + quick actions + customize).
     await page.goto('/#dashboard')
-    await expect(page.locator('.hero-strip')).toBeVisible({ timeout: FIVE_S })
-    await expect(page.locator('.hero-strip')).not.toContainText('Welcome back, halo')
-    await expect(page.locator('.hero-strip')).not.toContainText('system steady on')
+    await expect(page.locator('.rd-hero')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('.rd-hero')).not.toContainText('Welcome back, halo')
+    await expect(page.locator('.rd-hero')).not.toContainText('system steady on')
     await expect(page.getByRole('button', { name: /customize/i })).toBeVisible()
   })
 })

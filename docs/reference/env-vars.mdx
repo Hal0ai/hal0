@@ -22,12 +22,12 @@ config by env-var name. Never commit a populated `api.env`.
 
 | Variable                       | What it does                                                   | Default |
 |--------------------------------|---------------------------------------------------------------|---------|
-| `HAL0_PORT`                    | API listen port. The API binds `0.0.0.0` unconditionally.     | `8080`  |
+| `HAL0_PORT`                    | API listen port — `hal0-api.service`'s `ExecStart` binds `--port ${HAL0_PORT}`. The API binds `0.0.0.0` unconditionally. | `8080`  |
 | `HAL0_SELF_BASE_URL`           | Base URL hal0 uses to re-enter its own `/v1` surface (omni router). | `http://127.0.0.1:8080` |
-| `HAL0_LOG_LEVEL`               | Log verbosity for the API.                                     | `info`  |
+| `HAL0_API_URL`                 | Base URL the `hal0` CLI (and bundled agents) talk to. Point it at a remote box instead of the local API. | `http://127.0.0.1:8080` |
 | `HAL0_UI_DIST`                 | Override path to the built dashboard bundle (`ui/dist`).       | unset (FHS/editable autodetect) |
-| `HAL0_ALLOWED_ORIGINS`         | Allowed browser origins for cross-origin requests.            | unset   |
-| `HAL0_ACTIVITY_RETENTION_DAYS` | Override the activity/audit store retention window.          | from `hal0.toml` |
+| `HAL0_ALLOWED_ORIGINS`         | Comma-separated browser `Origin` allowlist for the **agent-chat WebSocket** upgrade (`/agents/*` chat proxy) — not general API CORS; there is no CORS middleware on `/api`/`/v1`. | `http://hal0.local`, `http://localhost:5173`, `http://127.0.0.1:8080` |
+| `HAL0_ACTIVITY_RETENTION_DAYS` | Override the activity/audit store retention window.          | from `hal0.toml` (`[activity].retention_days`, `30`) |
 
 <Aside type="note">
 hal0 ships with **no built-in auth or TLS** (ADR-0012). The API is open on the
@@ -41,37 +41,66 @@ There is no bearer-token or basic-auth flag to enable.
 |----------------------|----------------------------------------------------------------------|---------|
 | `HAL0_HOME`          | Relocate all four roots (code/config/state/log) under one prefix.     | unset (use FHS) |
 | `HAL0_MODEL_STORE`   | Model-store directory slot containers bind-mount (highest precedence).| `[models].store`, then the conventional mount |
+| `HAL0_FLM_MODELS_DIR` | FLM (NPU) model-store directory the npu slot bind-mounts (highest precedence). | `[models].flm_store`, then FLM's default HOME cache |
 
 ## Runtime
 
 | Variable                  | What it does                                                       | Default |
 |---------------------------|-------------------------------------------------------------------|---------|
 | `HAL0_CONTAINER_RUNTIME`  | Container runtime binary for slots.                               | `/usr/bin/podman`, falling back to `/usr/bin/docker` |
-| `HAL0_TOOLBOX_IMAGE_ROCM` | Override the `rocm` toolbox image ref.                            | from `manifest.json` |
-| `HAL0_TOOLBOX_IMAGE_VULKAN` | Override the `vulkan` toolbox image ref.                        | from `manifest.json` |
-| `HAL0_TOOLBOX_IMAGE_FLM`  | Override the `flm` toolbox image ref.                             | from `manifest.json` |
-| `HAL0_TOOLBOX_IMAGE_KOKORO` | Override the `kokoro` toolbox image ref.                        | from `manifest.json` |
-| `HAL0_TOOLBOX_IMAGE_COMFYUI` | Override the `comfyui` toolbox image ref.                      | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_FLM`  | Override the FLM (NPU) toolbox image ref.                          | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_KOKORO` | Override the Kokoro TTS toolbox image ref.                      | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_QWEN3TTS` | Override the Qwen3-TTS toolbox image ref.                     | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_COMFYUI` | Override the ComfyUI toolbox image ref.                        | from `manifest.json` |
 
 <Aside type="note">
 podman (rootless, no daemon) is the runtime. `docker` is only a fallback when
-podman is not installed.
+podman is not installed. The GPU llama-server profiles (`rocm`, `rocm-dnse`,
+`rocm-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `cpu-llm`) have no
+per-backend `HAL0_TOOLBOX_IMAGE_*` override — their container image is baked
+into the [profile](/docs/reference/providers-profiles-devices) itself. Only
+the companion-service toolboxes above (FLM, Kokoro, Qwen3-TTS, ComfyUI) read
+one.
 </Aside>
+
+## Services
+
+Companion services (Open WebUI, ComfyUI, Hermes, Hindsight, n8n) can be given
+a browser-facing URL that differs from their loopback port — useful behind a
+reverse proxy, or when a service binds loopback-only. See
+[Companion services](/docs/operate/services) for the full picture.
+
+| Variable                    | What it does                                                     | Default |
+|------------------------------|-------------------------------------------------------------------|---------|
+| `HAL0_HOSTNAME`              | Hostname used to build the `<host>.local` mDNS name (set by the install wizard). Wins over `socket.gethostname()`. | detected hostname |
+| `HAL0_OPENWEBUI_PUBLIC_URL`  | Public/proxy URL shown for Open WebUI instead of the LAN `host:3001` guess. | unset |
+| `HAL0_OPENWEBUI_PROBE_URL`   | Health-probe URL override for Open WebUI's `/api/services` status. | unset |
+| `HAL0_COMFYUI_PUBLIC_URL`    | Public/proxy URL for ComfyUI — also avoids the mixed-content block a plain `http://host:8188` link hits from an HTTPS dashboard. | unset |
+| `HAL0_HERMES_PUBLIC_URL`     | Public URL for Hermes. Hermes binds **loopback-only** (`:9119`); this is the *only* way a browser link is shown for it. | unset (no link shown) |
+| `HAL0_N8N_PUBLIC_URL`        | Public URL for an operator-run n8n instance (n8n is external/unmanaged). | unset |
+| `HAL0_N8N_PROBE_URL`         | Health-probe URL for n8n. n8n's status is **unmonitored** unless this is set. | unset |
 
 ## Memory & MCP
 
 | Variable                  | What it does                                                       | Default |
 |---------------------------|-------------------------------------------------------------------|---------|
-| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Hindsight-backed, `/mcp/memory`, `/api/memory/*`). Memory is **opt-in**. | `0` (disabled) |
-| `HAL0_MCP_ALLOWED_HOSTS`  | Allowlist of `Host` headers accepted by the mounted MCP servers.  | unset   |
-| `HAL0_MCP_ALLOWED_ORIGINS`| Allowlist of origins for MCP transport requests.                  | unset   |
+| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Hindsight-backed, `/mcp/memory`, `/api/memory/*`). | `0` (disabled) if unset |
+| `HAL0_MCP_ALLOWED_HOSTS`  | Comma-separated `Host` headers (or `host:port` / `host:*`) added to the MCP mounts' localhost allowlist. `*` disables the DNS-rebinding check entirely. | unset (localhost only) |
+| `HAL0_MCP_ALLOWED_ORIGINS`| Comma-separated browser origins for MCP transport requests. When unset, `http`/`https` origins are derived from `HAL0_MCP_ALLOWED_HOSTS`. | unset (derived from hosts) |
+
+<Aside type="note">
+The code-level default for `HAL0_MEMORY_ENABLED` is off, but a fresh install's
+`/etc/hal0/api.env` explicitly sets `HAL0_MEMORY_ENABLED=1` — so a new install
+ships with memory **on**. An in-place upgrade never rewrites an existing
+`api.env`, so an install that previously had it unset (or off) stays off.
+</Aside>
 
 ## Models & providers
 
 | Variable             | What it does                                                  | Default |
 |----------------------|--------------------------------------------------------------|---------|
-| `HF_TOKEN`           | Hugging Face token used when pulling gated/private models.    | unset   |
-| `HF_HOME`            | Hugging Face cache root.                                      | tool default |
+| `HF_TOKEN`           | Hugging Face token used when pulling gated/private models. `HUGGING_FACE_HUB_TOKEN` is accepted as a fallback name. | unset   |
+| `HF_HOME`            | Hugging Face cache root used by the Kokoro TTS toolbox for its downloaded voice assets. | `/var/lib/hal0/.cache/huggingface` |
 
 ## Install & update
 
@@ -94,4 +123,7 @@ checkout.
 ## See also
 
 - [Paths & files](/docs/reference/paths-and-files) — what each root holds and the `HAL0_HOME` remap.
+- [Devices, providers & profiles](/docs/reference/providers-profiles-devices) — the seed profile catalog and toolbox image refs.
+- [Companion services](/docs/operate/services) — the services registry, mDNS discovery, and the `/api/services` surface behind the `HAL0_*_PUBLIC_URL`/`PROBE_URL` knobs.
+- [Authentication & HTTPS](/docs/operate/auth) — the reverse-proxy threat model and what `HAL0_ALLOWED_ORIGINS`/`HAL0_MCP_ALLOWED_*` actually gate.
 - [REST API index](/docs/reference/api/rest-api).

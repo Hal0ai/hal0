@@ -6,6 +6,7 @@ from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.install.profile_derive import (
     derive_device,
     derive_profile,
+    npu_healthy,
     npu_takes_utility,
 )
 
@@ -31,10 +32,12 @@ def _hw(*, platform="bare-metal-amd-gpu", compute=True, vulkan=True, npu=False):
     )
 
 
-def test_chat_on_rocm_box_picks_rocm_mtp():
+def test_chat_on_rocm_box_picks_rocm():
+    # derive no longer prefers the MTP image on ROCm — chat/coder derive to the
+    # plain `rocm` profile; MTP dense now lives on rocmfpx-rocm (opt-in only).
     hw = _hw(compute=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
-    assert derive_profile("chat", "gpu-rocm") == "rocm-dnse"
+    assert derive_profile("chat", "gpu-rocm") == "rocm"
 
 
 def test_chat_on_vulkan_only_box_picks_vulkan():
@@ -101,6 +104,24 @@ def test_utility_capability_routes_like_chat_lane():
     # NPU-absent → utility stays on the iGPU.
     igpu_box = _hw(npu=False, compute=True)
     assert derive_device("utility", igpu_box, npu_opt_in=False) == "gpu-rocm"
+
+
+def test_npu_healthy_requires_present_and_validated_true():
+    """npu_healthy is True ONLY for present + validated=True (#1109). A present-
+    but-broken (False) or never-validated (None) NPU is unhealthy, and an absent
+    NPU is unhealthy regardless of the validated flag."""
+    from hal0.config.schema import NPUInfo
+
+    def _with(present, validated):
+        hw = _hw(npu=present)
+        hw.npu = NPUInfo(present=present, validated=validated)
+        return hw
+
+    assert npu_healthy(_with(True, True)) is True
+    assert npu_healthy(_with(True, False)) is False
+    assert npu_healthy(_with(True, None)) is False
+    assert npu_healthy(_with(False, True)) is False
+    assert npu_healthy(_with(False, None)) is False
 
 
 def test_tts_is_cpu_kokoro():

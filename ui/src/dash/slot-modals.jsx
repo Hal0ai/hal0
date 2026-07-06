@@ -367,6 +367,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [nGpuLayers, setNGpuLayers] = useStateSM(
     slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
   );
+  // Continuous batching: --parallel sequence slots. Empty = inherit the
+  // profile (today: 1). Rides the Save button (PUT /config {parallel}),
+  // restart-required. See the concurrency-batching plan.
+  const [parallel, setParallel] = useStateSM(
+    slot?.parallel != null ? String(slot.parallel) : ""
+  );
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Dirty-close confirms through the shared ConfirmDialog (state-driven),
@@ -429,6 +435,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setThinking(slot.enable_thinking === true);
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
+      setParallel(slot.parallel != null ? String(slot.parallel) : "");
       // #587: re-seed from the slot prop so the drawer tracks the real
       // on-disk values.
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
@@ -472,6 +479,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
     const nglNum = nglRaw === "" ? null : Number(nglRaw);
     if (nglRaw !== "" && (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1)) {
       errs.ngl = "Must be an integer ≥ -1 (or empty)";
+    }
+    // parallel (--parallel/-np): empty = inherit the profile; else integer ≥ 1.
+    const parRaw = String(parallel).trim();
+    const parNum = parRaw === "" ? null : Number(parRaw);
+    if (parRaw !== "" && (!Number.isFinite(parNum) || !Number.isInteger(parNum) || parNum < 1)) {
+      errs.parallel = "Must be an integer ≥ 1 (or empty to inherit the profile)";
     }
     // Task 5: GPU-class slots have an editable profile select; mirror the
     // create-slot modal's guard and block Save when it's been cleared. NPU/CPU
@@ -530,6 +543,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
       }
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
+      }
+      // parallel is a top-level slot field. Empty → null (inherit the profile;
+      // the None-means-delete merge clears any persisted override). Ship only
+      // when the normalized value differs from the persisted baseline.
+      const parValue = parRaw === "" ? null : parNum;
+      if (parValue !== (slot.parallel ?? null)) {
+        slotBody.parallel = parValue;
       }
       const defaultsBody = {};
       if (ctxChanged) defaultsBody.ctx_size = ctxNum;
@@ -674,10 +694,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // Trim + parse before comparing; an unparseable edit still counts dirty
   // (NaN !== N) so garbage input keeps the guard armed.
   const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
+  const parRawNow = String(parallel).trim();
+  const parValueNow = parRawNow === "" ? null : Number(parRawNow);
+  const parallelDirty = parValueNow !== (slot.parallel ?? null);
   const dirty =
     extraArgsDirty ||
     ctxDirty ||
     nglDirty ||
+    parallelDirty ||
     (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
     (overrideOpen && chatTemplate !== (slot.chat_template || ""));
   const requestClose = () => {
@@ -1094,6 +1118,51 @@ function EditSlotDrawer({ open, slot, onClose }) {
                   }
                 }}
               />
+            </div>
+          </div>
+        );
+      })()}
+      {/* Continuous batching — the --parallel / -np sequence-slot count. Shown
+          for llama-server slots (llm/embed/rerank), not tts/image/npu (the NPU
+          admits a single LLM context). Rides Save + a cold restart. When >1 the
+          backend also emits --kv-unified so --ctx-size stays a shared pool. */}
+      {(() => {
+        const t = slot.type || "llm";
+        if (!["llm", "embedding", "reranking"].includes(t) || slot.device === "npu") return null;
+        const parNum = Number(String(parallel).trim());
+        const showPool = Number.isInteger(parNum) && parNum > 1;
+        const ctxNow = Number(String(ctx).trim()) || 0;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Parallel</span>
+              <span className="sub warn">⟳ restart required on change</span>
+            </div>
+            <div className="form-ctl">
+              <input
+                className={"input mono" + (fieldErrs.parallel ? " input-err" : "")}
+                type="number"
+                min="1"
+                step="1"
+                placeholder="1 (profile default)"
+                value={parallel}
+                onChange={e => { setParallel(e.target.value); setFieldErrs(p => ({...p, parallel: undefined})); }}
+              />
+              <div className="hint">
+                Sequence slots for continuous batching — concurrent requests share the
+                loaded weights instead of serializing. Empty = inherit the profile.
+                Interactive slots want 1–2 (per-stream speed ≈ 1/N); agent fan-in wants 4–8.
+              </div>
+              {showPool && (
+                <div className="hint mono">
+                  {parNum} slots share the {ctxNow ? `${ctxNow.toLocaleString()}-token ` : ""}context pool
+                  (--kv-unified); worst case, {parNum} simultaneous full-context requests get ~
+                  {ctxNow ? Math.floor(ctxNow / parNum).toLocaleString() : `ctx/${parNum}`} each.
+                </div>
+              )}
+              {fieldErrs.parallel && (
+                <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.parallel}</div>
+              )}
             </div>
           </div>
         );

@@ -7,7 +7,7 @@
 
 ### Open-source home AI inference platform
 
-[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
+[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/#roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
 
 </div>
 
@@ -28,22 +28,57 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.8.4b1** — container-runtime era, declarative
-> config. Each slot (`agent`, `utility`, `embed`, `rerank`, `stt`, `tts`,
-> `img`, `vision`, NPU trio) runs as a dedicated podman container
-> (`hal0-slot@<name>.service`).
-> Slot definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
-> in `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
+> **Status:** **v0.9.0 — first public beta.** Container-runtime era,
+> declarative config. Each slot (`agent`, `utility`, `embed`, `rerank`,
+> `stt`, `tts`, `img`, `vision`, NPU trio) runs as a dedicated podman
+> container (`hal0-slot@<name>.service`). Slot definitions live in
+> `/etc/hal0/slots/<name>.toml`; backend profiles in
+> `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
 > single source of truth for every HuggingFace coordinate and SHA-256
 > digest. The launch command for every slot is resolved from a single
 > source (deduped, with per-flag provenance), **Stacks** apply
 > declarative model/slot layouts atomically, and profiles share the same
-> portable export/import envelope. Models can carry a preferred runtime
-> profile, interrupted pulls resume, and voice runs end-to-end (NPU STT +
-> Kokoro or GPU Qwen3-TTS). The one-liner
-> seeds the recommended Main slot non-interactively; run `hal0 setup`
+> portable export/import envelope. hal0 is **Strix Halo native, not
+> Strix-Halo-only**: experimental CUDA + multi-GPU pinning ride alongside
+> the ROCm/Vulkan defaults. Companion services (Open WebUI, ComfyUI,
+> Hermes, Hindsight) are managed from one **Services** dashboard
+> page with mDNS discovery; the dashboard itself has a redesigned
+> fixed-band layout with a live telemetry header. Seed profiles are
+> virtual (code-defined, self-healing on upgrade) with dedicated
+> embed/rerank lanes and a model×profile×slot MTP decision; models carry
+> a preferred runtime profile, interrupted pulls resume, and voice runs
+> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner writes the
+> first-run sentinel only — no model picks, no downloads; run `hal0 setup`
 > anytime to configure models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
+
+## Screenshots
+
+<div align="center">
+
+<table>
+<tr>
+<td width="50%"><a href="https://hal0.dev/docs/"><img src="https://hal0.dev/screenshots/dashboard-overview.png" alt="hal0 dashboard" width="100%"></a><br><sub><b>Dashboard</b> — unified-memory hero, at-a-glance health, and live slot rows.</sub></td>
+<td width="50%"><a href="https://hal0.dev/docs/guides/manage-slots/"><img src="https://hal0.dev/screenshots/slots-inference.png" alt="Slots" width="100%"></a><br><sub><b>Slots</b> — the inference engine: per-slot models, devices, and live telemetry.</sub></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="33%"><a href="https://hal0.dev/docs/guides/pull-and-register-models/"><img src="https://hal0.dev/screenshots/models-registry.png" alt="Model registry" width="100%"></a><br><sub><b>Model registry</b> — catalogue with quant chips and pull status.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/generate-images/"><img src="https://hal0.dev/screenshots/image-gen-comfyui.png" alt="Image generation" width="100%"></a><br><sub><b>Image generation</b> — ComfyUI queue and GPU gauges.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/enable-memory/"><img src="https://hal0.dev/screenshots/memory-graph.png" alt="Memory graph" width="100%"></a><br><sub><b>Memory</b> — Hindsight facts and graph extraction.</sub></td>
+</tr>
+<tr>
+<td width="33%"><a href="https://hal0.dev/docs/concepts/architecture/"><img src="https://hal0.dev/screenshots/services-page.png" alt="Services page" width="100%"></a><br><sub><b>Services</b> — Open WebUI, ComfyUI, Hermes, Hindsight, n8n with mDNS.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/concepts/slots/"><img src="https://hal0.dev/screenshots/stacks-tab.png" alt="Stacks" width="100%"></a><br><sub><b>Stacks</b> — declarative slot + profile + model bundles, applied atomically.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/configure/"><img src="https://hal0.dev/screenshots/settings-page.png" alt="Settings" width="100%"></a><br><sub><b>Settings</b> — full <code>hal0.toml</code> parity with an Advanced section.</sub></td>
+</tr>
+</table>
+
+<sub>More in the <a href="https://hal0.dev/docs/">docs</a>.</sub>
+
+</div>
 
 ## Why hal0
 
@@ -166,9 +201,9 @@ be evicted out from under a streaming request.
   stable|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
 - **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
-  seeds the recommended Main slot and writes the first-run sentinel
-  automatically (no synchronous model download, no interaction needed).
-  Run `hal0 setup` afterward to customize models, apps, and agents.
+  writes the first-run sentinel and wiring automatically — no model picks,
+  no download, no interaction needed. Run `hal0 setup` afterward to choose
+  models and configure apps and agents.
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects model pulls
   off `/var/lib/hal0/models`). The bootstrap fetches the release
   manifest, sha256-verifies the tarball, cosign-verifies the signature
@@ -334,10 +369,23 @@ VM installs leave the panel off and the dashboard stays quiet.
 ## Roadmap
 
 No dates — items are direction. The closer to the left, the closer to
-running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap).
+running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadmap).
 
-### Shipped (v0.3 / container runtime)
+### Shipped (v0.9 / public beta)
 
+- **Dashboard redesign + live telemetry header** — fixed-band layout
+  with a unified-memory hero, and a combined throughput / GPU / CPU /
+  NPU-occupancy metrics card that reads only from live probes
+- **Companion services, one surface** — Open WebUI, ComfyUI, Hermes,
+  Hindsight, and n8n managed from a dashboard **Services** page with
+  mDNS discovery and allow-listed lifecycle actions
+- **GPU generalization** — experimental CUDA + per-slot `gpu_index`
+  pinning for multi-GPU hosts, alongside the ROCm/Vulkan defaults
+- **Virtual seed profiles** — code-defined and self-healing on upgrade,
+  with dedicated embed/rerank lanes and a model×profile×slot MTP
+  decision (tri-state Auto/On/Off)
+- **`hal0 mcp` CLI + two-way MCP** — manage MCP servers from the CLI;
+  hal0 hosts admin + memory servers and reaches external ones
 - **Per-slot podman containers** — every inference workload runs in
   its own `hal0-slot@<name>.service` container; `ContainerProvider` +
   `profiles.toml` replace the old single-daemon model
@@ -355,8 +403,8 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
   AMDXDNA hardware context; toggle via `[npu]` in the slot TOML
 - **OmniRouter client-side tool-calling** — 8 tools, dynamic
   per-request filtering, `route_to_chat` cross-slot delegation
-- **`hal0 setup` TUI** — replaces the web FirstRun picker; seeds the
-  recommended Main slot on install (`--auto --no-pull`); interactive
+- **`hal0 setup` TUI** — replaces the web FirstRun picker; the installer
+  seeds no model picks (`--auto --no-pull --no-slots`); the interactive
   post-install flow covers storage, Extensions, models, and NPU opt-in
 - **`hal0 registry import`** — one-shot v0.1.x → v0.3 registry
   recovery from a backup tarball
@@ -368,14 +416,12 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
 
 ### Soon
 
-- **Advanced memory** — MCP client side of hal0 (agents reach
-  external MCP servers), federated memory across local + remote
-  sources
+- **Federated memory** — recall across local + remote sources behind
+  one memory surface (the MCP-client side shipped in v0.9)
 - **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,
   plus curated loadout presets you can flash onto a fresh install
 - **AUR PKGBUILD & Ubuntu PPA** — native distro packages on top of
   the install script; pacman and apt as first-class install paths
-- `hal0.local` mDNS auto-discovery polish
 - Light mode toggle
 
 ### Exploring (v1.x +)
@@ -387,8 +433,6 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
   warm base model without unloading the underlying weights
 - **Per-model rate limits & budgets** — cost-style accounting for
   local inference — cap a chatty agent without taking the whole box down
-- **Voice mode end-to-end** — agent loop stitched into a hands-free
-  streaming conversation
 - **ChatOps adapters** — Slack and Matrix bridges as extensions —
   talk to hal0 from the rooms you already live in
 

@@ -9,6 +9,8 @@ is hermetic — assert orchestration, not network).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 
 
@@ -40,12 +42,12 @@ def test_apply_selections_creates_only_selected_slots(
     app, client = isolated_app_client
     app.state.hardware_probe = _FakeProbe()
 
-    import hal0.api.routes.installer as inst
-
+    # WS-E (#1108): run_pull_and_activate imports run_pull lazily from
+    # hal0.registry.pull — patch it there.
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     payload = {
         "storage_dir": tmp_hal0_home,
@@ -69,3 +71,45 @@ def test_apply_selections_creates_only_selected_slots(
     # ONLY the one selected slot is created — not a whole tier.
     assert len(data["slots"]) == 1
     assert "qwen3-4b" in data["model_ids"]
+
+
+def test_apply_selections_writes_first_run_sentinel(
+    isolated_app_client, tmp_hal0_home, monkeypatch
+):
+    """WS-I (#1101): the apply-selections endpoint itself writes the
+    first-run sentinel on success — this is the endpoint the `hal0 setup`
+    API-up branch and answer-file installs POST to, so an install that
+    never hits the wizard's explicit POST /complete must still converge
+    with the CLI in-process path (which has always written it directly)."""
+    app, client = isolated_app_client
+    app.state.hardware_probe = _FakeProbe()
+
+    async def _fake_run_pull(job, **kw):
+        job.state = "completed"
+
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
+
+    sentinel = Path(tmp_hal0_home) / "var-lib" / "hal0" / ".first_run_done"
+    assert not sentinel.exists()
+
+    payload = {
+        "storage_dir": tmp_hal0_home,
+        "npu_opt_in": False,
+        "extensions": {},
+        "slots": [
+            {
+                "capability": "chat",
+                "slot_name": "chat",
+                "port": 8081,
+                "model_id": "qwen3-4b",
+                "device": None,
+                "profile": None,
+            },
+        ],
+    }
+    r = client.post("/api/install/apply-selections", json=payload)
+    assert r.status_code == 200, r.text
+    assert sentinel.exists()
+
+    state = client.get("/api/install/state")
+    assert state.json()["first_run"] is False

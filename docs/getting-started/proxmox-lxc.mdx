@@ -1,0 +1,353 @@
+---
+title: Quick start — Proxmox LXC
+description: Run hal0 as a privileged Proxmox LXC on AMD Strix Halo — host-kernel GTT sizing, iGPU + XDNA NPU passthrough into an Ubuntu container, the FastFlowLM (FLM) NPU trio, and the Proxmox host-pressure integration.
+sidebar:
+  order: 11
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+A Proxmox **LXC** is the primary deployment shape for hal0 on AMD Strix
+Halo. An LXC shares the host kernel, so the iGPU and XDNA NPU are passed
+through as ordinary device nodes — no VM, no vGPU shim, near-native
+throughput. hal0's own FLM provider treats "Strix Halo under Proxmox LXC"
+as its main target.
+
+This guide assumes a working Proxmox VE host with a Strix Halo (Ryzen AI
+Max+) APU and walks the full path: prepare the host kernel, create a
+privileged Ubuntu 24.04 container, pass through the GPU + NPU, install
+hal0, and wire up the NPU trio.
+
+<Aside type="caution" title="Privileged container">
+GPU/NPU passthrough on Strix Halo requires a **privileged** LXC
+(`--unprivileged 0`) with an unconfined AppArmor profile. That is a
+deliberate trust decision — run it only on a host and network you
+control. A vanilla **unprivileged** LXC works too, but only for CPU /
+Vulkan inference with no device passthrough.
+</Aside>
+
+## 1. Prepare the Proxmox host
+
+Everything the accelerators need lives on the **host kernel**, because the
+LXC shares it. Do this once on the PVE host.
+
+### Drivers and firmware
+
+The iGPU uses the in-tree `amdgpu` driver. The NPU needs the `amdxdna`
+kernel module loaded and recent NPU firmware:
+
+- **Kernel**: recent silicon wants a recent kernel. `amdxdna` needs
+  ≥ 6.11; for the gfx1151 iGPU, kernels **before 6.18.4 have a known
+  stability bug** — prefer the newest Proxmox opt-in kernel available.
+- **NPU firmware ≥ 1.1.0.0** (validated in the field at 1.1.2.65;
+  FastFlowLM refuses to start against older firmware).
+
+Verify the host actually bound the GPU before touching the container:
+
+```sh
+lspci -nnk | grep -A3 -iE 'VGA|Display'   # want: "Kernel driver in use: amdgpu"
+ls -l /dev/dri /dev/kfd /dev/accel        # want: renderD128, kfd, accel0
+```
+
+<Aside type="caution" title="Do NOT install firmware-amd-graphics on PVE">
+Proxmox's `pve-firmware` package already bundles the full AMD GPU firmware
+set (including the Strix Halo `gc_11_5_*` / `dcn_3_5_*` blobs) and declares
+`Conflicts: firmware-amd-graphics`. `apt install firmware-amd-graphics`
+therefore fails with an unresolvable conflict — and "fixing" it by removing
+`pve-firmware` drags out the `proxmox-ve` meta-package and the NIC firmware
+with it. If `lspci` shows `amdgpu` bound, firmware is already done. Only if
+the GPU is genuinely newer than `pve-firmware`'s blobs (real `dmesg`
+firmware-load failures), copy the specific newer blobs from
+kernel-firmware git into `/lib/firmware/amdgpu/` and `update-initramfs -u`
+— never swap the package.
+</Aside>
+
+hal0 supplies the *userspace* runtime (XRT + the FastFlowLM binary) inside
+its container image, but it cannot load a kernel driver from inside a
+container — the driver and firmware must already be present on the host.
+
+### Size the GTT pool
+
+On Strix Halo the GPU's usable memory is the amdgpu **GTT** pool, which is
+carved from system RAM (unified memory). A model can only allocate up to
+the GTT cap, not the full RAM pool — so if GTT is left at its small
+default, large models won't fit even on a 128 GB box.
+
+hal0 *measures* the live GTT cap and sizes its model recommendations
+against it, but it does **not** configure GTT for you. Set it on the host
+kernel command line. On a 128 GB Strix Halo, the reference values from
+hal0's profile-tuning work are:
+
+```sh
+# /etc/default/grub — append to GRUB_CMDLINE_LINUX_DEFAULT, then update-grub && reboot
+amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856
+```
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `amdgpu.gttsize` | `126976` | GTT window in **MiB** (≈ 124 GiB) |
+| `ttm.pages_limit` | `32505856` | TTM page cap in **4 KiB pages** (≈ 124 GiB — keep it equal to `gttsize`) |
+| `amd_iommu=off` | — | Disables the IOMMU; measured worth ~5–12% on this workload |
+
+<Aside type="tip">
+`126976` MiB leaves only ~4 GB for the host on a 128 GB machine — fine for
+a dedicated inference LXC, aggressive if the host runs other tenants.
+Scale both numbers down together (they must stay equal) to reserve more
+host RAM. After rebooting, `cat /proc/cmdline` should show the params.
+</Aside>
+
+## 2. Create the container
+
+Create a **privileged** Ubuntu 24.04 LXC with nesting enabled (containers
+run inside it) and enough disk for models:
+
+```sh
+# on the Proxmox host, as root
+pct create 105 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+  --hostname hal0 --cores 8 --memory 8192 --swap 2048 \
+  --rootfs local-zfs:64 --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --ostype ubuntu --features nesting=1,fuse=1,keyctl=1,mknod=1 \
+  --unprivileged 0 --onboot 1
+```
+
+<Aside type="note">
+`--memory` bounds the container's own working set, not the model pool —
+GPU model memory is drawn from the host's GTT window you sized above.
+Give the rootfs headroom (hal0 wants ~20 GB free before models). Add a
+bind mount for model storage with `pct set 105 --mp0
+/host/path,mp=/var/lib/hal0/models` if you keep models on the host.
+</Aside>
+
+## 3. Pass through the GPU and NPU
+
+Append the passthrough block to `/etc/pve/lxc/105.conf` on the host. This
+exposes four device nodes and grants the container cgroup permission to
+open them:
+
+```ini
+# /etc/pve/lxc/105.conf
+dev0: /dev/dri/renderD128,gid=993
+dev1: /dev/dri/card0,gid=44
+dev2: /dev/kfd,gid=993
+dev3: /dev/accel/accel0,gid=993
+lxc.cgroup2.devices.allow: c 226:* rwm
+lxc.cgroup2.devices.allow: c 234:* rwm
+lxc.cgroup2.devices.allow: c 261:* rwm
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.prlimit.memlock: unlimited
+lxc.apparmor.profile: unconfined
+```
+
+| Device | Node | Role | Group inside CT |
+|---|---|---|---|
+| iGPU render | `/dev/dri/renderD128` | Vulkan / ROCm render node | `render` |
+| iGPU card | `/dev/dri/card0` (amdgpu) | DRM card device | `video` |
+| ROCm compute | `/dev/kfd` | ROCm compute queues | `render` |
+| XDNA NPU | `/dev/accel/accel0` | FastFlowLM NPU device | `render` |
+
+<Aside type="caution" title="gid= means the gid INSIDE the container">
+The `gid=` on each `dev` entry sets the group owner the node appears with
+**inside the container** — it is the single most common passthrough
+mistake. Check the real values in the container first:
+
+```sh
+pct exec 105 -- getent group render video
+# render:x:993:hal0   ← use 993 for render-class nodes
+# video:x:44:hal0     ← use 44 for the card node
+```
+
+`993`/`44` above are this reference host's values (Ubuntu 24.04 CT);
+yours may differ (e.g. `render` is `109` on some Debian bases). If the
+gid is wrong the nodes land owned by an unmapped id, userspace gets
+`Permission denied`, and `hal0 doctor` flags it ("owned by gid N, which
+maps to NO group"). Omitting `gid=` entirely leaves the nodes
+root-owned — fine for root-only processes, broken for the `hal0` service
+user and host `flm` probe.
+</Aside>
+
+The cgroup majors correspond to the DRM (`226`), the dynamically-allocated
+kfd/accel majors (`234`, `261`), and a misc device (`10:200`) on this
+reference host. `lxc.prlimit.memlock: unlimited` lets the NPU DMA-lock
+model weights; `lxc.apparmor.profile: unconfined` is required for the
+container runtime to launch slots inside the LXC.
+
+<Aside type="caution" title="Device majors are host-specific">
+The exact major numbers (`234`, `261`) are dynamically assigned by the
+kernel and can differ between hosts and kernel versions. The reliable way
+to reproduce this is to copy the passthrough block from a **known-good**
+`.conf` on the same host, or verify each node's major with `ls -l` under
+`/dev/dri` and `/dev/accel` and adjust. hal0 does not write this file —
+it is host-side operator setup done before the container boots.
+</Aside>
+
+Start (or restart) the container so the passthrough takes effect:
+
+```sh
+pct start 105
+```
+
+<Aside type="note" title="Stopping a GPU-holding LXC">
+Once a slot has warmed the GPU, a container holding `/dev/kfd` can hang on
+`pct stop`. If it does, `pkill -9 -f 'lxc-start -F -n 105'` on the host
+clears it.
+</Aside>
+
+## 4. Install hal0 in the container
+
+Open a shell in the container (`pct enter 105`) and install the one
+prerequisite the Ubuntu base image lacks, then run the installer:
+
+```sh
+apt-get update && apt-get install -y python3-venv python3-pip
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+The installer auto-installs **podman**, builds the Python venv, writes the
+systemd units, probes the hardware (it should now see the iGPU and NPU
+via the passed-through nodes), seeds a hardware-recommended slot, and
+starts `hal0-api` on port `8080`. See [Install hal0](/docs/getting-started/install/)
+for the full breakdown of what the bootstrap does.
+
+<Aside type="tip">
+In an unprivileged LXC, `podman info` can fail without newuidmap/subuid
+setup — another reason the passthrough path uses a privileged container.
+</Aside>
+
+## 5. Point hal0 at your model storage
+
+Models are large; most Proxmox deployments keep them on a dedicated
+dataset/disk bind-mounted into the container rather than on the rootfs.
+Whatever path you choose, tell hal0 about it **once** — the store is the
+single directory the pull engine writes to, the scanner registers from,
+and slot containers bind-mount:
+
+```sh
+# host: bind-mount the model dataset into the CT (path is an example)
+pct set 105 --mp0 /tank/ai-models,mp=/mnt/ai-models
+
+# inside the CT: make it hal0's store (persists to [models].store in
+# hal0.toml, rescans immediately, and registers anything already there)
+hal0 model store /mnt/ai-models
+```
+
+Files you copy in by hand are picked up with `hal0 model scan` (or
+register one file from any path with `hal0 model add /path/file.gguf`).
+`hal0 doctor models` audits the whole pipeline — dangling registry
+entries, unregistered files, store mismatches — and prints the fix for
+each finding.
+
+<Aside type="tip" title="Relocating the NPU model cache">
+FLM's model cache defaults to `/var/lib/hal0/.config/flm/models` on the
+container rootfs. To keep NPU weights on the model disk too, set
+`flm_store = "/mnt/ai-models/flm/models"` under `[models]` in
+`/etc/hal0/hal0.toml` (or export `HAL0_FLM_MODELS_DIR`). hal0 creates the
+directory with container-compatible ownership (the FLM container runs as
+uid 1000 — not the host `hal0` uid) and the generated slot unit orders
+after the backing mount, so a reboot with a slow or missing mount no
+longer kills the npu slot with podman exit 125.
+</Aside>
+
+## 6. Set up the NPU trio (FastFlowLM)
+
+On an apt host with the NPU present, the installer already handles the
+**FastFlowLM (FLM)** userspace: it verifies and installs the pinned
+FastFlowLM `.deb` (matched to your Ubuntu release), pulls the NPU runtime
+libraries, and installs `libxrt-npu2` from the lemonade PPA. A single
+`flm serve` process backs the **NPU trio** — one chat model plus optional
+embedding and speech-to-text "passengers" sharing the NPU.
+
+Confirm the NPU runtime is reachable from inside the container:
+
+```sh
+flm validate       # → "flm validate ok — NPU runtime reachable"
+hal0 doctor        # re-runs preflight; hardware probe records the NPU
+```
+
+The seeded `npu` slot serves a chat model on port `8088`. The trio's
+embedding and STT passengers are **opt-in** — enable them per slot (the
+`asr` / `embed` keys on the slot's `[npu]` table) once the chat slot is
+loaded. See [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) and
+[Slots](/docs/concepts/slots/) for the trio routing details.
+
+<Aside type="note">
+If `flm validate` reports the NPU is unreachable, re-check that
+`/dev/accel/accel0` is visible **inside** the container (`ls -l
+/dev/accel/`) and that `amdxdna` is loaded on the **host** kernel. The
+`.deb` ships only userspace — it never loads the kernel driver.
+</Aside>
+
+## 7. Surface true host memory pressure (optional)
+
+Inside an LXC, hal0 only sees its own cgroup memory share — but the GPU's
+GTT pool is drawn from the same physical DIMMs every other tenant and the
+host kernel use. Give hal0 a **read-only** Proxmox API token so the
+dashboard's unified-memory bar shows real host pressure instead of
+pretending only this container's bytes exist.
+
+Create a read-only token in the Proxmox UI (Datacenter → Permissions →
+API Tokens, with `PVEAuditor` on `/`), then configure it via the dashboard
+Settings → Proxmox card, or write `/etc/hal0/proxmox.json` directly:
+
+```json
+{
+  "proxmox": { "host": "192.0.2.10", "port": 8006, "verify_ssl": false, "service": "PVE" },
+  "auth": { "user": "hal0@pve", "token_name": "readonly", "token_value": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" }
+}
+```
+
+hal0 polls `GET /cluster/resources` (cached 30 s) and surfaces host RAM
+total/used plus every running tenant's allocation. Non-Proxmox installs
+leave the file absent and the feature stays silent.
+
+## 8. Verify
+
+```sh
+hal0 status                       # system + slot status
+systemctl status hal0-api         # control plane
+journalctl -fu hal0-api           # live logs
+```
+
+The API and dashboard listen on `http://<container-ip>:8080`; OpenWebUI on
+`:3001`.
+
+## Troubleshooting — known failure signatures
+
+Every entry below is a real failure observed in the field, keyed on the
+exact log line you'll see. `hal0 doctor` and `hal0 doctor models`
+diagnose most of these automatically.
+
+| Signature (journalctl / CLI) | Root cause | Fix |
+|---|---|---|
+| `gguf_init_from_file: failed to open ... (No such file or directory)` | Registry entry points where the file is not — classically weights on the bind-mounted store while the entry references a stale path. | `hal0 doctor models` shows the dangling entries; `hal0 model store <dir>` points hal0 at the real location and rescans; `hal0 model rm <id> && hal0 model scan` re-registers from disk. |
+| `podman ... exit 125` + `statfs /...: no such file or directory` | A slot's bind-mount source vanished (mount not up yet at boot, or dir on a recreated dataset). Units now emit `RequiresMountsFor=` + a mkdir guard, but a wrong path in config still hits this. | Check the path in `[models].store` / `[models].flm_store` exists; `systemctl cat hal0-slot@<name>` shows what the unit mounts. |
+| `flm pull` → `Permission denied` creating a model subdir | FLM store owned `hal0:hal0` (host uid) but the FLM container writes as **uid 1000**. | `chown 1000:hal0 <flm store> && chmod 2775 <flm store>` — the installer and slot start do this for managed dirs. |
+| `pve-firmware : Conflicts: firmware-amd-graphics` on the host | Attempted to install Debian's AMD firmware package on PVE. | Don't — `pve-firmware` already ships those blobs (see §1). |
+| `vainfo`/`vulkaninfo`/`rocminfo` → `Permission denied` in the CT | `dev` entry `gid=` set to a host gid (or omitted), so the node maps to no group inside the CT. | Set `gid=` to the CT's own `render`/`video` gid (§3) and restart the CT; `hal0 doctor` flags the unmapped gid. |
+| Models pulled but invisible in `hal0 model list` | Files landed outside the scanned roots (pre-v0.9 installs seeded only `pull_root`). | `hal0 model store` (shows effective store + candidates), then `hal0 model scan`. |
+| `pct stop` hangs on a GPU-holding CT | llama.cpp/ROCm process pinned `/dev/kfd`. | `pkill -9 -f 'lxc-start -F -n <CTID>'` on the host (see §3). |
+| NPU slot dies mid-request, FLM exits with SIGABRT (134) | FLM 0.9.x can double-free when a client disconnects mid-prefill on direct port access. | Talk to the dispatcher (`:8080`), not the raw slot port — it serializes NPU requests; avoid hammering `:8088` with overlapping/cancelled calls. |
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="First-run setup"
+    href="/docs/getting-started/setup/"
+    description="Run the hal0 setup TUI to provision slots, models, and extensions."
+  />
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="Pull a model from Hugging Face and assign it to a slot."
+  />
+  <LinkCard
+    title="Strix Halo tuning"
+    href="/docs/concepts/strix-halo/"
+    description="Unified memory, the GTT pool, and the GPU arbiter."
+  />
+  <LinkCard
+    title="Manage slots"
+    href="/docs/guides/manage-slots/"
+    description="Edit drawers, profiles, and the MTP control."
+  />
+</CardGrid>

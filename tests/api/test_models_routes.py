@@ -125,6 +125,35 @@ def test_get_model_attaches_ns(inspect_client: TestClient, tmp_hal0_home: str) -
     assert row["ns"] == "pulled"
 
 
+def test_list_models_type_is_dispatcher_vocab_for_local_rows(
+    inspect_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    """Local registry rows expose ``type`` in the DISPATCHER vocabulary
+    (llm/embedding/reranking), NOT ``classify()``'s modality bucket
+    (chat/embed/rerank). The UI joins slots↔models on ``model.type ===
+    slot.type`` (dispatcher vocab), so a modality value hides every model from
+    the slot pickers — the 0.9.1 regression where local rows leaked "chat"
+    (line-219 stamp) collapsed every slot's model dropdown to its current
+    default. The FLM path was already correct; only the local/upstream stamps
+    leaked modality, so this guards the local path specifically."""
+    cases = (
+        ("chatty", ["chat"], "llm"),
+        ("visionary", ["chat", "vision"], "llm"),  # multimodal → still llm
+        ("ranker", ["rerank"], "reranking"),
+        ("embedder", ["embed"], "embedding"),
+    )
+    for mid, caps, _want in cases:
+        fp = Path(tmp_hal0_home) / f"{mid}.gguf"
+        fp.write_bytes(b"\x00" * 8)
+        inspect_client.post("/api/models", json={"id": mid, "path": str(fp)})
+        inspect_client.put(f"/api/models/{mid}", json={"capabilities": caps})
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    for mid, _caps, want in cases:
+        assert rows[mid]["type"] == want, f"{mid}: {rows[mid]['type']!r} != {want!r}"
+
+
 # ── POST /api/models/inspect ───────────────────────────────────────────────
 
 
@@ -207,6 +236,72 @@ def test_inspect_returns_gguf_variants_sorted_by_size(
     assert "gguf" in body["tags"]
     assert body["metadata"]["license"] == "apache-2.0"
     assert "Hello world" in body["metadata"]["readme_excerpt"]
+
+
+def test_inspect_surfaces_bare_mmproj_sidecar(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``.mmproj`` sidecar (no ``.gguf`` suffix) must appear as a variant.
+
+    Regression: repos like ``jcbtc/chadrock-35b-…`` ship the projector as
+    ``mmproj-…-F32.mmproj``. The inspect filter used to admit only ``.gguf``,
+    so the Add-by-HF modal's vision picker showed "no mmproj files in repo"
+    and vision pulls silently shipped without a projector.
+    """
+    tree = [
+        {
+            "path": "CHADROCK-35B-MoEQuality-7.07BPW.gguf",
+            "lfs": {"size": 31_410_670_848},
+            "size": 136,
+        },
+        {
+            "path": "mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj",
+            "lfs": {"size": 902_821_824},
+            "size": 134,
+        },
+        {"path": "README.md", "size": 19037},
+    ]
+    _patch_httpx_transport(
+        monkeypatch,
+        _hf_handler(meta_body={"tags": []}, tree_body=tree),
+    )
+
+    r = inspect_client.post(
+        "/api/models/inspect",
+        json={"hf_repo": "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"},
+    )
+    assert r.status_code == 200, r.text
+    variants = {v["id"]: v for v in r.json()["variants"]}
+    # Both the main quant and the bare .mmproj sidecar are surfaced.
+    assert "CHADROCK-35B-MoEQuality-7.07BPW.gguf" in variants
+    assert "mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj" in variants
+    # The sidecar is labelled so the modal (and operator) can tell it apart.
+    assert "mmproj" in variants["mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj"]["info"]
+
+
+def test_inspect_ignores_non_mmproj_non_gguf_files(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stray ``.mmproj``-less, ``.gguf``-less file stays out of variants."""
+    tree = [
+        {"path": "model-q4.gguf", "lfs": {"size": 4_000_000_000}, "size": 132},
+        {"path": "config.json", "size": 2048},
+        {"path": "tokenizer.mmproj.txt", "size": 512},
+    ]
+    _patch_httpx_transport(
+        monkeypatch,
+        _hf_handler(meta_body={"tags": []}, tree_body=tree),
+    )
+
+    r = inspect_client.post(
+        "/api/models/inspect",
+        json={"hf_repo": "foo/bar"},
+    )
+    assert r.status_code == 200, r.text
+    ids = [v["id"] for v in r.json()["variants"]]
+    assert ids == ["model-q4.gguf"]
 
 
 def test_inspect_accepts_hf_url_alias(

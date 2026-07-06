@@ -26,6 +26,7 @@ installs and tests).
 | `upstreams.toml` | `/etc/hal0/upstreams.toml` | Slot + remote upstream catalog. |
 | `capabilities.toml` | `/etc/hal0/capabilities.toml` | Capability-slot selections. |
 | `agents/<name>.toml` | `/etc/hal0/agents/<name>.toml` | One file per bundled/user agent. |
+| `stacks.toml` | `/etc/hal0/stacks.toml` | Named slot+profile+model bundles (optional; see Stacks, below). |
 | `hardware.json` | `/etc/hal0/hardware.json` | Cached hardware probe (written by `hal0 probe`). |
 | `manifest.json` | `/etc/hal0/manifest.json` | Release manifest (pinned toolbox image digests). |
 
@@ -36,16 +37,25 @@ State (registry, models, slot state, memory banks) lives under
 
 | Set | Values |
 |---|---|
-| `device` (hardware preference) | `gpu-rocm`, `gpu-vulkan`, `cpu`, `npu` |
-| `provider` (engine label) | `llama-server`, `flm`, `kokoro`, `comfyui` |
+| `device` (hardware preference) | `gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu` |
+| `provider` (slot engine label) | `llama-server`, `flm`, `moonshine`, `kokoro`, `qwen3tts`, `comfyui` |
 | slot `type` (dispatch routing) | `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image` |
-| seed profiles | `rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `flm`, `tts`, `comfyui` |
+| seed profiles | `rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui` |
 
 <Aside type="caution">
 Use `device`, not the legacy `backend` field. `backend` is deprecated: a slot
 TOML that sets `backend` without `device` logs a deprecation warning and the
-loader auto-fills `device`. Set `device` directly. NVIDIA/CUDA is unsupported —
-it is not a valid device.
+loader auto-fills `device`. Set `device` directly.
+</Aside>
+
+<Aside type="note">
+`gpu-cuda` (NVIDIA) is supported experimentally via the `cuda` seed profile,
+which runs the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda` image
+(not a hal0 toolbox image) and requires the NVIDIA Container Toolkit (CDI)
+on the host. It is not part of the Strix Halo bench matrix and carries no
+published throughput numbers. `POST /api/slots/{name}/backend` still only
+accepts `rocm`, `vulkan`, `cpu`, `auto` — flipping to CUDA is a device +
+profile change, not a backend flip.
 </Aside>
 
 ## `hal0.toml`
@@ -68,6 +78,7 @@ defaults (an empty file is valid).
 | `port_range_end` | int | `8099` | Last port in the auto-allocation pool (inclusive); must be ≥ start. The pool stops below `8188` so a new slot never claims ComfyUI's port — this only bounds auto-*allocation*, not an individual slot's `port` field, which validates up to `8200` (see `[slot].port` below). |
 | `idle_timeout_s` | int (≥0) | `300` | Default idle-eviction TTL; `0` disables. Per-slot value overrides. |
 | `evict_pressure_mb` | int (≥0) | `8192` | Host free-RAM floor (MiB) for pressure-driven LRU eviction. When host `MemAvailable` drops below this, idle LRU-eligible slots are evicted in least-recently-used order until free RAM recovers; `0` disables pressure eviction. |
+| `publish_host` | str | `"127.0.0.1"` | Address slot containers publish their port on. `0.0.0.0` exposes every slot's raw port directly on the LAN, bypassing the hal0-api/reverse-proxy front door; a specific interface IP binds just that address. Applies on the slot's next (re)start; host-networked slots ignore it. |
 
 ### `[dispatcher]`
 
@@ -91,11 +102,47 @@ defaults (an empty file is valid).
 | `auto_scan_on_start` | bool | `true` | Run discovery scan at startup. |
 | `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | Candidate file suffixes. |
 | `store` | str | `""` | Single source of truth for where models are read/written. When set, the pull engine writes here and slot containers bind-mount it. `HAL0_MODEL_STORE` overrides. |
+| `flm_store` | str | `""` | Where FLM (NPU) model weights live. The npu slot bind-mounts it over FLM's hardcoded `~/.config/flm/models` cache; host `flm` probe/pull bookkeeping follows it. `HAL0_FLM_MODELS_DIR` overrides; empty → `/var/lib/hal0/.config/flm/models`. hal0 creates the dir (container-uid writable) before slot start. |
 
 <Aside type="note">
 `store` is the canonical model-store field. When empty, hal0 falls back to the
 deprecated `pull_root` (default `/var/lib/hal0/models`). Point `store` at your
-fast disk / network mount to align pulls and slot bind-mounts on one path.
+fast disk / network mount to align pulls and slot bind-mounts on one path —
+and `flm_store` at a sibling dir (e.g. `/mnt/ai-models/flm/models`) to keep
+NPU weights off the root filesystem too.
+</Aside>
+
+### `[memory]` — engine selection
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `engine` | str | `"hindsight"` | Active memory engine: `cognee` \| `hindsight` \| `mem0` \| `pgvector`. `hindsight` is the current default. |
+
+<Aside type="note">
+The validator also accepts `cognee`/`mem0`, but the Advanced Settings dropdown
+only offers `hindsight`/`pgvector` — the factory silently remaps `cognee`/`mem0`
+selections to `hindsight`, so the dashboard doesn't offer a choice that would
+lie about what actually runs. Hand-editing `hal0.toml` to `cognee`/`mem0` is
+still accepted at the schema level, but resolves to `hindsight` in practice.
+</Aside>
+
+### `[memory.embedding]` — reranker knobs (Hindsight era)
+
+Hindsight embeds server-side with its own bundled model, so this table no
+longer pins an embedding model — it only tunes the second-pass reranker
+hal0 runs over cross-bank recall results.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `rerank_gateway_url` | str | `"http://127.0.0.1:8080"` | Base URL of the OpenAI-compatible gateway the reranker POSTs `/v1/rerankings` to. Defaults to hal0-api itself. |
+| `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | Rerank model id sent to the gateway; must resolve to a model the `rerank` slot serves. |
+| `rerank_connect_timeout_s` | float (0.05–10.0) | `1.0` | TCP connect timeout for the rerank call. Kept short so a wedged rerank slot can't stall memory search. |
+| `rerank_read_timeout_s` | float (0.05–60.0) | `8.0` | Read budget for the rerank slot. Failures on either timeout fall through to fused vector ordering, never blocking recall. |
+
+<Aside type="note">
+Cognee-era keys (`model`, `rerank_enabled`, `rerank_url`,
+`rerank_over_fetch_factor`, `rerank_max_candidates`) are silently dropped on
+load — they no longer validate or round-trip.
 </Aside>
 
 ### `[memory.graph]` — graph extraction (ADR-0023)
@@ -113,6 +160,38 @@ key in an old `hal0.toml` is silently dropped on load (it does not fail
 validation), so upgrades don't hard-break.
 </Aside>
 
+### `[activity]` — durable audit trail
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | Records every config-mutating action and system state change to a SQLite table (`/var/lib/hal0/activity.db`) that survives restarts. |
+| `retention_days` | int (≥1) | `30` | Rows older than this are pruned. `HAL0_ACTIVITY_RETENTION_DAYS` overrides at the env layer. |
+| `max_rows` | int (≥100) \| null | `50000` | Row cap; `null` disables the cap (`retention_days` still applies). |
+
+## Advanced Settings — dashboard parity
+
+The dashboard's **Settings → Advanced** panel is schema-driven, not hand-copied:
+it reads `GET /api/settings/schema` (Pydantic field types/bounds/descriptions)
+and `GET /api/settings/apply-plan` (per-key `apply_class`: live / ⟳ restart a
+service / ⚠ manual restart) and renders a control per key, so the dashboard
+cannot drift out of sync with this page. It groups every key above — except
+`[meta]` and `[models]`, which have their own dedicated General/Storage pages —
+into four panels:
+
+1. **Slots runtime** — `[slots]`: `max_slots`, `port_range_start`,
+   `port_range_end`, `idle_timeout_s`, `evict_pressure_mb`, `publish_host`.
+2. **Dispatcher** — `[dispatcher]`: `prefetch_timeout_s`, `prefetch_parallel_cap`.
+3. **Memory** — `[memory]` engine + reranker (`engine`, the four
+   `[memory.embedding]` keys); a separate **Memory graph extraction** panel
+   right below it drives `[memory.graph]` through its own
+   `GET`/`PUT /api/memory/graph` endpoints instead of the generic settings PUT.
+4. **Activity log** — `[activity]`: `enabled`, `retention_days`, `max_rows`.
+
+A dirty **manual-restart** key gates Save behind a confirm dialog; Save
+batches every dirty key into one deep-merged `PUT /api/settings`. A
+`Restart hal0-api` control sits below the groups for `service-restart`/
+`manual-restart` keys that need it.
+
 ## Per-slot TOML (`slots/<name>.toml`)
 
 A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
@@ -125,16 +204,21 @@ A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
 | `name` | str | required | Lowercase alphanumeric + `-`/`_`, starts alphanumeric, ≤32 chars. |
 | `port` | int | required | Host port in range `8081–8200` (127.0.0.1 only). |
 | `type` | str | `llm` | Dispatch routing: `llm` \| `embedding` \| `reranking` \| `transcription` \| `tts` \| `image`. |
-| `device` | str | `gpu-rocm` | `gpu-rocm` \| `gpu-vulkan` \| `cpu` \| `npu`. |
+| `device` | str | `gpu-rocm` | `gpu-rocm` \| `gpu-vulkan` \| `gpu-cuda` \| `cpu` \| `npu`. |
+| `gpu_index` | int \| null (≥0) | `null` | Pins the slot to one GPU on multi-GPU hosts (`HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` on ROCm, `GGML_VK_VISIBLE_DEVICES` on Vulkan, CDI device mapping on CUDA). `null` = all GPUs. No dashboard control yet — TOML/CLI only. |
 | `provider` | str | `llama-server` | Engine label (round-trips for compatibility/UI). |
 | `profile` | str \| null | `null` | Profile name from `profiles.toml` (image + tuned flags). |
 | `role` | str \| null | `null` | Role hint: `primary`, `utility`, `npu`. Derived from name when unset. |
 | `enabled` | bool | `true` | Start this slot on hal0 startup. |
 | `enable_thinking` | bool \| null | `null` | Per-slot reasoning default; overridable per request. |
-| `mtp` | bool \| null | `null` | Per-slot multi-token-prediction override (effective only on `rocmfp4`/MTP-capable profiles). |
+| `mtp` | bool \| null | `null` | Tri-state multi-token-prediction override: `true` forces on, `false` forces off, `null` (Auto) enables MTP only when the profile opts in (`profile.mtp`) **and** the model itself ships MTP heads (registry `mtp` tag, or a delimited `mtp` marker in the model id/filename, e.g. `-MTP-`/`_mtp`/`.MTP`). |
 | `chat_template` | str \| null | `null` | Chat-template id override (`auto`/null = GGUF-embedded). |
+| `vision` | bool | `true` | Loads the model's `mmproj` sidecar (`--mmproj`) when present, so the slot accepts images. Set `false` to boot text-only and free the ~0.9 GB resident projector. No effect when the model has no sidecar. |
 | `workers` | int (≥1) | `1` | Parallel request workers. |
 | `idle_timeout_s` | int (≥0) | `300` | Idle TTL for this slot; `0` disables. |
+| `default_voice` | str \| null | `null` | TTS slots only. Voice id injected into `/v1/audio/speech` when the request omits `voice`. `null` = engine default. Set from Settings → Voice. |
+| `default_speed` | float \| null (0.25–4.0) | `null` | TTS slots only. Playback speed injected when the request omits `speed`. Engines clamp further (Kokoro: 0.5–2.0). |
+| `default_response_format` | str \| null | `null` | TTS slots only. One of `mp3` \| `wav` \| `opus` \| `flac` \| `pcm`, injected when the request omits `response_format`. `null` = engine default (mp3). |
 
 <Aside type="note">
 `backend` (deprecated) and `runtime` (always `container`) still round-trip but
@@ -155,7 +239,8 @@ container provider.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `extra_args` | str \| null | `null` | Freeform `llama-server` CLI passthrough; tokenised and merged with the profile/model flags. |
+| `extra_args` | str \| null | `null` | Freeform `llama-server` CLI passthrough; tokenised and merged with the profile/model flags — this segment wins last, so it overrides the same flag set anywhere else in the chain. |
+| `env` | dict[str, str] \| null | `null` | Extra environment variables injected into the slot container (`--env K=V`), e.g. `HSA_OVERRIDE_GFX_VERSION`. Keys must match `[A-Za-z_][A-Za-z0-9_]*`; values must not contain newlines. Explicit `env` keys win over any GPU-visibility vars `gpu_index` derives. |
 
 ### `[npu]` section (NPU slots)
 
@@ -168,7 +253,7 @@ container provider.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `idle_restore_minutes` | int (≥0) | `60` | Idle minutes before the GPU arbiter restores stopped LLM GPU slots; `0` = never. |
+| `idle_restore_minutes` | int (≥0) | `60` | Idle minutes before the GPU arbiter restores stopped LLM GPU slots; `0` = never. Hot-reloadable — unlike most slot-TOML values, a change here takes effect without restarting the slot. |
 | `default_size` | str | `"1024x1024"` | Default output size (WxH). |
 | `default_steps` | int (≥0) | `0` | Default sampler steps; `0` = model-class default. |
 
@@ -218,25 +303,60 @@ default = ""
 
 A profile is a reusable backend template: a container image plus a bench-tuned
 flag bundle. Slots reference a profile by name; the profile supplies the image
-and flags, the slot supplies the model, context size, and port. When
-`profiles.toml` is absent, hal0 serves the built-in seed profiles.
+and flags, the slot supplies the model, context size, and port.
 
 | Key | Type | Notes |
 |---|---|---|
 | `image` | str | Container image ref (required). |
 | `flags` | str | Bench-tuned `llama-server` flags (no model/port/ctx args). |
-| `mtp` | bool | Append the MTP draft-speculation bundle at resolve time. |
+| `mtp` | bool | Profile **opt-in**: when `true`, a slot in Auto mode enables MTP for models that are actually MTP-eligible. It does not unconditionally append the speculation bundle to every model. |
 | `device_class` | `gpu` \| `cpu` \| `npu` \| `img` | Device class the profile targets. |
-| `backend` | `rocm` \| `vulkan` \| null | GPU runtime (authoritative ROCm-vs-Vulkan choice); null for non-GPU profiles. |
+| `backend` | `rocm` \| `vulkan` \| `cuda` \| null | GPU runtime (authoritative ROCm/Vulkan/CUDA choice); null for non-GPU profiles. |
+| `cloned_from` | str \| null | Provenance: the profile this one was cloned from (set by the dashboard's Clone / "Edit a copy" flow). Informational only. |
 | `intent` | str | Human label shown in the dashboard. |
-| `quant` | str | Weight quant format shown as a chip (informational). |
+| `quant` | str | Weight quant format shown as a chip — informational only, never read by the runtime. |
 
-Seed profiles: `rocm`, `rocm-moe`, `rocm-dnse`, `vulkan` (GPU), `flm` (NPU),
-`tts` (CPU / Kokoro), `comfyui` (image generation). `rocm` is the `gpu-rocm`
-default (MoE/agents, FP4, no MTP).
+<Aside type="note">
+Seed profiles are **virtual**: they ship in code and are overlaid onto whatever
+`profiles.toml` contains every time it's loaded — the code definition always
+wins for a seed-named key, and `hal0 config`/the dashboard never persist seeds
+back to disk. This means a hal0 update can re-tune a seed's flags or image and
+every install picks it up on next load, with no per-install migration step.
+When `profiles.toml` is absent entirely, hal0 serves the seeds from memory.
+Seeds cannot be edited or deleted in place — the dashboard's "Edit a copy" /
+Clone flow forks a `<name>-custom` profile with `cloned_from` set instead.
+</Aside>
+
+Current seed profiles (12): `rocm`, `rocm-dnse`, `rocm-moe`, `vulkan` (GPU/ROCm
+and Vulkan chat profiles — `rocm` is the `gpu-rocm` default, MoE/agents, FP4, no
+MTP; `rocm-dnse`/`rocm-moe` opt into MTP), `cuda` (experimental NVIDIA, upstream
+llama.cpp CUDA image), `embed` and `rerank` (dedicated GPU lanes — these must
+run as separate slots, since combining `--embedding` and `--reranking` on one
+`llama-server` instance yields all-zero scores), `flm` (NPU), `tts` (CPU /
+Kokoro), `tts-qwen3` (GPU / Qwen3-TTS, multilingual), `cpu-llm` (CPU-only
+chat, no MTP), `comfyui` (image generation).
+
+## Stacks (`stacks.toml`)
+
+A **stack** is a named, portable bundle of slot assignments — one
+`[stack.<slug>]` entry holding a list of slot rows (each with `slot`, `model`,
+`profile`, `device`, `role`, `vision`, the `mtp` tri-state, `server_extra_args`,
+and optional embed/rerank/stt/tts/vision capability child rows) plus the
+profile and model metadata those rows reference, embedded so the stack is
+self-contained. `stacks.toml` is optional; three seed stacks (`saber`, `forge`,
+`pi`) ship built in and are immutable like seed profiles — clone under a new
+name to customize one. Applying a stack writes each row through the same
+guarded slot-config pipeline as a manual edit (device/profile coherence, NPU
+exclusivity, default-uniqueness), then converges the runtime: it loads or
+swaps every slot the stack names and **unloads any dispatchable slot the
+stack doesn't mention** — applying a stack is a declarative replace, not a
+merge. Stacks can be exported/imported as a portable `.hal0stack.json`
+envelope, and `POST /api/stacks/snapshot` can capture the live running
+configuration into a new draft stack.
 
 ## Related references
 
 - [Slot lifecycle](/docs/reference/slot-lifecycle) — the slot state machine and `state.json`.
 - [hal0 CLI](/docs/reference/cli) — `hal0 config` and `hal0 slot` commands.
 - [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) — the concept behind the schema.
+- [Stacks](/docs/concepts/stacks) — the concept behind `stacks.toml`: plan/converge, drift, and portable export/import.

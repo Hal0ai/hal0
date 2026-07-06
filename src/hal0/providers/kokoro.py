@@ -55,9 +55,6 @@ _DEFAULT_PROFILE = "tts"
 # (profiles.toml); a non-default [models].store moves the mount but not that
 # flag yet — tracked as a follow-up.
 
-# Providers whose model weights are pre-staged by the operator (not hal0 registry).
-SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "comfyui"})
-
 # Health/infer timeouts.
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
 _INFER_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)

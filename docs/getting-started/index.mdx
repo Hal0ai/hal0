@@ -19,21 +19,31 @@ OpenAI-compatible `/v1/*` requests to the right slot, and serves the
 dashboard. There is no shared inference daemon to babysit.
 
 <Aside type="note" title="Current release">
-This documentation tracks the **hal0 v0.7.x beta** line — the container-runtime
-era, where each slot (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
+This documentation tracks the **hal0 v0.9.x beta** line — the container-runtime
+era, where each slot (`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
 and `agent` — plus the NPU-conditional slots `stt-npu` and `embed-npu` when
-FastFlowLM is installed) runs in a dedicated podman container. See the
-[changelog](/changelog) for the exact current version.
+FastFlowLM is installed) runs in a dedicated podman container. `agent` is the
+capable default/fallback anchor and `utility` is the cheap helper used for
+background jobs like memory extraction; the older `chat`/`primary` slot names
+are retired. See the [changelog](/changelog) for the exact current version.
 </Aside>
 
 ## What you get
 
 - **OpenAI-compatible `/v1/*` API** — chat, completions, embeddings,
-  rerank, audio transcription, speech, and image generation. Point any
-  OpenAI SDK at `http://localhost:8080/v1` and go.
+  rerank (`/v1/rerankings`, plus the `/v1/rerank` alias for
+  llama.cpp/Cohere-style clients), audio transcription, speech, and image
+  generation. Point any OpenAI SDK at `http://localhost:8080/v1` and go.
 - **Hardware-aware slots** — each capability gets its own container,
   image, flags, port, and lifecycle, sharing only the GPU through an
   arbiter.
+- **Profiles** — bench-tuned llama-server flag bundles per backend
+  (`rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`, dedicated `embed`/
+  `rerank` lanes, and more) that a slot picks up for its image, flags,
+  and MTP behavior.
+- **Stacks** — named, exportable bundles of slot + profile + model
+  assignments (built-in `saber`, `forge`, and `pi`) that you can load,
+  clone, and re-apply as a single declarative unit.
 - **First-run terminal setup** — the `hal0 setup` TUI picks a
   hardware-anchored tier and provisions a coherent set of slots, models,
   and extensions.

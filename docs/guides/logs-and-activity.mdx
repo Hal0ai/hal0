@@ -9,7 +9,10 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 gives you three observation surfaces: **journald** per systemd unit,
 the **API log tail** (a thin wrapper over journald with filters), and the
-**durable Activity / Audit log** that survives restarts.
+**durable Activity / Audit log** that survives restarts. The dashboard also
+rolls request traffic up live:
+
+![The dashboard Requests widget — per-endpoint request volume with p50 / p95 latency over the last 60 seconds](/screenshots/requests-latency-widget.png)
 
 ## journald per unit
 
@@ -92,9 +95,18 @@ The dashboard's Logs page reads from two different backends behind one
   `model:<id>`, …) instead of everything collapsing to the literal
   `"hal0"`, plus a parsed `slot` field so per-slot filtering doesn't
   require re-parsing `source` client-side. `GET /api/journal` (and its
-  `/api/journal/stream` SSE counterpart) accepts `?source=` (exact match,
-  or pass `source=slot` to match every `slot:*` source) and `?slot=` for
-  the same filtering server-side.
+  `/api/journal/stream` SSE counterpart, which replays the last ~50
+  matching entries before tailing live) accept the same server-side
+  filters: `source` (exact match, or pass `source=slot` to match every
+  `slot:*` source), `slot`, `level` (`info` / `warn` / `error`, exact
+  match — unlike the "and higher severity" semantics of the `/api/logs`
+  `level` filter above), `q` (substring match on the message), `since`
+  (an id cursor, paged the same way as the Activity log below), and
+  `limit` (1–500, default 200):
+
+  ```sh
+  curl 'http://localhost:8080/api/journal?source=slot&slot=agent&level=warn'
+  ```
 - **`slot`** — the raw per-slot journald tail, i.e. `GET
   /api/slots/{name}/logs` and `/api/slots/{name}/logs/stream` (the same
   data `hal0 slot logs` reads — see

@@ -11,7 +11,195 @@ page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 ADR-level architecture decisions are kept internal (the `docs/internal/`
 tree is gitignored, #638) and referenced by number throughout the code.
 
+**Release automation.** On a tagged release the matching `## [<version>]`
+section below is bundled into the release tarball as `RELEASE_NOTES.md`, and its
+optional `### Highlights`, `### Breaking`, and `### Migrations` subsections are
+extracted into `release.json`. `hal0 update` shows both — rendering
+breaking/migrations as callouts — from the cosign-verified tarball, before
+applying. Add those subsections to a version's section to surface them; see
+`scripts/gen_release_notes.py`.
+
 ## [Unreleased]
+
+## [0.9.2] — 2026-07-05
+
+Hotfix: restore the full model listing in every slot's model picker.
+
+### Highlights
+- Fix collapsed slot model dropdowns — `/api/models` rows again advertise the dispatcher-vocab `type` (`llm`/`embedding`/`reranking`) the pickers join on.
+
+### Fixed
+- **Slot model dropdowns (and the model→slot compatibility list) showed only the currently-assigned model.** `/api/models` stamped local- and upstream-registry rows' `type` with `classify()`'s coarse modality bucket (`chat` / `embed` / `rerank`) instead of the dispatcher vocabulary (`llm` / `embedding` / `reranking`) that the FLM path already emitted and that the UI joins on (`model.type === slot.type`), so every local model failed the picker filter and each dropdown collapsed to its default. Map the modality bucket → dispatcher type at both stamp sites; adds a local-row regression test (the FLM path was already covered, which is how this slipped through).
+
+## [0.9.1] — 2026-07-05
+
+ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
+
+### Highlights
+- ROCmFPX runner support: GGUF quant-family detection, `rocmfpx-rocm` / `vkfpx-moe` seed profiles, and a build/quantize agent skill.
+- `hal0 update` now shows cosign-verified release notes and asks before applying (staged prepare → commit).
+
+### Added
+- **Updater `prepare` / `commit` split.** `hal0 update` downloads + cosign-verifies + extracts a release and shows its notes — with breaking/migration callouts — *before* activating anything; `--yes` skips the prompt for headless/cron. Adds `POST /api/updates/prepare` + `/commit` (#1075).
+- **Release notes in the update.** The release build bundles `RELEASE_NOTES.md` + `release.json` into the cosign-verified tarball; a CHANGELOG section's `### Highlights` / `### Breaking` / `### Migrations` subsections become the `hal0 update` callouts (#1078).
+- **ROCmFPX quant detection** — the registry classifies the `ROCmFPX` / `ROCmFP{3,4,6,8}` quant family from a GGUF filename so FPX slots resolve their launch command (#1068).
+- **ROCmFPX seed profiles** `rocmfpx-rocm` (ROCm0 dense) and `vkfpx-moe` (Vulkan0 MoE) for the custom ROCmFPX runner (#1069, renamed in #1076).
+- `vkfpx-dense` seed profile — the Vulkan0 lane for DENSE ROCmFP4, for prefill-bound dense workloads (Vulkan wins prompt-processing); complements the decode-optimal ROCm0 `rocmfpx-rocm`.
+- **`hal0-quantize` agent skill** — build the ROCmFPX toolchain and quantize a model to ROCmFP4/FPX (#1071).
+- ROCmFPX bench tooling: server-ab (MTP / concurrency) aggregation in the benchmark SUMMARY, FPX sweep cells, run provenance (#1072).
+- **Continuous batching — per-slot `parallel` field.** A slot can now set
+  llama-server's `--parallel` / `-np` sequence-slot count so concurrent
+  requests share the once-loaded weights instead of serializing through a
+  single sequence and thrashing one prompt cache (the win the shared-slot
+  architecture already earns but never harvested — every seed profile pins
+  `--parallel 1`). `None` inherits the profile; a value >1 also emits
+  `--kv-unified` so `--ctx-size` stays a SHARED pool (each request may use the
+  full context) rather than being silently split to ctx/N per slot. Emitted as
+  a slot override (beats the profile, loses to hand-authored `extra_args`);
+  surfaced in the slot drawer with a shared-pool hint. The dead haloai
+  `workers` field is deprecated (inert; a non-default value now logs at
+  launch). MTP x batching runs but logs `mtp.batched_speculation` (unproven on
+  gfx1151, bench-gated). Seed-profile defaults stay `--parallel 1` pending the
+  on-box `-np` sweep (`server_ab.py --mode batch`). See the
+  concurrency-batching plan handoff.
+
+### Changed
+- The plain `rocm` / `vulkan` seed profiles are reduced to basic flags
+  (`-ngl 999 -fa on --jinja`); per-model KV/batch tuning now lives in the
+  model's `defaults.extra_args` (#1076).
+- Seed-profile `intent` labels normalised to terse structural tags
+  (e.g. `ROCmFPX · DENSE · MTP`, `VULKFPX · MOE · MTP`, `ROCm`, `Embeddings`) —
+  no served-model names, no filler.
+- Slot units are re-rendered through the new code during an update's `commit`
+  step, so a subsequent restart uses current argv (#1075).
+
+### Removed
+- Legacy MTP toolbox seed profiles `rocm-moe` and `rocm-dnse` (superseded by the
+  ROCmFPX profiles); `rocmfpx-moe` renamed to `vkfpx-moe` to indicate its Vulkan
+  lane (#1076).
+
+### Migrations
+- Slots pinned to a removed/renamed seed profile (`rocm-moe`, `rocm-dnse`, `rocmfpx-moe`) auto-fall-back to the backend's basic profile (`rocm` / `vulkan`) on launch — existing slots keep working with no operator action (#1076).
+
+## [v0.9.0] — 2026-07-04
+
+**The first public-beta cut.** hal0 graduates from the b-tagged 0.8.x
+line: the dashboard gets its redesigned fixed-band layout and a live
+telemetry header, seed profiles carry flags from a measured Strix Halo
+bench matrix (plus a new per-model-family override layer), MCP servers
+are manageable from the CLI, and the Memory view becomes a per-bank
+workspace. **Safe upgrade from v0.8.5b2** — no on-disk migrations in
+this cut. Profile flag changes (re-tune, `FAMILY_DEFAULTS`) land on each
+slot's next restart; thanks to the v0.8.5b2 auto unit re-render, any
+restart path picks them up.
+
+### Added
+
+- **Dashboard redesign — fixed-band layout with swap-in-place widgets
+  (#1061).** The free-form drag/resize grid is replaced by a fixed
+  vertical band stack: hero strip (steady-on + quick actions), 5-cell
+  health strip, a full-width **Unified Memory hero** (slot allocations
+  drawn inside the pool bar, striped system block, Proxmox-host block
+  when configured), Throughput / Utilization / Requests band, locked
+  dense slot rows, and an Activity / Services / Needs-Attention band
+  with inline actions. Customization is swap-in-place per cell (layout
+  v3 via the existing `PUT /api/user/dashboard-layout`, fail-soft to
+  defaults on old payloads). Ships a new **Requests & Latency** widget
+  against a new `/api/stats/requests` endpoint (gates to "source
+  pending" until the dispatcher rollup ships).
+- **Telemetry header on the Slots page (#1059, #1062, #1064).** One
+  combined live-metrics card replaces the old hero band: throughput
+  hero + 20-bucket spark, GPU semicircle gauge (sclk/temp/watts), CPU +
+  memory gauge, and the NPU 4×8 occupancy grid with per-slot owner
+  hues — above a full-width memory rack ruler in the #1061 memory-hero
+  style (in-bar allocations, live tok/s on serving segments, click-through
+  to the slot). Honest-data rules throughout: missing metric → em-dash,
+  measured zero renders as 0.0 with the serving count, GPU util captioned
+  "pinned" when forced high. Container queries keep the 4→3→2→1 column
+  wrap gap-free.
+- **`hal0 mcp` CLI surface** (#504) — `hal0 mcp {list,status,install,uninstall,restart,catalog}`
+  backed by the existing `/api/mcp/*` routes. Rich tables with `--json` flag for
+  machine output. The `restart` subcommand surfaces the 501 supervisor-stub
+  gracefully until ADR-0015 lands.
+- **`FAMILY_DEFAULTS` — per-model-family launcher-flag overrides.** A new
+  resolution layer between a profile's generic flags and a slot's own
+  `[model].defaults`, keyed on model family (matched from the id/filename).
+  Applied automatically at slot resolution (launch + preview parity) and
+  collapsed by `normalize_argv` last-wins, so a family override beats the
+  profile but a per-slot `[server].extra_args` still beats the family. First
+  tenant: **gemma → `-ctk f16 -ctv f16 --cache-reuse 0`** — any gemma model on
+  any q8 profile is pinned back to f16 KV (gemma iSWA regresses on quantized KV:
+  measured -28.5% pp on RADV / -10% tg on rocm, plus SWA+cache-reuse bugs
+  #21468/#21749). This fixes the live gemma-on-`rocm-dnse` regression and makes
+  adopting Vulkan q8 KV safe as a follow-up.
+- **Configurable slot publish host — `[slots].publish_host` (#1058).**
+  Slot containers published on 127.0.0.1 only; raw slot ports were
+  reachable solely through hal0-api/Traefik. A first-class, UI-settable
+  config key (default `127.0.0.1`, unchanged behavior) lets an operator
+  widen to `0.0.0.0` or a specific interface IP. Fail-soft: an
+  unresolvable value falls back to loopback, never opens the box. Baked
+  into ExecStart, so live slots re-bind on their next restart; the
+  Settings row carries a loud LAN-exposure warning.
+
+### Changed
+
+- **Memory Overview is a per-bank workspace (#1057).** Selecting a bank
+  drives one combined primary card — retained-memories spark, graph
+  extraction panel, embedded Tools (recall · reflect · documents ·
+  mental models · directives), async operations, danger zone. The
+  standalone `#memory/tools` route is retired; documents paginate and
+  show composed titles instead of raw UUIDs; mental models and
+  directives gain create forms.
+- **The MTP control is always visible on llm slots (#1054).** Hiding the
+  row for ineligible models made the tri-state undiscoverable. The slot
+  drawer now always renders it, with a reason line for Auto·off ("model
+  has no MTP heads" / "profile doesn't enable MTP") and a
+  launch-will-fail warning when forcing On for a model without
+  advertised heads. Stack editor rows follow the same contract.
+- **Activity sidebar rework (#1063).** Taller pane, stacked
+  timestamp/actor meta reclaiming horizontal space, and the free-text
+  search replaced by a slot filter dropdown (exact target match,
+  server-side pre-narrowed).
+- **Seed profiles: bench-driven flag re-tune (Strix Halo matrix, 2026-07-04).**
+  `rocm-moe` micro-batch `-ub 2048` → `-ub 1024` (+30% prompt-processing on
+  Qwen3.6-35B-A3B-MTP: 1165 vs 895 t/s pp2048, consistent across all `-b`;
+  token-gen flat ~47). `vulkan` `-ub 512` → `-ub 256` (+5.4% pp; the reported
+  1024 sweet spot measured *worse*). Dropped `--threads-batch 32` and
+  `--poll 100 --poll-batch 1` from the rocm chat profiles (measured within noise
+  at full offload — simpler flags win ties). Added explicit `-ngl 999` to all
+  GPU LLM profiles (GTT/unified free-mem autodetect is unreliable) and `--jinja`
+  to all LLM profiles. Decode throughput is unchanged (all wins are prefill), so
+  `PROFILE_BENCH` hero numbers stand. MTP draft depth measured `n-max 4` optimal
+  (+23% decode vs n-max 2 on dense MTP) — seeded default kept.
+- **Vulkan seed adopts symmetric q8 KV** (`-ctk q8_0 -ctv q8_0`): +45% pp at 32k
+  depth on qwen (168 vs 116 t/s) and halves KV memory. It is the mirror image on
+  gemma (gemma-4-12B @32k: q8 costs -28.5% pp on RADV), so the vulkan profile is
+  no longer intrinsically gemma-safe — it relies on `FAMILY_DEFAULTS["gemma"]`
+  pinning gemma slots back to f16 KV. (The upstream "~10x pp cliff" did NOT
+  reproduce on this fork.)
+
+### Fixed
+
+- **OpenRouter OAuth callback route is gated behind
+  `HAL0_OPENROUTER_OAUTH_ENABLED` (#775).** The callback endpoint no
+  longer registers unless the flow is explicitly enabled, closing an
+  unauthenticated surface on installs that never use OpenRouter OAuth.
+- **Capability slot mini-cards regained Logs/Edit buttons (#1055).** The
+  utility-tier (embedding/reranking/tts/transcription) cards rendered
+  compact controls with no way to edit or tail a capability slot created
+  via the UI.
+- **Hermes memory identity defaults to `hermes` (#1056).** The upstream
+  plugin base defaulted to `hermes-agent` on env-less code paths,
+  spawning a stray duplicate `private:hermes-agent` bank alongside the
+  correct `private:hermes`. Reads/writes now consistently target
+  `private:hermes`.
+- **Telemetry throughput no longer flaps to "source pending" on an idle
+  box (#1062).** An empty 100-second history window is a measurement
+  (0.0 with the live serving count), and the spark keeps the last 20
+  measured buckets on screen; "source pending" is reserved for a
+  genuinely missing source.
+- Removed a dead duplicate `SELF_MANAGED_PROVIDERS` constant from
+  `kokoro.py` (#982).
 
 ## [v0.8.5b2] — 2026-07-04
 

@@ -388,6 +388,21 @@ class SlotConfig(BaseModel):
             "See providers.container._effective_mtp and build_mtp_flag_bundle."
         ),
     )
+    parallel: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-slot llama-server sequence slots (--parallel / -np) for continuous "
+            "batching: concurrent requests share the once-loaded weights instead of "
+            "serializing through a single sequence and thrashing one prompt cache. "
+            "None = inherit the profile flags (today: 1). When >1, --kv-unified is "
+            "emitted alongside so --ctx-size stays a SHARED pool (each request may "
+            "use up to the full context) instead of being silently split to ctx/N "
+            "per slot. Interactive slots want low N (per-stream speed ~= 1/N); agent "
+            "fan-in slots want 4-8 (bench-gated). See "
+            "providers.container._effective_parallel."
+        ),
+    )
     chat_template: str | None = Field(
         default=None,
         description=(
@@ -453,7 +468,13 @@ class SlotConfig(BaseModel):
     workers: int = Field(
         default=1,
         ge=1,
-        description="Number of parallel request workers.",
+        description=(
+            "DEPRECATED / inert — a haloai-era field that was never emitted to "
+            "llama-server argv (it did not mean sequence slots). Round-tripped for "
+            "one release; a non-default value logs a warning at launch and does "
+            "nothing. For continuous batching use the `parallel` field, which maps "
+            "to llama-server --parallel."
+        ),
     )
     idle_timeout_s: int = Field(
         default=300,
@@ -824,39 +845,79 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: let ``device_class`` drive display.
 SEED_PROFILES: dict[str, dict[str, object]] = {
     "rocm": {
+        # Basic general-purpose ROCm GPU LLM profile (Strix Halo toolbox image).
+        # Intentionally minimal: -ngl 999 (offload all), -fa on (flash attn),
+        # --jinja (chat templating). Per-model KV/batch/MTP tuning lives in the
+        # model's defaults.extra_args. mtp stays False — the ROCmFPX profiles
+        # (rocmfpx-rocm / vkfpx-moe) are the MTP lanes now; the legacy MTP
+        # rocm-dnse / rocm-moe profiles were removed 2026-07-05.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "MoE agents",
+        "intent": "ROCm",
         "quant": "FP4",
     },
-    "rocm-dnse": {
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1",
+    "rocmfpx-rocm": {
+        # hal0 ROCmFPX runner (llama.cpp fork, ghcr.io/hal0ai/hal0-rocmfpx —
+        # HIP+Vulkan, Strix Halo gfx1151). ROCm0/HIP lane for the custom ROCmFP4
+        # dense weight format (NOT stock Q4 / MXFP4 / NVFP4). mtp=True is gated by
+        # model_is_mtp_eligible, so it only activates for MTP heads. Per-model KV
+        # and spec-draft tuning come from the model's defaults.extra_args (e.g.
+        # the 27B Coder card pins -ctk q4_0 / draft-type q4_0).
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Dense + MTP · q8 KV",
-        "quant": "FP4",
+        "intent": "ROCmFPX · DENSE · MTP",
+        "quant": "ROCmFP4",
     },
-    "rocm-moe": {
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja",
+    # Renamed rocmfpx-moe -> vkfpx-moe (2026-07-05) so the name indicates the
+    # Vulkan lane (this MoEQuality profile runs on Vulkan0, not the ROCm/HIP lane).
+    "vkfpx-moe": {
+        # hal0 ROCmFPX runner — Vulkan0 lane for the ROCmFPX MoEQuality weight
+        # format (35B-A3B). Vulkan0 gives the best decode t/s for the MoE (ROCm0
+        # wins prefill if a slot overrides -dev). -sm none (single GPU) and
+        # --no-context-shift per the validated Tool-Eval card. The external chat
+        # template (Froggeric Qwen fixed) is set per-slot via [server].extra_args.
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "MoE + MTP · q8 KV",
-        "quant": "FP4",
+        "backend": "vulkan",
+        "intent": "VULKFPX · MOE · MTP",
+        "quant": "ROCmFPX",
+    },
+    "vkfpx-dense": {
+        # hal0 ROCmFPX runner — Vulkan0 lane for a DENSE ROCmFP4 weight format.
+        # Complements rocmfpx-rocm (ROCm0 dense): the ROCm lane wins sustained
+        # decode, the Vulkan lane wins prefill (~+24% PP), so a prefill-bound
+        # dense workload (RAG / long-context reads / re-prefill after a cache
+        # miss) belongs here. Small ubatch wins on gfx1151; per-model KV +
+        # spec-draft tuning come from the model's defaults.extra_args. mtp=True
+        # is the runner-capability gate (auto-on for MTP-head models, model-
+        # gated + slot-overridable) — the MTP *params* stay on the model.
+        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "VULKFPX · DENSE · MTP",
+        "quant": "ROCmFP4",
     },
     "vulkan": {
+        # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
+        # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
+        # is gemma-safe) — per-model KV/batch tuning lives in the model's
+        # defaults.extra_args.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
-        "intent": "Vulkan std · fallback",
+        "intent": "Vulkan",
         "quant": "Q4_K_M",
     },
     "cuda": {
@@ -867,11 +928,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # tuning, no KV-quant assumptions); requires nvidia-container-toolkit
         # (CDI) for GPU passthrough — see providers/_gpu.nvidia_cdi_devices.
         "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
-        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "cuda",
-        "intent": "CUDA · NVIDIA (upstream llama.cpp, experimental)",
+        "intent": "CUDA · experimental",
         "quant": "Q4_K_M",
     },
     "embed": {
@@ -889,7 +950,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Embeddings · GPU",
+        "intent": "Embeddings",
         "quant": "",
     },
     "rerank": {
@@ -905,7 +966,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Reranking · GPU",
+        "intent": "Reranking",
         "quant": "",
     },
     "flm": {
@@ -913,7 +974,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "",
         "mtp": False,
         "device_class": "npu",
-        "intent": "FLM NPU inference",
+        "intent": "FLM · NPU",
         "quant": "W4ABF16",
     },
     "tts": {
@@ -921,7 +982,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
         "device_class": "cpu",
-        "intent": "TTS · Kokoro",
+        "intent": "TTS · CPU",
         "quant": "",
     },
     "tts-qwen3": {
@@ -933,7 +994,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "TTS · Qwen3 (multilingual GPU)",
+        "intent": "TTS · GPU",
         "quant": "BF16",
     },
     "cpu-llm": {
@@ -943,10 +1004,10 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # batch to limit peak RAM, and a thread count sensible for a typical
         # multi-core host.  backend=None keeps the #807 coherence check happy.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap",
+        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap --jinja",
         "mtp": False,
         "device_class": "cpu",
-        "intent": "CPU-only LLM · llama-server",
+        "intent": "CPU",
         "quant": "Q4_K_M",
     },
     "comfyui": {
@@ -954,7 +1015,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--disable-mmap --bf16-vae --cache-none",
         "mtp": False,
         "device_class": "img",
-        "intent": "Image generation",
+        "intent": "ComfyUI",
         "quant": "",
     },
 }
@@ -963,16 +1024,60 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: ``tps`` = tokens/sec (LLM throughput); ``rtf`` = real-time factor (synth,
 #: e.g. TTS).  Grounded in hal0-container-bench-2026-06-08.md.  Custom
 #: profiles have no entry → the card shows "—" until benched.
+#: Unchanged by the 2026-07-04 Strix Halo flag re-tune: every adopted change
+#: (rocm-moe -ub 1024, vulkan -ub 256, dropped threads-batch/poll) is a prefill
+#: (pp) win — token-generation throughput was flat across all matrix cells, so
+#: these decode-based hero numbers still hold.
 PROFILE_BENCH: dict[str, dict[str, float]] = {
     "rocm": {"tps": 52.8},
-    "rocm-moe": {"tps": 90.0},
-    "rocm-dnse": {"tps": 30.4},
     "vulkan": {"tps": 41.0},
     "flm": {"tps": 38.6},
     "tts": {"rtf": 0.18},
     # Native gfx1151 ~2.1x realtime -> rtf ~= 1/2.1 (memory qwen3tts-voice-ct105).
     "tts-qwen3": {"rtf": 0.48},
 }
+
+#: Per-family llama-server flag overrides — the "model-architecture quirks"
+#: layer, distinct from profiles (backend/hardware tuning) and slot config
+#: (per-instance).  Applied when a slot's model resolves to the family; each
+#: string merges into the ``model_defaults`` argv segment, so it OVERRIDES the
+#: profile's generic flags (``normalize_argv`` keeps the last occurrence) but a
+#: per-slot ``[model].defaults.extra_args`` still beats it.  Virtual like
+#: SEED_PROFILES — ships to every install, never persisted to config.
+FAMILY_DEFAULTS: dict[str, str] = {
+    # Gemma is an iSWA (interleaved sliding-window) architecture: quantized KV
+    # regresses prompt-processing — measured 2026-07-04 on gemma-4-12B @32k depth,
+    # -ctk/-ctv q8_0 costs -28.5% pp on RADV / -10% tg on rocm vs f16 (the mirror
+    # of qwen's +45% q8 gain) — and SWA + cache-reuse has upstream bugs
+    # (#21468/#21749).  So any gemma model, on any q8 profile, is pinned back to
+    # f16 KV with cache-reuse off.
+    "gemma": "-ctk f16 -ctv f16 --cache-reuse 0",
+}
+
+#: Families FAMILY_DEFAULTS can key on, matched as a token in the model id /
+#: filename.  GGUF ``general.architecture`` would be the canonical signal, but
+#: it is not persisted on registry rows today (auto-scan stores only
+#: ``{discovered, source}``); the id/filename carries the family reliably for
+#: the GGUF fleet, and arch-from-header is the future hardening.
+_KNOWN_FAMILIES: tuple[str, ...] = ("gemma", "qwen", "llama", "phi", "mistral", "deepseek")
+
+
+def model_family(*hints: str | None) -> str | None:
+    """Best-effort model family from id/name/path hints (lower-cased token scan).
+
+    Returns the first :data:`_KNOWN_FAMILIES` token found across the hints, or
+    ``None``.  Cheap and side-effect-free so the launch + preview argv paths can
+    both call it.
+    """
+    hay = " ".join(h for h in hints if h).lower()
+    return next((fam for fam in _KNOWN_FAMILIES if fam in hay), None)
+
+
+def family_flags(*hints: str | None) -> str:
+    """The :data:`FAMILY_DEFAULTS` flag string for the model's family, else ''."""
+    fam = model_family(*hints)
+    return FAMILY_DEFAULTS.get(fam, "") if fam else ""
+
 
 #: Preselect map for the create-modal device picker and legacy-slot
 #: migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
@@ -1308,7 +1413,7 @@ SEED_STACKS: dict[str, StackConfig] = {
                 slot="agent",
                 model="qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
                 device="gpu-rocm",
-                profile="rocm-moe",
+                profile="rocm",
                 mtp=True,
                 capabilities=_embed_rerank_rows(),
             ),
@@ -1594,6 +1699,17 @@ class NPUInfo(BaseModel):
         description=(
             "Total AIE column count discovered via xrt-smi at probe time. "
             "0 = unknown; consumers fall back to the Strix Halo constant 8."
+        ),
+    )
+    validated: bool | None = Field(
+        default=None,
+        description=(
+            "Functional NPU validation result from `flm validate`, run at "
+            "install/setup time (not by the fast presence probe). None = not "
+            "yet validated (presence is node-detection only); True = the NPU "
+            "runtime is reachable; False = flm validate ran but failed (NPU "
+            "absent or libxrt-npu2 mismatched). Distinct from `present`, which "
+            "only reflects device-node detection."
         ),
     )
 
@@ -2337,6 +2453,34 @@ class ModelsConfig(BaseModel):
             "deployments are unaffected until ``store`` is set."
         ),
     )
+    flm_store: str = Field(
+        default="",
+        description=(
+            "Where FLM (NPU backend) model weights live. The NPU slot container "
+            "bind-mounts this directory over FLM's hardcoded ~/.config/flm/models "
+            "cache, and the host ``flm`` probe/pull bookkeeping points at it. "
+            "Empty falls back to the HAL0_FLM_MODELS_DIR env var, then to FLM's "
+            "default cache under the hal0 HOME (/var/lib/hal0/.config/flm/models). "
+            "Set an absolute path (e.g. /mnt/ai-models/flm/models) to keep NPU "
+            "weights off the root filesystem; hal0 creates the directory "
+            "(container-uid-writable) at slot-spec build time and the generated "
+            "unit orders after the backing mount, so a reboot with a late or "
+            "missing mount no longer kills the slot with podman exit 125."
+        ),
+    )
+
+    @field_validator("flm_store")
+    @classmethod
+    def flm_store_is_absolute_when_set(cls, v: str) -> str:
+        """Empty means "env var / FLM default cache"; non-empty must be absolute."""
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        if not Path(s).is_absolute():
+            raise ValueError(
+                f"models.flm_store {s!r} must be an absolute path (or empty for the default cache)"
+            )
+        return s
 
     def scan_roots(self) -> list[str]:
         """Roots the discovery scan actually walks: declared ``roots`` plus the
@@ -2451,6 +2595,7 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
+    "FAMILY_DEFAULTS",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
@@ -2487,6 +2632,8 @@ __all__ = [
     "ToolPolicy",
     "UpstreamEntry",
     "UpstreamsConfig",
+    "family_flags",
     "map_backend_to_device",
+    "model_family",
     "resolve_profile_flags",
 ]
