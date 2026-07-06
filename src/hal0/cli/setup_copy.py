@@ -16,9 +16,33 @@ PANE_COPY: dict[str, PaneCopy] = {
         "Welcome to hal0",
         "We detected your hardware and tuned the defaults on the left. Press Enter to continue.",
     ),
+    "network": PaneCopy(
+        "How hal0 is reached",
+        "Bind loopback (127.0.0.1) to keep hal0 private behind a reverse proxy, "
+        "or all interfaces (0.0.0.0) to reach it directly on your LAN. The "
+        "hostname seeds mDNS (<name>.local) and the browser-origin allowlist.",
+    ),
     "storage": PaneCopy(
         "Where models live",
-        "Downloaded models are stored here. Pick a disk with room — chat models run 2-30 GB each.",
+        "Downloaded models are stored here. Pick a disk with room — chat models run 2-30 GB each. "
+        "This is mandatory: nothing downloads until a writable store is set.",
+    ),
+    "hf": PaneCopy(
+        "Hugging Face access",
+        "Some curated models live in gated repos. Paste a read token to pull "
+        "them (used for background downloads this run), or leave blank — open "
+        "models still work. HF_TOKEN in the environment always wins.",
+    ),
+    "gen": PaneCopy(
+        "Image & video generation",
+        "ComfyUI runs on the iGPU. Scaffold-only wires the slot without "
+        "downloading weights (default — fast install); scaffold+download also "
+        "pulls the default generation models. Off skips image/video gen.",
+    ),
+    "verify": PaneCopy(
+        "All set",
+        "Slots are created and the first-run sentinel is written. Models "
+        "download in the background — start chatting as soon as Main lands.",
     ),
     "extensions": PaneCopy(
         "One-shot perfection",

@@ -1921,3 +1921,30 @@ SUMMARY_LINES+=(
 )
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
+
+# ── Stage-2 guided setup handoff (issue #1112) ──────────────────────────────
+# Stage-1 (everything above) did system prep + the platform/GPU gate + the
+# --auto slot/sentinel seed. Stage-2 is the INTERACTIVE `hal0 setup` flow
+# (network → store → HF token → slots → NPU → gen → apps → review → apply).
+# On a real terminal, offer to drop the operator straight into it; on a piped
+# / headless (`curl … | bash`) run there is no interactive stdin, so just
+# print the command. Self-contained so later install.sh edits merge around it.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "1" ]]; then
+    _confirm_launch_setup() {
+        # y/N read from the controlling terminal so it works even when stdin is
+        # the piped installer. Default Yes; any read failure (no TTY) → No, and
+        # the caller falls through to just printing the command.
+        local reply=""
+        printf '\n%s' "Launch the guided hal0 setup now? [Y/n] " >/dev/tty 2>/dev/null || return 1
+        IFS= read -r reply </dev/tty 2>/dev/null || return 1
+        [[ -z "${reply}" || "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
+    }
+    if [[ -r /dev/tty ]] && _confirm_launch_setup; then
+        "${HAL0_BIN}" setup \
+            || warn "guided setup exited non-zero — re-run '${BOLD}hal0 setup${RST}' anytime"
+    else
+        printf '\n'
+        info "Finish setup any time from a terminal: ${BOLD}hal0 setup${RST}"
+        info "  (guided: network, model store, slots, NPU, image gen, apps)"
+    fi
+fi

@@ -1,5 +1,23 @@
-from hal0.cli.setup_command import _api_reachable, build_auto_selections
+from typer.testing import CliRunner
+
+from hal0.cli.setup_command import _api_reachable, app, build_auto_selections
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
+
+
+def test_headless_interactive_prints_stage2_command(monkeypatch):
+    """Two-stage handoff (issue #1112): a piped / non-TTY `hal0 setup` (no
+    --auto) must NOT launch rich prompts — it prints the command to run and
+    exits 0 without probing hardware or applying anything."""
+    monkeypatch.delenv("HAL0_FORCE_INTERACTIVE", raising=False)
+
+    def boom(*a, **k):  # would blow up if the probe were reached
+        raise AssertionError("hardware probe should not run on the headless guard path")
+
+    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", boom)
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0
+    assert "hal0 setup" in result.output
+    assert "--auto" in result.output
 
 
 def _hw(ram_gb=96):
