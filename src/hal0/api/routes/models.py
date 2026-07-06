@@ -1795,6 +1795,13 @@ _INSPECT_TTL_SECONDS = 300
 _INSPECT_TIMEOUT_SECONDS = 8.0
 _INSPECT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _INSPECT_GGUF_SUFFIX = ".gguf"
+# mmproj sidecars are often uploaded with a bare ``.mmproj`` extension
+# (e.g. ``mmproj-Foo-F32.mmproj``) rather than ``…mmproj….gguf``.  The local
+# directory scanner (:func:`hal0.registry.discover._is_mmproj_sidecar`) matches
+# those by name regardless of extension, so the HF inspect path has to admit
+# them too — otherwise the Add-by-HF modal's vision picker shows "no mmproj
+# files in repo" and a vision pull silently ships without a projector.
+_INSPECT_MMPROJ_SUFFIX = ".mmproj"
 
 
 class _HFUpstreamError(Hal0Error):
@@ -1928,7 +1935,14 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
         rel = entry.get("path") or entry.get("rfilename")
         if not isinstance(rel, str):
             continue
-        if not rel.lower().endswith(_INSPECT_GGUF_SUFFIX):
+        rel_low = rel.lower()
+        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
+        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
+        # the modal filters it out of the main variant dropdown (by the
+        # "mmproj" token) and into the vision picker. Guard on the token too so
+        # an unrelated ``.mmproj`` never slips into the main list.
+        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
+        if not (is_gguf or is_mmproj):
             continue
         # HF's tree API reports the *pointer file* size in ``size`` for
         # LFS objects; the real bytes live under ``lfs.size``. Prefer
@@ -1946,12 +1960,13 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
             size_bytes = 0
         # Use the GGUF filename as the canonical variant id — that's
         # also what the pull endpoint resolves against (hf_filename).
+        kind_label = "mmproj sidecar" if (is_mmproj and not is_gguf) else "single file"
         variants.append(
             {
                 "id": rel,
                 "size_bytes": size_bytes,
                 "size": _format_size(size_bytes),
-                "info": _format_size(size_bytes) + " · single file",
+                "info": _format_size(size_bytes) + " · " + kind_label,
             }
         )
     variants.sort(key=lambda v: v.get("size_bytes") or 0)
