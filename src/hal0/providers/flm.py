@@ -642,6 +642,38 @@ def _probe_flm_catalog() -> list[dict[str, Any]] | None:
     return models
 
 
+def flm_validate() -> bool | None:
+    """Run host ``flm validate`` — the upstream NPU-runtime health check.
+
+    Unlike :func:`_probe_flm_catalog` (``flm list``, which never touches the
+    NPU), ``flm validate`` exercises the actual XDNA runtime. Returns:
+
+    * ``True``  — validation passed (NPU runtime reachable); rc 0.
+    * ``False`` — the binary ran but validation failed (NPU hardware absent
+      or ``libxrt-npu2`` mismatched); non-zero rc.
+    * ``None``  — could not run at all (flm not installed / OS error /
+      timeout), so functional state is unknown.
+
+    This mirrors the installer's ``flm validate`` smoke test but records the
+    result into ``hardware.json`` (``npu.validated``) so slots and the FLM
+    container spec have an authoritative functional signal, not just node
+    presence. Runs as the hal0 identity via :func:`flm_host_spawn_kwargs`.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [_HOST_FLM_BIN, "validate"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60.0,
+            **flm_host_spawn_kwargs(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    return proc.returncode == 0
+
+
 def flm_served_models() -> list[dict[str, Any]]:
     """Return what the FLM toolbox can serve, classified into hal0 capabilities.
 
