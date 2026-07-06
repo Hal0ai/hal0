@@ -100,25 +100,10 @@ def _registry() -> _FakeModelRegistry:
     )
 
 
-def _patch_loaded(monkeypatch: pytest.MonkeyPatch, loaded: set[str] | None) -> None:
-    async def _fake(_sm: Any) -> set[str] | None:
-        return loaded
-
-    monkeypatch.setattr(hal0_api, "_loaded_model_ids", _fake)
-
-
 @pytest.mark.asyncio
-async def test_all_loaded_chat_slots_emit_alias_entries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_loaded(
-        monkeypatch,
-        {
-            "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "hermes-4-14b-q5km",
-            "qwen3-zero-coder-v2-0.8b-f16",
-        },
-    )
+async def test_all_enabled_llm_slots_emit_alias_entries() -> None:
+    """Every enabled chat slot (type=="llm") with a model appears —
+    both warm and cold — because dispatch cold-loads on demand."""
     entries = await hal0_slot_alias_models(
         _FakeSlotManager(_three_chat_slots()), _registry(), now=1000
     )
@@ -148,43 +133,21 @@ async def test_all_loaded_chat_slots_emit_alias_entries(
 
 
 @pytest.mark.asyncio
-async def test_unloaded_slots_are_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only slots whose model is in the dispatchable loaded set appear."""
-    _patch_loaded(monkeypatch, {"hermes-4-14b-q5km"})
+async def test_all_enabled_llm_slots_appear_regardless_of_load_state() -> None:
+    """All enabled llm slots appear even when only a subset are
+    actually loaded — dispatch cold-loads on demand."""
     entries = await hal0_slot_alias_models(
         _FakeSlotManager(_three_chat_slots()), _registry(), now=1000
     )
-    assert {e["id"] for e in entries} == {"agent-hermes"}
+    assert {e["id"] for e in entries} == {"primary", "agent-hermes", "utility"}
 
 
 @pytest.mark.asyncio
-async def test_disabled_slots_are_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_disabled_slots_are_hidden() -> None:
     cfgs = _three_chat_slots()
     cfgs[0]["enabled"] = False  # disable primary
-    _patch_loaded(
-        monkeypatch,
-        {
-            "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "hermes-4-14b-q5km",
-            "qwen3-zero-coder-v2-0.8b-f16",
-        },
-    )
     entries = await hal0_slot_alias_models(_FakeSlotManager(cfgs), _registry(), now=1000)
     assert "primary" not in {e["id"] for e in entries}
-
-
-@pytest.mark.asyncio
-async def test_no_entries_when_loaded_set_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If slot state can't be read at all (loaded set is None), no alias
-    entries are emitted rather than advertising slots we can't confirm
-    are serving."""
-    _patch_loaded(monkeypatch, None)
-    entries = await hal0_slot_alias_models(
-        _FakeSlotManager(_three_chat_slots()), _registry(), now=1000
-    )
-    assert entries == []
 
 
 # ── handler integration: GET /v1/models surfaces the alias entries ──────────

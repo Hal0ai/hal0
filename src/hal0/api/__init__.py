@@ -289,49 +289,23 @@ def _slot_ctx_size(
     return None
 
 
-async def _loaded_model_ids(slot_manager: SlotManager) -> set[str] | None:
-    """Return the set of model ids served by dispatchable container slots.
-
-    A model counts as loaded when its slot is in the dispatchable
-    ready-set (READY / SERVING / IDLE, per #696). Returns ``None`` when
-    slot configs can't be read at all so callers can decide how to
-    degrade — distinct from an empty set, which means "no slot is
-    currently serving anything".
-    """
-    try:
-        cfgs = await slot_manager.iter_configs()
-    except Exception:  # pragma: no cover — defensive
-        return None
-    loaded: set[str] = set()
-    for cfg in cfgs:
-        name = str(cfg.get("name") or "").strip()
-        if not name:
-            continue
-        model_id = _slot_model_id(cfg)
-        if not model_id:
-            continue
-        try:
-            if slot_manager.is_ready_for_dispatch(name):
-                loaded.add(model_id)
-        except Exception:
-            continue
-    return loaded
-
-
 async def hal0_slot_alias_models(
     slot_manager: SlotManager,
     model_registry: ModelRegistry,
     *,
     now: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Build OpenAI ``model`` objects for every LOADED chat slot, alias-addressed.
+    """Build OpenAI ``model`` objects for every enabled chat slot, alias-addressed.
 
-    Each enabled chat slot (``type == "llm"``) whose configured model is
-    currently being served surfaces as one model object whose ``id``
-    is the slot **alias = slot name** (e.g. ``chat``, ``agent``,
-    ``utility``). The alias is the stable handle: it does not change when
-    the underlying model is swapped, so callers can pin a co-resident slot
-    without tracking the GGUF filename.
+    Each enabled chat slot (``type == "llm"``) with a configured model
+    surfaces as one model object whose ``id`` is the slot **alias = slot
+    name** (e.g. ``chat``, ``agent``, ``utility``). The alias is the stable
+    handle: it does not change when the underlying model is swapped, so
+    callers can pin a co-resident slot without tracking the GGUF filename.
+
+    Both warm and cold slots are advertised — dispatch cold-loads on demand
+    when a request addresses a cold slot by alias, so restricting discovery
+    to only warm slots needlessly hid slots the gateway would happily serve.
 
     Fields:
 
@@ -344,23 +318,13 @@ async def hal0_slot_alias_models(
       back to the model registry entry's ``defaults.context_size``.
     * ``owned_by`` — ``"hal0"``.
 
-    Slots that are disabled, lack a configured model, or are not
-    currently serving are omitted. If slot configs can't be read at all,
-    no alias entries are emitted (we refuse to advertise a slot we can't
-    confirm is serving) — the composite ``hal0`` model list still
-    carries the raw model ids for direct addressing.
+    Slots that are disabled or lack a configured model are omitted.
     """
     created = int(time.time()) if now is None else now
     try:
         cfgs = await slot_manager.iter_configs()
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("v1.slot_alias_iter_failed", error=str(exc))
-        return []
-
-    loaded = await _loaded_model_ids(slot_manager)
-    if loaded is None:
-        # Can't confirm what's loaded → emit nothing rather than advertise
-        # slots that may be cold. The composite still lists raw model ids.
         return []
 
     out: list[dict[str, Any]] = []
@@ -374,8 +338,6 @@ async def hal0_slot_alias_models(
             continue
         model_id = _slot_model_id(cfg)
         if not model_id:
-            continue
-        if model_id not in loaded:
             continue
 
         display = model_id

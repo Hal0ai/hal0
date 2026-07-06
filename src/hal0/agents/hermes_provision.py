@@ -2657,9 +2657,10 @@ def _collect_chat_slots(
     — the rendered ``model_aliases`` block never appeared, so Hermes only
     ever saw the primary upstream's single model in ``/v1/models``.
 
-    Only slots reporting a live/ready state are advertised so we don't tell
-    the agent about a model that isn't actually loaded — matches the
-    dashboard chat-filter at ``src/hal0/api/routes/slots.py``.
+    Both warm and cold slots are advertised — the gateway cold-loads on
+    demand when a request addresses a cold slot by alias, so restricting
+    to only ready slots needlessly hid models the gateway would happily
+    serve.
 
     Each alias's ``backend_url`` is the STABLE hal0 gateway (`:8080/v1`),
     NOT the slot's raw ``backend_url``. The per-slot upstream port
@@ -2678,8 +2679,6 @@ def _collect_chat_slots(
     out: list[dict[str, Any]] = []
     for s in slots:
         if (s.get("type") or "").lower() != "llm":
-            continue
-        if not _is_ready(s):
             continue
         model_id = _slot_model_id(s)
         if not model_id:
