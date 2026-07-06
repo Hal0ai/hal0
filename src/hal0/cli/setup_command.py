@@ -162,8 +162,19 @@ def setup(
         "--no-slots",
         help="Seed the sentinel + extensions but NO model-slot picks (installer default; operator chooses models later).",
     ),
+    answers: str | None = typer.Option(
+        None,
+        "--answers",
+        help="Path to a hal0-setup.yaml answer file for a fully non-interactive run.",
+    ),
 ) -> None:
     hw = HardwareProbe().probe()
+    if answers is not None:
+        from hal0.install.answers import load_answers
+
+        sel = load_answers(answers, hw)
+        asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
+        return
     if auto:
         sel = build_auto_selections(
             hw,
