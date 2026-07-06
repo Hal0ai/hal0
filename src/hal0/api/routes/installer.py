@@ -13,9 +13,15 @@ Endpoints:
     POST /api/install/complete — marker call after the wizard finishes;
                                  writes ``/var/lib/hal0/.first_run_done``
                                  so subsequent boots skip the wizard.
+                                 Idempotent alongside the apply endpoints
+                                 below, which also write the sentinel.
 
 The curated-models picker feeds into POST /apply and POST /apply-selections
-for multi-slot orchestrated install (design D3/D6).
+for multi-slot orchestrated install (design D3/D6). Both converge on the
+same :func:`_apply_selections_core` provisioning path and both write the
+first-run sentinel on success (WS-I, issue #1101) — a UI or answer-file
+install no longer depends on an explicit ``POST /complete`` to flip
+``first_run``.
 """
 
 from __future__ import annotations
@@ -333,6 +339,43 @@ def _bundle_to_selections(bundle, overrides, npu_opt_in, *, storage_dir):
     )
 
 
+async def _apply_selections_core(
+    selections: Selections,
+    *,
+    request: Request,
+    background: BackgroundTasks,
+):
+    """Shared provisioning core for both apply endpoints (WS-I, issue #1101).
+
+    ``/apply`` (tier manifest) and ``/apply-selections`` (raw selections) both
+    reduce to a :class:`~hal0.install.orchestrate.Selections` and funnel
+    through here — one slot-provisioning path, no duplicated logic between
+    the two routes.
+
+    Writes the first-run sentinel on success (``write_sentinel=True``) so an
+    API-driven install (UI wizard *or* ``hal0 setup --answers`` over a live
+    service) converges with the CLI in-process path, which has always written
+    it directly. Previously only ``/apply-selections`` deferred to the
+    dashboard's explicit ``POST /complete``, which left ``first_run``
+    oscillating on the ``has_models`` heuristic alone for any client that
+    never called ``/complete``. ``mark_first_run_done`` is idempotent, so a
+    later ``/complete`` call (the wizard still makes one) is a harmless no-op.
+    """
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    result = await apply_setup(
+        selections,
+        hardware=request.app.state.hardware_probe.probe(),
+        slot_manager=request.app.state.slot_manager,
+        registry=request.app.state.model_registry,
+        jobs=request.app.state.model_pull_jobs,
+        hf_token=hf_token,
+        write_sentinel=True,
+    )
+    for plan in result.pulls:
+        background.add_task(run_pull, plan.job, **plan.kwargs)
+    return result
+
+
 @router.post("/apply")
 async def install_apply(request: Request, background: BackgroundTasks) -> dict[str, Any]:
     """Orchestrated FirstRun install (design D3).
@@ -342,10 +385,13 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
         { "tier": "hal0-Default", "storage_dir": "/srv/models",
           "npu_opt_in": false, "overrides": { "<slot>": {model_id, profile, ...} } }
 
-    Thin wrapper: builds a :class:`~hal0.install.orchestrate.Selections` from the
-    tier manifest and delegates to :func:`~hal0.install.orchestrate.apply_setup`.
-    Best-effort, non-aborting per row (ADR-0010). The UI reattaches per model via
-    the existing ``/api/models/{id}/pull/stream`` SSE.
+    Thin tier→selections adapter: builds a
+    :class:`~hal0.install.orchestrate.Selections` from the tier manifest via
+    :func:`_bundle_to_selections`, then delegates to the same
+    :func:`_apply_selections_core` that ``/apply-selections`` uses — one
+    shared provisioning path (WS-I, issue #1101). Best-effort, non-aborting
+    per row (ADR-0010). The UI reattaches per model via the existing
+    ``/api/models/{id}/pull/stream`` SSE.
     """
     try:
         body = await request.json()
@@ -370,18 +416,7 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
         npu_opt_in,
         storage_dir=body.get("storage_dir") or "",
     )
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    result = await apply_setup(
-        selections,
-        hardware=request.app.state.hardware_probe.probe(),
-        slot_manager=request.app.state.slot_manager,
-        registry=request.app.state.model_registry,
-        jobs=request.app.state.model_pull_jobs,
-        hf_token=hf_token,
-        write_sentinel=False,  # the dashboard still POSTs /complete explicitly
-    )
-    for plan in result.pulls:
-        background.add_task(run_pull, plan.job, **plan.kwargs)
+    result = await _apply_selections_core(selections, request=request, background=background)
 
     return {
         "tier": canonical,
@@ -396,7 +431,8 @@ async def install_apply_selections(request: Request, background: BackgroundTasks
     """Tier-less orchestrated install: accepts a Selections JSON directly and
     provisions exactly the chosen slots (no tier manifest expansion). Used by
     the `hal0 setup` TUI's API-up branch (roster coherence — the running
-    service registers the slots itself)."""
+    service registers the slots itself) and by ``/apply``'s tier adapter,
+    via the shared :func:`_apply_selections_core`."""
     try:
         body = await request.json()
     except Exception as exc:
@@ -422,18 +458,7 @@ async def install_apply_selections(request: Request, background: BackgroundTasks
         extensions=body.get("extensions") or {},
         npu_opt_in=bool(body.get("npu_opt_in", False)),
     )
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    result = await apply_setup(
-        selections,
-        hardware=request.app.state.hardware_probe.probe(),
-        slot_manager=request.app.state.slot_manager,
-        registry=request.app.state.model_registry,
-        jobs=request.app.state.model_pull_jobs,
-        hf_token=hf_token,
-        write_sentinel=False,
-    )
-    for plan in result.pulls:
-        background.add_task(run_pull, plan.job, **plan.kwargs)
+    result = await _apply_selections_core(selections, request=request, background=background)
     return {"model_ids": result.model_ids, "slots": [vars(s) for s in result.slots]}
 
 
