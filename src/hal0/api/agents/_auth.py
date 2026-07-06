@@ -10,10 +10,15 @@ hermes's tool surface.
 This module fixes that for the chat-proxy WebSocket routes by:
 
 1. Origin allowlist on every WS upgrade. Configured via
-   ``HAL0_ALLOWED_ORIGINS`` (comma-separated). Default covers the
-   hal0.local hostname and dev origins (``localhost:5173`` for Vite,
-   ``127.0.0.1:8080`` for the bundled SPA). The check is FREE; missing
-   it leaves the rest of this scheme
+   ``HAL0_ALLOWED_ORIGINS`` (comma-separated); when unset, derived from
+   ``HAL0_BIND_HOST``/``HAL0_HOSTNAME`` via
+   ``hal0.config.network.derive_allowed_origins`` (#1099 WS-C) so it
+   covers the hal0.local hostname, LAN IPs (when LAN-bound), and dev
+   origins (``localhost:5173`` for Vite, ``127.0.0.1:8080`` for the
+   bundled SPA) — the same bind-host value ``GET /api/config/urls``
+   advertises, so the WS gate never 4403s a URL the dashboard just told
+   the operator to use. The check is FREE; missing it leaves the rest of
+   this scheme
    moot because any drive-by site could WebSocket into hal0-api from
    the user's own browser session.
 
@@ -50,10 +55,16 @@ from typing import Final
 from fastapi import HTTPException, Request, Response
 from starlette.websockets import WebSocket
 
+from hal0.config import network
+
 # Default-deny set of browser origins permitted to upgrade to chat-proxy
 # WebSockets. Operators can override at boot via ``HAL0_ALLOWED_ORIGINS``
-# (comma-separated). The default covers:
-#   - http://hal0.local         — mDNS / hosts-file alias
+# (comma-separated). Absent an override, :func:`allowed_origins` unions
+# this static set with the hostname/LAN-derived set from
+# ``hal0.config.network`` — this set alone covers the historical
+# loopback/dev-only defaults so pre-#1099 behaviour never regresses:
+#   - http://hal0.local         — mDNS / hosts-file alias (port-less, for
+#                                 reverse-proxy deploys on :80)
 #   - http://localhost:5173     — Vite dev server (UI hot-reload)
 #   - http://127.0.0.1:8080     — bundled SPA served from hal0-api
 DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
@@ -124,14 +135,28 @@ def _b64url_decode(s: str) -> bytes:
 def allowed_origins() -> tuple[str, ...]:
     """Effective allowlist, including the env override when set.
 
-    A misconfigured env (empty string) falls back to the default rather
-    than denying everything — first-run dev convenience.
+    A misconfigured env (empty string) falls back to the derived default
+    rather than denying everything — first-run dev convenience.
+
+    Absent an explicit ``HAL0_ALLOWED_ORIGINS`` override, the default is
+    DERIVED from ``HAL0_BIND_HOST``/``HAL0_HOSTNAME`` (#1099 WS-C) via
+    :func:`hal0.config.network.derive_allowed_origins`, unioned with the
+    static :data:`DEFAULT_ALLOWED_ORIGINS` so the historical loopback/dev
+    entries (including the port-less ``http://hal0.local`` reverse-proxy
+    entry) are always present. This is what closes the WS-4403 mismatch:
+    the allowlist now agrees with whatever hostname/LAN-IP ``GET
+    /api/config/urls`` just advertised to the browser.
     """
     raw = os.environ.get("HAL0_ALLOWED_ORIGINS", "").strip()
-    if not raw:
-        return DEFAULT_ALLOWED_ORIGINS
-    parsed = tuple(o.strip() for o in raw.split(",") if o.strip())
-    return parsed or DEFAULT_ALLOWED_ORIGINS
+    if raw:
+        parsed = tuple(o.strip() for o in raw.split(",") if o.strip())
+        if parsed:
+            return parsed
+    try:
+        derived = network.derive_allowed_origins()
+    except Exception:
+        derived = ()
+    return tuple(sorted(set(DEFAULT_ALLOWED_ORIGINS) | set(derived)))
 
 
 def mint_session_cookie(now: float | None = None) -> str:

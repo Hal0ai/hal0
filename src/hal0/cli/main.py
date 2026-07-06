@@ -191,7 +191,17 @@ app.command(name="update")(_update_impl)
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", "--host", help="Bind host for the hal0 API."),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        envvar="HAL0_BIND_HOST",
+        help=(
+            "Bind host for the hal0 API. Reads HAL0_BIND_HOST when not "
+            "passed explicitly — the SAME env var hal0-api.service sources "
+            "from /etc/hal0/api.env (#1099 WS-C), so a bare `hal0 serve` "
+            "run outside systemd binds identically to the service."
+        ),
+    ),
     port: int = typer.Option(8080, "--port", help="Bind port for the hal0 API."),
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload (dev mode)."),
 ) -> None:

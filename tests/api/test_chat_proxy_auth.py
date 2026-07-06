@@ -103,9 +103,22 @@ def test_allowed_origins_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_allowed_origins_empty_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty override falls back to the default allowlist (dev convenience)."""
+    """An empty override falls back to the derived default (dev convenience).
+
+    #1099 WS-C: the derived default always includes the historical
+    static ``DEFAULT_ALLOWED_ORIGINS`` set, unioned with whatever
+    ``hal0.config.network.derive_allowed_origins`` adds for the current
+    ``HAL0_BIND_HOST``/``HAL0_HOSTNAME``/``HAL0_PORT`` — pinned here so
+    the loopback-bind case stays deterministic.
+    """
     monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "")
-    assert _auth.allowed_origins() == _auth.DEFAULT_ALLOWED_ORIGINS
+    monkeypatch.setenv("HAL0_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("HAL0_HOSTNAME", "hal0")
+    monkeypatch.delenv("HAL0_PORT", raising=False)
+    origins = _auth.allowed_origins()
+    assert set(_auth.DEFAULT_ALLOWED_ORIGINS) <= set(origins)
+    assert "http://hal0.local:8080" in origins
+    assert "http://127.0.0.1:8080" in origins
 
 
 # ---------------------------------------------------------------------------

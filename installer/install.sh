@@ -110,9 +110,13 @@ ui_banner
 HAL0_PORT="${HAL0_PORT:-8080}"
 PY="${HAL0_PYTHON:-python3}"
 
-# API binds 0.0.0.0:8080 unconditionally. TLS is upstream's job — see
-# the comment on TLS posture near the flag parser.
-API_BIND_HOST="0.0.0.0"
+# API binds 0.0.0.0:8080 (LAN-reachable) by default; TLS is upstream's job —
+# see the comment on TLS posture near the flag parser. HAL0_BIND_HOST (env,
+# pre-set by the operator or a Proxmox/community-scripts wrapper) overrides
+# the default — this is the SAME var the unit and `hal0 serve` both read
+# (#1099 WS-C), seeded into api.env below so a fresh install and a manual
+# `hal0 serve` never disagree about how far the API is reachable.
+API_BIND_HOST="${HAL0_BIND_HOST:-0.0.0.0}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -541,10 +545,33 @@ fi
 
 API_ENV="${ETC_DIR}/api.env"
 if [[ ! -f "${API_ENV}" ]]; then
+    # Network coherence (#1099 WS-C): HAL0_HOSTNAME + HAL0_ALLOWED_ORIGINS are
+    # derived from the SAME API_BIND_HOST decision above, so the dashboard's
+    # advertised URL (GET /api/config/urls) and the WS chat-proxy origin gate
+    # (api/agents/_auth.py) always agree — closes the WS-4403 mismatch a
+    # LAN-bound API + a loopback-only allowlist used to cause. LAN IPs are
+    # only added to the allowlist when the API actually binds beyond
+    # loopback; a fresh `hostname -I` read is best-effort (empty is fine —
+    # the allowlist still has localhost/127.0.0.1/hostname.local).
+    API_HOSTNAME="${HAL0_HOSTNAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo hal0)}"
+    API_ALLOWED_ORIGINS="http://localhost:${HAL0_PORT},http://127.0.0.1:${HAL0_PORT},http://${API_HOSTNAME}.local:${HAL0_PORT}"
+    if [[ "${API_BIND_HOST}" != "127.0.0.1" && "${API_BIND_HOST}" != "localhost" ]]; then
+        API_LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        if [[ -n "${API_LAN_IP}" ]]; then
+            API_ALLOWED_ORIGINS="${API_ALLOWED_ORIGINS},http://${API_LAN_IP}:${HAL0_PORT}"
+        fi
+    fi
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
 HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
+# Network shape (#1099 WS-C) — the SAME HAL0_BIND_HOST hal0-api.service's
+# ExecStart binds to and \`hal0 serve\` defaults to when run directly.
+# HAL0_HOSTNAME/HAL0_ALLOWED_ORIGINS are derived from it at install time;
+# GET /api/config/urls echoes all three back as the single source of truth.
+HAL0_BIND_HOST=${API_BIND_HOST}
+HAL0_HOSTNAME=${API_HOSTNAME}
+HAL0_ALLOWED_ORIGINS=${API_ALLOWED_ORIGINS}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
 # is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/

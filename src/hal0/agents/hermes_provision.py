@@ -1861,10 +1861,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
         "primary": primary_for_template,
         "chat_slots": chat_slots,
         "peer_agents": [],
-        "dashboard_url": os.environ.get(
-            "HAL0_DASHBOARD_URL",
-            os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
-        ),
+        "dashboard_url": _dashboard_url(),
     }
 
     rendered: dict[str, str] = {}
@@ -2294,6 +2291,43 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
 HAL0_API_URL = "http://127.0.0.1:8080"
 
 
+def _dashboard_url() -> str:
+    """Resolve the URL Hermes's rendered docs should link back to the dashboard.
+
+    Precedence (#1099 WS-C — "Hermes dashboard URL derives from
+    /api/config/urls"):
+
+    1. An explicit ``HAL0_DASHBOARD_URL`` always wins — operator override,
+       e.g. a reverse-proxy hostname distinct from the local API.
+    2. Otherwise ask the local hal0-api for its own canonical URL via
+       ``GET /api/config/urls`` (the single source of truth this issue
+       establishes — same env-derived ``bind_host``/``hostname`` the
+       dashboard and the WS origin gate agree on).
+    3. Falls back to the legacy ``HAL0_API_URL`` env var / hardcoded
+       default when the daemon can't be reached (e.g. during
+       ExecStartPre, before hal0-api is up) — matches the previous
+       behaviour exactly so a degraded daemon never breaks rendering.
+    """
+    override = os.environ.get("HAL0_DASHBOARD_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    req = Request(f"{HAL0_API_URL}/api/config/urls", headers={"Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        api_url = data.get("api") if isinstance(data, dict) else None
+        if isinstance(api_url, str) and api_url.strip():
+            return api_url.strip().rstrip("/")
+    except (URLError, OSError, json.JSONDecodeError, TimeoutError, ValueError):
+        pass
+
+    return os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/")
+
+
 def _fetch_slots() -> list[dict[str, Any]]:
     """Pull the full slot list from the local hal0 daemon.
 
@@ -2558,10 +2592,7 @@ def render_live_context(
         "capabilities": capabilities,
         "npu": npu,
         "igpu_sclk_mhz": _igpu_sclk_mhz(),
-        "dashboard_url": os.environ.get(
-            "HAL0_DASHBOARD_URL",
-            os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
-        ),
+        "dashboard_url": _dashboard_url(),
         "inference_base": os.environ.get("HAL0_INFERENCE_BASE", "http://127.0.0.1:8080"),
         "daemon": "degraded" if degraded else "reachable",
         "as_of": now,
@@ -2622,10 +2653,7 @@ def render_live_context(
             primary=primary_for_template,
             chat_slots=chat_slots,
             peer_agents=[],
-            dashboard_url=os.environ.get(
-                "HAL0_DASHBOARD_URL",
-                os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
-            ),
+            dashboard_url=_dashboard_url(),
         )
         hpath = RUNTIME_SNAPSHOT_DIR / "HERMES.md"
         out["hermes_path"] = str(hpath)

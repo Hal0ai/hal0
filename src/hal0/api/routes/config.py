@@ -22,7 +22,9 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
+from hal0.api.agents._auth import allowed_origins as _ws_allowed_origins
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.config import network as network_config
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
@@ -166,6 +168,26 @@ def _comfyui_link(request: Request) -> str:
     return f"http://{_host_without_port(host)}:{_COMFYUI_PORT}"
 
 
+def _network_fields() -> dict[str, object]:
+    """The network-coherence fields (#1099 WS-C).
+
+    ``bind_host``/``hostname`` are read from the exact same
+    ``HAL0_BIND_HOST``/``HAL0_HOSTNAME`` env vars the systemd unit and
+    ``hal0 serve`` consume (``hal0.config.network``); ``allowed_origins``
+    is the WS-upgrade allowlist the chat-proxy origin gate
+    (``hal0.api.agents._auth.allowed_origins``) actually checks against.
+    Surfacing all three here makes this endpoint the single source of
+    truth the issue asks for: a client can confirm, before opening a
+    WebSocket, that the URL it's about to use is on the allowlist rather
+    than discovering a 4403 after the fact.
+    """
+    return {
+        "bind_host": network_config.bind_host(),
+        "hostname": network_config.hostname(),
+        "allowed_origins": list(_ws_allowed_origins()),
+    }
+
+
 @router.get("/urls")
 async def get_urls(request: Request) -> dict[str, object]:
     """Return the canonical URLs the dashboard should advertise.
@@ -180,7 +202,16 @@ async def get_urls(request: Request) -> dict[str, object]:
           "hermes":            "" | "https://hermes.<host>",
           "hermes_enabled":    true | false,
           "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
+          "bind_host":         "0.0.0.0" | "127.0.0.1" | "<lan-ip>",
+          "hostname":          "hal0",
+          "allowed_origins":   ["http://hal0.local:8080", ...],
         }
+
+    ``bind_host``/``hostname``/``allowed_origins`` (#1099 WS-C) are the
+    same values the ``hal0-api`` unit and the WS chat-proxy origin gate
+    read — this endpoint is the single source of truth for "what network
+    shape is this box running", so a reverse-proxy/health-check client
+    doesn't need to re-derive it from env vars itself.
 
     ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
     whenever it's defined — it's how a reverse-proxy deploy declares the
@@ -210,6 +241,7 @@ async def get_urls(request: Request) -> dict[str, object]:
     host = _resolve_host(request)
     enabled = await _openwebui_is_active()
     comfyui = _comfyui_link(request)
+    network_fields = _network_fields()
 
     if public:
         if _behind_proxy(request):
@@ -225,6 +257,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
+            **network_fields,
         }
 
     if _behind_proxy(request):
@@ -238,6 +271,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
+            **network_fields,
         }
     return {
         "api": f"http://{host}:{_api_port()}",
@@ -246,6 +280,7 @@ async def get_urls(request: Request) -> dict[str, object]:
         "hermes": hermes,
         "hermes_enabled": bool(hermes),
         "comfyui": comfyui,
+        **network_fields,
     }
 
 

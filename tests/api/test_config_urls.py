@@ -202,3 +202,105 @@ def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient
     assert resp.status_code == 200
     body = resp.json()
     assert body["comfyui"] == "http://hal0.thinmint.dev:8188", body
+
+
+# ── #1099 WS-C: network coherence (bind_host / hostname / allowed_origins) ──
+
+
+def test_urls_network_coherence_keys_present(client: TestClient) -> None:
+    """bind_host/hostname/allowed_origins are always present (#1099 WS-C).
+
+    These are the single-source-of-truth fields: the same values the
+    hal0-api unit binds to and the WS chat-proxy origin gate
+    (``api/agents/_auth.allowed_origins``) checks against.
+    """
+    resp = client.get("/api/config/urls")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) >= {"bind_host", "hostname", "allowed_origins"}
+    assert isinstance(body["bind_host"], str) and body["bind_host"]
+    assert isinstance(body["hostname"], str) and body["hostname"]
+    assert isinstance(body["allowed_origins"], list) and body["allowed_origins"]
+
+
+def test_urls_bind_host_defaults_to_loopback(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """Unset HAL0_BIND_HOST resolves to 127.0.0.1 — hal0 serve's historical default."""
+    monkeypatch.delenv("HAL0_BIND_HOST", raising=False)
+    resp = client.get("/api/config/urls")
+    assert resp.json()["bind_host"] == "127.0.0.1"
+
+
+def test_urls_bind_host_honours_env(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """HAL0_BIND_HOST echoes through — the same var the unit's ExecStart reads."""
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    resp = client.get("/api/config/urls")
+    assert resp.json()["bind_host"] == "0.0.0.0"
+
+
+def test_urls_hostname_honours_env(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """HAL0_HOSTNAME (the install wizard's choice) wins for the hostname field."""
+    monkeypatch.setenv("HAL0_HOSTNAME", "mybox")
+    resp = client.get("/api/config/urls")
+    assert resp.json()["hostname"] == "mybox"
+
+
+def test_urls_allowed_origins_honours_explicit_env(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """An explicit HAL0_ALLOWED_ORIGINS is echoed back verbatim."""
+    monkeypatch.setenv(
+        "HAL0_ALLOWED_ORIGINS",
+        "https://demo.example.com,http://other.example.com",
+    )
+    resp = client.get("/api/config/urls")
+    body = resp.json()
+    assert body["allowed_origins"] == [
+        "https://demo.example.com",
+        "http://other.example.com",
+    ], body
+
+
+def test_urls_allowed_origins_derives_lan_ip_when_lan_bound(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """Binding beyond loopback pulls in a detected LAN IP (#1099 WS-C).
+
+    This is the fix for the WS-4403 mismatch: a LAN-reachable install
+    must advertise (and accept) the LAN URL, not just loopback/mDNS.
+    """
+    from hal0.config import network as network_config
+
+    monkeypatch.delenv("HAL0_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    monkeypatch.setenv("HAL0_HOSTNAME", "hal0")
+    monkeypatch.setattr(network_config, "detect_lan_ips", lambda: ["192.0.2.10"])
+    resp = client.get("/api/config/urls")
+    body = resp.json()
+    assert "http://192.0.2.10:8080" in body["allowed_origins"], body
+    assert "http://hal0.local:8080" in body["allowed_origins"], body
+
+
+def test_urls_allowed_origins_loopback_bind_skips_lan_ips(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """A loopback-only bind never leaks LAN IPs into the allowlist."""
+    from hal0.config import network as network_config
+
+    monkeypatch.delenv("HAL0_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "127.0.0.1")
+    monkeypatch.setattr(network_config, "detect_lan_ips", lambda: ["192.0.2.10"])
+    resp = client.get("/api/config/urls")
+    body = resp.json()
+    assert "http://192.0.2.10:8080" not in body["allowed_origins"], body
