@@ -160,6 +160,164 @@ async def test_apply_setup_persists_custom_store_dir(tmp_hal0_home, tmp_path):
     assert pull_mod._pull_root() == custom
 
 
+async def test_apply_setup_colocates_flm_store(tmp_hal0_home, tmp_path):
+    """A custom ``storage_dir`` also seeds ``[models].flm_store`` co-located
+    under it (``<store>/flm/models``), so NPU/FLM weights don't strand on the
+    root FS (issue #1100, decision Q4 — extends #1095's WS-A store thread)."""
+    from hal0.config.loader import load_hal0_config
+    from hal0.install import orchestrate
+
+    custom = tmp_path / "custom-store"
+    sel = Selections(
+        storage_dir=str(custom),
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=_FakeSlotManager(),
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    cfg = load_hal0_config()
+    assert cfg.models.store == str(custom)
+    assert cfg.models.flm_store == str(custom / "flm" / "models")
+
+
+def test_colocated_flm_store_path():
+    from hal0.install import orchestrate
+
+    assert orchestrate._colocated_flm_store("/mnt/ai-models") == "/mnt/ai-models/flm/models"
+
+
+def test_persist_store_dir_idempotent_when_both_already_set(tmp_hal0_home, tmp_path, monkeypatch):
+    """No rewrite when both ``store`` and the co-located ``flm_store`` already
+    match the chosen dir (the existing #1095 idempotency guard extended to
+    cover the new field)."""
+    from hal0.config.loader import load_hal0_config, save_hal0_config
+    from hal0.install import orchestrate
+
+    custom = tmp_path / "custom-store"
+    cfg = load_hal0_config()
+    cfg.models.store = str(custom)
+    cfg.models.flm_store = str(custom / "flm" / "models")
+    save_hal0_config(cfg)
+
+    calls = []
+    monkeypatch.setattr("hal0.config.loader.save_hal0_config", lambda c, path=None: calls.append(c))
+    orchestrate._persist_store_dir(str(custom))
+    assert calls == []  # save_hal0_config never invoked — already up to date
+
+
+def test_persist_store_dir_rewrites_flm_store_when_store_already_set(tmp_hal0_home, tmp_path):
+    """A pre-#1100 config with ``store`` set but no ``flm_store`` still gets
+    the co-located ``flm_store`` seeded on the next persist (store already
+    matching must not short-circuit the flm_store write)."""
+    from hal0.config.loader import load_hal0_config, save_hal0_config
+    from hal0.install import orchestrate
+
+    custom = tmp_path / "custom-store"
+    cfg = load_hal0_config()
+    cfg.models.store = str(custom)  # pre-existing, store already correct
+    save_hal0_config(cfg)
+    assert load_hal0_config().models.flm_store == ""  # sanity: unset before
+
+    orchestrate._persist_store_dir(str(custom))
+
+    assert load_hal0_config().models.flm_store == str(custom / "flm" / "models")
+
+
+async def test_apply_setup_ignores_relative_storage_dir_for_flm_store_too(tmp_hal0_home):
+    """A relative ``storage_dir`` leaves ``flm_store`` untouched too (mirrors
+    the existing relative-store guard)."""
+    from hal0.config.loader import load_hal0_config
+    from hal0.install import orchestrate
+
+    sel = Selections(
+        storage_dir="relative/models",
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=_FakeSlotManager(),
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    assert load_hal0_config().models.flm_store == ""
+
+
+def test_validate_store_mount_warns_on_unwritable(tmp_path, caplog, monkeypatch):
+    from hal0.install import orchestrate
+
+    monkeypatch.setattr(orchestrate, "_is_writable", lambda ancestor: False)
+    monkeypatch.setattr(orchestrate, "_is_root_fs", lambda ancestor: False)
+    monkeypatch.setattr(orchestrate, "_free_space_gib", lambda path: 999.0)
+    with caplog.at_level("WARNING", logger="hal0.install.orchestrate"):
+        orchestrate._validate_store_mount(str(tmp_path / "store"))
+    assert "not writable" in caplog.text
+
+
+def test_validate_store_mount_warns_on_root_fs(tmp_path, caplog, monkeypatch):
+    from hal0.install import orchestrate
+
+    monkeypatch.setattr(orchestrate, "_is_writable", lambda ancestor: True)
+    monkeypatch.setattr(orchestrate, "_is_root_fs", lambda ancestor: True)
+    monkeypatch.setattr(orchestrate, "_free_space_gib", lambda path: 999.0)
+    with caplog.at_level("WARNING", logger="hal0.install.orchestrate"):
+        orchestrate._validate_store_mount(str(tmp_path / "store"))
+    assert "root filesystem" in caplog.text
+
+
+def test_validate_store_mount_warns_on_low_free_space(tmp_path, caplog, monkeypatch):
+    from hal0.install import orchestrate
+
+    monkeypatch.setattr(orchestrate, "_is_writable", lambda ancestor: True)
+    monkeypatch.setattr(orchestrate, "_is_root_fs", lambda ancestor: False)
+    monkeypatch.setattr(orchestrate, "_free_space_gib", lambda path: 1.0)
+    with caplog.at_level("WARNING", logger="hal0.install.orchestrate"):
+        orchestrate._validate_store_mount(str(tmp_path / "store"))
+    assert "GiB free" in caplog.text
+
+
+def test_validate_store_mount_silent_when_healthy(tmp_path, caplog, monkeypatch):
+    from hal0.install import orchestrate
+
+    monkeypatch.setattr(orchestrate, "_is_writable", lambda ancestor: True)
+    monkeypatch.setattr(orchestrate, "_is_root_fs", lambda ancestor: False)
+    monkeypatch.setattr(orchestrate, "_free_space_gib", lambda path: 999.0)
+    with caplog.at_level("WARNING", logger="hal0.install.orchestrate"):
+        orchestrate._validate_store_mount(str(tmp_path / "store"))
+    assert caplog.text == ""
+
+
+def test_free_space_gib_walks_to_existing_ancestor(tmp_path):
+    from hal0.install import orchestrate
+
+    missing = tmp_path / "does" / "not" / "exist" / "yet"
+    free = orchestrate._free_space_gib(str(missing))
+    assert free is not None and free > 0
+
+
+def test_is_root_fs_false_for_tmp_path(tmp_path):
+    """A pytest tmp_path is essentially never the same device as ``/`` in CI
+    sandboxes/containers; this pins the comparison direction (not a hard
+    filesystem-topology assertion)."""
+    from pathlib import Path
+
+    from hal0.install import orchestrate
+
+    if orchestrate._is_root_fs(Path("/")) and orchestrate._is_root_fs(tmp_path):
+        pytest.skip("test root and / share a device in this sandbox — inconsistent host")
+    assert orchestrate._is_root_fs(tmp_path) == (tmp_path.stat().st_dev == Path("/").stat().st_dev)
+
+
 async def test_apply_setup_ignores_relative_storage_dir(tmp_hal0_home):
     """A relative ``storage_dir`` is not persisted (best-effort guard); the
     store stays at its default so a bad pick never corrupts config."""
