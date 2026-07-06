@@ -33,6 +33,7 @@ from hal0.cli._shared import _api_base
 # call-site only) so tests can monkeypatch ``hal0.cli.setup_install._api_reachable``.
 from hal0.cli.setup_command import _api_reachable
 
+
 def choose_apply_mode() -> str:
     """Return ``"api"`` when hal0-api is reachable, else ``"in_process"``."""
     return "api" if _api_reachable() else "in_process"
