@@ -19,6 +19,7 @@ uses (``suggest_models``, ``derive_device``/``derive_profile`` via
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ import yaml
 
 from hal0.config.schema import HardwareInfo
 from hal0.install.extensions import EXTENSIONS
+from hal0.install.network import network_env
 from hal0.install.orchestrate import Selections, SlotSelection
 from hal0.install.suggest import suggest_models
 
@@ -282,10 +284,51 @@ def _resolve_extensions(doc: dict[str, Any], comfyui_enabled: bool) -> dict[str,
     return extensions
 
 
+def _apply_network(doc: dict[str, Any]) -> dict[str, str] | None:
+    """Validate + apply the ``network`` block (spec §5, WS-C / #1099).
+
+    ``network.bind_host`` / ``network.hostname`` / ``network.public_url`` are
+    resolved through :func:`hal0.install.network.network_env` — the SAME
+    derivation the installer uses to seed ``/etc/hal0/api.env`` — into the
+    coherent triple ``HAL0_BIND_HOST`` (read by both the ``hal0-api`` unit and
+    ``hal0 serve``), ``HAL0_HOSTNAME`` (mDNS), and ``HAL0_ALLOWED_ORIGINS`` (the
+    chat-proxy WS allowlist). The resolved values are exported into
+    ``os.environ`` so the in-process apply run inherits the operator's bind
+    choice; the answer file is authoritative over detected defaults (spec §2
+    precedence). Returns the applied triple (or ``None`` when no ``network``
+    block is present) so callers can persist it.
+
+    No disk write happens here — ``load_answers`` is shared with the ``--plan``
+    preview path, so it stays free of file side effects; the persistent
+    ``api.env`` seeding is owned by the installer (``install.sh``, WS-C).
+    """
+    net = doc.get("network")
+    if net is None:
+        return None
+    if not isinstance(net, dict):
+        raise AnswersError("network must be a mapping")
+
+    resolved: dict[str, str | None] = {}
+    for key in ("bind_host", "hostname", "public_url"):
+        value = net.get(key)
+        if value is not None and not isinstance(value, str):
+            raise AnswersError(f"network.{key} must be a string or null, got {value!r}")
+        resolved[key] = value
+
+    env = network_env(
+        bind_host=resolved["bind_host"],
+        hostname=resolved["hostname"],
+        public_url=resolved["public_url"],
+    )
+    # Answer-file bind choice is authoritative over detected defaults; export
+    # so the same-process apply (and any env-reading step it triggers) agrees
+    # with what /api/config/urls will advertise.
+    os.environ.update(env)
+    return env
+
+
 def _warn_not_yet_wired(doc: dict[str, Any]) -> None:
     """Warn about known-but-not-yet-wired top-level blocks (spec §5)."""
-    if "network" in doc:
-        _warn("network is not yet applied (#1108)")
     if "huggingface" in doc:
         _warn(
             "huggingface token settings are not yet applied (#1108); "
@@ -303,6 +346,7 @@ def load_answers(path: str, hw: HardwareInfo) -> Selections:
     doc = _load_yaml(path)
     _check_version(doc)
     _check_top_level_keys(doc)
+    _apply_network(doc)
     _warn_not_yet_wired(doc)
 
     storage_dir = _resolve_storage_dir(doc)

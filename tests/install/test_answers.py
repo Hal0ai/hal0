@@ -1,3 +1,4 @@
+import os
 import textwrap
 import warnings
 
@@ -190,7 +191,13 @@ def test_gen_mode_scaffold_only_enables_comfyui_and_populates_defaults(tmp_path)
     assert sel.comfyui_defaults == (("txt2img", "qwen-image"),)
 
 
-def test_network_and_huggingface_blocks_warn_but_do_not_raise(tmp_path):
+def test_network_block_applied_huggingface_still_warns(tmp_path, monkeypatch):
+    """WS-C (#1099): the network block is now APPLIED (bind_host → the coherent
+    HAL0_BIND_HOST/HAL0_HOSTNAME/HAL0_ALLOWED_ORIGINS triple), no longer a
+    warn-ignore; huggingface stays a warn-ignore until its workstream lands."""
+    for var in ("HAL0_BIND_HOST", "HAL0_HOSTNAME", "HAL0_ALLOWED_ORIGINS", "HAL0_LAN_IPS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HAL0_LAN_IPS", "192.168.1.42")  # deterministic derivation
     path = _write(
         tmp_path,
         """
@@ -212,8 +219,34 @@ def test_network_and_huggingface_blocks_warn_but_do_not_raise(tmp_path):
         sel = load_answers(path, _hw())
     assert sel.storage_dir == "/var/lib/hal0/models"
     messages = [str(w.message) for w in caught]
-    assert any("network" in m for m in messages)
+    # network is applied, so it must NOT emit a "not yet applied" warning.
+    assert not any("network is not yet applied" in m for m in messages)
     assert any("huggingface" in m for m in messages)
+    # The bind choice was resolved into the coherent env triple.
+    assert os.environ["HAL0_BIND_HOST"] == "0.0.0.0"
+    assert os.environ["HAL0_HOSTNAME"] == "hal0"
+    origins = os.environ["HAL0_ALLOWED_ORIGINS"].split(",")
+    assert "http://192.168.1.42:8080" in origins  # advertised URL passes WS gate
+    assert "http://hal0:8080" in origins
+
+
+def test_network_block_bad_type_raises(tmp_path):
+    """A malformed network value is rejected, not silently ignored."""
+    path = _write(
+        tmp_path,
+        """
+        version: 1
+        network:
+          bind_host: [not, a, string]
+        model_store: { path: /var/lib/hal0/models }
+        slots: []
+        npu: { opt_in: false }
+        gen: { mode: off }
+        apps: {}
+        """,
+    )
+    with pytest.raises(AnswersError, match=r"network\.bind_host"):
+        load_answers(path, _hw())
 
 
 def test_unknown_top_level_key_warns_by_default(tmp_path):
