@@ -117,6 +117,10 @@ def test_render_live_context_writes_then_skips_when_unchanged(tmp_path, monkeypa
     ]
     monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
 
+    # _igpu_sclk_mhz reads a live sysfs value — stabilise it so the
+    # content-hash comparison doesn't fail on a fluctuating clock.
+    monkeypatch.setattr(hp, "_igpu_sclk_mhz", lambda: 600)
+
     r1 = hp.render_live_context(
         hermes_home=home,
         slots_fetcher=lambda: slots,
@@ -261,6 +265,7 @@ def test_render_live_context_bumps_mtime_when_unchanged_reachable(tmp_path, monk
         }
     ]
     monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
+    monkeypatch.setattr(hp, "_igpu_sclk_mhz", lambda: 600)
 
     r1 = hp.render_live_context(
         hermes_home=home, slots_fetcher=lambda: slots, now_iso="2026-06-04T10:00:00+00:00"
