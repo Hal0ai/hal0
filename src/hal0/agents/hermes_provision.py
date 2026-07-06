@@ -2291,6 +2291,9 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
 HAL0_API_URL = "http://127.0.0.1:8080"
 
 
+_dashboard_url_cache: str | None = None
+
+
 def _dashboard_url() -> str:
     """Resolve the URL Hermes's rendered docs should link back to the dashboard.
 
@@ -2298,7 +2301,8 @@ def _dashboard_url() -> str:
     /api/config/urls"):
 
     1. An explicit ``HAL0_DASHBOARD_URL`` always wins — operator override,
-       e.g. a reverse-proxy hostname distinct from the local API.
+       e.g. a reverse-proxy hostname distinct from the local API. Always
+       re-checked (cheap env read); never cached.
     2. Otherwise ask the local hal0-api for its own canonical URL via
        ``GET /api/config/urls`` (the single source of truth this issue
        establishes — same env-derived ``bind_host``/``hostname`` the
@@ -2307,25 +2311,43 @@ def _dashboard_url() -> str:
        default when the daemon can't be reached (e.g. during
        ExecStartPre, before hal0-api is up) — matches the previous
        behaviour exactly so a degraded daemon never breaks rendering.
+
+    The network/fallback resolution (2/3) is memoised per-process
+    (``_dashboard_url_cache``): ``render_live_context``/
+    ``_phase_context_link`` are content-hash gated — STATE.md/HERMES.md
+    are only rewritten when substantive content changes — so a network
+    round-trip that's merely SLOW (not down) on one call and fast on the
+    next would make ``dashboard_url`` flap between the live value and the
+    fallback across two calls a few seconds apart, defeating that
+    idempotency check and causing spurious rewrites. Dashboard network
+    shape doesn't change without a restart in practice, so resolving it
+    once per process (like the ``HAL0_API_URL`` module constant itself)
+    is the right cost/freshness trade-off here.
     """
     override = os.environ.get("HAL0_DASHBOARD_URL", "").strip()
     if override:
         return override.rstrip("/")
 
+    global _dashboard_url_cache
+    if _dashboard_url_cache is not None:
+        return _dashboard_url_cache
+
     from urllib.error import URLError
     from urllib.request import Request, urlopen
 
+    resolved = os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/")
     req = Request(f"{HAL0_API_URL}/api/config/urls", headers={"Accept": "application/json"})
     try:
         with urlopen(req, timeout=3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         api_url = data.get("api") if isinstance(data, dict) else None
         if isinstance(api_url, str) and api_url.strip():
-            return api_url.strip().rstrip("/")
+            resolved = api_url.strip().rstrip("/")
     except (URLError, OSError, json.JSONDecodeError, TimeoutError, ValueError):
         pass
 
-    return os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/")
+    _dashboard_url_cache = resolved
+    return resolved
 
 
 def _fetch_slots() -> list[dict[str, Any]]:

@@ -18,6 +18,19 @@ import pytest
 from hal0.agents import hermes_provision as hp
 
 
+@pytest.fixture(autouse=True)
+def _reset_dashboard_url_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force a fresh network/fallback resolution in every test.
+
+    ``_dashboard_url`` memoises its network/fallback result per-process
+    (see its docstring — this is what fixes the STATE.md/HERMES.md
+    idempotency flake this issue's network call introduced), so without
+    resetting it here, whichever test runs first would poison every test
+    after it with a stale cached value.
+    """
+    monkeypatch.setattr(hp, "_dashboard_url_cache", None)
+
+
 def test_explicit_env_override_always_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit override short-circuits before any network call is made."""
     monkeypatch.setenv("HAL0_DASHBOARD_URL", "https://hal0.example.com/")
@@ -107,3 +120,49 @@ def test_ignores_malformed_response_and_falls_back(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     assert hp._dashboard_url() == "http://hal0.local:8080"
+
+
+def test_network_result_is_cached_across_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The network/fallback resolution only hits urlopen once per process.
+
+    This is the fix for the STATE.md/HERMES.md content-hash idempotency
+    flake (#1099): ``render_live_context`` calls ``_dashboard_url`` on
+    every invocation, but the value must be stable across nearby calls in
+    the same process even if the daemon's reachability is momentarily
+    flaky — otherwise "same substantive state, different clock-time ->
+    NOT rewritten" trips over dashboard_url alone flapping.
+    """
+    monkeypatch.delenv("HAL0_DASHBOARD_URL", raising=False)
+    monkeypatch.delenv("HAL0_API_URL", raising=False)
+
+    calls = {"n": 0}
+
+    class _FakeResp:
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"api": "http://10.0.1.5:8080"}).encode("utf-8")
+
+    def fake_urlopen(*_a: object, **_k: object) -> _FakeResp:
+        calls["n"] += 1
+        return _FakeResp()
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    first = hp._dashboard_url()
+    second = hp._dashboard_url()
+    assert first == second == "http://10.0.1.5:8080"
+    assert calls["n"] == 1
+
+
+def test_explicit_override_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike the network path, an explicit override is re-read every call."""
+    monkeypatch.setenv("HAL0_DASHBOARD_URL", "https://first.example.com")
+    assert hp._dashboard_url() == "https://first.example.com"
+    monkeypatch.setenv("HAL0_DASHBOARD_URL", "https://second.example.com")
+    assert hp._dashboard_url() == "https://second.example.com"
