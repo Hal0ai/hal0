@@ -220,12 +220,6 @@ def _resolve_gen(doc: dict[str, Any]) -> tuple[bool, tuple[tuple[str, str], ...]
         raise AnswersError(f"gen.mode must be one of {sorted(_GEN_MODES)}, got {mode!r}")
     comfyui_enabled = mode in _GEN_MODES_ON
 
-    if mode == "scaffold_and_download":
-        _warn(
-            "gen.mode: scaffold_and_download — the download side is not yet applied (#1108); "
-            "only scaffolding is performed"
-        )
-
     caps_raw = gen.get("capabilities") or {}
     if not isinstance(caps_raw, dict):
         raise AnswersError("gen.capabilities must be a mapping")
@@ -250,6 +244,26 @@ def _resolve_gen(doc: dict[str, Any]) -> tuple[bool, tuple[tuple[str, str], ...]
         defaults.append((cap_id, family))
 
     return comfyui_enabled, tuple(defaults)
+
+
+def gen_download_requested(path: str) -> bool:
+    """True iff the answer file's ``gen.mode`` is ``scaffold_and_download``.
+
+    Read WITHOUT applying anything so the real-apply path (setup_command) can
+    decide whether to run the ComfyUI per-variant fetch (WS-G, #1113) after
+    ``load_answers`` produces the ``Selections`` (whose ``comfyui_defaults`` carry
+    the picks). ``scaffold_only`` / ``off`` return ``False`` — those never
+    download here. Malformed files return ``False`` rather than raising; the
+    apply path's :func:`load_answers` is the single source of validation errors.
+    """
+    try:
+        doc = _load_yaml(path)
+    except (OSError, AnswersError):
+        return False
+    gen = doc.get("gen") or {}
+    if not isinstance(gen, dict):
+        return False
+    return _yaml_word(gen.get("mode", "off")) == "scaffold_and_download"
 
 
 def _resolve_extensions(doc: dict[str, Any], comfyui_enabled: bool) -> dict[str, bool]:
@@ -454,4 +468,10 @@ def write_answers(sel: Selections, path: str) -> None:
     out_path.write_text(header + body, encoding="utf-8")
 
 
-__all__ = ["AnswersError", "dump_answers", "load_answers", "write_answers"]
+__all__ = [
+    "AnswersError",
+    "dump_answers",
+    "gen_download_requested",
+    "load_answers",
+    "write_answers",
+]

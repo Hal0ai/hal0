@@ -331,6 +331,73 @@ def _comfyui_defaults() -> tuple[tuple[str, str], ...]:
     return tuple((cap_id, cap.alternatives[0].family) for cap_id, cap in _CAPS.items())
 
 
+def _fmt_duration(seconds: int) -> str:
+    """Compact human ETA for a fetch: ``45s`` / ``6m`` / ``1h05m``."""
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _variant_label(v) -> str:
+    """One-line human label for a ComfyUI variant: family + precision + lora."""
+    bits = [v.family]
+    if v.precision:
+        bits.append(v.precision)
+    if v.lora:
+        bits.append(v.lora)
+    return " · ".join(bits)
+
+
+def _render_gen_variants(cap) -> RenderableType:
+    """Per-capability variant table: number, model, size + time estimates.
+
+    Row 1 is the default (first) variant; ``s`` scaffolds the capability without
+    downloading anything, so the operator can gate each pull independently."""
+    t = Table(title=f"{cap.label}", expand=True)
+    t.add_column(" ", width=2)
+    t.add_column("Variant")
+    t.add_column("Size", justify="right")
+    t.add_column("Est. time", justify="right")
+    for i, v in enumerate(cap.alternatives):
+        star = "★" if i == 0 else " "
+        t.add_row(
+            star, _variant_label(v), f"~{v.approx_gb:.1f}GB", f"~{_fmt_duration(v.est_seconds)}"
+        )
+    return Group(
+        t, Text("number = download that variant now · s = scaffold (download later)", style="dim")
+    )
+
+
+def _pick_gen_variants(hw: HardwareInfo) -> tuple[tuple[str, str], ...]:
+    """Per-capability variant picker for ``scaffold + download`` (WS-G, #1113).
+
+    Walks every ComfyUI capability (txt2img/img2img/txt2video/img2video/upscale),
+    shows its variants with size + time estimates, and returns the selected
+    ``(capability_id, family)`` picks. Choosing ``s`` (scaffold) for a capability
+    omits it — no download is queued for it. The default is the recommended
+    (first) variant so pressing Enter through the walk pulls the curated set."""
+    from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
+
+    picks: list[tuple[str, str]] = []
+    for cap_id, cap in _CAPS.items():
+        _draw("gen", _render_gen_variants(cap), hw)
+        choices = [str(i + 1) for i in range(len(cap.alternatives))] + ["s"]
+        choice = Prompt.ask(
+            f"{cap.label}: variant number or [s]caffold (download later)",
+            choices=choices,
+            default="1",
+        )
+        if choice == "s":
+            continue
+        picks.append((cap_id, cap.alternatives[int(choice) - 1].family))
+    return tuple(picks)
+
+
 # ── REVIEW gate ──────────────────────────────────────────────────────────────
 
 
@@ -417,6 +484,19 @@ def render_review(plan: SetupPlan) -> RenderableType:
         Text(f"Apps/agents: {enabled}"),
         Text(f"Total download: ~{total_gb:.1f} GB"),
     ]
+    # Opt-in ComfyUI downloads (scaffold + download): surface the extra pull cost
+    # so the size/time estimate gates the decision at the review gate too.
+    if plan.gen_mode == "scaffold_and_download" and plan.comfyui_defaults:
+        from hal0.comfyui.provision import estimate_totals, resolve_variants
+
+        gen_variants, _unknown = resolve_variants(plan.comfyui_defaults)
+        gen_gb, gen_s = estimate_totals(gen_variants)
+        parts.append(
+            Text(
+                f"Generation models: {len(gen_variants)} variant(s), "
+                f"~{gen_gb:.1f} GB, ~{_fmt_duration(gen_s)}"
+            )
+        )
     issues = _port_issues(plan.slots)
     if issues:
         parts.append(Text(""))
@@ -476,7 +556,47 @@ def _apply(plan: SetupPlan) -> None:
     from hal0.cli.setup_install import run_install
 
     asyncio.run(run_install(plan.selections(), plan.hw))
+    _provision_gen_downloads(plan)
     _verify_report(plan)
+
+
+def _provision_gen_downloads(plan: SetupPlan) -> None:
+    """Queue the ComfyUI per-variant fetch for a ``scaffold + download`` plan and
+    activate the img slot once the first model lands (WS-G, #1113).
+
+    No-op for ``off`` / ``scaffold_only`` — those never download here. Reuses the
+    working fetch (#1110) via :func:`hal0.comfyui.provision.provision_comfyui_downloads`;
+    the img slot flips live on the first landed model (enable-on-pull-success,
+    #1108). Progress prints one line per settled variant."""
+    if plan.gen_mode != "scaffold_and_download" or not plan.comfyui_defaults:
+        return
+    from hal0.comfyui.provision import (
+        estimate_totals,
+        provision_comfyui_downloads,
+        resolve_variants,
+    )
+
+    variants, _unknown = resolve_variants(plan.comfyui_defaults)
+    total_gb, total_s = estimate_totals(variants)
+    typer.echo(
+        f"Downloading {len(variants)} generation model(s) "
+        f"(~{total_gb:.1f} GB, ~{_fmt_duration(total_s)}). The img slot activates "
+        "when the first model lands…"
+    )
+
+    def _on_status(_job_id, variant, status) -> None:
+        mark = "done" if status == "done" else status.upper()
+        typer.echo(f"  {_variant_label(variant)}: {mark}")
+
+    result = provision_comfyui_downloads(plan.comfyui_defaults, on_status=_on_status)
+    if result.activated:
+        typer.echo(f"Image generation ready — {len(result.landed)} model(s) landed.")
+    elif result.failed:
+        typer.echo(
+            "No generation model finished downloading — the img slot stays inactive. "
+            "Retry later from the dashboard (Image-Gen tab).",
+            err=True,
+        )
 
 
 def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
@@ -551,8 +671,20 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
 
     # 9. ComfyUI / image+video generation — gen.mode drives the comfyui extension
     gen_mode = _step_gen(hw)
-    state["comfyui"] = gen_mode in _GEN_MODES_ON
-    comfyui_defaults = _comfyui_defaults() if gen_mode in _GEN_MODES_ON else ()
+    if gen_mode == "scaffold_and_download":
+        # Opt-in downloads: a per-capability variant picker (size + time) gates
+        # each pull. The engine is NOT wired up-front — activation is deferred to
+        # enable-on-pull-success (after the first model lands, in _apply), so we
+        # never advertise an empty img slot. If every variant is scaffolded
+        # (nothing picked), fall back to wiring the engine now (grey, no models).
+        comfyui_defaults = _pick_gen_variants(hw)
+        state["comfyui"] = not comfyui_defaults
+    elif gen_mode == "scaffold_only":
+        comfyui_defaults = _comfyui_defaults()
+        state["comfyui"] = True
+    else:  # off
+        comfyui_defaults = ()
+        state["comfyui"] = False
 
     plan = SetupPlan(
         hw=hw,

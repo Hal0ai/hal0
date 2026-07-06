@@ -312,3 +312,133 @@ def test_no_apply_skips_verify_report(monkeypatch):
     setup_ui, rec = _stub_flow(monkeypatch, build=False)
     setup_ui.run_interactive(_hw(), storage_dir="/var/lib/hal0/models")
     assert rec.get("verified") is None
+
+
+# ── WS-G ComfyUI gen branch (issue #1113) ────────────────────────────────────
+
+
+def test_fmt_duration_buckets():
+    from hal0.cli import setup_ui
+
+    assert setup_ui._fmt_duration(45) == "45s"
+    assert setup_ui._fmt_duration(360) == "6m"
+    assert setup_ui._fmt_duration(3900) == "1h05m"
+
+
+def test_render_gen_variants_shows_size_and_time():
+    from hal0.cli import setup_ui
+    from hal0.comfyui.capabilities import CAPABILITIES
+
+    con = Console(width=100, record=True)
+    con.print(setup_ui._render_gen_variants(CAPABILITIES["txt2img"]))
+    text = con.export_text()
+    assert "qwen-image" in text and "sdxl" in text
+    assert "GB" in text  # size estimate column
+    assert "~" in text  # time estimate
+
+
+def test_pick_gen_variants_picks_and_scaffolds(monkeypatch):
+    from hal0.cli import setup_ui
+
+    monkeypatch.setattr(setup_ui, "_draw", lambda *a, **k: None)
+    # txt2img→2 (second variant), img2img→1, everything else→scaffold ("s").
+    answers = iter(["2", "1", "s", "s", "s"])
+    monkeypatch.setattr(setup_ui.Prompt, "ask", lambda *a, **k: next(answers))
+    picks = setup_ui._pick_gen_variants(_hw())
+    from hal0.comfyui.capabilities import CAPABILITIES
+
+    assert picks[0][0] == "txt2img"
+    # choice "2" → the 2nd txt2img alternative (family from the registry order).
+    assert picks[0][1] == CAPABILITIES["txt2img"].alternatives[1].family
+    assert picks[1][0] == "img2img"
+    assert len(picks) == 2  # the three "s" caps were scaffolded (omitted)
+
+
+def test_scaffold_and_download_defers_engine_and_runs_picker(monkeypatch):
+    setup_ui2, rec = _stub_flow(monkeypatch, build=True)
+    monkeypatch.setattr(setup_ui2, "_step_gen", lambda hw: "scaffold_and_download")
+    monkeypatch.setattr(setup_ui2, "_pick_gen_variants", lambda hw: (("txt2img", "sdxl"),))
+    setup_ui2.run_interactive(_hw(), storage_dir="/var/lib/hal0/models")
+    plan = rec["applied"]
+    assert plan.gen_mode == "scaffold_and_download"
+    assert plan.comfyui_defaults == (("txt2img", "sdxl"),)
+    # Engine activation deferred to enable-on-pull-success → not pre-enabled.
+    assert plan.extensions["comfyui"] is False
+
+
+def test_provision_gen_downloads_noop_for_scaffold_only(monkeypatch):
+    from hal0.cli import setup_ui
+    from hal0.cli.setup_ui import NetworkChoice, SetupPlan
+
+    called = {"n": 0}
+    import hal0.comfyui.provision as prov
+
+    monkeypatch.setattr(
+        prov, "provision_comfyui_downloads", lambda *a, **k: called.__setitem__("n", 1)
+    )
+    plan = SetupPlan(
+        hw=_hw(),
+        network=NetworkChoice("127.0.0.1", "h", None),
+        storage_dir="/s",
+        hf_token=None,
+        extensions={"comfyui": True},
+        slots=[],
+        npu_opt_in=False,
+        gen_mode="scaffold_only",
+        comfyui_defaults=(("txt2img", "sdxl"),),
+    )
+    setup_ui._provision_gen_downloads(plan)
+    assert called["n"] == 0  # scaffold_only never downloads here
+
+
+def test_provision_gen_downloads_runs_for_scaffold_and_download(monkeypatch):
+    from hal0.cli import setup_ui
+    from hal0.cli.setup_ui import NetworkChoice, SetupPlan
+    from hal0.comfyui.provision import ProvisionResult
+
+    seen = {}
+
+    def fake_provision(defaults, **kw):
+        seen["defaults"] = defaults
+        return ProvisionResult(landed=["sdxl"], activated=True)
+
+    monkeypatch.setattr(setup_ui, "_fmt_duration", lambda s: "1m")
+    import hal0.comfyui.provision as prov
+
+    monkeypatch.setattr(prov, "provision_comfyui_downloads", fake_provision)
+    plan = SetupPlan(
+        hw=_hw(),
+        network=NetworkChoice("127.0.0.1", "h", None),
+        storage_dir="/s",
+        hf_token=None,
+        extensions={"comfyui": False},
+        slots=[],
+        npu_opt_in=False,
+        gen_mode="scaffold_and_download",
+        comfyui_defaults=(("txt2img", "sdxl"),),
+    )
+    setup_ui._provision_gen_downloads(plan)
+    assert seen["defaults"] == (("txt2img", "sdxl"),)
+
+
+def test_render_review_shows_gen_download_estimate():
+    from hal0.cli import setup_ui
+    from hal0.cli.setup_ui import NetworkChoice, SetupPlan
+    from hal0.install.orchestrate import SlotSelection
+
+    plan = SetupPlan(
+        hw=_hw(),
+        network=NetworkChoice("127.0.0.1", "box", None),
+        storage_dir="/mnt/ai-models",
+        hf_token=None,
+        extensions={"comfyui": False},
+        slots=[SlotSelection("chat", "chat", 8081, None)],
+        npu_opt_in=False,
+        gen_mode="scaffold_and_download",
+        comfyui_defaults=(("txt2img", "sdxl"), ("image_upscale", "esrgan")),
+    )
+    con = Console(width=120, record=True)
+    con.print(setup_ui.render_review(plan))
+    text = con.export_text()
+    assert "Generation models" in text
+    assert "2 variant" in text

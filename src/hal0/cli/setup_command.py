@@ -247,10 +247,18 @@ def setup(
         # result still drives this run; the daemon persists it later.
         typer.echo(f"warning: could not persist hardware.json ({exc})", err=True)
     if answers is not None:
-        from hal0.install.answers import load_answers
+        from hal0.install.answers import gen_download_requested, load_answers
 
         sel = load_answers(answers, hw)
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
+        # WS-G (#1113): gen.mode: scaffold_and_download opts into the ComfyUI
+        # per-variant fetch. The loader records the picks in comfyui_defaults;
+        # perform the working download here (skipped under --no-pull, matching
+        # the LLM-slot pull deferral). The img slot activates on the first land.
+        if not no_pull and gen_download_requested(answers) and sel.comfyui_defaults:
+            from hal0.comfyui.provision import provision_comfyui_downloads
+
+            provision_comfyui_downloads(sel.comfyui_defaults)
         return
     if auto:
         sel = build_auto_selections(
