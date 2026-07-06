@@ -1,8 +1,8 @@
 """mDNS / avahi discovery for companion services.
 
-The installer already drops ``/etc/avahi/services/hal0.service`` (the main
-UI announcement — see packaging/avahi/hal0.service). This module extends
-that to the *addon* services: one avahi service-group file per advertised
+If something else drops ``/etc/avahi/services/hal0.service`` (the main UI
+announcement), this module extends that to the *addon* services: one avahi
+service-group file per advertised
 addon (``hal0-addon-<id>.service``), so LAN clients see distinct
 "OpenWebUI on <host>" / "ComfyUI on <host>" entries and each service is
 reachable as ``http://<host>.local:<port>`` without DNS.
