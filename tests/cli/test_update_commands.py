@@ -1,10 +1,17 @@
-"""Tests for the ``hal0 update`` CLI subcommand (#510).
+"""Tests for the ``hal0 update`` CLI subcommand (#510, #1111).
 
 The CLI is a thin client over /api/updates/*; these tests stub the
 ``api_*`` helpers (imported into the update_commands namespace) so the
 command logic - target-version normalization, the apply trigger, and the
-absence of the retired ``--restart-slots`` flag - is exercised without a
+``--restart-slots`` / drift-banner behaviour - is exercised without a
 running daemon.
+
+``--restart-slots`` was removed in #539/#510 (it blind-restarted every
+``hal0-slot@*.service`` unconditionally — dead code targeting a naming
+scheme that no longer applied) and reintroduced in #1111 with a completely
+different, safe shape: it's forwarded to ``/commit`` as a body flag, and the
+server only ever bounces the slots its own reconcile sweep found drifted.
+The CLI itself never touches systemd.
 """
 
 from __future__ import annotations
@@ -80,12 +87,80 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     return captured
 
 
-def test_restart_slots_flag_removed() -> None:
-    """The retired ``--restart-slots`` flag is gone from the command signature."""
+def test_restart_slots_flag_present_and_defaults_false() -> None:
+    """``--restart-slots`` (#1111) exists and defaults to False (opt-in only)."""
     sig = inspect.signature(uc.update)
-    assert "restart_slots" not in sig.parameters
-    # And the helper that bounced hal0-slot@*.service is removed too.
+    assert "restart_slots" in sig.parameters
+    default = sig.parameters["restart_slots"].default
+    assert default.default is False  # typer.Option(False, ...)
+    # The old (#539/#510-removed) helper that reached around the API to
+    # blind-restart every hal0-slot@*.service is gone for good — the new
+    # flag never touches systemd from the CLI process.
     assert not hasattr(uc, "_restart_slots")
+
+
+def test_default_update_sends_restart_slots_false(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the flag, /commit is sent restart_slots=False — never implicitly True."""
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    result = runner.invoke(app, ["update", "--target", "0.1.1"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["commit_json"] == {"version": "0.1.1", "restart_slots": False}
+
+
+def test_restart_slots_flag_forwarded_to_commit_body(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--restart-slots`` is forwarded as a /commit body flag, not a local systemctl call."""
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    result = runner.invoke(app, ["update", "--target", "0.1.1", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["commit_json"] == {"version": "0.1.1", "restart_slots": True}
+
+
+def test_drift_banner_clean_when_no_drifted_slots(capsys: pytest.CaptureFixture[str]) -> None:
+    """No drifted slots -> a quiet confirmation, no restart language."""
+    uc._print_drift_banner({"drifted_slots": []}, restart_slots=False)
+    out = capsys.readouterr().out
+    assert "no restart needed" in out
+    assert "restart" not in out.lower().replace("no restart needed", "")
+
+
+def test_drift_banner_warns_without_restart_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """Drifted slots + no --restart-slots -> a loud warning naming the slots, no restart claim."""
+    uc._print_drift_banner(
+        {"drifted_slots": ["chat", "embed"], "restarted_slots": []}, restart_slots=False
+    )
+    out = capsys.readouterr().out
+    assert "2 slot(s)" in out
+    assert "chat" in out and "embed" in out
+    assert "--restart-slots" in out
+
+
+def test_drift_banner_reports_restarted_slots(capsys: pytest.CaptureFixture[str]) -> None:
+    """Drifted slots + --restart-slots -> reports what was actually bounced."""
+    uc._print_drift_banner(
+        {"drifted_slots": ["chat", "embed"], "restarted_slots": ["chat", "embed"]},
+        restart_slots=True,
+    )
+    out = capsys.readouterr().out
+    assert "restarted 2 drifted slot(s)" in out
+    assert "chat" in out and "embed" in out
+    assert "failed to restart" not in out
+
+
+def test_drift_banner_flags_slots_that_failed_to_restart(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A drifted slot missing from restarted_slots is called out as a failure."""
+    uc._print_drift_banner(
+        {"drifted_slots": ["chat", "embed"], "restarted_slots": ["chat"]}, restart_slots=True
+    )
+    out = capsys.readouterr().out
+    assert "restarted 1 drifted slot(s)" in out
+    assert "1 drifted slot(s) failed to restart" in out
+    assert "embed" in out
 
 
 def test_target_strips_leading_v(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,7 +186,7 @@ def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatc
     assert result.exit_code == 0, result.output
     # prepare got the (normalized) target; commit got the resolved_version from the poll.
     assert stub_api["prepare_json"] == {"version": "0.1.1"}
-    assert stub_api["commit_json"] == {"version": "0.1.1"}
+    assert stub_api["commit_json"] == {"version": "0.1.1", "restart_slots": False}
 
 
 def test_yes_flag_present_and_skips_confirm(
@@ -130,7 +205,7 @@ def test_yes_flag_present_and_skips_confirm(
     result = runner.invoke(app, ["update", "--target", "0.1.1", "--yes"])
     assert result.exit_code == 0, result.output
     assert called["confirm"] is False
-    assert stub_api["commit_json"] == {"version": "0.1.1"}
+    assert stub_api["commit_json"] == {"version": "0.1.1", "restart_slots": False}
 
 
 def test_tty_decline_stages_without_commit(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:

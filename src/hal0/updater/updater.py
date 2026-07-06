@@ -46,6 +46,7 @@ import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -1132,31 +1133,22 @@ def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None
     return cleared
 
 
-def rerender_slot_units(*, job_id: str | None = None) -> int:
-    """Re-render every existing container slot unit through current code.
+def _iter_slot_configs(
+    *, job_id: str | None = None
+) -> Iterator[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Yield ``(slot_name, cfg, model_info)`` for every configured slot TOML.
 
-    A slot's systemd unit bakes the launch argv at load time. Updating hal0
-    changes the code that WOULD render but not the file that DID — so
-    ``systemctl restart``, crash-restarts, and reboots keep running pre-update
-    flags until an operator remembers a hal0-level reload (field finding,
-    CT105). This sweep rewrites each on-disk unit via the same plan path a
-    load uses and batches one ``daemon-reload`` — it never enables, starts, or
-    restarts anything, so serving is not bounced; the fresh argv applies on
-    the next start from ANY path. The dashboard's drift indicator covers the
-    remaining "process still running old argv" window.
-
-    Per-slot failures (unresolvable model/profile, malformed TOML) log and
-    skip — a bad slot must never wedge an update.
-
-    Returns the number of unit files rewritten.
+    Shared enumeration used by the update-time unit sweep
+    (:func:`rerender_slot_units`) and its read-only sibling
+    (:func:`detect_drifted_slots`) so both see exactly the same slot set and
+    the same never-raising model resolution. Per-slot parse/resolve failures
+    log a warning and are skipped — a bad slot must never wedge the caller.
     """
     import tomllib
 
     from hal0.config.paths import slots_config_dir
-    from hal0.providers.container import ContainerProvider, _best_effort_model_info
+    from hal0.providers.container import _best_effort_model_info
 
-    provider = ContainerProvider()
-    rewritten = 0
     slots_dir = slots_config_dir()
     for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
         slot_name = toml_path.stem
@@ -1171,8 +1163,60 @@ def rerender_slot_units(*, job_id: str | None = None) -> int:
             # Same registry-backed, never-raising resolver the preview path
             # uses — a registry miss degrades to a minimal path dict.
             model_info = _best_effort_model_info(cfg, None)
+        except Exception as exc:
+            log.warning(
+                "updater.slot_config_skipped",
+                job_id=job_id,
+                slot=slot_name,
+                error=str(exc),
+            )
+            continue
+        yield slot_name, cfg, model_info
+
+
+def rerender_slot_units(*, job_id: str | None = None) -> int:
+    """Re-render every existing container slot unit through current code.
+
+    A slot's systemd unit bakes the launch argv at load time. Updating hal0
+    changes the code that WOULD render but not the file that DID — so
+    ``systemctl restart``, crash-restarts, and reboots keep running pre-update
+    flags until an operator remembers a hal0-level reload (field finding,
+    CT105). This sweep rewrites each on-disk unit via the same plan path a
+    load uses and batches one ``daemon-reload`` — it never enables, starts, or
+    restarts anything, so serving is not bounced; the fresh argv applies on
+    the next start from ANY path. ``hal0 update --restart-slots`` (#1111) is
+    the only path that bounces the drifted slots this sweep finds — see
+    :func:`post_commit_slot_sweep`.
+
+    Per-slot failures (unresolvable model/profile, malformed TOML) log and
+    skip — a bad slot must never wedge an update.
+
+    Returns the number of unit files rewritten. Thin wrapper over
+    :func:`_rerender_slot_units_impl` that keeps this function's long-standing
+    int-count contract (see ``tests/updater/test_unit_rerender.py``) while the
+    new #1111 callers get at the actual slot NAMES.
+    """
+    return len(_rerender_slot_units_impl(job_id=job_id))
+
+
+def _rerender_slot_units_impl(*, job_id: str | None = None) -> list[str]:
+    """Do the rewrite sweep :func:`rerender_slot_units` describes; return names.
+
+    A slot appears in the returned list exactly when its on-disk unit was
+    stale (the reconcile seam's fresh render differed from what was on
+    disk) and got rewritten — i.e. this list IS the post-update drift set
+    (#1111): each of these slots is still running the pre-update argv until
+    something restarts it (any path — a plain ``systemctl restart``, a
+    reboot, or the opt-in ``hal0 update --restart-slots``).
+    """
+    from hal0.providers.container import ContainerProvider
+
+    provider = ContainerProvider()
+    rewritten: list[str] = []
+    for slot_name, cfg, model_info in _iter_slot_configs(job_id=job_id):
+        try:
             if provider.rerender_unit_sync(cfg, model_info):
-                rewritten += 1
+                rewritten.append(slot_name)
                 log.info("updater.unit_rerendered", job_id=job_id, slot=slot_name)
         except Exception as exc:
             log.warning(
@@ -1186,8 +1230,95 @@ def rerender_slot_units(*, job_id: str | None = None) -> int:
             provider.daemon_reload()
         except Exception as exc:
             log.warning("updater.unit_rerender_daemon_reload_failed", job_id=job_id, error=str(exc))
-        log.info("updater.unit_rerender_complete", job_id=job_id, rewritten=rewritten)
+        log.info("updater.unit_rerender_complete", job_id=job_id, rewritten=len(rewritten))
     return rewritten
+
+
+def detect_drifted_slots(*, job_id: str | None = None) -> list[str]:
+    """Report which configured slots have a stale on-disk unit — read-only.
+
+    Companion to :func:`rerender_slot_units` that answers the same "stale
+    vs freshly-rendered" question (via :meth:`ContainerProvider.unit_is_stale`,
+    the reconcile seam from #1103) WITHOUT writing anything or touching
+    systemd. Safe to call any time — e.g. a dashboard poll — since a normal
+    ``hal0 update`` already rewrites stale units via :func:`rerender_slot_units`
+    and this never mutates state.
+
+    Per-slot failures log and skip, matching :func:`rerender_slot_units`.
+    """
+    from hal0.providers.container import ContainerProvider
+
+    provider = ContainerProvider()
+    drifted: list[str] = []
+    for slot_name, cfg, model_info in _iter_slot_configs(job_id=job_id):
+        try:
+            if provider.unit_is_stale(cfg, model_info):
+                drifted.append(slot_name)
+        except Exception as exc:
+            log.warning(
+                "updater.drift_check_skipped",
+                job_id=job_id,
+                slot=slot_name,
+                error=str(exc),
+            )
+    return drifted
+
+
+def restart_drifted_slots(slot_names: list[str], *, job_id: str | None = None) -> list[str]:
+    """Bounce (``systemctl restart``) exactly *slot_names* — nothing else.
+
+    The ONLY path that ever restarts a slot as part of ``hal0 update``
+    (#1111), and only when an operator opts in with ``--restart-slots``.
+    Never called from the default update flow. Callers must only pass
+    already-confirmed-drifted slot names (:func:`_rerender_slot_units_impl` /
+    :func:`detect_drifted_slots`) — this function does not itself check for
+    drift, so it must never be pointed at an unfiltered slot list; a slot
+    mid-inference must never be bounced implicitly.
+
+    Per-slot restart failures log and skip — one stuck unit must not stop
+    the rest from bouncing. Returns the slot names actually restarted.
+    """
+    from hal0.providers.container import ContainerProvider
+
+    provider = ContainerProvider()
+    restarted: list[str] = []
+    for slot_name in slot_names:
+        try:
+            provider.restart_unit_sync(slot_name)
+            restarted.append(slot_name)
+            log.info("updater.slot_restarted", job_id=job_id, slot=slot_name)
+        except Exception as exc:
+            log.warning(
+                "updater.slot_restart_failed",
+                job_id=job_id,
+                slot=slot_name,
+                error=str(exc),
+            )
+    return restarted
+
+
+def post_commit_slot_sweep(*, restart: bool = False, job_id: str | None = None) -> dict[str, Any]:
+    """The full post-commit slot maintenance sweep (#1111).
+
+    Rewrites every stale on-disk unit (:func:`_rerender_slot_units_impl`),
+    which doubles as the post-update drift detection — a slot only appears
+    in ``drifted`` when its unit was actually stale. Only when *restart* is
+    True (the opt-in ``hal0 update --restart-slots`` path) are those exact
+    drifted slots then bounced (:func:`restart_drifted_slots`); the default
+    (*restart* False) never restarts anything, matching the hard safety
+    requirement that ``hal0 update`` alone must never bounce a slot that may
+    be mid-inference.
+
+    Must run in a FRESH interpreter of the just re-pipped venv — see
+    :meth:`Updater.commit` step 8c, which is the sole caller (via a
+    subprocess so the sweep sees the NEW code, not the still-old in-memory
+    module of the process driving the update).
+
+    Returns ``{"rewritten": int, "drifted": [str, ...], "restarted": [str, ...]}``.
+    """
+    rewritten = _rerender_slot_units_impl(job_id=job_id)
+    restarted = restart_drifted_slots(rewritten, job_id=job_id) if restart else []
+    return {"rewritten": len(rewritten), "drifted": rewritten, "restarted": restarted}
 
 
 # ── Updater class ──────────────────────────────────────────────────────────────
@@ -1412,7 +1543,7 @@ class Updater:
             "notes": notes,
         }
 
-    async def commit(self, version: str) -> dict[str, Any]:
+    async def commit(self, version: str, *, restart_slots: bool = False) -> dict[str, Any]:
         """Activate a previously :meth:`prepare`d ``version`` (§9 steps 7-9+).
 
         Runs forward config migrations, prunes materialised seed profiles, clears
@@ -1423,8 +1554,13 @@ class Updater:
 
         Slot units are NOT restarted and ``hal0-api`` is not bounced here; the
         route layer (``routes/updater._run_commit_job``) try-restarts hal0-api
-        fail-soft after a successful commit. Returns the same breadcrumb dict
-        shape as the old single-step apply.
+        fail-soft after a successful commit. The returned dict's
+        ``drifted_slots`` lists slots whose on-disk unit was stale and just
+        got rewritten (#1111) — still running pre-update argv until
+        something restarts them. Pass *restart_slots* (the opt-in
+        ``hal0 update --restart-slots`` path) to also bounce exactly those
+        drifted slots (``restarted_slots``); the default never restarts
+        anything, so an in-flight inference is never interrupted.
         """
         if _is_editable_install():
             raise UpdateError(
@@ -1531,10 +1667,15 @@ class Updater:
 
         # Step 8c: re-render existing slot units through the NEW code so any
         # subsequent start (systemctl restart, crash-restart, reboot) uses
-        # current argv — never bounces serving (write + daemon-reload only).
+        # current argv, detect which slots were stale (#1111 drift signal),
+        # and — ONLY when restart_slots is True — bounce exactly those. The
+        # default never enables/starts/restarts anything, so serving is not
+        # bounced; the fresh argv applies on the next start from ANY path.
         # Must run AFTER the 8b venv reinstall and in a FRESH interpreter:
         # this (still-old) process would render pre-update argv, defeating the
         # point; a subprocess of the re-pipped venv executes the new module.
+        drifted_slots: list[str] = []
+        restarted_slots: list[str] = []
         if not _is_editable_install():
             try:
                 proc = await asyncio.to_thread(
@@ -1542,18 +1683,25 @@ class Updater:
                     [
                         sys.executable,
                         "-c",
-                        "from hal0.updater.updater import rerender_slot_units; "
-                        "print(rerender_slot_units())",
+                        "import json, sys; "
+                        "from hal0.updater.updater import post_commit_slot_sweep; "
+                        "print(json.dumps(post_commit_slot_sweep(restart=(sys.argv[1] == '1'))))",
+                        "1" if restart_slots else "0",
                     ],
                     capture_output=True,
                     text=True,
                     timeout=300,
                 )
                 if proc.returncode == 0:
+                    sweep = json.loads((proc.stdout or "").strip() or "{}")
+                    drifted_slots = list(sweep.get("drifted") or [])
+                    restarted_slots = list(sweep.get("restarted") or [])
                     log.info(
                         "updater.unit_rerender_done",
                         job_id=self.job_id,
-                        rewritten=(proc.stdout or "").strip(),
+                        rewritten=sweep.get("rewritten"),
+                        drifted=drifted_slots,
+                        restarted=restarted_slots,
                     )
                 else:
                     log.warning(
@@ -1589,9 +1737,13 @@ class Updater:
             "migrations": {"from": migration_info[0], "to": migration_info[1]},
             "cosign_skipped": _cosign_skip(),
             "installed_at": time.time(),
+            "drifted_slots": drifted_slots,
+            "restarted_slots": restarted_slots,
         }
 
-    async def apply(self, version: str | None = None) -> dict[str, Any]:
+    async def apply(
+        self, version: str | None = None, *, restart_slots: bool = False
+    ) -> dict[str, Any]:
         """Prepare + commit in one call — the back-compat single-step update.
 
         Equivalent to the pre-split ``apply()``: stages the release
@@ -1600,7 +1752,7 @@ class Updater:
         phases call :meth:`prepare` then :meth:`commit` directly instead.
         """
         prepared = await self.prepare(version)
-        return await self.commit(str(prepared["version"]))
+        return await self.commit(str(prepared["version"]), restart_slots=restart_slots)
 
     # ── rollback ───────────────────────────────────────────────────────────────
 

@@ -222,6 +222,7 @@ async def _run_apply_job(
     job_id: str,
     channel: str,
     version: str | None,
+    restart_slots: bool = False,
 ) -> None:
     """Background task that drives ``Updater.apply()`` and records progress.
 
@@ -229,7 +230,9 @@ async def _run_apply_job(
     doesn't strand the CLI's status poll. On a successful apply it
     try-restarts ``hal0-api.service`` fail-soft - a restart failure is
     recorded on the job (``restarted`` / ``restart_error``) but never
-    re-fails the apply or tears down the new tree.
+    re-fails the apply or tears down the new tree. ``drifted_slots`` /
+    ``restarted_slots`` (#1111) come straight off ``Updater.apply()``'s
+    result — see :meth:`hal0.updater.updater.Updater.commit`.
     """
     job = jobs[job_id]
     job["state"] = "running"
@@ -237,7 +240,7 @@ async def _run_apply_job(
     _persist_job(job)
     try:
         updater = Updater(channel=channel)
-        await updater.apply(version)
+        result = await updater.apply(version, restart_slots=restart_slots)
     except Exception as exc:
         job["state"] = "failed"
         job["error"] = str(exc)
@@ -251,6 +254,8 @@ async def _run_apply_job(
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
+        job["drifted_slots"] = result.get("drifted_slots", [])
+        job["restarted_slots"] = result.get("restarted_slots", [])
         job["state"] = "applied"
     finally:
         job["updated_at"] = time.time()
@@ -297,13 +302,16 @@ async def _run_commit_job(
     job_id: str,
     channel: str,
     version: str,
+    restart_slots: bool = False,
 ) -> None:
     """Background task that ACTIVATES a prepared version via ``Updater.commit()``.
 
     Runs the migrations + symlink swap + venv re-pip, then try-restarts
     ``hal0-api.service`` fail-soft (same policy as ``_run_apply_job``). Requires
     that ``/prepare`` staged ``version`` first; ``commit()`` raises otherwise and
-    the job goes to ``failed``.
+    the job goes to ``failed``. ``drifted_slots`` / ``restarted_slots`` (#1111)
+    come straight off ``Updater.commit()``'s result — the CLI's post-update
+    banner and the dashboard drift signal both read these off the job.
     """
     job = jobs[job_id]
     job["state"] = "running"
@@ -311,7 +319,7 @@ async def _run_commit_job(
     _persist_job(job)
     try:
         updater = Updater(channel=channel)
-        await updater.commit(version)
+        result = await updater.commit(version, restart_slots=restart_slots)
     except Exception as exc:
         job["state"] = "failed"
         job["error"] = str(exc)
@@ -320,6 +328,8 @@ async def _run_commit_job(
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
+        job["drifted_slots"] = result.get("drifted_slots", [])
+        job["restarted_slots"] = result.get("restarted_slots", [])
         job["state"] = "applied"
     finally:
         job["updated_at"] = time.time()
@@ -540,17 +550,31 @@ async def check_updates(request: Request) -> dict[str, Any]:
 # ── /apply ─────────────────────────────────────────────────────────────────
 
 
+def _body_restart_slots(body: Any) -> bool:
+    """Extract the opt-in ``restart_slots`` flag (#1111) from a request body.
+
+    Defaults to False — ``hal0 update`` must never bounce a slot unless the
+    operator explicitly asks for it.
+    """
+    if isinstance(body, dict):
+        return bool(body.get("restart_slots", False))
+    return False
+
+
 @router.post("/apply", status_code=202)
 async def apply_update(request: Request) -> dict[str, Any]:
     """Kick off an update job in the background; return a job id.
 
     Body (optional)::
 
-        {"version": "0.1.0"}   # pin a specific version; omit for latest
+        {"version": "0.1.0", "restart_slots": false}   # pin a version; omit for latest
 
     The actual update work happens in ``_run_apply_job`` which calls
     ``Updater.apply()``. The route returns immediately with the queued-job
     snapshot; poll ``/api/updates/status/{job_id}`` for state transitions.
+    ``restart_slots`` (#1111, default False) is the opt-in flag that bounces
+    exactly the slots detected as drifted after the swap — never on by
+    default, so an in-flight inference is never interrupted.
 
     Returns **202 Accepted** because the work is queued, not completed —
     matches ``/api/models/{id}/pull`` and the rest of hal0's async-job
@@ -569,6 +593,7 @@ async def apply_update(request: Request) -> dict[str, Any]:
             # drive the same target - matches the CLI's --target handling
             # (#510). lstrip is fine here: versions never start with "v".
             version = v.strip().lstrip("v") or None
+    restart_slots = _body_restart_slots(body)
 
     channel = _current_channel(request)
     jobs = _update_jobs(request)
@@ -578,6 +603,7 @@ async def apply_update(request: Request) -> dict[str, Any]:
         "state": "queued",
         "channel": channel,
         "version": version,
+        "restart_slots": restart_slots,
         "created_at": time.time(),
         "updated_at": time.time(),
         "error": None,
@@ -593,7 +619,7 @@ async def apply_update(request: Request) -> dict[str, Any]:
     if bg_tasks is None:
         bg_tasks = set()
         request.app.state._update_bg_tasks = bg_tasks
-    task = asyncio.create_task(_run_apply_job(jobs, job_id, channel, version))
+    task = asyncio.create_task(_run_apply_job(jobs, job_id, channel, version, restart_slots))
     bg_tasks.add(task)
     task.add_done_callback(bg_tasks.discard)
     return dict(jobs[job_id])
@@ -659,9 +685,13 @@ async def commit_update(request: Request) -> dict[str, Any]:
     """Activate a previously ``/prepare``d version.
 
     Body (required): ``{"version": "0.1.0"}`` — the ``resolved_version`` returned
-    by the prepare job. Returns a queued-job snapshot (202); poll
-    ``/status/{job_id}`` until ``applied`` | ``failed``. The daemon try-restarts
-    hal0-api fail-soft after a successful commit.
+    by the prepare job. Optional ``"restart_slots": true`` (#1111, default
+    False) bounces exactly the slots detected as drifted after the swap —
+    the opt-in ``hal0 update --restart-slots`` path; omitted or False never
+    restarts anything. Returns a queued-job snapshot (202); poll
+    ``/status/{job_id}`` until ``applied`` | ``failed`` — the job carries
+    ``drifted_slots`` / ``restarted_slots`` once applied. The daemon
+    try-restarts hal0-api fail-soft after a successful commit.
     """
     try:
         body = await request.json()
@@ -673,6 +703,7 @@ async def commit_update(request: Request) -> dict[str, Any]:
             "commit requires a 'version' — the resolved_version from /prepare",
             details={"hint": "POST /api/updates/prepare first, then commit its resolved_version"},
         )
+    restart_slots = _body_restart_slots(body)
     channel = _current_channel(request)
     jobs = _update_jobs(request)
     job_id = uuid.uuid4().hex[:12]
@@ -682,12 +713,13 @@ async def commit_update(request: Request) -> dict[str, Any]:
         "phase": "commit",
         "channel": channel,
         "version": version,
+        "restart_slots": restart_slots,
         "created_at": time.time(),
         "updated_at": time.time(),
         "error": None,
     }
     _persist_job(jobs[job_id])
-    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version))
+    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version, restart_slots))
     return dict(jobs[job_id])
 
 
@@ -712,6 +744,27 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
             details={"job_id": job_id},
         )
     return dict(job)
+
+
+# ── /drift ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/drift")
+async def update_drift(request: Request) -> dict[str, Any]:
+    """Report which configured slots have a stale on-disk unit right now.
+
+    On-demand dashboard/API signal for post-update drift (#1111) —
+    complements the per-job ``drifted_slots`` on ``/status/{job_id}``, which
+    only exists right after an update job runs. This is safe to poll any
+    time: it never writes anything (:func:`detect_drifted_slots`, the
+    read-only sibling of the update-time unit-rewrite sweep), and — unlike
+    that sweep — it runs live in THIS already-current process, so it needs
+    no subprocess trick to see fresh code.
+    """
+    from hal0.updater.updater import detect_drifted_slots
+
+    drifted = await asyncio.to_thread(detect_drifted_slots)
+    return {"drifted_slots": drifted, "count": len(drifted)}
 
 
 # ── /rollback ──────────────────────────────────────────────────────────────

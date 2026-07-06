@@ -1253,6 +1253,38 @@ class ContainerProvider(Provider):
         """``systemctl daemon-reload`` — public for the unit-rerender sweep."""
         self._run("systemctl", "daemon-reload")
 
+    def unit_is_stale(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
+        """Read-only companion to :meth:`rerender_unit_sync` (#1111).
+
+        Reports whether a fresh render would differ from what's on disk —
+        the same comparison :meth:`rerender_unit_sync` makes before it
+        writes — WITHOUT writing anything. Lets a caller ask "is this slot
+        drifted?" (e.g. an on-demand dashboard poll) without mutating state
+        or requiring a daemon-reload afterwards.
+
+        False for a slot with no unit on disk (never rendered → nothing
+        stale), matching :meth:`rerender_unit_sync`'s no-op contract.
+        """
+        slot_name: str = str(slot_cfg.get("name", ""))
+        unit_path = self._unit_path(slot_name)
+        if not unit_path.exists():
+            return False
+        return unit_path.read_text() != self._render_unit_text(slot_cfg, model_info)
+
+    def restart_unit_sync(self, slot_name: str) -> None:
+        """Bounce ``hal0-slot@<slot_name>.service`` — restart, nothing else.
+
+        Used ONLY by the opt-in ``hal0 update --restart-slots`` path
+        (#1111): the default update flow never restarts a slot that may be
+        mid-inference — see :func:`hal0.updater.updater.restart_drifted_slots`,
+        which is the sole caller and only ever passes slot names already
+        confirmed drifted. Assumes the unit file is already current on disk
+        (``rerender_unit_sync`` plus the batched ``daemon_reload`` earlier in
+        the same sweep) — this just asks systemd to relaunch the service so
+        the fresh argv takes effect.
+        """
+        self._run("systemctl", "restart", self._unit_name(slot_name))
+
     def expected_argv(
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
     ) -> list[str] | None:

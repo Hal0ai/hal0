@@ -6,12 +6,23 @@ is exercised whether you trigger an update from the dashboard or the
 shell. After a successful apply the daemon try-restarts hal0-api itself
 (see ``routes/updater._run_apply_job``); the CLI does not touch systemd.
 
+``--restart-slots`` (#1111) is the one exception, and it still doesn't
+reach around the API: it's a flag forwarded in the ``/commit`` body, and the
+actual bounce happens server-side, scoped to exactly the slots the commit's
+own reconcile sweep found drifted (see ``Updater.commit`` step 8c /
+``post_commit_slot_sweep``). Without the flag, ``hal0 update`` only prints a
+banner naming the drifted slots — it never restarts anything. A prior,
+unrelated ``--restart-slots`` (removed in #539/#510) reached around the API
+to blind-restart every ``hal0-slot@*.service`` unconditionally; this one
+never restarts a slot that wasn't detected as drifted.
+
 Surface:
     hal0 update                 # check + apply if newer
     hal0 update --check         # check only
     hal0 update --rollback      # roll back to previous tree
     hal0 update --channel CH    # set channel (persists), then check
     hal0 update --target VER    # pin a specific version
+    hal0 update --restart-slots # also bounce slots detected as drifted
 """
 
 from __future__ import annotations
@@ -194,6 +205,56 @@ def _render_notes(notes: dict | None) -> None:
         console.print(Markdown(markdown))
 
 
+def _print_drift_banner(final: dict, *, restart_slots: bool) -> None:
+    """Print the post-update slot-drift banner (#1111).
+
+    ``final`` is the terminal ``/api/updates/status/<id>`` job snapshot —
+    ``drifted_slots`` lists slots whose on-disk unit was stale and just got
+    rewritten by the commit's sweep (still running pre-update argv);
+    ``restarted_slots`` lists which of those were actually bounced (only
+    populated when ``--restart-slots`` was passed).
+
+    Three cases:
+      - no drift → a quiet confirmation that nothing needs a restart.
+      - drift, ``--restart-slots`` not passed → a loud warning naming the
+        affected slots and pointing at the opt-in flag. Never restarts
+        anything itself — the hard safety rule that plain ``hal0 update``
+        must never bounce a slot that may be mid-inference.
+      - drift, ``--restart-slots`` passed → reports what got bounced, and
+        calls out any drifted slot that failed to restart.
+    """
+    drifted = list(final.get("drifted_slots") or [])
+    restarted = list(final.get("restarted_slots") or [])
+
+    if not drifted:
+        console.print("[dim]all slots are in sync — no restart needed.[/dim]")
+        return
+
+    if not restart_slots:
+        console.print(
+            Panel(
+                f"[yellow]{len(drifted)} slot(s) need a restart to pick up this update:[/yellow] "
+                f"{', '.join(drifted)}\n"
+                "[dim]slots are never bounced automatically — re-run with "
+                "`hal0 update --restart-slots` to bounce just these, or "
+                "`hal0 slot restart <name>` for one at a time.[/dim]",
+                title="slots need restart",
+                border_style="yellow",
+            )
+        )
+        return
+
+    failed = [name for name in drifted if name not in restarted]
+    if restarted:
+        console.print(
+            f"[green]restarted {len(restarted)} drifted slot(s):[/green] {', '.join(restarted)}"
+        )
+    if failed:
+        console.print(
+            f"[red]{len(failed)} drifted slot(s) failed to restart:[/red] {', '.join(failed)}"
+        )
+
+
 def update(
     channel: UpdateChannel | None = typer.Option(
         None,
@@ -220,6 +281,15 @@ def update(
         "--yes",
         "-y",
         help="Skip the confirmation prompt after reviewing release notes.",
+    ),
+    restart_slots: bool = typer.Option(
+        False,
+        "--restart-slots",
+        help=(
+            "Opt-in: bounce (systemctl restart) exactly the slots detected as "
+            "drifted after the swap. Never on by default — hal0 update alone "
+            "only warns, it never restarts a slot that may be mid-inference."
+        ),
     ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
@@ -305,7 +375,10 @@ def update(
         return
 
     try:
-        cjob = api_post("/api/updates/commit", json={"version": resolved})
+        cjob = api_post(
+            "/api/updates/commit",
+            json={"version": resolved, "restart_slots": restart_slots},
+        )
     except CliApiError as exc:
         die(str(exc))
         return
@@ -323,6 +396,10 @@ def update(
             console.print(
                 f"[yellow]hal0-api restart did not complete:[/yellow] {final['restart_error']}"
             )
+        # #1111: loud, non-blocking slot-drift banner — never restarts
+        # anything itself; that only happens server-side, and only when
+        # --restart-slots was passed on this invocation.
+        _print_drift_banner(final, restart_slots=restart_slots)
     else:
         err = final.get("error") or "unknown error"
         die(f"update {state}: {err}")

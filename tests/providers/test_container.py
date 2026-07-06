@@ -796,6 +796,75 @@ class TestLoadSync:
         # The WS-J guarantee: byte-for-byte identical units.
         assert upd_unit.read_text() == fresh_text
 
+    def test_unit_is_stale_true_when_on_disk_differs_from_fresh_render(
+        self, tmp_path: Path
+    ) -> None:
+        """unit_is_stale (#1111) reports True for a stale on-disk unit —
+        WITHOUT writing anything, unlike its mutating sibling rerender_unit_sync."""
+        profile = _moe_profile()
+        provider = ContainerProvider()
+        unit_path = tmp_path / "stale.service"
+        stale_text = "# stale pre-update unit\n"
+        unit_path.write_text(stale_text)
+        slot_cfg = {"name": "test-container", "port": 8095, "profile": "rocm"}
+        model_info = {"path": "/mnt/ai-models/model.gguf", "_model_key": "m"}
+
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(provider, "_unit_path", return_value=unit_path),
+        ):
+            assert provider.unit_is_stale(slot_cfg, model_info) is True
+
+        # Read-only: the stale content on disk is untouched.
+        assert unit_path.read_text() == stale_text
+
+    def test_unit_is_stale_false_when_up_to_date(self, tmp_path: Path) -> None:
+        """A unit that already matches the fresh render is not stale."""
+        profile = _moe_profile()
+        provider = ContainerProvider()
+        unit_path = tmp_path / "fresh.service"
+        slot_cfg = {"name": "test-container", "port": 8095, "profile": "rocm"}
+        model_info = {"path": "/mnt/ai-models/model.gguf", "_model_key": "m"}
+
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(provider, "_unit_path", return_value=unit_path),
+        ):
+            unit_path.write_text(provider._render_unit_text(slot_cfg, model_info))
+            assert provider.unit_is_stale(slot_cfg, model_info) is False
+
+    def test_unit_is_stale_false_when_no_unit_on_disk(self, tmp_path: Path) -> None:
+        """A slot never rendered (no unit file yet) is never reported stale —
+        matches rerender_unit_sync's no-op contract for the same case."""
+        provider = ContainerProvider()
+        with patch.object(provider, "_unit_path", return_value=tmp_path / "never.service"):
+            assert provider.unit_is_stale({"name": "never-loaded"}, {}) is False
+
+    def test_restart_unit_sync_calls_systemctl_restart_only(self) -> None:
+        """restart_unit_sync (#1111) issues exactly one systemctl restart —
+        never enable/start/daemon-reload; those belong to other call sites."""
+        provider = ContainerProvider()
+        calls: list[tuple[str, ...]] = []
+
+        def fake_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with patch.object(provider, "_run", side_effect=fake_run):
+            provider.restart_unit_sync("chat")
+
+        assert calls == [("systemctl", "restart", "hal0-slot@chat.service")]
+
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
         what actually launches."""

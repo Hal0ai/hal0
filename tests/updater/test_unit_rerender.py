@@ -22,7 +22,12 @@ from hal0.config.schema import ProfileConfig
 from hal0.providers import container as container_mod
 from hal0.slots.manager import SlotManager
 from hal0.updater import updater as updater_mod
-from hal0.updater.updater import rerender_slot_units
+from hal0.updater.updater import (
+    detect_drifted_slots,
+    post_commit_slot_sweep,
+    rerender_slot_units,
+    restart_drifted_slots,
+)
 
 _PROFILE = ProfileConfig(
     image="ghcr.io/test/toolbox:v2",
@@ -143,3 +148,102 @@ async def test_per_slot_failure_does_not_wedge_sweep(rerender_env, monkeypatch) 
 async def test_updater_module_reexports(rerender_env) -> None:
     # install.sh + Step 8c import it from the updater module.
     assert callable(updater_mod.rerender_slot_units)
+
+
+# ── #1111: post-update drift detection + opt-in restart ─────────────────────
+#
+# The reconcile seam from #1103 (rerender_unit_sync) already answers "is this
+# slot's on-disk unit stale vs. a fresh render?" — a slot is "drifted" exactly
+# when that comparison differs. detect_drifted_slots is the read-only sibling
+# (never writes); restart_drifted_slots is the ONLY thing that ever bounces a
+# slot as part of hal0 update, and only for names the caller already confirmed
+# drifted (the opt-in ``hal0 update --restart-slots`` path).
+
+
+def _restart_calls(calls: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    return [c for c in calls if c[0] == "systemctl" and c[1] == "restart"]
+
+
+async def test_detect_drifted_slots_finds_stale_unit(rerender_env) -> None:
+    """A stale on-disk unit is reported drifted — and left untouched (read-only)."""
+    unit_dir, _calls = rerender_env
+    await _mk_slot("a", 8095)
+    stale_text = "# stale pre-update unit\n"
+    _unit_path(unit_dir, "a").write_text(stale_text)
+
+    assert detect_drifted_slots() == ["a"]
+    # Read-only: unlike rerender_slot_units, nothing was written.
+    assert _unit_path(unit_dir, "a").read_text() == stale_text
+
+
+async def test_detect_drifted_slots_empty_once_rewritten(rerender_env) -> None:
+    """After the sweep rewrites a slot, it no longer reports as drifted."""
+    unit_dir, _calls = rerender_env
+    await _mk_slot("a", 8095)
+    _unit_path(unit_dir, "a").write_text("stale")
+
+    assert detect_drifted_slots() == ["a"]
+    assert rerender_slot_units() == 1
+    assert detect_drifted_slots() == []
+
+
+async def test_detect_drifted_slots_skips_slot_with_no_unit(rerender_env) -> None:
+    """A slot that has never been loaded (no unit file) is never 'drifted'."""
+    await _mk_slot("never-loaded", 8096)
+    assert detect_drifted_slots() == []
+
+
+async def test_restart_drifted_slots_only_touches_named_slots(rerender_env) -> None:
+    """restart_drifted_slots bounces exactly the names it's given — not every slot."""
+    unit_dir, calls = rerender_env
+    await _mk_slot("a", 8095)
+    await _mk_slot("b", 8096)
+    _unit_path(unit_dir, "a").write_text("stale")
+    _unit_path(unit_dir, "b").write_text("stale")
+
+    restarted = restart_drifted_slots(["a"])
+
+    assert restarted == ["a"]
+    assert _restart_calls(calls) == [("systemctl", "restart", "hal0-slot@a.service")]
+
+
+async def test_post_commit_slot_sweep_default_never_restarts(rerender_env) -> None:
+    """restart=False (the plain ``hal0 update`` default): report drift, bounce nothing."""
+    unit_dir, calls = rerender_env
+    await _mk_slot("a", 8095)
+    _unit_path(unit_dir, "a").write_text("stale")
+
+    result = post_commit_slot_sweep(restart=False)
+
+    assert result == {"rewritten": 1, "drifted": ["a"], "restarted": []}
+    assert _restart_calls(calls) == []
+
+
+async def test_post_commit_slot_sweep_restarts_when_opted_in(rerender_env) -> None:
+    """restart=True (``hal0 update --restart-slots``): bounce the drifted slot."""
+    unit_dir, calls = rerender_env
+    await _mk_slot("a", 8095)
+    _unit_path(unit_dir, "a").write_text("stale")
+
+    result = post_commit_slot_sweep(restart=True)
+
+    assert result == {"rewritten": 1, "drifted": ["a"], "restarted": ["a"]}
+    assert _restart_calls(calls) == [("systemctl", "restart", "hal0-slot@a.service")]
+
+
+async def test_post_commit_slot_sweep_restarts_only_drifted_of_several(rerender_env) -> None:
+    """With two slots, only the one that was actually stale gets bounced."""
+    unit_dir, calls = rerender_env
+    await _mk_slot("a", 8095)
+    await _mk_slot("b", 8096)
+    _unit_path(unit_dir, "a").write_text("stale")
+    # Seed "b" as already current so only "a" is drifted going into the sweep.
+    rerender_slot_units()
+    _unit_path(unit_dir, "a").write_text("stale again")
+    calls.clear()
+
+    result = post_commit_slot_sweep(restart=True)
+
+    assert result["drifted"] == ["a"]
+    assert result["restarted"] == ["a"]
+    assert _restart_calls(calls) == [("systemctl", "restart", "hal0-slot@a.service")]

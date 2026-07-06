@@ -401,7 +401,9 @@ def test_apply_success_tries_restart_hal0_api_fail_soft(
     """
     from hal0.api.routes import updater as u_mod
 
-    async def fake_apply(self: object, version: str | None = None) -> dict:
+    async def fake_apply(
+        self: object, version: str | None = None, *, restart_slots: bool = False
+    ) -> dict:
         return {"version": "0.0.9", "installed_at": time.time()}
 
     monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
@@ -443,7 +445,9 @@ def test_apply_success_restart_failure_is_fail_soft(
     """If the restart raises, the job is still 'applied' with a breadcrumb."""
     from hal0.api.routes import updater as u_mod
 
-    async def fake_apply(self: object, version: str | None = None) -> dict:
+    async def fake_apply(
+        self: object, version: str | None = None, *, restart_slots: bool = False
+    ) -> dict:
         return {"version": "0.0.9"}
 
     monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
@@ -482,7 +486,9 @@ def test_apply_target_strips_leading_v(
 
     seen: list[str | None] = []
 
-    async def fake_apply(self: object, version: str | None = None) -> dict:
+    async def fake_apply(
+        self: object, version: str | None = None, *, restart_slots: bool = False
+    ) -> dict:
         seen.append(version)
         return {"version": version or "latest"}
 
@@ -576,3 +582,104 @@ def test_commit_route_accepts_version(isolated_client: TestClient) -> None:
     assert body["phase"] == "commit"
     assert body["state"] == "queued"
     assert body["version"] == "0.0.1"
+
+
+# ── #1111: post-update drift surfacing + opt-in --restart-slots ────────────
+
+
+def test_commit_defaults_restart_slots_false_when_omitted(isolated_client: TestClient) -> None:
+    """Omitting restart_slots on /commit defaults to False — never implicitly True."""
+    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.1"})
+    assert r.status_code == 202, r.text
+    assert r.json()["restart_slots"] is False
+
+
+def test_commit_forwards_restart_slots_to_updater(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /commit with restart_slots=true threads it to Updater.commit()."""
+    from hal0.api.routes import updater as u_mod
+
+    seen: dict[str, object] = {}
+
+    async def fake_commit(self: object, version: str, *, restart_slots: bool = False) -> dict:
+        seen["version"] = version
+        seen["restart_slots"] = restart_slots
+        return {"version": version, "drifted_slots": ["chat"], "restarted_slots": ["chat"]}
+
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+    monkeypatch.setattr(u_mod.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+
+    r = isolated_client.post(
+        "/api/updates/commit", json={"version": "0.0.1", "restart_slots": True}
+    )
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("applied", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert seen == {"version": "0.0.1", "restart_slots": True}
+    assert final["state"] == "applied", final
+    assert final["drifted_slots"] == ["chat"]
+    assert final["restarted_slots"] == ["chat"]
+
+
+def test_commit_job_reports_drift_with_no_restart_by_default(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A default (restart_slots omitted) commit surfaces drift but restarted_slots is empty."""
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_commit(self: object, version: str, *, restart_slots: bool = False) -> dict:
+        assert restart_slots is False
+        return {"version": version, "drifted_slots": ["chat", "embed"], "restarted_slots": []}
+
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+    monkeypatch.setattr(u_mod.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+
+    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.1"})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("applied", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final["state"] == "applied", final
+    assert final["drifted_slots"] == ["chat", "embed"]
+    assert final["restarted_slots"] == []
+
+
+def test_drift_endpoint_reports_live_drifted_slots(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /api/updates/drift is a read-only, on-demand drift signal."""
+    from hal0.updater import updater as updater_mod
+
+    monkeypatch.setattr(updater_mod, "detect_drifted_slots", lambda **_k: ["chat"])
+
+    r = isolated_client.get("/api/updates/drift")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"drifted_slots": ["chat"], "count": 1}
+
+
+def test_drift_endpoint_empty_when_nothing_drifted(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No drifted slots -> a clear empty/zero response, not an error."""
+    from hal0.updater import updater as updater_mod
+
+    monkeypatch.setattr(updater_mod, "detect_drifted_slots", lambda **_k: [])
+
+    r = isolated_client.get("/api/updates/drift")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"drifted_slots": [], "count": 0}
