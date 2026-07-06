@@ -29,6 +29,7 @@ from hal0.cli._shared import (
     die,
 )
 from hal0.cli.agent_commands import app as agent_app
+from hal0.cli.app_commands import app as app_ext_app
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
@@ -65,6 +66,9 @@ app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
 app.add_typer(capabilities_app, name="capabilities")
 app.add_typer(agent_app, name="agent")
+# Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps
+# skipped via HAL0_SKIP_OPENWEBUI=1 at install time; Q9 skip/defer parity).
+app.add_typer(app_ext_app, name="app")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(registry_app, name="registry")
 # Issue #504 — ``hal0 mcp {list,status,install,uninstall,restart,catalog}``
