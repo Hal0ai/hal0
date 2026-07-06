@@ -20,12 +20,18 @@ from hal0.registry.pull import get_job, make_job
 
 @dataclass(frozen=True)
 class SlotSelection:
-    """One slot the user chose to provision."""
+    """One slot the user chose to provision.
 
-    capability: str  # "chat" | "coder"
-    slot_name: str  # "chat" | "coder"
+    ``model_id`` may be ``None`` (or empty) to provision an *empty scaffold*
+    slot: the device/profile/port structure is created but ``model.default`` is
+    left unset for the operator to fill in later (pick-free — we never choose a
+    model for them). A falsy ``model_id`` means no curated lookup and no pull.
+    """
+
+    capability: str  # "chat" | "coder" | "embed" | "rerank" | "stt" | "tts" | "vision" | "img"
+    slot_name: str
     port: int
-    model_id: str
+    model_id: str | None = None  # None/"" → scaffold an empty (modelless) slot
     device: str | None = None  # explicit override; None → derive from hw
     profile: str | None = None  # explicit override; None → derive from device
 
@@ -168,7 +174,7 @@ async def apply_setup(
     pulls: list[PullPlan] = []
 
     for s in selections.slots:
-        rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id)
+        rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id or "")
         device = s.device or derive_device(s.capability, hardware, npu_opt_in=selections.npu_opt_in)
         if device is None:
             rec.skipped = "not_applicable_on_this_hardware"
@@ -176,6 +182,24 @@ async def apply_setup(
             continue
         profile = s.profile or derive_profile(s.capability, device)
         rec.device, rec.profile = device, profile
+
+        # Empty scaffold: create the slot structure with no model default and
+        # no pull. The operator assigns a model later (pick-free).
+        if not s.model_id:
+            cfg = _build_slot_cfg(
+                slot=s.slot_name,
+                model_id="",
+                device=device,
+                profile=profile,
+                port=s.port,
+            )
+            try:
+                await slot_manager.create(s.slot_name, cfg)
+                rec.created = True
+            except Exception as exc:  # best-effort
+                rec.error = str(exc)
+            slot_outcomes.append(rec)
+            continue
 
         curated = get_curated(s.model_id)
         if curated is None:

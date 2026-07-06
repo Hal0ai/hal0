@@ -21,15 +21,24 @@ def test_api_reachable_false_on_connection_error(monkeypatch):
     assert _api_reachable(timeout=0.01) is False
 
 
-def test_auto_selections_pick_recommended_and_default_extensions():
+def test_auto_selections_scaffolds_capability_slots_empty():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
-    chat = next(s for s in sel.slots if s.slot_name == "chat")
-    assert chat.model_id  # a recommended model id was chosen
+    names = {s.slot_name for s in sel.slots}
+    # the capability slot STRUCTURE is scaffolded (device/profile/port), but no
+    # model is chosen — pick-free: slots yes, models no.
+    assert {"chat", "embed", "rerank", "stt", "tts", "vision"} <= names
+    assert all(s.model_id is None for s in sel.slots)  # every slot empty
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True
     assert sel.extensions["pi"] is False
-    # an agent is enabled by default → agent slot is seeded
-    assert any(s.slot_name == "coder" for s in sel.slots)
+    # an agent is enabled by default → coder slot is scaffolded too
+    assert "coder" in names
+
+
+def test_auto_selections_no_slots_seeds_nothing():
+    sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models", with_slots=False)
+    assert sel.slots == []
+    assert sel.comfyui_defaults == ()
 
 
 def test_auto_selections_no_extensions_disables_all_and_skips_agent_slot():

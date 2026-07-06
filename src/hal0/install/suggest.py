@@ -35,8 +35,12 @@ _CAP_MATCH: dict[str, tuple[str, ...]] = {
     "chat": ("chat",),
     "coder": ("coder", "chat"),
     "embed": ("embed",),
-    "stt": ("asr",),
+    "rerank": ("rerank",),
+    # Curated speech models carry capability "stt" (not "asr"); vision rides on
+    # chat models that ship an mmproj sidecar.
+    "stt": ("stt",),
     "tts": ("tts",),
+    "vision": ("chat",),
 }
 
 
