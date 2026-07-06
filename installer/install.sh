@@ -577,13 +577,67 @@ ${NETWORK_ENV_LINES}
 HAL0_MEMORY_ENABLED=1
 # HF_TOKEN — HuggingFace token for gated / large model pulls. Easiest path:
 # set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,
-# no-restart update. Or uncomment below and \`systemctl restart hal0-api\`.
+# no-restart update. If HF_TOKEN/HUGGING_FACE_HUB_TOKEN was present in the
+# installer's own environment it was already gathered and persisted to a
+# root-only secrets/ EnvironmentFile below (NOT here — api.env is 0644,
+# world-readable). Uncommenting below also works, but lands the token in
+# that world-readable file; prefer the secrets file or the dashboard.
+# \`systemctl restart hal0-api\` either way.
 # HF_TOKEN=
 # HAL0_TOOLBOX_IMAGE_VULKAN / HAL0_TOOLBOX_IMAGE_ROCM — optional overrides for
 # the per-backend container image refs used by providers/llama_server.py.
 # Unset = use the image pinned in the provider at release time.
 EOF
     info "wrote ${API_ENV}"
+fi
+
+# ── HF_TOKEN gather + persist (WS-D, #1106) ─────────────────────────────────
+# Gather: pre-fill from the installer's own env — HF_TOKEN first, falling
+# back to HUGGING_FACE_HUB_TOKEN — the same precedence already used by the
+# `hal0 setup` in-process apply path and the /api/install/* + /api/models
+# pull routes (#1094). install.sh is non-interactive (see the file header),
+# so there is no TTY prompt here; a headless `HF_TOKEN=hf_xxx sudo -E bash
+# install.sh` run IS the "prompt". No token in either var is a clean,
+# silent skip — public model pulls need none.
+HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+SECRETS_DIR="${VAR_DIR}/secrets"
+HF_SECRETS_ENV="${SECRETS_DIR}/hal0-api.env"
+if [[ -n "${HF_TOKEN_VAL}" ]]; then
+    # Optional `hf whoami` validation — warns on a bad/expired token but
+    # NEVER hard-fails the install (acceptance criterion). Guarded on the
+    # venv's `hf` console script (shipped by the huggingface-hub dependency,
+    # already installed by the "Python environment" step above) existing.
+    HF_CLI="${VENV_DIR}/bin/hf"
+    if [[ -x "${HF_CLI}" ]]; then
+        if HF_TOKEN="${HF_TOKEN_VAL}" "${HF_CLI}" auth whoami >/dev/null 2>&1; then
+            info "HuggingFace token validated (hf auth whoami)"
+        else
+            warn "hf auth whoami could not validate the HuggingFace token — continuing anyway (gated/large model pulls may fail until it's fixed)"
+        fi
+    fi
+
+    # Persist: root:root 0600, under secrets/ — NOT api.env (0644). Re-running
+    # install.sh with HF_TOKEN set rewrites this file (an explicit env var is
+    # an explicit rotate signal); with no token set, any existing file here is
+    # left untouched — never deleted just because the env var was omitted on
+    # a later run.
+    mkdir -p "${SECRETS_DIR}"
+    HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
+    cat > "${HF_SECRETS_TMP}" <<EOF
+# HuggingFace token for gated / large model pulls — gathered at install time
+# from HF_TOKEN / HUGGING_FACE_HUB_TOKEN. Root-only (0600); loaded by
+# hal0-api.service as an EnvironmentFile (see the "Systemd units" step).
+# Rotate by re-running install.sh with a new HF_TOKEN in env, or:
+#   sudo install -m 0600 -o root -g root /dev/stdin ${HF_SECRETS_ENV} <<<"HF_TOKEN=..."
+#   sudo systemctl restart hal0-api
+HF_TOKEN=${HF_TOKEN_VAL}
+EOF
+    chown root:root "${HF_SECRETS_TMP}" 2>/dev/null || true
+    chmod 0600 "${HF_SECRETS_TMP}"
+    mv -f "${HF_SECRETS_TMP}" "${HF_SECRETS_ENV}"
+    info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
+else
+    info "no HF_TOKEN / HUGGING_FACE_HUB_TOKEN in env — skipping (gated model pulls will need one later via the dashboard Settings -> Secrets tab, or rerun install.sh with HF_TOKEN set)"
 fi
 
 UPSTREAMS_TOML="${ETC_DIR}/upstreams.toml"
@@ -643,6 +697,10 @@ User=root
 UMask=0002
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
+# Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
+# on a fresh box with no token gathered at install time, and a missing
+# EnvironmentFile= target must not block the unit from starting.
+EnvironmentFile=-${HF_SECRETS_ENV}
 # No --host here (WS-C): the bind host comes from HAL0_BIND_HOST in the
 # EnvironmentFile above — the SAME var \`hal0 serve\` reads — so the unit
 # and the CLI can never disagree on the bind address.
