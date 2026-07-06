@@ -40,6 +40,14 @@ PANE_COPY: dict[str, PaneCopy] = {
         "Your NPU can run embeddings, speech-to-text, and text-to-speech in "
         "parallel — leaving the GPU for chat. Recommended when present.",
     ),
+    "npu_broken": PaneCopy(
+        "NPU needs attention",
+        "An NPU was detected but `flm validate` failed, so we're leaving it "
+        "off — enabling it would create slots that never start. Usual causes: "
+        "the amdxdna accel device isn't passed through to this container, or "
+        "libxrt-npu2 doesn't match the host driver. Fix the passthrough / "
+        "driver, then re-run `hal0 setup` to enable the NPU.",
+    ),
     "capabilities": PaneCopy(
         "Capability slots",
         "Wire up embeddings, rerank, speech, and vision. For each, pick a "

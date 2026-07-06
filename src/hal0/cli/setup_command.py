@@ -18,6 +18,7 @@ from hal0.config.schema import HardwareInfo
 from hal0.hardware.probe import HardwareProbe, HardwareProbeError
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
+from hal0.install.profile_derive import npu_healthy
 
 #: capability → (slot_name, port) for the slots first-run provisions. Mirrors
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
@@ -135,7 +136,10 @@ def build_auto_selections(
         storage_dir=storage_dir,
         slots=slots,
         extensions=ext,
-        npu_opt_in=bool(hw.npu.present),
+        # NPU routing on ONLY when present AND healthy (#1109): a present-but-
+        # broken NPU (npu.validated False/None) must not auto-advertise a lane
+        # apply_setup would skip. Same single npu_opt_in the picker + apply use.
+        npu_opt_in=npu_healthy(hw),
         comfyui_defaults=comfyui_defaults,
     )
 

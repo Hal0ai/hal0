@@ -17,6 +17,7 @@ from hal0.cli.setup_copy import PANE_COPY
 from hal0.config.schema import HardwareInfo
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
+from hal0.install.profile_derive import npu_healthy
 from hal0.install.suggest import suggest_models
 
 _con = Console()
@@ -91,10 +92,16 @@ def _any_agent(extensions: dict) -> bool:
     )
 
 
-def plan_steps(*, extensions: dict, npu_present: bool) -> list[str]:
+def plan_steps(*, extensions: dict, npu_present: bool, npu_ok: bool = False) -> list[str]:
     """Ordered list of step keys to show, gated on extension picks (spec §6.3).
     Main shows whenever OWUI OR any agent is enabled; Agent shows iff any agent
-    is enabled; NPU shows iff hardware present."""
+    is enabled.
+
+    NPU gating (WS-F / #1109): the ``npu`` enable offer shows ONLY when the NPU
+    is present AND healthy (``npu_ok`` — the #1097 ``npu.validated`` fact via
+    :func:`~hal0.install.profile_derive.npu_healthy`). A present-but-broken NPU
+    gets the ``npu_broken`` remedy step instead of the enable offer, so we never
+    advertise an NPU lane the operator can't actually use."""
     steps = ["welcome", "storage", "extensions"]
     needs_main = bool(extensions.get("openwebui")) or _any_agent(extensions)
     if needs_main:
@@ -102,7 +109,7 @@ def plan_steps(*, extensions: dict, npu_present: bool) -> list[str]:
     if _any_agent(extensions):
         steps.append("agent")
     if npu_present:
-        steps.append("npu")
+        steps.append("npu" if npu_ok else "npu_broken")
     # Capability slots (embed/rerank/stt/tts/vision) are always offered — they
     # don't depend on a chat consumer.
     steps.append("capabilities")
@@ -137,11 +144,17 @@ def _provision_body(slot_name, suggestions) -> RenderableType:
     )
 
 
-def _provision_slot(step_key, capability, hw, slot_name, port, *, prefer_coder=False):
+def _provision_slot(
+    step_key, capability, hw, slot_name, port, *, prefer_coder=False, npu_opt_in=False
+):
     """Guide the operator through one slot: pick a fitting model, scaffold the
     slot empty (``model_id=None``), or skip it. Returns a ``SlotSelection`` or
-    ``None`` to skip. Never auto-selects a model on the operator's behalf."""
-    sugg = suggest_models(capability, hw, limit=3, prefer_coder=prefer_coder)
+    ``None`` to skip. Never auto-selects a model on the operator's behalf.
+
+    ``npu_opt_in`` is passed straight through to :func:`suggest_models` so the
+    advertised ``device`` matches the lane ``apply_setup`` will use (e.g. the
+    NPU-only ``stt`` slot only shows an NPU device once the operator opted in)."""
+    sugg = suggest_models(capability, hw, limit=3, prefer_coder=prefer_coder, npu_opt_in=npu_opt_in)
     _draw(step_key, _provision_body(slot_name, sugg), hw)
     choices = [str(i + 1) for i in range(len(sugg))] + ["s", "x"]
     # Default to the recommended pick when one fits; otherwise to "scaffold".
@@ -195,7 +208,7 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
     state = {e.id: e.default_enabled for e in EXTENSIONS}
     _toggle_extensions(state, hw)
 
-    steps = plan_steps(extensions=state, npu_present=bool(hw.npu.present))
+    steps = plan_steps(extensions=state, npu_present=bool(hw.npu.present), npu_ok=npu_healthy(hw))
     slots: list[SlotSelection] = []
     if "main" in steps:
         name, port = _SETUP_SLOTS["chat"]
@@ -209,8 +222,22 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
             slots.append(s)
     npu_opt_in = False
     if "npu" in steps:
+        # Present + healthy: offer to route the NPU trio.
         _draw("npu", "Run embed + STT + TTS on the NPU?", hw)
         npu_opt_in = Confirm.ask("Enable NPU trio?", default=True)
+    elif "npu_broken" in steps:
+        # Present but NOT healthy (npu.validated is False/None): show the remedy,
+        # never the enable offer — apply_setup would skip an NPU lane here.
+        _draw(
+            "npu_broken",
+            Text(
+                "NPU detected but functional validation failed — leaving it off. "
+                "See the remedy on the right, then re-run `hal0 setup` once it validates.",
+                style="yellow",
+            ),
+            hw,
+        )
+        Prompt.ask("Press Enter to continue", default="")
     if "capabilities" in steps:
         # STT is NPU-only (derive_device returns None without an NPU), so only
         # offer it when the NPU trio is on.
@@ -219,7 +246,7 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
             caps.insert(2, "stt")
         for cap in caps:
             name, port = _SETUP_SLOTS[cap]
-            s = _provision_slot("capabilities", cap, hw, name, port)
+            s = _provision_slot("capabilities", cap, hw, name, port, npu_opt_in=npu_opt_in)
             if s:
                 slots.append(s)
 

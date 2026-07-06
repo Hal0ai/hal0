@@ -28,6 +28,7 @@ import yaml
 from hal0.config.schema import HardwareInfo
 from hal0.install.extensions import EXTENSIONS
 from hal0.install.orchestrate import Selections, SlotSelection
+from hal0.install.profile_derive import npu_healthy
 from hal0.install.suggest import suggest_models
 
 #: Top-level keys this loader recognizes at all (wired or not-yet-wired).
@@ -195,7 +196,10 @@ def _resolve_npu_opt_in(doc: dict[str, Any], hw: HardwareInfo) -> bool:
         raise AnswersError("npu must be a mapping")
     opt_in = npu.get("opt_in", "auto")
     if opt_in == "auto":
-        return bool(hw.npu.present)
+        # `auto` resolves to present-AND-healthy (#1109): the same single
+        # npu_opt_in the picker + apply use, so an unvalidated / broken NPU
+        # (npu.validated False/None) never auto-advertises a lane apply skips.
+        return npu_healthy(hw)
     if isinstance(opt_in, bool):
         return opt_in
     raise AnswersError(f"npu.opt_in must be true, false, or 'auto', got {opt_in!r}")
