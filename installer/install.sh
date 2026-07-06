@@ -274,6 +274,52 @@ HAL0_VENV_REQUIRED=1 preflight_venv \
 HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
     || die "no container runtime — install podman (see above), then re-run install.sh"
 
+# ── GPU / NPU device gate (WS-B, #1104) ─────────────────────────────────────
+# preflight_gpu detects GPU/NPU device visibility and, inside an LXC, whether
+# the render node's gid maps to a real group. In `hal0 doctor` it is
+# advisory-only; run here in GATE mode (HAL0_GPU_GATE=1) it returns a code we
+# smart-block on, so a box with broken Proxmox passthrough never installs
+# "successfully" and then silently runs every slot CPU-only:
+#   HAL0_GPU_RC_BROKEN_GID → devices visible but the render gid maps to no group
+#     inside this container (the #1 broken-install shape). HARD STOP with the
+#     dev0 remedy preflight_gpu just printed; the operator fixes the host dev0
+#     line and re-runs.
+#   HAL0_GPU_RC_NO_DEVICE  → no GPU devices inside an LXC. Allow an EXPLICIT
+#     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1, or a y/N confirm on a real TTY;
+#     otherwise stop with the passthrough remedy.
+#   0 → GPU present + wired, or a genuine bare-metal CPU box: proceed silently.
+# Skipped in dev mode (no system slots there). This block is self-contained so
+# later install.sh edits merge around it cleanly.
+_confirm_cpu_only() {
+    # y/N confirm read from the controlling terminal, so it works even when
+    # stdin is the piped install script (`curl … | bash`). Default No; any
+    # read failure (no TTY) also means No.
+    local reply=""
+    printf '%s' "Continue with a CPU-only install anyway? [y/N] " >/dev/tty 2>/dev/null || return 1
+    IFS= read -r reply </dev/tty 2>/dev/null || return 1
+    [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    gpu_rc=0
+    HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
+    if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
+        err "GPU passthrough is broken: the render device is visible but its gid maps to no group in this container."
+        err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
+        exit 1
+    elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
+        if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
+            warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
+        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+            warn "Proceeding with a CPU-only install (confirmed at the prompt)."
+        else
+            err "No GPU devices inside this container. Forward them from the Proxmox host (remedy above), then re-run install.sh."
+            err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+            exit 1
+        fi
+    fi
+fi
+
 # The Hindsight memory engine (installed much later) builds its own venv and
 # pulls litellm, which gates out Python 3.14 via requires-python metadata.
 # Resolve the interpreter for that venv NOW — auto-installing a compatible

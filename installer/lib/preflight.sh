@@ -25,10 +25,17 @@
 #                                slot dead ("no container runtime found").
 #                                `preflight_docker` is a back-compat alias.
 #   preflight_gpu              — GPU/NPU device nodes visible + group wiring
-#                                sane. Soft (always returns 0; CPU-only is a
-#                                valid install) but prints the exact Proxmox
-#                                LXC dev0/gid fix when devices are missing
-#                                inside a container.
+#                                sane. Soft by default (always returns 0;
+#                                CPU-only is a valid install) but prints the
+#                                exact Proxmox LXC dev0/gid fix when devices
+#                                are missing or mis-mapped inside a container.
+#                                Set HAL0_GPU_GATE=1 to flip it into the
+#                                install-time GATE: same detection + messages,
+#                                but the return code classifies the platform so
+#                                install.sh can smart-block a broken passthrough
+#                                (HAL0_GPU_RC_BROKEN_GID / HAL0_GPU_RC_NO_DEVICE)
+#                                instead of installing "successfully" and then
+#                                silently running CPU-only.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #   preflight_all              — run all of the above; aggregate non-zero
@@ -46,6 +53,10 @@
 #                        manager) and hard-fails (returns non-zero) when it
 #                        can't. Default empty → soft mode for `hal0 doctor`.
 #                        Legacy HAL0_DOCKER_REQUIRED is still honoured.
+#   HAL0_GPU_GATE      — when "1", preflight_gpu returns a classification code
+#                        (see HAL0_GPU_RC_*) instead of always 0, so install.sh
+#                        can smart-block a broken LXC passthrough. Default 0 →
+#                        soft/advisory mode for `hal0 doctor`.
 
 # shellcheck shell=bash
 
@@ -459,24 +470,48 @@ preflight_podman_forward() {
     return 0
 }
 
-# GPU / NPU device visibility. Soft check (always returns 0): CPU-only
-# installs are valid, but a Proxmox LXC with the GPU forwarded wrong is the
-# single most common broken-install shape — so when devices are missing or
-# their group wiring is off, print the exact host-side fix instead of a
-# generic warning. See docs/guides/proxmox.md for the full walkthrough.
+# GPU / NPU device visibility.
+#
+# Two modes, selected by HAL0_GPU_GATE:
+#   unset / 0 (default — `hal0 doctor`, preflight_all): SOFT. Always returns 0;
+#     prints device visibility + the Proxmox LXC dev0/gid remedy as advisories
+#     so the full report never aborts.
+#   1 (install.sh Stage-1 gate, #1104): GATED. Identical detection + messages,
+#     but the return code classifies the platform so install.sh can smart-block
+#     the single most common broken-install shape — a Proxmox LXC with the GPU
+#     forwarded but the render-node gid mis-mapped, which otherwise installs
+#     "successfully" and then silently runs every slot CPU-only:
+#       0                         → GPU present + wired, or a genuine bare-metal
+#                                    CPU box: proceed.
+#       HAL0_GPU_RC_BROKEN_GID(3) → render device visible but its gid maps to
+#                                    NO group inside this LXC (dev0 miswire):
+#                                    caller HARD STOPS with the printed remedy.
+#       HAL0_GPU_RC_NO_DEVICE(4)  → no GPU devices inside an LXC: caller allows
+#                                    an EXPLICIT CPU-only opt-in.
+# Test seams (only consulted here, never set in production): HAL0_GPU_DRI_GLOB,
+# HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE.
+# See docs/guides/proxmox.md for the full walkthrough.
+HAL0_GPU_RC_BROKEN_GID=3
+HAL0_GPU_RC_NO_DEVICE=4
 preflight_gpu() {
+    local gate="${HAL0_GPU_GATE:-0}"
+
     local in_container=""
     if [[ -f /run/systemd/container ]] || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
         in_container="lxc"
     fi
+    # Test seam: force the container classification (unit tests can't fake
+    # /proc/1/environ). Never set in production.
+    [[ -n "${HAL0_GPU_CONTAINER_OVERRIDE:-}" ]] && in_container="${HAL0_GPU_CONTAINER_OVERRIDE}"
 
+    local dri_glob="${HAL0_GPU_DRI_GLOB:-/dev/dri/renderD*}"
     local have_render="" have_kfd="" have_accel=""
-    compgen -G "/dev/dri/renderD*" >/dev/null 2>&1 && have_render=1
+    compgen -G "${dri_glob}" >/dev/null 2>&1 && have_render=1
     [[ -e /dev/kfd ]] && have_kfd=1
     [[ -e /dev/accel/accel0 ]] && have_accel=1
 
     if [[ -n "${have_render}" ]]; then
-        info "gpu: $(ls /dev/dri/renderD* 2>/dev/null | tr '\n' ' ')present"
+        info "gpu: $(compgen -G "${dri_glob}" 2>/dev/null | tr '\n' ' ')present"
     fi
     [[ -n "${have_kfd}"   ]] && info "gpu: /dev/kfd present (ROCm compute)"
     [[ -n "${have_accel}" ]] && info "npu: /dev/accel/accel0 present (AMD XDNA)"
@@ -489,10 +524,13 @@ preflight_gpu() {
             warn "    dev1: /dev/kfd                    # ROCm compute (optional)"
             warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
             warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: docs/guides/proxmox.md"
+            # Gated install: no devices in an LXC is the opt-in CPU-only case.
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
         else
             warn "gpu: no /dev/dri/renderD* — no GPU driver bound (CPU-only install?)"
             warn "  AMD: check 'lspci -nnk' shows 'Kernel driver in use: amdgpu'; very new"
             warn "  silicon (Strix Halo) needs kernel >= 6.14 + current firmware."
+            # Bare-metal CPU box → proceed silently even when gated.
         fi
         return 0
     fi
@@ -502,9 +540,9 @@ preflight_gpu() {
     # a dev0 entry with the HOST's gid leaves the node owned by an unmapped
     # gid inside the container — userspace then gets Permission denied.
     local node gid grpname
-    node="$(ls /dev/dri/renderD* 2>/dev/null | head -1)"
+    node="$(compgen -G "${dri_glob}" 2>/dev/null | head -1)"
     if [[ -n "${node}" ]]; then
-        gid="$(stat -c '%g' "${node}" 2>/dev/null)"
+        gid="${HAL0_GPU_RENDER_GID_OVERRIDE:-$(stat -c '%g' "${node}" 2>/dev/null)}"
         grpname="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)"
         if [[ -z "${grpname}" ]]; then
             warn "gpu: ${node} is owned by gid ${gid}, which maps to NO group in this container"
@@ -513,6 +551,9 @@ preflight_gpu() {
                 want_gid="$(getent group render 2>/dev/null | cut -d: -f3)"
                 warn "  Fix on the Proxmox host: dev0: ${node},gid=${want_gid:-<render gid>}"
                 warn "  (gid= must be the group id INSIDE the container, not the host's)"
+                # Gated install: devices present but a mis-mapped gid → silent
+                # CPU-only fallback. This is the #1 broken-install shape.
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             fi
         else
             info "gpu: ${node} → group ${grpname} (gid ${gid})"
