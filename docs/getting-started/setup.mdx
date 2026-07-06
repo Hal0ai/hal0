@@ -17,12 +17,14 @@ hal0 setup
 ```
 
 <Aside type="note">
-The installer runs `hal0 setup --auto --no-pull --no-extensions` to seed the
-hardware-recommended slot and write the first-run sentinel
-(`/var/lib/hal0/.first_run_done`) **non-destructively** — only slots whose
-config is absent. Re-running `hal0 setup` interactively afterwards lets you
-pull models and enable extensions. The web dashboard no longer hosts a
-first-run picker; it shows a banner pointing you at the terminal.
+The installer runs `hal0 setup --auto --no-pull --no-slots --no-extensions`
+to write the first-run sentinel (`/var/lib/hal0/.first_run_done`) and wiring
+only — it seeds **no model slots** and downloads nothing. A fresh box boots
+with no model configured; you pick your first one afterwards. Re-running
+`hal0 setup` interactively (**non-destructively** — it never overwrites an
+existing slot config) is where you choose models and enable extensions. The
+web dashboard no longer hosts a first-run picker; it shows a banner pointing
+you at the terminal.
 </Aside>
 
 ## The flow
