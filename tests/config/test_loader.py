@@ -285,9 +285,7 @@ class TestSlotConfigRoundTrip:
     def test_load_flat_slot_toml_infers_name_from_filename(self, tmp_hal0_home: str) -> None:
         """A flat TOML omitting `name` still names the slot from its stem."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
-        (paths.slots_config_dir() / "embed.toml").write_text(
-            "port = 8082\n" 'profile = "embed-cpu"\n'
-        )
+        (paths.slots_config_dir() / "embed.toml").write_text('port = 8082\nprofile = "embed-cpu"\n')
         cfg = load_slot_config("embed")
         assert cfg.name == "embed"
         assert cfg.port == 8082
