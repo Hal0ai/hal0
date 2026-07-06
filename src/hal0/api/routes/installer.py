@@ -13,8 +13,9 @@ Endpoints:
     POST /api/install/complete — marker call after the wizard finishes;
                                  writes ``/var/lib/hal0/.first_run_done``
                                  so subsequent boots skip the wizard.
-                                 Idempotent alongside the apply endpoints
-                                 below, which also write the sentinel.
+                                 First-run-only alongside the apply
+                                 endpoints below, which also write the
+                                 sentinel.
 
 The curated-models picker feeds into POST /apply and POST /apply-selections
 for multi-slot orchestrated install (design D3/D6). Both converge on the
@@ -22,6 +23,19 @@ same :func:`_apply_selections_core` provisioning path and both write the
 first-run sentinel on success (WS-I, issue #1101) — a UI or answer-file
 install no longer depends on an explicit ``POST /complete`` to flip
 ``first_run``.
+
+Closing the surface (WS-C, issue #1105): ADR-0012 removed auth from
+``/api/install/*``, so on a LAN-bound box anyone reaching the port could
+otherwise re-trigger provisioning indefinitely. Once the first-run
+sentinel exists, the three *provisioning* endpoints — ``POST /apply``,
+``POST /apply-selections``, ``POST /complete`` — refuse with 409
+``install.closed`` (see :func:`_require_install_open`) instead of
+re-running. ``GET /state`` stays readable forever so the dashboard can
+always confirm ``first_run: false``, and the day-2 tools that happen to
+live on this router (``POST /probe``, ``PUT /slots/{name}/model``,
+``GET /curated-models``, ``GET /services``, ``POST /services/{unit}/repair``)
+stay open — they're legitimate post-setup operations, not re-provisioning
+(``hal0 model swap`` persists through the slots endpoint long after setup).
 """
 
 from __future__ import annotations
@@ -38,7 +52,7 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Request
 
-from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.bundles import tiers as bundle_tiers
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
@@ -84,9 +98,44 @@ class SlotTomlNotFound(Hal0Error):
 _DEFAULT_SLOT = "agent"
 
 
+class InstallClosed(Conflict):
+    """409 — a first-run-only install endpoint refused post-setup.
+
+    ADR-0012 removed auth from ``/api/install/*``, so on a LAN-bound box
+    anyone reaching the port could otherwise re-run the provisioning
+    endpoints (rewrite slots, re-dispatch pulls) long after first-run
+    setup finished (issue #1105, WS-C). Once the first-run sentinel
+    exists, the mutating provisioning endpoints (``/apply``,
+    ``/apply-selections``, ``/complete``) refuse instead of re-running.
+    """
+
+    code = "install.closed"
+    status = 409
+
+
 def _first_run_sentinel() -> Path:
     """Path to the marker file written after the FirstRun wizard finishes."""
     return paths.var_lib() / ".first_run_done"
+
+
+def _require_install_open() -> None:
+    """Raise :class:`InstallClosed` if the first-run sentinel is already set.
+
+    Guards the first-run-only *provisioning* endpoints (``/apply``,
+    ``/apply-selections``, ``/complete``) — not the whole ``/api/install``
+    surface. ``GET /state`` stays readable forever (the dashboard needs it
+    to confirm ``first_run: false``), and day-2 endpoints that happen to
+    live under this router (``/probe``, ``PUT /slots/{name}/model``,
+    ``/curated-models``, ``/services*``) are legitimate post-setup tools —
+    ``hal0 model swap`` in particular persists through the slots endpoint
+    long after setup completes — so they are intentionally left open.
+    """
+    sentinel = _first_run_sentinel()
+    if sentinel.exists():
+        raise InstallClosed(
+            "first-run setup already completed; this endpoint is closed",
+            details={"sentinel_path": str(sentinel)},
+        )
 
 
 def _models_dir_populated() -> bool:
@@ -205,8 +254,13 @@ async def install_complete(request: Request) -> dict[str, Any]:
     """Mark the FirstRun wizard as complete by writing the sentinel.
 
     Atomic: tempfile + os.replace in the parent directory so a partial
-    write can't leave a half-written marker. Idempotent — re-calling
-    after the sentinel already exists is a no-op.
+    write can't leave a half-written marker.
+
+    First-run-only (WS-C, issue #1105): once the sentinel already exists
+    this refuses with 409 ``install.closed`` instead of re-writing it —
+    a re-run after setup is a safe, typed refusal rather than a silent
+    no-op or a crash. ``GET /state`` remains the read-only source of
+    truth for ``first_run`` regardless.
 
     Also consumes the ``.first-run.lock`` file. The lockfile already
     disappears on a successful POST /api/auth/password, but operators
@@ -216,6 +270,7 @@ async def install_complete(request: Request) -> dict[str, Any]:
     pass-through on wizard writer routes would survive. Consuming
     here closes that window the moment the wizard signals completion.
     """
+    _require_install_open()
     sentinel = _first_run_sentinel()
     sentinel.parent.mkdir(parents=True, exist_ok=True)
 
@@ -360,6 +415,11 @@ async def _apply_selections_core(
     oscillating on the ``has_models`` heuristic alone for any client that
     never called ``/complete``. ``mark_first_run_done`` is idempotent, so a
     later ``/complete`` call (the wizard still makes one) is a harmless no-op.
+
+    First-run-only (WS-C, issue #1105): both callers guard with
+    :func:`_require_install_open` before parsing their body, so a closed
+    install refuses fast — no tier/selections validation, no probing, no
+    provisioning — once the sentinel is set.
     """
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     result = await apply_setup(
@@ -392,7 +452,11 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
     shared provisioning path (WS-I, issue #1101). Best-effort, non-aborting
     per row (ADR-0010). The UI reattaches per model via the existing
     ``/api/models/{id}/pull/stream`` SSE.
+
+    First-run-only (WS-C, issue #1105): refuses with 409 ``install.closed``
+    once the first-run sentinel exists — see :func:`_require_install_open`.
     """
+    _require_install_open()
     try:
         body = await request.json()
     except Exception as exc:
@@ -432,7 +496,12 @@ async def install_apply_selections(request: Request, background: BackgroundTasks
     provisions exactly the chosen slots (no tier manifest expansion). Used by
     the `hal0 setup` TUI's API-up branch (roster coherence — the running
     service registers the slots itself) and by ``/apply``'s tier adapter,
-    via the shared :func:`_apply_selections_core`."""
+    via the shared :func:`_apply_selections_core`.
+
+    First-run-only (WS-C, issue #1105): refuses with 409 ``install.closed``
+    once the first-run sentinel exists — see :func:`_require_install_open`.
+    """
+    _require_install_open()
     try:
         body = await request.json()
     except Exception as exc:
