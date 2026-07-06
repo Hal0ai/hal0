@@ -9,14 +9,15 @@ from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.install.answers import AnswersError, load_answers
 
 
-def _hw(ram_gb=96, npu_present=True):
+def _hw(ram_gb=96, npu_present=True, npu_validated=True):
     return HardwareInfo(
         platform="strix-halo",
         ram_mb=ram_gb * 1024,
         ram_available_mb=ram_gb * 1024,
         unified_memory_mb=ram_gb * 1024,
         gpus=[GPUInfo(vendor="amd", vram_mb=512, compute_capable=True, vulkan_capable=True)],
-        npu=NPUInfo(present=npu_present),
+        # Default fixture is a present-AND-healthy NPU (#1109 auto → opt-in True).
+        npu=NPUInfo(present=npu_present, validated=npu_validated if npu_present else None),
     )
 
 
@@ -317,3 +318,34 @@ def test_npu_opt_in_explicit_bool_passes_through(tmp_path):
     # even on a box without an NPU, explicit true passes through unchanged.
     sel = load_answers(path, _hw(npu_present=False))
     assert sel.npu_opt_in is True
+
+
+_AUTO_NPU = """
+version: 1
+model_store: { path: /var/lib/hal0/models }
+slots: []
+npu: { opt_in: auto }
+gen: { mode: off }
+apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+"""
+
+
+def test_npu_opt_in_auto_resolves_present_and_healthy(tmp_path):
+    # `auto` on a present + validated NPU → opt-in True (#1109).
+    path = _write(tmp_path, _AUTO_NPU)
+    sel = load_answers(path, _hw(npu_present=True, npu_validated=True))
+    assert sel.npu_opt_in is True
+
+
+def test_npu_opt_in_auto_off_when_present_but_broken(tmp_path):
+    # `auto` on a present-but-BROKEN NPU (validated False) → opt-in False: never
+    # auto-advertise a lane apply_setup would skip (#1109).
+    path = _write(tmp_path, _AUTO_NPU)
+    sel = load_answers(path, _hw(npu_present=True, npu_validated=False))
+    assert sel.npu_opt_in is False
+
+
+def test_npu_opt_in_auto_off_when_absent(tmp_path):
+    path = _write(tmp_path, _AUTO_NPU)
+    sel = load_answers(path, _hw(npu_present=False))
+    assert sel.npu_opt_in is False

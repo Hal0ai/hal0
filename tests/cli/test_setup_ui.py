@@ -123,3 +123,20 @@ def test_nothing_consuming_chat_hides_main():
 def test_no_npu_skips_npu_step():
     steps = plan_steps(extensions={"openwebui": True}, npu_present=False)
     assert "npu" not in steps
+    assert "npu_broken" not in steps
+
+
+def test_present_and_healthy_npu_shows_enable_offer():
+    # present + healthy → the "npu" enable offer, NOT the remedy (#1109).
+    steps = plan_steps(extensions={"openwebui": True}, npu_present=True, npu_ok=True)
+    assert "npu" in steps and "npu_broken" not in steps
+
+
+def test_present_but_broken_npu_shows_remedy_not_offer():
+    # present but NOT healthy → the "npu_broken" remedy, never the enable offer.
+    steps = plan_steps(extensions={"openwebui": True}, npu_present=True, npu_ok=False)
+    assert "npu_broken" in steps and "npu" not in steps
+
+
+def test_pane_copy_has_npu_broken_remedy():
+    assert "npu_broken" in PANE_COPY and PANE_COPY["npu_broken"].body

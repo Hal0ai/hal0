@@ -61,3 +61,14 @@ def test_stt_suggestions_use_stt_capability():
 def test_embed_suggestions_returned():
     out = suggest_models("embed", _hw(96), limit=3)
     assert out and all(s.capability == "embed" for s in out)
+
+
+def test_npu_opt_in_threads_into_advertised_device():
+    # STT is NPU-only. With npu_opt_in=True the picker advertises the NPU lane;
+    # with the default (False) it advertises NO device — the SAME value apply
+    # uses, so the picker never advertises a lane apply_setup would skip (#1109).
+    hw = _hw(96, npu=True)
+    on = suggest_models("stt", hw, limit=3, npu_opt_in=True)
+    assert on and all(s.device == "npu" and s.profile == "flm" for s in on)
+    off = suggest_models("stt", hw, limit=3)  # default npu_opt_in=False
+    assert off and all(s.device is None and s.profile is None for s in off)
