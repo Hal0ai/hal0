@@ -33,7 +33,7 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
-from hal0.model_meta import device_to_backend, is_resolvable
+from hal0.model_meta import is_resolvable
 from hal0.slot_view import (
     SlotViewAggregator,
     config_enrichment,
@@ -42,7 +42,7 @@ from hal0.slot_view import (
     serialize_slot,
     synthesize_upstream_entries,
 )
-from hal0.slots.manager import Slot, SlotManager, _cfg_effective_backend
+from hal0.slots.manager import Slot, SlotManager
 
 # Auth was removed in ADR-0012. All routes are open on the local network.
 
@@ -1075,196 +1075,6 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
         snap = await sm.update_config(name, {"model": body})
         _rec.after = {"model": body}
     return _slot_to_dict(snap, request)
-
-
-def _selectable_backend_devices() -> dict[str, str | None]:
-    """Selectable backend token → SlotConfig ``device`` enum for the TOML.
-
-    Derived from the single schema map (``config.schema.BACKEND_TO_DEVICE``)
-    rather than a duplicated literal, so the two can't drift; only the
-    ``auto`` → ``None`` entry (clear the device so the load path falls back
-    to its default) is endpoint-local. flm/npu are not selectable through
-    this control (they require a recipe/profile switch, not a device flip).
-    """
-    from hal0.config.schema import BACKEND_TO_DEVICE
-
-    return {
-        "rocm": BACKEND_TO_DEVICE["rocm"],
-        "vulkan": BACKEND_TO_DEVICE["vulkan"],
-        "cpu": BACKEND_TO_DEVICE["cpu"],
-        "auto": None,
-    }
-
-
-def _normalize_backend_token(raw: str) -> str:
-    """Normalize a backend/device request token to rocm|vulkan|cpu|auto|flm|npu.
-
-    Accepts the gpu- device forms and folds them onto the backend token so
-    the endpoint accepts both ``{"backend":"vulkan"}`` and
-    ``{"device":"gpu-vulkan"}``.
-    """
-    t = raw.strip().lower()
-    if t == "gpu-rocm":
-        return "rocm"
-    if t == "gpu-vulkan":
-        return "vulkan"
-    return t
-
-
-@router.post("/{name}/backend")
-async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
-    """Switch a slot's runtime backend (ADR-0022 control endpoint).
-
-    Body: ``{"backend": "rocm"|"vulkan"|"cpu"|"auto"}``. The alias key
-    ``device`` is also accepted and ``gpu-rocm``/``gpu-vulkan`` normalize to
-    ``rocm``/``vulkan``.
-
-    Effect: writes the slot's ``device`` field to TOML via
-    ``update_config`` (which auto-refreshes the mirrored ``extra.backend``);
-    if the slot is currently loaded it is restarted so the model reloads
-    under the new backend. Idempotent — when the requested backend already
-    equals the declared device (and, when loaded, the effective backend) it
-    is a no-op with ``reloaded: false``.
-
-    Validation: ``rocm``/``vulkan``/``cpu``/``auto`` are valid (backend
-    builds ship inside the container images — a missing image surfaces as
-    ``image_status="missing"`` on the slot card and pulls on demand, so
-    there is no host-side build-presence check); ``flm``/``npu`` → 400
-    ``backend.not_selectable``.
-
-    Response 200: the standard ``_slot_to_dict`` payload plus the ADR-0022
-    declared/effective snapshot — ``requested_backend`` /
-    ``declared_backend`` / ``effective_backend`` / ``device`` / ``profile``
-    / ``reloaded``. ``actual_backend`` is kept for wire back-compat
-    (ui useSlots.ts) and carries the same EFFECTIVE backend token, derived
-    from the post-write config (device → backend via the single
-    ``_cfg_effective_backend`` mapping); per-process introspection was
-    retired with the legacy runtime (#663 — the running image is the
-    backend-of-record, surfaced as ``actual_image``).
-    """
-    sm = _get_slot_manager(request)
-    try:
-        body = await request.json()
-    except Exception as exc:
-        raise BadRequest(
-            "request body must be valid JSON",
-            details={"error": str(exc)},
-            code="request.invalid_json",
-        ) from exc
-    if not isinstance(body, dict):
-        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    # Accept either ``backend`` or the alias ``device``.
-    raw = body.get("backend")
-    if not isinstance(raw, str) or not raw.strip():
-        raw = body.get("device")
-    if not isinstance(raw, str) or not raw.strip():
-        raise BadRequest(
-            "'backend' (or 'device') is required in request body",
-            code="backend.missing",
-        )
-
-    backend = _normalize_backend_token(raw)
-
-    # flm/npu are not selectable via this control — they need a recipe
-    # switch, not a llamacpp_backend flip.
-    if backend in ("flm", "npu"):
-        raise BadRequest(
-            f"backend {backend!r} is not selectable via this endpoint "
-            "(NPU/FLM requires a recipe change, not a backend flip)",
-            code="backend.not_selectable",
-        )
-    backend_to_device = _selectable_backend_devices()
-    if backend not in backend_to_device:
-        raise BadRequest(
-            f"backend {backend!r} is not recognised; choose from rocm|vulkan|cpu|auto",
-            code="backend.not_selectable",
-        )
-
-    target_device = backend_to_device[backend]
-
-    # Determine current declared device + whether the slot is loaded, so we
-    # can short-circuit an idempotent no-op and decide whether to restart.
-    cfg = await sm.get_config(name)
-    current_device = (cfg.get("device") if isinstance(cfg, dict) else None) or ""
-    # Normalized declared backend for the CURRENT device (for the response +
-    # the idempotency comparison).
-    _recipe, _llamacpp = device_to_backend(current_device)
-    current_declared = _llamacpp or (_recipe if _recipe == "flm" else None)
-    # EFFECTIVE backend for the current config: device-derived (with the
-    # legacy ``backend``-field fallback) via the single shared mapping —
-    # what the container will actually run under. This fills the ADR-0022
-    # declared/actual contract honestly instead of a hardcoded None.
-    current_effective = _cfg_effective_backend(cfg) if isinstance(cfg, dict) else None
-
-    # Is the slot currently loaded? Container truth is the slot's
-    # lifecycle state; per-process backend introspection retired with the
-    # legacy runtime (#663: the running image is the backend-of-record,
-    # surfaced as ``actual_image`` on the slot card).
-    try:
-        is_loaded = bool(sm.is_ready_for_dispatch(name))
-    except Exception:
-        is_loaded = False
-
-    # Idempotency: the requested backend already equals the declared device,
-    # AND (when loaded) the effective backend already matches → no-op.
-    # ``auto`` has no requested token to compare, so declared-match decides.
-    requested_declared = device_to_backend(target_device)[1] if target_device else None
-    already_declared = current_device == (target_device or "")
-    already_effective = (
-        (not is_loaded) or (requested_declared is None) or (current_effective == requested_declared)
-    )
-    if already_declared and already_effective:
-        snap = await sm.status(name)
-        out = _slot_to_dict(snap, request)
-        out["requested_backend"] = backend
-        out["declared_backend"] = current_declared
-        out["effective_backend"] = current_effective
-        # Back-compat alias — carries the effective value now (see docstring).
-        out["actual_backend"] = current_effective
-        out["device"] = current_device or None
-        out["profile"] = cfg.get("profile") if isinstance(cfg, dict) else None
-        out["reloaded"] = False
-        return out
-
-    # Persist the new device. ``auto`` clears the device field entirely so
-    # the load path falls back to its default on the next load.
-    async with record_action(
-        request,
-        category="slot",
-        action="slot.set_backend",
-        target=name,
-        before={"device": current_declared},
-        message=f"backend → {backend}",
-    ) as _rec:
-        await sm.update_config(name, {"device": target_device or ""})
-
-        reloaded = False
-        if is_loaded:
-            # Restart so the model reloads under the new backend (the
-            # container unit re-renders from the updated TOML).
-            await sm.restart(name)
-            reloaded = True
-        _rec.after = {"backend": backend, "device": target_device}
-
-    snap = await sm.status(name)
-    out = _slot_to_dict(snap, request)
-    # Recompute the declared/effective snapshot from the post-change config
-    # so the response reports {declared_backend, effective_backend, device,
-    # profile} coherently for what will actually run.
-    new_cfg = await sm.get_config(name)
-    new_device = (new_cfg.get("device") if isinstance(new_cfg, dict) else None) or ""
-    _nrecipe, _nllamacpp = device_to_backend(new_device)
-    new_declared = _nllamacpp or (_nrecipe if _nrecipe == "flm" else None)
-    new_effective = _cfg_effective_backend(new_cfg) if isinstance(new_cfg, dict) else None
-    out["requested_backend"] = backend
-    out["declared_backend"] = new_declared
-    out["effective_backend"] = new_effective
-    # Back-compat alias — carries the effective value now (see docstring).
-    out["actual_backend"] = new_effective
-    out["device"] = new_device or None
-    out["profile"] = new_cfg.get("profile") if isinstance(new_cfg, dict) else None
-    out["reloaded"] = reloaded
-    return out
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────
