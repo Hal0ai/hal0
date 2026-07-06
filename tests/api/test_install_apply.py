@@ -53,7 +53,8 @@ def test_build_slot_cfg_sets_device_profile_model():
     assert cfg["name"] == "chat"
     assert cfg["device"] == "gpu-rocm"
     assert cfg["profile"] == "rocm"
-    assert cfg["enabled"] is True
+    # WS-E (#1108): born DISABLED — enable-on-pull-success flips it later.
+    assert cfg["enabled"] is False
     assert cfg["model"]["default"] == "qwen3.6-27b"
     assert cfg["model"]["context_size"] == 32768
     # v2 sets device+profile, NOT the legacy `backend` field.
@@ -91,12 +92,12 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
 
     # Stub the actual download so the test is hermetic — assert orchestration,
     # not network. run_pull is patched to mark the job completed immediately.
-    import hal0.api.routes.installer as inst
-
+    # WS-E (#1108): the background task now runs run_pull_and_activate, which
+    # imports run_pull lazily from hal0.registry.pull — patch it there.
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     r = client.post(
         "/api/install/apply",
@@ -114,6 +115,9 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
     cfg = tomllib.loads(toml.read_text())
     assert cfg["model"]["default"] == "qwen3.5-9b"
     assert "profile" in cfg
+    # WS-E (#1108): the fake pull completed successfully → the slot, created
+    # DISABLED, was flipped enabled=True by run_pull_and_activate.
+    assert cfg["enabled"] is True
 
 
 def test_apply_unknown_tier_400(isolated_app_client):
@@ -128,12 +132,10 @@ def test_apply_honors_per_slot_override(isolated_app_client, tmp_hal0_home, monk
     app, client = isolated_app_client
     app.state.hardware_probe = _FakeProbe()
 
-    import hal0.api.routes.installer as inst
-
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     r = client.post(
         "/api/install/apply",
@@ -169,12 +171,10 @@ def test_apply_writes_first_run_sentinel(isolated_app_client, tmp_hal0_home, mon
     app, client = isolated_app_client
     app.state.hardware_probe = _FakeProbe()
 
-    import hal0.api.routes.installer as inst
-
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     sentinel = Path(tmp_hal0_home) / "var-lib" / "hal0" / ".first_run_done"
     assert not sentinel.exists()
@@ -203,7 +203,7 @@ def test_apply_delegates_to_apply_selections_core(isolated_app_client, tmp_hal0_
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     calls: list[str] = []
     real_core = inst._apply_selections_core

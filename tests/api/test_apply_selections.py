@@ -42,12 +42,12 @@ def test_apply_selections_creates_only_selected_slots(
     app, client = isolated_app_client
     app.state.hardware_probe = _FakeProbe()
 
-    import hal0.api.routes.installer as inst
-
+    # WS-E (#1108): run_pull_and_activate imports run_pull lazily from
+    # hal0.registry.pull — patch it there.
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     payload = {
         "storage_dir": tmp_hal0_home,
@@ -84,12 +84,10 @@ def test_apply_selections_writes_first_run_sentinel(
     app, client = isolated_app_client
     app.state.hardware_probe = _FakeProbe()
 
-    import hal0.api.routes.installer as inst
-
     async def _fake_run_pull(job, **kw):
         job.state = "completed"
 
-    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     sentinel = Path(tmp_hal0_home) / "var-lib" / "hal0" / ".first_run_done"
     assert not sentinel.exists()

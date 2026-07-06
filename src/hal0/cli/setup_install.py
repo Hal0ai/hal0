@@ -84,7 +84,7 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
         )
         return
 
-    await _run_pulls_with_progress(result.pulls)
+    await _run_pulls_with_progress(result.pulls, slot_manager=slot_manager)
 
     n_slots = sum(1 for s in result.slots if getattr(s, "created", False))
     typer.echo(
@@ -93,22 +93,23 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
     )
 
 
-async def _run_pulls_with_progress(pulls) -> None:
-    """Drive ``run_pull`` for each plan while rendering one rich bar per model.
+async def _run_pulls_with_progress(pulls, *, slot_manager) -> None:
+    """Drive each plan while rendering one rich bar per model.
 
-    ``run_pull`` takes no progress callback — it mutates the ``PullJob`` in
-    place (``job.state``, ``job.bytes_downloaded``, ``job.bytes_total``). So we
-    launch all pulls as a single ``gather`` task and poll the job objects in a
-    :class:`rich.progress.Progress` loop until the gather completes, updating
-    each bar's total/completed from the live job fields.
+    Each pull runs through :func:`~hal0.install.orchestrate.run_pull_and_activate`
+    (WS-E, #1108): it calls ``run_pull`` (which mutates the ``PullJob`` in place
+    — ``job.state`` / ``job.bytes_downloaded`` / ``job.bytes_total``) and then
+    flips the slot ``enabled=True`` on success / marks it disabled on failure.
+    We launch all of them as a single ``gather`` task and poll the job objects
+    in a :class:`rich.progress.Progress` loop until the gather completes.
     """
     if not pulls:
         return
 
-    from hal0.registry.pull import run_pull
+    from hal0.install.orchestrate import run_pull_and_activate
 
     gather_task = asyncio.gather(
-        *(run_pull(p.job, **p.kwargs) for p in pulls),
+        *(run_pull_and_activate(p, slot_manager=slot_manager) for p in pulls),
         return_exceptions=True,
     )
 

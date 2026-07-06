@@ -56,9 +56,13 @@ from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.bundles import tiers as bundle_tiers
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
-from hal0.install.orchestrate import Selections, SlotSelection, apply_setup
+from hal0.install.orchestrate import (
+    Selections,
+    SlotSelection,
+    apply_setup,
+    run_pull_and_activate,
+)
 from hal0.registry.curated import CURATED_MODELS
-from hal0.registry.pull import run_pull
 from hal0.slot_config import write_slot_toml
 
 # Auth was removed in ADR-0012. All endpoints are open on the local
@@ -431,8 +435,12 @@ async def _apply_selections_core(
         hf_token=hf_token,
         write_sentinel=True,
     )
+    # WS-E (#1108): drive each pull through run_pull_and_activate so the slot,
+    # created DISABLED, flips enabled=True only after its bytes land (and a
+    # failed pull leaves a marked, disabled slot instead of a crash-loop).
+    slot_manager = request.app.state.slot_manager
     for plan in result.pulls:
-        background.add_task(run_pull, plan.job, **plan.kwargs)
+        background.add_task(run_pull_and_activate, plan, slot_manager=slot_manager)
     return result
 
 
