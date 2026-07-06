@@ -167,8 +167,30 @@ def setup(
         "--answers",
         help="Path to a hal0-setup.yaml answer file for a fully non-interactive run.",
     ),
+    emit_answers: str | None = typer.Option(
+        None,
+        "--emit-answers",
+        help="Write the resolved choices to a hal0-setup.yaml and exit.",
+    ),
 ) -> None:
     hw = HardwareProbe().probe()
+    if emit_answers is not None:
+        from hal0.install.answers import load_answers, write_answers
+
+        sel = (
+            load_answers(answers, hw)
+            if answers is not None
+            else build_auto_selections(
+                hw,
+                storage_dir=storage_dir,
+                with_extensions=not no_extensions,
+                with_slots=not no_slots,
+                existing_slots=_existing_slot_names(),
+            )
+        )
+        write_answers(sel, emit_answers)
+        typer.echo(f"Wrote resolved setup answers to {emit_answers}")
+        return
     if answers is not None:
         from hal0.install.answers import load_answers
 
