@@ -36,7 +36,9 @@ def test_provision_slot_pick_scaffold_and_skip(monkeypatch):
     from hal0.install.suggest import Suggestion
 
     sugg = [
-        Suggestion("m1", "M1", 1.0, 0.0, 4096, "gpu-rocm", "embed", "embed", False, recommended=True)
+        Suggestion(
+            "m1", "M1", 1.0, 0.0, 4096, "gpu-rocm", "embed", "embed", False, recommended=True
+        )
     ]
     monkeypatch.setattr(setup_ui, "suggest_models", lambda *a, **k: sugg)
     monkeypatch.setattr(setup_ui, "_draw", lambda *a, **k: None)
