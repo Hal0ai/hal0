@@ -540,11 +540,35 @@ else
 fi
 
 API_ENV="${ETC_DIR}/api.env"
+# Network coherence (WS-C): derive HAL0_BIND_HOST + HAL0_HOSTNAME +
+# HAL0_ALLOWED_ORIGINS from ONE bind choice so the hal0-api unit, `hal0
+# serve`, mDNS, and the chat-proxy WS origin gate all agree. The unit's
+# ExecStart no longer passes --host — it reads HAL0_BIND_HOST from this
+# file, the same var `hal0 serve` honours (main.py). HAL0_ALLOWED_ORIGINS
+# is seeded with the hostname + every LAN IP + localhost on the API port
+# so whatever URL /api/config/urls advertises passes the WS gate (no 4403
+# mismatch). All derivation lives in src/hal0/install/network.py (single
+# source), invoked via the just-installed venv; a failure degrades to a
+# bare bind var rather than aborting the install.
+NETWORK_ENV_LINES="$(
+    HAL0_BIND_HOST="${API_BIND_HOST}" \
+    HAL0_PORT="${HAL0_PORT}" \
+    HAL0_LAN_IPS="$(hostname -I 2>/dev/null || true)" \
+    "${VENV_DIR}/bin/python" -c 'from hal0.install.network import main; raise SystemExit(main())' 2>/dev/null
+)" || NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
+if [[ -z "${NETWORK_ENV_LINES}" ]]; then
+    NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
+fi
 if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
 HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
+# Network shape — derived from one bind choice (WS-C). HAL0_BIND_HOST is
+# read by BOTH this file's consumer (\`hal0 serve\`) and the hal0-api unit;
+# HAL0_HOSTNAME feeds mDNS; HAL0_ALLOWED_ORIGINS gates the chat-proxy WS
+# upgrade. Regenerate with: hal0 doctor / rerun installer.
+${NETWORK_ENV_LINES}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
 # is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
@@ -619,7 +643,10 @@ User=root
 UMask=0002
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
-ExecStart=${HAL0_BIN} serve --host ${API_BIND_HOST} --port \${HAL0_PORT}
+# No --host here (WS-C): the bind host comes from HAL0_BIND_HOST in the
+# EnvironmentFile above — the SAME var \`hal0 serve\` reads — so the unit
+# and the CLI can never disagree on the bind address.
+ExecStart=${HAL0_BIN} serve --port \${HAL0_PORT}
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
