@@ -38,6 +38,11 @@
 #                                silently running CPU-only.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
+#   preflight_bootstrap_prereqs — Linux host + curl/tar/sha256sum on PATH,
+#                                mirroring bootstrap.sh's own preflight() so
+#                                the direct `sudo bash install.sh` path
+#                                enforces the same floor as the curl|bash
+#                                one-liner (#1098)
 #   preflight_all              — run all of the above; aggregate non-zero
 #
 # Globals honoured
@@ -562,6 +567,38 @@ preflight_gpu() {
     return 0
 }
 
+# ── Bootstrap-prereq parity (#1098) ────────────────────────────────────────
+# bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
+# curl/tar/sha256sum in its own preflight() before it ever fetches the
+# release tarball. install.sh leans on all three later in its own run
+# (preflight_network's curl probe, the rsync-fallback tar copy, the FLM
+# .deb sha256 check) but a direct `sudo bash install.sh` — no bootstrap in
+# front — never checked for them up front: a minimal host missing one
+# would sail past "Pre-flight checks" and die deep in the run with a bare
+# "command not found" instead of an actionable message. This mirrors
+# bootstrap.sh's preflight() (same checks, same die-style message) so both
+# entry points enforce the same floor. python3 is deliberately NOT
+# re-checked here — preflight_python (below) already does a stricter,
+# version-aware check with a better error message; duplicating a bare
+# `command -v python3` here would just produce a redundant, less useful
+# failure.
+preflight_bootstrap_prereqs() {
+    local rc=0
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        err "hal0 only supports Linux right now (got $(uname -s))"
+        rc=1
+    fi
+    local dep
+    for dep in curl tar sha256sum; do
+        if ! command -v "${dep}" >/dev/null 2>&1; then
+            err "missing dependency: ${dep} — install it and re-run"
+            rc=1
+        fi
+    done
+    [[ "${rc}" -eq 0 ]] && info "bootstrap prereqs: curl, tar, sha256sum present (Linux)"
+    return "${rc}"
+}
+
 preflight_disk() {
     local min_gb="${1:-${HAL0_DISK_MIN_GB:-20}}"
     local target="${2:-${HAL0_DISK_TARGET:-/var/lib}}"
@@ -646,6 +683,7 @@ preflight_ports() {
 # picture, not the first failure.
 preflight_all() {
     local rc=0
+    preflight_bootstrap_prereqs || rc=$?
     preflight_arch    || rc=$?
     preflight_systemd || rc=$?
     preflight_python  || rc=$?
