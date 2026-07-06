@@ -36,9 +36,31 @@ LXC shares it. Do this once on the PVE host.
 The iGPU uses the in-tree `amdgpu` driver. The NPU needs the `amdxdna`
 kernel module loaded and recent NPU firmware:
 
-- **Kernel ≥ 6.11** with `amdxdna` available (`modprobe amdxdna`; confirm
-  `/dev/accel/accel0` appears on the host).
-- **NPU firmware ≥ 1.1.0.0** (validated in the field at 1.1.2.65).
+- **Kernel**: recent silicon wants a recent kernel. `amdxdna` needs
+  ≥ 6.11; for the gfx1151 iGPU, kernels **before 6.18.4 have a known
+  stability bug** — prefer the newest Proxmox opt-in kernel available.
+- **NPU firmware ≥ 1.1.0.0** (validated in the field at 1.1.2.65;
+  FastFlowLM refuses to start against older firmware).
+
+Verify the host actually bound the GPU before touching the container:
+
+```sh
+lspci -nnk | grep -A3 -iE 'VGA|Display'   # want: "Kernel driver in use: amdgpu"
+ls -l /dev/dri /dev/kfd /dev/accel        # want: renderD128, kfd, accel0
+```
+
+<Aside type="caution" title="Do NOT install firmware-amd-graphics on PVE">
+Proxmox's `pve-firmware` package already bundles the full AMD GPU firmware
+set (including the Strix Halo `gc_11_5_*` / `dcn_3_5_*` blobs) and declares
+`Conflicts: firmware-amd-graphics`. `apt install firmware-amd-graphics`
+therefore fails with an unresolvable conflict — and "fixing" it by removing
+`pve-firmware` drags out the `proxmox-ve` meta-package and the NIC firmware
+with it. If `lspci` shows `amdgpu` bound, firmware is already done. Only if
+the GPU is genuinely newer than `pve-firmware`'s blobs (real `dmesg`
+firmware-load failures), copy the specific newer blobs from
+kernel-firmware git into `/lib/firmware/amdgpu/` and `update-initramfs -u`
+— never swap the package.
+</Aside>
 
 hal0 supplies the *userspace* runtime (XRT + the FastFlowLM binary) inside
 its container image, but it cannot load a kernel driver from inside a
@@ -104,10 +126,10 @@ open them:
 
 ```ini
 # /etc/pve/lxc/105.conf
-dev0: /dev/dri/renderD128
-dev1: /dev/dri/card0
-dev2: /dev/kfd
-dev3: /dev/accel/accel0
+dev0: /dev/dri/renderD128,gid=993
+dev1: /dev/dri/card0,gid=44
+dev2: /dev/kfd,gid=993
+dev3: /dev/accel/accel0,gid=993
 lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.cgroup2.devices.allow: c 234:* rwm
 lxc.cgroup2.devices.allow: c 261:* rwm
@@ -116,12 +138,32 @@ lxc.prlimit.memlock: unlimited
 lxc.apparmor.profile: unconfined
 ```
 
-| Device | Node | Role |
-|---|---|---|
-| iGPU render | `/dev/dri/renderD128` | Vulkan / ROCm render node |
-| iGPU card | `/dev/dri/card0` (amdgpu) | DRM card device |
-| ROCm compute | `/dev/kfd` | ROCm compute queues |
-| XDNA NPU | `/dev/accel/accel0` | FastFlowLM NPU device |
+| Device | Node | Role | Group inside CT |
+|---|---|---|---|
+| iGPU render | `/dev/dri/renderD128` | Vulkan / ROCm render node | `render` |
+| iGPU card | `/dev/dri/card0` (amdgpu) | DRM card device | `video` |
+| ROCm compute | `/dev/kfd` | ROCm compute queues | `render` |
+| XDNA NPU | `/dev/accel/accel0` | FastFlowLM NPU device | `render` |
+
+<Aside type="caution" title="gid= means the gid INSIDE the container">
+The `gid=` on each `dev` entry sets the group owner the node appears with
+**inside the container** — it is the single most common passthrough
+mistake. Check the real values in the container first:
+
+```sh
+pct exec 105 -- getent group render video
+# render:x:993:hal0   ← use 993 for render-class nodes
+# video:x:44:hal0     ← use 44 for the card node
+```
+
+`993`/`44` above are this reference host's values (Ubuntu 24.04 CT);
+yours may differ (e.g. `render` is `109` on some Debian bases). If the
+gid is wrong the nodes land owned by an unmapped id, userspace gets
+`Permission denied`, and `hal0 doctor` flags it ("owned by gid N, which
+maps to NO group"). Omitting `gid=` entirely leaves the nodes
+root-owned — fine for root-only processes, broken for the `hal0` service
+user and host `flm` probe.
+</Aside>
 
 The cgroup majors correspond to the DRM (`226`), the dynamically-allocated
 kfd/accel majors (`234`, `261`), and a misc device (`10:200`) on this
@@ -171,7 +213,41 @@ In an unprivileged LXC, `podman info` can fail without newuidmap/subuid
 setup — another reason the passthrough path uses a privileged container.
 </Aside>
 
-## 5. Set up the NPU trio (FastFlowLM)
+## 5. Point hal0 at your model storage
+
+Models are large; most Proxmox deployments keep them on a dedicated
+dataset/disk bind-mounted into the container rather than on the rootfs.
+Whatever path you choose, tell hal0 about it **once** — the store is the
+single directory the pull engine writes to, the scanner registers from,
+and slot containers bind-mount:
+
+```sh
+# host: bind-mount the model dataset into the CT (path is an example)
+pct set 105 --mp0 /tank/ai-models,mp=/mnt/ai-models
+
+# inside the CT: make it hal0's store (persists to [models].store in
+# hal0.toml, rescans immediately, and registers anything already there)
+hal0 model store /mnt/ai-models
+```
+
+Files you copy in by hand are picked up with `hal0 model scan` (or
+register one file from any path with `hal0 model add /path/file.gguf`).
+`hal0 doctor models` audits the whole pipeline — dangling registry
+entries, unregistered files, store mismatches — and prints the fix for
+each finding.
+
+<Aside type="tip" title="Relocating the NPU model cache">
+FLM's model cache defaults to `/var/lib/hal0/.config/flm/models` on the
+container rootfs. To keep NPU weights on the model disk too, set
+`flm_store = "/mnt/ai-models/flm/models"` under `[models]` in
+`/etc/hal0/hal0.toml` (or export `HAL0_FLM_MODELS_DIR`). hal0 creates the
+directory with container-compatible ownership (the FLM container runs as
+uid 1000 — not the host `hal0` uid) and the generated slot unit orders
+after the backing mount, so a reboot with a slow or missing mount no
+longer kills the npu slot with podman exit 125.
+</Aside>
+
+## 6. Set up the NPU trio (FastFlowLM)
 
 On an apt host with the NPU present, the installer already handles the
 **FastFlowLM (FLM)** userspace: it verifies and installs the pinned
@@ -200,7 +276,7 @@ If `flm validate` reports the NPU is unreachable, re-check that
 `.deb` ships only userspace — it never loads the kernel driver.
 </Aside>
 
-## 6. Surface true host memory pressure (optional)
+## 7. Surface true host memory pressure (optional)
 
 Inside an LXC, hal0 only sees its own cgroup memory share — but the GPU's
 GTT pool is drawn from the same physical DIMMs every other tenant and the
@@ -223,7 +299,7 @@ hal0 polls `GET /cluster/resources` (cached 30 s) and surfaces host RAM
 total/used plus every running tenant's allocation. Non-Proxmox installs
 leave the file absent and the feature stays silent.
 
-## 7. Verify
+## 8. Verify
 
 ```sh
 hal0 status                       # system + slot status
@@ -233,6 +309,23 @@ journalctl -fu hal0-api           # live logs
 
 The API and dashboard listen on `http://<container-ip>:8080`; OpenWebUI on
 `:3001`.
+
+## Troubleshooting — known failure signatures
+
+Every entry below is a real failure observed in the field, keyed on the
+exact log line you'll see. `hal0 doctor` and `hal0 doctor models`
+diagnose most of these automatically.
+
+| Signature (journalctl / CLI) | Root cause | Fix |
+|---|---|---|
+| `gguf_init_from_file: failed to open ... (No such file or directory)` | Registry entry points where the file is not — classically weights on the bind-mounted store while the entry references a stale path. | `hal0 doctor models` shows the dangling entries; `hal0 model store <dir>` points hal0 at the real location and rescans; `hal0 model rm <id> && hal0 model scan` re-registers from disk. |
+| `podman ... exit 125` + `statfs /...: no such file or directory` | A slot's bind-mount source vanished (mount not up yet at boot, or dir on a recreated dataset). Units now emit `RequiresMountsFor=` + a mkdir guard, but a wrong path in config still hits this. | Check the path in `[models].store` / `[models].flm_store` exists; `systemctl cat hal0-slot@<name>` shows what the unit mounts. |
+| `flm pull` → `Permission denied` creating a model subdir | FLM store owned `hal0:hal0` (host uid) but the FLM container writes as **uid 1000**. | `chown 1000:hal0 <flm store> && chmod 2775 <flm store>` — the installer and slot start do this for managed dirs. |
+| `pve-firmware : Conflicts: firmware-amd-graphics` on the host | Attempted to install Debian's AMD firmware package on PVE. | Don't — `pve-firmware` already ships those blobs (see §1). |
+| `vainfo`/`vulkaninfo`/`rocminfo` → `Permission denied` in the CT | `dev` entry `gid=` set to a host gid (or omitted), so the node maps to no group inside the CT. | Set `gid=` to the CT's own `render`/`video` gid (§3) and restart the CT; `hal0 doctor` flags the unmapped gid. |
+| Models pulled but invisible in `hal0 model list` | Files landed outside the scanned roots (pre-v0.9 installs seeded only `pull_root`). | `hal0 model store` (shows effective store + candidates), then `hal0 model scan`. |
+| `pct stop` hangs on a GPU-holding CT | llama.cpp/ROCm process pinned `/dev/kfd`. | `pkill -9 -f 'lxc-start -F -n <CTID>'` on the host (see §3). |
+| NPU slot dies mid-request, FLM exits with SIGABRT (134) | FLM 0.9.x can double-free when a client disconnects mid-prefill on direct port access. | Talk to the dispatcher (`:8080`), not the raw slot port — it serializes NPU requests; avoid hammering `:8088` with overlapping/cancelled calls. |
 
 ## Next
 

@@ -17,7 +17,9 @@ def test_seed_rerank_toml_validates() -> None:
     assert slot.device == "gpu-vulkan"
     assert slot.port == 8083
     assert "--reranking" in (slot.server.extra_args or "")
-    assert slot.model.default == "bge-reranker-v2-m3-q4_k_m"
+    # Clean seed (WS-E, #1107): no model pin — boots grey, no surprise download.
+    assert slot.model.default == ""
+    assert slot.enabled is False
 
 
 def test_seed_utility_toml_validates() -> None:
@@ -27,8 +29,12 @@ def test_seed_utility_toml_validates() -> None:
     assert slot.profile == "vulkan"
     assert slot.device == "gpu-vulkan"
     assert slot.port == 8081
-    assert slot.model.default == "gemma-4-12b-it"
+    # Clean seed (WS-E, #1107): the ghost id `gemma-4-12b-it` pin is gone — the
+    # slot boots grey (no crash-loop, no surprise download). context_size is a
+    # tuning default that applies once the operator assigns a model.
+    assert slot.model.default == ""
     assert slot.model.context_size == 65536
+    assert slot.enabled is False
 
 
 def test_rerank_defaults_are_hindsight_era() -> None:

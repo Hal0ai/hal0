@@ -28,6 +28,7 @@ import { useServices } from '@/api/hooks/useServices'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useActivityRecent } from '@/api/hooks/useActivity'
 import { useApprovalList } from '@/api/hooks/useAgents'
+import { useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
 import {
   useDashLayout,
   useSaveDashLayout,
@@ -1010,6 +1011,46 @@ function CellWidget({ cellId, layout, onSwap, onGo, attentionItems }) {
   }
 }
 
+// ─── post-update slot-drift banner (WS-J, #1111) ──────────────────────────────
+//
+// After a self-update the slot unit files are re-rendered on disk but the
+// running containers are NOT bounced (a restart could kill a mid-inference
+// request). This banner surfaces the slots still serving the pre-update
+// launch command and offers a one-click restart of ONLY those slots — nothing
+// is ever bounced automatically.
+function SlotDriftBanner() {
+  const drift = useSlotDrift()
+  const restart = useRestartDriftedSlots()
+  const count = drift.data?.count ?? 0
+  if (count <= 0) return null
+  const names = (drift.data?.slots ?? []).map((s) => s.slot).filter(Boolean).join(', ')
+  const plural = count === 1 ? '' : 's'
+  return (
+    <div className="banner-stack">
+      <div className="banner banner-warn" role="status">
+        <span className="banner-ic" aria-hidden="true">↻</span>
+        <div className="banner-content">
+          <span className="banner-eye">Update · slots need restart</span>
+          <span className="banner-heading">{count} slot{plural} need restart</span>
+          <span className="banner-body">
+            {names ? names + ' — ' : ''}still running the pre-update launch command.
+            Restarting briefly interrupts any in-flight request on those slots.
+          </span>
+          <div className="banner-actions">
+            <button
+              className="btn ghost sm mono"
+              disabled={restart.isPending}
+              onClick={() => restart.mutate(undefined)}
+            >
+              {restart.isPending ? 'restarting…' : 'restart drifted slots'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── view ────────────────────────────────────────────────────────────────────
 
 function DashboardRedesignView({ onGo }) {
@@ -1065,6 +1106,7 @@ function DashboardRedesignView({ onGo }) {
 
   return (
     <div className={'view rd-view' + (swapMode ? ' rd-swapmode' : '')}>
+      <SlotDriftBanner />
       <HeroStrip
         slots={slots}
         heroTps={heroTps}

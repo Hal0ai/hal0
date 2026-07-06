@@ -257,6 +257,75 @@ async def _run_apply_job(
         _persist_job(job)
 
 
+async def _run_prepare_job(
+    jobs: dict[str, dict[str, Any]],
+    job_id: str,
+    channel: str,
+    version: str | None,
+) -> None:
+    """Background task that STAGES an update via ``Updater.prepare()``.
+
+    Downloads + cosign-verifies + extracts the release without touching the
+    running system, then attaches the (verified) release notes + resolved
+    version to the job and transitions it to the terminal ``prepared`` state.
+    Does NOT restart hal0-api — nothing is active yet. The caller reviews the
+    notes and then POSTs ``/commit`` to activate.
+    """
+    job = jobs[job_id]
+    job["state"] = "running"
+    job["updated_at"] = time.time()
+    _persist_job(job)
+    try:
+        updater = Updater(channel=channel)
+        result = await updater.prepare(version)
+    except Exception as exc:
+        job["state"] = "failed"
+        job["error"] = str(exc)
+        job["error_code"] = type(exc).__name__
+    else:
+        job["resolved_version"] = result.get("version")
+        job["notes"] = result.get("notes")
+        job["cosign_skipped"] = result.get("cosign_skipped")
+        job["state"] = "prepared"
+    finally:
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
+
+async def _run_commit_job(
+    jobs: dict[str, dict[str, Any]],
+    job_id: str,
+    channel: str,
+    version: str,
+) -> None:
+    """Background task that ACTIVATES a prepared version via ``Updater.commit()``.
+
+    Runs the migrations + symlink swap + venv re-pip, then try-restarts
+    ``hal0-api.service`` fail-soft (same policy as ``_run_apply_job``). Requires
+    that ``/prepare`` staged ``version`` first; ``commit()`` raises otherwise and
+    the job goes to ``failed``.
+    """
+    job = jobs[job_id]
+    job["state"] = "running"
+    job["updated_at"] = time.time()
+    _persist_job(job)
+    try:
+        updater = Updater(channel=channel)
+        await updater.commit(version)
+    except Exception as exc:
+        job["state"] = "failed"
+        job["error"] = str(exc)
+        job["error_code"] = type(exc).__name__
+    else:
+        restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
+        job["restarted"] = restarted
+        job["restart_error"] = restart_error
+        job["state"] = "applied"
+    finally:
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
+
 # ── /state ─────────────────────────────────────────────────────────────────
 
 
@@ -530,6 +599,98 @@ async def apply_update(request: Request) -> dict[str, Any]:
     return dict(jobs[job_id])
 
 
+def _spawn_update_task(request: Request, coro: Any) -> None:
+    """Track a fire-and-forget update background task on app.state (RUF006)."""
+    bg_tasks = getattr(request.app.state, "_update_bg_tasks", None)
+    if bg_tasks is None:
+        bg_tasks = set()
+        request.app.state._update_bg_tasks = bg_tasks
+    task = asyncio.create_task(coro)
+    bg_tasks.add(task)
+    task.add_done_callback(bg_tasks.discard)
+
+
+def _body_version(body: Any) -> str | None:
+    """Extract a normalised ``version`` from a request body (strip a leading v)."""
+    if isinstance(body, dict):
+        v = body.get("version")
+        if isinstance(v, str) and v.strip():
+            return v.strip().lstrip("v") or None
+    return None
+
+
+@router.post("/prepare", status_code=202)
+async def prepare_update(request: Request) -> dict[str, Any]:
+    """Stage an update (download + cosign-verify + extract) WITHOUT activating it.
+
+    Returns a queued-job snapshot (202). Poll ``/api/updates/status/{job_id}``
+    until state ``prepared`` — the job then carries ``resolved_version`` and
+    ``notes`` (release notes read from the *verified* tree) — then POST
+    ``/api/updates/commit`` with that version to activate. Nothing about the
+    running system changes until commit, so an abandoned prepare is harmless.
+
+    Body (optional): ``{"version": "0.1.0"}`` — pin a version; omit for latest.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    version = _body_version(body)
+    channel = _current_channel(request)
+    jobs = _update_jobs(request)
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {
+        "id": job_id,
+        "state": "queued",
+        "phase": "prepare",
+        "channel": channel,
+        "version": version,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "error": None,
+    }
+    _persist_job(jobs[job_id])
+    _spawn_update_task(request, _run_prepare_job(jobs, job_id, channel, version))
+    return dict(jobs[job_id])
+
+
+@router.post("/commit", status_code=202)
+async def commit_update(request: Request) -> dict[str, Any]:
+    """Activate a previously ``/prepare``d version.
+
+    Body (required): ``{"version": "0.1.0"}`` — the ``resolved_version`` returned
+    by the prepare job. Returns a queued-job snapshot (202); poll
+    ``/status/{job_id}`` until ``applied`` | ``failed``. The daemon try-restarts
+    hal0-api fail-soft after a successful commit.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    version = _body_version(body)
+    if not version:
+        raise BadRequest(
+            "commit requires a 'version' — the resolved_version from /prepare",
+            details={"hint": "POST /api/updates/prepare first, then commit its resolved_version"},
+        )
+    channel = _current_channel(request)
+    jobs = _update_jobs(request)
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {
+        "id": job_id,
+        "state": "queued",
+        "phase": "commit",
+        "channel": channel,
+        "version": version,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "error": None,
+    }
+    _persist_job(jobs[job_id])
+    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version))
+    return dict(jobs[job_id])
+
+
 @router.get("/status/{job_id}")
 async def update_status(job_id: str, request: Request) -> dict[str, Any]:
     """Return the current snapshot of an update job by id.
@@ -641,3 +802,132 @@ async def set_channel(request: Request) -> dict[str, str]:
         ) from exc
     request.app.state.hal0_config = merged
     return {"channel": channel}
+
+
+# ── /slot-drift + /restart-slots (installer-setup WS-J, #1111) ───────────────
+#
+# ``rerender_slot_units`` (updater) rewrites each on-disk slot unit through
+# current code after an update but deliberately never restarts a running
+# process — a bounce could kill a mid-inference request. The freshly-rendered
+# unit therefore describes the argv a restart WOULD use while the live
+# container keeps serving the pre-update argv: "post-update drift". These two
+# endpoints surface that drift (banner) and let an operator clear it on demand.
+
+
+def _slot_manager(request: Request) -> Any:
+    """Pull the SlotManager off app.state (wired in the lifespan).
+
+    Mirrors ``routes/slots._get_slot_manager`` — a missing manager is an
+    internal invariant (lifespan should always wire it), surfaced as a typed
+    envelope rather than an AttributeError.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        raise UpdateError(
+            "slot_manager not initialised on app.state",
+            details={"hint": "lifespan did not run"},
+        )
+    return sm
+
+
+async def _collect_slot_drift(sm: Any) -> list[dict[str, Any]]:
+    """Return one entry per slot whose RUNNING argv lags a fresh render.
+
+    Reuses the reconcile seam (#1103): ``SlotManager.compute_config_drift``
+    compares the live container's argv (``ContainerProvider.running_argv``)
+    against the command a restart would render now (``expected_argv`` — the
+    same ``container_spec`` plan path ``_render_unit_text`` bakes into the
+    unit file). ``rerender_slot_units`` rewrites the on-disk unit after an
+    update but never bounces the process, so the running argv stays stale
+    until an explicit restart — precisely the drift this reports.
+
+    Never raises: a probe failure on one slot logs and skips so a single bad
+    slot can't blank the whole banner. Inactive slots (drift == None) are
+    dropped — a stopped slot cannot run a stale process.
+    """
+    try:
+        slots = await sm.list()
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("updater.slot_drift_list_failed", error=str(exc))
+        return []
+    drifted: list[dict[str, Any]] = []
+    for slot in slots:
+        name = getattr(slot, "name", None)
+        if not name:
+            continue
+        try:
+            payload = await sm.compute_config_drift(name)
+        except Exception as exc:
+            log.warning("updater.slot_drift_probe_failed", slot=name, error=str(exc))
+            continue
+        if payload and payload.get("drifted"):
+            drifted.append({"slot": name, "diffs": payload.get("diffs") or []})
+    return drifted
+
+
+@router.get("/slot-drift")
+async def slot_drift(request: Request) -> dict[str, Any]:
+    """Report slots whose running process lags the freshly-rendered unit.
+
+    Response shape (consumed by ``useSlotDrift`` + the CLI post-update
+    summary)::
+
+        {
+            "count": 1,
+            "slots": [
+                {"slot": "chat", "diffs": [
+                    {"key": "--ctx-size", "running": "4096", "rendered": "131072"}
+                ]}
+            ]
+        }
+
+    ``count == 0`` is the clean case — nothing needs a restart.
+    """
+    sm = _slot_manager(request)
+    drifted = await _collect_slot_drift(sm)
+    return {"count": len(drifted), "slots": drifted}
+
+
+@router.post("/restart-slots")
+async def restart_drifted_slots(request: Request) -> dict[str, Any]:
+    """Bounce ONLY the drifted slots — the explicit opt-in behind
+    ``hal0 update --restart-slots``.
+
+    A plain update never reaches this path, so it never auto-kills a slot
+    that may be mid-inference: the fresh argv only takes effect once the
+    operator asks for it here. Optionally restrict to a subset via
+    ``{"slots": ["chat", ...]}``; an omitted / empty list means "all
+    currently-drifted slots".
+
+    Response::
+
+        {"restarted": ["chat"], "failed": [], "count": 1}
+
+    A per-slot restart failure is recorded in ``failed`` (never re-raised) so
+    one wedged slot can't abort the rest of the sweep.
+    """
+    sm = _slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    only: set[str] | None = None
+    if isinstance(body, dict):
+        raw = body.get("slots")
+        if isinstance(raw, list) and raw:
+            only = {str(s) for s in raw}
+
+    drifted = await _collect_slot_drift(sm)
+    targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
+    restarted: list[str] = []
+    failed: list[dict[str, str]] = []
+    for name in targets:
+        try:
+            await sm.restart(name)
+        except Exception as exc:
+            log.warning("updater.slot_restart_failed", slot=name, error=str(exc))
+            failed.append({"slot": name, "error": str(exc)})
+            continue
+        log.info("updater.slot_restarted", slot=name)
+        restarted.append(name)
+    return {"restarted": restarted, "failed": failed, "count": len(restarted)}

@@ -501,3 +501,78 @@ def test_apply_target_strips_leading_v(
         time.sleep(0.05)
 
     assert seen == ["0.1.1"], seen
+
+
+# ── prepare / commit split ─────────────────────────────────────────────────────
+
+
+def test_prepare_route_returns_queued_prepare_job(isolated_client: TestClient) -> None:
+    """POST /api/updates/prepare returns a queued job tagged phase=prepare."""
+    r = isolated_client.post("/api/updates/prepare", json={})
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert "id" in body and isinstance(body["id"], str)
+    assert body["phase"] == "prepare"
+    assert body["state"] == "queued"
+    assert body["channel"] == "stable"
+
+
+def test_prepare_job_reaches_prepared_with_notes(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the bg prepare job runs, status shows prepared + resolved_version + notes.
+
+    ``Updater.prepare`` is stubbed as an async success (same style as the
+    apply-route tests stub ``Updater.apply``) so the test exercises the route
+    layer's bg-job handling, not the real download/verify path.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_prepare(self: object, version: str | None = None) -> dict:
+        return {
+            "version": "0.0.1",
+            "install_dir": "/tmp/hal0-0.0.1",
+            "cache_dir": "/tmp/cache/0.0.1",
+            "cosign_skipped": True,
+            "notes": {
+                "markdown": "# 0.0.1\n- did xyz",
+                "highlights": ["h"],
+                "breaking": [],
+                "migrations": [],
+            },
+        }
+
+    monkeypatch.setattr(u_mod.Updater, "prepare", fake_prepare)
+
+    r = isolated_client.post("/api/updates/prepare", json={})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("prepared", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "prepared", final
+    assert final.get("resolved_version") == "0.0.1"
+    assert final.get("notes")
+
+
+def test_commit_route_requires_version(isolated_client: TestClient) -> None:
+    """POST /api/updates/commit with no version rejects with a typed 400."""
+    r = isolated_client.post("/api/updates/commit", json={})
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert "error" in body
+
+
+def test_commit_route_accepts_version(isolated_client: TestClient) -> None:
+    """POST /api/updates/commit with a version queues a phase=commit job (202)."""
+    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.1"})
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["phase"] == "commit"
+    assert body["state"] == "queued"
+    assert body["version"] == "0.0.1"

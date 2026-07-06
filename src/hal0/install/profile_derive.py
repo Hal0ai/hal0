@@ -38,6 +38,24 @@ NPU_ONLY_CHAT_CAPS = frozenset({"agent"})
 NPU_FALLBACK_CHAT_CAPS = frozenset({"utility"})
 
 
+def npu_healthy(hw: HardwareInfo) -> bool:
+    """True only when the NPU is present AND functionally healthy.
+
+    "Healthy" means device-node detection (:attr:`NPUInfo.present`) *and* the
+    functional ``flm validate`` pass recorded at install/setup time
+    (:attr:`NPUInfo.validated` is ``True`` — the #1097 hardware.json fact,
+    passthrough + render-group GID reachable). ``validated is False``
+    (present-but-broken: libxrt-npu2 mismatch / passthrough gap) and
+    ``validated is None`` (present but never validated) are both **unhealthy**:
+    we never advertise / auto-enable a device we cannot confirm works.
+
+    This is the single source of truth that folds NPU health into the one
+    ``npu_opt_in`` boolean threaded through suggest + apply, so the picker never
+    advertises an NPU slot that ``apply_setup`` would then skip.
+    """
+    return bool(hw.npu.present and hw.npu.validated is True)
+
+
 def npu_takes_utility(hw: HardwareInfo, *, npu_opt_in: bool) -> bool:
     """True when the NPU claims the ``utility`` role on this box.
 
@@ -108,8 +126,10 @@ def derive_profile(capability: str, device: str) -> str:
     GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
     """
     if device == "gpu-rocm" and capability in ("chat", "coder"):
-        # Dense chat/coder benefit from MTP; embed/rerank take their own lanes.
-        return "rocm-dnse"
+        # Plain ROCm GPU LLM. (The legacy MTP rocm-dnse profile was removed
+        # 2026-07-05; MTP dense now lives on the ROCmFPX profiles, which slots
+        # opt into explicitly — derivation never silently forces MTP.)
+        return "rocm"
     if device == "gpu-rocm" and capability == "embed":
         # Embeddings get the dedicated GPU embed profile (llama-server
         # --embedding, -ub 8192) rather than the chat-tuned plain `rocm` — the

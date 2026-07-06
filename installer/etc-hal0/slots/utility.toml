@@ -1,12 +1,23 @@
 # Utility LLM slot — vulkan llama-server container (hal0-slot@utility).
+#
+# Clean seed (WS-E, #1107): ships WITHOUT a `[model].default` and DISABLED, so a
+# fresh, deliberately model-less box boots a GREY tile — no surprise multi-GB
+# download and no crash-loop. The previous pin was the GHOST id `gemma-4-12b-it`:
+# a catalog/marketing id with NO registry file and NO curated coords (the real
+# GGUF is `gemma-4-12b-it-ud-q4-k-xl` → `unsloth/gemma-4-12b-it-GGUF`). Pinned to
+# the ghost on a box with nothing to fall back to, the slot crash-looped.
+#
+# The operator assigns a model later (dashboard / `hal0 setup`), which flips the
+# slot enabled. device/profile here are the widest-compatible GPU-Vulkan tile
+# defaults; the guided / answer-file setup path derives them from the up-front
+# preflight (hardware.json, #1097) via `derive_device`/`derive_profile`.
 name = "utility"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
 profile = "vulkan"
-enabled = true
+enabled = false
 port = 8081
 
 [model]
-default = "gemma-4-12b-it"
 context_size = 65536

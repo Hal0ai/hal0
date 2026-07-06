@@ -42,3 +42,33 @@ def test_coder_capability_filters_to_coder_models():
 def test_excludes_bundle_only_entries():
     out = suggest_models("chat", _hw(96), limit=20)
     assert all(not s.bundle_only for s in out)
+
+
+def test_rerank_suggestions_returned():
+    out = suggest_models("rerank", _hw(96), limit=3)
+    assert out, "expected curated rerank picks"
+    assert all(s.capability == "rerank" for s in out)
+
+
+def test_stt_suggestions_use_stt_capability():
+    # _CAP_MATCH["stt"] must map to the curated "stt" capability (not "asr"),
+    # otherwise suggest_models returns nothing for speech.
+    out = suggest_models("stt", _hw(96), limit=3)
+    assert out, "expected curated stt picks"
+    assert all(s.capability == "stt" for s in out)
+
+
+def test_embed_suggestions_returned():
+    out = suggest_models("embed", _hw(96), limit=3)
+    assert out and all(s.capability == "embed" for s in out)
+
+
+def test_npu_opt_in_threads_into_advertised_device():
+    # STT is NPU-only. With npu_opt_in=True the picker advertises the NPU lane;
+    # with the default (False) it advertises NO device — the SAME value apply
+    # uses, so the picker never advertises a lane apply_setup would skip (#1109).
+    hw = _hw(96, npu=True)
+    on = suggest_models("stt", hw, limit=3, npu_opt_in=True)
+    assert on and all(s.device == "npu" and s.profile == "flm" for s in on)
+    off = suggest_models("stt", hw, limit=3)  # default npu_opt_in=False
+    assert off and all(s.device is None and s.profile is None for s in off)

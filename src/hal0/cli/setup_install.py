@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 
 import httpx
 import typer
@@ -33,12 +34,32 @@ from hal0.cli._shared import _api_base
 # call-site only) so tests can monkeypatch ``hal0.cli.setup_install._api_reachable``.
 from hal0.cli.setup_command import _api_reachable
 
-_DASHBOARD_URL = "https://hal0.thinmint.dev"
-
 
 def choose_apply_mode() -> str:
     """Return ``"api"`` when hal0-api is reachable, else ``"in_process"``."""
     return "api" if _api_reachable() else "in_process"
+
+
+async def _dashboard_url() -> str:
+    """Best-effort canonical dashboard URL for the completion banner.
+
+    The live service's ``GET /api/config/urls`` is the single source of
+    truth the dashboard itself reads (it derives the host from the bind
+    address / forwarded proxy headers), so we prefer it. When the service
+    isn't up yet (install-time in-process path) we fall back to the local
+    API base — always a valid link, never a hardcoded public host.
+    """
+    base = _api_base()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            resp = await client.get(f"{base}/api/config/urls")
+            resp.raise_for_status()
+            api = str(resp.json().get("api") or "").strip()
+            if api:
+                return api
+    except Exception:
+        pass
+    return base
 
 
 async def run_install(sel, hw, *, no_pull: bool = False) -> None:
@@ -65,12 +86,14 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
     from hal0.install.orchestrate import apply_setup
 
     slot_manager, registry = setup_command._build_offline_deps()
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     result = await apply_setup(
         sel,
         hardware=hw,
         slot_manager=slot_manager,
         registry=registry,
         jobs={},
+        hf_token=hf_token,
         write_sentinel=True,
     )
 
@@ -81,31 +104,33 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
         )
         return
 
-    await _run_pulls_with_progress(result.pulls)
+    await _run_pulls_with_progress(result.pulls, slot_manager=slot_manager)
 
     n_slots = sum(1 for s in result.slots if getattr(s, "created", False))
+    dashboard = await _dashboard_url()
     typer.echo(
         f"hal0 setup complete: {len(result.model_ids)} model(s), {n_slots} slot(s). "
-        f"Dashboard: {_DASHBOARD_URL}"
+        f"Dashboard: {dashboard}"
     )
 
 
-async def _run_pulls_with_progress(pulls) -> None:
-    """Drive ``run_pull`` for each plan while rendering one rich bar per model.
+async def _run_pulls_with_progress(pulls, *, slot_manager) -> None:
+    """Drive each plan while rendering one rich bar per model.
 
-    ``run_pull`` takes no progress callback — it mutates the ``PullJob`` in
-    place (``job.state``, ``job.bytes_downloaded``, ``job.bytes_total``). So we
-    launch all pulls as a single ``gather`` task and poll the job objects in a
-    :class:`rich.progress.Progress` loop until the gather completes, updating
-    each bar's total/completed from the live job fields.
+    Each pull runs through :func:`~hal0.install.orchestrate.run_pull_and_activate`
+    (WS-E, #1108): it calls ``run_pull`` (which mutates the ``PullJob`` in place
+    — ``job.state`` / ``job.bytes_downloaded`` / ``job.bytes_total``) and then
+    flips the slot ``enabled=True`` on success / marks it disabled on failure.
+    We launch all of them as a single ``gather`` task and poll the job objects
+    in a :class:`rich.progress.Progress` loop until the gather completes.
     """
     if not pulls:
         return
 
-    from hal0.registry.pull import run_pull
+    from hal0.install.orchestrate import run_pull_and_activate
 
     gather_task = asyncio.gather(
-        *(run_pull(p.job, **p.kwargs) for p in pulls),
+        *(run_pull_and_activate(p, slot_manager=slot_manager) for p in pulls),
         return_exceptions=True,
     )
 
@@ -175,7 +200,8 @@ async def _apply_via_api(sel) -> None:
         data = resp.json()
     n_models = len(data.get("model_ids", []))
     n_slots = len(data.get("slots", []))
+    dashboard = await _dashboard_url()
     typer.echo(
         f"hal0 setup applied via API: {n_models} model(s), {n_slots} slot(s) "
-        f"(downloads run on the service). Dashboard: {_DASHBOARD_URL}"
+        f"(downloads run on the service). Dashboard: {dashboard}"
     )

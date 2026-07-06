@@ -13,11 +13,12 @@ benchmark history so the datasets can later merge.
 
 Results dir resolution: argv[1] > $HAL0_BENCH_RESULTS > /var/lib/hal0/benchmarks
 """
+
 import json
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 if len(sys.argv) > 1:
     RESULT_DIR = sys.argv[1]
@@ -100,9 +101,7 @@ def collect():
         if not fname.endswith(".json") or fname.endswith(".meta.json"):
             continue
         path = os.path.join(RUNS_DIR, fname)
-        mtime_iso = datetime.fromtimestamp(
-            os.path.getmtime(path), tz=timezone.utc
-        ).isoformat()
+        mtime_iso = datetime.fromtimestamp(os.path.getmtime(path), tz=UTC).isoformat()
         try:
             with open(path) as fh:
                 rows = json.load(fh)
@@ -125,38 +124,70 @@ def fmt_ts(rec):
     return f"{m['avg_ts']:.1f}±{sd:.1f}"
 
 
+def short_model(name):
+    """Display name: drop the dir prefix and the .gguf suffix so the table
+    reads as a model, not a filesystem path."""
+    if not name:
+        return "?"
+    base = name.rsplit("/", 1)[-1]
+    if base.lower().endswith(".gguf"):
+        base = base[: -len(".gguf")]
+    return base
+
+
+# Quant families we care about for the FPX/FP4/MTP bench (finding 0.2/0.3).
+_QUANT_TAGS = ("ROCMFPX", "ROCMFP8", "ROCMFP6", "ROCMFP4", "ROCMFP3")
+
+
+def quant_tag(rec):
+    """Short quant/speculation label from model.type + name, e.g. `ROCMFP4·MTP`.
+    Empty for models outside the FPX/FP4/MTP family so the focused view can
+    filter on it."""
+    hay = f"{rec['model'].get('type') or ''} {rec['model'].get('name') or ''}".upper()
+    parts = [t for t in _QUANT_TAGS if t in hay]
+    fam = parts[0] if parts else ""
+    if "MTP" in hay:
+        fam = f"{fam}·MTP" if fam else "MTP"
+    return fam
+
+
 def write_summary(records):
     """Markdown table: rows = model x context x tag, columns = backend (pp / tg t/s)."""
     backends = sorted({r["backend"] for r in records if r.get("backend")})
     grid = defaultdict(lambda: defaultdict(dict))
     for r in records:
-        mname = r["model"]["name"] or "?"
+        mname = short_model(r["model"]["name"])
+        quant = quant_tag(r)
         ctx = r.get("context", "default")
         tag = r.get("tag") or ""
-        grid[(mname, ctx, tag)][r.get("backend")][r["test"]] = fmt_ts(r)
+        grid[(mname, quant, ctx, tag)][r.get("backend")][r["test"]] = fmt_ts(r)
 
     lines = []
     lines.append("# Strix Halo Benchmark Summary")
     lines.append("")
     lines.append(
-        f"Generated {datetime.now(tz=timezone.utc).isoformat()} · "
+        f"Generated {datetime.now(tz=UTC).isoformat()} · "
         f"{len(records)} measurements · backends: {', '.join(backends) or 'none'}"
     )
     lines.append("")
-    lines.append("Throughput in tokens/sec (avg±stddev). "
-                 "**pp** = prompt processing, **tg** = token generation.")
+    lines.append(
+        "Throughput in tokens/sec (avg±stddev). "
+        "**pp** = prompt processing, **tg** = token generation."
+    )
     lines.append("")
 
-    header = ["model", "context", "tag"]
+    lines.append("## Tier A — llama-bench (single-stream kernel shape)")
+    lines.append("")
+    header = ["model", "quant", "context", "tag"]
     for b in backends:
         header += [f"{b} pp", f"{b} tg"]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
 
     for key in sorted(grid):
-        mname, ctx, tag = key
+        mname, quant, ctx, tag = key
         cells = grid[key]
-        row = [mname, ctx, tag or "-"]
+        row = [mname, quant or "-", ctx, tag or "-"]
         for b in backends:
             row.append(cells.get(b, {}).get("pp", "-"))
             row.append(cells.get(b, {}).get("tg", "-"))
@@ -166,15 +197,127 @@ def write_summary(records):
     return "\n".join(lines) + "\n"
 
 
+def collect_server_ab():
+    """Ingest server_ab.py output (Tier B/C: MTP draft sweeps, concurrency,
+    cache-reuse). These carry the metrics Tier A can't — decode t/s under
+    speculation, draft-acceptance %, and aggregate/per-stream/TTFT under
+    -np>1 — which is the whole point of the FPX/FP4/MTP bench. Each file is
+    `{mode, slot, provenance, results:{label:{...median...}}}`."""
+    sa_dir = os.path.join(RESULT_DIR, "server-ab")
+    docs = []
+    if not os.path.isdir(sa_dir):
+        return docs
+    for fname in sorted(os.listdir(sa_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(sa_dir, fname)) as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"  [warn] skipping unreadable {fname}: {exc}", file=sys.stderr)
+            continue
+        # Current server_ab.py wraps results in a dict; skip legacy bare-list files.
+        if not isinstance(doc, dict) or "results" not in doc:
+            print(f"  [warn] {fname}: legacy/unknown shape, skipped", file=sys.stderr)
+            continue
+        # This section covers the decode/draft/concurrency modes (the FPX/FP4/MTP
+        # story). embed/rerank have a flat, non-label results shape — skip them.
+        if doc.get("mode") not in ("ab", "batch", "mtp", "reuse"):
+            continue
+        doc["_file"] = fname
+        docs.append(doc)
+    return docs
+
+
+def _fnum(x):
+    return "-" if x is None else (f"{x:.1f}" if isinstance(x, float) else str(x))
+
+
+def _cell_metrics(val):
+    """Pull the display metrics out of one label's result block, whatever the
+    mode. `median` (ab/batch/mtp) or `second_call` (reuse) or the block itself."""
+    empty = {
+        k: None for k in ("prefill", "decode", "accept", "aggregate", "per_stream", "ttft_p95")
+    }
+    if not isinstance(val, dict):
+        return empty
+    m = val.get("median") or val.get("second_call") or val
+    if not isinstance(m, dict):
+        return empty
+    return {
+        "prefill": m.get("prompt_per_second"),
+        "decode": m.get("predicted_per_second"),
+        "accept": m.get("draft_acceptance_pct"),
+        "aggregate": m.get("aggregate_tps"),
+        "per_stream": m.get("per_stream_tps"),
+        "ttft_p95": m.get("ttft_p95_s"),
+    }
+
+
+def write_server_ab_section(docs):
+    lines = ["## Tier B/C — server (MTP · draft · concurrency)", ""]
+    if not docs:
+        lines.append("_No server-ab results yet._")
+        lines.append("")
+        return "\n".join(lines) + "\n"
+    lines.append(
+        "Live-server measurements: decode t/s under speculation, draft "
+        "acceptance, and concurrency aggregate/per-stream/TTFT. Governing "
+        "metric per §2 is **net decode t/s at the production sampler**."
+    )
+    lines.append("")
+    for doc in docs:
+        prov = doc.get("provenance") or {}
+        img = prov.get("runner_image") or "?"
+        depth = prov.get("depth_tokens")
+        temp = (prov.get("sampler") or {}).get("temperature")
+        meta = [f"mode={doc.get('mode')}"]
+        if depth is not None:
+            meta.append(f"depth~{depth}")
+        if temp is not None:
+            meta.append(f"temp {temp}")
+        meta.append(f"img={img}")
+        if prov.get("note"):
+            meta.append(f"note={prov['note']}")
+        lines.append(f"### {doc.get('slot', '?')} · " + " · ".join(meta))
+        lines.append("")
+        results = doc.get("results") or {}
+        is_batch = doc.get("mode") == "batch" or any(
+            _cell_metrics(v).get("aggregate") is not None for v in results.values()
+        )
+        if is_batch:
+            lines.append("| cell | aggregate t/s | per-stream t/s | TTFT p95 s |")
+            lines.append("|---|---|---|---|")
+            for label, val in results.items():
+                c = _cell_metrics(val)
+                lines.append(
+                    f"| {label} | {_fnum(c['aggregate'])} | "
+                    f"{_fnum(c['per_stream'])} | {_fnum(c['ttft_p95'])} |"
+                )
+        else:
+            lines.append("| cell | decode t/s | prefill t/s | draft accept % |")
+            lines.append("|---|---|---|---|")
+            for label, val in results.items():
+                c = _cell_metrics(val)
+                lines.append(
+                    f"| {label} | {_fnum(c['decode'])} | "
+                    f"{_fnum(c['prefill'])} | {_fnum(c['accept'])} |"
+                )
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     records = collect()
+    server_ab = collect_server_ab()
     os.makedirs(RESULT_DIR, exist_ok=True)
 
     index_path = os.path.join(RESULT_DIR, "index.json")
     out = {
-        "generated": datetime.now(tz=timezone.utc).isoformat(),
+        "generated": datetime.now(tz=UTC).isoformat(),
         "count": len(records),
         "records": records,
+        "server_ab": server_ab,
     }
     with open(index_path, "w") as fh:
         json.dump(out, fh, indent=2)
@@ -182,8 +325,10 @@ def main():
     summary_path = os.path.join(RESULT_DIR, "SUMMARY.md")
     with open(summary_path, "w") as fh:
         fh.write(write_summary(records))
+        fh.write("\n")
+        fh.write(write_server_ab_section(server_ab))
 
-    print(f"Wrote {index_path} ({len(records)} measurements)")
+    print(f"Wrote {index_path} ({len(records)} measurements, {len(server_ab)} server-ab files)")
     print(f"Wrote {summary_path}")
 
 

@@ -437,8 +437,9 @@ export function useSlotCreate() {
  * Edit a slot. PUT /api/slots/{name}/config — body is a partial
  * SlotConfig (shallow merged into the existing TOML). Use
  * `useSlotDefaults` when the caller only needs to update keys inside the
- * `[model]` sub-table (ctx_size, temperature, …); use `useSlotBackend`
- * for the single-field backend switch.
+ * `[model]` sub-table (ctx_size, temperature, …). Backend identity is
+ * owned by the slot's profile — change it by editing the profile, not via a
+ * dedicated switch (the legacy backend-switch surface was removed in WS-5).
  */
 export function useSlotEdit() {
   const qc = useQueryClient()
@@ -468,38 +469,6 @@ export function useSlotDefaults() {
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: Record<string, unknown> }) =>
       slotPatch(ENDPOINTS.slotDefaults(name), body),
-    onSuccess: invalidate,
-  })
-}
-
-/**
- * Response of POST /api/slots/{name}/backend. The backend is being
- * extended to carry the post-switch snapshot (declared/effective backend,
- * device, profile) — every field is OPTIONAL so the UI tolerates both the
- * old bare response and the enriched one. `effective_backend` and
- * `actual_backend` are alternative spellings during the transition.
- */
-export interface SlotBackendSwitchResponse {
-  name?: string
-  declared_backend?: string | null
-  effective_backend?: string | null
-  actual_backend?: string | null
-  device?: string | null
-  profile?: string | null
-  [k: string]: unknown
-}
-
-/**
- * POST /api/slots/{name}/backend — switch the slot's backend
- * (e.g. vulkan → rocm). Body shape: `{ backend: string }`. Triggers a
- * container restart server-side; the caller should confirm with the
- * operator first (see the backend-mismatch chip in slots.jsx).
- */
-export function useSlotBackend() {
-  const invalidate = useSlotsInvalidator()
-  return useMutation({
-    mutationFn: ({ name, backend }: { name: string; backend: string }) =>
-      slotPost<SlotBackendSwitchResponse>(ENDPOINTS.slotBackend(name), { backend }),
     onSuccess: invalidate,
   })
 }

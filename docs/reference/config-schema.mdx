@@ -102,11 +102,14 @@ defaults (an empty file is valid).
 | `auto_scan_on_start` | bool | `true` | Run discovery scan at startup. |
 | `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | Candidate file suffixes. |
 | `store` | str | `""` | Single source of truth for where models are read/written. When set, the pull engine writes here and slot containers bind-mount it. `HAL0_MODEL_STORE` overrides. |
+| `flm_store` | str | `""` | Where FLM (NPU) model weights live. The npu slot bind-mounts it over FLM's hardcoded `~/.config/flm/models` cache; host `flm` probe/pull bookkeeping follows it. `HAL0_FLM_MODELS_DIR` overrides; empty → `/var/lib/hal0/.config/flm/models`. hal0 creates the dir (container-uid writable) before slot start. |
 
 <Aside type="note">
 `store` is the canonical model-store field. When empty, hal0 falls back to the
 deprecated `pull_root` (default `/var/lib/hal0/models`). Point `store` at your
-fast disk / network mount to align pulls and slot bind-mounts on one path.
+fast disk / network mount to align pulls and slot bind-mounts on one path —
+and `flm_store` at a sibling dir (e.g. `/mnt/ai-models/flm/models`) to keep
+NPU weights off the root filesystem too.
 </Aside>
 
 ### `[memory]` — engine selection

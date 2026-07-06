@@ -61,9 +61,8 @@ _DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
 #     debug shells). Container runs never reference it.
 _CONTAINER_FLM_ROOT = "/opt/fastflowlm"
 _NATIVE_FLM_ROOT = "/opt/hal0/flm-ubuntu"
-# FLM's per-user model cache. Bind-mounted writable so `flm pull` downloads
-# survive container restarts. (Still used by the serving container_spec below.)
-_DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/.config/flm/models"
+# FLM's per-user model cache default lives in config.paths.default_flm_models_dir
+# (bind-mounted writable so `flm pull` downloads survive container restarts).
 # FLM hardcodes ~/.config/flm/models as its model cache. The container runs
 # as the hal0 user with HOME=/var/lib/hal0, so the cache resolves to this
 # path. The host source must be the SAME directory the host flm binary uses,
@@ -86,11 +85,60 @@ _DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/.config/flm/models"
 _HOST_FLM_BIN = os.environ.get("HAL0_FLM_BIN", "/usr/bin/flm")
 _HOST_FLM_HOME = os.environ.get("HAL0_FLM_HOME", "/var/lib/hal0")
 _HOST_FLM_USER = os.environ.get("HAL0_FLM_USER", "hal0")
-# Real FLM cache (HOME/.config/flm/models). Replaces the toolbox bind-mount
-# source for probe/pull; HAL0_FLM_MODELS_DIR still overrides if set.
-_HOST_FLM_MODELS_DIR = (
-    os.environ.get("HAL0_FLM_MODELS_DIR") or f"{_HOST_FLM_HOME}/.config/flm/models"
-)
+# Real FLM cache (HOME/.config/flm/models), relocatable via [models].flm_store
+# or HAL0_FLM_MODELS_DIR. Resolved lazily (not at import) so a TOML edit or a
+# settings change is honoured without an api restart — the historic module-
+# level constant froze the env var at import time and silently ignored config.
+
+
+def _host_flm_models_dir() -> str:
+    """FLM model store for probe/pull bookkeeping and the container mount.
+
+    Delegates to :func:`hal0.config.paths.flm_models_dir` (env var >
+    ``[models].flm_store`` > FLM's default HOME cache) so every consumer —
+    serving container bind-mount, pull bookkeeping, installer — agrees on
+    one directory.
+    """
+    from hal0.config import paths as _cfg_paths
+
+    return _cfg_paths.flm_models_dir()
+
+
+# uid the FLM toolbox container runs as — fixed by the image, NOT the host
+# hal0 user's uid (an LXC host commonly maps hal0 to a different uid, which
+# is exactly how a chown-hal0:hal0 store dir ends up unwritable for the
+# container and `flm pull` dies with Permission denied on subdir creation).
+_FLM_CONTAINER_UID = 1000
+
+
+def _ensure_flm_models_dir(path: str) -> None:
+    """Best-effort create the FLM store so the bind-mount source exists.
+
+    A missing source dir makes podman exit 125 (``statfs ... no such file or
+    directory``) — the classic failure after a reboot when the store lives on
+    a mount that wasn't there yet or was recreated empty. Called at spec
+    build time; the rendered unit additionally orders after the backing
+    mount and re-runs mkdir at ExecStartPre for the reboot path.
+
+    When running as root, ownership is set to the container uid (1000) with
+    the hal0 group and mode 2775 so both the in-container FLM (uid 1000) and
+    host-side ``flm pull`` (hal0 user via group + setgid) can write. Never
+    raises: a failure here surfaces later as the slot health probe.
+    """
+    try:
+        os.makedirs(path, mode=0o2775, exist_ok=True)
+        if os.geteuid() == 0:
+            import grp as _grp
+
+            try:
+                gid = _grp.getgrnam(_HOST_FLM_USER).gr_gid
+            except KeyError:
+                gid = _FLM_CONTAINER_UID
+            os.chown(path, _FLM_CONTAINER_UID, gid)
+            os.chmod(path, 0o2775)
+    except OSError:
+        pass
+
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
@@ -286,12 +334,13 @@ class FLMProvider(Provider):
         env = self.build_env(slot_cfg, model_info)
         port = int(env["HAL0_PORT"])
 
+        # Per-slot [_paths].flm_models wins (rare, test/debug shape); otherwise
+        # the shared resolver: HAL0_FLM_MODELS_DIR env > [models].flm_store >
+        # FLM's default HOME cache. Historically this chain never consulted
+        # config — [models]-level relocation only worked via the env var.
         paths = slot_cfg.get("_paths", {}) or {}
-        flm_models = (
-            paths.get("flm_models")
-            or os.environ.get("HAL0_FLM_MODELS_DIR")
-            or _DEFAULT_FLM_MODELS_DIR
-        )
+        flm_models = paths.get("flm_models") or _host_flm_models_dir()
+        _ensure_flm_models_dir(flm_models)
 
         # Only the model cache is bind-mounted. FLM hardcodes
         # ~/.config/flm/models internally; map our hal0-managed cache
@@ -593,6 +642,38 @@ def _probe_flm_catalog() -> list[dict[str, Any]] | None:
     return models
 
 
+def flm_validate() -> bool | None:
+    """Run host ``flm validate`` — the upstream NPU-runtime health check.
+
+    Unlike :func:`_probe_flm_catalog` (``flm list``, which never touches the
+    NPU), ``flm validate`` exercises the actual XDNA runtime. Returns:
+
+    * ``True``  — validation passed (NPU runtime reachable); rc 0.
+    * ``False`` — the binary ran but validation failed (NPU hardware absent
+      or ``libxrt-npu2`` mismatched); non-zero rc.
+    * ``None``  — could not run at all (flm not installed / OS error /
+      timeout), so functional state is unknown.
+
+    This mirrors the installer's ``flm validate`` smoke test but records the
+    result into ``hardware.json`` (``npu.validated``) so slots and the FLM
+    container spec have an authoritative functional signal, not just node
+    presence. Runs as the hal0 identity via :func:`flm_host_spawn_kwargs`.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [_HOST_FLM_BIN, "validate"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60.0,
+            **flm_host_spawn_kwargs(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    return proc.returncode == 0
+
+
 def flm_served_models() -> list[dict[str, Any]]:
     """Return what the FLM toolbox can serve, classified into hal0 capabilities.
 
@@ -736,7 +817,7 @@ def flm_pull_command(tag: str) -> tuple[list[str], str]:
     No ``--device``: ``flm pull`` downloads files; it doesn't touch the NPU,
     so it still runs on dev hosts without XDNA passthrough.
     """
-    return [_HOST_FLM_BIN, "pull", tag], _HOST_FLM_MODELS_DIR
+    return [_HOST_FLM_BIN, "pull", tag], _host_flm_models_dir()
 
 
 _FLM_PROGRESS_RE = re.compile(

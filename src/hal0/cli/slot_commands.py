@@ -23,6 +23,7 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
+from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 
 app = typer.Typer(help="Manage inference slots.")
 console = Console()
@@ -412,7 +413,10 @@ def slot_create(
         None,
         "--port",
         "-p",
-        help="Slot port (default: auto-assign next free port in 8081-8099).",
+        help=(
+            "Slot port (default: auto-assign next free port in "
+            f"{SLOT_PORT_RANGE_START}-{SLOT_PORT_RANGE_END})."
+        ),
         min=1024,
         max=65535,
     ),
@@ -463,16 +467,18 @@ def slot_create(
     if port is not None:
         body["port"] = port
     else:
-        # Best-effort: pick first free port in 8081-8099 by asking the API.
+        # Best-effort: pick first free port in the shared slot pool by asking
+        # the API. Bounds come from hardware.stats so the CLI scan can never
+        # drift from the API's _next_free_slot_port pool again.
         try:
             existing = api_get("/api/slots")
             used = {int(s.get("port") or 0) for s in existing}
-            for p in range(8081, 8100):
+            for p in range(SLOT_PORT_RANGE_START, SLOT_PORT_RANGE_END + 1):
                 if p not in used:
                     body["port"] = p
                     break
         except CliApiError:
-            body["port"] = 8081
+            body["port"] = SLOT_PORT_RANGE_START
     try:
         snap = api_post("/api/slots", json=body)
     except CliApiError as exc:

@@ -1,11 +1,12 @@
 # TTS slot — kokoro-onnx in a podman container (hal0-slot@tts), CPU-only.
+#
+# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
+# box boots a grey tile (no surprise download, no crash-loop). The operator picks
+# a voice model later, which flips the slot enabled.
 name = "tts"
 type = "tts"
 device = "cpu"
 runtime = "container"
 profile = "tts"
-enabled = true
+enabled = false
 port = 8084
-
-[model]
-default = "kokoro-v1"

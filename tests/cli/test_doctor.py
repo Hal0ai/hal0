@@ -67,7 +67,7 @@ def test_doctor_success_propagates_exit_code(
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(stub))
 
     with pytest.raises(typer.Exit) as exc:
-        doctor(ctx=_fake_ctx(), plain=False, ports=None)
+        doctor(ctx=_fake_ctx(), verify=False, plain=False, ports=None)
 
     assert _exit_code(exc) == 0
     captured = capfd.readouterr()
@@ -84,7 +84,7 @@ def test_doctor_failure_propagates_exit_code(
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(stub))
 
     with pytest.raises(typer.Exit) as exc:
-        doctor(ctx=_fake_ctx(), plain=False, ports=None)
+        doctor(ctx=_fake_ctx(), verify=False, plain=False, ports=None)
 
     assert _exit_code(exc) == 1
     captured = capfd.readouterr()
@@ -96,7 +96,7 @@ def test_doctor_missing_script_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", "/definitely/not/a/real/path.sh")
 
     with pytest.raises(typer.Exit) as exc:
-        doctor(ctx=_fake_ctx(), plain=False, ports=None)
+        doctor(ctx=_fake_ctx(), verify=False, plain=False, ports=None)
 
     assert _exit_code(exc) == 2
 
@@ -114,7 +114,7 @@ def test_doctor_forwards_plain_flag(
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(stub))
 
     with pytest.raises(typer.Exit) as exc:
-        doctor(ctx=_fake_ctx(), plain=True, ports=None)
+        doctor(ctx=_fake_ctx(), verify=False, plain=True, ports=None)
 
     assert _exit_code(exc) == 0
     captured = capfd.readouterr()
@@ -134,7 +134,7 @@ def test_doctor_forwards_ports_option(
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(stub))
 
     with pytest.raises(typer.Exit) as exc:
-        doctor(ctx=_fake_ctx(), plain=False, ports="9090 9091")
+        doctor(ctx=_fake_ctx(), verify=False, plain=False, ports="9090 9091")
 
     assert _exit_code(exc) == 0
     captured = capfd.readouterr()
@@ -387,6 +387,6 @@ def test_toolbox_pull_invoked_subcommand_skips_preflight(
 
     # Doctor callback should return None silently (no typer.Exit) when a
     # sub-command is present.
-    result = doctor(ctx=_CtxWithSubcommand(), plain=False, ports=None)  # type: ignore[arg-type]
+    result = doctor(ctx=_CtxWithSubcommand(), verify=False, plain=False, ports=None)  # type: ignore[arg-type]
     assert result is None
     assert "should-not-run" not in capfd.readouterr().out

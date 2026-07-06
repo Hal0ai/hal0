@@ -284,7 +284,9 @@ def test_seeded_npu_toml_fields_survive_model_update(
     slot_toml = _seed_slot_toml(
         tmp_hal0_home,
         "npu",
-        # Mirrors installer/etc-hal0/slots/npu.toml exactly
+        # Canonical npu-slot shape AFTER a model has been assigned (the seed
+        # itself ships grey/model-less per WS-E #1107; this fixture exercises the
+        # post-assignment PUT-preserves-fields path).
         "\n".join(
             [
                 "# NPU LLM slot",

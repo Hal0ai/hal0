@@ -58,12 +58,13 @@ def fake_run_pull(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         job._signal()
 
     monkeypatch.setattr(pull_module, "run_pull", fake)
-    # The routes import run_pull at module load — also patch their
-    # binding so the fake reaches the BackgroundTasks invocation.
-    from hal0.api.routes import installer as installer_routes
+    # The models route imports run_pull at module load — also patch its
+    # binding so the fake reaches the BackgroundTasks invocation. (The
+    # installer route no longer binds run_pull directly: WS-E / #1108 moved
+    # it behind run_pull_and_activate, which imports run_pull lazily from
+    # hal0.registry.pull — already patched above via pull_module.)
     from hal0.api.routes import models as model_routes
 
-    monkeypatch.setattr(installer_routes, "run_pull", fake)
     monkeypatch.setattr(model_routes, "run_pull", fake)
     return calls
 

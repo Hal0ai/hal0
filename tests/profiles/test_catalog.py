@@ -32,7 +32,7 @@ def test_resolve_qwen3tts_seed_is_gpu_tts_family(tmp_hal0_home: str) -> None:
 def test_resolve_exposes_backend(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
     assert catalog.resolve("rocm").backend == "rocm"
-    assert catalog.resolve("rocm-dnse").backend == "rocm"
+    assert catalog.resolve("rocmfpx-rocm").backend == "rocm"
     assert catalog.resolve("vulkan").backend == "vulkan"
     # non-GPU seeds carry no backend
     assert catalog.resolve("flm").backend is None
@@ -123,7 +123,7 @@ def test_cloned_from_defaults_to_none_and_survives_update(tmp_hal0_home: str) ->
 def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["rocm"].tps == 52.8
-    assert by_name["rocm-dnse"].tps == 30.4
+    assert by_name["vulkan"].tps == 41.0
     # TTS is synth — reported as a real-time factor, not tok/s.
     assert by_name["tts"].tps is None
     assert by_name["tts"].rtf == 0.18
@@ -131,7 +131,7 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
-    assert by_name["rocm"].intent == "MoE agents"
+    assert by_name["rocm"].intent == "ROCm"
     assert by_name["rocm"].quant == "FP4"
     assert by_name["vulkan"].quant == "Q4_K_M"
 

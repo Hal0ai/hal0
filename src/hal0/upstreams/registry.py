@@ -209,6 +209,65 @@ class UpstreamRegistry:
         self._upstreams[name] = merged
         return merged
 
+    def set_advertise(self, name: str, value: bool, *, persist: bool = True) -> Upstream:
+        """Flip an upstream's ``advertise_models`` flag and persist atomically.
+
+        Reads ``upstreams.toml``, updates the matching entry's
+        ``advertise_models`` field, and writes the file back via
+        :func:`hal0.config.loader.save_upstreams_config` (which uses
+        ``write_toml_atomic`` for a crash-safe rename). The in-memory
+        ``Upstream`` is also updated so the next ``/v1/models`` request
+        reflects the change without an API restart.
+
+        Auto-registered upstreams (e.g. slot-backed entries that aren't
+        authored in ``upstreams.toml``) have no on-disk row to patch — for
+        those the in-memory value is updated and the on-disk config is left
+        untouched. The flag stays at its in-memory value for the lifetime
+        of the process; on restart the default (``True``) is re-applied.
+
+        Args:
+            name: Upstream name.
+            value: New ``advertise_models`` value.
+            persist: When ``True`` (default), atomically write
+                ``upstreams.toml``. Set to ``False`` for tests that don't
+                want filesystem side-effects.
+
+        Returns the new in-memory :class:`Upstream`.
+
+        Raises:
+            UpstreamNotFound: If ``name`` is not registered.
+        """
+        cur = self._upstreams.get(name)
+        if cur is None:
+            raise UpstreamNotFound(f"upstream {name!r} not found", {"name": name})
+
+        if persist:
+            # Local import: hal0.config.loader imports from this module's
+            # sibling modules, so a top-level import here would risk a
+            # circular import in some test configurations.
+            from hal0.config.loader import (
+                load_upstreams_config,
+                save_upstreams_config,
+            )
+
+            cfg = load_upstreams_config()
+            for entry in cfg.upstream:
+                if entry.name == name:
+                    entry.advertise_models = value
+                    save_upstreams_config(cfg)
+                    break
+            # else: auto-registered upstream, not on disk — in-memory only.
+
+        merged = replace(cur, advertise_models=value)
+        self._upstreams[name] = merged
+        log.info(
+            "upstream.set_advertise",
+            name=name,
+            advertise_models=value,
+            persisted=persist,
+        )
+        return merged
+
     def in_priority_order(self) -> list[Upstream]:
         """Sort order for dispatcher fallback: slots first, then remotes."""
         rank = {"slot": 0, "remote": 1}
