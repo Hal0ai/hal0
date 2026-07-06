@@ -6,7 +6,10 @@ set -euo pipefail
 
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"   # persistent HF cache
-HF="/opt/venv/bin/hf"
+# Resolve the Hugging Face CLI: prefer an explicit $HF override, then a
+# host-PATH `hf` (installer-provisioned), and fall back to the ComfyUI
+# container venv path for in-container execution.
+HF="${HF:-$(command -v hf 2>/dev/null || echo /opt/venv/bin/hf)}"
 
 MODEL_DIR="${MODEL_DIR:-/mnt/ai-models/comfyui/models}"
 STAGE="$MODEL_DIR/.hf_stage_qwen"                      # persistent staging (resume support)
