@@ -40,6 +40,12 @@ PANE_COPY: dict[str, PaneCopy] = {
         "Your NPU can run embeddings, speech-to-text, and text-to-speech in "
         "parallel — leaving the GPU for chat. Recommended when present.",
     ),
+    "capabilities": PaneCopy(
+        "Capability slots",
+        "Wire up embeddings, rerank, speech, and vision. For each, pick a "
+        "fitting model, scaffold the slot empty to choose a model later, or "
+        "skip it — we never choose a model for you.",
+    ),
     "review": PaneCopy(
         "Ready to build",
         "Here's exactly what will be created and wired. Nothing has been written yet.",

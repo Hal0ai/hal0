@@ -58,9 +58,8 @@ async def test_profile_change_drives_device(tmp_hal0_home: str) -> None:
 async def test_device_change_reconciles_conflicting_profile(tmp_hal0_home: str) -> None:
     """Flipping device across backends drops an incompatible profile.
 
-    The ``POST /api/slots/{name}/backend`` control writes only ``device``;
-    a cross-backend flip must reconcile the profile to a compatible one so
-    no rocm+vulkan pair is ever persisted.
+    A cross-backend ``device`` change via ``update_config`` must reconcile
+    the profile to a compatible one so no rocm+vulkan pair is ever persisted.
     """
     sm = SlotManager()
     await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="rocm"))

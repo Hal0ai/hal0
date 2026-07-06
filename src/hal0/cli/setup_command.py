@@ -18,11 +18,26 @@ from hal0.config.schema import HardwareInfo
 from hal0.hardware.probe import HardwareProbe
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
-from hal0.install.suggest import suggest_models
 
-#: capability → (slot_name, port). Mirrors installer.py:_SLOT_META for the
-#: two slots first-run provisions.
-_SETUP_SLOTS = {"chat": ("chat", 8081), "coder": ("coder", 8082)}
+#: capability → (slot_name, port) for the slots first-run provisions. Mirrors
+#: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
+#: tts) and adds rerank/vision on free ports in the 8081-8099 pool. ``img`` is
+#: handled via the ComfyUI ``comfyui_defaults`` sidecar, not this table.
+_SETUP_SLOTS = {
+    "chat": ("chat", 8081),
+    "coder": ("coder", 8082),
+    "embed": ("embed", 8083),
+    "stt": ("stt", 8084),
+    "tts": ("tts", 8085),
+    "rerank": ("rerank", 8086),
+    "vision": ("vision", 8087),
+}
+
+#: Capabilities scaffolded (empty, no model) by ``--auto``. ``coder`` is added
+#: separately, gated on an agent extension. ``apply_setup`` derives each slot's
+#: device and skips any that don't apply to the hardware (e.g. NPU-only ``stt``
+#: without ``npu_opt_in``).
+_SCAFFOLD_CAPS = ("chat", "embed", "rerank", "stt", "tts", "vision")
 
 
 def _api_reachable(timeout: float = 0.5) -> bool:
@@ -58,8 +73,13 @@ def build_auto_selections(
     with_slots: bool = True,
     existing_slots: frozenset[str] = frozenset(),
 ) -> Selections:
-    """Non-interactive defaults for ``--auto`` (install.sh path): recommended
-    model per slot, default extension set, NPU trio on if present.
+    """Non-interactive defaults for ``--auto`` (install.sh path): scaffold the
+    capability + NPU slot structure with **no model picks** (pick-free) plus the
+    default extension set; NPU routing on when an NPU is present.
+
+    Each provisioned slot is an *empty scaffold* — ``SlotSelection.model_id`` is
+    ``None`` so ``apply_setup`` wires device/profile/port but leaves the model
+    unset for the operator to choose later.  We never pick a model for the user.
 
     When *with_extensions* is ``False`` every extension is disabled (all keys
     present, all values ``False``).  The coder/agent slot is gated on an agent
@@ -86,25 +106,26 @@ def build_auto_selections(
     slots: list[SlotSelection] = []
     comfyui_defaults: tuple[tuple[str, str], ...] = ()
     if with_slots:
-        # Main (chat) is always provisioned in --auto (OWUI + Hermes default on)
-        # — unless it was already configured by a prior install.
-        if "chat" not in existing_slots:
-            chat = suggest_models("chat", hw, limit=1)
-            if chat:
-                name, port = _SETUP_SLOTS["chat"]
-                slots.append(SlotSelection("chat", name, port, chat[0].model_id))
-        # Agent slot only if an agent extension is enabled and not already present.
+        # Scaffold the capability + NPU slot STRUCTURE with no model picks
+        # (pick-free): device/profile/port are wired but ``model.default`` is
+        # left unset for the operator to fill later. apply_setup derives each
+        # slot's device and skips any not applicable to the hardware (e.g.
+        # NPU-only ``stt`` without an NPU / opt-in). Existing configs are never
+        # overwritten.
+        for cap in _SCAFFOLD_CAPS:
+            name, port = _SETUP_SLOTS[cap]
+            if name not in existing_slots:
+                slots.append(SlotSelection(cap, name, port, None))
+        # Coder slot only when an agent extension is enabled (and not present).
         if (
             any(_kind(eid) == "agent" and on for eid, on in ext.items())
             and "coder" not in existing_slots
         ):
-            coder = suggest_models("coder", hw, limit=1, prefer_coder=True)
-            if coder:
-                name, port = _SETUP_SLOTS["coder"]
-                slots.append(SlotSelection("coder", name, port, coder[0].model_id))
-        # Record ComfyUI default capability picks as (capability_id, family) pairs.
-        # No model pull at install — operator triggers downloads later via
-        # POST /api/comfyui/models/fetch.
+            name, port = _SETUP_SLOTS["coder"]
+            slots.append(SlotSelection("coder", name, port, None))
+        # Record ComfyUI default image capability picks as (capability_id,
+        # family) pairs. No pull at install — the operator triggers downloads
+        # later via POST /api/comfyui/models/fetch.
         from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
 
         comfyui_defaults = tuple(

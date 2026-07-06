@@ -12,6 +12,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
+from hal0.cli.setup_command import _SETUP_SLOTS
 from hal0.cli.setup_copy import PANE_COPY
 from hal0.config.schema import HardwareInfo
 from hal0.install.extensions import EXTENSIONS, get_extension
@@ -102,6 +103,9 @@ def plan_steps(*, extensions: dict, npu_present: bool) -> list[str]:
         steps.append("agent")
     if npu_present:
         steps.append("npu")
+    # Capability slots (embed/rerank/stt/tts/vision) are always offered — they
+    # don't depend on a chat consumer.
+    steps.append("capabilities")
     steps += ["review", "install"]
     return steps
 
@@ -120,16 +124,38 @@ def _draw(step_key: str, left, hw: HardwareInfo) -> None:
     _con.print(render_shell(step_key=step_key, left_body=left, hw_footer=_hw_footer(hw)))
 
 
-def _choose_model(step_key, capability, hw, *, prefer_coder=False):
-    sugg = suggest_models(capability, hw, limit=3, prefer_coder=prefer_coder)
-    if not sugg:
-        return None
-    _draw(step_key, render_suggestion_table(sugg), hw)
-    default = next((str(i + 1) for i, s in enumerate(sugg) if s.recommended), "1")
-    choice = Prompt.ask(
-        "Pick a model", choices=[str(i + 1) for i in range(len(sugg))], default=default
+def _provision_body(slot_name, suggestions) -> RenderableType:
+    legend = Text("s) scaffold empty — choose a model later    x) skip this slot", style="dim")
+    if suggestions:
+        return Group(
+            Text(f"{slot_name} slot", style="bold"), render_suggestion_table(suggestions), legend
+        )
+    return Group(
+        Text(f"{slot_name} slot", style="bold"),
+        Text("No curated model fits this hardware — scaffold empty or skip.", style="dim"),
+        legend,
     )
-    return sugg[int(choice) - 1]
+
+
+def _provision_slot(step_key, capability, hw, slot_name, port, *, prefer_coder=False):
+    """Guide the operator through one slot: pick a fitting model, scaffold the
+    slot empty (``model_id=None``), or skip it. Returns a ``SlotSelection`` or
+    ``None`` to skip. Never auto-selects a model on the operator's behalf."""
+    sugg = suggest_models(capability, hw, limit=3, prefer_coder=prefer_coder)
+    _draw(step_key, _provision_body(slot_name, sugg), hw)
+    choices = [str(i + 1) for i in range(len(sugg))] + ["s", "x"]
+    # Default to the recommended pick when one fits; otherwise to "scaffold".
+    default = next((str(i + 1) for i, s in enumerate(sugg) if s.recommended), "s")
+    choice = Prompt.ask(
+        f"{slot_name}: model number, [s]caffold empty, or [x] skip",
+        choices=choices,
+        default=default,
+    )
+    if choice == "x":
+        return None
+    if choice == "s":
+        return SlotSelection(capability, slot_name, port, None)
+    return SlotSelection(capability, slot_name, port, sugg[int(choice) - 1].model_id)
 
 
 def _toggle_extensions(state: dict, hw: HardwareInfo) -> None:
@@ -154,7 +180,8 @@ def _review_table(sel: Selections):
     t.add_column("Extensions")
     enabled = ", ".join(k for k, v in sel.extensions.items() if v)
     for i, s in enumerate(sel.slots):
-        t.add_row(s.slot_name, s.model_id, enabled if i == 0 else "")
+        model = s.model_id or "(scaffold — choose later)"
+        t.add_row(s.slot_name, model, enabled if i == 0 else "")
     return t
 
 
@@ -171,17 +198,30 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
     steps = plan_steps(extensions=state, npu_present=bool(hw.npu.present))
     slots: list[SlotSelection] = []
     if "main" in steps:
-        m = _choose_model("main", "chat", hw)
-        if m:
-            slots.append(SlotSelection("chat", "chat", 8081, m.model_id))
+        name, port = _SETUP_SLOTS["chat"]
+        s = _provision_slot("main", "chat", hw, name, port)
+        if s:
+            slots.append(s)
     if "agent" in steps:
-        a = _choose_model("agent", "coder", hw, prefer_coder=True)
-        if a:
-            slots.append(SlotSelection("coder", "coder", 8082, a.model_id))
+        name, port = _SETUP_SLOTS["coder"]
+        s = _provision_slot("agent", "coder", hw, name, port, prefer_coder=True)
+        if s:
+            slots.append(s)
     npu_opt_in = False
     if "npu" in steps:
         _draw("npu", "Run embed + STT + TTS on the NPU?", hw)
         npu_opt_in = Confirm.ask("Enable NPU trio?", default=True)
+    if "capabilities" in steps:
+        # STT is NPU-only (derive_device returns None without an NPU), so only
+        # offer it when the NPU trio is on.
+        caps = ["embed", "rerank", "tts", "vision"]
+        if npu_opt_in:
+            caps.insert(2, "stt")
+        for cap in caps:
+            name, port = _SETUP_SLOTS[cap]
+            s = _provision_slot("capabilities", cap, hw, name, port)
+            if s:
+                slots.append(s)
 
     sel = Selections(storage_dir=storage_dir, slots=slots, extensions=state, npu_opt_in=npu_opt_in)
     _draw("review", _review_table(sel), hw)
