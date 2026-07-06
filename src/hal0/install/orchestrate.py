@@ -7,6 +7,9 @@ post-install. Deps are injected so there is no hidden ``app.state`` coupling.
 
 from __future__ import annotations
 
+import logging
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,13 @@ from hal0.config.schema import HardwareInfo
 from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.registry.curated import get_curated
 from hal0.registry.pull import get_job, make_job
+
+log = logging.getLogger(__name__)
+
+# Mirrors ``cli.setup_plan.MIN_FREE_GIB`` — duplicated (not imported) so this
+# install-time validation path stays independent of the CLI module (isolation
+# guardrail: setup_plan.py is owned by a sibling workstream).
+MIN_FREE_GIB = 10.0
 
 
 @dataclass(frozen=True)
@@ -132,8 +142,112 @@ def mark_first_run_done() -> None:
     tmp.replace(p)  # atomic
 
 
+def _nearest_existing_ancestor(path: str) -> Path | None:
+    """Walk up from *path* to the nearest ancestor that actually exists.
+
+    A chosen store dir usually doesn't exist yet at persist time, so free-space
+    and writability checks need to land on the mount it *will* be created on.
+    Mirrors the ancestor-walk in ``cli.setup_plan._free_space_gib``. Returns
+    ``None`` if no ancestor can be resolved (e.g. a bare relative fragment).
+    """
+    p = Path(path)
+    seen: set[Path] = set()
+    while p not in seen:
+        seen.add(p)
+        if p.exists():
+            return p
+        if p.parent == p:
+            return None
+        p = p.parent
+    return None
+
+
+def _free_space_gib(path: str) -> float | None:
+    """Available GiB on the mount containing *path*.
+
+    Duplicated from (not imported off) ``cli.setup_plan._free_space_gib`` per
+    the isolation guardrail that keeps this install-time path independent of
+    the CLI module. Returns ``None`` if no ancestor can be stat'd.
+    """
+    ancestor = _nearest_existing_ancestor(path)
+    if ancestor is None:
+        return None
+    try:
+        return shutil.disk_usage(ancestor).free / (1024**3)
+    except OSError:
+        return None
+
+
+def _is_root_fs(ancestor: Path) -> bool:
+    """True if *ancestor* lives on the same filesystem as ``/``.
+
+    Compares ``st_dev`` (same pattern as ``registry.model_store``'s same-fs
+    bind-mount check) rather than string-prefix matching ``/`` so bind mounts
+    and nested mount points are handled correctly. Fails closed (``False``) on
+    a stat error — a validation warning is best-effort, never fatal.
+    """
+    try:
+        return ancestor.stat().st_dev == Path("/").stat().st_dev
+    except OSError:
+        return False
+
+
+def _is_writable(ancestor: Path) -> bool:
+    return os.access(ancestor, os.W_OK)
+
+
+def _validate_store_mount(storage_dir: str) -> None:
+    """Best-effort writability + free-space check on the chosen store mount.
+
+    Warns (logs only — never raises) when the mount is unwritable, sits on
+    the root filesystem, or is short on space (issue #1100 / decision Q4).
+    Non-fatal: a bad pick is surfaced to the operator via logs/``hal0
+    doctor`` rather than aborting the setup walk (ADR-0010).
+    """
+    ancestor = _nearest_existing_ancestor(storage_dir)
+    if ancestor is None:
+        log.warning(
+            "model store %s: could not resolve an existing ancestor to validate", storage_dir
+        )
+        return
+
+    if not _is_writable(ancestor):
+        log.warning("model store %s is not writable (checked %s)", storage_dir, ancestor)
+
+    if _is_root_fs(ancestor):
+        log.warning(
+            "model store %s is on the root filesystem — model + FLM/NPU weights "
+            "will consume root-FS space; consider a dedicated mount",
+            storage_dir,
+        )
+
+    free_gib = _free_space_gib(storage_dir)
+    if free_gib is None:
+        log.warning("model store %s: could not determine free space", storage_dir)
+    elif free_gib < MIN_FREE_GIB:
+        log.warning(
+            "model store %s has only %.1f GiB free (< %.0f GiB threshold)",
+            storage_dir,
+            free_gib,
+            MIN_FREE_GIB,
+        )
+
+
+def _colocated_flm_store(store_dir: str) -> str:
+    """Compute the FLM (NPU) store path co-located under the chosen model store.
+
+    Mirrors the convention documented on ``ModelsConfig.flm_store`` and used by
+    ``installer/install.sh`` (``<store>/flm/models``) so NPU weights land on
+    the same mount as the rest of the model store rather than stranding on the
+    root FS.
+    """
+    return str(Path(store_dir) / "flm" / "models")
+
+
 def _persist_store_dir(storage_dir: str) -> None:
-    """Persist a chosen model-store directory to ``[models].store`` in hal0.toml.
+    """Persist a chosen model-store directory to ``[models].store`` AND
+    co-locate ``[models].flm_store`` alongside it in hal0.toml (issue #1100,
+    decision Q4 — extends #1095's WS-A store threading).
 
     ``Selections.storage_dir`` (WS-A, issue #1095) is the operator's pull
     destination pick from ``/apply``, ``/apply-selections`` and
@@ -142,23 +256,37 @@ def _persist_store_dir(storage_dir: str) -> None:
     (``registry.pull._pull_root`` → ``ModelsConfig.effective_store``), so
     writing the pick here — before the planned pulls run — is what makes a
     custom store actually land pulls in that directory rather than silently
-    no-op'ing the field.
+    no-op'ing the field. ``[models].flm_store`` is resolved the same way
+    (``config.paths.flm_models_dir``), so NPU weights need the same treatment
+    or they strand under the default ``/var/lib/hal0`` cache on the root FS.
+
+    Also runs a non-fatal writability + free-space check on the chosen mount
+    (``_validate_store_mount``), warning on an unwritable dir, a root-FS pick,
+    or low free space — never blocking the walk.
 
     Best-effort per ADR-0010: an empty or relative value is ignored (the pull
     engine keeps its default store), and a config-write failure is swallowed so
-    a bad storage pick never aborts the slot/extension walk. Idempotent — skips
-    the rewrite when ``[models].store`` already points at the chosen path.
+    a bad storage pick never aborts the slot/extension walk. Idempotent —
+    skips the rewrite when both ``[models].store`` and ``[models].flm_store``
+    already point at the chosen (co-located) paths.
     """
     s = (storage_dir or "").strip()
     if not s or not Path(s).is_absolute():
         return
+
+    _validate_store_mount(s)
+    flm_target = _colocated_flm_store(s)
+
     try:
         from hal0.config.loader import load_hal0_config, save_hal0_config
 
         cfg = load_hal0_config()
-        if (cfg.models.store or "").strip() == s:
+        store_ok = (cfg.models.store or "").strip() == s
+        flm_ok = (cfg.models.flm_store or "").strip() == flm_target
+        if store_ok and flm_ok:
             return
         cfg.models.store = s
+        cfg.models.flm_store = flm_target
         save_hal0_config(cfg)
     except Exception:
         # Config persistence is best-effort: pulls fall back to the default
