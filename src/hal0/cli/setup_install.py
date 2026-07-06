@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 
 import httpx
 import typer
@@ -65,12 +66,14 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
     from hal0.install.orchestrate import apply_setup
 
     slot_manager, registry = setup_command._build_offline_deps()
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     result = await apply_setup(
         sel,
         hardware=hw,
         slot_manager=slot_manager,
         registry=registry,
         jobs={},
+        hf_token=hf_token,
         write_sentinel=True,
     )
 
