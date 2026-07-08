@@ -3233,11 +3233,10 @@ class SlotManager:
 
         # Wait for /health 200 on the container port.
         slot_port = port or int(_cfg_to_dict(cfg).get("port", 0))
-        from hal0.providers.container import container_provider
+        from hal0.providers.container import _spec_provider_for, container_provider
 
         try:
             await container_provider().wait_ready(slot_port)
-            return SlotState.READY
         except TimeoutError as exc:
             log.warning(
                 "slot.container_await_ready_timeout",
@@ -3250,6 +3249,32 @@ class SlotManager:
             # request re-drives load() — the fail watcher / reload governs
             # recovery instead of live traffic hitting a wedged server.
             return SlotState.WARMING
+
+        # One-shot inference gate for FLM/NPU slots. The hot health paths (2s
+        # fail-watch + per-request readiness) use only the cheap /v1/models
+        # liveness probe — a repeating/overlapping real completion double-frees
+        # the single NPU context (SIGABRT, status 134). We still verify real
+        # inferability ONCE, here, where there is no contention: the slot is
+        # not yet dispatchable, this load holds the slot lock, and the warming
+        # fail-watcher skips /health. A wedged NPU that lists models but can't
+        # infer resolves to retryable WARMING instead of a lying READY.
+        from hal0.providers.flm import FLMProvider
+
+        provider = _spec_provider_for(cfg)
+        if isinstance(provider, FLMProvider):
+            verdict = await provider.verify_inference(slot_port)
+            if not verdict.get("ok"):
+                log.warning(
+                    "slot.flm_inference_gate_failed",
+                    extra={
+                        "slot": slot_name,
+                        "port": slot_port,
+                        "status": verdict.get("status"),
+                        "detail": verdict.get("detail"),
+                    },
+                )
+                return SlotState.WARMING
+        return SlotState.READY
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
 

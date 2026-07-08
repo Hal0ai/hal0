@@ -31,6 +31,7 @@ haloai's lib/providers/flm.py.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
@@ -223,9 +224,22 @@ def _resolve_render_gid() -> int | None:
 class FLMProvider(Provider):
     """Provider for the AMD NPU FLM backend.
 
-    Health probe REQUIRES a real /v1/chat/completions round-trip with
-    max_tokens=1, not just a populated /v1/models list. This is the
-    Tier 1 fix for the haloai lib/slots.py:899-920 bug.
+    Two-tier readiness (Option A — NPU double-free avoidance):
+
+      * :meth:`health` is the CHEAP liveness probe (non-empty ``/v1/models``).
+        It issues NO NPU work and is the ONLY probe safe to run on the hot
+        paths — the 2s fail-watcher and the per-request readiness gate. FLM
+        serialises the single NPU context and double-frees (SIGABRT, status
+        134) when an in-flight completion is cancelled or overlapped, so a
+        real-inference probe MUST NOT run on a repeating/concurrent path.
+      * :meth:`verify_inference` is the one-shot ``/v1/chat/completions``
+        sentinel (max_tokens=1). It runs EXACTLY ONCE at the warm→ready
+        promotion (:meth:`SlotManager._await_ready`), where there is no
+        contention — the slot is not yet dispatchable, the load lock is held,
+        and the warming fail-watcher skips health probes. This preserves the
+        Tier-1 "listing models is not the same as being able to infer" check
+        (haloai lib/slots.py:899-920) without the polling storm that crashed
+        the NPU.
     """
 
     name = "flm"
@@ -423,24 +437,69 @@ class FLMProvider(Provider):
     # ── Health / infer ─────────────────────────────────────────────────────────
 
     async def health(self, port: int) -> dict[str, Any]:
-        """Health probe with a real inference round-trip.
+        """Cheap liveness probe — non-empty ``/v1/models``, NO NPU work.
 
-        TIER1: PLAN.md §5 — the haloai version (lib/providers/flm.py)
-        reported "ok" as soon as `/v1/models` returned data, even when
-        the model failed to actually load on the NPU. We now require
-        BOTH:
-          1. non-empty /v1/models
-          2. a /v1/chat/completions with max_tokens=1 returning a
-             well-formed response with at least one choice
+        This is the ONLY health probe safe to run on the hot paths (the 2s
+        fail-watcher and the per-request readiness gate). It deliberately does
+        NOT issue a ``/v1/chat/completions`` sentinel: FLM serialises the
+        single NPU context and its request-cancel path double-frees (SIGABRT,
+        status 134), so a real-inference probe fired repeatedly — and
+        overlapping real traffic — crashes the container. Real inferability is
+        verified once, out of band, by :meth:`verify_inference` at the
+        warm→ready promotion.
+
+        Distinguishes "up but still loading" (``ok=False``,
+        ``models_endpoint_empty``) from "up and serving a model"
+        (``ok=True``). Transport errors surface as ``ok=False`` /
+        ``http_error`` so the manager's strike-based fail-watcher can act.
 
         Returns {"ok": bool, "status": str, "model": str|None, ...}.
         """
         models_url = f"http://127.0.0.1:{port}/v1/models"
-        chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
-
         try:
             async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
-                # Step 1: /v1/models must be non-empty.
+                models_resp = await client.get(models_url)
+                models_resp.raise_for_status()
+                data = models_resp.json()
+                models = data.get("data", [])
+                if not models:
+                    return {
+                        "ok": False,
+                        "status": "models_endpoint_empty",
+                        "detail": "/v1/models returned no entries",
+                    }
+                model_id = models[0].get("id")
+            return {"ok": True, "status": "ready", "model": model_id}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "status": "http_error", "detail": str(exc)}
+        except Exception as exc:
+            # Do not silently swallow — surface the failure to the fail-watcher.
+            return {"ok": False, "status": "exception", "detail": str(exc)}
+
+    async def verify_inference(self, port: int) -> dict[str, Any]:
+        """One-shot real-inference gate — a single ``/v1/chat/completions``.
+
+        Run EXACTLY ONCE at the warm→ready promotion (see
+        :meth:`SlotManager._await_ready`), never on a repeating/concurrent
+        path. This is the Tier-1 check that ``/v1/models`` listing a model is
+        not proof the NPU can actually produce a token (haloai
+        lib/slots.py:899-920).
+
+        The sentinel POST is wrapped in :func:`asyncio.shield`: if the load
+        coroutine is cancelled mid-flight we must NOT abort an in-progress NPU
+        prefill — that is exactly the cancellation FLM double-frees on. The
+        gate runs with no contention (slot not yet dispatchable, load lock
+        held, warming fail-watcher skips /health), so draining the shielded
+        request costs at most the read timeout.
+
+        Returns {"ok": bool, "status": str, "model": str|None, ...}. Never
+        raises; a transport failure resolves to ``ok=False`` so the caller can
+        hold the slot in the retryable WARMING state rather than a lying READY.
+        """
+        models_url = f"http://127.0.0.1:{port}/v1/models"
+        chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        try:
+            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
                 models_resp = await client.get(models_url)
                 models_resp.raise_for_status()
                 data = models_resp.json()
@@ -453,7 +512,6 @@ class FLMProvider(Provider):
                     }
                 model_id = models[0].get("id")
 
-            # Step 2: real inference round-trip.  # TIER1
             async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {
                     "model": model_id,
@@ -462,7 +520,8 @@ class FLMProvider(Provider):
                     "temperature": 0.0,
                     "stream": False,
                 }
-                chat_resp = await client.post(chat_url, json=probe_body)
+                # shield: never hand FLM a cancelled prefill (double-free).
+                chat_resp = await asyncio.shield(client.post(chat_url, json=probe_body))
                 if chat_resp.status_code != 200:
                     return {
                         "ok": False,
@@ -488,7 +547,6 @@ class FLMProvider(Provider):
         except httpx.HTTPError as exc:
             return {"ok": False, "status": "http_error", "detail": str(exc)}
         except Exception as exc:
-            # TIER1: do not silently swallow.
             return {"ok": False, "status": "exception", "detail": str(exc)}
 
     async def infer(self, port: int, body: dict[str, Any]) -> dict[str, Any]:

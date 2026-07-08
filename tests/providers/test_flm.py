@@ -1,8 +1,18 @@
 """Unit tests for FLMProvider.
 
-Critical: TIER1 — the haloai FLM health probe accepted an empty
-/v1/models and an unstuck-but-non-functional NPU as "ready". hal0
-requires a real inference round-trip. These tests are the contract.
+Two-tier readiness (Option A — NPU double-free avoidance):
+
+  * ``health`` is the CHEAP hot-path probe — non-empty ``/v1/models``, and it
+    MUST NOT issue a ``/v1/chat/completions`` sentinel. FLM double-frees
+    (status 134) when a real completion on its single NPU context is cancelled
+    or overlapped, so the repeating 2s fail-watch + per-request readiness gate
+    can only run the cheap probe.
+  * ``verify_inference`` is the one-shot warm→ready gate that DOES exercise a
+    real inference round-trip (max_tokens=1) to catch a wedged NPU that lists
+    a model but can't produce a token (the original haloai
+    lib/slots.py:899-920 contract), run once where there is no contention.
+
+These tests pin both halves of that contract.
 """
 
 from __future__ import annotations
@@ -179,7 +189,7 @@ def test_container_spec_ld_library_path_includes_xrt(
     assert "/opt/xilinx/xrt/lib" in ld, f"LD_LIBRARY_PATH missing XRT runtime path: {ld!r}"
 
 
-# ─── health (TIER1 inference round-trip) ──────────────────────────────────────
+# ─── health (cheap /v1/models liveness) + verify_inference (one-shot gate) ────
 
 
 def _mock_response(
@@ -202,28 +212,25 @@ def _mock_response(
 
 
 @pytest.mark.asyncio
-async def test_health_requires_inference_round_trip(provider: FLMProvider) -> None:
-    """TIER1: health MUST exercise /v1/chat/completions, not just /v1/models.
+async def test_health_is_cheap_and_never_probes_the_npu(provider: FLMProvider) -> None:
+    """Regression (NPU double-free): the hot-path health probe MUST NOT issue a
+    /v1/chat/completions sentinel — only non-empty /v1/models.
 
-    This is the explicit contract from PLAN.md §5 Tier 1 (haloai bug
-    at lib/slots.py:899-920).
+    A repeating/overlapping real completion on FLM's single NPU context
+    double-frees the container (status 134). ``health`` runs on the 2s
+    fail-watch + per-request readiness gate, so it can only do the cheap probe.
     """
     models_payload = {"data": [{"id": "qwen3.5:0.8b"}]}
-    chat_payload = {"choices": [{"message": {"content": "x"}}]}
-
-    sentinel_was_called = {"value": False}
 
     async def _fake_get(url: str) -> httpx.Response:
         assert url.endswith("/v1/models")
         return _mock_response(status_code=200, json_payload=models_payload)
 
     async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
-        # TIER1: sentinel POST is required, with max_tokens=1.
-        assert url.endswith("/v1/chat/completions")
-        assert json["max_tokens"] == 1
-        assert json["model"] == "qwen3.5:0.8b"
-        sentinel_was_called["value"] = True
-        return _mock_response(status_code=200, json_payload=chat_payload)
+        raise AssertionError(
+            "health() must NOT POST /v1/chat/completions — the NPU sentinel on "
+            "the hot path is exactly what double-frees FLM (status 134)."
+        )
 
     with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
@@ -231,10 +238,6 @@ async def test_health_requires_inference_round_trip(provider: FLMProvider) -> No
         client.post = _fake_post
         result = await provider.health(8086)
 
-    assert sentinel_was_called["value"], (
-        "TIER1: FLM health probe MUST issue a /v1/chat/completions sentinel "
-        "(haloai bug was reporting ready without it)."
-    )
     assert result["ok"] is True
     assert result["status"] == "ready"
     assert result["model"] == "qwen3.5:0.8b"
@@ -242,72 +245,18 @@ async def test_health_requires_inference_round_trip(provider: FLMProvider) -> No
 
 @pytest.mark.asyncio
 async def test_health_rejects_empty_models(provider: FLMProvider) -> None:
-    """TIER1: empty /v1/models → not ready (the original haloai bug)."""
+    """Empty /v1/models → not ready (still loading)."""
 
     async def _fake_get(url: str) -> httpx.Response:
         return _mock_response(status_code=200, json_payload={"data": []})
 
-    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
-        raise AssertionError("must not POST when /v1/models is empty")
-
     with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get = _fake_get
-        client.post = _fake_post
         result = await provider.health(8086)
 
     assert result["ok"] is False
     assert result["status"] == "models_endpoint_empty"
-
-
-@pytest.mark.asyncio
-async def test_health_rejects_models_ok_but_inference_failing(
-    provider: FLMProvider,
-) -> None:
-    """TIER1: populated /v1/models but failing inference → not ready.
-
-    This is the precise failure mode the haloai code missed.
-    """
-    models_payload = {"data": [{"id": "qwen3.5:0.8b"}]}
-
-    async def _fake_get(url: str) -> httpx.Response:
-        return _mock_response(status_code=200, json_payload=models_payload)
-
-    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
-        # Inference fails — NPU loaded the model metadata but the runtime is stuck.
-        return _mock_response(status_code=500, text="kernel not ready")
-
-    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
-        client = MockClient.return_value.__aenter__.return_value
-        client.get = _fake_get
-        client.post = _fake_post
-        result = await provider.health(8086)
-
-    assert result["ok"] is False, (
-        "TIER1: failed sentinel must drop ok=False even though /v1/models was good."
-    )
-    assert "sentinel_completion_http_500" in result["status"]
-
-
-@pytest.mark.asyncio
-async def test_health_rejects_response_with_no_choices(provider: FLMProvider) -> None:
-    """TIER1: 200 but malformed (no choices) → not ready."""
-    models_payload = {"data": [{"id": "qwen3.5:0.8b"}]}
-
-    async def _fake_get(url: str) -> httpx.Response:
-        return _mock_response(status_code=200, json_payload=models_payload)
-
-    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
-        return _mock_response(status_code=200, json_payload={"id": "x"})  # no choices
-
-    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
-        client = MockClient.return_value.__aenter__.return_value
-        client.get = _fake_get
-        client.post = _fake_post
-        result = await provider.health(8086)
-
-    assert result["ok"] is False
-    assert result["status"] == "sentinel_completion_no_choices"
 
 
 @pytest.mark.asyncio
@@ -324,6 +273,107 @@ async def test_health_transport_failure_surfaces_typed_status(
 
     assert result["ok"] is False
     assert result["status"] == "http_error"
+
+
+@pytest.mark.asyncio
+async def test_verify_inference_requires_round_trip(provider: FLMProvider) -> None:
+    """The one-shot gate MUST exercise /v1/chat/completions with max_tokens=1.
+
+    This is the wedged-NPU check (haloai lib/slots.py:899-920) preserved off
+    the hot path.
+    """
+    models_payload = {"data": [{"id": "qwen3.5:0.8b"}]}
+    chat_payload = {"choices": [{"message": {"content": "x"}}]}
+
+    sentinel_was_called = {"value": False}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        assert url.endswith("/v1/models")
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        assert url.endswith("/v1/chat/completions")
+        assert json["max_tokens"] == 1
+        assert json["model"] == "qwen3.5:0.8b"
+        sentinel_was_called["value"] = True
+        return _mock_response(status_code=200, json_payload=chat_payload)
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086)
+
+    assert sentinel_was_called["value"], "verify_inference MUST issue the sentinel."
+    assert result["ok"] is True
+    assert result["status"] == "ready"
+    assert result["model"] == "qwen3.5:0.8b"
+
+
+@pytest.mark.asyncio
+async def test_verify_inference_rejects_empty_models(provider: FLMProvider) -> None:
+    """Empty /v1/models → not ready; the gate must not POST."""
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload={"data": []})
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        raise AssertionError("must not POST when /v1/models is empty")
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086)
+
+    assert result["ok"] is False
+    assert result["status"] == "models_endpoint_empty"
+
+
+@pytest.mark.asyncio
+async def test_verify_inference_rejects_models_ok_but_inference_failing(
+    provider: FLMProvider,
+) -> None:
+    """Populated /v1/models but failing inference → not ready (wedged NPU)."""
+    models_payload = {"data": [{"id": "qwen3.5:0.8b"}]}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        return _mock_response(status_code=500, text="kernel not ready")
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086)
+
+    assert result["ok"] is False
+    assert "sentinel_completion_http_500" in result["status"]
+
+
+@pytest.mark.asyncio
+async def test_verify_inference_rejects_response_with_no_choices(
+    provider: FLMProvider,
+) -> None:
+    """200 but malformed (no choices) → not ready."""
+    models_payload = {"data": [{"id": "qwen3.5:0.8b"}]}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload={"id": "x"})  # no choices
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086)
+
+    assert result["ok"] is False
+    assert result["status"] == "sentinel_completion_no_choices"
 
 
 # ─── infer ────────────────────────────────────────────────────────────────────
