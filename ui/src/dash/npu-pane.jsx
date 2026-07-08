@@ -343,11 +343,12 @@ export function NpuOccupancyCard({ slots }) {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const editMut = useSlotEdit()
-  const flmSlot = npuSlots.find(s => s.name === 'flm')
-  const mainFlmNpu = flmSlot?.npu || {}
 
   const npuSlots = (slots || []).filter(isNpuSlot)
   if (npuSlots.length === 0) return null
+
+  const flmSlot = npuSlots.find(s => s.name === 'flm')
+  const mainFlmNpu = flmSlot?.npu || {}
 
   const occ = occQuery.data || {}
   const occSlots = occ.slots || []
