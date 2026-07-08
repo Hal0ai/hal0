@@ -57,9 +57,7 @@ def configured_client(isolated_client, monkeypatch):
         app.state.slot_manager = sm
         app.state.model_registry = mr
         # Prevent the composite upstream from adding raw model ids
-        monkeypatch.setattr(
-            "hal0.api.hal0_chat_slot_model_ids", lambda sm: {"big"}
-        )
+        monkeypatch.setattr("hal0.api.hal0_chat_slot_model_ids", lambda sm: {"big"})
         yield client
 
 
