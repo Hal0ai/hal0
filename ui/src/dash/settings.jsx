@@ -1723,24 +1723,9 @@ function GeneralSection() {
 // memory.engine is a plain string in the schema (validator-enforced), so
 // its options are pinned here to the backend's accepted set.
 // Every key here is verified consumed by the backend: max_slots gates
-// POST /api/slots, the port pool feeds the auto-allocator (both read from
-// the live config — no restart), the dispatcher knobs bound the cold
-// prefetch fanout, and the memory rerank knobs configure Hal0Reranker.
-// (The cognee-era embedding keys were deleted from the schema.)
 const ADV_GROUPS = [
-  { title: "Slots runtime", sub: "hal0.toml [slots]", keys: [
-    "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
-    "slots.idle_timeout_s", "slots.evict_pressure_mb", "slots.publish_host",
-  ]},
-  { title: "Dispatcher", sub: "hal0.toml [dispatcher]", keys: [
+  { title: "Dispatcher", sub: "hal0.toml [dispatcher] · upstream routing tunables", keys: [
     "dispatcher.prefetch_timeout_s", "dispatcher.prefetch_parallel_cap",
-  ]},
-  { title: "Memory", sub: "hal0.toml [memory] · engine + reranker; graph extraction below", keys: [
-    "memory.engine",
-    "memory.embedding.rerank_gateway_url",
-    "memory.embedding.rerank_model",
-    "memory.embedding.rerank_connect_timeout_s",
-    "memory.embedding.rerank_read_timeout_s",
   ]},
   { title: "Activity log", sub: "hal0.toml [activity] · durable audit trail", keys: [
     "activity.enabled", "activity.retention_days", "activity.max_rows",
@@ -1957,9 +1942,8 @@ function AdvancedSection() {
     <div className="s-section">
       <h2>Advanced</h2>
       <p className="desc">
-        Runtime tuning for hal0.toml sections that don't have a dedicated page. Descriptions and
-        bounds come from the server's config schema; effect chips show whether a change applies
-        live or needs a restart.
+        Low-level dispatcher and activity log tuning. Slot runtime moved to Slots; memory
+        moved to Memory. Effect chips show whether a change applies live or needs a restart.
       </p>
 
       {loading && <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading config schema…</div>}
@@ -1987,7 +1971,6 @@ function AdvancedSection() {
                   />
                 ))}
               </div>
-              {g.title === "Memory" && <MemoryGraphPanel />}
             </React.Fragment>
           ))}
 
