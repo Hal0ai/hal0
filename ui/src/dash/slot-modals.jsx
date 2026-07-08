@@ -887,8 +887,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       </FieldGroup>
 
-      {slot.device !== "npu" && <FieldGroup label="Model" hint="what it loads">}
-      {slot.device === "npu" && <FieldGroup label="Capabilities" hint="NPU trio — single hardware context">}
+      <FieldGroup label="Model" hint="what it loads">
       {/* Task 1: live model swap — mirrors the card's ModelPicker but with the
           full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
           Swap is its own POST /slots/{name}/swap (not part of the batched
@@ -1031,8 +1030,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
-      {slot.device !== "npu" && </FieldGroup>}
-      {/* NPU capability matrix — Model is replaced by Capabilities for NPU slots */}
+      {/* NPU capability matrix — replaces Model+Template for NPU slots */}
       {slot.device === "npu" && (() => {
         const applyNpu = async (nextChat, nextAsr, nextEmbed, field) => {
           setNpuPending(true);
@@ -1137,8 +1135,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </>
         );
       })()}
-      {slot.device === "npu" && </FieldGroup>}
-      {slot.device !== "npu" && </FieldGroup>}
+      </FieldGroup>
 
       <FieldGroup label="Inference" hint="behavior">
       {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
