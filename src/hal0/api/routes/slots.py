@@ -867,6 +867,14 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
             entry = {"name": name}
             merged[name] = entry
         entry["request_count"] = count
+    # Per-slot last-use timestamps (drives most-recent animation)
+    last_used = getattr(request.app.state, "slot_last_used", {})
+    for name, ts in last_used.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["last_used_ts"] = ts
     return merged
 
 

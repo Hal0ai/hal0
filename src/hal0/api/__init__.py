@@ -954,6 +954,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.slot_throughput: dict[str, float] = {}
     app.state.slot_kv_occupancy: dict[str, float] = {}
     app.state.slot_request_count: dict[str, int] = {}
+    app.state.slot_last_used: dict[str, float] = {}
 
     log.info(
         "hal0.api.upstreams_loaded",

@@ -160,6 +160,12 @@ def _record_nonstreaming_throughput(
     req_store = getattr(app_state, "slot_request_count", None)
     if req_store is not None and slot_name:
         req_store[slot_name] = req_store.get(slot_name, 0) + 1
+        # Also record last-use timestamp for recency-based animation
+        import time
+
+        last_used = getattr(app_state, "slot_last_used", None)
+        if last_used is not None:
+            last_used[slot_name] = time.monotonic()
     try:
         data = json.loads(body_bytes)
     except (ValueError, TypeError):
@@ -188,17 +194,21 @@ def _record_nonstreaming_throughput(
 
 
 def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
-    """Increment the per-slot request counter for an NPU shadow slot.
+    """Increment the per-slot request counter and record a last-use timestamp.
 
     Called after STT/embed dispatch via the NPU trio router so the
     flm-stt / flm-embed cards show activity even though they don't have
-    their own server process.
+    their own server process.  The timestamp drives which column squares
+    get animated (most recent capability wins the glow).
     """
-    from fastapi import Request as _R
+    import time
 
     store = getattr(request.app.state, "slot_request_count", None)
+    last_used = getattr(request.app.state, "slot_last_used", None)
     if store is not None:
         store[slot_name] = store.get(slot_name, 0) + 1
+    if last_used is not None:
+        last_used[slot_name] = time.monotonic()
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:
