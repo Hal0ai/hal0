@@ -265,6 +265,32 @@ def _restart_drifted_slots() -> None:
             console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
+def _update_via_git() -> None:
+    """Update hal0 by cloning/fetching the git repo and pip-installing.
+
+    This is the local-only path — it goes through the CLI directly, not
+    the API, because the git tree lives on the host filesystem.
+    """
+    from hal0.updater.updater import Updater
+
+    console.print("[cyan]Updating via git (local)…[/cyan]")
+    updater = Updater()
+    try:
+        import asyncio
+        prepared = asyncio.run(updater.prepare_git())
+        version = prepared["version"]
+        console.print(f"[green]Prepared {version} from git[/green]")
+        if _interactive() and not typer.confirm(f"Apply hal0 {version}?", default=True):
+            console.print("[dim]Staged but not applied — re-run to apply.[/dim]")
+            return
+        result = asyncio.run(updater.commit_git(version))
+        console.print(Panel(f"[green]Updated to {version}[/green]", border_style="green"))
+        console.print(f"[dim]Restart hal0-api to apply:[/dim] systemctl restart hal0-api")
+        _print_drift_banner(_fetch_slot_drift())
+    except Exception as exc:
+        die(f"git update failed: {exc}")
+
+
 def update(
     channel: UpdateChannel | None = typer.Option(
         None,
@@ -300,6 +326,11 @@ def update(
             "(post-update drift). Never bounces a slot unless you pass this flag."
         ),
     ),
+    source: str = typer.Option(
+        "release",
+        "--source",
+        help="Update source: 'release' (cosign-verified tarball, default) or 'git' (clone/fetch from GitHub).",
+    ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
 
@@ -319,6 +350,11 @@ def update(
             die(str(exc))
             return
         console.print(f"[green]channel set to {channel.value}[/green]")
+
+    # ── git-based update: clone/fetch → pip install → symlink swap ────────────
+    if source == "git":
+        _update_via_git()
+        return
 
     # Standalone action: bounce drifted slots on demand, then stop. Kept
     # separate from the check/apply flow so an operator can clear post-update
