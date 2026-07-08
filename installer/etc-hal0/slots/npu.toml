@@ -1,6 +1,6 @@
 # NPU LLM slot — FastFlowLM in a podman container (hal0-slot@npu).
-# Chat-only utility slot: no trio (asr/embed disabled).
-# role="utility" lets hal0/utility resolve here; hal0/npu still matches by device.
+# hal0/npu resolves by device type (``device = "npu"``); hal0/utility goes to the
+# utility slot only — role="npu" avoids colliding with the utility slot's role.
 #
 # Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
 # box boots a grey tile (no surprise FLM download, no crash-loop). The operator
@@ -11,7 +11,7 @@ device = "npu"
 runtime = "container"
 profile = "flm"
 type = "llm"
-role = "utility"
+role = "npu"
 enabled = false
 
 [model]
