@@ -339,12 +339,20 @@ export function NpuOccupancyCard({ slots }) {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const editMut = useSlotEdit()
+  const [flmNpuConfig, setFlmNpuConfig] = useStateSM({})
+
+  // Fetch flm slot config for full npu dict (asr/embed/chat)
+  React.useEffect(() => {
+    fetch('/api/slots/flm/config').then(r => r.json()).then(d => {
+      setFlmNpuConfig(d?.npu || {})
+    }).catch(() => {})
+  }, [])
 
   const npuSlots = (slots || []).filter(isNpuSlot)
   if (npuSlots.length === 0) return null
 
   const flmSlot = npuSlots.find(s => s.name === 'flm')
-  const mainFlmNpu = flmSlot?.npu || {}
+  const mainFlmNpu = flmNpuConfig || flmSlot?.npu || {}
 
   const occ = occQuery.data || {}
   const occSlots = occ.slots || []
