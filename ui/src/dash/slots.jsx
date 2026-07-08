@@ -344,7 +344,7 @@ function SlotCard({
       {slot.served_by === 'npu' && (
         <div className="cslot-row" style={{margin: '4px 0 0 0'}}>
           <span className="cslot-strip">
-            <TileStrip owners={{npu: 8}} ownerName="npu" act={slot.container_status === 'running' ? 1 : 0} />
+            <TileStrip owners={{npu: 8}} ownerName="npu" act={1} />
           </span>
         </div>
       )}
@@ -442,7 +442,7 @@ function SlotListRow({ slot, onEdit }) {
       {/* NPU column mini squares for STT served by npu slot */}
       {slot.served_by === 'npu' && (
         <span className="met" style={{marginLeft: 6}}>
-          <TileStrip owners={{npu: 8}} ownerName="npu" act={slot.container_status === 'running' ? 1 : 0} w={6} h={6} />
+          <TileStrip owners={{npu: 8}} ownerName="npu" act={1} />
         </span>
       )}
       <span className="ac">
