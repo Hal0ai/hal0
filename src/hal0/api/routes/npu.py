@@ -214,6 +214,26 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             }
         )
 
+        # Synthesise virtual sub-slots for STT + embed so the NPU pane
+        # shows three glowing cards when the FLM trio is running.
+        npu_cfg = getattr(s, "npu", None) or {}
+        if npu_cfg.get("asr"):
+            slots_out.append({
+                "name": s.name + "-stt",
+                "model": "whisper-v3:turbo",
+                "state": mapped_state,
+                "cols": list(range(_NPU_COLS)),
+                "gb": None,
+            })
+        if npu_cfg.get("embed"):
+            slots_out.append({
+                "name": s.name + "-embed",
+                "model": "embedding-gemma",
+                "state": mapped_state,
+                "cols": list(range(_NPU_COLS)),
+                "gb": None,
+            })
+
     # Degraded fallback: if xrt-smi never succeeded, every loaded slot owns
     # all 8 columns (single-tenant binary occupancy).
     if not columns_available:
