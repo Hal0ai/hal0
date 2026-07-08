@@ -439,11 +439,13 @@ function SlotListRow({ slot, onEdit }) {
         {type === "llm" && metrics.ttft && <span>· {metrics.ttft}ms ttft</span>}
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
-      {/* NPU column mini squares for STT served by npu slot */}
+      {/* NPU column squares for STT served by npu slot */}
       {slot.served_by === 'npu' && (
-        <span className="met" style={{marginLeft: 6}}>
-          <TileStrip owners={{npu: 8}} ownerName="npu" act={1} />
-        </span>
+        <div className="cslot-row" style={{margin: '2px 0 0 6px'}}>
+          <span className="cslot-strip">
+            <TileStrip owners={{npu: 8}} ownerName="npu" act={1} w={6} h={6} />
+          </span>
+        </div>
       )}
       <span className="ac">
         <button
