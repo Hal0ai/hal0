@@ -31,7 +31,7 @@ import { TelemetryHeader } from './telemetry-header.jsx'
 import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 
-const { useState: useStateS } = React;
+const { useState: useStateS, useRef, useEffect } = React;
 
 // ─── Slot indicator dot ────────────────────────────────────────────────
 //
@@ -425,6 +425,19 @@ function SlotListRow({ slot, onEdit }) {
   const slotTps = metrics.tokens_per_sec || metrics.tps || metrics.toks || 0;
   const tps = type === "llm" ? `${slotTps > 0 ? slotTps.toFixed(1) : 0} t/s` : "—";
   const kvPct = metrics.kv_cache_usage;
+  // Track request_count changes for shadow-slot animation
+  const reqCount = metrics.request_count || 0;
+  const prevReq = useRef(reqCount);
+  const [flash, setFlash] = useStateS(false);
+  useEffect(() => {
+    if (reqCount > prevReq.current) {
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 600);
+      prevReq.current = reqCount;
+      return () => clearTimeout(t);
+    }
+    prevReq.current = reqCount;
+  }, [reqCount]);
   return (
     <div className="slot-list-row" onClick={goEdit}>
       <IndicatorDot slot={slot} />
@@ -444,25 +457,19 @@ function SlotListRow({ slot, onEdit }) {
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
       {/* NPU column squares — animate when slot is actively serving */}
-      {slot.served_by === 'flm' && (function() {
-        const reqCount = metrics.request_count || 0;
-        const [lastCount, setLastCount] = React.useState ? React.useState(0) : [0, () => {}];
-        const active = reqCount > (lastCount || 0);
-        if (active && setLastCount) setLastCount(reqCount);
-        return (
+      {slot.served_by === 'flm' && (
         <div style={{display: 'flex', gap: 2, marginLeft: 6}}>
           {[...Array(8)].map((_, i) => (
             <div key={i} style={{
               width: 6, height: 6, borderRadius: 1.5,
               background: 'var(--dev-npu)',
-              boxShadow: active ? '0 0 8px var(--dev-npu)' : '0 0 4px var(--dev-npu)',
-              opacity: active ? 1 : 0.6,
-              transition: 'all 0.3s ease',
+              boxShadow: flash ? '0 0 10px var(--dev-npu)' : '0 0 4px var(--dev-npu)',
+              opacity: flash ? 1 : 0.55,
+              transition: 'all 0.25s ease',
             }} />
           ))}
         </div>
-        );
-      })()}
+      )}
       <span className="ac">
         <button
           className="btn ghost sm"
