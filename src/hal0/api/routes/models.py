@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
@@ -34,6 +34,7 @@ from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
     PullJobNotFound,
+    list_persisted_jobs,
     make_job,
     run_flm_pull,
     run_pull,
@@ -956,6 +957,102 @@ def _lazy_quant(dumped: dict[str, Any]) -> str | None:
     return None
 
 
+@router.get("/pulls")
+async def list_pulls(request: Request) -> list[dict[str, Any]]:
+    """Return all pull jobs (active in-memory + persisted terminal from disk).
+
+    Dedup: in-memory jobs win over persisted snapshots for the same model_id.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    registry = request.app.state.model_registry
+
+    # Start with persisted TERMINAL jobs from disk.
+    # Non-terminal snapshots (e.g. "running" from a crash) are skipped
+    # — there is no matching in-memory job to reconcile them.
+    persisted = list_persisted_jobs()
+    by_model: dict[str, dict[str, Any]] = {}
+    for p in persisted:
+        state = p.get("state")
+        if state not in ("completed", "failed", "cancelled"):
+            continue
+        mid = p.get("model_id")
+        if isinstance(mid, str) and mid:
+            by_model[mid] = p
+
+    # Overlay in-memory jobs (they win — reflect live state)
+    for mid, job in jobs.items():
+        by_model[mid] = job.as_dict()
+
+    # Build response entries enriched with registry data
+    result: list[dict[str, Any]] = []
+    for mid, data in by_model.items():
+        entry = _pull_entry(data, mid, registry)
+        result.append(entry)
+
+    # Sort: active first, then by started_at descending
+    result.sort(
+        key=lambda e: (
+            0 if e.get("state") in ("queued", "running") else 1,
+            -(e.get("started_at") or 0),
+        )
+    )
+    return result
+
+
+def _pull_entry(data: dict[str, Any], model_id: str, registry: Any) -> dict[str, Any]:
+    """Build a downloads-pane entry from a pull-job snapshot dict."""
+    state = data.get("state", "unknown")
+    speed = _speed_for_entry(data, state)
+    eta = _eta_for_entry(data, state, speed)
+    hf_repo = _hf_repo_for_model(registry, model_id)
+
+    return {
+        "model_id": model_id,
+        "job_id": data.get("id"),
+        "state": state,
+        "bytes_downloaded": data.get("bytes_downloaded", 0),
+        "bytes_total": data.get("bytes_total", 0),
+        "speed_bps": speed,
+        "eta_s": eta,
+        "hf_repo": hf_repo,
+        "dest_path": data.get("path"),
+        "error": data.get("error"),
+        "started_at": data.get("started_at"),
+        "finished_at": data.get("finished_at"),
+    }
+
+
+def _speed_for_entry(data: dict[str, Any], state: str) -> float:
+    """Compute average bytes/s for a pull-job entry snapshot."""
+    if state not in ("queued", "running"):
+        return 0.0
+    started = data.get("started_at")
+    if not isinstance(started, (int, float)) or started <= 0:
+        return 0.0
+    elapsed = max(time.time() - started, 0.001)
+    return data.get("bytes_downloaded", 0) / elapsed
+
+
+def _eta_for_entry(data: dict[str, Any], state: str, speed: float) -> float | None:
+    """Estimate seconds-to-completion for a pull-job entry snapshot."""
+    if state not in ("queued", "running") or speed <= 0:
+        return None
+    total = data.get("bytes_total", 0)
+    if total <= 0:
+        return None
+    remaining = max(total - data.get("bytes_downloaded", 0), 0)
+    return remaining / speed
+
+
+def _hf_repo_for_model(registry: Any, model_id: str) -> str | None:
+    """Resolve the HF repo from the model registry, or None if unknown."""
+    try:
+        model = registry.get(model_id)
+        return getattr(model, "hf_repo", None) or None
+    except Exception:
+        return None
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
@@ -1201,6 +1298,45 @@ async def delete_model(
         "deleted": bool(removed),
         "affected_slots": affected_names,
     }
+
+
+@router.delete("/pulls/{model_id}", status_code=204)
+async def delete_pull(model_id: str, request: Request):
+    """Clear a terminal pull job from memory + disk.
+
+    Returns 409 if the job is still active (queued/running).
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+
+    # Check in-memory first — active jobs must not be cleared
+    job = jobs.get(model_id)
+    if job is not None and job.state in ("queued", "running"):
+        from hal0.errors import Conflict
+
+        raise Conflict(
+            f"pull job for {model_id!r} is still active (state={job.state})",
+            code="pull.active",
+            details={"model_id": model_id, "state": job.state},
+        )
+
+    # Remove from in-memory dict
+    deleted_mem = jobs.pop(model_id, None) is not None
+
+    # Remove persisted file
+    deleted_disk = False
+    with contextlib.suppress(OSError):
+        p = _pull_job_file(model_id)
+        if p.exists():
+            p.unlink()
+            deleted_disk = True
+
+    if not deleted_mem and not deleted_disk:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+
+    return Response(status_code=204)
 
 
 def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
