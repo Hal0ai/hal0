@@ -474,7 +474,26 @@ function SlotListRow({ slot, onEdit }) {
           ))}
         </div>
       )}
-      <span className="ac">
+      {/* NPU shadow slots: replace Restart with on/off toggle */}
+      {slot.served_by === 'flm' && (slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
+        <span className="ac" style={{gap: 6}}>
+          <span style={{fontSize: 11, color: 'var(--fg-2)'}}>
+            {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+          </span>
+          <span style={{
+            background: slot.enabled ? 'var(--dev-npu)' : 'transparent',
+            border: '1px solid var(--dev-npu)', borderRadius: 10,
+            padding: '1px 10px', fontSize: 11,
+            color: slot.enabled ? '#fff' : 'var(--dev-npu)',
+          }}>
+            {slot.enabled ? 'ON' : 'OFF'}
+          </span>
+          <button className="btn ghost sm" title="Edit"
+            onClick={e => { e.stopPropagation(); goEdit(); }}
+          >{Icons.edit}</button>
+        </span>
+      ) : (
+        <span className="ac">
         <button
           className="btn ghost sm"
           title="Restart"
@@ -485,7 +504,8 @@ function SlotListRow({ slot, onEdit }) {
           title="Edit"
           onClick={e => { e.stopPropagation(); goEdit(); }}
         >{Icons.edit}</button>
-      </span>
+        </span>
+      )}
     </div>
   );
 }
