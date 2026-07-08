@@ -337,8 +337,8 @@ async def test_health_200_on_health_still_healthy() -> None:
 @pytest.mark.anyio
 async def test_health_delegates_to_flm_tier1_when_slot_is_npu() -> None:
     """When ContainerProvider.health is given an FLM slot_cfg, it delegates to
-    FLMProvider.health (the Tier-1 /v1/chat/completions probe) instead of the
-    weak /v1/models fallback."""
+    FLMProvider.health (the cheap non-empty /v1/models liveness probe — no NPU
+    sentinel on the hot path) instead of the weak any-200 /v1/models fallback."""
     from hal0.providers.flm import FLMProvider
 
     sentinel = {"ok": True, "status": "ready", "model": "qwen3:0.6b"}

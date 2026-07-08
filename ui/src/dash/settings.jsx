@@ -38,18 +38,19 @@ import { useQueryClient } from '@tanstack/react-query'
 const { useState: useStateSet, useEffect: useEffectSet, useRef: useRefSet } = React;
 
 function SettingsView({ param }) {
-  const VALID_IDS = ["secrets", "storage", "updates", "voice", "imagegen", "npu", "defaults", "general", "advanced", "about"];
-  const initialSection = param && VALID_IDS.includes(param) ? param : "secrets";
+  const VALID_IDS = ["general", "slots", "npu", "memory", "voice", "imagegen", "storage", "secrets", "updates", "advanced", "about"];
+  const initialSection = param && VALID_IDS.includes(param) ? param : "general";
   const [section, setSection] = useStateSet(initialSection);
   const sections = [
-    { id: "secrets",   label: "Secrets" },
-    { id: "storage",   label: "Storage" },
-    { id: "updates",   label: "Updates" },
+    { id: "general",   label: "General" },
+    { id: "slots",     label: "Slots" },
+    { id: "npu",       label: "NPU" },
+    { id: "memory",    label: "Memory" },
     { id: "voice",     label: "Voice" },
     { id: "imagegen",  label: "Image-gen" },
-    { id: "npu",       label: "NPU" },
-    { id: "defaults",  label: "Default slots" },
-    { id: "general",   label: "General" },
+    { id: "storage",   label: "Storage" },
+    { id: "secrets",   label: "Secrets" },
+    { id: "updates",   label: "Updates" },
     { id: "advanced",  label: "Advanced" },
     { id: "about",     label: "About" },
   ];
@@ -76,14 +77,15 @@ function SettingsView({ param }) {
         </div>
 
         <div className="settings-content">
-          {section === "secrets" && <SecretsSection />}
-          {section === "storage" && <StorageSection />}
-          {section === "updates" && <UpdatesSection />}
+          {section === "general" && <GeneralSection />}
+          {section === "slots" && <SlotsSection />}
+          {section === "npu" && <NpuSection />}
+          {section === "memory" && <MemorySection />}
           {section === "voice" && <VoiceSection />}
           {section === "imagegen" && <ImageGenSection />}
-          {section === "npu" && <NpuSection />}
-          {section === "defaults" && <DefaultSlotsSection />}
-          {section === "general" && <GeneralSection />}
+          {section === "storage" && <StorageSection />}
+          {section === "secrets" && <SecretsSection />}
+          {section === "updates" && <UpdatesSection />}
           {section === "advanced" && <AdvancedSection />}
           {section === "about" && <AboutSection />}
         </div>
@@ -770,6 +772,153 @@ const KOKORO_VOICES = [
   { id: "bm_lewis",   label: "Lewis (bm) — British male" },
 ];
 
+// ─── MemorySection ───────────────────────────────────────────────────────────
+
+function MemorySection() {
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
+
+  return (
+    <div className="s-section">
+      <h2>Memory</h2>
+      <p className="desc">
+        Memory engine, graph extraction, and second-pass reranking. Changes to the engine
+        require a hal0-api restart; graph and reranker knobs apply live.
+      </p>
+      <MemoryEnginePanel registry={registry} />
+      <MemoryGraphPanel />
+      <MemoryRerankerPanel registry={registry} />
+    </div>
+  );
+}
+
+function MemoryEnginePanel({ registry }) {
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  const engineField = _schemaField(schema, "memory.engine");
+  const currentEngine = live?.memory?.engine || "hindsight";
+  const [engine, setEngine] = useStateSet(currentEngine);
+  useEffectSet(() => {
+    if (live?.memory?.engine) setEngine(live.memory.engine);
+  }, [live?.memory?.engine]);
+
+  const dirty = engine !== currentEngine;
+
+  const doSave = async () => {
+    try {
+      await update.mutateAsync({ memory: { engine } });
+      setEngine(engine);
+      window.__hal0Toast && window.__hal0Toast("Memory engine saved — restart hal0-api to apply", "warn");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const engineDesc = ADV_DESC_OVERRIDE["memory.engine"] || engineField?.description || "";
+  const options = ["hindsight", "pgvector"];
+
+  return (
+    <div className="s-panel" style={{marginBottom: 12}}>
+      <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+        <div className="k"><span>Engine</span><span className="sub">hal0.toml [memory] · requires restart to switch</span></div>
+      </div>
+      <SRow
+        k="Engine"
+        sub={<span title={engineDesc}>{engineDesc.length > 150 ? engineDesc.slice(0, 147) + "…" : engineDesc}</span>}
+        v={
+          <select value={engine} onChange={e => setEngine(e.target.value)} style={_advInputStyle}>
+            {options.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        }
+        actions={<ApplyBadge settingsKey="memory.engine" registry={registry} />}
+      />
+      <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+        {dirty && (
+          <button className="btn ghost sm" onClick={() => setEngine(currentEngine)}>Reset</button>
+        )}
+        <button className="btn sm" disabled={!dirty || update.isPending} onClick={doSave}>
+          {update.isPending ? "Saving…" : "Save engine"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MemoryRerankerPanel({ registry }) {
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  const RERANK_KEYS = [
+    "memory.embedding.rerank_gateway_url",
+    "memory.embedding.rerank_model",
+    "memory.embedding.rerank_connect_timeout_s",
+    "memory.embedding.rerank_read_timeout_s",
+  ];
+  const fields = {};
+  for (const k of RERANK_KEYS) fields[k] = _schemaField(schema, k);
+
+  const [buf, setBuf] = useStateSet({});
+  const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
+
+  const dirtyKeys = Object.keys(buf).filter(k => {
+    const { ok, value } = _advCoerce(fields[k], buf[k]);
+    if (!ok) return true;
+    const cur = _getIn(live, k);
+    return value !== (cur === undefined ? (fields[k]?.default ?? null) : cur);
+  });
+  const invalidKeys = dirtyKeys.filter(k => !_advCoerce(fields[k], buf[k]).ok);
+  const canSave = dirtyKeys.length > 0 && invalidKeys.length === 0 && !update.isPending;
+
+  const doSave = async () => {
+    let patch = {};
+    for (const k of dirtyKeys) {
+      const { value } = _advCoerce(fields[k], buf[k]);
+      patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
+    }
+    try {
+      await update.mutateAsync(patch);
+      setBuf({});
+      window.__hal0Toast && window.__hal0Toast("Reranker settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="s-panel" style={{marginBottom: 12}}>
+      <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+        <div className="k"><span>Reranker</span><span className="sub">hal0.toml [memory.embedding] · second-pass ranking after recall</span></div>
+      </div>
+      {RERANK_KEYS.map(k => (
+        <AdvRow
+          key={k}
+          dotKey={k}
+          field={fields[k]}
+          live={_getIn(live, k)}
+          buf={buf[k]}
+          onChange={onChange}
+          registry={registry}
+        />
+      ))}
+      <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+        {dirtyKeys.length > 0 && (
+          <button className="btn ghost sm" onClick={() => setBuf({})}>Reset</button>
+        )}
+        <button className="btn sm" disabled={!canSave} onClick={doSave}>
+          {update.isPending ? "Saving…" : "Save reranker"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── VoiceSection ───────────────────────────────────────────────────────────
 //
 // STT: pick model from capabilities.catalogs.voice.stt — persisted via
@@ -1212,6 +1361,145 @@ function ImageGenSection() {
 //   - [npu].embed          → HAL0_FLM_LOAD_EMBED → --embed 1
 //   - [npu].asr            → HAL0_FLM_LOAD_ASR   → --asr 1
 // All three take effect when the slot's container next (re)starts, so they're
+// ─── SlotsSection ────────────────────────────────────────────────────────────
+
+function SlotsSection() {
+  // --- Slot defaults (moved from former DefaultSlotsSection) ---
+  const slotsQuery = useSlots();
+  const editSlot = useSlotEdit();
+  const slots = slotsQuery.data || [];
+  const byType = {};
+  for (const s of slots) { (byType[s.type] ||= []).push(s); }
+  const types = Object.keys(byType).filter(t => byType[t].length >= 2).sort();
+
+  const setDefault = async (type, name) => {
+    const sibs = byType[type] || [];
+    const prev = sibs.find(s => s.isDefault && s.name !== name);
+    try {
+      await editSlot.mutateAsync({ name, body: { default: true } });
+      if (prev) await editSlot.mutateAsync({ name: prev.name, body: { default: false } });
+      window.__hal0Toast && window.__hal0Toast(`Default ${type} slot → ${name}`, "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Couldn't set default — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  // --- Slots runtime (moved from Advanced: slots.max_slots etc.) ---
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  const RUNTIME_KEYS = [
+    "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
+    "slots.idle_timeout_s", "slots.evict_pressure_mb", "slots.publish_host",
+  ];
+  const runtimeFields = {};
+  for (const k of RUNTIME_KEYS) runtimeFields[k] = _schemaField(schema, k);
+
+  const [buf, setBuf] = useStateSet({});
+  const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
+
+  const runtimeDirty = Object.keys(buf).filter(k => {
+    const { ok, value } = _advCoerce(runtimeFields[k], buf[k]);
+    if (!ok) return true;
+    const cur = _getIn(live, k);
+    return value !== (cur === undefined ? (runtimeFields[k]?.default ?? null) : cur);
+  });
+  const invalidKeys = runtimeDirty.filter(k => !_advCoerce(runtimeFields[k], buf[k]).ok);
+  const canSaveRuntime = runtimeDirty.length > 0 && invalidKeys.length === 0 && !update.isPending;
+
+  const doSaveRuntime = async () => {
+    let patch = {};
+    for (const k of runtimeDirty) {
+      const { value } = _advCoerce(runtimeFields[k], buf[k]);
+      patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
+    }
+    try {
+      await update.mutateAsync(patch);
+      setBuf({});
+      window.__hal0Toast && window.__hal0Toast("Slots runtime settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="s-section">
+      <h2>Slots</h2>
+      <p className="desc">
+        Default slot assignments per modality and runtime limits for the slot pool.
+      </p>
+
+      {/* --- Default slots --- */}
+      {slotsQuery.isPending && (
+        <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading slots…</div>
+      )}
+      {slotsQuery.isError && (
+        <div className="err">{slotsQuery.error?.message || "Failed to load slots"}</div>
+      )}
+      {!slotsQuery.isPending && !slotsQuery.isError && types.length > 0 && (
+        <div className="s-panel" style={{marginBottom: 12}}>
+          <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+            <div className="k"><span>Default slots</span><span className="sub">For each modality with multiple slots, pick the one that serves type-routed requests</span></div>
+          </div>
+          {types.map(type => {
+            const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
+            return (
+              <div className="default-slot-row form-row s-row" key={type}>
+                <div className="k"><span>{type}</span></div>
+                <div className="v">
+                  <select
+                    className="input mono"
+                    value={cur}
+                    disabled={editSlot.isPending}
+                    onChange={e => { const n = e.target.value; if (n && n !== cur) setDefault(type, n); }}
+                    style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}
+                  >
+                    {byType[type].map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                  </select>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!slotsQuery.isPending && !slotsQuery.isError && types.length === 0 && (
+        <p className="hint" style={{fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)", marginBottom: 12}}>No modality has multiple slots yet.</p>
+      )}
+
+      {/* --- Runtime --- */}
+      <div className="s-panel">
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k"><span>Runtime</span><span className="sub">hal0.toml [slots]</span></div>
+        </div>
+        {RUNTIME_KEYS.map(k => (
+          <AdvRow
+            key={k}
+            dotKey={k}
+            field={runtimeFields[k]}
+            live={_getIn(live, k)}
+            buf={buf[k]}
+            onChange={onChange}
+            registry={registry}
+          />
+        ))}
+        <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+          {runtimeDirty.length > 0 && (
+            <button className="btn ghost sm" onClick={() => setBuf({})}>Reset</button>
+          )}
+          <button className="btn sm" disabled={!canSaveRuntime} onClick={doSaveRuntime}>
+            {update.isPending ? "Saving…" : "Save runtime"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // service-restart. Persisted via PUT /api/slots/{name}/config, mirroring how
 // ImageGenSection writes the [image] table. A read-only occupancy strip below
 // reflects the live AIE-column allocation (single-tenant: one FLM = 8 cols).
@@ -1220,23 +1508,13 @@ function NpuSection() {
   const editSlot = useSlotEdit();
   const occQuery = useNpuOccupancy();
 
-  // NPU slots are device === "npu". There may be more than one on disk (only
-  // one can be the live anchor); let the operator pick which to edit.
   const npuSlots = (slotsQuery.data || []).filter(s => s.device === "npu");
-  const [selName, setSelName] = useStateSet("");
-  useEffectSet(() => {
-    if (npuSlots.length && !npuSlots.some(s => s.name === selName)) {
-      setSelName(npuSlots[0].name);
-    }
-  }, [npuSlots.map(s => s.name).join(",")]);
-
-  const cfgQuery = useSlotConfig(selName || null);
+  const npuName = npuSlots.length > 0 ? npuSlots[0].name : null;
+  const cfgQuery = useSlotConfig(npuName);
   const cfg = cfgQuery.data || {};
   const liveCtx = cfg.model?.context_size;
   const liveNpu = cfg.npu || {};
 
-  // Schema defaults: NpuConfig asr/embed default false; context_size has no
-  // schema default on the [model] table, so fall back to the FLM env default.
   const DEF_CTX = "16384";
   const origCtx = liveCtx != null ? String(liveCtx) : DEF_CTX;
   const origAsr = !!liveNpu.asr;
@@ -1253,15 +1531,13 @@ function NpuSection() {
 
   const ctxNum = parseInt(ctx, 10);
   const ctxValid = /^\d+$/.test(ctx.trim()) && ctxNum >= 512;
-  const dirty = !!selName && (ctx !== origCtx || asr !== origAsr || embed !== origEmbed);
+  const dirty = !!npuName && (ctx !== origCtx || asr !== origAsr || embed !== origEmbed);
 
   const doSave = async () => {
-    if (!selName || !ctxValid) return;
-    // model.context_size merges into [model] (preserving [model].default);
-    // npu.{asr,embed} merges into [npu] — both one-level deep-merged server-side.
+    if (!npuName || !ctxValid) return;
     const body = { model: { context_size: ctxNum }, npu: { asr, embed } };
     try {
-      await editSlot.mutateAsync({ name: selName, body });
+      await editSlot.mutateAsync({ name: npuName, body });
       window.__hal0Toast && window.__hal0Toast("NPU settings saved — restart the slot to apply", "warn");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
@@ -1294,33 +1570,27 @@ function NpuSection() {
       {npuSlots.length > 0 && (
         <div className="s-panel">
           <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-            <div className="k"><span>FLM slot</span><span className="sub">device=npu · profile=flm</span></div>
+            <div className="k"><span>FLM slot</span><span className="sub">{npuName} · device=npu · profile=flm</span></div>
             <div className="v">
-              {npuSlots.length > 1 ? (
-                <select value={selName} onChange={e => setSelName(e.target.value)} style={inputStyle}>
-                  {npuSlots.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-                </select>
-              ) : (
-                <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{selName}</span>
-              )}
+              <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{npuName}</span>
             </div>
           </div>
           <SRow
             k="Context size"
-            sub="FLM --ctx-len (tokens) · HAL0_FLM_CTX · larger = more KV cache on the NPU"
+            sub="FLM --ctx-len (tokens) · larger = more KV cache on the NPU"
             v={
-              <input type="number" min={512} step={512} value={ctx} disabled={!selName}
+              <input type="number" min={512} step={512} value={ctx} disabled={!npuName}
                 onChange={e => setCtx(e.target.value)} placeholder={DEF_CTX}
                 className="mono" style={{...inputStyle, width: 120, borderColor: ctxValid || !ctx ? "var(--line)" : "var(--err)"}} />
             }
-            actions={<span className="chip mono" style={{fontSize: 10, padding: "2px 8px", color: "var(--warn)", borderColor: "var(--warn)", whiteSpace: "nowrap"}}>⟳ restart {selName}</span>}
+            actions={<span className="chip mono" style={{fontSize: 10, padding: "2px 8px", color: "var(--warn)", borderColor: "var(--warn)", whiteSpace: "nowrap"}}>⟳ restart {npuName}</span>}
           />
           <SRow
             k="Load embeddings"
             sub="Serve /v1/embeddings from the FLM trio (--embed 1)"
             v={
               <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
-                <input type="checkbox" checked={embed} disabled={!selName} onChange={e => setEmbed(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+                <input type="checkbox" checked={embed} disabled={!npuName} onChange={e => setEmbed(e.target.checked)} style={{accentColor: "var(--accent)"}} />
                 <span>{embed ? "enabled" : "disabled"}</span>
               </label>
             }
@@ -1330,7 +1600,7 @@ function NpuSection() {
             sub="Serve /v1/audio/transcriptions from the FLM trio (--asr 1)"
             v={
               <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
-                <input type="checkbox" checked={asr} disabled={!selName} onChange={e => setAsr(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+                <input type="checkbox" checked={asr} disabled={!npuName} onChange={e => setAsr(e.target.checked)} style={{accentColor: "var(--accent)"}} />
                 <span>{asr ? "enabled" : "disabled"}</span>
               </label>
             }
@@ -1374,83 +1644,7 @@ function NpuSection() {
   );
 }
 
-// ─── DefaultSlotsSection ─────────────────────────────────────────────────────
-//
-// For each slot type with ≥2 slots, lets the operator pick which slot is the
-// default for type-routed requests. Setting a default:
-//   PUT /api/slots/{name}/config { default: true }  — on chosen slot
-//   PUT /api/slots/{name}/config { default: false } — on previously-default sibling
-// Both calls route through the existing useSlotEdit hook.
-// No backend schema change is needed — `default` is already an accepted field.
-// Relocated from the slot edit drawer (removed in earlier task).
-function DefaultSlotsSection() {
-  const slotsQuery = useSlots();
-  const editSlot = useSlotEdit();
-  const slots = slotsQuery.data || [];
-  const byType = {};
-  for (const s of slots) { (byType[s.type] ||= []).push(s); }
-  const types = Object.keys(byType).filter(t => byType[t].length >= 2).sort();
-
-  const setDefault = async (type, name) => {
-    const sibs = byType[type] || [];
-    const prev = sibs.find(s => s.isDefault && s.name !== name);
-    try {
-      await editSlot.mutateAsync({ name, body: { default: true } });
-      if (prev) await editSlot.mutateAsync({ name: prev.name, body: { default: false } });
-      window.__hal0Toast && window.__hal0Toast(`Default ${type} slot → ${name}`, "ok");
-    } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(`Couldn't set default — ${e?.message || "see logs"}`, "err");
-    }
-  };
-
-  return (
-    <div className="s-section">
-      <h2>Default slots</h2>
-      <p className="desc">
-        For each modality with more than one slot, choose which slot serves type-routed requests.
-      </p>
-      {slotsQuery.isPending && (
-        <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading slots…</div>
-      )}
-      {slotsQuery.isError && (
-        <div className="err">{slotsQuery.error?.message || "Failed to load slots"}</div>
-      )}
-      {!slotsQuery.isPending && !slotsQuery.isError && types.length === 0 && (
-        <p className="hint" style={{fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>No modality has multiple slots yet.</p>
-      )}
-      {types.length > 0 && (
-        <div className="s-panel">
-          {types.map(type => {
-            const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
-            return (
-              <div className="default-slot-row form-row s-row" key={type}>
-                <div className="k"><span>{type}</span></div>
-                <div className="v">
-                  <select
-                    className="input mono"
-                    value={cur}
-                    disabled={editSlot.isPending}
-                    onChange={e => { const n = e.target.value; if (n && n !== cur) setDefault(type, n); }}
-                    style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}
-                  >
-                    {byType[type].map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-                  </select>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function GeneralSection() {
-  // Wave 8: telemetry.enabled privacy toggle. hal0.toml [telemetry].enabled
-  // defaults to false (opt-in anonymous telemetry). Persisted via the generic
-  // PUT /api/settings {telemetry:{enabled}} — the backend deep-merges, so we
-  // only send the one bit. The apply-plan registry classes telemetry.enabled
-  // as "immediate" (re-read on each save, no restart), rendered by ApplyBadge.
   const settings = useSettings();
   const update = useSettingsUpdate();
   const applyPlanQuery = useApplyPlan();
@@ -1473,14 +1667,17 @@ function GeneralSection() {
     }
   };
 
+  const meta = settings.data?.meta || {};
+  const version = meta.hal0_version || "—";
+  const schemaVer = meta.schema_version != null ? String(meta.schema_version) : "—";
+
   return (
     <div className="s-section">
       <h2>General</h2>
-      <p className="desc">
-        Privacy and appearance. The dashboard is dark-only by design — theme / density / accent
-        customization is not available in this release.
-      </p>
+      <p className="desc">Platform identity and privacy.</p>
       <div className="s-panel">
+        <SRow k="hal0 version" sub="Running API version" mono v={<span style={{color: "var(--fg-2)"}}>{version}</span>} />
+        <SRow k="Schema version" sub="hal0.toml schema version" mono v={<span style={{color: "var(--fg-3)"}}>{schemaVer}</span>} />
         <SRow
           k="Anonymous telemetry"
           sub="Opt-in · off by default. Sends anonymized, aggregate usage counts to help prioritize work — no prompts, model I/O, or file paths leave the machine."
@@ -1507,7 +1704,6 @@ function GeneralSection() {
             </div>
           }
         />
-        <SRow k="Theme" v={<span className="chip mono" style={{color: "var(--fg-4)"}}>dark · locked</span>} />
       </div>
     </div>
   );
@@ -1527,24 +1723,9 @@ function GeneralSection() {
 // memory.engine is a plain string in the schema (validator-enforced), so
 // its options are pinned here to the backend's accepted set.
 // Every key here is verified consumed by the backend: max_slots gates
-// POST /api/slots, the port pool feeds the auto-allocator (both read from
-// the live config — no restart), the dispatcher knobs bound the cold
-// prefetch fanout, and the memory rerank knobs configure Hal0Reranker.
-// (The cognee-era embedding keys were deleted from the schema.)
 const ADV_GROUPS = [
-  { title: "Slots runtime", sub: "hal0.toml [slots]", keys: [
-    "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
-    "slots.idle_timeout_s", "slots.evict_pressure_mb", "slots.publish_host",
-  ]},
-  { title: "Dispatcher", sub: "hal0.toml [dispatcher]", keys: [
+  { title: "Dispatcher", sub: "hal0.toml [dispatcher] · upstream routing tunables", keys: [
     "dispatcher.prefetch_timeout_s", "dispatcher.prefetch_parallel_cap",
-  ]},
-  { title: "Memory", sub: "hal0.toml [memory] · engine + reranker; graph extraction below", keys: [
-    "memory.engine",
-    "memory.embedding.rerank_gateway_url",
-    "memory.embedding.rerank_model",
-    "memory.embedding.rerank_connect_timeout_s",
-    "memory.embedding.rerank_read_timeout_s",
   ]},
   { title: "Activity log", sub: "hal0.toml [activity] · durable audit trail", keys: [
     "activity.enabled", "activity.retention_days", "activity.max_rows",
@@ -1761,9 +1942,8 @@ function AdvancedSection() {
     <div className="s-section">
       <h2>Advanced</h2>
       <p className="desc">
-        Runtime tuning for hal0.toml sections that don't have a dedicated page. Descriptions and
-        bounds come from the server's config schema; effect chips show whether a change applies
-        live or needs a restart.
+        Low-level dispatcher and activity log tuning. Slot runtime moved to Slots; memory
+        moved to Memory. Effect chips show whether a change applies live or needs a restart.
       </p>
 
       {loading && <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading config schema…</div>}
@@ -1791,7 +1971,6 @@ function AdvancedSection() {
                   />
                 ))}
               </div>
-              {g.title === "Memory" && <MemoryGraphPanel />}
             </React.Fragment>
           ))}
 
