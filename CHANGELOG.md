@@ -21,6 +21,19 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.4.1] — 2026-07-08
+
+### Changed
+- **Idempotent `hal0 setup`** — removed the install-closed guard that blocked
+  re-running `hal0 setup` after the first-run sentinel was written (#1161).
+  The three provisioning endpoints (`/apply`, `/apply-selections`, `/complete`)
+  are now idempotent and can be invoked at any time, fixing a Python traceback
+  when `install.sh` re-launched the interactive setup after the `--auto` seed.
+
+### Docs
+- **README updated** — corrected version, slot list, setup flow description,
+  and agent selection docs to match v0.9.4 reality.
+
 ## [0.9.4] — 2026-07-08
 
 ### Added
