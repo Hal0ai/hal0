@@ -1312,6 +1312,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
+      </FieldGroup>
 
       {/* Task 4: Advanced fields (mostly read-only, profile-owned) are
           collapsed by default — minimal native <details> disclosure (no
