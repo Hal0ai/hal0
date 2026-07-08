@@ -297,13 +297,6 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
           </span>
         </span>
       </div>
-      {slot.name === 'flm' && (
-        <div className="cslot-row">
-          <span className="cslot-strip">
-            <TileStrip owners={owners} ownerName={slot.name} act={act} />
-          </span>
-        </div>
-      )}
       <div className="cslot-foot">
         <span className="grow" />
         {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
