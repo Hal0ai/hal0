@@ -15,6 +15,8 @@
 // columns by the xrt-smi probe (/api/npu/occupancy). The shimmer is cosmetic
 // and honours prefers-reduced-motion. Per-tile load is NOT claimed as real.
 
+const { useState: useStateSM } = React;
+
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit } from '@/api/hooks/useSlots'
