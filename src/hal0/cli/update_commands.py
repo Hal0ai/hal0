@@ -265,30 +265,42 @@ def _restart_drifted_slots() -> None:
             console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
-def _update_via_git() -> None:
+def _update_via_git(check_only: bool = False) -> None:
     """Update hal0 by cloning/fetching the git repo and pip-installing.
 
-    This is the local-only path — it goes through the CLI directly, not
-    the API, because the git tree lives on the host filesystem.
+    When *check_only* is True, only report whether an update is available
+    without applying it.
     """
     from hal0.updater.updater import Updater
 
-    console.print("[cyan]Updating via git (local)…[/cyan]")
+    console.print("[cyan]Checking for updates via git (local)…[/cyan]")
     updater = Updater()
+    import asyncio
+    prepared = asyncio.run(updater.prepare_git())
+    version = prepared["version"]
+
+    current = hal0.__version__
     try:
-        import asyncio
-        prepared = asyncio.run(updater.prepare_git())
-        version = prepared["version"]
-        console.print(f"[green]Prepared {version} from git[/green]")
-        if _interactive() and not typer.confirm(f"Apply hal0 {version}?", default=True):
-            console.print("[dim]Staged but not applied — re-run to apply.[/dim]")
-            return
-        result = asyncio.run(updater.commit_git(version))
-        console.print(Panel(f"[green]Updated to {version}[/green]", border_style="green"))
-        console.print(f"[dim]Restart hal0-api to apply:[/dim] systemctl restart hal0-api")
-        _print_drift_banner(_fetch_slot_drift())
-    except Exception as exc:
-        die(f"git update failed: {exc}")
+        from packaging.version import Version
+        newer = Version(version) > Version(current)
+    except Exception:
+        newer = version != current
+
+    if not newer:
+        console.print(f"[dim]hal0 {current} is up to date (latest tag: {version})[/dim]")
+        return
+
+    console.print(f"[green]hal0 {current} → {version}  update available[/green]")
+    if check_only:
+        return
+
+    if _interactive() and not typer.confirm(f"Apply hal0 {version}?", default=True):
+        console.print("[dim]Staged but not applied — re-run to apply.[/dim]")
+        return
+    result = asyncio.run(updater.commit_git(version))
+    console.print(Panel(f"[green]Updated to {version}[/green]", border_style="green"))
+    console.print(f"[dim]Restart hal0-api to apply:[/dim] systemctl restart hal0-api")
+    _print_drift_banner(_fetch_slot_drift())
 
 
 def update(
@@ -353,7 +365,7 @@ def update(
 
     # ── git-based update: clone/fetch → pip install → symlink swap ────────────
     if source == "git":
-        _update_via_git()
+        _update_via_git(check_only=check)
         return
 
     # Standalone action: bounce drifted slots on demand, then stop. Kept
