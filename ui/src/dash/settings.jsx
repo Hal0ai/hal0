@@ -785,14 +785,14 @@ function MemorySection() {
         Memory engine, graph extraction, and second-pass reranking. Changes to the engine
         require a hal0-api restart; graph and reranker knobs apply live.
       </p>
-      <MemoryEnginePanel />
+      <MemoryEnginePanel registry={registry} />
       <MemoryGraphPanel />
       <MemoryRerankerPanel registry={registry} />
     </div>
   );
 }
 
-function MemoryEnginePanel() {
+function MemoryEnginePanel({ registry }) {
   const settings = useSettings();
   const update = useSettingsUpdate();
   const schemaQuery = useSettingsSchema();
