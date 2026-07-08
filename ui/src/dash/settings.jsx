@@ -1361,23 +1361,13 @@ function NpuSection() {
   const editSlot = useSlotEdit();
   const occQuery = useNpuOccupancy();
 
-  // NPU slots are device === "npu". There may be more than one on disk (only
-  // one can be the live anchor); let the operator pick which to edit.
   const npuSlots = (slotsQuery.data || []).filter(s => s.device === "npu");
-  const [selName, setSelName] = useStateSet("");
-  useEffectSet(() => {
-    if (npuSlots.length && !npuSlots.some(s => s.name === selName)) {
-      setSelName(npuSlots[0].name);
-    }
-  }, [npuSlots.map(s => s.name).join(",")]);
-
-  const cfgQuery = useSlotConfig(selName || null);
+  const npuName = npuSlots.length > 0 ? npuSlots[0].name : null;
+  const cfgQuery = useSlotConfig(npuName);
   const cfg = cfgQuery.data || {};
   const liveCtx = cfg.model?.context_size;
   const liveNpu = cfg.npu || {};
 
-  // Schema defaults: NpuConfig asr/embed default false; context_size has no
-  // schema default on the [model] table, so fall back to the FLM env default.
   const DEF_CTX = "16384";
   const origCtx = liveCtx != null ? String(liveCtx) : DEF_CTX;
   const origAsr = !!liveNpu.asr;
@@ -1394,15 +1384,13 @@ function NpuSection() {
 
   const ctxNum = parseInt(ctx, 10);
   const ctxValid = /^\d+$/.test(ctx.trim()) && ctxNum >= 512;
-  const dirty = !!selName && (ctx !== origCtx || asr !== origAsr || embed !== origEmbed);
+  const dirty = !!npuName && (ctx !== origCtx || asr !== origAsr || embed !== origEmbed);
 
   const doSave = async () => {
-    if (!selName || !ctxValid) return;
-    // model.context_size merges into [model] (preserving [model].default);
-    // npu.{asr,embed} merges into [npu] — both one-level deep-merged server-side.
+    if (!npuName || !ctxValid) return;
     const body = { model: { context_size: ctxNum }, npu: { asr, embed } };
     try {
-      await editSlot.mutateAsync({ name: selName, body });
+      await editSlot.mutateAsync({ name: npuName, body });
       window.__hal0Toast && window.__hal0Toast("NPU settings saved — restart the slot to apply", "warn");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
@@ -1435,33 +1423,27 @@ function NpuSection() {
       {npuSlots.length > 0 && (
         <div className="s-panel">
           <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-            <div className="k"><span>FLM slot</span><span className="sub">device=npu · profile=flm</span></div>
+            <div className="k"><span>FLM slot</span><span className="sub">{npuName} · device=npu · profile=flm</span></div>
             <div className="v">
-              {npuSlots.length > 1 ? (
-                <select value={selName} onChange={e => setSelName(e.target.value)} style={inputStyle}>
-                  {npuSlots.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-                </select>
-              ) : (
-                <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{selName}</span>
-              )}
+              <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{npuName}</span>
             </div>
           </div>
           <SRow
             k="Context size"
-            sub="FLM --ctx-len (tokens) · HAL0_FLM_CTX · larger = more KV cache on the NPU"
+            sub="FLM --ctx-len (tokens) · larger = more KV cache on the NPU"
             v={
-              <input type="number" min={512} step={512} value={ctx} disabled={!selName}
+              <input type="number" min={512} step={512} value={ctx} disabled={!npuName}
                 onChange={e => setCtx(e.target.value)} placeholder={DEF_CTX}
                 className="mono" style={{...inputStyle, width: 120, borderColor: ctxValid || !ctx ? "var(--line)" : "var(--err)"}} />
             }
-            actions={<span className="chip mono" style={{fontSize: 10, padding: "2px 8px", color: "var(--warn)", borderColor: "var(--warn)", whiteSpace: "nowrap"}}>⟳ restart {selName}</span>}
+            actions={<span className="chip mono" style={{fontSize: 10, padding: "2px 8px", color: "var(--warn)", borderColor: "var(--warn)", whiteSpace: "nowrap"}}>⟳ restart {npuName}</span>}
           />
           <SRow
             k="Load embeddings"
             sub="Serve /v1/embeddings from the FLM trio (--embed 1)"
             v={
               <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
-                <input type="checkbox" checked={embed} disabled={!selName} onChange={e => setEmbed(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+                <input type="checkbox" checked={embed} disabled={!npuName} onChange={e => setEmbed(e.target.checked)} style={{accentColor: "var(--accent)"}} />
                 <span>{embed ? "enabled" : "disabled"}</span>
               </label>
             }
@@ -1471,7 +1453,7 @@ function NpuSection() {
             sub="Serve /v1/audio/transcriptions from the FLM trio (--asr 1)"
             v={
               <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
-                <input type="checkbox" checked={asr} disabled={!selName} onChange={e => setAsr(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+                <input type="checkbox" checked={asr} disabled={!npuName} onChange={e => setAsr(e.target.checked)} style={{accentColor: "var(--accent)"}} />
                 <span>{asr ? "enabled" : "disabled"}</span>
               </label>
             }
