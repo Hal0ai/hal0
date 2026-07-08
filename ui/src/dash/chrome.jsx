@@ -7,7 +7,9 @@
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots } from '@/api/hooks/useSlots'
-import { useModels } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { apiPost } from '@/api/client'
+import { ENDPOINTS } from '@/api/endpoints'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
@@ -476,6 +478,22 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   const serviceHealth = useServicesHealth();
   const [paneSrc, setPaneSrc] = useStateC("merged");
   const [paneQ, setPaneQ] = useStateC("");
+  const [footerTab, setFooterTab] = useStateC("journal");
+  // Reset to journal when pane collapses
+  useEffectC(() => {
+    if (!expanded) setFooterTab("journal");
+  }, [expanded]);
+  // Auto-expand and switch to downloads on pull-started
+  useEffectC(() => {
+    const onPullStarted = () => {
+      setFooterTab("downloads");
+      if (!expanded && onToggle) onToggle();
+    };
+    window.addEventListener("hal0:pull-started", onPullStarted);
+    return () => window.removeEventListener("hal0:pull-started", onPullStarted);
+  }, [expanded, onToggle]);
+  const { jobs, hasActive } = usePullsList({ enabled: expanded && footerTab === "downloads" });
+  const clearJob = useClearPullJob();
   // Stream the full (merged) event feed and filter by source group
   // CLIENT-SIDE. This keeps every source chip available regardless of the
   // active filter (deriving chips from a server-narrowed ring would drop
@@ -548,6 +566,12 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   return (
     <div className={"footer" + (expanded ? " expanded" : "")}>
       {expanded && (
+        <>
+          <div className="foot-tabs">
+            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} onClick={() => setFooterTab("journal")}>journal</button>
+            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} onClick={() => setFooterTab("downloads")}>downloads</button>
+          </div>
+          {footerTab === "journal" ? (
         <div className="foot-pane">
           <div className="foot-pane-h mono">
             <span>Live journal</span>
@@ -595,6 +619,77 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             ))}
           </div>
         </div>
+      
+          ) : (
+            <div className="foot-downloads">
+              {jobs.length === 0 ? (
+                <div className="foot-dl-empty">
+                  No downloads yet — <a href="#models">browse models</a>
+                </div>
+              ) : (
+                jobs.map((j) => {
+                  const pct = j.bytes_total ? Math.round((j.bytes_downloaded / (j.bytes_total || 1)) * 100) : 0;
+                  const isRunning = j.state === 'running';
+                  const isQueued = j.state === 'queued';
+                  const isCompleted = j.state === 'completed';
+                  const isFailed = j.state === 'failed';
+                  const isCancelled = j.state === 'cancelled';
+                  const barClass = isCompleted ? ' completed' : isFailed ? ' failed' : '';
+                  return (
+                    <div key={j.job_id || j.model_id} className="foot-dl-row">
+                      <span className={"foot-dl-state " + j.state}>
+                        {isRunning ? '⟳' : isQueued ? '⏰' : isCompleted ? '✓' : isFailed ? '✗' : '—'}
+                      </span>
+                      <span className="foot-dl-repo">
+                        {j.hf_repo || j.model_id}
+                        {j.dest_path && (<><span className="foot-dl-arrow">→</span><span className="foot-dl-dest">{j.dest_path}</span></>)}
+                      </span>
+                      <span className="foot-dl-act">
+                        {(isRunning || isQueued) && (
+                          <button className="cancel" onClick={() => apiPost(ENDPOINTS.modelPullCancel(j.model_id))}>× cancel</button>
+                        )}
+                        {isFailed && (
+                          <>
+                            <button className="retry" onClick={() => apiPost(ENDPOINTS.modelPull(j.model_id))}>↻ retry</button>
+                            <button onClick={() => clearJob.mutate(j.model_id)}>clear</button>
+                          </>
+                        )}
+                        {isCompleted && (
+                          <button onClick={() => clearJob.mutate(j.model_id)}>clear</button>
+                        )}
+                        {isCancelled && (
+                          <button onClick={() => clearJob.mutate(j.model_id)}>clear</button>
+                        )}
+                      </span>
+                      {!isCompleted && !isFailed && !isCancelled && (
+                        <div className="foot-dl-bar">
+                          <div className="foot-dl-bar-track">
+                            <div className={"foot-dl-bar-fill" + barClass} style={{width: pct + '%'}} />
+                          </div>
+                          <span className="foot-dl-stats">
+                            <span>{pct}%</span>
+                            {isRunning && (j.speed_bps > 0 ? <span>{fmtSpeed(j.speed_bps)}</span> : <span>calculating…</span>)}
+                            {isRunning && j.eta_s > 0 && <span>{fmtEta(j.eta_s)} left</span>}
+                          </span>
+                        </div>
+                      )}
+                      {!isRunning && !isQueued && isCompleted && (
+                        <div className="foot-dl-bar">
+                          <div className="foot-dl-bar-track">
+                            <div className="foot-dl-bar-fill completed" style={{width: '100%'}} />
+                          </div>
+                        </div>
+                      )}
+                      {isFailed && (
+                        <div className="foot-dl-err">{j.error?.message || 'Download failed'}</div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </>
       )}
       <div className="foot-chips">
         {/* runtimes — one LED pip per enabled slot + ready count */}

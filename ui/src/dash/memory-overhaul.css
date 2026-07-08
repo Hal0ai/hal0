@@ -194,6 +194,9 @@
 /* Embedded tools grid inside the primary bank display — keeps its own sub-card
    chrome; just trims the standalone-page top spacing. */
 .mo-main .mt-embedded { margin: 4px 0 6px; }
+/* Documents card sits below the 2×2 grid as a full-width sibling. */
+.mt > .mt-card { margin-top: 14px; }
+.mt-embedded > .mt-card { margin-top: 14px; }
 
 /* Consolidate action sits under the operations list. */
 .mo-ops-actions { display: flex; justify-content: flex-end; margin: 10px 0 4px; }
@@ -282,6 +285,7 @@
    stacks on its own regardless of the other's height. */
 .mt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .mt-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.mt-col > .mt-card { flex: 1; }
 @media (max-width: 760px) {
   .mt-cols { grid-template-columns: 1fr; }
 }
