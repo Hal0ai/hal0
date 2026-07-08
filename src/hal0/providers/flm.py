@@ -275,6 +275,7 @@ class FLMProvider(Provider):
             # win even if stale legacy defaults say otherwise.
             load_asr = "1" if npu_table.get("asr") else "0"
             load_embed = "1" if npu_table.get("embed") else "0"
+            load_chat = "1" if npu_table.get("chat", True) not in (False, "0", 0) else "0"
         else:
             # Legacy (pre-container) fallback — still reachable from legacy
             # TOMLs without an [npu] table (api/__init__.py reads the same
@@ -289,6 +290,7 @@ class FLMProvider(Provider):
             "HAL0_FLM_CTX": str(ctx),
             "HAL0_FLM_LOAD_ASR": load_asr,
             "HAL0_FLM_LOAD_EMBED": load_embed,
+            "HAL0_FLM_LOAD_CHAT": load_chat,
         }
 
     def start_cmd(self, env: dict[str, str]) -> list[str]:
@@ -302,10 +304,10 @@ class FLMProvider(Provider):
         STT/embed models without editing the flm slot config.
         """
         binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
-        argv = [
-            binary,
-            "serve",
-            env["HAL0_FLM_TAG"],
+        argv = [binary, "serve"]
+        if env.get("HAL0_FLM_LOAD_CHAT", "1") == "1":
+            argv += [env["HAL0_FLM_TAG"]]
+        argv += [
             "--host",
             "0.0.0.0",
             "--port",

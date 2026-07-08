@@ -354,7 +354,7 @@ function ModelsView() {
         </div>
 
         {/* ── Detail + Downloads ── */}
-        <div style={{display: "flex", flexDirection: "column", gap: 14}}>
+        <div className="models-sidebar">
           <ModelDetail
             model={selected}
             onDelete={() => setDelModel(selected)}

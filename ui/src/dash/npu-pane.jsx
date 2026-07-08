@@ -313,7 +313,19 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
               {(slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? 'ON' : 'OFF'}
             </span>
           </span>
-        ) : null}
+        ) : (
+          <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
+            <span style={{color: 'var(--fg-2)'}}>Chat</span>
+            <span style={{
+              background: mainFlmNpu?.chat !== false ? 'var(--dev-npu)' : 'transparent',
+              border: '1px solid var(--dev-npu)', borderRadius: 10,
+              padding: '1px 10px', cursor: 'pointer',
+              color: mainFlmNpu?.chat !== false ? '#fff' : 'var(--dev-npu)',
+            }} onClick={(e) => { e.stopPropagation(); handlers.onToggleShadow(slot); }}>
+              {mainFlmNpu?.chat !== false ? 'ON' : 'OFF'}
+            </span>
+          </span>
+        )}
       </div>
     </div>
   )
@@ -388,14 +400,13 @@ export function NpuOccupancyCard({ slots }) {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
     onToggleShadow: (s) => {
-      // Toggle NPU flags on the main flm slot, not the shadow slot
-      const flmSlot = npuSlots.find(sl => sl.name === 'flm')
-      if (!flmSlot) return
-      const field = s.name === 'flm-stt' ? 'asr' : 'embed'
-      const cur = flmSlot.npu?.[field] !== false
+      // Toggle NPU flags on the main flm slot
+      const field = s.name === 'flm-stt' ? 'asr' : s.name === 'flm-embed' ? 'embed' : 'chat'
+      const cur = flmSlot?.npu?.[field] !== false
+      const next = { ...flmSlot?.npu, [field]: !cur }
       editMut.mutate(
-        { name: 'flm', body: { npu: { ...flmSlot.npu, [field]: !cur } } },
-        { onSuccess: () => window.__hal0Toast && window.__hal0Toast(`flm-stt: ${!cur ? 'ON' : 'OFF'}`, 'info') }
+        { name: 'flm', body: { npu: next } },
+        { onSuccess: () => window.__hal0Toast && window.__hal0Toast(`flm ${field}: ${!cur ? 'ON' : 'OFF'}. Restart to apply.`, 'info') }
       )
     },
   }
