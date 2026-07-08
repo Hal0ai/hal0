@@ -422,6 +422,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // revert-on-error.
   const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
   const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
+  const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
+  const [npuChatModel, setNpuChatModel] = useStateSM(slot?.model_id || slot?.model || 'qwen3:4b');
   const [npuAsrModel, setNpuAsrModel] = useStateSM(slot?.npu?.asr_model || 'whisper-v3:turbo');
   const [npuEmbedModel, setNpuEmbedModel] = useStateSM(slot?.npu?.embed_model || 'embed-gemma:300m');
   const [npuPending, setNpuPending] = useStateSM(false);
@@ -1028,28 +1030,59 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
-      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only. */}
+      {/* NPU capability matrix — replaces Model+Template for NPU slots */}
       {slot.device === "npu" && (() => {
-        const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
+        const applyNpu = async (nextChat, nextAsr, nextEmbed, field) => {
           setNpuPending(true);
           setNpuErr(null);
-          setSubmitErr(null);
+          // Determine primary model from first ON capability
+          const npuBody = { chat: nextChat, asr: nextAsr, embed: nextEmbed };
+          const body = { npu: npuBody };
+          if (nextChat && npuChatModel) body.model = npuChatModel;
+          else if (nextAsr && npuAsrModel) body.model = npuAsrModel;
+          else if (nextEmbed && npuEmbedModel) body.model = npuEmbedModel;
           try {
-            await editMut.mutateAsync({ name: slot.name, body: { npu: { asr: nextAsr, embed: nextEmbed } } });
+            await editMut.mutateAsync({ name: slot.name, body });
             restartMut.mutate(slot.name, {
               onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
             });
-            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
+            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${field} updated — restarting`, "info");
           } catch (err) {
-            setNpuAsr(prevAsr);
-            setNpuEmbed(prevEmbed);
+            setNpuChat(npuChat); setNpuAsr(npuAsr); setNpuEmbed(npuEmbed);
             setNpuErr(err?.message || "NPU toggle failed");
           } finally {
             setNpuPending(false);
           }
         };
+        const chatModels = flmModels.filter(m => m.model && !m.model?.toLowerCase().includes('whisper') && !m.model?.toLowerCase().includes('embed') && m.installed);
+        const sttModels = flmModels.filter(m => m.model?.toLowerCase().includes('whisper'));
+        const embedModels = flmModels.filter(m => m.model?.toLowerCase().includes('embed'));
         return (
           <>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · Chat</span>
+                <span className="sub">Primary LLM model. First ON capability becomes the slot{'\u2019'}s model. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                    on={npuChat}
+                    disabled={npuPending || saving}
+                    label="Chat"
+                    stateText={npuChat ? "On" : "Off"}
+                    onToggle={(next) => { setNpuChat(next); applyNpu(next, npuAsr, npuEmbed, "chat"); }}
+                  />
+                  <select className="input mono" style={{width: 160}} value={npuChatModel}
+                    onChange={e => setNpuChatModel(e.target.value)}
+                    disabled={npuPending || saving || !npuChat}
+                  >
+                    {chatModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
+                  </select>
+                  {!npuChat && npuAsr && npuAsrModel === npuChatModel && <span style={{fontSize:11,color:'var(--fg-5)'}}>→ primary</span>}
+                </span>
+              </div>
+            </div>
             <div className="form-row">
               <div className="form-lbl">
                 <span>NPU · ASR</span>
@@ -1060,23 +1093,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
                   <PillToggle
                     on={npuAsr}
                     disabled={npuPending || saving}
-                    label="NPU ASR"
+                    label="ASR"
                     stateText={npuAsr ? "On" : "Off"}
-                    onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
+                    onToggle={(next) => { setNpuAsr(next); applyNpu(npuChat, next, npuEmbed, "ASR"); }}
                   />
-                  {flmModels.length > 0 && (
-                    <select
-                      className="input mono"
-                      style={{width: 160}}
-                      value={npuAsrModel}
+                  <select className="input mono" style={{width: 160}} value={npuAsrModel}
                     onChange={e => setNpuAsrModel(e.target.value)}
-                    disabled={npuPending || saving}
+                    disabled={npuPending || saving || !npuAsr}
                   >
-                    {flmModels.filter(m => m.model?.toLowerCase().includes('whisper')).map(m => (
-                      <option key={m.model} value={m.model}>{m.model}</option>
-                    ))}
+                    {sttModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
                   </select>
-                )}
+                  {!npuChat && npuAsr && <span style={{fontSize:11,color:'var(--ok)'}}>primary</span>}
                 </span>
               </div>
             </div>
@@ -1088,25 +1115,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
               <div className="form-ctl">
                 <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
                   <PillToggle
-                  on={npuEmbed}
-                  disabled={npuPending || saving}
-                  label="NPU Embed"
-                  stateText={npuEmbed ? "On" : "Off"}
-                  onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
-                />
-                  {flmModels.length > 0 && (
-                    <select
-                      className="input mono"
-                      style={{width: 160}}
-                      value={npuEmbedModel}
-                    onChange={e => setNpuEmbedModel(e.target.value)}
+                    on={npuEmbed}
                     disabled={npuPending || saving}
+                    label="Embed"
+                    stateText={npuEmbed ? "On" : "Off"}
+                    onToggle={(next) => { setNpuEmbed(next); applyNpu(npuChat, npuAsr, next, "Embed"); }}
+                  />
+                  <select className="input mono" style={{width: 160}} value={npuEmbedModel}
+                    onChange={e => setNpuEmbedModel(e.target.value)}
+                    disabled={npuPending || saving || !npuEmbed}
                   >
-                    {flmModels.filter(m => m.model?.toLowerCase().includes('embed')).map(m => (
-                      <option key={m.model} value={m.model}>{m.model}</option>
-                    ))}
+                    {embedModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
                   </select>
-                )}
+                  {!npuChat && !npuAsr && npuEmbed && <span style={{fontSize:11,color:'var(--ok)'}}>primary</span>}
                 </span>
               </div>
             </div>
