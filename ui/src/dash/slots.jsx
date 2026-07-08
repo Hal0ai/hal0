@@ -443,19 +443,26 @@ function SlotListRow({ slot, onEdit }) {
         {type === "llm" && metrics.ttft && <span>· {metrics.ttft}ms ttft</span>}
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
-      {/* NPU column squares — match left border color */}
-      {slot.served_by === 'flm' && (
+      {/* NPU column squares — animate when slot is actively serving */}
+      {slot.served_by === 'flm' && (function() {
+        const reqCount = metrics.request_count || 0;
+        const [lastCount, setLastCount] = React.useState ? React.useState(0) : [0, () => {}];
+        const active = reqCount > (lastCount || 0);
+        if (active && setLastCount) setLastCount(reqCount);
+        return (
         <div style={{display: 'flex', gap: 2, marginLeft: 6}}>
           {[...Array(8)].map((_, i) => (
             <div key={i} style={{
               width: 6, height: 6, borderRadius: 1.5,
               background: 'var(--dev-npu)',
-              boxShadow: '0 0 4px var(--dev-npu)',
-              opacity: 0.85,
+              boxShadow: active ? '0 0 8px var(--dev-npu)' : '0 0 4px var(--dev-npu)',
+              opacity: active ? 1 : 0.6,
+              transition: 'all 0.3s ease',
             }} />
           ))}
         </div>
-      )}
+        );
+      })()}
       <span className="ac">
         <button
           className="btn ghost sm"
