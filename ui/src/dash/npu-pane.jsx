@@ -297,21 +297,39 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
           </span>
         </span>
       </div>
-      <div className="cslot-row">
-        <span className="cslot-strip">
-          <TileStrip owners={owners} ownerName={slot.name} act={act} />
-        </span>
-      </div>
+      {slot.name === 'flm' && (
+        <div className="cslot-row">
+          <span className="cslot-strip">
+            <TileStrip owners={owners} ownerName={slot.name} act={act} />
+          </span>
+        </div>
+      )}
       <div className="cslot-foot">
         <span className="grow" />
-        <SlotControls
-          phase={slotCtrlPhase(slot)}
-          onStart={() => handlers.onStart(slot)}
-          onStop={() => handlers.onStop(slot)}
+        {slot.name === 'flm-stt' || slot.name === 'flm-embed' ? (
+          <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
+            <span style={{color: 'var(--fg-2)'}}>
+              {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+            </span>
+            <span style={{
+              background: slot.enabled !== false ? 'var(--dev-npu)' : 'transparent',
+              border: '1px solid var(--dev-npu)', borderRadius: 10,
+              padding: '1px 10px',
+              color: slot.enabled !== false ? '#fff' : 'var(--dev-npu)',
+            }}>
+              {slot.enabled !== false ? 'ON' : 'OFF'}
+            </span>
+          </span>
+        ) : (
+          <SlotControls
+            phase={slotCtrlPhase(slot)}
+            onStart={() => handlers.onStart(slot)}
+            onStop={() => handlers.onStop(slot)}
           onRestart={() => handlers.onRestart(slot)}
           onLogs={() => handlers.onLogs(slot)}
           onEdit={() => handlers.onEdit(slot)}
         />
+        )}
       </div>
     </div>
   )
