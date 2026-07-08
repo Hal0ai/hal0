@@ -650,9 +650,11 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const groups = {
     chat:  cardSlots.filter(s => dc(s) === "gpu" && s.type === "llm"),
     caps:  cardSlots.filter(s =>
-             dc(s) !== "npu" && dc(s) !== "img" &&
+             dc(s) !== "npu" && dc(s) !== "img" && !s.served_by &&
              ["embedding", "reranking", "transcription", "tts"].includes(s.type)),
     img:   cardSlots.filter(s => dc(s) === "img" || s.type === "image"),
+    npuStt: cardSlots.filter(s => s.name === "flm-stt"),
+    npuEmb: cardSlots.filter(s => s.name === "flm-embed"),
   };
 
   // Any non-image slot currently holding GPU/loaded → drives the Inference-tab
@@ -989,6 +991,9 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
                   device_class "npu" (serializer-emitted), legacy device === "npu"
                   kept as a fallback by dc(). */}
               {cardSlots.some(s => dc(s) === "npu") && <NpuOccupancyCard slots={cardSlots} />}
+              {/* NPU shadow capability cards — rendered inline after the NPU pane */}
+              {groups.npuStt.map(s => <SlotListRow key={s.name} slot={s} />)}
+              {groups.npuEmb.map(s => <SlotListRow key={s.name} slot={s} />)}
             </>
           )}
         </div>
