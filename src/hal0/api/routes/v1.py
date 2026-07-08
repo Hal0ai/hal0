@@ -187,6 +187,20 @@ def _record_nonstreaming_throughput(
         _update_slot_kv_occupancy(app_state, slot_name, float(flm_kv))
 
 
+def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
+    """Increment the per-slot request counter for an NPU shadow slot.
+
+    Called after STT/embed dispatch via the NPU trio router so the
+    flm-stt / flm-embed cards show activity even though they don't have
+    their own server process.
+    """
+    from fastapi import Request as _R
+
+    store = getattr(request.app.state, "slot_request_count", None)
+    if store is not None:
+        store[slot_name] = store.get(slot_name, 0) + 1
+
+
 async def _read_json_body(request: Request) -> dict[str, Any]:
     """Best-effort JSON parse.  Empty / malformed bodies become ``{}``.
 
@@ -901,6 +915,7 @@ async def _dispatch_via_npu_trio(
     if router_obj is None:
         return None
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
+    _touch_npu_shadow_count(request, "flm-embed")
     return _wrap_npu_trio_response(upstream_resp)
 
 
@@ -1436,6 +1451,7 @@ async def _forward_multipart(
                     body=raw_body,
                     content_type=content_type,
                 )
+                _touch_npu_shadow_count(request, "flm-stt")
                 return _wrap_npu_trio_response(upstream_resp)
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
