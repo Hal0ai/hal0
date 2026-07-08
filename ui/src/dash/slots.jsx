@@ -407,11 +407,11 @@ function SlotListRow({ slot, onEdit }) {
     });
     window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}…`, "info");
   };
-  // Only tok/s is backed by a real slot-payload field. The legacy rpm/xrt/avg
-  // metrics were never populated by the backend (same reasoning as the card
-  // variant's dead-chip cleanup, W6) — non-llm rows show an em-dash instead
-  // of a fabricated 0.
-  const tps = type === "llm" ? `${metrics.toks || 0} t/s` : "—";
+  // tok/s: prefer tokens_per_sec (from /api/slots/metrics, backed by FLM)
+  // fall back to metrics.toks (local streaming count).
+  const slotTps = metrics.tokens_per_sec || metrics.tps || metrics.toks || 0;
+  const tps = type === "llm" ? `${slotTps > 0 ? slotTps.toFixed(1) : 0} t/s` : "—";
+  const kvPct = metrics.kv_cache_usage;
   return (
     <div className="slot-list-row" onClick={goEdit}>
       <IndicatorDot slot={slot} />
@@ -426,6 +426,7 @@ function SlotListRow({ slot, onEdit }) {
       </span>
       <span className="met">
         <b>{tps}</b>
+        {type === "llm" && kvPct != null && <span>· {(kvPct * 100).toFixed(1)}% KV</span>}
         {type === "llm" && metrics.ttft && <span>· {metrics.ttft}ms ttft</span>}
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
