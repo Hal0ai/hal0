@@ -115,14 +115,13 @@ def test_install_complete_writes_sentinel_atomically(
     assert sentinel.exists()
     assert sentinel.read_text(encoding="utf-8").strip() == "first_run_done"
 
-    # WS-C (#1105): first-run install endpoints close once the sentinel
-    # exists — a second call is a safe typed refusal, not a silent no-op.
+    # Idempotent: re-running /complete returns 200, sentinel stays intact.
     r2 = isolated_client.post("/api/install/complete")
-    assert r2.status_code == 409, r2.text
-    assert r2.json()["error"]["code"] == "install.closed"
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["first_run"] is False
 
 
-# ── WS-C (#1105): close /api/install/* provisioning endpoints post-setup ────
+# ── Idempotent re-provisioning (guard removed) ───────────────────────────────
 
 
 def _write_sentinel(tmp_hal0_home: str) -> Path:
@@ -133,16 +132,17 @@ def _write_sentinel(tmp_hal0_home: str) -> Path:
     return sentinel
 
 
-def test_install_complete_closed_when_sentinel_present(
+def test_install_complete_idempotent_when_sentinel_present(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:
-    """A sentinel written by another path (e.g. /apply) also closes /complete."""
+    """A sentinel written by another path (e.g. /apply) is harmless — /complete is idempotent."""
     _write_sentinel(tmp_hal0_home)
 
     r = isolated_client.post("/api/install/complete")
-    assert r.status_code == 409, r.text
+    assert r.status_code == 200, r.text
     body = r.json()
-    assert body["error"]["code"] == "install.closed"
+    assert body["first_run"] is False
+    assert Path(body["sentinel_path"]).exists()
 
     # GET /state keeps working and still reports first_run: false.
     state = isolated_client.get("/api/install/state")
@@ -150,32 +150,33 @@ def test_install_complete_closed_when_sentinel_present(
     assert state.json()["first_run"] is False
 
 
-def test_install_apply_closed_when_sentinel_present(
+def test_install_apply_idempotent_when_sentinel_present(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:
-    """POST /apply refuses fast (before any tier/hardware work) once closed."""
+    """/apply is idempotent — re-running provisions normally."""
     _write_sentinel(tmp_hal0_home)
 
     r = isolated_client.post(
         "/api/install/apply",
         json={"tier": "hal0-Default", "storage_dir": tmp_hal0_home, "npu_opt_in": False},
     )
-    assert r.status_code == 409, r.text
-    assert r.json()["error"]["code"] == "install.closed"
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "model_ids" in body
+    assert "slots" in body
 
 
-def test_install_apply_selections_closed_when_sentinel_present(
+def test_install_apply_selections_idempotent_when_sentinel_present(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:
-    """POST /apply-selections refuses once closed, same as /apply."""
+    """/apply-selections is idempotent — re-running provisions normally."""
     _write_sentinel(tmp_hal0_home)
 
     r = isolated_client.post(
         "/api/install/apply-selections",
         json={"storage_dir": tmp_hal0_home, "npu_opt_in": False, "extensions": {}, "slots": []},
     )
-    assert r.status_code == 409, r.text
-    assert r.json()["error"]["code"] == "install.closed"
+    assert r.status_code == 200, r.text
 
 
 def test_install_apply_open_without_sentinel_still_validates_body(
