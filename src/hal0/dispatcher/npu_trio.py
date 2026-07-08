@@ -102,7 +102,7 @@ class NpuTrioRouter:
         if self._slot_manager is None:
             return None
         try:
-            cfg = await self._slot_manager.get_config("npu")
+            cfg = await self._slot_manager.get_config("flm")
         except Exception as exc:
             log.debug(
                 "npu_trio.resolve_failed",
@@ -115,7 +115,7 @@ class NpuTrioRouter:
         if not port:
             return None
         try:
-            if not self._slot_manager.is_ready_for_dispatch("npu"):
+            if not self._slot_manager.is_ready_for_dispatch("flm"):
                 return None
         except Exception as exc:
             log.debug(
