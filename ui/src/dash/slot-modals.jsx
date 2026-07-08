@@ -1178,59 +1178,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
-      {/* #901: Vision pill — gated to slots whose bound model carries an mmproj
-          sidecar (the registry Model.mmproj presence flag). Toggling drops or
-          adds the ~0.9 GB projector; instant-apply via PUT /config {vision}
-          plus a non-blocking cold restart (mirrors MTP). Default-ON, so a
-          null/absent on-disk value renders as on. */}
-      {(() => {
-        const cur = slot.model_id || slot.model || "";
-        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
-        // mmproj is a presence flag on the registry row (path or marker string);
-        // any truthy value means the model ships a vision projector sidecar.
-        if (!m || !m.mmproj) return null;
-        return (
-          <div className="form-row">
-            <div className="form-lbl">
-              <span>Vision</span>
-              <span className="sub">Load the multimodal projector so the slot accepts images. Off frees ~0.9 GB (text-only). Restarts the container.</span>
-            </div>
-            <div className="form-ctl">
-              <PillToggle
-                on={vision}
-                disabled={visionPending || saving}
-                label="Vision"
-                stateText={vision ? "On" : "Off"}
-                onToggle={async (next) => {
-                  // Optimistic set-before-mutate + revert-on-error (mirrors MTP).
-                  setVision(next);
-                  setVisionPending(true);
-                  setVisionErr(null);
-                  setSubmitErr(null);
-                  try {
-                    await editMut.mutateAsync({ name: slot.name, body: { vision: next } });
-                    restartMut.mutate(slot.name, {
-                      onError: (err) => window.__hal0Toast && window.__hal0Toast(`Vision restart failed — ${err?.message || "see logs"}`, "err"),
-                    });
-                    window.__hal0Toast && window.__hal0Toast(`${slot.name} vision ${next ? "on" : "off"} — restarting in the background`, "info");
-                  } catch (err) {
-                    setVision(!next);
-                    setVisionErr(err?.message || "vision toggle failed");
-                  } finally {
-                    setVisionPending(false);
-                  }
-                }}
-              />
-              {visionErr && <div className="hint" style={{ color: "var(--err)" }}>{visionErr}</div>}
-            </div>
-          </div>
-        );
-      })()}
-      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only.
-          Seeded from slot.npu; each toggle sends the full {asr,embed} object via
-          PUT /config {npu:{...}} (the backend one-level merge replaces the [npu]
-          table wholesale) + a non-blocking cold restart. Optimistic with
-          revert-on-error. */}
+      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only. */}
       {slot.device === "npu" && (() => {
         const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
           setNpuPending(true);
@@ -1243,7 +1191,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
             });
             window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
           } catch (err) {
-            // Revert both to their pre-toggle values.
             setNpuAsr(prevAsr);
             setNpuEmbed(prevEmbed);
             setNpuErr(err?.message || "NPU toggle failed");
@@ -1317,7 +1264,54 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </>
         );
       })()}
-      </FieldGroup>
+      {/* #901: Vision pill — gated to slots whose bound model carries an mmproj
+          sidecar (the registry Model.mmproj presence flag). Toggling drops or
+          adds the ~0.9 GB projector; instant-apply via PUT /config {vision}
+          plus a non-blocking cold restart (mirrors MTP). Default-ON, so a
+          null/absent on-disk value renders as on. */}
+      {(() => {
+        const cur = slot.model_id || slot.model || "";
+        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
+        // mmproj is a presence flag on the registry row (path or marker string);
+        // any truthy value means the model ships a vision projector sidecar.
+        if (!m || !m.mmproj) return null;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Vision</span>
+              <span className="sub">Load the multimodal projector so the slot accepts images. Off frees ~0.9 GB (text-only). Restarts the container.</span>
+            </div>
+            <div className="form-ctl">
+              <PillToggle
+                on={vision}
+                disabled={visionPending || saving}
+                label="Vision"
+                stateText={vision ? "On" : "Off"}
+                onToggle={async (next) => {
+                  // Optimistic set-before-mutate + revert-on-error (mirrors MTP).
+                  setVision(next);
+                  setVisionPending(true);
+                  setVisionErr(null);
+                  setSubmitErr(null);
+                  try {
+                    await editMut.mutateAsync({ name: slot.name, body: { vision: next } });
+                    restartMut.mutate(slot.name, {
+                      onError: (err) => window.__hal0Toast && window.__hal0Toast(`Vision restart failed — ${err?.message || "see logs"}`, "err"),
+                    });
+                    window.__hal0Toast && window.__hal0Toast(`${slot.name} vision ${next ? "on" : "off"} — restarting in the background`, "info");
+                  } catch (err) {
+                    setVision(!next);
+                    setVisionErr(err?.message || "vision toggle failed");
+                  } finally {
+                    setVisionPending(false);
+                  }
+                }}
+              />
+              {visionErr && <div className="hint" style={{ color: "var(--err)" }}>{visionErr}</div>}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Task 4: Advanced fields (mostly read-only, profile-owned) are
           collapsed by default — minimal native <details> disclosure (no
