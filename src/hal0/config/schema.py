@@ -188,6 +188,10 @@ class NpuConfig(BaseModel):
         default=False,
         description="Enable embedding modality via FLM --embed 1.",
     )
+    chat: bool = Field(
+        default=True,
+        description="Enable chat (LLM) modality on the FLM slot. Default ON.",
+    )
 
 
 class ImageGenConfig(BaseModel):
