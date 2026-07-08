@@ -17,7 +17,7 @@
 
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
-import { useSlotRestart, useSlotUnload, useSlotLoad } from '@/api/hooks/useSlots'
+import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit } from '@/api/hooks/useSlots'
 import { SlotControls, slotCtrlPhase } from './inference-pane.jsx'
 import { slotIndicatorFromPhase } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -314,9 +314,9 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
             <span style={{
               background: slot.enabled !== false ? 'var(--dev-npu)' : 'transparent',
               border: '1px solid var(--dev-npu)', borderRadius: 10,
-              padding: '1px 10px',
+              padding: '1px 10px', cursor: 'pointer',
               color: slot.enabled !== false ? '#fff' : 'var(--dev-npu)',
-            }}>
+            }} onClick={(e) => { e.stopPropagation(); handlers.onToggleShadow(slot); }}>
               {slot.enabled !== false ? 'ON' : 'OFF'}
             </span>
           </span>
@@ -342,6 +342,7 @@ export function NpuOccupancyCard({ slots }) {
   const restartMut = useSlotRestart()
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
+  const editMut = useSlotEdit()
 
   const npuSlots = (slots || []).filter(isNpuSlot)
   if (npuSlots.length === 0) return null
@@ -398,6 +399,13 @@ export function NpuOccupancyCard({ slots }) {
     },
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
+    },
+    onToggleShadow: (s) => {
+      const next = s.enabled === false
+      editMut.mutate(
+        { name: s.name, body: { enabled: next } },
+        { onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${s.name}: ${next ? 'ON' : 'OFF'}`, 'info') }
+      )
     },
   }
 
