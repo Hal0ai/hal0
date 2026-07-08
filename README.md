@@ -24,6 +24,19 @@ control plane — it owns slot state machines, dispatches OpenAI-compatible
 `/v1/*` requests to the right slot port, and serves the dashboard. No
 shared inference daemon; no extra process to babysit.
 
+> **⚡ If you just installed or upgraded, run `hal0 setup`** for the
+> guided interactive setup. It walks you through network binding, model
+> storage, HuggingFace token, capability slots, NPU opt-in, image
+> generation, and extensions — then downloads your chosen models with
+> live progress. Run it anytime:
+>
+> ```sh
+> hal0 setup
+> ```
+>
+> Non-interactive: `hal0 setup --auto` scaffolds defaults without
+> prompting. Skipped during install? Just run it now.
+
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
