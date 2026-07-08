@@ -18,7 +18,10 @@ every error path (no SlotManager, accessor errors, etc.).
 
 from __future__ import annotations
 
+import tomllib
+import tomllib
 from typing import Any
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 
@@ -27,7 +30,14 @@ from hal0.dispatcher.npu_swap_status import (
     fetch_npu_swap_status,
 )
 
+from pathlib import Path
+
 router = APIRouter()
+
+
+def _slots_dir() -> Path:
+    """Return /etc/hal0/slots/ — the TOML config directory."""
+    return Path("/etc/hal0/slots")
 
 # Strix Halo XDNA NPU geometry — fixed silicon: 4 rows by 8 cols = 32 AIE
 # tiles, ~50 TOPS peak (single-tenant). These never change at runtime; the
@@ -217,6 +227,15 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         # Synthesise virtual sub-slots for STT + embed so the NPU pane
         # shows three glowing cards when the FLM trio is running.
         npu_cfg = getattr(s, "npu", None) or {}
+        # The slot object may not carry the [npu] table — read from the TOML.
+        if not npu_cfg:
+            try:
+                toml_path = _slots_dir() / f"{s.name}.toml"
+                if toml_path.exists():
+                    raw = tomllib.loads(toml_path.read_text())
+                    npu_cfg = raw.get("npu") or {}
+            except Exception:
+                pass
         if npu_cfg.get("asr"):
             slots_out.append({
                 "name": s.name + "-stt",
