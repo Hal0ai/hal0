@@ -1942,7 +1942,7 @@ select.npu-sel {
   letter-spacing: 0.08em;
   margin-right: 2px;
 }
-.mdl-clear { color: var(--fg-4); border-style: dashed; }
+.mdl-sort-grp { flex-shrink: 0; flex-wrap: nowrap; }
 .mdl-clear:hover { color: var(--err); border-color: var(--err-line); }
 .mdl-chip {
   padding: 3px 8px;
@@ -1976,6 +1976,26 @@ select.npu-sel {
 }
 .mdl-list-h .ct { color: var(--fg-5); }
 .mdl-list-h .right { margin-left: auto; }
+.mdl-pager {
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-family: var(--jbm);
+  font-size: 11px;
+}
+.mdl-pager .lbl {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.mdl-pager-pages { display: flex; align-items: center; gap: 8px; }
+.mdl-pager-size { display: flex; align-items: center; gap: 4px; }
 .mdl-section-label {
   padding: 10px 16px 6px;
   font-family: var(--jbm);
@@ -2006,6 +2026,8 @@ select.npu-sel {
 .mdl-row-tags .chip { text-transform: lowercase; }
 .mdl-row .sz { color: var(--fg-3); text-align: right; font-size: 11px; }
 .mdl-row .tg { color: var(--fg-3); font-size: 10.5px; text-align: right; }
+.mdl-row-icon { width: 14px; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+.mdl-row-icon svg { width: 12px; height: 12px; }
 
 .mdl-detail {
   background: var(--bg-1);
