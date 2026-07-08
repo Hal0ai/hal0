@@ -436,6 +436,22 @@ export function NpuOccupancyCard({ slots }) {
             XDNA 2 · npu
           </span>
           <span className="grow" />
+          <button className="btn ghost sm" title="Start"
+            onClick={() => handlers.onStart(flmSlot)} disabled={!flmSlot}>
+            ▶
+          </button>
+          <button className="btn ghost sm" title="Stop"
+            onClick={() => handlers.onStop(flmSlot)} disabled={!flmSlot}>
+            ■
+          </button>
+          <button className="btn ghost sm" title="Restart"
+            onClick={() => handlers.onRestart(flmSlot)} disabled={!flmSlot}>
+            ↻
+          </button>
+          <button className="btn ghost sm" title="Logs"
+            onClick={() => handlers.onLogs(flmSlot)} disabled={!flmSlot}>
+            📋
+          </button>
           <button className="btn ghost sm" title="Edit FLM slot" onClick={() => window.location.hash = '#slots/flm'} style={{fontSize: 13}}>✎ Edit</button>
         </div>
         <div className="wcard-b">
