@@ -156,6 +156,10 @@ def _record_nonstreaming_throughput(
     events = _slot_events(app_state, slot_name)
     if events is None or not body_bytes:
         return
+    # Increment per-slot request counter (shadow slots share with parent)
+    req_store = getattr(app_state, "slot_request_count", None)
+    if req_store is not None and slot_name:
+        req_store[slot_name] = req_store.get(slot_name, 0) + 1
     try:
         data = json.loads(body_bytes)
     except (ValueError, TypeError):

@@ -859,6 +859,14 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
             entry = {"name": name}
             merged[name] = entry
         entry["kv_cache_usage"] = kv
+    # Per-slot request counts (shadow slots inherit from parent)
+    req_store = getattr(request.app.state, "slot_request_count", {})
+    for name, count in req_store.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["request_count"] = count
     return merged
 
 

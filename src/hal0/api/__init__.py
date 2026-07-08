@@ -953,6 +953,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # kv_token_occupancy_rate_percentage in the usage block.
     app.state.slot_throughput: dict[str, float] = {}
     app.state.slot_kv_occupancy: dict[str, float] = {}
+    app.state.slot_request_count: dict[str, int] = {}
 
     log.info(
         "hal0.api.upstreams_loaded",
