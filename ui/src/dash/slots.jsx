@@ -425,6 +425,10 @@ function SlotListRow({ slot, onEdit }) {
   const slotTps = metrics.tokens_per_sec || metrics.tps || metrics.toks || 0;
   const tps = type === "llm" ? `${slotTps > 0 ? slotTps.toFixed(1) : 0} t/s` : "—";
   const kvPct = metrics.kv_cache_usage;
+  // DEBUG: check served_by
+  if (slot.name && slot.name.startsWith('flm') && typeof window !== 'undefined') {
+    console.log('SlotListRow', slot.name, 'served_by:', slot.served_by, 'type:', slot.type, 'full:', slot);
+  }
   // Track request_count changes for shadow-slot animation
   const reqCount = metrics.request_count || 0;
   const prevReq = useRef(reqCount);
@@ -475,7 +479,7 @@ function SlotListRow({ slot, onEdit }) {
         </div>
       )}
       {/* NPU shadow slots: replace Restart with on/off toggle */}
-      {slot.served_by === 'flm' && (slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
+      {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
         <span className="ac" style={{gap: 6}}>
           <span style={{fontSize: 11, color: 'var(--fg-2)'}}>
             {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
