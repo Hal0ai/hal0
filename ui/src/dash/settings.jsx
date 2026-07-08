@@ -772,6 +772,153 @@ const KOKORO_VOICES = [
   { id: "bm_lewis",   label: "Lewis (bm) — British male" },
 ];
 
+// ─── MemorySection ───────────────────────────────────────────────────────────
+
+function MemorySection() {
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
+
+  return (
+    <div className="s-section">
+      <h2>Memory</h2>
+      <p className="desc">
+        Memory engine, graph extraction, and second-pass reranking. Changes to the engine
+        require a hal0-api restart; graph and reranker knobs apply live.
+      </p>
+      <MemoryEnginePanel />
+      <MemoryGraphPanel />
+      <MemoryRerankerPanel registry={registry} />
+    </div>
+  );
+}
+
+function MemoryEnginePanel() {
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  const engineField = _schemaField(schema, "memory.engine");
+  const currentEngine = live?.memory?.engine || "hindsight";
+  const [engine, setEngine] = useStateSet(currentEngine);
+  useEffectSet(() => {
+    if (live?.memory?.engine) setEngine(live.memory.engine);
+  }, [live?.memory?.engine]);
+
+  const dirty = engine !== currentEngine;
+
+  const doSave = async () => {
+    try {
+      await update.mutateAsync({ memory: { engine } });
+      setEngine(engine);
+      window.__hal0Toast && window.__hal0Toast("Memory engine saved — restart hal0-api to apply", "warn");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const engineDesc = ADV_DESC_OVERRIDE["memory.engine"] || engineField?.description || "";
+  const options = ["hindsight", "pgvector"];
+
+  return (
+    <div className="s-panel" style={{marginBottom: 12}}>
+      <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+        <div className="k"><span>Engine</span><span className="sub">hal0.toml [memory] · requires restart to switch</span></div>
+      </div>
+      <SRow
+        k="Engine"
+        sub={<span title={engineDesc}>{engineDesc.length > 150 ? engineDesc.slice(0, 147) + "…" : engineDesc}</span>}
+        v={
+          <select value={engine} onChange={e => setEngine(e.target.value)} style={_advInputStyle}>
+            {options.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        }
+        actions={<ApplyBadge settingsKey="memory.engine" registry={registry} />}
+      />
+      <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+        {dirty && (
+          <button className="btn ghost sm" onClick={() => setEngine(currentEngine)}>Reset</button>
+        )}
+        <button className="btn sm" disabled={!dirty || update.isPending} onClick={doSave}>
+          {update.isPending ? "Saving…" : "Save engine"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MemoryRerankerPanel({ registry }) {
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  const RERANK_KEYS = [
+    "memory.embedding.rerank_gateway_url",
+    "memory.embedding.rerank_model",
+    "memory.embedding.rerank_connect_timeout_s",
+    "memory.embedding.rerank_read_timeout_s",
+  ];
+  const fields = {};
+  for (const k of RERANK_KEYS) fields[k] = _schemaField(schema, k);
+
+  const [buf, setBuf] = useStateSet({});
+  const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
+
+  const dirtyKeys = Object.keys(buf).filter(k => {
+    const { ok, value } = _advCoerce(fields[k], buf[k]);
+    if (!ok) return true;
+    const cur = _getIn(live, k);
+    return value !== (cur === undefined ? (fields[k]?.default ?? null) : cur);
+  });
+  const invalidKeys = dirtyKeys.filter(k => !_advCoerce(fields[k], buf[k]).ok);
+  const canSave = dirtyKeys.length > 0 && invalidKeys.length === 0 && !update.isPending;
+
+  const doSave = async () => {
+    let patch = {};
+    for (const k of dirtyKeys) {
+      const { value } = _advCoerce(fields[k], buf[k]);
+      patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
+    }
+    try {
+      await update.mutateAsync(patch);
+      setBuf({});
+      window.__hal0Toast && window.__hal0Toast("Reranker settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="s-panel" style={{marginBottom: 12}}>
+      <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+        <div className="k"><span>Reranker</span><span className="sub">hal0.toml [memory.embedding] · second-pass ranking after recall</span></div>
+      </div>
+      {RERANK_KEYS.map(k => (
+        <AdvRow
+          key={k}
+          dotKey={k}
+          field={fields[k]}
+          live={_getIn(live, k)}
+          buf={buf[k]}
+          onChange={onChange}
+          registry={registry}
+        />
+      ))}
+      <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+        {dirtyKeys.length > 0 && (
+          <button className="btn ghost sm" onClick={() => setBuf({})}>Reset</button>
+        )}
+        <button className="btn sm" disabled={!canSave} onClick={doSave}>
+          {update.isPending ? "Saving…" : "Save reranker"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── VoiceSection ───────────────────────────────────────────────────────────
 //
 // STT: pick model from capabilities.catalogs.voice.stt — persisted via
