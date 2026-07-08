@@ -18,7 +18,6 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { ActivityLog } from './activity-log.jsx'
-import { TileStrip, HUES } from './npu-pane.jsx'
 import { ComfyuiPane } from './comfyui-pane.jsx'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
@@ -340,16 +339,17 @@ function SlotCard({
           return <span className="chip" style={{color: chipColor}}>{ind.label}</span>;
         })()}
       </div>
-      {/* NPU column squares for STT served by NPU slot */}
+      {/* NPU column squares — match left border color */}
       {slot.served_by === 'npu' && (
-        <div className="cslot-row" style={{margin: '4px 0 0 0'}}>
-          <span className="cslot-strip">
-            <TileStrip
-              owners={Array(8).fill({ name: 'npu', serving: true, hue: HUES[0].hue, glow: HUES[0].glow })}
-              ownerName="npu"
-              act={1}
-            />
-          </span>
+        <div style={{display: 'flex', gap: 3, marginTop: 4, marginBottom: 4}}>
+          {[...Array(8)].map((_, i) => (
+            <div key={i} style={{
+              width: 8, height: 8, borderRadius: 2,
+              background: 'var(--dev-npu)',
+              boxShadow: '0 0 6px var(--dev-npu)',
+              opacity: 0.85,
+            }} />
+          ))}
         </div>
       )}
       {metricsRow.length > 0 && (
@@ -443,18 +443,17 @@ function SlotListRow({ slot, onEdit }) {
         {type === "llm" && metrics.ttft && <span>· {metrics.ttft}ms ttft</span>}
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
-      {/* NPU column squares for STT served by npu slot */}
+      {/* NPU column squares — match left border color */}
       {slot.served_by === 'npu' && (
-        <div className="cslot-row" style={{margin: '2px 0 0 6px'}}>
-          <span className="cslot-strip">
-            <TileStrip
-              owners={Array(8).fill({ name: 'npu', serving: true, hue: HUES[0].hue, glow: HUES[0].glow })}
-              ownerName="npu"
-              act={1}
-              w={6}
-              h={6}
-            />
-          </span>
+        <div style={{display: 'flex', gap: 2, marginLeft: 6}}>
+          {[...Array(8)].map((_, i) => (
+            <div key={i} style={{
+              width: 6, height: 6, borderRadius: 1.5,
+              background: 'var(--dev-npu)',
+              boxShadow: '0 0 4px var(--dev-npu)',
+              opacity: 0.85,
+            }} />
+          ))}
         </div>
       )}
       <span className="ac">
