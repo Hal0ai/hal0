@@ -442,7 +442,7 @@ export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
 
   const query = useQuery<PullJob[]>({
     queryKey: ['pulls'],
-    queryFn: () => apiGet<PullJob[]>(ENDPOINTS.pulls),
+    queryFn: () => apiGet<PullJob[]>(ENDPOINTS.modelPulls),
     enabled,
     refetchInterval: enabled ? 2_000 : false,
   })
@@ -456,7 +456,7 @@ export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
 export function useClearPullJob() {
   const qc = useQueryClient()
   return useMutation<void, Hal0Error, string>({
-    mutationFn: (id: string) => apiDelete(ENDPOINTS.pullsDelete(id)),
+    mutationFn: (id: string) => apiDelete(ENDPOINTS.modelPullDelete(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pulls'] }),
   })
 }
