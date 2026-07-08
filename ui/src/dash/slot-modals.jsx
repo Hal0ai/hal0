@@ -422,8 +422,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // revert-on-error.
   const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
   const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
+  const [npuAsrModel, setNpuAsrModel] = useStateSM(slot?.npu?.asr_model || 'whisper-v3:turbo');
+  const [npuEmbedModel, setNpuEmbedModel] = useStateSM(slot?.npu?.embed_model || 'embed-gemma:300m');
   const [npuPending, setNpuPending] = useStateSM(false);
   const [npuErr, setNpuErr] = useStateSM(null);
+  const [flmModels, setFlmModels] = useStateSM([]);
+
+  // Fetch available FLM models when NPU slot editor is open
+  React.useEffect(() => {
+    if (slot?.device !== 'npu') return;
+    fetch('/api/slots/flm/models').then(r => r.json()).then(d => {
+      setFlmModels(d.models || d || []);
+    }).catch(() => {});
+  }, [slot?.name]);
 
   // Resolved command provenance — only fetched while the drawer is open.
   // Falls back gracefully when null (non-llama slots) or on error.
@@ -1255,6 +1266,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
                   stateText={npuAsr ? "On" : "Off"}
                   onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
                 />
+                {flmModels.length > 0 && (
+                  <select
+                    value={npuAsrModel}
+                    onChange={e => setNpuAsrModel(e.target.value)}
+                    disabled={npuPending || saving}
+                    style={{marginLeft: 8, padding: '2px 4px', fontSize: 12, borderRadius: 4, border: '1px solid var(--fg-4)', background: 'var(--bg-2)', color: 'var(--fg)'}}
+                  >
+                    {flmModels.filter(m => m.type === 'transcription' || m.tag?.includes('whisper')).map(m => (
+                      <option key={m.tag} value={m.tag}>{m.name || m.tag}</option>
+                    ))}
+                  </select>
+                )}
               </div>
             </div>
             <div className="form-row">
@@ -1270,6 +1293,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
                   stateText={npuEmbed ? "On" : "Off"}
                   onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
                 />
+                {flmModels.length > 0 && (
+                  <select
+                    value={npuEmbedModel}
+                    onChange={e => setNpuEmbedModel(e.target.value)}
+                    disabled={npuPending || saving}
+                    style={{marginLeft: 8, padding: '2px 4px', fontSize: 12, borderRadius: 4, border: '1px solid var(--fg-4)', background: 'var(--bg-2)', color: 'var(--fg)'}}
+                  >
+                    {flmModels.filter(m => m.type === 'embedding' || m.tag?.includes('embed')).map(m => (
+                      <option key={m.tag} value={m.tag}>{m.name || m.tag}</option>
+                    ))}
+                  </select>
+                )}
               </div>
             </div>
             {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}

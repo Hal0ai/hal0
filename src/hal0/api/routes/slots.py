@@ -49,6 +49,23 @@ from hal0.slots.manager import Slot, SlotManager
 router = APIRouter()
 
 
+@router.get("/flm/models")
+async def list_flm_models(request: Request):
+    """Return installed FLM models (parsed from the NPU slot's container)."""
+    import subprocess, json as _json
+    try:
+        raw = subprocess.run(
+            ["podman", "exec", "hal0-slot-flm", "/opt/fastflowlm/bin/flm", "list", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        raw.check_returncode()
+        data = _json.loads(raw.stdout)
+        models = data if isinstance(data, list) else data.get("models", [])
+        return {"models": models}
+    except Exception:
+        return {"models": []}
+
+
 class NotImplementedYet(Hal0Error):
     code = "system.not_implemented"
     status = 501
