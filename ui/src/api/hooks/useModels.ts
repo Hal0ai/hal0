@@ -330,6 +330,10 @@ export function usePullJob(): PullSnapshot {
     try {
       const res = await apiPost<any>(ENDPOINTS.modelPull(id), body)
       setJobId(res?.id ?? res?.job_id ?? null)
+      // Dispatch pull-started event so the downloads pane can open / refresh
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hal0:pull-started', { detail: { modelId: id } }))
+      }
       attachStream(id)
       return res
     } catch (e) {
@@ -403,6 +407,60 @@ export function usePullJob(): PullSnapshot {
     reattach,
   }
 }
+
+// ─── usePullsList ─────────────────────────────────────────────────
+
+export interface PullJob {
+  id: string
+  model_id: string
+  repo: string
+  dest: string
+  state: PullState
+  downloaded: number
+  total: number
+  speed_bps: number
+  eta_s: number
+  error: { code: string; message: string } | null
+  pct: number | null
+  created_at: string
+}
+
+export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
+  const qc = useQueryClient()
+
+  // Listen for pull lifecycle events to force a refetch
+  useEffect(() => {
+    if (!enabled) return
+    const invalidate = () => qc.invalidateQueries({ queryKey: ['pulls'] })
+    window.addEventListener('hal0:pull-started', invalidate)
+    window.addEventListener('hal0:pull-ended', invalidate)
+    return () => {
+      window.removeEventListener('hal0:pull-started', invalidate)
+      window.removeEventListener('hal0:pull-ended', invalidate)
+    }
+  }, [enabled, qc])
+
+  const query = useQuery<PullJob[]>({
+    queryKey: ['pulls'],
+    queryFn: () => apiGet<PullJob[]>(ENDPOINTS.pulls),
+    enabled,
+    refetchInterval: enabled ? 2_000 : false,
+  })
+
+  const jobs = query.data ?? []
+  const hasActive = jobs.some((j: PullJob) => j.state === 'queued' || j.state === 'running')
+
+  return { jobs, hasActive, ...query }
+}
+
+export function useClearPullJob() {
+  const qc = useQueryClient()
+  return useMutation<void, Hal0Error, string>({
+    mutationFn: (id: string) => apiDelete(ENDPOINTS.pullsDelete(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['pulls'] }),
+  })
+}
+
 
 export function fmtBytes(b: number) {
   if (!b || b < 0) return '—'
