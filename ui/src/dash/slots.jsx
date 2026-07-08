@@ -340,7 +340,7 @@ function SlotCard({
         })()}
       </div>
       {/* NPU column squares — match left border color */}
-      {slot.served_by === 'npu' && (
+      {slot.served_by === 'flm' && (
         <div style={{display: 'flex', gap: 3, marginTop: 4, marginBottom: 4}}>
           {[...Array(8)].map((_, i) => (
             <div key={i} style={{
@@ -444,7 +444,7 @@ function SlotListRow({ slot, onEdit }) {
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
       {/* NPU column squares — match left border color */}
-      {slot.served_by === 'npu' && (
+      {slot.served_by === 'flm' && (
         <div style={{display: 'flex', gap: 2, marginLeft: 6}}>
           {[...Array(8)].map((_, i) => (
             <div key={i} style={{

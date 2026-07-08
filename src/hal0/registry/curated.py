@@ -199,7 +199,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_repo="",
         hf_file="",
         context_length=64000,
-        recommended_slot="npu",
+        recommended_slot="flm",
         tags=["npu", "chat"],
     ),
     # ── 2026-05 refresh: featured chat picks the wizard surfaces first ────
