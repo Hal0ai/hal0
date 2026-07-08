@@ -1214,6 +1214,145 @@ function ImageGenSection() {
 //   - [npu].embed          → HAL0_FLM_LOAD_EMBED → --embed 1
 //   - [npu].asr            → HAL0_FLM_LOAD_ASR   → --asr 1
 // All three take effect when the slot's container next (re)starts, so they're
+// ─── SlotsSection ────────────────────────────────────────────────────────────
+
+function SlotsSection() {
+  // --- Slot defaults (moved from former DefaultSlotsSection) ---
+  const slotsQuery = useSlots();
+  const editSlot = useSlotEdit();
+  const slots = slotsQuery.data || [];
+  const byType = {};
+  for (const s of slots) { (byType[s.type] ||= []).push(s); }
+  const types = Object.keys(byType).filter(t => byType[t].length >= 2).sort();
+
+  const setDefault = async (type, name) => {
+    const sibs = byType[type] || [];
+    const prev = sibs.find(s => s.isDefault && s.name !== name);
+    try {
+      await editSlot.mutateAsync({ name, body: { default: true } });
+      if (prev) await editSlot.mutateAsync({ name: prev.name, body: { default: false } });
+      window.__hal0Toast && window.__hal0Toast(`Default ${type} slot → ${name}`, "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Couldn't set default — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  // --- Slots runtime (moved from Advanced: slots.max_slots etc.) ---
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const schemaQuery = useSettingsSchema();
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
+  const schema = schemaQuery.data || null;
+  const live = settings.data || null;
+
+  const RUNTIME_KEYS = [
+    "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
+    "slots.idle_timeout_s", "slots.evict_pressure_mb", "slots.publish_host",
+  ];
+  const runtimeFields = {};
+  for (const k of RUNTIME_KEYS) runtimeFields[k] = _schemaField(schema, k);
+
+  const [buf, setBuf] = useStateSet({});
+  const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
+
+  const runtimeDirty = Object.keys(buf).filter(k => {
+    const { ok, value } = _advCoerce(runtimeFields[k], buf[k]);
+    if (!ok) return true;
+    const cur = _getIn(live, k);
+    return value !== (cur === undefined ? (runtimeFields[k]?.default ?? null) : cur);
+  });
+  const invalidKeys = runtimeDirty.filter(k => !_advCoerce(runtimeFields[k], buf[k]).ok);
+  const canSaveRuntime = runtimeDirty.length > 0 && invalidKeys.length === 0 && !update.isPending;
+
+  const doSaveRuntime = async () => {
+    let patch = {};
+    for (const k of runtimeDirty) {
+      const { value } = _advCoerce(runtimeFields[k], buf[k]);
+      patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
+    }
+    try {
+      await update.mutateAsync(patch);
+      setBuf({});
+      window.__hal0Toast && window.__hal0Toast("Slots runtime settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="s-section">
+      <h2>Slots</h2>
+      <p className="desc">
+        Default slot assignments per modality and runtime limits for the slot pool.
+      </p>
+
+      {/* --- Default slots --- */}
+      {slotsQuery.isPending && (
+        <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading slots…</div>
+      )}
+      {slotsQuery.isError && (
+        <div className="err">{slotsQuery.error?.message || "Failed to load slots"}</div>
+      )}
+      {!slotsQuery.isPending && !slotsQuery.isError && types.length > 0 && (
+        <div className="s-panel" style={{marginBottom: 12}}>
+          <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+            <div className="k"><span>Default slots</span><span className="sub">For each modality with multiple slots, pick the one that serves type-routed requests</span></div>
+          </div>
+          {types.map(type => {
+            const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
+            return (
+              <div className="default-slot-row form-row s-row" key={type}>
+                <div className="k"><span>{type}</span></div>
+                <div className="v">
+                  <select
+                    className="input mono"
+                    value={cur}
+                    disabled={editSlot.isPending}
+                    onChange={e => { const n = e.target.value; if (n && n !== cur) setDefault(type, n); }}
+                    style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}
+                  >
+                    {byType[type].map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                  </select>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!slotsQuery.isPending && !slotsQuery.isError && types.length === 0 && (
+        <p className="hint" style={{fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)", marginBottom: 12}}>No modality has multiple slots yet.</p>
+      )}
+
+      {/* --- Runtime --- */}
+      <div className="s-panel">
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k"><span>Runtime</span><span className="sub">hal0.toml [slots]</span></div>
+        </div>
+        {RUNTIME_KEYS.map(k => (
+          <AdvRow
+            key={k}
+            dotKey={k}
+            field={runtimeFields[k]}
+            live={_getIn(live, k)}
+            buf={buf[k]}
+            onChange={onChange}
+            registry={registry}
+          />
+        ))}
+        <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+          {runtimeDirty.length > 0 && (
+            <button className="btn ghost sm" onClick={() => setBuf({})}>Reset</button>
+          )}
+          <button className="btn sm" disabled={!canSaveRuntime} onClick={doSaveRuntime}>
+            {update.isPending ? "Saving…" : "Save runtime"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // service-restart. Persisted via PUT /api/slots/{name}/config, mirroring how
 // ImageGenSection writes the [image] table. A read-only occupancy strip below
 // reflects the live AIE-column allocation (single-tenant: one FLM = 8 cols).
@@ -1370,77 +1509,6 @@ function NpuSection() {
       {occQuery.data && !occ?.present && (
         <div style={{marginTop: 12, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>
           No NPU detected on this host — occupancy unavailable.
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── DefaultSlotsSection ─────────────────────────────────────────────────────
-//
-// For each slot type with ≥2 slots, lets the operator pick which slot is the
-// default for type-routed requests. Setting a default:
-//   PUT /api/slots/{name}/config { default: true }  — on chosen slot
-//   PUT /api/slots/{name}/config { default: false } — on previously-default sibling
-// Both calls route through the existing useSlotEdit hook.
-// No backend schema change is needed — `default` is already an accepted field.
-// Relocated from the slot edit drawer (removed in earlier task).
-function DefaultSlotsSection() {
-  const slotsQuery = useSlots();
-  const editSlot = useSlotEdit();
-  const slots = slotsQuery.data || [];
-  const byType = {};
-  for (const s of slots) { (byType[s.type] ||= []).push(s); }
-  const types = Object.keys(byType).filter(t => byType[t].length >= 2).sort();
-
-  const setDefault = async (type, name) => {
-    const sibs = byType[type] || [];
-    const prev = sibs.find(s => s.isDefault && s.name !== name);
-    try {
-      await editSlot.mutateAsync({ name, body: { default: true } });
-      if (prev) await editSlot.mutateAsync({ name: prev.name, body: { default: false } });
-      window.__hal0Toast && window.__hal0Toast(`Default ${type} slot → ${name}`, "ok");
-    } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(`Couldn't set default — ${e?.message || "see logs"}`, "err");
-    }
-  };
-
-  return (
-    <div className="s-section">
-      <h2>Default slots</h2>
-      <p className="desc">
-        For each modality with more than one slot, choose which slot serves type-routed requests.
-      </p>
-      {slotsQuery.isPending && (
-        <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading slots…</div>
-      )}
-      {slotsQuery.isError && (
-        <div className="err">{slotsQuery.error?.message || "Failed to load slots"}</div>
-      )}
-      {!slotsQuery.isPending && !slotsQuery.isError && types.length === 0 && (
-        <p className="hint" style={{fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>No modality has multiple slots yet.</p>
-      )}
-      {types.length > 0 && (
-        <div className="s-panel">
-          {types.map(type => {
-            const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
-            return (
-              <div className="default-slot-row form-row s-row" key={type}>
-                <div className="k"><span>{type}</span></div>
-                <div className="v">
-                  <select
-                    className="input mono"
-                    value={cur}
-                    disabled={editSlot.isPending}
-                    onChange={e => { const n = e.target.value; if (n && n !== cur) setDefault(type, n); }}
-                    style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}
-                  >
-                    {byType[type].map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-                  </select>
-                </div>
-              </div>
-            );
-          })}
         </div>
       )}
     </div>
