@@ -38,18 +38,19 @@ import { useQueryClient } from '@tanstack/react-query'
 const { useState: useStateSet, useEffect: useEffectSet, useRef: useRefSet } = React;
 
 function SettingsView({ param }) {
-  const VALID_IDS = ["secrets", "storage", "updates", "voice", "imagegen", "npu", "defaults", "general", "advanced", "about"];
-  const initialSection = param && VALID_IDS.includes(param) ? param : "secrets";
+  const VALID_IDS = ["general", "slots", "npu", "memory", "voice", "imagegen", "storage", "secrets", "updates", "advanced", "about"];
+  const initialSection = param && VALID_IDS.includes(param) ? param : "general";
   const [section, setSection] = useStateSet(initialSection);
   const sections = [
-    { id: "secrets",   label: "Secrets" },
-    { id: "storage",   label: "Storage" },
-    { id: "updates",   label: "Updates" },
+    { id: "general",   label: "General" },
+    { id: "slots",     label: "Slots" },
+    { id: "npu",       label: "NPU" },
+    { id: "memory",    label: "Memory" },
     { id: "voice",     label: "Voice" },
     { id: "imagegen",  label: "Image-gen" },
-    { id: "npu",       label: "NPU" },
-    { id: "defaults",  label: "Default slots" },
-    { id: "general",   label: "General" },
+    { id: "storage",   label: "Storage" },
+    { id: "secrets",   label: "Secrets" },
+    { id: "updates",   label: "Updates" },
     { id: "advanced",  label: "Advanced" },
     { id: "about",     label: "About" },
   ];
@@ -76,14 +77,15 @@ function SettingsView({ param }) {
         </div>
 
         <div className="settings-content">
-          {section === "secrets" && <SecretsSection />}
-          {section === "storage" && <StorageSection />}
-          {section === "updates" && <UpdatesSection />}
+          {section === "general" && <GeneralSection />}
+          {section === "slots" && <SlotsSection />}
+          {section === "npu" && <NpuSection />}
+          {section === "memory" && <MemorySection />}
           {section === "voice" && <VoiceSection />}
           {section === "imagegen" && <ImageGenSection />}
-          {section === "npu" && <NpuSection />}
-          {section === "defaults" && <DefaultSlotsSection />}
-          {section === "general" && <GeneralSection />}
+          {section === "storage" && <StorageSection />}
+          {section === "secrets" && <SecretsSection />}
+          {section === "updates" && <UpdatesSection />}
           {section === "advanced" && <AdvancedSection />}
           {section === "about" && <AboutSection />}
         </div>
