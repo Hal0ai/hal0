@@ -1448,11 +1448,6 @@ function DefaultSlotsSection() {
 }
 
 function GeneralSection() {
-  // Wave 8: telemetry.enabled privacy toggle. hal0.toml [telemetry].enabled
-  // defaults to false (opt-in anonymous telemetry). Persisted via the generic
-  // PUT /api/settings {telemetry:{enabled}} — the backend deep-merges, so we
-  // only send the one bit. The apply-plan registry classes telemetry.enabled
-  // as "immediate" (re-read on each save, no restart), rendered by ApplyBadge.
   const settings = useSettings();
   const update = useSettingsUpdate();
   const applyPlanQuery = useApplyPlan();
@@ -1475,14 +1470,17 @@ function GeneralSection() {
     }
   };
 
+  const meta = settings.data?.meta || {};
+  const version = meta.hal0_version || "—";
+  const schemaVer = meta.schema_version != null ? String(meta.schema_version) : "—";
+
   return (
     <div className="s-section">
       <h2>General</h2>
-      <p className="desc">
-        Privacy and appearance. The dashboard is dark-only by design — theme / density / accent
-        customization is not available in this release.
-      </p>
+      <p className="desc">Platform identity and privacy.</p>
       <div className="s-panel">
+        <SRow k="hal0 version" sub="Running API version" mono v={<span style={{color: "var(--fg-2)"}}>{version}</span>} />
+        <SRow k="Schema version" sub="hal0.toml schema version" mono v={<span style={{color: "var(--fg-3)"}}>{schemaVer}</span>} />
         <SRow
           k="Anonymous telemetry"
           sub="Opt-in · off by default. Sends anonymized, aggregate usage counts to help prioritize work — no prompts, model I/O, or file paths leave the machine."
@@ -1509,7 +1507,6 @@ function GeneralSection() {
             </div>
           }
         />
-        <SRow k="Theme" v={<span className="chip mono" style={{color: "var(--fg-4)"}}>dark · locked</span>} />
       </div>
     </div>
   );
