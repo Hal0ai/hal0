@@ -1028,6 +1028,92 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
+      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only. */}
+      {slot.device === "npu" && (() => {
+        const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
+          setNpuPending(true);
+          setNpuErr(null);
+          setSubmitErr(null);
+          try {
+            await editMut.mutateAsync({ name: slot.name, body: { npu: { asr: nextAsr, embed: nextEmbed } } });
+            restartMut.mutate(slot.name, {
+              onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
+            });
+            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
+          } catch (err) {
+            setNpuAsr(prevAsr);
+            setNpuEmbed(prevEmbed);
+            setNpuErr(err?.message || "NPU toggle failed");
+          } finally {
+            setNpuPending(false);
+          }
+        };
+        return (
+          <>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · ASR</span>
+                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                    on={npuAsr}
+                    disabled={npuPending || saving}
+                    label="NPU ASR"
+                    stateText={npuAsr ? "On" : "Off"}
+                    onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
+                  />
+                  {flmModels.length > 0 && (
+                    <select
+                      className="input mono"
+                      style={{width: 160}}
+                      value={npuAsrModel}
+                    onChange={e => setNpuAsrModel(e.target.value)}
+                    disabled={npuPending || saving}
+                  >
+                    {flmModels.filter(m => m.model?.toLowerCase().includes('whisper')).map(m => (
+                      <option key={m.model} value={m.model}>{m.model}</option>
+                    ))}
+                  </select>
+                )}
+                </span>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · Embed</span>
+                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                  on={npuEmbed}
+                  disabled={npuPending || saving}
+                  label="NPU Embed"
+                  stateText={npuEmbed ? "On" : "Off"}
+                  onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
+                />
+                  {flmModels.length > 0 && (
+                    <select
+                      className="input mono"
+                      style={{width: 160}}
+                      value={npuEmbedModel}
+                    onChange={e => setNpuEmbedModel(e.target.value)}
+                    disabled={npuPending || saving}
+                  >
+                    {flmModels.filter(m => m.model?.toLowerCase().includes('embed')).map(m => (
+                      <option key={m.model} value={m.model}>{m.model}</option>
+                    ))}
+                  </select>
+                )}
+                </span>
+              </div>
+            </div>
+            {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
+          </>
+        );
+      })()}
       </FieldGroup>
 
       <FieldGroup label="Inference" hint="behavior">
@@ -1176,92 +1262,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
               )}
             </div>
           </div>
-        );
-      })()}
-      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only. */}
-      {slot.device === "npu" && (() => {
-        const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
-          setNpuPending(true);
-          setNpuErr(null);
-          setSubmitErr(null);
-          try {
-            await editMut.mutateAsync({ name: slot.name, body: { npu: { asr: nextAsr, embed: nextEmbed } } });
-            restartMut.mutate(slot.name, {
-              onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
-            });
-            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
-          } catch (err) {
-            setNpuAsr(prevAsr);
-            setNpuEmbed(prevEmbed);
-            setNpuErr(err?.message || "NPU toggle failed");
-          } finally {
-            setNpuPending(false);
-          }
-        };
-        return (
-          <>
-            <div className="form-row">
-              <div className="form-lbl">
-                <span>NPU · ASR</span>
-                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
-              </div>
-              <div className="form-ctl">
-                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
-                  <PillToggle
-                    on={npuAsr}
-                    disabled={npuPending || saving}
-                    label="NPU ASR"
-                    stateText={npuAsr ? "On" : "Off"}
-                    onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
-                  />
-                  {flmModels.length > 0 && (
-                    <select
-                      className="input mono"
-                      style={{width: 160}}
-                      value={npuAsrModel}
-                    onChange={e => setNpuAsrModel(e.target.value)}
-                    disabled={npuPending || saving}
-                  >
-                    {flmModels.filter(m => m.model?.toLowerCase().includes('whisper')).map(m => (
-                      <option key={m.model} value={m.model}>{m.model}</option>
-                    ))}
-                  </select>
-                )}
-                </span>
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-lbl">
-                <span>NPU · Embed</span>
-                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
-              </div>
-              <div className="form-ctl">
-                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
-                  <PillToggle
-                  on={npuEmbed}
-                  disabled={npuPending || saving}
-                  label="NPU Embed"
-                  stateText={npuEmbed ? "On" : "Off"}
-                  onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
-                />
-                  {flmModels.length > 0 && (
-                    <select
-                      className="input mono"
-                      style={{width: 160}}
-                      value={npuEmbedModel}
-                    onChange={e => setNpuEmbedModel(e.target.value)}
-                    disabled={npuPending || saving}
-                  >
-                    {flmModels.filter(m => m.model?.toLowerCase().includes('embed')).map(m => (
-                      <option key={m.model} value={m.model}>{m.model}</option>
-                    ))}
-                  </select>
-                )}
-                </span>
-              </div>
-            </div>
-            {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
-          </>
         );
       })()}
       {/* #901: Vision pill — gated to slots whose bound model carries an mmproj
