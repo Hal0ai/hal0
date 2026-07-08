@@ -1440,12 +1440,12 @@ __all__ = [
     "_sanitise_id",
     "get_job",
     "hf_download_url",
+    "list_persisted_jobs",
     "make_job",
     "persist_pull_job",
     "pull_job_file",
     "run_flm_pull",
     "run_pull",
-    "list_persisted_jobs",
     "sweep_orphaned_partials",
     "sweep_pull_jobs",
 ]
