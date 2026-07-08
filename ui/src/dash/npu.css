@@ -586,3 +586,8 @@
     flex-basis: 100%;
   }
 }
+
+.npu-card-toggle.pill.on {
+  box-shadow: 0 0 8px var(--dev-npu), 0 0 16px var(--dev-npu);
+  transition: box-shadow 0.3s ease;
+}

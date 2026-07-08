@@ -26,6 +26,7 @@ import { slotIndicatorFromPhase } from './slot-status.js'
 // the local copy (which also mis-classified backend tokens like "flm" —
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
+import { PillToggle } from './primitives.jsx'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -306,26 +307,22 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
             <span style={{color: 'var(--fg-2)'}}>
               {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
             </span>
-            <span style={{
-              background: (slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? 'var(--dev-npu)' : 'transparent',
-              border: '1px solid var(--dev-npu)', borderRadius: 10,
-              padding: '1px 10px', cursor: 'pointer',
-              color: (slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? '#fff' : 'var(--dev-npu)',
-            }} onClick={(e) => { e.stopPropagation(); handlers.onToggleShadow(slot); }}>
-              {(slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? 'ON' : 'OFF'}
-            </span>
+            <PillToggle
+              on={slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false}
+              label={slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+              className="npu-card-toggle"
+              onToggle={() => handlers.onEdit(slot)}
+            />
           </span>
         ) : (
           <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
             <span style={{color: 'var(--fg-2)'}}>Chat</span>
-            <span style={{
-              background: mainFlmNpu?.chat !== false ? 'var(--dev-npu)' : 'transparent',
-              border: '1px solid var(--dev-npu)', borderRadius: 10,
-              padding: '1px 10px', cursor: 'pointer',
-              color: mainFlmNpu?.chat !== false ? '#fff' : 'var(--dev-npu)',
-            }} onClick={(e) => { e.stopPropagation(); handlers.onToggleShadow(slot); }}>
-              {mainFlmNpu?.chat !== false ? 'ON' : 'OFF'}
-            </span>
+            <PillToggle
+              on={mainFlmNpu?.chat !== false}
+              label="Chat"
+              className="npu-card-toggle"
+              onToggle={() => handlers.onEdit(slot)}
+            />
           </span>
         )}
       </div>
