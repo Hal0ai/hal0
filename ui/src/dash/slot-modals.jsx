@@ -1259,17 +1259,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
                 <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
-                <PillToggle
-                  on={npuAsr}
-                  disabled={npuPending || saving}
-                  label="NPU ASR"
-                  stateText={npuAsr ? "On" : "Off"}
-                  onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
-                />
-                {flmModels.length > 0 && (
-                  <select
-                    className="input mono"
-                    value={npuAsrModel}
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                    on={npuAsr}
+                    disabled={npuPending || saving}
+                    label="NPU ASR"
+                    stateText={npuAsr ? "On" : "Off"}
+                    onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
+                  />
+                  {flmModels.length > 0 && (
+                    <select
+                      className="input mono"
+                      style={{width: 160}}
+                      value={npuAsrModel}
                     onChange={e => setNpuAsrModel(e.target.value)}
                     disabled={npuPending || saving}
                   >
@@ -1278,6 +1280,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     ))}
                   </select>
                 )}
+                </span>
               </div>
             </div>
             <div className="form-row">
@@ -1286,17 +1289,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
                 <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
-                <PillToggle
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
                   on={npuEmbed}
                   disabled={npuPending || saving}
                   label="NPU Embed"
                   stateText={npuEmbed ? "On" : "Off"}
                   onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
                 />
-                {flmModels.length > 0 && (
-                  <select
-                    className="input mono"
-                    value={npuEmbedModel}
+                  {flmModels.length > 0 && (
+                    <select
+                      className="input mono"
+                      style={{width: 160}}
+                      value={npuEmbedModel}
                     onChange={e => setNpuEmbedModel(e.target.value)}
                     disabled={npuPending || saving}
                   >
@@ -1305,6 +1310,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     ))}
                   </select>
                 )}
+                </span>
               </div>
             </div>
             {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
