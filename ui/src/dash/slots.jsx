@@ -344,7 +344,11 @@ function SlotCard({
       {slot.served_by === 'npu' && (
         <div className="cslot-row" style={{margin: '4px 0 0 0'}}>
           <span className="cslot-strip">
-            <TileStrip owners={{npu: 8}} ownerName="npu" act={1} />
+            <TileStrip
+              owners={Array(8).fill({ name: 'npu', serving: true, hue: HUES[0].hue, glow: HUES[0].glow })}
+              ownerName="npu"
+              act={1}
+            />
           </span>
         </div>
       )}
@@ -443,7 +447,13 @@ function SlotListRow({ slot, onEdit }) {
       {slot.served_by === 'npu' && (
         <div className="cslot-row" style={{margin: '2px 0 0 6px'}}>
           <span className="cslot-strip">
-            <TileStrip owners={{npu: 8}} ownerName="npu" act={1} w={6} h={6} />
+            <TileStrip
+              owners={Array(8).fill({ name: 'npu', serving: true, hue: HUES[0].hue, glow: HUES[0].glow })}
+              ownerName="npu"
+              act={1}
+              w={6}
+              h={6}
+            />
           </span>
         </div>
       )}

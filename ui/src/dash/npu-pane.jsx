@@ -63,7 +63,7 @@ const isNpuSlot = (s) => s.device_class === 'npu' || devKind(s.device) === 'npu'
 // owner. Three cohesive accents (deep-indigo → teal → sage); single-tenant NPU
 // usually shows just the first. The hue fills the slot's claimed columns in the
 // grid AND its mini column strip; glow/line drive the active-tile halo.
-const HUES = [
+export const HUES = [
   { hue: 'var(--npu-s0)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
   { hue: 'var(--npu-s1)', glow: 'var(--npu-s1-glow)', line: 'var(--npu-s1-line)', dim: 'var(--npu-s1-dim)', fg: 'var(--npu-s1-fg)' },
   { hue: 'var(--npu-s2)', glow: 'var(--npu-s2-glow)', line: 'var(--npu-s2-line)', dim: 'var(--npu-s2-dim)', fg: 'var(--npu-s2-fg)' },
