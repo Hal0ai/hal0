@@ -431,7 +431,7 @@ class SlotManager:
 
         upstream = Upstream(
             name=slot_name,
-            kind="remote",
+            kind="slot",
             url=f"http://127.0.0.1:{port}/v1",
             auth_style="none",
             warmup_strategy="none",
