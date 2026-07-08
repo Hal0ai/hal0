@@ -126,8 +126,8 @@ NPU_SEEDED_SLOTS: tuple[str, ...] = ("stt-npu", "embed-npu")
 SLOT_ALIASES: dict[str, str] = {
     "agent-hermes": "agent",
     # Route curated NPU model IDs to the FLM trio slot.
+    "qwen3:4b": "npu",
     "qwen3-4b": "npu",
-    "qwen3-4b-FLM": "npu",
 }
 
 #: Slot ``type`` vocabulary (plan §4.1) — sourced from the canonical
