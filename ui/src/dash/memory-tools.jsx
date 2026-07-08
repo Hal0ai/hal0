@@ -564,13 +564,13 @@ function MemToolsPanel({ bank: bankProp, embedded } = {}) {
         <div className="mt-col">
           <MemReflectPlayground bank={bank} />
           <MemRecallConsole bank={bank} />
-          <MemDocuments bank={bank} />
         </div>
         <div className="mt-col">
-          <MemMentalModels bank={bank} />
           <MemDirectives bank={bank} />
+          <MemMentalModels bank={bank} />
         </div>
       </div>
+      <MemDocuments bank={bank} />
     </div>
   );
 }
