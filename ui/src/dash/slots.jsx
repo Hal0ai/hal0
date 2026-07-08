@@ -991,9 +991,6 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
                   device_class "npu" (serializer-emitted), legacy device === "npu"
                   kept as a fallback by dc(). */}
               {cardSlots.some(s => dc(s) === "npu") && <NpuOccupancyCard slots={cardSlots} />}
-              {/* NPU shadow capability cards — rendered inline after the NPU pane */}
-              {groups.npuStt.map(s => <SlotListRow key={s.name} slot={s} />)}
-              {groups.npuEmb.map(s => <SlotListRow key={s.name} slot={s} />)}
             </>
           )}
         </div>
