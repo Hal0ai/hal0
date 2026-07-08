@@ -1951,7 +1951,7 @@ class DispatcherConfig(BaseModel):
         description=(
             "Non-streaming upstream read timeout in seconds. "
             "Large consolidation/extraction prompts can exceed 60s on slow slots. "
-            "Streaming paths are unaffected. Range 30–600."
+            "Streaming paths are unaffected. Range 30-600."
         ),
     )
     prefetch_parallel_cap: int = Field(
