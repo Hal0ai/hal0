@@ -339,7 +339,7 @@ function SlotCard({
           return <span className="chip" style={{color: chipColor}}>{ind.label}</span>;
         })()}
       </div>
-      {/* NPU column squares — match left border color */}
+      {/* NPU column squares — animate when slot is actively serving */}
       {slot.served_by === 'flm' && (
         <div style={{display: 'flex', gap: 3, marginTop: 4, marginBottom: 4}}>
           {[...Array(8)].map((_, i) => (
@@ -468,7 +468,7 @@ function SlotListRow({ slot, onEdit }) {
               width: 6, height: 6, borderRadius: 1.5,
               background: npuAccent,
               boxShadow: flash ? `0 0 10px ${npuAccent}` : `0 0 4px ${npuAccent}`,
-              opacity: flash ? 1 : 0.55,
+              opacity: flash ? 1 : 0.85,
               transition: 'all 0.25s ease',
             }} />
           ))}
