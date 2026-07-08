@@ -482,6 +482,26 @@ def sweep_pull_jobs(max_age_days: int = 14) -> int:
     return removed
 
 
+def list_persisted_jobs() -> list[dict[str, Any]]:
+    """Read all ``.json`` files from the pull-jobs directory and return a list of dicts.
+
+    Best-effort: malformed or unreadable files are silently skipped.
+    An absent jobs directory returns an empty list.
+    """
+    jobs_dir = _pull_jobs_dir()
+    if not jobs_dir.is_dir():
+        return []
+    results: list[dict[str, Any]] = []
+    for path in sorted(jobs_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                results.append(data)
+        except (OSError, ValueError):
+            continue
+    return results
+
+
 # ── resume / partial-download support (MR-7) ──────────────────────────────────
 #
 # A prior interrupted pull leaves a deterministic ``<id>.part`` in the staging
@@ -1425,6 +1445,7 @@ __all__ = [
     "pull_job_file",
     "run_flm_pull",
     "run_pull",
+    "list_persisted_jobs",
     "sweep_orphaned_partials",
     "sweep_pull_jobs",
 ]

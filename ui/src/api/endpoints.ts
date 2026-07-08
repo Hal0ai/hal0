@@ -56,6 +56,8 @@ export const ENDPOINTS = {
   modelPullStatus: (id: string) => `/api/models/${encodeURIComponent(id)}/pull/status`,
   modelPullStream: (id: string) => `/api/models/${encodeURIComponent(id)}/pull/stream`,
   modelPullCancel: (id: string) => `/api/models/${encodeURIComponent(id)}/pull/cancel`,
+  modelPulls: '/api/models/pulls',
+  modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
