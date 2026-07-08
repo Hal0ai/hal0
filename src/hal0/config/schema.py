@@ -1943,6 +1943,17 @@ class DispatcherConfig(BaseModel):
         gt=0.0,
         description="Cold-cache prefetch timeout (PLAN.md §5 Tier 2).",
     )
+
+    direct_read_timeout_s: float = Field(
+        default=300.0,
+        ge=30.0,
+        le=600.0,
+        description=(
+            "Non-streaming upstream read timeout in seconds. "
+            "Large consolidation/extraction prompts can exceed 60s on slow slots. "
+            "Streaming paths are unaffected. Range 30–600."
+        ),
+    )
     prefetch_parallel_cap: int = Field(
         default=4,
         ge=1,
