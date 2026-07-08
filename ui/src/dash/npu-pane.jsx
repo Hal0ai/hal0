@@ -18,6 +18,7 @@
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit } from '@/api/hooks/useSlots'
+import { SlotControls, slotCtrlPhase } from './inference-pane.jsx'
 import { slotIndicatorFromPhase } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the local copy (which also mis-classified backend tokens like "flm" —
@@ -296,6 +297,13 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
           </span>
         </span>
       </div>
+      {slot.name === 'flm' && (
+        <div className="cslot-row">
+          <span className="cslot-strip">
+            <TileStrip owners={owners} ownerName={slot.name} act={act} />
+          </span>
+        </div>
+      )}
       <div className="cslot-foot">
         <span className="grow" />
         {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
@@ -423,19 +431,44 @@ export function NpuOccupancyCard({ slots }) {
           <button className="btn ghost sm" title="Edit FLM slot" onClick={() => window.location.hash = '#slots/flm'} style={{fontSize: 13}}>✎ Edit</button>
         </div>
         <div className="wcard-b">
-          <div className="combo-slots">
-            {npuSlots.map((s, idx) => (
-              <ComboSlot
-                key={s.name}
-                slot={s}
-                occ={occByName[s.name]}
-                owners={owners}
-                hue={HUES[idx % HUES.length]}
-                handlers={handlers}
-                act={act}
-                mainFlmNpu={mainFlmNpu}
-              />
-            ))}
+          <div className="combo">
+            <div className="combo-gauge">
+              <Gauge pct={dutyPct} label="npu duty" sub={dutySub} />
+              <div className="combo-metrics">
+                <div className="aie-stat">
+                  <div className="sv">
+                    {colsUsed}
+                    <span className="u">/{colsTotal}</span>
+                  </div>
+                  <div className="sl">columns</div>
+                </div>
+                <div className="aie-stat">
+                  <div className="sv acc">
+                    {tpsSum > 0 ? Math.round(tpsSum) : '—'}
+                    <span className="u">tok/s</span>
+                  </div>
+                  <div className="sl">throughput</div>
+                </div>
+              </div>
+            </div>
+            <div className="combo-grid">
+              <AieGrid owners={owners} available={colsAvailable} act={act} size={30} cgap={6} rgap={5} />
+              <div className="aie-foot">allocated columns — not per-tile utilisation</div>
+            </div>
+            <div className="combo-slots">
+              {npuSlots.map((s, idx) => (
+                <ComboSlot
+                  key={s.name}
+                  slot={s}
+                  occ={occByName[s.name]}
+                  owners={owners}
+                  hue={HUES[idx % HUES.length]}
+                  handlers={handlers}
+                  act={act}
+                  mainFlmNpu={mainFlmNpu}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </div>
