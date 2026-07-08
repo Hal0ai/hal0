@@ -268,7 +268,7 @@ export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
 }
 
 // ═══ per-slot card (right rail) ════════════════════════════════════════
-function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
+function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
   const ind = slotIndicatorFromPhase(slot)
   const serving = ind.cls === 'serving'
   const m = slot.metrics || {}
@@ -312,12 +312,12 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
               {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
             </span>
             <span style={{
-              background: slot.enabled !== false ? 'var(--dev-npu)' : 'transparent',
+              background: (slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? 'var(--dev-npu)' : 'transparent',
               border: '1px solid var(--dev-npu)', borderRadius: 10,
               padding: '1px 10px', cursor: 'pointer',
-              color: slot.enabled !== false ? '#fff' : 'var(--dev-npu)',
+              color: (slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? '#fff' : 'var(--dev-npu)',
             }} onClick={(e) => { e.stopPropagation(); handlers.onToggleShadow(slot); }}>
-              {slot.enabled !== false ? 'ON' : 'OFF'}
+              {(slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false) ? 'ON' : 'OFF'}
             </span>
           </span>
         ) : (
@@ -343,6 +343,8 @@ export function NpuOccupancyCard({ slots }) {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const editMut = useSlotEdit()
+  const flmSlot = npuSlots.find(s => s.name === 'flm')
+  const mainFlmNpu = flmSlot?.npu || {}
 
   const npuSlots = (slots || []).filter(isNpuSlot)
   if (npuSlots.length === 0) return null
@@ -401,10 +403,14 @@ export function NpuOccupancyCard({ slots }) {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
     onToggleShadow: (s) => {
-      const next = s.enabled === false
+      // Toggle NPU flags on the main flm slot, not the shadow slot
+      const flmSlot = npuSlots.find(sl => sl.name === 'flm')
+      if (!flmSlot) return
+      const field = s.name === 'flm-stt' ? 'asr' : 'embed'
+      const cur = flmSlot.npu?.[field] !== false
       editMut.mutate(
-        { name: s.name, body: { enabled: next } },
-        { onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${s.name}: ${next ? 'ON' : 'OFF'}`, 'info') }
+        { name: 'flm', body: { npu: { ...flmSlot.npu, [field]: !cur } } },
+        { onSuccess: () => window.__hal0Toast && window.__hal0Toast(`flm-stt: ${!cur ? 'ON' : 'OFF'}`, 'info') }
       )
     },
   }
@@ -475,6 +481,7 @@ export function NpuOccupancyCard({ slots }) {
                   hue={HUES[idx % HUES.length]}
                   handlers={handlers}
                   act={act}
+                  mainFlmNpu={mainFlmNpu}
                 />
               ))}
               {/* third owner hue stays reserved — the dashed free card
