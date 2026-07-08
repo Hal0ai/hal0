@@ -280,8 +280,8 @@
 .mt-bankbar .input { padding: 6px 9px; }
 .mt-hint { color: var(--fg-5); margin-left: 6px; }
 .mt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-/* Two independent stacks: left = reflect · recall · documents, right =
-   mental models · directives. Flex columns (not grid auto-flow) so each side
+/* Two independent stacks: left = reflect · recall, right =
+   directives · mental models. Flex columns (not grid auto-flow) so each side
    stacks on its own regardless of the other's height. */
 .mt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .mt-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
