@@ -410,14 +410,8 @@ export function NpuOccupancyCard({ slots }) {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
     onToggleShadow: (s) => {
-      // Toggle NPU flags on the main flm slot
-      const field = s.name === 'flm-stt' ? 'asr' : s.name === 'flm-embed' ? 'embed' : 'chat'
-      const cur = flmSlot?.npu?.[field] !== false
-      const next = { ...flmSlot?.npu, [field]: !cur }
-      editMut.mutate(
-        { name: 'flm', body: { npu: next } },
-        { onSuccess: () => window.__hal0Toast && window.__hal0Toast(`flm ${field}: ${!cur ? 'ON' : 'OFF'}. Restart to apply.`, 'info') }
-      )
+      // Open the FLM edit drawer — capability toggles are configured there
+      window.location.hash = '#slots/flm'
     },
   }
 
