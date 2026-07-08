@@ -36,9 +36,10 @@ async function openApprovals(page: any) {
 
 test.describe('AddSecretModal — real save', () => {
   test('Add secret button is enabled when a valid token is entered', async ({ page }) => {
-    // Navigate to settings (secrets section is default)
+    // Navigate to settings — #1163 defaults to General, click Secrets first
     await page.goto('/#settings')
     await expect(page.locator('h1, .vh h1')).toContainText('Settings', { timeout: FIVE_S })
+    await page.locator('.settings-nav .nav-item', { hasText: 'Secrets' }).click()
 
     // Open the Add Secret modal via the footer Add secret button
     // (button contains an SVG icon + text " Add secret")
@@ -76,19 +77,21 @@ test.describe('Settings header stubs removed', () => {
   })
 })
 
-test.describe('GeneralSection — Theme controls', () => {
-  test('Only read-only "dark · locked" chip; no Density or Accent controls', async ({ page }) => {
+test.describe('GeneralSection — content', () => {
+  test('Shows hal0 version, schema version, and telemetry toggle; no Density or Accent controls', async ({ page }) => {
     await page.goto('/#settings')
-    // Click General nav item
-    await page.locator('.nav-item', { hasText: 'General' }).click()
-    await expect(page.locator('body')).toContainText('dark · locked', { timeout: FIVE_S })
+    // #1163: General is now the default section — already visible, no click needed
+    await expect(page.locator('body')).toContainText('hal0 version', { timeout: FIVE_S })
+    await expect(page.locator('body')).toContainText('Schema version', { timeout: FIVE_S })
+    await expect(page.locator('body')).toContainText('Anonymous telemetry', { timeout: FIVE_S })
 
     // Density and Accent editable controls must be absent
     await expect(page.locator('body')).not.toContainText('Density')
     await expect(page.locator('body')).not.toContainText('Accent color')
 
-    // The explanation text confirms this is intentional
-    await expect(page.locator('body')).toContainText('dark-only by design')
+    // Old dark/locked chip removed in settings reorg
+    await expect(page.locator('body')).not.toContainText('dark · locked')
+    await expect(page.locator('body')).not.toContainText('dark-only by design')
   })
 })
 
@@ -116,6 +119,8 @@ test.describe('SecretsSection — forced-mock secrets render', () => {
     // forced-mock always returns 3 rows; the old fallbackRows behaviour
     // was identical. Confirm the live-query path renders rows correctly.
     await page.goto('/#settings')
+    // #1163: default section is General — click Secrets nav to see HF_TOKEN
+    await page.locator('.settings-nav .nav-item', { hasText: 'Secrets' }).click()
     await expect(page.locator('body')).toContainText('HF_TOKEN', { timeout: FIVE_S })
     // Empty state must be absent when rows exist
     await expect(page.locator('body')).not.toContainText('no secrets configured')
