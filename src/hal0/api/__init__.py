@@ -782,6 +782,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         upstream_registry=upstreams,
         model_registry=model_registry,
         prefetch_timeout_s=hal0_cfg.dispatcher.prefetch_timeout_s,
+        direct_read_timeout_s=hal0_cfg.dispatcher.direct_read_timeout_s,
         prefetch_parallel_cap=hal0_cfg.dispatcher.prefetch_parallel_cap,
         cached_models=lambda name: model_cache.get(name, []),
         fetch_models=_fetch_and_cache,
