@@ -243,7 +243,7 @@ function AieGrid({ owners, available, act = 0, size = 30, cgap = 6, rgap = 5, sh
 }
 
 // mini single-row strip of the 8 columns, filtered to one owner (slot rail)
-function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
+export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
   const cols = Array.from({ length: NPU_COLS }, (_, c) => c)
   return (
     <div className="tstrip" style={{ '--ts-w': w + 'px', '--ts-h': h + 'px' }}>

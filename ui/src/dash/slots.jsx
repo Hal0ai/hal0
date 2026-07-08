@@ -18,6 +18,7 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { ActivityLog } from './activity-log.jsx'
+import { TileStrip, HUES } from './npu-pane.jsx'
 import { ComfyuiPane } from './comfyui-pane.jsx'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
@@ -339,6 +340,14 @@ function SlotCard({
           return <span className="chip" style={{color: chipColor}}>{ind.label}</span>;
         })()}
       </div>
+      {/* NPU column squares for STT served by NPU slot */}
+      {slot.served_by === 'npu' && (
+        <div className="cslot-row" style={{margin: '4px 0 0 0'}}>
+          <span className="cslot-strip">
+            <TileStrip owners={{npu: 8}} ownerName="npu" act={slot.container_status === 'running' ? 1 : 0} />
+          </span>
+        </div>
+      )}
       {metricsRow.length > 0 && (
         <div className="slot-metrics">
           {metricsRow.map((m, i) => (
