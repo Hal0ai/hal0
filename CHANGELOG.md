@@ -21,6 +21,20 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-07-08
+
+### Added
+- **Downloads pane** in footer with pull job tracking (#1165).
+- **Settings page reorganisation** with improved layout and navigation (#1163).
+- **Configurable `direct_read_timeout`** via `[dispatcher]` TOML section (#1160).
+
+### Fixed
+- **NPU double-free**: stop FLM health poll from double-freeing the NPU slot (#1077).
+- **Vision models**: add missing `mmproj_file` to curated vision model entries (#1162).
+- **Memory tools UI**: make documents card full-width (#1166).
+- **CI repair**: fix test failures post-settings-reorg (#1163).
+- **Lint**: ruff formatting and `__all__` ordering across several files.
+
 ## [0.9.3] — 2026-07-06
 
 **The Guided Setup.** hal0 setup grows a review-gated TUI, headless answer
