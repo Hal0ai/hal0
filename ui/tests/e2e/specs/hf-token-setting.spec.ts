@@ -20,6 +20,9 @@ test.describe('Settings — HuggingFace token', () => {
 
     await page.goto('/#settings', { waitUntil: 'domcontentloaded' })
 
+    // #1163: default section is General — click Secrets nav to show the HF token field
+    await page.locator('.settings-nav .nav-item', { hasText: 'Secrets' }).click()
+
     const field = page.getByLabel('HuggingFace token')
     await expect(field).toBeVisible()
 
