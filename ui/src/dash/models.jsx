@@ -7,7 +7,9 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullJob, useHfSearch, fmtBytes } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { apiPost } from '@/api/client'
+import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
@@ -73,8 +75,7 @@ function ModelsView() {
   const [searchOpen, setSearchOpen] = useStateM(false);
   const [searchQ, setSearchQ] = useStateM("");
   const [searchPick, setSearchPick] = useStateM("");
-  // Downloads
-  const [activePulls, setActivePulls] = useStateM([]);
+
 
   const modelsQuery = useModels();
   const modelList = modelsQuery.data ?? [];
@@ -175,17 +176,7 @@ function ModelsView() {
     for (const m of slicedUserNs) sectionedInference.push({ type: "row", model: m });
   }
 
-  // ── Pull listener ───────────────────────────────────────────────────
-  useEffectM(() => {
-    const handler = (e) => {
-      const id = e?.detail?.modelId;
-      if (id) setActivePulls(prev => prev.includes(id) ? prev : [...prev, id]);
-    };
-    window.addEventListener("hal0:pull-started", handler);
-    return () => window.removeEventListener("hal0:pull-started", handler);
-  }, []);
-
-  const removeActive = (id) => setActivePulls(prev => prev.filter(x => x !== id));
+  const pullsList = usePullsList();
 
   // ── Render ──────────────────────────────────────────────────────────
   const tabLabel = tab === "inference" ? `Inference Models${inferenceRows.length ? ` · ${inferenceRows.length}` : ""}`
@@ -359,9 +350,8 @@ function ModelsView() {
             model={selected}
             onDelete={() => setDelModel(selected)}
             onEdit={() => setRecipeOpen(true)}
-            onPullStarted={(id) => setActivePulls(prev => prev.includes(id) ? prev : [...prev, id])}
           />
-          <DownloadsPane activeIds={activePulls} onRemove={removeActive} />
+          <DownloadsPane />
         </div>
       </div>
 
@@ -649,22 +639,97 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
 }
 
 // ── DownloadsPane ─────────────────────────────────────────────────────
-function DownloadsPane({ activeIds, onRemove }) {
+function DownloadsPane() {
+  const { jobs } = usePullsList();
+  const clearJob = useClearPullJob();
   return (
     <div className="mdl-dl">
       <div className="mdl-dl-h">
         <span>Downloads</span>
-        <span className="ct mono">{activeIds.length}</span>
+        <span className="ct mono">{jobs.length}</span>
       </div>
-      {activeIds.length === 0 ? (
+      {jobs.length === 0 ? (
         <div style={{padding: "32px 16px", textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>
           <div style={{marginBottom: 6}}>No active downloads.</div>
           <div style={{fontSize: 11, color: "var(--fg-5)"}}>Add a model from the catalog or via "Add by HF coords".</div>
         </div>
       ) : (
-        activeIds.slice(0, 8).map(id => (
-          <DownloadRow key={id} modelId={id} onRemove={onRemove} />
-        ))
+        jobs.map((j) => {
+          const pct = j.bytes_total ? Math.round((j.bytes_downloaded / (j.bytes_total || 1)) * 100) : 0;
+          const isRunning = j.state === 'running';
+          const isQueued = j.state === 'queued';
+          const isCompleted = j.state === 'completed';
+          const isFailed = j.state === 'failed';
+          const isCancelled = j.state === 'cancelled';
+          const [cancelling, setCancelling] = useStateM(false);
+          const doCancel = async () => {
+            setCancelling(true);
+            try {
+              await apiPost(ENDPOINTS.modelPullCancel(j.model_id));
+            } catch (e) {
+              window.__hal0Toast && window.__hal0Toast(
+                `Cancel failed — ${e?.message || "see logs"}`, "err",
+              );
+            } finally {
+              setCancelling(false);
+            }
+          };
+          return (
+            <div key={j.job_id || j.model_id} style={{padding: "12px 16px", borderBottom: "1px solid var(--line-soft)"}}>
+              <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 11.5, marginBottom: 6, alignItems: "center", gap: 8}}>
+                <span style={{
+                  color: isCompleted ? "var(--ok)" : isCancelled ? "var(--fg-4)" : isFailed ? "var(--err)" : "var(--fg)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
+                }}>
+                  {j.hf_repo || j.model_id}
+                  {j.dest_path && <span style={{color: "var(--fg-4)", marginLeft: 6, fontSize: 10}}>→ {j.dest_path}</span>}
+                </span>
+                <span style={{color: isCompleted ? "var(--ok)" : isFailed ? "var(--err)" : "var(--fg-3)", fontSize: 11}}>
+                  {isRunning && `${pct}%`}
+                  {isQueued && "queued"}
+                  {isCompleted && "✓ done"}
+                  {isFailed && "failed"}
+                  {isCancelled && "cancelled"}
+                </span>
+              </div>
+              {!isCompleted && !isFailed && !isCancelled && (
+                <div className="dl-bar" style={{height: 4, marginBottom: 4}}>
+                  <i style={{width: `${pct}%`, background: "var(--accent)"}} />
+                </div>
+              )}
+              {isRunning && (
+                <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", marginBottom: 4}}>
+                  <span>{fmtBytes(j.bytes_downloaded)} / {fmtBytes(j.bytes_total)}</span>
+                  <span>{fmtSpeed(j.speed_bps)} · {fmtEta(j.eta_s)}</span>
+                </div>
+              )}
+              {isFailed && j.error && (
+                <div style={{marginBottom: 6, padding: "6px 10px", background: "var(--err-soft)", border: "1px solid var(--err-line)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--err)"}}>
+                  {j.error.message || "Download failed"}
+                </div>
+              )}
+              <div style={{display: "flex", gap: 4}}>
+                {(isRunning || isQueued) && (
+                  <button className="btn ghost sm" onClick={doCancel} disabled={cancelling}>
+                    {cancelling ? "Cancelling…" : "Cancel"}
+                  </button>
+                )}
+                {isFailed && (
+                  <>
+                    <button className="btn ghost sm" onClick={() => apiPost(ENDPOINTS.modelPull(j.model_id))}>↻ Retry</button>
+                    <button className="btn ghost sm" onClick={() => clearJob.mutate(j.model_id)}>Clear</button>
+                  </>
+                )}
+                {isCompleted && (
+                  <button className="btn ghost sm" onClick={() => clearJob.mutate(j.model_id)}>Dismiss</button>
+                )}
+                {isCancelled && (
+                  <button className="btn ghost sm" onClick={() => clearJob.mutate(j.model_id)}>Clear</button>
+                )}
+              </div>
+            </div>
+          );
+        })
       )}
     </div>
   );
