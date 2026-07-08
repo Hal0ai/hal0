@@ -296,6 +296,10 @@ class FLMProvider(Provider):
 
         Used by tests and the fallback systemd-without-Docker path. The
         primary deployment path is ``container_spec``.
+
+        Reads per-capability model preferences from shadow TOMLs
+        (flm-stt.toml, flm-embed.toml) so the operator can change
+        STT/embed models without editing the flm slot config.
         """
         binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
         argv = [
@@ -310,9 +314,15 @@ class FLMProvider(Provider):
             env["HAL0_FLM_CTX"],
         ]
         if env.get("HAL0_FLM_LOAD_EMBED") == "1":
+            embed_model = _read_shadow_model("flm-embed")
             argv += ["--embed", "1"]
+            if embed_model and embed_model != "embed-gemma:300m":
+                argv += ["--embed-model", embed_model]
         if env.get("HAL0_FLM_LOAD_ASR") == "1":
+            stt_model = _read_shadow_model("flm-stt")
             argv += ["--asr", "1"]
+            if stt_model and stt_model != "whisper-v3:turbo":
+                argv += ["--asr-model", stt_model]
         return argv
 
     # ── Image / container spec ─────────────────────────────────────────────────
@@ -730,6 +740,31 @@ def flm_validate() -> bool | None:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     return proc.returncode == 0
+
+
+def _read_shadow_model(slot_name: str) -> str | None:
+    """Read the model.default from a shadow slot TOML.
+
+    Returns the model tag (e.g. 'whisper-v3:turbo') or None if the
+    shadow TOML doesn't exist or can't be parsed.
+    """
+    from pathlib import Path
+
+    toml_path = Path("/etc/hal0/slots") / f"{slot_name}.toml"
+    if not toml_path.exists():
+        return None
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+    try:
+        data = tomllib.loads(toml_path.read_text())
+        model = data.get("model", {})
+        if isinstance(model, dict):
+            return str(model.get("default", "")).strip() or None
+    except Exception:
+        pass
+    return None
 
 
 def flm_served_models() -> list[dict[str, Any]]:
