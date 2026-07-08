@@ -291,9 +291,7 @@ async def test_flm_inference_gate_wedged_npu_stays_warming(
 
     _write_npu_container_slot(slot_root, "npu")
     fake_provider = _make_container_provider_mock()
-    gate = AsyncMock(
-        return_value={"ok": False, "status": "sentinel_completion_http_500"}
-    )
+    gate = AsyncMock(return_value={"ok": False, "status": "sentinel_completion_http_500"})
 
     with (
         patch("hal0.providers.container.container_provider", return_value=fake_provider),

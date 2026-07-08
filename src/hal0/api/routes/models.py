@@ -990,10 +990,12 @@ async def list_pulls(request: Request) -> list[dict[str, Any]]:
         result.append(entry)
 
     # Sort: active first, then by started_at descending
-    result.sort(key=lambda e: (
-        0 if e.get("state") in ("queued", "running") else 1,
-        -(e.get("started_at") or 0),
-    ))
+    result.sort(
+        key=lambda e: (
+            0 if e.get("state") in ("queued", "running") else 1,
+            -(e.get("started_at") or 0),
+        )
+    )
     return result
 
 
