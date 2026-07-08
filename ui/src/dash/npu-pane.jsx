@@ -437,15 +437,6 @@ export function NpuOccupancyCard({ slots }) {
             XDNA 2 · npu
           </span>
           <span className="grow" />
-          <span className="meta">
-            <b>{colsUsed * NPU_ROWS}</b>/{tiles} tiles claimed · <b>{NPU_ROWS}×{NPU_COLS}</b> AIE-ML
-            {/* telemetry-header handoff: the meta leads with how many slots
-                actually hold columns; single-tenant only shows when nothing
-                is live (once slots claim columns the free card carries it) */}
-            {liveCount > 0
-              ? <span className="st"> · {liveCount} slot{liveCount !== 1 ? 's' : ''} live</span>
-              : occ.single_tenant !== false && <span className="st"> · single-tenant</span>}
-          </span>
         </div>
         <div className="wcard-b">
           <div className="combo">
