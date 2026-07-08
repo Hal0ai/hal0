@@ -1,4 +1,4 @@
-// force cache bust: 2026-07-08-npu-squares-v2
+// force cache bust v4 — 2026-07-08-toggle-deploy
 //
 // Phase B1 → slots wireup: live slot list + per-slot lifecycle mutations
 // via the typed `useSlots` family. The `slots` prop (HAL0_DATA fallback)
