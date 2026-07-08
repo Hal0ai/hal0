@@ -485,22 +485,6 @@ export function NpuOccupancyCard({ slots }) {
                   mainFlmNpu={mainFlmNpu}
                 />
               ))}
-              {/* third owner hue stays reserved — the dashed free card
-                  renders even at 0 free columns ("array full") so the
-                  single-tenant ceiling stays visible (handoff screen 2) */}
-              <div className="cslot free">
-                <div className="cslot-top">
-                  <span className="sw free" />
-                  <span className="nm">free</span>
-                  <span className="grow" />
-                  <span className="md">
-                    {colsTotal - colsUsed} columns ·{' '}
-                    {colsUsed >= colsTotal && occ.single_tenant !== false
-                      ? 'single-tenant array full'
-                      : 'idle'}
-                  </span>
-                </div>
-              </div>
             </div>
           </div>
         </div>
