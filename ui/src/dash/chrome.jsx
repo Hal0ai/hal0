@@ -628,7 +628,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
                 </div>
               ) : (
                 jobs.map((j) => {
-                  const pct = j.pct != null ? j.pct : (j.total ? Math.round((j.downloaded / j.total) * 100) : 0);
+                  const pct = j.bytes_total ? Math.round((j.bytes_downloaded / (j.bytes_total || 1)) * 100) : 0;
                   const isRunning = j.state === 'running';
                   const isQueued = j.state === 'queued';
                   const isCompleted = j.state === 'completed';
@@ -636,13 +636,13 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
                   const isCancelled = j.state === 'cancelled';
                   const barClass = isCompleted ? ' completed' : isFailed ? ' failed' : '';
                   return (
-                    <div key={j.id} className="foot-dl-row">
+                    <div key={j.job_id || j.model_id} className="foot-dl-row">
                       <span className={"foot-dl-state " + j.state}>
                         {isRunning ? '⟳' : isQueued ? '⏰' : isCompleted ? '✓' : isFailed ? '✗' : '—'}
                       </span>
                       <span className="foot-dl-repo">
-                        {j.repo || j.model_id}
-                        {j.dest && (<><span className="foot-dl-arrow">→</span><span className="foot-dl-dest">{j.dest}</span></>)}
+                        {j.hf_repo || j.model_id}
+                        {j.dest_path && (<><span className="foot-dl-arrow">→</span><span className="foot-dl-dest">{j.dest_path}</span></>)}
                       </span>
                       <span className="foot-dl-act">
                         {(isRunning || isQueued) && (
@@ -651,14 +651,14 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
                         {isFailed && (
                           <>
                             <button className="retry" onClick={() => apiPost(ENDPOINTS.modelPull(j.model_id))}>↻ retry</button>
-                            <button onClick={() => clearJob.mutate(j.id)}>clear</button>
+                            <button onClick={() => clearJob.mutate(j.model_id)}>clear</button>
                           </>
                         )}
                         {isCompleted && (
-                          <button onClick={() => clearJob.mutate(j.id)}>clear</button>
+                          <button onClick={() => clearJob.mutate(j.model_id)}>clear</button>
                         )}
                         {isCancelled && (
-                          <button onClick={() => clearJob.mutate(j.id)}>clear</button>
+                          <button onClick={() => clearJob.mutate(j.model_id)}>clear</button>
                         )}
                       </span>
                       {!isCompleted && !isFailed && !isCancelled && (
@@ -668,7 +668,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
                           </div>
                           <span className="foot-dl-stats">
                             <span>{pct}%</span>
-                            {isRunning && j.speed_bps > 0 && <span>{fmtSpeed(j.speed_bps)}</span>}
+                            {isRunning && (j.speed_bps > 0 ? <span>{fmtSpeed(j.speed_bps)}</span> : <span>calculating…</span>)}
                             {isRunning && j.eta_s > 0 && <span>{fmtEta(j.eta_s)} left</span>}
                           </span>
                         </div>

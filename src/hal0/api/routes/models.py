@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
@@ -966,10 +966,15 @@ async def list_pulls(request: Request) -> list[dict[str, Any]]:
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     registry = request.app.state.model_registry
 
-    # Start with persisted terminal jobs from disk
+    # Start with persisted TERMINAL jobs from disk.
+    # Non-terminal snapshots (e.g. "running" from a crash) are skipped
+    # — there is no matching in-memory job to reconcile them.
     persisted = list_persisted_jobs()
     by_model: dict[str, dict[str, Any]] = {}
     for p in persisted:
+        state = p.get("state")
+        if state not in ("completed", "failed", "cancelled"):
+            continue
         mid = p.get("model_id")
         if isinstance(mid, str) and mid:
             by_model[mid] = p
@@ -1293,8 +1298,8 @@ async def delete_model(
     }
 
 
-@router.delete("/pulls/{model_id}")
-async def delete_pull(model_id: str, request: Request) -> dict[str, object]:
+@router.delete("/pulls/{model_id}", status_code=204)
+async def delete_pull(model_id: str, request: Request):
     """Clear a terminal pull job from memory + disk.
 
     Returns 409 if the job is still active (queued/running).
@@ -1329,7 +1334,7 @@ async def delete_pull(model_id: str, request: Request) -> dict[str, object]:
             details={"model_id": model_id},
         )
 
-    return {"model_id": model_id, "deleted": True}
+    return Response(status_code=204)
 
 
 def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:

@@ -411,18 +411,18 @@ export function usePullJob(): PullSnapshot {
 // ─── usePullsList ─────────────────────────────────────────────────
 
 export interface PullJob {
-  id: string
+  job_id: string
   model_id: string
-  repo: string
-  dest: string
+  hf_repo: string | null
+  dest_path: string | null
   state: PullState
-  downloaded: number
-  total: number
+  bytes_downloaded: number
+  bytes_total: number
   speed_bps: number
   eta_s: number
   error: { code: string; message: string } | null
-  pct: number | null
-  created_at: string
+  started_at: number | null
+  finished_at: number | null
 }
 
 export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
