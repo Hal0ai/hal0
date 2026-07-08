@@ -188,7 +188,7 @@ class CuratedModel(BaseModel):
 CURATED_MODELS: list[CuratedModel] = [
     # NPU (FLM) models — served through the NPU slot container, no GGUF pull.
     CuratedModel(
-        id="qwen3-4b-FLM",
+        id="qwen3-4b",
         display_name="Qwen3 4B (NPU)",
         description="Qwen3 4B running on the AMD XDNA NPU via FastFlowLM. Chat + STT + embed on one column.",
         family="qwen",
@@ -201,7 +201,6 @@ CURATED_MODELS: list[CuratedModel] = [
         context_length=64000,
         recommended_slot="npu",
         tags=["npu", "chat"],
-        provider="flm",
     ),
     # ── 2026-05 refresh: featured chat picks the wizard surfaces first ────
     # Sized for a Strix Halo unified memory pool (~100 GB).  The wizard
