@@ -438,6 +438,10 @@ function SlotListRow({ slot, onEdit }) {
     }
     prevReq.current = reqCount;
   }, [reqCount]);
+  // NPU shadow slot colors: flm=purple, flm-stt=green, flm-embed=teal
+  const npuAccent = slot.name === 'flm-stt' ? 'var(--npu-stt-accent, #22c55e)'
+    : slot.name === 'flm-embed' ? 'var(--npu-embed-accent, #14b8a6)'
+    : 'var(--dev-npu)';
   return (
     <div className="slot-list-row" onClick={goEdit}>
       <IndicatorDot slot={slot} />
@@ -462,8 +466,8 @@ function SlotListRow({ slot, onEdit }) {
           {[...Array(8)].map((_, i) => (
             <div key={i} style={{
               width: 6, height: 6, borderRadius: 1.5,
-              background: 'var(--dev-npu)',
-              boxShadow: flash ? '0 0 10px var(--dev-npu)' : '0 0 4px var(--dev-npu)',
+              background: npuAccent,
+              boxShadow: flash ? `0 0 10px ${npuAccent}` : `0 0 4px ${npuAccent}`,
               opacity: flash ? 1 : 0.55,
               transition: 'all 0.25s ease',
             }} />
