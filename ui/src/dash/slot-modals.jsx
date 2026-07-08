@@ -1268,10 +1268,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
                 />
                 {flmModels.length > 0 && (
                   <select
+                    className="input mono"
                     value={npuAsrModel}
                     onChange={e => setNpuAsrModel(e.target.value)}
                     disabled={npuPending || saving}
-                    style={{marginLeft: 8, padding: '2px 4px', fontSize: 12, borderRadius: 4, border: '1px solid var(--fg-4)', background: 'var(--bg-2)', color: 'var(--fg)'}}
                   >
                     {flmModels.filter(m => m.model?.toLowerCase().includes('whisper')).map(m => (
                       <option key={m.model} value={m.model}>{m.model}</option>
@@ -1295,10 +1295,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
                 />
                 {flmModels.length > 0 && (
                   <select
+                    className="input mono"
                     value={npuEmbedModel}
                     onChange={e => setNpuEmbedModel(e.target.value)}
                     disabled={npuPending || saving}
-                    style={{marginLeft: 8, padding: '2px 4px', fontSize: 12, borderRadius: 4, border: '1px solid var(--fg-4)', background: 'var(--bg-2)', color: 'var(--fg)'}}
                   >
                     {flmModels.filter(m => m.model?.toLowerCase().includes('embed')).map(m => (
                       <option key={m.model} value={m.model}>{m.model}</option>
