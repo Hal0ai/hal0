@@ -72,6 +72,30 @@ def _slot_ttft_events(app_state: Any, slot_name: str | None) -> Any:
     return events_store[slot_name]
 
 
+def _update_slot_throughput(app_state: Any, slot_name: str | None, tps: float) -> None:
+    """Record a FLM decoding-speed sample (tok/s) for the slot.
+
+    Stored on ``app_state.slot_throughput`` keyed by slot name so
+    ``/api/slots/metrics`` surfaces it in the tile throughput gauge.
+    """
+    store = getattr(app_state, "slot_throughput", None)
+    if store is None or not slot_name:
+        return
+    store[slot_name] = tps
+
+
+def _update_slot_kv_occupancy(app_state: Any, slot_name: str | None, pct: float) -> None:
+    """Record a FLM KV-column occupancy sample (0-100%) for the slot.
+
+    Stored on ``app_state.slot_kv_occupancy`` per slot so the dashboard
+    NPU gauge reads the latest column utilisation.
+    """
+    store = getattr(app_state, "slot_kv_occupancy", None)
+    if store is None or not slot_name:
+        return
+    store[slot_name] = pct
+
+
 def _instrument_streaming_throughput(
     response: StreamingResponse,
     app_state: Any,
@@ -146,6 +170,17 @@ def _record_nonstreaming_throughput(
     # — the rolling window will smear it across the lookback. Better
     # alternatives need start-time tracking through forward().
     events.append((time.monotonic(), int(completion)))
+
+    # FLM (NPU) metrics: extract decoding speed + KV column occupancy from
+    # the ``usage`` block so the dashboard can show NPU tok/s and column
+    # usage gauge. These fields are FLM-specific; llama.cpp responses
+    # don't carry them.
+    flm_tps = usage.get("decoding_speed_tps")
+    flm_kv = usage.get("kv_token_occupancy_rate_percentage")
+    if isinstance(flm_tps, (int, float)):
+        _update_slot_throughput(app_state, slot_name, float(flm_tps))
+    if isinstance(flm_kv, (int, float)):
+        _update_slot_kv_occupancy(app_state, slot_name, float(flm_kv))
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:

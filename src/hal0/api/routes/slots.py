@@ -843,6 +843,22 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
             entry = {"name": name}
             merged[name] = entry
         entry.update(ttft)
+    # FLM / NPU per-slot throughput + KV column occupancy — captured
+    # from the ``usage`` block of non-streaming chat completions.
+    flm_tps = getattr(request.app.state, "slot_throughput", {})
+    flm_kv = getattr(request.app.state, "slot_kv_occupancy", {})
+    for name, tps in flm_tps.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["tokens_per_sec"] = tps
+    for name, kv in flm_kv.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["kv_cache_usage"] = kv
     return merged
 
 

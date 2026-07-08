@@ -948,6 +948,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.ttft_events = collections.defaultdict(_new_ttft_deque)
 
+    # FLM / NPU per-slot metrics — updated by v1._record_nonstreaming_throughput
+    # when the upstream (FLM container) returns decoding_speed_tps and
+    # kv_token_occupancy_rate_percentage in the usage block.
+    app.state.slot_throughput: dict[str, float] = {}
+    app.state.slot_kv_occupancy: dict[str, float] = {}
+
     log.info(
         "hal0.api.upstreams_loaded",
         count=len(upstreams.list()),
