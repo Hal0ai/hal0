@@ -171,6 +171,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             meta = getattr(s, "metadata", None) or {}
             provider = str(meta.get("provider") or "").lower()
             backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
+            # Skip shadow slots — they ride on the FLM trio, no separate process
+            served = getattr(s, "served_by", None)
+            if served:
+                continue
             if provider == "flm" or backend in ("flm", "npu"):
                 flm_slots.append(s)
 
