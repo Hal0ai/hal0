@@ -253,6 +253,13 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 "gb": None,
             })
 
+    # Sort: flm first, then flm-stt, flm-embed in alphabetical order
+    slots_out.sort(key=lambda s: (
+        0 if s["name"] == "flm" else
+        1 if s["name"] == "flm-stt" else
+        2 if s["name"] == "flm-embed" else 9
+    ))
+
     # Degraded fallback: if xrt-smi never succeeded, every loaded slot owns
     # all 8 columns (single-tenant binary occupancy).
     if not columns_available:
