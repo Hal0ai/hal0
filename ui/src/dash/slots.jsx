@@ -1,4 +1,4 @@
-// hal0 dashboard — Slots view (SlotCard, NPU trio variants, group sections)
+// force cache bust: 2026-07-08-npu-squares-v2
 //
 // Phase B1 → slots wireup: live slot list + per-slot lifecycle mutations
 // via the typed `useSlots` family. The `slots` prop (HAL0_DATA fallback)
