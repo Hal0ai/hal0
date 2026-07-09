@@ -188,7 +188,7 @@ class CuratedModel(BaseModel):
 CURATED_MODELS: list[CuratedModel] = [
     # NPU (FLM) models — served through the NPU slot container, no GGUF pull.
     CuratedModel(
-        id="qwen3-4b",
+        id="qwen3-4b-npu",
         display_name="Qwen3 4B (NPU)",
         description="Qwen3 4B running on the AMD XDNA NPU via FastFlowLM. Chat + STT + embed on one column.",
         family="qwen",

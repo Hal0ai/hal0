@@ -283,6 +283,7 @@ class FLMProvider(Provider):
             # before the [npu] table existed.
             load_asr = "1" if defaults.get("load_asr") else "0"
             load_embed = "1" if defaults.get("load_embed") else "0"
+            load_chat = "1" if defaults.get("load_chat") else "1"
 
         return {
             "HAL0_FLM_TAG": str(flm_tag),

@@ -506,7 +506,7 @@ def test_pull_command_is_host_flm_and_real_cache_dir() -> None:
     assert argv == [flm._HOST_FLM_BIN, "pull", "gemma4-it:e4b"]
     assert "docker" not in argv
     assert host_dir == flm._host_flm_models_dir()
-    assert host_dir.endswith("/.config/flm/models")
+    assert host_dir == flm._host_flm_models_dir()
 
 
 def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:

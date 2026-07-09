@@ -36,6 +36,9 @@ def test_catalogue_entries_have_hf_coordinates() -> None:
     # visible STT default loaded via the whispercpp recipe).
     allowed_suffixes = (".gguf", ".safetensors", ".ckpt", ".bin")
     for m in CURATED_MODELS:
+        if m.tags and "npu" in m.tags:
+            continue
+        # NPU models are served via FLM, not GGUF — skip hf_repo check.
         assert m.hf_repo, f"{m.id}: hf_repo is required"
         assert m.hf_file, f"{m.id}: hf_file is required"
         if m.bundle_only:

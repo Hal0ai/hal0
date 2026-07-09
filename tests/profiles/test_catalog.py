@@ -32,8 +32,11 @@ def test_resolve_qwen3tts_seed_is_gpu_tts_family(tmp_hal0_home: str) -> None:
 def test_resolve_exposes_backend(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
     assert catalog.resolve("rocm").backend == "rocm"
-    assert catalog.resolve("rocmfpx-rocm").backend == "rocm"
+    assert catalog.resolve("rocm-dense").backend == "rocm"
+    assert catalog.resolve("rocm-moe").backend == "rocm"
     assert catalog.resolve("vulkan").backend == "vulkan"
+    assert catalog.resolve("vulkan-dense").backend == "vulkan"
+    assert catalog.resolve("vulkan-moe").backend == "vulkan"
     # non-GPU seeds carry no backend
     assert catalog.resolve("flm").backend is None
     assert catalog.resolve("tts").backend is None
