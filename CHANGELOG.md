@@ -21,6 +21,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.5.2] — 2026-07-09
+
+### Fixed
+- **Models → Downloads tab: React invariant 310 ("Rendered more hooks than during the previous render").** The Downloads pane in the Models view called `useStateM(false)` inside a `jobs.map((j) => { … })` callback. React counts hook calls per render, so the moment the downloads list changed length (a pull started, finished, failed, or was cleared) the hook count differed across renders and the entire `<ModelsView>` crashed behind the v3 error boundary — masking the rest of the dashboard. Fix: extract the per-row logic into a `DownloadRow` component that owns its own `cancelling` state, so the hook lives at row-component top level and its count is stable across renders. Pinned by `ui/src/dash/__tests__/react-hooks-order.test.mjs`, a new AST-based static check that walks every JSX/JS file under `src/dash/` and flags any useXxx (incl. the `useStateM`/`useEffectM`/etc. aliases used in this dashboard) called inside an array-iteration callback (`.map`/`.forEach`/`.filter`/`.reduce`/`.some`/`.every`/`.flatMap`/`.find`/`.findIndex`).
+
 ## [0.9.5.1] — 2026-07-09
 
 ### Highlights
