@@ -19,9 +19,8 @@ every error path (no SlotManager, accessor errors, etc.).
 from __future__ import annotations
 
 import tomllib
-import tomllib
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Request
 
@@ -30,14 +29,13 @@ from hal0.dispatcher.npu_swap_status import (
     fetch_npu_swap_status,
 )
 
-from pathlib import Path
-
 router = APIRouter()
 
 
 def _slots_dir() -> Path:
     """Return /etc/hal0/slots/ — the TOML config directory."""
     return Path("/etc/hal0/slots")
+
 
 # Strix Halo XDNA NPU geometry — fixed silicon: 4 rows by 8 cols = 32 AIE
 # tiles, ~50 TOPS peak (single-tenant). These never change at runtime; the
@@ -241,28 +239,38 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             except Exception:
                 pass
         if npu_cfg.get("asr"):
-            slots_out.append({
-                "name": s.name + "-stt",
-                "model": "whisper-v3:turbo",
-                "state": mapped_state,
-                "cols": list(range(_NPU_COLS)),
-                "gb": None,
-            })
+            slots_out.append(
+                {
+                    "name": s.name + "-stt",
+                    "model": "whisper-v3:turbo",
+                    "state": mapped_state,
+                    "cols": list(range(_NPU_COLS)),
+                    "gb": None,
+                }
+            )
         if npu_cfg.get("embed"):
-            slots_out.append({
-                "name": s.name + "-embed",
-                "model": "embedding-gemma",
-                "state": mapped_state,
-                "cols": list(range(_NPU_COLS)),
-                "gb": None,
-            })
+            slots_out.append(
+                {
+                    "name": s.name + "-embed",
+                    "model": "embedding-gemma",
+                    "state": mapped_state,
+                    "cols": list(range(_NPU_COLS)),
+                    "gb": None,
+                }
+            )
 
     # Sort: flm first, then flm-stt, flm-embed in alphabetical order
-    slots_out.sort(key=lambda s: (
-        0 if s["name"] == "flm" else
-        1 if s["name"] == "flm-stt" else
-        2 if s["name"] == "flm-embed" else 9
-    ))
+    slots_out.sort(
+        key=lambda s: (
+            0
+            if s["name"] == "flm"
+            else 1
+            if s["name"] == "flm-stt"
+            else 2
+            if s["name"] == "flm-embed"
+            else 9
+        )
+    )
 
     # Degraded fallback: if xrt-smi never succeeded, every loaded slot owns
     # all 8 columns (single-tenant binary occupancy).

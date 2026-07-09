@@ -56,6 +56,7 @@ MAX_CONCURRENT_PAGES = int(os.environ.get("HAL0_BROWSER_PAGE_MAX", "4"))
 
 # ── Browser pool ──────────────────────────────────────────────────────────
 
+
 @dataclass
 class BrowserPool:
     """Persistent browser with page lifecycle management."""
@@ -366,7 +367,9 @@ async def browser_close_page(page_id: str = "default") -> dict[str, Any]:
     return {"ok": True, "closed": page_id}
 
 
-def _trim_snapshot(node: dict[str, Any], max_depth: int, max_children: int, depth: int = 0) -> dict[str, Any] | None:
+def _trim_snapshot(
+    node: dict[str, Any], max_depth: int, max_children: int, depth: int = 0
+) -> dict[str, Any] | None:
     """Recursively trim an accessibility snapshot to manageable size."""
     if depth > max_depth:
         return None
@@ -378,16 +381,20 @@ def _trim_snapshot(node: dict[str, Any], max_depth: int, max_children: int, dept
     if children and depth < max_depth:
         trimmed["children"] = [
             child
-            for child in (_trim_snapshot(c, max_depth, max_children, depth + 1) for c in children[:max_children])
+            for child in (
+                _trim_snapshot(c, max_depth, max_children, depth + 1)
+                for c in children[:max_children]
+            )
             if child is not None
         ]
     return trimmed
 
 
-
 # ── Entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    )
     logger.info("Starting hal0-browser on http://127.0.0.1:%d/mcp", PORT)
     mcp.run(transport="streamable-http")

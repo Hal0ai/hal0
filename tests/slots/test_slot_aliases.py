@@ -170,9 +170,7 @@ def test_resolve_chain_hal0_chat_is_not_canonical():
     from hal0.normalize.resolver import SlotView, resolve_chain
 
     slots = [
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
     ]
     # No `chat` slot present → hal0/chat is unknown.
     assert resolve_chain("hal0/chat", slots, loaded={"big"}) is None

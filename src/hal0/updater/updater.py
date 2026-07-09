@@ -818,9 +818,7 @@ def _is_editable_install() -> bool:
         pass
     # Git-tracked FHS installs: code lives in a versioned dir under
     # /usr/lib/hal0/ — not truly editable. Let prepare_git handle them.
-    if _is_git_install():
-        return False
-    return True
+    return not _is_git_install()
 
 
 def _is_git_install() -> bool:
@@ -834,10 +832,7 @@ def _is_git_install() -> bool:
     import hal0
 
     here = Path(hal0.__file__).resolve()
-    for parent in here.parents:
-        if (parent / ".git").is_dir():
-            return True
-    return False
+    return any((parent / ".git").is_dir() for parent in here.parents)
 
 
 def _reinstall_into_venv(install_dir: Path, *, job_id: str | None = None) -> None:
@@ -1639,12 +1634,17 @@ class Updater:
         cache = paths.var_lib() / "cache"
         cache.mkdir(parents=True, exist_ok=True)
         repo_dir = cache / "repo.git"
-        remote_url = f"https://github.com/Hal0ai/hal0.git"
+        remote_url = "https://github.com/Hal0ai/hal0.git"
 
         if (repo_dir / "HEAD").is_file():
             log.info("updater.git_fetch", repo=str(repo_dir), remote=remote_url)
             await asyncio.to_thread(
-                _git, "-C", str(repo_dir), "fetch", remote_url, f"+refs/tags/*:refs/tags/*",
+                _git,
+                "-C",
+                str(repo_dir),
+                "fetch",
+                remote_url,
+                "+refs/tags/*:refs/tags/*",
             )
         else:
             log.info("updater.git_clone_bare", repo=str(repo_dir), remote=remote_url)
@@ -1652,7 +1652,11 @@ class Updater:
             with contextlib.suppress(OSError):
                 shutil.rmtree(repo_dir)
             await asyncio.to_thread(
-                _git, "clone", "--bare", remote_url, str(repo_dir),
+                _git,
+                "clone",
+                "--bare",
+                remote_url,
+                str(repo_dir),
             )
 
         # Find the latest stable tag (highest semver, ignoring -nightly/-beta).
@@ -1669,8 +1673,15 @@ class Updater:
         install_dir = _versioned_install_dir(target_version)
         if not install_dir.exists():
             await asyncio.to_thread(
-                _git, "-C", str(repo_dir), "--work-tree", str(install_dir),
-                "checkout", latest_tag, "--", ".",
+                _git,
+                "-C",
+                str(repo_dir),
+                "--work-tree",
+                str(install_dir),
+                "checkout",
+                latest_tag,
+                "--",
+                ".",
             )
         log.info("updater.git_prepared", version=target_version, install_dir=str(install_dir))
         return {"version": target_version, "install_dir": str(install_dir)}
@@ -1702,7 +1713,9 @@ class Updater:
         migration_info: tuple[int, int]
         try:
             migration_info = await asyncio.to_thread(
-                _maybe_run_config_migrations, min_data_version, job_id=self.job_id,
+                _maybe_run_config_migrations,
+                min_data_version,
+                job_id=self.job_id,
             )
         except Hal0Error as exc:
             raise UpdateError(
@@ -1745,17 +1758,29 @@ class Updater:
         try:
             proc = await asyncio.to_thread(
                 subprocess.run,
-                [sys.executable, "-c",
-                 "from hal0.updater.updater import rerender_slot_units; "
-                 "print(rerender_slot_units())"],
-                capture_output=True, text=True, timeout=300,
+                [
+                    sys.executable,
+                    "-c",
+                    "from hal0.updater.updater import rerender_slot_units; "
+                    "print(rerender_slot_units())",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             if proc.returncode == 0:
-                log.info("updater.unit_rerender_done", job_id=self.job_id,
-                         rewritten=(proc.stdout or "").strip())
+                log.info(
+                    "updater.unit_rerender_done",
+                    job_id=self.job_id,
+                    rewritten=(proc.stdout or "").strip(),
+                )
             else:
-                log.warning("updater.unit_rerender_failed", job_id=self.job_id,
-                            rc=proc.returncode, stderr=(proc.stderr or "")[-500:])
+                log.warning(
+                    "updater.unit_rerender_failed",
+                    job_id=self.job_id,
+                    rc=proc.returncode,
+                    stderr=(proc.stderr or "")[-500:],
+                )
         except Exception as exc:
             log.warning("updater.unit_rerender_failed", job_id=self.job_id, error=str(exc))
 
@@ -1899,7 +1924,8 @@ def _latest_stable_tag(repo_dir: Path) -> str | None:
     """Return the highest semver tag (v0.x.y) skipping -nightly/-beta."""
     proc = subprocess.run(
         ["git", "-C", str(repo_dir), "tag", "--sort=-version:refname"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if proc.returncode != 0:
         return None

@@ -276,12 +276,14 @@ def _update_via_git(check_only: bool = False) -> None:
     console.print("[cyan]Checking for updates via git (local)…[/cyan]")
     updater = Updater()
     import asyncio
+
     prepared = asyncio.run(updater.prepare_git())
     version = prepared["version"]
 
     current = hal0.__version__
     try:
         from packaging.version import Version
+
         newer = Version(version) > Version(current)
     except Exception:
         newer = version != current
@@ -297,9 +299,9 @@ def _update_via_git(check_only: bool = False) -> None:
     if _interactive() and not typer.confirm(f"Apply hal0 {version}?", default=True):
         console.print("[dim]Staged but not applied — re-run to apply.[/dim]")
         return
-    result = asyncio.run(updater.commit_git(version))
+    asyncio.run(updater.commit_git(version))
     console.print(Panel(f"[green]Updated to {version}[/green]", border_style="green"))
-    console.print(f"[dim]Restart hal0-api to apply:[/dim] systemctl restart hal0-api")
+    console.print("[dim]Restart hal0-api to apply:[/dim] systemctl restart hal0-api")
     _print_drift_banner(_fetch_slot_drift())
 
 

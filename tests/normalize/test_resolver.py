@@ -10,18 +10,14 @@ from hal0.normalize.resolver import (
 def _slots():
     # ADR-0023: the anchor slot is `agent` (replaces the old `chat` anchor).
     return [
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big-35b", context_length=65536
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big-35b", context_length=65536),
         SlotView(
             name="utility",
             device="gpu-vulkan",
             model_id="tiny-0.8b",
             context_length=65536,
         ),
-        SlotView(
-            name="npu-slot", device="npu", model_id="qwen3-4b-FLM", context_length=32768
-        ),
+        SlotView(name="npu-slot", device="npu", model_id="qwen3-4b-FLM", context_length=32768),
     ]
 
 
@@ -81,9 +77,7 @@ def test_npu_name_matches_any_npu_device_slot():
             model_id="qwen3-4b-FLM",
             context_length=32768,
         ),
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
     ]
     r = resolve_chain("hal0/npu", slots, loaded={"qwen3-4b-FLM", "big"})
     assert r.model_id == "qwen3-4b-FLM"
@@ -103,9 +97,7 @@ def test_utility_chain_does_not_pick_non_utility_named_slot():
             model_id="cm",
             context_length=8192,
         ),
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
     ]
     r = resolve_chain("hal0/utility", slots, loaded={"cm", "big"})
     assert r.model_id == "big"
@@ -133,12 +125,8 @@ def test_generalized_custom_slot_resolves():
     """ADR-0023 §2: any enabled llm slot X is addressable as hal0/X with chain
     (X, agent), even without a DEFAULT_CHAINS entry."""
     slots = [
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
-        SlotView(
-            name="coder", device="gpu-vulkan", model_id="coder-30b", context_length=32768
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
+        SlotView(name="coder", device="gpu-vulkan", model_id="coder-30b", context_length=32768),
     ]
     r = resolve_chain("hal0/coder", slots, loaded={"coder-30b"})
     assert r is not None
@@ -151,12 +139,8 @@ def test_generalized_custom_slot_falls_back_to_agent():
     """A generalized hal0/<slot> falls back to the agent anchor when the slot's
     own model isn't loaded."""
     slots = [
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
-        SlotView(
-            name="coder", device="gpu-vulkan", model_id="coder-30b", context_length=32768
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
+        SlotView(name="coder", device="gpu-vulkan", model_id="coder-30b", context_length=32768),
     ]
     r = resolve_chain("hal0/coder", slots, loaded={"big"})
     # agent is the second link in the (coder, agent) chain; it's loaded, so this
@@ -178,12 +162,8 @@ async def test_live_resolver_reads_views_and_health():
     from hal0.normalize.resolver import LiveSlotResolver, SlotView
 
     views = [
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
-        SlotView(
-            name="utility", device="gpu-vulkan", model_id="tiny", context_length=65536
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
+        SlotView(name="utility", device="gpu-vulkan", model_id="tiny", context_length=65536),
     ]
     resolver = LiveSlotResolver(
         slot_views_provider=lambda: views,
@@ -202,9 +182,7 @@ async def test_live_resolver_rejects_removed_alias():
     from hal0.normalize.resolver import LiveSlotResolver, SlotView
 
     views = [
-        SlotView(
-            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
-        ),
+        SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
     ]
     resolver = LiveSlotResolver(
         slot_views_provider=lambda: views,
