@@ -760,8 +760,8 @@ def test_resolve_auxiliary_tasks_degrades_to_main_without_utility_slot() -> None
 
 def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> None:
     # Utility role lives on the NPU slot (name 'npu', role not surfaced by
-    # /api/slots) and there is NO slot named 'utility'. Aux group must target
-    # the hal0/utility virtual so the gateway routes to the NPU slot.
+    # /api/slots) and there is NO slot named 'utility'. Aux group degrades
+    # hal0/npu (the NPU virtual) so the gateway routes to the NPU slot.
     slots = [
         _ROLE_SLOTS[0],  # chat
         {
@@ -777,7 +777,7 @@ def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> 
     for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
-            "model": "hal0/utility",
+            "model": "hal0/npu",
             "base_url": _HAL0_V1,
         }
     for task in ("vision", "web_extract"):

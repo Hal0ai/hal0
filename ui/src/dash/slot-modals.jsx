@@ -247,43 +247,22 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
       </div>
 
-      {/* Per-slot image override (v0.9.5). Empty = use the profile's image (or
-          DEFAULT_ROCMFPX_IMAGE if the profile omits one). Text input keeps it
-          flexible (operators can pin a debug build, A/B test, etc.); a Reset
-          button clears the override. A "will-be-used" hint previews the
-          effective image so the operator can see what the unit will pull. */}
+      {/* Image preview (v0.9.5). Read-only in create mode — shows the
+          profile's image (or DEFAULT_ROCMFPX_IMAGE if the profile omits one).
+          Image override is available in the EditSlotDrawer instead. */}
       {(() => {
-        const sel = (selectedProfile || slot.profile || "").trim();
-        const profMeta = (profilesQuery.data ?? []).find(p => p.name === sel);
-        const fallback = profMeta?.image || "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5";
-        const effective = (image || "").trim() || fallback;
+        const profMeta = (profilesQuery.data ?? []).find(p => p.name === profile);
+        const img = profMeta?.image || "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5";
         return (
           <div className="form-row">
             <div className="form-lbl">
               <span>Image</span>
-              <span className="sub">empty = profile default</span>
+              <span className="sub">from profile</span>
             </div>
             <div className="form-ctl">
-              <input
-                className={"input mono" + (fieldErrs.image ? " input-err" : "")}
-                value={image}
-                placeholder={fallback}
-                onChange={e => { setImage(e.target.value); setFieldErrs(p => ({...p, image: undefined})); }}
-              />
-              <div className="hint mono" style={{marginTop: 4, fontSize: 11, color: "var(--fg-5)"}}>
-                will use: <span style={{color: "var(--fg-3)"}}>{effective}</span>
-              </div>
-              {image && (
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  style={{marginTop: 4, alignSelf: "flex-start"}}
-                  onClick={() => setImage("")}
-                >Reset to default</button>
-              )}
-              {fieldErrs.image && (
-                <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.image}</div>
-              )}
+              <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-3)", fontSize: 12, wordBreak: "break-all"}}>
+                {img}
+              </span>
             </div>
           </div>
         );
