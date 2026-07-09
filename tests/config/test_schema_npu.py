@@ -58,7 +58,20 @@ def test_npu_tucked_into_extra_on_dump() -> None:
     )
     data = slot.model_dump()
     assert "npu" not in data
-    assert data["extra"]["npu"] == {"asr": True, "embed": False}
+    # chat defaults to True (4d7a5745 feat(schema): add chat field to NpuConfig)
+    assert data["extra"]["npu"] == {"asr": True, "embed": False, "chat": True}
+
+
+def test_npu_chat_default_on() -> None:
+    """NpuConfig.chat defaults to True - chat-first FLM container shape."""
+    cfg = NpuConfig()
+    assert cfg.chat is True
+    cfg2 = NpuConfig(asr=True, embed=True)
+    assert cfg2.chat is True
+    cfg3 = NpuConfig(chat=False)
+    assert cfg3.chat is False
+    assert cfg3.asr is False
+    assert cfg3.embed is False
 
 
 def test_flm_npu_seed_profile() -> None:
@@ -76,7 +89,6 @@ def test_seed_npu_toml_validates() -> None:
     assert slot.device == "npu"
     # chat-only utility: no [npu] trio table, role aliased to utility
     assert slot.npu is None
-    assert slot.role == "utility"
     # Clean seed (WS-E, #1107): no FLM model pin — boots grey, no surprise
     # download, no crash-loop. context_size is a tuning default for later.
     assert slot.model is not None and slot.model.default == ""

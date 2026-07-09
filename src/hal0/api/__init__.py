@@ -448,7 +448,6 @@ async def hal0_llm_slot_views(
         out.append(
             {
                 "name": name,
-                "role": cfg.get("role"),
                 "device": (cfg.get("device") or "").strip(),
                 "model_id": model_id,
                 "context_length": int(_slot_ctx_size(cfg, model_registry, model_id) or 0),

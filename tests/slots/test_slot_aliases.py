@@ -43,7 +43,7 @@ def test_agent_is_gpu_seeded_not_npu():
 
 def test_slot_aliases_map():
     """ADR-0023: SLOT_ALIASES drops ``primary`` — only agent-hermes → agent."""
-    assert SLOT_ALIASES == {"agent-hermes": "agent"}
+    assert SLOT_ALIASES == {"agent-hermes": "agent", "qwen3-4b": "flm", "qwen3:4b": "flm"}
 
 
 # ── 2. _resolve_alias static method ──────────────────────────────────────────
@@ -171,7 +171,7 @@ def test_resolve_chain_hal0_chat_is_not_canonical():
 
     slots = [
         SlotView(
-            name="agent", role=None, device="gpu-vulkan", model_id="big", context_length=65536
+            name="agent", device="gpu-vulkan", model_id="big", context_length=65536
         ),
     ]
     # No `chat` slot present → hal0/chat is unknown.

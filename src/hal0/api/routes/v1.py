@@ -359,7 +359,6 @@ async def _normalize_slot_views(request: Request) -> list:
     return [
         SlotView(
             name=r["name"],
-            role=r.get("role"),
             device=r.get("device", ""),
             model_id=r["model_id"],
             context_length=int(r.get("context_length") or 0),

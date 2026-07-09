@@ -247,6 +247,48 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
       </div>
 
+      {/* Per-slot image override (v0.9.5). Empty = use the profile's image (or
+          DEFAULT_ROCMFPX_IMAGE if the profile omits one). Text input keeps it
+          flexible (operators can pin a debug build, A/B test, etc.); a Reset
+          button clears the override. A "will-be-used" hint previews the
+          effective image so the operator can see what the unit will pull. */}
+      {(() => {
+        const sel = (selectedProfile || slot.profile || "").trim();
+        const profMeta = (profilesQuery.data ?? []).find(p => p.name === sel);
+        const fallback = profMeta?.image || "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5";
+        const effective = (image || "").trim() || fallback;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Image</span>
+              <span className="sub">empty = profile default</span>
+            </div>
+            <div className="form-ctl">
+              <input
+                className={"input mono" + (fieldErrs.image ? " input-err" : "")}
+                value={image}
+                placeholder={fallback}
+                onChange={e => { setImage(e.target.value); setFieldErrs(p => ({...p, image: undefined})); }}
+              />
+              <div className="hint mono" style={{marginTop: 4, fontSize: 11, color: "var(--fg-5)"}}>
+                will use: <span style={{color: "var(--fg-3)"}}>{effective}</span>
+              </div>
+              {image && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  style={{marginTop: 4, alignSelf: "flex-start"}}
+                  onClick={() => setImage("")}
+                >Reset to default</button>
+              )}
+              {fieldErrs.image && (
+                <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.image}</div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="form-row">
         <div className="form-lbl">
           <span>Model</span>
@@ -373,6 +415,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [parallel, setParallel] = useStateSM(
     slot?.parallel != null ? String(slot.parallel) : ""
   );
+  // Per-slot image override. Empty = use profile default (DEFAULT_ROCMFPX_IMAGE
+  // in schema.py, v0.9.5+). The current 0.9.4.1 backend ignores this field
+  // on the wire; 0.9.5+ reads it via _resolve_image_ref. Sibling fields
+  // (profile, model) keep their own state — image is a third independent
+  // axis, not a sub-set of profile.
+  const [image, setImage] = useStateSM(slot?.image || "");
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Dirty-close confirms through the shared ConfirmDialog (state-driven),
@@ -459,6 +507,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setFieldErrs({});
       // C7: re-seed profile from the (possibly-updated) slot prop.
       setSelectedProfile(slot.profile || "");
+      // Re-seed per-slot image override from the (possibly-updated) slot prop.
+      setImage(slot.image || "");
       // Task 5: re-seed chat_template override from the slot prop.
       setChatTemplate(slot.chat_template || "");
       setOverrideOpen(!!(slot.chat_template));
@@ -510,6 +560,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
     if (profileDeviceClass === "gpu" && !selectedProfile) {
       errs.profile = "Profile is required";
     }
+    // Image: empty is allowed (use profile default). When set, must look like
+    // a registry ref — at minimum contains ":" (host:tag or repo:tag) and
+    // doesn't contain whitespace. Keep the regex loose; the actual pull
+    // happens in load_sync and reports its own errors.
+    const imgTrim = (image || "").trim();
+    if (imgTrim && (!imgTrim.includes(":") || /\s/.test(imgTrim))) {
+      errs.image = "Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
+    }
     // Block Save on malformed extra_args (unbalanced quotes) the same way
     // numeric fields block — the resolved command can't be built from it.
     if (extraArgsErr) {
@@ -553,6 +611,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
       }
       if (chatTemplateChanged) {
         slotBody.chat_template = chatTemplate;
+      }
+      // Per-slot image override. Empty → null (use profile default). Ship
+      // only when the normalized (trimmed) value differs from the persisted
+      // baseline so a no-op Save stays quiet. The backend's
+      // _resolve_image_ref (v0.9.5+) prefers this field over profile.image.
+      const imgValue = imgTrim === "" ? null : imgTrim;
+      if (imgValue !== (slot.image || null)) {
+        slotBody.image = imgValue;
       }
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
@@ -887,6 +953,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       </FieldGroup>
 
+      {slot.device !== "npu" && (
       <FieldGroup label="Model" hint="what it loads">
       {/* Task 1: live model swap — mirrors the card's ModelPicker but with the
           full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
@@ -1030,6 +1097,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
+      </FieldGroup>
+      )}
       {/* NPU capability matrix — replaces Model+Template for NPU slots */}
       {slot.device === "npu" && (() => {
         const applyNpu = async (nextChat, nextAsr, nextEmbed, field) => {
@@ -1135,7 +1204,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </>
         );
       })()}
-      </FieldGroup>
 
       <FieldGroup label="Inference" hint="behavior">
       {/* C4: per-slot thinking default — llm slots only. Instant-apply (its

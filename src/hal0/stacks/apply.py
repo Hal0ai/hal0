@@ -243,8 +243,6 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
-        if entry.role is not None:
-            updates["role"] = entry.role
         # ``vision`` is a plain bool (no inherit) → declaratively written.
         updates["vision"] = entry.vision
         # ``mtp`` is declaratively written INCLUDING None: a stack row set to

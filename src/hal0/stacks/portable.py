@@ -319,7 +319,6 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
         # backend string (e.g. "rocm") would fail StackSlotEntry validation.
         "device": device if device in _VALID_DEVICES else None,
         "provider": g("provider"),
-        "role": g("role"),
         "profile": g("profile"),
         "vision": bool(g("vision", False)),
         "mtp": g("mtp"),
@@ -379,7 +378,6 @@ def snapshot_live_stack(
                 model=model,
                 device=sc["device"],
                 provider=sc["provider"],
-                role=sc["role"],
                 vision=sc["vision"],
                 mtp=sc["mtp"],
                 enable_thinking=sc["enable_thinking"],

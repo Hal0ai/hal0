@@ -21,6 +21,98 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-07-08
+
+### Added
+- **NPU chat-first seed (FLM container shape).** `NpuConfig.chat` now
+  defaults to `True` so a bare `[npu]` section in a slot TOML is a chat-ready
+  NPU slot out of the box. Operators opt out by setting `chat = false` when
+  they want an asr-only or embed-only NPU slot. A new seed
+  `installer/etc-hal0/slots/npu.toml` is included so `hal0 setup` can
+  register a clean (no FLM model pinned, `enabled = false`) `hal0/npu`
+  tile on fresh boxes. The EditSlotDrawer now hides the Model field for
+  `device = "npu"` slots (the NPU capability matrix replaces it).
+
+### Changed
+- **Slot routing key is now the slot `name`, not `role` (ADR-0023 §2.1).**
+  The legacy `role` field on `SlotConfig` is gone — slot identity IS the
+  routing key for `hal0/<slot>` aliases. Resolution chains in
+  `src/hal0/normalize/resolver.py` now use `_slot_matches_name` (case-
+  insensitive exact match on `name`), with one silicon-class escape
+  hatch: the special name `npu` additionally matches any slot with
+  `device == "npu"`, so a container that calls the trio's chat edge by
+  a different slot name (`flm`, `npuchat`, …) still answers `hal0/npu`.
+  Operator-custom seeds (`saber-fpx`, `deckard-fpx*`) and live slot
+  TOMLs that used the old `role` tag now resolve by name. Live installs
+  with the old `role` field in any slot TOML continue to parse (the
+  field is parked under `extra` via Pydantic) and resolve to the slot
+  by its `name`.
+
+### Highlights
+- **New canonical ROCmFPX runner: `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`** —
+  built from `Hal0ai/Hal0_ROCmFPX@5b395660` plus a 4-line upstream cherry-pick
+  that wires the **minicpm5** pre-tokenizer (upstream PR #23384). Unblocks
+  loading the BRAINTRAIN-1B GGUFs on Strix Halo (the `tokenizer.ggml.pre =
+  minicpm5` field now resolves correctly). The new image serves both ROCm/HIP
+  and Vulkan backends from a single artifact; this consolidates the
+  previously-3-tag ROCmFPX image family into one.
+- **Slot-level image override** — `slot.image` (top-level string in the slot
+  TOML) now overrides the profile's `image`. Resolution order is
+  `slot.image` → `profile.image` → `DEFAULT_ROCMFPX_IMAGE`. Future image
+  bumps will be a code-only release (one constant in `schema.py`); operators
+  no longer have to chase profile clones to keep their stack current. The
+  EditSlotDrawer now exposes an **Image** form-row (free-form text input
+  with a live `will use:` preview of the effective ref, plus a Reset
+  button) so operators can pin/clear the override without editing TOMLs.
+
+### Breaking
+- **SEED_PROFILES reshuffled to a clean 2x2 grid.** The three old ROCmFPX
+  runner slugs (`rocmfpx-rocm`, `vkfpx-moe`, `vkfpx-dense`) are replaced by
+  four explicitly-named profiles that match the 2x2 (backend x {dense,moe})
+  matrix. The names are self-describing — the backend is the prefix, the
+  weight format is the suffix:
+
+    | Old slug         | New slug         | Backend | Format   |
+    |------------------|------------------|---------|----------|
+    | `rocmfpx-rocm`   | `rocm-dense`     | ROCm0   | ROCmFP4  |
+    | (new)            | `rocm-moe`       | ROCm0   | ROCmFPX  |
+    | `vkfpx-dense`    | `vulkan-dense`   | Vulkan0 | ROCmFP4  |
+    | `vkfpx-moe`      | `vulkan-moe`     | Vulkan0 | ROCmFPX  |
+
+  All four reference `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`
+  (the new canonical runner). `rocm-moe` is a NEW profile — pre-0.9.5 the
+  ROCmFPX MoEQuality format was Vulkan-only; this adds the ROCm0/HIP
+  variant for operators who want a single-backend fleet.
+- `profile.image` is now **deprecated** for new code paths. It still works as
+  a fallback when no slot override is set, but the plan is to drop it from
+  `SEED_PROFILES` entirely in **0.9.6**. Operator-custom profiles that
+  override `image` (e.g. `saber-fpx`, `rocmfpx-rocm-custom`, `vkfpx-moe-custom`,
+  `deckard-fpx*`) should migrate to per-slot `image` instead — a single
+  slot TOML is a single grep hit, a profile clone is a maintenance liability.
+
+### Migrations
+- **Re-pin your custom profiles' images via the slot, not the profile.** Edit
+  `/etc/hal0/slots/<name>.toml` and add a top-level `image = "ghcr.io/hal0ai/
+  hal0-rocmfpx:vulkan-minicpm5"` line. The slot-level value wins on next
+  `hal0 slot <name> restart`. Once your slots are migrated, you can remove
+  the `image` line from your operator-custom profile in `profiles.toml`.
+- **Rename operator-custom profile references in slot TOMLs.** If your slot
+  points at one of the old slugs (`profile = "rocmfpx-rocm"`, `"vkfpx-moe"`,
+  `"vkfpx-dense"`, or a `-custom` clone of those), update it to the matching
+  new name (`"rocm-dense"`, `"vulkan-moe"`, `"vulkan-dense"`, or your
+  custom variant of the new name). Example: `nano.toml`'s `profile` field
+  should change from `"vkfpx-moe-custom"` → `"vulkan-moe-custom"` (and your
+  `vulkan-moe-custom` profile in `profiles.toml` should mirror the new
+  `vulkan-moe` seed's image + flags).
+- **Verify the new image pulls cleanly on a non-production slot first**:
+  `hal0 slot <name> image ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5 && hal0
+  slot <name> restart`. Then `curl :PORT/v1/models` to confirm the slot
+  launched the new image (`system_fingerprint` carries the upstream commit
+  hash for traceability).
+- **The `image_mismatch` warning clears naturally** — it was a symptom of the
+  old `profiles.toml` carrying stale image refs; once slots own their image,
+  the mismatch can only happen on a manual `image` edit.
+
 ## [0.9.4.1] — 2026-07-08
 
 ### Changed

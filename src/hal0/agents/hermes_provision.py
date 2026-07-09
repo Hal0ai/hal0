@@ -2861,10 +2861,10 @@ def _resolve_auxiliary_tasks(
 
     utility = _find_named_ready_slot(slots, _UTILITY_SLOT_NAME)
     # When no utility-slot named ``utility`` exists but a ready NPU llm slot
-    # does (device="npu"), route aux tasks to hal0/npu. The NPU slot now uses
-    # role="npu" (not "utility") so hal0/utility resolves only to the real
-    # utility slot. hal0/npu resolves by device type and falls back to the
-    # anchor slot if the NPU is ever not loaded.
+    # does (device="npu"), route aux tasks to hal0/npu. The retired ``role``
+    # tag was removed (slot ``name`` is the routing key) so hal0/utility
+    # resolves only to a slot literally named `utility`. hal0/npu is
+    # special-cased to match by device, then falls back to the anchor.
     npu_utility = utility is None and _has_ready_npu_llm_slot(slots)
     for task in _UTILITY_AUX_TASKS:
         if utility is not None:

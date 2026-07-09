@@ -10,7 +10,6 @@ device = "npu"
 runtime = "container"
 profile = "flm"
 type = "llm"
-role = "npu"
 enabled = false
 
 [model]
