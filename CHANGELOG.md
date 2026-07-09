@@ -21,11 +21,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-## [0.9.5.3] — 2026-07-09
-
-### Fixed
-- **Top-bar GPU/CPU digit values now centered in their cells.** The `.th-digit` cell (MHz sclk / temp C / watts on the GPU widget; util + temp C on the CPU/Memory widget) was inheriting default left-alignment for both the value and the caption, while the arch on the left of the same row centers its % value inside its 118 px container — so the short numeric values ("600", "40°", "40") floated off the left of their grid column and looked visually unaligned with the centered arch reading. Add `text-align: center` on `.th-digit` so the value+caption stack centers in its column and reads as one aligned block under the arch. Applies to both `.c3` (GPU) and `.c2` (CPU/Memory) because both consume the same `.th-digit` cells.
-
 ## [0.9.5.2] — 2026-07-09
 
 ### Fixed
