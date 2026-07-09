@@ -1627,11 +1627,6 @@
 }
 .th-digits.c3 { grid-template-columns: repeat(3, 1fr); }
 .th-digits.c2 { grid-template-columns: repeat(2, 1fr); }
-.th-digit {
-  /* center value+caption in the cell so they sit visually under the
-     arch's centered % on the left, instead of the default left-align. */
-  text-align: center;
-}
 .th-digit .v {
   font-family: var(--jbm);
   font-size: 22px;
