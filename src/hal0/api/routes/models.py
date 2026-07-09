@@ -383,7 +383,12 @@ async def list_catalogue() -> dict[str, Any]:
     upstream: list[dict[str, Any]] = []
     for entry in CURATED:
         if isinstance(entry, CuratedModel):
-            pullable.append(entry.model_dump(mode="json"))
+            # Only HF-coordinate entries are pullable. FLM/NPU-served curated
+            # entries (empty hf_repo, recommended_slot="flm") are neither
+            # HF-pullable nor haloai-upstream — the FLM slot serves them
+            # locally — so they don't appear in this pull/upstream split.
+            if entry.hf_repo:
+                pullable.append(entry.model_dump(mode="json"))
         elif isinstance(entry, HaloaiModel):
             upstream.append(entry.model_dump(mode="json"))
     return {
@@ -1939,6 +1944,28 @@ _INSPECT_GGUF_SUFFIX = ".gguf"
 # files in repo" and a vision pull silently ships without a projector.
 _INSPECT_MMPROJ_SUFFIX = ".mmproj"
 
+_INSPECT_FLM_TOKENIZERS = ("tokenizer.json", "tokenizer.model")
+
+
+def _looks_like_flm_repo(rel_basenames: set[str]) -> bool:
+    """True when an HF repo tree has the FastFlowLM (NPU) model shape.
+
+    FLM models aren't a single GGUF — they're a HF-Transformers-shaped
+    directory (``config.json`` + a tokenizer + NPU-quant weights, e.g.
+    ``model.q4nx``), so the ``.gguf``/``.mmproj`` variant filter skips every
+    file and the repo inspects as "no variants".
+
+    Detected by dir shape rather than a brittle weight-extension allowlist:
+    ``config.json`` + tokenizer + at least one NPU-quant weight blob matched
+    by the FastFlowLM ``…nx`` quant family (``model.q4nx`` and future levels).
+    Requiring the ``nx`` blob is what keeps a plain GGUF/safetensors repo —
+    which shares ``config.json``/``tokenizer`` — from being misread as FLM.
+    """
+    has_config = "config.json" in rel_basenames
+    has_tokenizer = any(t in rel_basenames for t in _INSPECT_FLM_TOKENIZERS)
+    has_npu_weight = any("." in n and n.endswith("nx") for n in rel_basenames)
+    return has_config and has_tokenizer and has_npu_weight
+
 
 class _HFUpstreamError(Hal0Error):
     """502 — fetching huggingface.co failed (network, 5xx, or unparseable)."""
@@ -2065,6 +2092,8 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
         meta_payload = {}
 
     variants: list[dict[str, Any]] = []
+    rel_basenames: set[str] = set()
+    flm_total_bytes = 0
     for entry in tree_payload:
         if not isinstance(entry, dict):
             continue
@@ -2072,14 +2101,7 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
         if not isinstance(rel, str):
             continue
         rel_low = rel.lower()
-        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
-        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
-        # the modal filters it out of the main variant dropdown (by the
-        # "mmproj" token) and into the vision picker. Guard on the token too so
-        # an unrelated ``.mmproj`` never slips into the main list.
-        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
-        if not (is_gguf or is_mmproj):
-            continue
+        rel_basenames.add(rel_low.rsplit("/", 1)[-1])
         # HF's tree API reports the *pointer file* size in ``size`` for
         # LFS objects; the real bytes live under ``lfs.size``. Prefer
         # the LFS size when present so the modal shows the real
@@ -2094,6 +2116,15 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
             size_bytes = int(size_raw) if size_raw is not None else 0
         except (TypeError, ValueError):
             size_bytes = 0
+        flm_total_bytes += size_bytes
+        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
+        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
+        # the modal filters it out of the main variant dropdown (by the
+        # "mmproj" token) and into the vision picker. Guard on the token too so
+        # an unrelated ``.mmproj`` never slips into the main list.
+        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
+        if not (is_gguf or is_mmproj):
+            continue
         # Use the GGUF filename as the canonical variant id — that's
         # also what the pull endpoint resolves against (hf_filename).
         kind_label = "mmproj sidecar" if (is_mmproj and not is_gguf) else "single file"
@@ -2106,6 +2137,21 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
             }
         )
     variants.sort(key=lambda v: v.get("size_bytes") or 0)
+    # FLM/NPU repos carry no GGUF variant but a config.json + tokenizer +
+    # ``…nx`` NPU-weight shape. Surface one whole-repo variant flagged
+    # ``flm`` so the dashboard routes the pull through the FLM path
+    # (``flm pull``) instead of the GGUF hf-download path, rather than
+    # showing the repo as having nothing to pull.
+    if not variants and _looks_like_flm_repo(rel_basenames):
+        variants.append(
+            {
+                "id": repo,
+                "size_bytes": flm_total_bytes,
+                "size": _format_size(flm_total_bytes),
+                "info": _format_size(flm_total_bytes) + " · FLM (NPU) — served via `flm pull`",
+                "flm": True,
+            }
+        )
 
     tags_raw = meta_payload.get("tags") or []
     tags = [t for t in tags_raw if isinstance(t, str)]

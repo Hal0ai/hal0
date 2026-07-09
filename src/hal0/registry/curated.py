@@ -71,7 +71,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -177,6 +177,21 @@ class CuratedModel(BaseModel):
             "See tests/registry/test_curation_drift.py (#500)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_deployable_source(self) -> CuratedModel:
+        """Every curated model must have a deployable source: either HF pull
+        coordinates (``hf_repo`` + ``hf_file``) or an FLM-served NPU entry
+        (``npu`` tag with ``recommended_slot="flm"``). Guards against catalogue
+        entries that appear in the UI but have nothing to pull or serve."""
+        if self.hf_repo and self.hf_file:
+            return self
+        if "npu" in self.tags and self.recommended_slot == "flm":
+            return self
+        raise ValueError(
+            f"curated model {self.id!r} has no deployable source: needs "
+            "hf_repo + hf_file, or an 'npu' tag with recommended_slot='flm'"
+        )
 
 
 # ── The catalogue ──────────────────────────────────────────────────────────

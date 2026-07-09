@@ -37,8 +37,13 @@ def test_catalogue_entries_have_hf_coordinates() -> None:
     allowed_suffixes = (".gguf", ".safetensors", ".ckpt", ".bin")
     for m in CURATED_MODELS:
         if m.tags and "npu" in m.tags:
+            # NPU models are served via FLM, not GGUF — no hf_repo pull. But
+            # they must still be deployable: assert the FLM slot coordinate
+            # instead of a bare skip (guards against undeployable entries).
+            assert m.recommended_slot == "flm", (
+                f"{m.id}: npu-tagged entry must set recommended_slot='flm'"
+            )
             continue
-        # NPU models are served via FLM, not GGUF — skip hf_repo check.
         assert m.hf_repo, f"{m.id}: hf_repo is required"
         assert m.hf_file, f"{m.id}: hf_file is required"
         if m.bundle_only:

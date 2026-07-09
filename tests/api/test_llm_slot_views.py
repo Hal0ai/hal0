@@ -21,7 +21,6 @@ async def test_llm_slot_views_filters_and_projects():
             "type": "llm",
             "enabled": True,
             "device": "gpu-vulkan",
-            "role": None,
             "model": {"default": "big", "context_size": 65536},
         },
         {
@@ -29,7 +28,6 @@ async def test_llm_slot_views_filters_and_projects():
             "type": "llm",
             "enabled": True,
             "device": "gpu-vulkan",
-            "role": "utility",
             "model": {"default": "tiny", "context_size": 8192},
         },
         {
@@ -37,7 +35,6 @@ async def test_llm_slot_views_filters_and_projects():
             "type": "llm",
             "enabled": True,
             "device": "npu",
-            "role": None,
             "model": {"default": "flm", "ctx_size": 32768},
         },
         {"name": "embed", "type": "embedding", "enabled": True, "model": {"default": "e5"}},
@@ -49,7 +46,6 @@ async def test_llm_slot_views_filters_and_projects():
     assert set(by_name) == {"primary", "utility", "agent"}
     assert by_name["primary"]["device"] == "gpu-vulkan"
     assert by_name["primary"]["context_length"] == 65536
-    assert by_name["utility"]["role"] == "utility"
     assert by_name["utility"]["context_length"] == 8192
     # ctx_size key (not context_size) must also be read correctly
     assert by_name["agent"]["context_length"] == 32768
@@ -70,7 +66,6 @@ async def test_llm_slot_views_translates_flm_id_to_colon_tag():
             "type": "llm",
             "enabled": True,
             "device": "npu",
-            "role": "utility",
             "model": {"default": "gemma4-it-e2b-FLM", "context_size": 18000},
         },
     ]
@@ -78,4 +73,3 @@ async def test_llm_slot_views_translates_flm_id_to_colon_tag():
     with patch("hal0.providers.flm.flm_served_models", lambda: fake_catalog):
         views = await hal0_llm_slot_views(_FakeSlotManager(cfgs))
     assert views[0]["model_id"] == "gemma4-it:e2b"
-    assert views[0]["role"] == "utility"

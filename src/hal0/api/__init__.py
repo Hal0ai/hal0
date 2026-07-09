@@ -413,10 +413,11 @@ async def hal0_llm_slot_views(
     slot_manager: SlotManager,
     model_registry: ModelRegistry | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one dict per enabled llm slot: {name, role, device, model_id, context_length}.
+    """Return one dict per enabled llm slot: {name, device, model_id, context_length}.
 
     Source for normalize.LiveSlotResolver's SlotView list. Mirrors
-    hal0_chat_slot_alias_map's iteration but carries role + device + context.
+    hal0_chat_slot_alias_map's iteration but carries device + context (the
+    legacy ``role`` field was retired — slot identity is the name).
     """
     try:
         cfgs = await slot_manager.iter_configs()
