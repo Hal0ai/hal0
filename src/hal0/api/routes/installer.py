@@ -289,7 +289,10 @@ _SLOT_META: dict[str, tuple[str, str, int]] = {
     "embed": ("embed", "embed", 8083),
     "stt": ("stt", "stt", 8084),
     "tts": ("tts", "tts", 8085),
-    "img": ("img", "img", 8186),
+    # 8188 is ComfyUI's canonical port: the img.toml seed, the slot
+    # port-range special case (schema.py), and the /services repair
+    # mapping below all assume the img slot owns :8188.
+    "img": ("img", "img", 8188),
 }
 
 

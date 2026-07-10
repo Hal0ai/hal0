@@ -61,8 +61,10 @@ PANE_COPY: dict[str, PaneCopy] = {
     ),
     "npu": PaneCopy(
         "Free up your GPU",
-        "Your NPU can run embeddings, speech-to-text, and text-to-speech in "
-        "parallel — leaving the GPU for chat. Recommended when present.",
+        "Route speech-to-text to your NPU, leaving the GPU for chat. "
+        "Recommended when present. The full FLM trio (chat + ASR + embed "
+        "on one NPU column) is enabled per-slot from the dashboard's NPU "
+        "drawer after setup.",
     ),
     "npu_broken": PaneCopy(
         "NPU needs attention",
