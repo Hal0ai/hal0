@@ -72,59 +72,27 @@ def test_chat_on_keeps_positional_tag() -> None:
     assert spec.command[:2] == ["serve", "gemma3:4b"]
 
 
-def test_asr_model_override_emits_flag() -> None:
-    """A non-default [npu].asr_model reaches --asr-model on the container path."""
+def test_no_per_role_model_flags() -> None:
+    """FLM has no --asr-model / --embed-model — --asr / --embed are booleans
+    that load FLM's single bundled whisper / embed-gemma. We must NEVER emit a
+    per-role model flag (passing an unknown option crashes ``flm serve``)."""
     spec = FLMProvider().container_spec(
-        _slot_cfg(npu={"asr": True, "asr_model": "whisper-v3:large"}), _model_info()
-    )
-    idx = spec.command.index("--asr-model")
-    assert spec.command[idx + 1] == "whisper-v3:large"
-
-
-def test_embed_model_override_emits_flag() -> None:
-    spec = FLMProvider().container_spec(
-        _slot_cfg(npu={"embed": True, "embed_model": "embed-gemma:1b"}), _model_info()
-    )
-    idx = spec.command.index("--embed-model")
-    assert spec.command[idx + 1] == "embed-gemma:1b"
-
-
-def test_default_role_model_is_elided() -> None:
-    """An override equal to FLM's default is NOT re-emitted — the bare
-    ``--asr 1`` / ``--embed 1`` already selects it."""
-    spec = FLMProvider().container_spec(
-        _slot_cfg(
-            npu={
-                "asr": True,
-                "asr_model": "whisper-v3:turbo",
-                "embed": True,
-                "embed_model": "embed-gemma:300m",
-            }
-        ),
-        _model_info(),
+        _slot_cfg(npu={"chat": True, "asr": True, "embed": True}), _model_info()
     )
     assert "--asr-model" not in spec.command
     assert "--embed-model" not in spec.command
-
-
-def test_role_model_ignored_when_modality_off() -> None:
-    """A model override for a disabled modality is not emitted."""
-    spec = FLMProvider().container_spec(
-        _slot_cfg(npu={"asr": False, "asr_model": "whisper-v3:large"}), _model_info()
-    )
-    assert "--asr" not in spec.command
-    assert "--asr-model" not in spec.command
+    assert "--asr" in spec.command and "--embed" in spec.command
 
 
 def test_start_cmd_matches_container_role_args() -> None:
-    """Native start_cmd and container_spec build the same shadow-role tail so
+    """Native start_cmd and container_spec build the same --asr/--embed tail so
     the two paths can never drift (they share _flm_shadow_role_args)."""
-    cfg = _slot_cfg(npu={"asr": True, "asr_model": "whisper-v3:large", "embed": True})
+    cfg = _slot_cfg(npu={"asr": True, "embed": True})
     provider = FLMProvider()
     env = provider.build_env(cfg, _model_info())
     argv = provider.start_cmd(env)
     spec = provider.container_spec(cfg, _model_info())
-    for flag in ("--asr", "--asr-model", "whisper-v3:large", "--embed"):
+    for flag in ("--asr", "--embed"):
         assert flag in argv and flag in spec.command
 
 

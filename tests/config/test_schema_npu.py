@@ -58,15 +58,8 @@ def test_npu_tucked_into_extra_on_dump() -> None:
     )
     data = slot.model_dump()
     assert "npu" not in data
-    # chat defaults to True (4d7a5745 feat(schema): add chat field to NpuConfig);
-    # asr_model/embed_model default to None (per-role FLM tag overrides).
-    assert data["extra"]["npu"] == {
-        "asr": True,
-        "embed": False,
-        "chat": True,
-        "asr_model": None,
-        "embed_model": None,
-    }
+    # chat defaults to True (4d7a5745 feat(schema): add chat field to NpuConfig).
+    assert data["extra"]["npu"] == {"asr": True, "embed": False, "chat": True}
 
 
 def test_npu_chat_default_on() -> None:

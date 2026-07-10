@@ -451,8 +451,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
   const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
   const [npuChatModel, setNpuChatModel] = useStateSM(slot?.model_id || slot?.model || 'qwen3:4b');
-  const [npuAsrModel, setNpuAsrModel] = useStateSM(slot?.npu?.asr_model || 'whisper-v3:turbo');
-  const [npuEmbedModel, setNpuEmbedModel] = useStateSM(slot?.npu?.embed_model || 'embed-gemma:300m');
   const [npuPending, setNpuPending] = useStateSM(false);
   const [npuErr, setNpuErr] = useStateSM(null);
   const [flmModels, setFlmModels] = useStateSM([]);
@@ -483,19 +481,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
     const asr = over.asr ?? npuAsr;
     const embed = over.embed ?? npuEmbed;
     const chatModel = over.chatModel ?? npuChatModel;
-    const asrModel = over.asrModel ?? npuAsrModel;
-    const embedModel = over.embedModel ?? npuEmbedModel;
     setNpuPending(true);
     setNpuErr(null);
-    // [npu] carries the modality toggles + per-role model overrides; FLM emits
-    // --asr-model / --embed-model from these (elided when they equal the
-    // default). The chat model is FLM's positional tag, sent as a nested
-    // [model] table so the backend merge preserves sibling keys
-    // (context_size, n_gpu_layers) instead of clobbering them with a string.
-    const npuBody = { chat, asr, embed };
-    if (asr && asrModel) npuBody.asr_model = asrModel;
-    if (embed && embedModel) npuBody.embed_model = embedModel;
-    const body = { npu: npuBody };
+    // [npu] carries the modality toggles (asr/embed are boolean — FLM loads its
+    // one bundled whisper / embed-gemma, no per-role model choice). The chat
+    // model is FLM's positional tag, sent as a nested [model] table so the
+    // backend merge preserves sibling keys (context_size, n_gpu_layers)
+    // instead of clobbering them with a bare string.
+    const body = { npu: { chat, asr, embed } };
     if (chat && chatModel) body.model = { default: chatModel };
     try {
       await editMut.mutateAsync({ name: slot.name, body });
@@ -505,20 +498,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
       window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${field} updated — restarting`, "info");
     } catch (err) {
       setNpuChat(npuChat); setNpuAsr(npuAsr); setNpuEmbed(npuEmbed);
-      setNpuChatModel(npuChatModel); setNpuAsrModel(npuAsrModel); setNpuEmbedModel(npuEmbedModel);
+      setNpuChatModel(npuChatModel);
       setNpuErr(err?.message || "NPU toggle failed");
     } finally {
       setNpuPending(false);
     }
   };
 
-  // Pick a model in a role's dropdown. Installed → apply immediately.
-  // Not-yet-downloaded → start the FLM pull and remember the target; the
-  // completion effect below auto-applies it once the weights land.
+  // Pick the chat model. Installed → apply immediately. Not-yet-downloaded →
+  // start the FLM pull and remember the target; the completion effect below
+  // auto-applies it once the weights land. (ASR/Embed have no model choice.)
   const onPickNpuModel = (role, field, tag) => {
-    if (field === "chatModel") setNpuChatModel(tag);
-    else if (field === "asrModel") setNpuAsrModel(tag);
-    else if (field === "embedModel") setNpuEmbedModel(tag);
+    setNpuChatModel(tag);
     const entry = flmModels.find(m => m.model === tag);
     if (entry && entry.installed === false) {
       setNpuErr(null);
@@ -584,8 +575,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // drifting until the drawer is remounted.
       setNpuChat(slot.npu?.chat !== false);
       setNpuChatModel(slot.model_id || slot.model || 'qwen3:4b');
-      setNpuAsrModel(slot.npu?.asr_model || 'whisper-v3:turbo');
-      setNpuEmbedModel(slot.npu?.embed_model || 'embed-gemma:300m');
       setNpuPending(false);
       setNpuErr(null);
     }
@@ -1171,8 +1160,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
         // `installed`, so any tag can be picked and pulled on demand. Lane
         // split by tag family (whisper → ASR, embed → Embed, else Chat).
         const chatModels = flmModels.filter(m => m.model && !m.model?.toLowerCase().includes('whisper') && !m.model?.toLowerCase().includes('embed'));
-        const sttModels = flmModels.filter(m => m.model?.toLowerCase().includes('whisper'));
-        const embedModels = flmModels.filter(m => m.model?.toLowerCase().includes('embed'));
         // Non-installed options carry a ⬇ marker; picking one downloads first.
         const optLabel = (m) => m.installed ? m.model : `${m.model}  ⬇ download`;
         // True while THIS tag is downloading (used to gate + show progress).
@@ -1201,57 +1188,42 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     {chatModels.map(m => <option key={m.model} value={m.model}>{optLabel(m)}</option>)}
                   </select>
                   {pulling(npuChatModel) && <span style={{fontSize:11,color:'var(--accent)'}}>⬇ {pullPct}</span>}
-                  {!pulling(npuChatModel) && !npuChat && npuAsr && npuAsrModel === npuChatModel && <span style={{fontSize:11,color:'var(--fg-5)'}}>→ primary</span>}
                 </span>
               </div>
             </div>
             <div className="form-row">
               <div className="form-lbl">
                 <span>NPU · ASR</span>
-                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
+                <span className="sub">Serve speech-to-text (whisper) on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
                 <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
                   <PillToggle
                     on={npuAsr}
-                    disabled={npuPending || saving}
+                    disabled={npuPending || saving || pull.inFlight}
                     label="ASR"
                     stateText={npuAsr ? "On" : "Off"}
                     onToggle={(next) => { setNpuAsr(next); applyNpu({ asr: next }, "ASR"); }}
                   />
-                  <select className="input mono" style={{width: 200}} value={npuAsrModel}
-                    onChange={e => onPickNpuModel("ASR", "asrModel", e.target.value)}
-                    disabled={npuPending || saving || !npuAsr || pull.inFlight}
-                  >
-                    {sttModels.map(m => <option key={m.model} value={m.model}>{optLabel(m)}</option>)}
-                  </select>
-                  {pulling(npuAsrModel) && <span style={{fontSize:11,color:'var(--accent)'}}>⬇ {pullPct}</span>}
-                  {!pulling(npuAsrModel) && !npuChat && npuAsr && <span style={{fontSize:11,color:'var(--ok)'}}>primary</span>}
+                  <span style={{fontSize:11,color:'var(--fg-5)'}}>whisper-v3 (fixed)</span>
                 </span>
               </div>
             </div>
             <div className="form-row">
               <div className="form-lbl">
                 <span>NPU · Embed</span>
-                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
+                <span className="sub">Serve embeddings (embed-gemma) on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
                 <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
                   <PillToggle
                     on={npuEmbed}
-                    disabled={npuPending || saving}
+                    disabled={npuPending || saving || pull.inFlight}
                     label="Embed"
                     stateText={npuEmbed ? "On" : "Off"}
                     onToggle={(next) => { setNpuEmbed(next); applyNpu({ embed: next }, "Embed"); }}
                   />
-                  <select className="input mono" style={{width: 200}} value={npuEmbedModel}
-                    onChange={e => onPickNpuModel("Embed", "embedModel", e.target.value)}
-                    disabled={npuPending || saving || !npuEmbed || pull.inFlight}
-                  >
-                    {embedModels.map(m => <option key={m.model} value={m.model}>{optLabel(m)}</option>)}
-                  </select>
-                  {pulling(npuEmbedModel) && <span style={{fontSize:11,color:'var(--accent)'}}>⬇ {pullPct}</span>}
-                  {!pulling(npuEmbedModel) && !npuChat && !npuAsr && npuEmbed && <span style={{fontSize:11,color:'var(--ok)'}}>primary</span>}
+                  <span style={{fontSize:11,color:'var(--fg-5)'}}>embed-gemma (fixed)</span>
                 </span>
               </div>
             </div>

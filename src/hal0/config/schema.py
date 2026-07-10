@@ -192,22 +192,10 @@ class NpuConfig(BaseModel):
         default=True,
         description="Enable chat (LLM) modality on the FLM slot. Default ON.",
     )
-    asr_model: str | None = Field(
-        default=None,
-        description=(
-            "FLM tag to serve for ASR (e.g. 'whisper-v3:turbo'). None → FLM's "
-            "default whisper model. Emitted as ``--asr-model`` only when it "
-            "differs from the default. Ignored unless ``asr`` is on."
-        ),
-    )
-    embed_model: str | None = Field(
-        default=None,
-        description=(
-            "FLM tag to serve for embeddings (e.g. 'embed-gemma:300m'). None → "
-            "FLM's default embed model. Emitted as ``--embed-model`` only when "
-            "it differs from the default. Ignored unless ``embed`` is on."
-        ),
-    )
+    # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
+    # boolean flags that load FLM's single bundled whisper + embed-gemma. There
+    # is deliberately no asr_model/embed_model here; the chat model is the
+    # ``flm serve`` positional tag ([model].default) and is the only choice.
 
 
 class ImageGenConfig(BaseModel):

@@ -141,14 +141,6 @@ def _ensure_flm_models_dir(path: str) -> None:
         pass
 
 
-# ── FLM per-role model defaults ────────────────────────────────────────────────
-# The tags FLM loads for the shadow roles when no explicit override is given.
-# An override equal to the default is elided from the argv (the bare ``--asr 1``
-# / ``--embed 1`` already selects it), so these must match FLM's own defaults.
-_DEFAULT_ASR_MODEL = "whisper-v3:turbo"
-_DEFAULT_EMBED_MODEL = "embed-gemma:300m"
-
-
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
@@ -210,25 +202,19 @@ def _npu_device_nodes() -> list[str]:
 
 
 def _flm_shadow_role_args(env: dict[str, str]) -> list[str]:
-    """Build the ``--embed`` / ``--asr`` (+ per-role ``--*-model``) argv tail.
+    """Build the ``--embed`` / ``--asr`` argv tail.
 
     Shared by :meth:`FLMProvider.start_cmd` (native) and
     :meth:`FLMProvider.container_spec` (primary) so the two paths can never
-    drift. A per-role model override is emitted only when it is set AND
-    differs from FLM's bundled default — the bare ``--embed 1`` / ``--asr 1``
-    already selects the default, and passing it explicitly is redundant.
+    drift. FLM's ``--embed`` / ``--asr`` are booleans: each loads FLM's single
+    bundled model (embed-gemma / whisper) — there is NO ``--embed-model`` /
+    ``--asr-model`` flag, so nothing per-role to emit here.
     """
     args: list[str] = []
     if env.get("HAL0_FLM_LOAD_EMBED") == "1":
         args += ["--embed", "1"]
-        embed_model = env.get("HAL0_FLM_EMBED_MODEL") or ""
-        if embed_model and embed_model != _DEFAULT_EMBED_MODEL:
-            args += ["--embed-model", embed_model]
     if env.get("HAL0_FLM_LOAD_ASR") == "1":
         args += ["--asr", "1"]
-        asr_model = env.get("HAL0_FLM_ASR_MODEL") or ""
-        if asr_model and asr_model != _DEFAULT_ASR_MODEL:
-            args += ["--asr-model", asr_model]
     return args
 
 
@@ -301,12 +287,6 @@ class FLMProvider(Provider):
 
         npu_table = slot_cfg.get("npu") or {}
         defaults = slot_cfg.get("defaults") or {}
-        # Per-role model overrides live on the [npu] table (asr_model /
-        # embed_model). Empty string when unset → argv construction elides
-        # the ``--asr-model`` / ``--embed-model`` flag and FLM serves its
-        # bundled default.
-        asr_model = str(npu_table.get("asr_model") or "")
-        embed_model = str(npu_table.get("embed_model") or "")
         if slot_cfg.get("npu") is not None:
             # [npu] table is PRIMARY when present — explicit asr=false must
             # win even if stale legacy defaults say otherwise.
@@ -330,20 +310,14 @@ class FLMProvider(Provider):
             "HAL0_FLM_LOAD_ASR": load_asr,
             "HAL0_FLM_LOAD_EMBED": load_embed,
             "HAL0_FLM_LOAD_CHAT": load_chat,
-            "HAL0_FLM_ASR_MODEL": asr_model,
-            "HAL0_FLM_EMBED_MODEL": embed_model,
         }
 
     def start_cmd(self, env: dict[str, str]) -> list[str]:
         """Return argv for the native ``flm serve`` invocation.
 
         Used by tests and the fallback systemd-without-Docker path. The
-        primary deployment path is ``container_spec``.
-
-        Per-role model overrides come from the [npu] table via
-        :meth:`build_env` (``HAL0_FLM_ASR_MODEL`` / ``HAL0_FLM_EMBED_MODEL``);
-        an override equal to FLM's default is elided so the argv matches the
-        container path exactly.
+        primary deployment path is ``container_spec``. Shares the
+        ``--embed`` / ``--asr`` tail with it via :func:`_flm_shadow_role_args`.
         """
         binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
         argv = [binary, "serve"]
@@ -591,6 +565,58 @@ class FLMProvider(Provider):
                         "status": "sentinel_completion_no_choices",
                         "model": model_id,
                     }
+            return {"ok": True, "status": "ready", "model": model_id}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "status": "http_error", "detail": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "status": "exception", "detail": str(exc)}
+
+    async def verify_embed(self, port: int) -> dict[str, Any]:
+        """One-shot embeddings gate — a single ``/v1/embeddings`` call.
+
+        The warm→ready sentinel for FLM slots serving EMBED without CHAT
+        (``[npu].chat=false``): :meth:`verify_inference`'s chat completion
+        would fail because no chat model is loaded, wedging the slot in
+        WARMING forever. This exercises the embed path instead — the actual
+        role the slot serves — so an embed-primary slot can promote to READY.
+
+        Mirrors :meth:`verify_inference`: reads ``/v1/models`` for the served
+        model id, then a single shielded ``/v1/embeddings`` POST (shield: never
+        hand FLM a cancelled request → NPU double-free). Never raises; a
+        transport failure resolves to ``ok=False`` (retryable WARMING).
+        """
+        models_url = f"http://127.0.0.1:{port}/v1/models"
+        embed_url = f"http://127.0.0.1:{port}/v1/embeddings"
+        try:
+            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+                models_resp = await client.get(models_url)
+                models_resp.raise_for_status()
+                data = models_resp.json()
+                models = data.get("data", [])
+                if not models:
+                    return {
+                        "ok": False,
+                        "status": "models_endpoint_empty",
+                        "detail": "/v1/models returned no entries",
+                    }
+                model_id = models[0].get("id")
+
+            async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
+                probe_body = {"model": model_id, "input": "ping"}
+                resp = await asyncio.shield(client.post(embed_url, json=probe_body))
+                if resp.status_code != 200:
+                    return {
+                        "ok": False,
+                        "status": f"sentinel_embed_http_{resp.status_code}",
+                        "detail": resp.text[:200],
+                        "model": model_id,
+                    }
+                try:
+                    body = resp.json()
+                except Exception:
+                    return {"ok": False, "status": "sentinel_embed_unparseable", "model": model_id}
+                if not body.get("data"):
+                    return {"ok": False, "status": "sentinel_embed_no_data", "model": model_id}
             return {"ok": True, "status": "ready", "model": model_id}
         except httpx.HTTPError as exc:
             return {"ok": False, "status": "http_error", "detail": str(exc)}
