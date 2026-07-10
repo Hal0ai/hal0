@@ -1088,7 +1088,18 @@ const BOARD_CHAT_MODEL = 'hal0/brain'
 // content: the backend already splits these into `thinking` frames, but an
 // older backend streaming raw think-tags must never show them in the bubble.
 function splitThink(text: string): { thinking: string; visible: string } {
-  if (!text.includes('<think>')) return { thinking: '', visible: text }
+  if (!text.includes('<think>')) {
+    // R1-style templates prefill the opening tag, so content may carry only
+    // the closing tag — everything before it is reasoning.
+    const close = text.indexOf('</think>')
+    if (close !== -1) {
+      return {
+        thinking: text.slice(0, close).trim(),
+        visible: text.slice(close + '</think>'.length).replace(/^\s+/, ''),
+      }
+    }
+    return { thinking: '', visible: text }
+  }
   const parts: string[] = []
   let visible = text.replace(/<think>([\s\S]*?)<\/think>/g, (_m, inner: string) => {
     if (inner.trim()) parts.push(inner.trim())

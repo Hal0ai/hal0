@@ -45,8 +45,13 @@ function mdInline(text, keyBase) {
         out.push(<em key={key}>{seg.slice(1, -1)}</em>);
       } else if (seg.startsWith("[")) {
         const m = seg.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-        if (m) out.push(<a href={m[2]} target="_blank" rel="noreferrer" key={key}>{m[1]}</a>);
-        else out.push(seg);
+        // Model output is attacker-influenceable (tool results, task titles fed
+        // back into context) — only linkify http(s); anything else stays text.
+        if (m && /^https?:\/\//i.test(m[2].trim())) {
+          out.push(<a href={m[2].trim()} target="_blank" rel="noreferrer" key={key}>{m[1]}</a>);
+        } else {
+          out.push(seg);
+        }
       } else {
         out.push(seg);
       }

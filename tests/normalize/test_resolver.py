@@ -36,6 +36,26 @@ def test_removed_aliases_are_unknown():
     assert resolve_chain("hal0/flm", _slots(), loaded={"qwen3-4b-FLM"}) is None
 
 
+def test_brain_falls_back_to_agent_when_no_brain_slot():
+    """hal0/brain is the dashboard agent-chat default. No installer seeds a
+    `brain` slot, so the canonical chain must degrade to the agent anchor on a
+    stock box instead of passing the name through unresolved (404)."""
+    r = resolve_chain("hal0/brain", _slots(), loaded={"big-35b"})
+    assert r is not None
+    assert r.model_id == "big-35b"
+    assert r.matched_name == "agent"
+
+
+def test_brain_prefers_brain_slot_when_present():
+    slots = [
+        *_slots(),
+        SlotView(name="brain", device="gpu-vulkan", model_id="brainy-8b", context_length=32768),
+    ]
+    r = resolve_chain("hal0/brain", slots, loaded={"brainy-8b", "big-35b"})
+    assert r.model_id == "brainy-8b"
+    assert r.matched_name == "brain"
+
+
 def test_npu_picks_npu_first_never_commandeers_agent():
     r = resolve_chain("hal0/npu", _slots(), loaded={"qwen3-4b-FLM", "big-35b"})
     assert r.model_id == "qwen3-4b-FLM"

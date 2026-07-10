@@ -691,6 +691,14 @@ def test_split_thinking_unterminated_tag() -> None:
     assert visible == ""
 
 
+def test_split_thinking_closing_tag_only() -> None:
+    """R1-style chat templates prefill the opening <think>, so the completion
+    can carry only the closing tag — everything before it is reasoning."""
+    thinking, visible = _split_thinking("chain of thought here</think>the reply")
+    assert thinking == "chain of thought here"
+    assert visible == "the reply"
+
+
 def test_split_thinking_passthrough_without_tags() -> None:
     thinking, visible = _split_thinking("plain reply")
     assert thinking == ""

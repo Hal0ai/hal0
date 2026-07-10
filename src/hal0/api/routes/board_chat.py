@@ -701,6 +701,11 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 def _split_thinking(content: str) -> tuple[str, str]:
     """Split ``<think>`` blocks out of assistant content → (thinking, visible)."""
     if "<think>" not in content:
+        # DeepSeek-R1-style chat templates prefill the opening tag, so the
+        # completion can start mid-reasoning and carry only a closing tag.
+        if "</think>" in content:
+            reasoning, _, visible = content.partition("</think>")
+            return reasoning.strip(), visible.strip()
         return "", content
     thinking_parts = _THINK_RE.findall(content)
     visible = _THINK_RE.sub("", content)
