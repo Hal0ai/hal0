@@ -1,0 +1,75 @@
+---
+title: Benchmark your models
+description: Run the in-tree hal0-bench engine — planned suites, a queue-driven worker, a weekly scheduled roster run, and the Benchmarks dashboard page — without disturbing live inference.
+sidebar:
+  order: 115
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+hal0 ships an in-tree benchmark engine (`hal0.bench`, since v0.9.6): a
+planner that works out which measurements are stale, a runner that executes
+them against the same container images your production slots serve, and a
+durable result store the **Benchmarks** dashboard page (roster / runs /
+evals / run-queue) reads through `/api/benchmarks/*`.
+
+```sh
+hal0 bench plan            # what's stale and why (no GPU, no writes)
+hal0 bench run             # execute the plan (or a slice)
+hal0 bench status          # recent records / session state
+hal0 bench results         # current values from bench.db
+hal0 bench history         # trend for a cell/model over time
+hal0 bench eval            # agentic task eval: score a model as a real agent
+```
+
+## What the installer sets up
+
+<Steps>
+
+1. **State store** — `/var/lib/hal0-bench` (override with
+   `HAL0_BENCH_STATE`): an append-only `records.jsonl` (the source of
+   truth), a derived `bench.db`, and an `artifacts/` directory. Kept on
+   uninstall unless `--purge`.
+
+2. **Operator-owned config** — suite definitions seeded no-clobber to
+   `/etc/hal0/bench/suites/*.toml` (`smoke`, `roster`, `lane-matrix`,
+   `concurrency`) plus `/etc/hal0/bench/window.toml`, the politeness
+   policy for scheduled runs.
+
+3. **Three systemd units** —
+   `hal0-bench.timer` fires `hal0-bench.service`
+   (`hal0 bench run --suite roster --scheduled`) weekly, Sunday 03:00
+   local with a randomized delay; `hal0-bench-worker.service` drains the
+   dashboard's run queue. The worker is **inert by default** — it touches
+   the GPU only after you press Start on the dashboard (or POST to
+   `/api/benchmarks/queue`).
+
+4. **A scoped sudo seam** — `/etc/sudoers.d/hal0-benchctl` lets the
+   `hal0` user stop/restart GPU consumers through the `hal0-benchctl`
+   helper only. The bench units are deliberately *not* sandboxed with
+   `NoNewPrivileges` because that would block this seam.
+
+</Steps>
+
+## Scheduled runs are polite
+
+A `--scheduled` run only proceeds inside the `[window]` defined in
+`/etc/hal0/bench/window.toml` (default Sun 03:00–07:00 local) and only
+when the box looks idle: minimum idle minutes, battery and thermal checks.
+Any failed check makes the tick exit cleanly and try again next week —
+a scheduled run never preempts live inference.
+
+<Aside type="note">
+The bench runner records the **observed** engine image from the running
+slot, so results are always attributed to the exact container your slots
+serve — there is no separate bench runner image to keep in sync.
+</Aside>
+
+## Where results go
+
+- `hal0 bench results` / `history` query the local `bench.db`.
+- `hal0 bench publish` regenerates `roster.json` for consumers.
+- The dashboard's **Benchmarks** page shows the roster, individual runs,
+  agentic eval scores, and the run queue, live from `/api/benchmarks/*`.
+- `hal0 bench reindex` rebuilds `bench.db` from `records.jsonl` if the
+  derived store is ever lost — the JSONL is the durable record.

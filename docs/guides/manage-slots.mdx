@@ -246,6 +246,23 @@ editing the slot TOML (`mtp = true|false`, or omit the key entirely for
 Auto — TOML has no null, so "back to Auto" always means *deleting* the key,
 never writing `mtp = null`).
 
+### Image override
+
+A slot's container image resolves in three steps — first match wins:
+
+1. **`image`** — a top-level string in the slot TOML (distinct from the
+   `[image]` *table*, which is image-gen settings), set from the drawer's
+   **Image** row: a free-form text input with a live `will use:` preview of
+   the effective ref, plus a Reset button that clears the override.
+2. **`profile.image`** — the image pinned by the slot's runtime profile.
+3. **The code default** (`DEFAULT_ROCMFPX_IMAGE`) — so image bumps ship as
+   a code-only release and slots without an override track them
+   automatically.
+
+Leave the override empty unless you deliberately need to pin: `hal0 update`
+retags only pins that exactly match a *former* default image (stale
+materialized debris); any other value is treated as your choice and kept.
+
 ### Other drawer-only fields
 
 - **Reasoning toggle** (llm slots) — instant-apply
