@@ -963,11 +963,11 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
         {/* enqueue */}
         <h4 style={{ ...h4Style, margin: '1.1rem 0 0.5rem' }}>queue a run</h4>
         <div className="card" style={{ padding: '0.8rem 0.9rem', display: 'grid', gap: 10 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <select
               value={suite}
               onChange={e => setSuite(e.target.value)}
-              style={{ fontFamily: mono, fontSize: 11, padding: '5px 8px', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--rad, 6px)', color: 'var(--fg)', flex: 1 }}
+              style={{ fontFamily: mono, fontSize: 11, padding: '5px 8px', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--rad, 6px)', color: 'var(--fg)', flex: 1, minWidth: 180 }}
             >
               {suites.map(s => (
                 <option key={s} value={s}>
@@ -977,11 +977,11 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
             </select>
             <button className="btn sm" onClick={enqueueSuite}>Queue suite</button>
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <select
               value={modelPick}
               onChange={e => setModelPick(e.target.value)}
-              style={{ fontFamily: mono, fontSize: 11, padding: '5px 8px', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--rad, 6px)', color: 'var(--fg)', flex: 1 }}
+              style={{ fontFamily: mono, fontSize: 11, padding: '5px 8px', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--rad, 6px)', color: 'var(--fg)', flex: 1, minWidth: 180 }}
             >
               <option value="">single model from the roster&hellip;</option>
               {roster.map(m => <option key={m.id} value={m.id}>{m.name || cleanName(m.id)}</option>)}
