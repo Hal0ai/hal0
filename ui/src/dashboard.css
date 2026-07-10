@@ -307,6 +307,146 @@ a { color: inherit; text-decoration: none; }
   box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
 }
 
+/* Notification bell — icon-only launcher + anchored dropdown panel. */
+.tb-bell-wrap { position: relative; display: inline-flex; }
+.tb-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.tb-bell svg {
+  color: #fff;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55));
+  transition: color .16s ease, filter .16s ease;
+}
+.tb-bell:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.tb-bell:hover svg,
+.tb-bell.on svg,
+.tb-bell.has svg {
+  color: var(--accent);
+  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+.tb-bell.on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
+}
+.tb-bell-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #1a1408;
+  font-family: var(--jbm);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--bg-1);
+}
+.notif-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(380px, calc(100vw - 24px));
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-lg);
+  box-shadow: 0 18px 60px -12px rgba(0, 0, 0, 0.8);
+  z-index: 90;
+  overflow: hidden;
+}
+.notif-pop-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+}
+.notif-pop-h .ct { color: var(--fg-4); text-transform: none; letter-spacing: 0; }
+.notif-pop-body { max-height: min(60vh, 480px); overflow-y: auto; }
+.notif-sec { padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.notif-sec:last-child { border-bottom: none; }
+.notif-sec-h {
+  padding: 4px 14px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-4);
+}
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.notif-row:hover { background: var(--bg-2); }
+.notif-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-top: 4.5px;
+}
+.notif-dot.pulse { animation: notif-pulse 1.6s ease-in-out infinite; }
+@keyframes notif-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notif-dot.pulse { animation: none; }
+}
+.notif-row .notif-msg { flex: 1; min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.notif-row .notif-msg b { color: var(--fg); font-weight: 500; }
+.notif-row .notif-msg .mono { font-family: var(--jbm); font-size: 11px; }
+.notif-row .notif-body { display: block; color: var(--fg-3); font-size: 11.5px; margin-top: 2px; }
+.notif-act {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.notif-act:hover { color: var(--fg); border-color: var(--line-strong); }
+.notif-act:disabled { opacity: 0.5; cursor: default; }
+.notif-link {
+  display: block;
+  padding: 5px 14px 4px;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 10.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.notif-link:hover { text-decoration: underline; }
+.notif-empty { padding: 22px 14px; text-align: center; color: var(--fg-4); font-size: 11.5px; }
+
 /* wordmark — inline SVG renders at currentColor */
 .wm svg { display: block; }
 .wm .zero { fill: var(--accent); }

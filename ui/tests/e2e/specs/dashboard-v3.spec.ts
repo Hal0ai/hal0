@@ -28,7 +28,7 @@ test.describe('Dashboard v3 (/)', () => {
     await expect(page.locator('.sb-row.active .lbl')).toHaveText('Overview')
   })
 
-  test('topbar exposes brand + Kanban/Agent Chat launchers without stale host/bell chrome', async ({ page }) => {
+  test('topbar exposes brand + Kanban/Agent Chat launchers + notification bell without stale host chrome', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.tb-brand')).toBeVisible()
     // The old "Quick actions" button was replaced by two launchers.
@@ -38,6 +38,9 @@ test.describe('Dashboard v3 (/)', () => {
     await expect(page.locator('[data-testid="tb-launch-chat"]')).toContainText('Agent Chat')
     await expect(page.locator('.tb-cmdk')).toHaveCount(0)
     await expect(page.locator('.tb-host')).toHaveCount(0)
-    await expect(page.locator('.tb-bell')).toHaveCount(0)
+    // The notification bell is LIVE chrome (notification-bell-v3.spec.ts owns
+    // its behaviour) — distinct from the stale prototype bell this test used
+    // to pin the removal of.
+    await expect(page.locator('[data-testid="tb-bell"]')).toBeVisible()
   })
 })
