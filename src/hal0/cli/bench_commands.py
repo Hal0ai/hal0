@@ -14,16 +14,16 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).parent.parent.parent.parent / "installer" / "bench"
 sys.path.insert(0, str(BENCH_DIR))
 
-from planner import plan, load_suites, get_installed_models
-from runner import run_worklist
-from v2_store import (
-    ensure_v2_dir,
-    DEFAULT_V2_DIR,
-    DEFAULT_RECORDS_PATH,
+from planner import plan  # noqa: E402
+from runner import run_worklist  # noqa: E402
+from v2_store import (  # noqa: E402
     DEFAULT_DB_PATH,
-    search_records,
+    DEFAULT_RECORDS_PATH,
+    DEFAULT_V2_DIR,
     count_records,
+    ensure_v2_dir,
     get_trend,
+    search_records,
 )
 
 
@@ -78,7 +78,7 @@ def cmd_status(args):
     # Show recent records
     records = search_records(limit=5)
     if records:
-        print(f"\nRecent records:")
+        print("\nRecent records:")
         for row in records:
             print(f"  {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]}")
 
@@ -112,11 +112,11 @@ def cmd_history(args):
 def cmd_reindex(args):
     """Rebuild bench.db from records.jsonl."""
     ensure_v2_dir()
-    from v2_store import _refresh_sqlite
     # Rebuild by reading all records
     import json
-    from v2_store import DEFAULT_RECORDS_PATH, DEFAULT_DB_PATH
     import sqlite3
+
+    from v2_store import DEFAULT_DB_PATH, DEFAULT_RECORDS_PATH
 
     db_path = DEFAULT_DB_PATH
     conn = sqlite3.connect(str(db_path))
@@ -193,7 +193,7 @@ def cmd_publish(args):
     }
 
     for row in records:
-        run_id, suite, trigger, cell_key, outcome, summary = row
+        run_id, suite, _trigger, cell_key, outcome, summary = row
         if outcome != "ok":
             continue
         try:

@@ -4,36 +4,30 @@ Benchmarks API — read-only over bench.db + one action.
 Registered like throughput.py.
 """
 
-from fastapi import APIRouter, Query, HTTPException
-from typing import Optional
 import json
 from pathlib import Path
 
+from fastapi import APIRouter, HTTPException
+
 try:
-    from installer.bench.v2_store import (
-        ensure_v2_dir,
-        DEFAULT_V2_DIR,
-        DEFAULT_RECORDS_PATH,
-        DEFAULT_DB_PATH,
-        search_records,
-        count_records,
-        get_trend,
-    )
     from installer.bench.planner import plan
+    from installer.bench.v2_store import (
+        DEFAULT_RECORDS_PATH,
+        ensure_v2_dir,
+        get_trend,
+        search_records,
+    )
 except ImportError:
     # Fallback for direct execution
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "installer" / "bench"))
-    from v2_store import (
-        ensure_v2_dir,
-        DEFAULT_V2_DIR,
-        DEFAULT_RECORDS_PATH,
-        DEFAULT_DB_PATH,
-        search_records,
-        count_records,
-        get_trend,
-    )
     from planner import plan
+    from v2_store import (
+        DEFAULT_RECORDS_PATH,
+        ensure_v2_dir,
+        get_trend,
+        search_records,
+    )
 
 router = APIRouter(prefix="/api/benchmarks", tags=["benchmarks"])
 
@@ -55,7 +49,7 @@ def get_roster():
     }
 
     for row in records:
-        run_id, suite, trigger, cell_key, outcome, summary = row
+        run_id, suite, _trigger, cell_key, outcome, summary = row
         if outcome != "ok":
             continue
         try:
@@ -74,18 +68,18 @@ def get_roster():
 
 @router.get("/cells")
 def get_cells(
-    model: Optional[str] = None,
-    lane: Optional[str] = None,
-    depth: Optional[int] = None,
-    kind: Optional[str] = None,
-    since: Optional[str] = None,
+    model: str | None = None,
+    lane: str | None = None,
+    depth: int | None = None,
+    kind: str | None = None,
+    since: str | None = None,
 ):
     """Filtered current-value matrix (compare view)."""
     ensure_v2_dir()
     records = search_records(limit=1000)
     results = []
     for row in records:
-        run_id, suite, trigger, cell_key, outcome, summary = row
+        run_id, suite, _trigger, cell_key, outcome, summary = row
         if outcome != "ok":
             continue
         try:
@@ -102,7 +96,7 @@ def get_cells(
 
 
 @router.get("/runs")
-def get_runs(suite: Optional[str] = None, limit: int = 10):
+def get_runs(suite: str | None = None, limit: int = 10):
     """Session list (run groups w/ outcome counts)."""
     ensure_v2_dir()
     records = search_records(suite=suite, limit=limit)
