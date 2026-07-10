@@ -1012,7 +1012,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "",
     },
     "flm": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
+        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
         "flags": "",
         "mtp": False,
         "device_class": "npu",

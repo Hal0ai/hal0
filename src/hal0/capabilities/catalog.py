@@ -139,7 +139,7 @@ def tts_profile_for_device(device: str) -> str:
 # ── Backends ──────────────────────────────────────────────────────────────────
 
 
-_FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
+_FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
 
 
 # FLM tags hidden from the dashboard catalog because of upstream FLM

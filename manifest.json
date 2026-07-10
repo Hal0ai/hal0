@@ -15,9 +15,9 @@
       "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
     },
     "flm": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
-      "digest": "sha256:5f4c8a08a269077d8d24b1a93cfa39aebd1bfa10c868048796e8d2e5f589fcad",
-      "_notes": "FastFlowLM v0.9.43 on AMD XDNA2 NPU; requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest (confirmed post-push 2026-06-14)."
+      "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
+      "digest": "sha256:644c7d1ec0463a21159e291c91a01eeba256b5a0b29fea3ffa54ffd8a065f53b",
+      "_notes": "FastFlowLM v0.9.44 on AMD XDNA2 NPU; requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest (confirmed post-push 2026-07-10)."
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
