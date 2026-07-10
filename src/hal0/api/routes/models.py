@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
@@ -34,6 +34,7 @@ from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
     PullJobNotFound,
+    list_persisted_jobs,
     make_job,
     run_flm_pull,
     run_pull,
@@ -382,7 +383,12 @@ async def list_catalogue() -> dict[str, Any]:
     upstream: list[dict[str, Any]] = []
     for entry in CURATED:
         if isinstance(entry, CuratedModel):
-            pullable.append(entry.model_dump(mode="json"))
+            # Only HF-coordinate entries are pullable. FLM/NPU-served curated
+            # entries (empty hf_repo, recommended_slot="flm") are neither
+            # HF-pullable nor haloai-upstream — the FLM slot serves them
+            # locally — so they don't appear in this pull/upstream split.
+            if entry.hf_repo:
+                pullable.append(entry.model_dump(mode="json"))
         elif isinstance(entry, HaloaiModel):
             upstream.append(entry.model_dump(mode="json"))
     return {
@@ -956,6 +962,102 @@ def _lazy_quant(dumped: dict[str, Any]) -> str | None:
     return None
 
 
+@router.get("/pulls")
+async def list_pulls(request: Request) -> list[dict[str, Any]]:
+    """Return all pull jobs (active in-memory + persisted terminal from disk).
+
+    Dedup: in-memory jobs win over persisted snapshots for the same model_id.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    registry = request.app.state.model_registry
+
+    # Start with persisted TERMINAL jobs from disk.
+    # Non-terminal snapshots (e.g. "running" from a crash) are skipped
+    # — there is no matching in-memory job to reconcile them.
+    persisted = list_persisted_jobs()
+    by_model: dict[str, dict[str, Any]] = {}
+    for p in persisted:
+        state = p.get("state")
+        if state not in ("completed", "failed", "cancelled"):
+            continue
+        mid = p.get("model_id")
+        if isinstance(mid, str) and mid:
+            by_model[mid] = p
+
+    # Overlay in-memory jobs (they win — reflect live state)
+    for mid, job in jobs.items():
+        by_model[mid] = job.as_dict()
+
+    # Build response entries enriched with registry data
+    result: list[dict[str, Any]] = []
+    for mid, data in by_model.items():
+        entry = _pull_entry(data, mid, registry)
+        result.append(entry)
+
+    # Sort: active first, then by started_at descending
+    result.sort(
+        key=lambda e: (
+            0 if e.get("state") in ("queued", "running") else 1,
+            -(e.get("started_at") or 0),
+        )
+    )
+    return result
+
+
+def _pull_entry(data: dict[str, Any], model_id: str, registry: Any) -> dict[str, Any]:
+    """Build a downloads-pane entry from a pull-job snapshot dict."""
+    state = data.get("state", "unknown")
+    speed = _speed_for_entry(data, state)
+    eta = _eta_for_entry(data, state, speed)
+    hf_repo = _hf_repo_for_model(registry, model_id)
+
+    return {
+        "model_id": model_id,
+        "job_id": data.get("id"),
+        "state": state,
+        "bytes_downloaded": data.get("bytes_downloaded", 0),
+        "bytes_total": data.get("bytes_total", 0),
+        "speed_bps": speed,
+        "eta_s": eta,
+        "hf_repo": hf_repo,
+        "dest_path": data.get("path"),
+        "error": data.get("error"),
+        "started_at": data.get("started_at"),
+        "finished_at": data.get("finished_at"),
+    }
+
+
+def _speed_for_entry(data: dict[str, Any], state: str) -> float:
+    """Compute average bytes/s for a pull-job entry snapshot."""
+    if state not in ("queued", "running"):
+        return 0.0
+    started = data.get("started_at")
+    if not isinstance(started, (int, float)) or started <= 0:
+        return 0.0
+    elapsed = max(time.time() - started, 0.001)
+    return data.get("bytes_downloaded", 0) / elapsed
+
+
+def _eta_for_entry(data: dict[str, Any], state: str, speed: float) -> float | None:
+    """Estimate seconds-to-completion for a pull-job entry snapshot."""
+    if state not in ("queued", "running") or speed <= 0:
+        return None
+    total = data.get("bytes_total", 0)
+    if total <= 0:
+        return None
+    remaining = max(total - data.get("bytes_downloaded", 0), 0)
+    return remaining / speed
+
+
+def _hf_repo_for_model(registry: Any, model_id: str) -> str | None:
+    """Resolve the HF repo from the model registry, or None if unknown."""
+    try:
+        model = registry.get(model_id)
+        return getattr(model, "hf_repo", None) or None
+    except Exception:
+        return None
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
@@ -1201,6 +1303,45 @@ async def delete_model(
         "deleted": bool(removed),
         "affected_slots": affected_names,
     }
+
+
+@router.delete("/pulls/{model_id}", status_code=204)
+async def delete_pull(model_id: str, request: Request):
+    """Clear a terminal pull job from memory + disk.
+
+    Returns 409 if the job is still active (queued/running).
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+
+    # Check in-memory first — active jobs must not be cleared
+    job = jobs.get(model_id)
+    if job is not None and job.state in ("queued", "running"):
+        from hal0.errors import Conflict
+
+        raise Conflict(
+            f"pull job for {model_id!r} is still active (state={job.state})",
+            code="pull.active",
+            details={"model_id": model_id, "state": job.state},
+        )
+
+    # Remove from in-memory dict
+    deleted_mem = jobs.pop(model_id, None) is not None
+
+    # Remove persisted file
+    deleted_disk = False
+    with contextlib.suppress(OSError):
+        p = _pull_job_file(model_id)
+        if p.exists():
+            p.unlink()
+            deleted_disk = True
+
+    if not deleted_mem and not deleted_disk:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+
+    return Response(status_code=204)
 
 
 def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
@@ -1803,6 +1944,28 @@ _INSPECT_GGUF_SUFFIX = ".gguf"
 # files in repo" and a vision pull silently ships without a projector.
 _INSPECT_MMPROJ_SUFFIX = ".mmproj"
 
+_INSPECT_FLM_TOKENIZERS = ("tokenizer.json", "tokenizer.model")
+
+
+def _looks_like_flm_repo(rel_basenames: set[str]) -> bool:
+    """True when an HF repo tree has the FastFlowLM (NPU) model shape.
+
+    FLM models aren't a single GGUF — they're a HF-Transformers-shaped
+    directory (``config.json`` + a tokenizer + NPU-quant weights, e.g.
+    ``model.q4nx``), so the ``.gguf``/``.mmproj`` variant filter skips every
+    file and the repo inspects as "no variants".
+
+    Detected by dir shape rather than a brittle weight-extension allowlist:
+    ``config.json`` + tokenizer + at least one NPU-quant weight blob matched
+    by the FastFlowLM ``…nx`` quant family (``model.q4nx`` and future levels).
+    Requiring the ``nx`` blob is what keeps a plain GGUF/safetensors repo —
+    which shares ``config.json``/``tokenizer`` — from being misread as FLM.
+    """
+    has_config = "config.json" in rel_basenames
+    has_tokenizer = any(t in rel_basenames for t in _INSPECT_FLM_TOKENIZERS)
+    has_npu_weight = any("." in n and n.endswith("nx") for n in rel_basenames)
+    return has_config and has_tokenizer and has_npu_weight
+
 
 class _HFUpstreamError(Hal0Error):
     """502 — fetching huggingface.co failed (network, 5xx, or unparseable)."""
@@ -1929,6 +2092,8 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
         meta_payload = {}
 
     variants: list[dict[str, Any]] = []
+    rel_basenames: set[str] = set()
+    flm_total_bytes = 0
     for entry in tree_payload:
         if not isinstance(entry, dict):
             continue
@@ -1936,14 +2101,7 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
         if not isinstance(rel, str):
             continue
         rel_low = rel.lower()
-        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
-        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
-        # the modal filters it out of the main variant dropdown (by the
-        # "mmproj" token) and into the vision picker. Guard on the token too so
-        # an unrelated ``.mmproj`` never slips into the main list.
-        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
-        if not (is_gguf or is_mmproj):
-            continue
+        rel_basenames.add(rel_low.rsplit("/", 1)[-1])
         # HF's tree API reports the *pointer file* size in ``size`` for
         # LFS objects; the real bytes live under ``lfs.size``. Prefer
         # the LFS size when present so the modal shows the real
@@ -1958,6 +2116,15 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
             size_bytes = int(size_raw) if size_raw is not None else 0
         except (TypeError, ValueError):
             size_bytes = 0
+        flm_total_bytes += size_bytes
+        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
+        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
+        # the modal filters it out of the main variant dropdown (by the
+        # "mmproj" token) and into the vision picker. Guard on the token too so
+        # an unrelated ``.mmproj`` never slips into the main list.
+        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
+        if not (is_gguf or is_mmproj):
+            continue
         # Use the GGUF filename as the canonical variant id — that's
         # also what the pull endpoint resolves against (hf_filename).
         kind_label = "mmproj sidecar" if (is_mmproj and not is_gguf) else "single file"
@@ -1970,6 +2137,21 @@ async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
             }
         )
     variants.sort(key=lambda v: v.get("size_bytes") or 0)
+    # FLM/NPU repos carry no GGUF variant but a config.json + tokenizer +
+    # ``…nx`` NPU-weight shape. Surface one whole-repo variant flagged
+    # ``flm`` so the dashboard routes the pull through the FLM path
+    # (``flm pull``) instead of the GGUF hf-download path, rather than
+    # showing the repo as having nothing to pull.
+    if not variants and _looks_like_flm_repo(rel_basenames):
+        variants.append(
+            {
+                "id": repo,
+                "size_bytes": flm_total_bytes,
+                "size": _format_size(flm_total_bytes),
+                "info": _format_size(flm_total_bytes) + " · FLM (NPU) — served via `flm pull`",
+                "flm": True,
+            }
+        )
 
     tags_raw = meta_payload.get("tags") or []
     tags = [t for t in tags_raw if isinstance(t, str)]

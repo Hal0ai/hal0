@@ -188,6 +188,14 @@ class NpuConfig(BaseModel):
         default=False,
         description="Enable embedding modality via FLM --embed 1.",
     )
+    chat: bool = Field(
+        default=True,
+        description="Enable chat (LLM) modality on the FLM slot. Default ON.",
+    )
+    # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
+    # boolean flags that load FLM's single bundled whisper + embed-gemma. There
+    # is deliberately no asr_model/embed_model here; the chat model is the
+    # ``flm serve`` positional tag ([model].default) and is the only choice.
 
 
 class ImageGenConfig(BaseModel):
@@ -358,14 +366,6 @@ class SlotConfig(BaseModel):
             "the container image + bench-tuned flags; the slot supplies "
             "model, context_size, and port. See ProfileConfig and the "
             "container-runtime design doc §1."
-        ),
-    )
-    role: str | None = Field(
-        default=None,
-        description=(
-            "Optional role hint for normalization chain binding "
-            "(e.g. 'primary', 'utility', 'npu'). When unset, role is derived "
-            "from the slot name. Authoritative over the name when set."
         ),
     )
     enable_thinking: bool | None = Field(
@@ -838,19 +838,61 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
 #: when ``/etc/hal0/profiles.toml`` is absent so ``GET /api/profiles`` is
 #: always populated on a fresh install.
+#:
+#: ``DEFAULT_ROCMFPX_IMAGE`` is the canonical ROCmFPX runner tag. It backs the
+#: ``rocmfpx-rocm`` / ``vkfpx-moe`` / ``vkfpx-dense`` seed profiles and is the
+#: fallback used by :func:`hal0.providers.container._resolve_image_ref` when
+#: neither a slot-level override nor a profile-level ``image`` is present.
+#: Bumping this constant in a release rolls the default runner for every
+#: fresh install and every slot that hasn't pinned an image explicitly —
+#: the slot-level ``image`` override is the lever for per-slot opt-outs
+#: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
+#: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
+#: drop ``image`` from SEED_PROFILES entirely.
+DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:c077206"
+
+#: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
+#: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
+#: FORMER DEFAULT — debris from slot creation under an older release — not a
+#: deliberate operator opt-out, so the updater retags it to the current
+#: default (:func:`hal0.updater.updater.retag_stale_slot_images`). A pin to
+#: any ref NOT in this set is treated as intentional and never touched.
+#:
+#: c077206 lineage (2026-07-10): charlie ROCmFPX main @5b39566 (FP6 CPU
+#: decode fix, MTP partial-draft-state fix, vecdotq pack window) + the
+#: minicpm5 pre-tokenizer vocab mapping (ac0137d) + TurboQuant turbo3/turbo4
+#: KV-cache types; image assembly drops the base toolbox's stale
+#: /usr/local llama.cpp (the old mixed install ABI-segfaulted llama-bench).
+STALE_ROCMFPX_IMAGE_REFS = frozenset(
+    {
+        "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
+        "localhost/hal0-rocmfpx:vulkan-minicpm5",
+        "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
+    }
+)
+
 #: Seed profile catalog.  Slugs are backend-agnostic workload names — the
 #: ``backend`` field (not the slug) carries the ROCm/Vulkan choice, and the
 #: card chip renders the backend as colour, so the slug no longer repeats it.
 #: GPU profiles set ``backend``; non-GPU profiles (npu/cpu/img) omit it and
 #: let ``device_class`` drive display.
+#:
+#: The three ROCmFPX runner profiles (``rocmfpx-rocm``, ``vkfpx-moe``,
+#: ``vkfpx-dense``) keep their ``image`` field for now (Phase 1, 0.9.5)
+#: so existing custom profiles that depend on it round-trip cleanly.
+#: Operators are encouraged to override per-slot (``image = "..."`` at the
+#: top of ``/etc/hal0/slots/<name>.toml``) so future image bumps are a
+#: code-only release, not a per-profile migration.
 SEED_PROFILES: dict[str, dict[str, object]] = {
     "rocm": {
         # Basic general-purpose ROCm GPU LLM profile (Strix Halo toolbox image).
         # Intentionally minimal: -ngl 999 (offload all), -fa on (flash attn),
         # --jinja (chat templating). Per-model KV/batch/MTP tuning lives in the
-        # model's defaults.extra_args. mtp stays False — the ROCmFPX profiles
-        # (rocmfpx-rocm / vkfpx-moe) are the MTP lanes now; the legacy MTP
-        # rocm-dnse / rocm-moe profiles were removed 2026-07-05.
+        # model's defaults.extra_args. mtp stays False — the ROCmFPX MTP lanes
+        # live in rocm-dense / rocm-moe (and the vulkan-dense / vulkan-moe
+        # pair on the Vulkan backend); the old rocmfpx-rocm / vkfpx-* slugs
+        # were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
@@ -859,53 +901,62 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "ROCm",
         "quant": "FP4",
     },
-    "rocmfpx-rocm": {
-        # hal0 ROCmFPX runner (llama.cpp fork, ghcr.io/hal0ai/hal0-rocmfpx —
-        # HIP+Vulkan, Strix Halo gfx1151). ROCm0/HIP lane for the custom ROCmFP4
-        # dense weight format (NOT stock Q4 / MXFP4 / NVFP4). mtp=True is gated by
-        # model_is_mtp_eligible, so it only activates for MTP heads. Per-model KV
-        # and spec-draft tuning come from the model's defaults.extra_args (e.g.
-        # the 27B Coder card pins -ctk q4_0 / draft-type q4_0).
-        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+    # ROCmFPX runner — 2x2 grid (backend x {dense,moe}). Replaces the
+    # rocmfpx-rocm / vkfpx-moe / vkfpx-dense slugs (consolidated 0.9.5).
+    # Image = DEFAULT_ROCMFPX_IMAGE (see the constant for lineage).
+    "rocm-dense": {
+        # ROCm0/HIP + ROCmFP4 DENSE weights. Sustained-decode win on Strix Halo
+        # (operator memory: ROCm lane wins sustained decode, Vulkan lane wins
+        # prefill by ~+24% PP). --no-mmap + --ctx-checkpoints are the dense
+        # workload's preferred memory pattern; per-model KV + spec-draft
+        # tuning come from the model's defaults.extra_args.
+        "image": DEFAULT_ROCMFPX_IMAGE,
         "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "ROCmFPX · DENSE · MTP",
+        "intent": "ROCmFPX · DENSE · MTP (sustained-decode)",
         "quant": "ROCmFP4",
     },
-    # Renamed rocmfpx-moe -> vkfpx-moe (2026-07-05) so the name indicates the
-    # Vulkan lane (this MoEQuality profile runs on Vulkan0, not the ROCm/HIP lane).
-    "vkfpx-moe": {
-        # hal0 ROCmFPX runner — Vulkan0 lane for the ROCmFPX MoEQuality weight
-        # format (35B-A3B). Vulkan0 gives the best decode t/s for the MoE (ROCm0
-        # wins prefill if a slot overrides -dev). -sm none (single GPU) and
-        # --no-context-shift per the validated Tool-Eval card. The external chat
-        # template (Froggeric Qwen fixed) is set per-slot via [server].extra_args.
-        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+    "rocm-moe": {
+        # ROCm0/HIP + ROCmFPX MoEQuality weights. Vulkan is the recommended
+        # lane for MoE sustained-decode (better t/s); this profile is the
+        # prefill-bound / -dev ROCm0 opt-in for operators who want the same
+        # backend lane across all their ROCmFPX slots. -sm none (single GPU)
+        # and --no-context-shift per the validated Tool-Eval card.
+        "image": DEFAULT_ROCMFPX_IMAGE,
+        "flags": "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "VULKFPX · MOE · MTP",
+        "backend": "rocm",
+        "intent": "ROCmFPX · MOE · MTP (prefill-bound / -dev ROCm0)",
         "quant": "ROCmFPX",
     },
-    "vkfpx-dense": {
-        # hal0 ROCmFPX runner — Vulkan0 lane for a DENSE ROCmFP4 weight format.
-        # Complements rocmfpx-rocm (ROCm0 dense): the ROCm lane wins sustained
-        # decode, the Vulkan lane wins prefill (~+24% PP), so a prefill-bound
-        # dense workload (RAG / long-context reads / re-prefill after a cache
-        # miss) belongs here. Small ubatch wins on gfx1151; per-model KV +
-        # spec-draft tuning come from the model's defaults.extra_args. mtp=True
-        # is the runner-capability gate (auto-on for MTP-head models, model-
-        # gated + slot-overridable) — the MTP *params* stay on the model.
-        "image": "ghcr.io/hal0ai/hal0-rocmfpx:server",
+    "vulkan-dense": {
+        # Vulkan0 + ROCmFP4 DENSE weights. Prefill win (~+24% PP) for prefill-
+        # bound dense workloads (RAG / long-context reads / re-prefill after a
+        # cache miss). Small ubatch wins on gfx1151; per-model KV + spec-draft
+        # tuning come from the model's defaults.extra_args.
+        "image": DEFAULT_ROCMFPX_IMAGE,
         "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
-        "intent": "VULKFPX · DENSE · MTP",
+        "intent": "VULKFPX · DENSE · MTP (prefill-bound)",
         "quant": "ROCmFP4",
+    },
+    "vulkan-moe": {
+        # Vulkan0 + ROCmFPX MoEQuality weights. Best sustained-decode t/s for
+        # MoE on Strix Halo. The validated Tool-Eval card. External chat
+        # templates (e.g. Froggeric Qwen fixed) are set per-slot via
+        # [server].extra_args.
+        "image": DEFAULT_ROCMFPX_IMAGE,
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "VULKFPX · MOE · MTP (best decode t/s)",
+        "quant": "ROCmFPX",
     },
     "vulkan": {
         # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
@@ -970,7 +1021,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "",
     },
     "flm": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
+        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
         "flags": "",
         "mtp": False,
         "device_class": "npu",
@@ -1283,7 +1334,6 @@ class StackSlotEntry(BaseModel):
     )
     device: str | None = Field(default=None, description="Device override for the slot.")
     provider: str | None = Field(default=None, description="Provider override for the slot.")
-    role: str | None = Field(default=None, description="Normalization role hint, e.g. 'primary'.")
     vision: bool = Field(
         default=False, description="Enable the mmproj vision sidecar for this slot."
     )
@@ -1942,6 +1992,17 @@ class DispatcherConfig(BaseModel):
         default=8.0,
         gt=0.0,
         description="Cold-cache prefetch timeout (PLAN.md §5 Tier 2).",
+    )
+
+    direct_read_timeout_s: float = Field(
+        default=300.0,
+        ge=30.0,
+        le=600.0,
+        description=(
+            "Non-streaming upstream read timeout in seconds. "
+            "Large consolidation/extraction prompts can exceed 60s on slow slots. "
+            "Streaming paths are unaffected. Range 30-600."
+        ),
     )
     prefetch_parallel_cap: int = Field(
         default=4,

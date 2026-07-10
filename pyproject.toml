@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hal0"
-version = "0.9.2"
+version = "0.9.6"
 description = "Open-source home AI inference platform"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -101,6 +101,9 @@ packages = ["src/hal0"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# Agentic-eval fixtures are TASK CONTENT (deliberately quirky code the agent
+# under eval must read/trace), not hal0 source — linting must never "fix" them.
+extend-exclude = ["src/hal0/bench/evals/agentic/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]

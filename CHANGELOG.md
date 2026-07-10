@@ -21,6 +21,254 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-07-10
+
+### Highlights
+- FLM NPU trio: the edit-slot drawer's Chat/ASR/Embed toggles now drive the running `flm serve` process, with a full-catalogue chat model picker that downloads on demand.
+- FLM can run embed- or STT-primary (chat disabled) — a modality-aware readiness gate promotes the slot instead of wedging on a chat probe.
+- Real FastFlowLM v0.9.44 toolbox image (`ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44`), rebuilt from the actual v0.9.44 binary.
+- NPU occupancy cards now glow purple when a slot is running (they used to read flat green regardless of state).
+- hal0-bench is now in-tree: the `hal0.bench` engine, `/api/benchmarks`, and a Benchmarks dashboard page.
+
+### Added
+- NPU trio drawer wiring: ASR/Embed on-off toggles + a Chat model picker that lists the full FLM catalogue and pulls a not-yet-downloaded model on select (auto-applies on completion).
+- `FLMProvider.verify_embed` — a one-shot `/v1/embeddings` readiness sentinel used when a slot serves embeddings without chat.
+- hal0-bench in-tree port: `hal0.bench` engine, `/api/benchmarks` routes, and the Benchmarks dashboard tab (roster / runs / evals / run-queue).
+
+### Changed
+- FLM toolbox pinned to `0.9.44` across `manifest.json`, the flm seed profile, and the capabilities catalog (contains FastFlowLM binary v0.9.44).
+- The warm→ready gate for FLM slots picks its sentinel by served modality: chat → `/v1/chat/completions`, chat-off+embed → `/v1/embeddings`, ASR-only → `/v1/models` liveness.
+- `/api/slots/flm/models` returns the full FLM catalogue (installed + downloadable) with accurate `installed` flags, container-exec first with a host-probe fallback.
+
+### Fixed
+- Chat toggle now actually gates the container: `container_spec` no longer passes the positional chat tag when `[npu].chat=false` (it was cosmetic on the container path).
+- Editing an NPU modality no longer clobbers `[model].default`/`context_size` — the drawer sends the model as a nested `[model]` table so the backend merge preserves sibling keys.
+- `/api/npu/occupancy` no longer 500s while the FLM slot is offline (the degraded single-tenant fallback's `zip(..., strict=True)` mismatched `slots_out` vs `flm_slots`).
+- NPU cards read a clear purple "running" glow for up/resident slots and dim for offline; the coresident STT/embed sub-cards reflect the anchor's `[npu]` toggles instead of the legacy shadow-slot `enabled` flag.
+
+## [0.9.5.2] — 2026-07-09
+
+### Fixed
+- **Models → Downloads tab: React invariant 310 ("Rendered more hooks than during the previous render").** The Downloads pane in the Models view called `useStateM(false)` inside a `jobs.map((j) => { … })` callback. React counts hook calls per render, so the moment the downloads list changed length (a pull started, finished, failed, or was cleared) the hook count differed across renders and the entire `<ModelsView>` crashed behind the v3 error boundary — masking the rest of the dashboard. Fix: extract the per-row logic into a `DownloadRow` component that owns its own `cancelling` state, so the hook lives at row-component top level and its count is stable across renders. Pinned by `ui/src/dash/__tests__/react-hooks-order.test.mjs`, a new AST-based static check that walks every JSX/JS file under `src/dash/` and flags any useXxx (incl. the `useStateM`/`useEffectM`/etc. aliases used in this dashboard) called inside an array-iteration callback (`.map`/`.forEach`/`.filter`/`.reduce`/`.some`/`.every`/`.flatMap`/`.find`/`.findIndex`).
+
+## [0.9.5.1] — 2026-07-09
+
+### Highlights
+- First green build on the 0.9.5 line — v0.9.5 shipped with a red CI (stale tests + lint); this hotfix greens the gate and closes v0.9.5's incomplete consolidations.
+
+### Added
+- **HF inspect recognizes FastFlowLM (NPU) repos.** `POST /api/models/inspect` now detects the FLM model shape (a `config.json` + tokenizer + `…nx` NPU-quant weight directory, e.g. `model.q4nx`) and surfaces one whole-repo variant flagged `flm` routed to the `flm pull` path — previously such repos inspected as "no variants" because the filter only admitted `.gguf`/`.mmproj`. Detection is shape-based (requires the `nx` weight blob) so a plain safetensors/GGUF repo is not misread as FLM.
+
+### Fixed
+- **Profile test suite realigned to the 2×2 seed grid.** v0.9.5 consolidated the retired `rocmfpx-rocm` / `vkfpx-*` slugs into the `{rocm,vulkan} × {dense,moe}` grid but left the tests asserting the old names, so `main` was red. Tests now assert the shipped grid.
+- **Role-retirement cleanup finished.** v0.9.5 retired `SlotConfig.role` but left stale tests/docstrings referencing it (`test_slot_role`, `test_chat_normalization`, `test_llm_slot_views`, `hal0_llm_slot_views`). Removed/updated — slot identity is the name.
+- **Curated catalogue guard for FLM/NPU entries.** FLM-served curated models (empty `hf_repo`) no longer surface in the `pullable` catalogue bucket (nothing to HF-pull), and a new `CuratedModel` validator requires every entry to be deployable — HF coords (`hf_repo` + `hf_file`) or an `npu` tag with `recommended_slot="flm"`.
+- **FLM provider `load_chat` UnboundLocalError.** The legacy `defaults` branch no longer leaves `load_chat` unset; chat defaults on (`NpuConfig.chat=True`).
+- **CI lint gate.** Cleared 12 `ruff check` errors + reformatted 7 files (import sorting, duplicate imports, placeholder-less f-strings, dead `result` binding, `SIM103`/`SIM110`/`RUF034`) that had blocked release CI since v0.9.5.
+
+## [0.9.5] — 2026-07-08
+
+### Added
+- **NPU chat-first seed (FLM container shape).** `NpuConfig.chat` now
+  defaults to `True` so a bare `[npu]` section in a slot TOML is a chat-ready
+  NPU slot out of the box. Operators opt out by setting `chat = false` when
+  they want an asr-only or embed-only NPU slot. A new seed
+  `installer/etc-hal0/slots/npu.toml` is included so `hal0 setup` can
+  register a clean (no FLM model pinned, `enabled = false`) `hal0/npu`
+  tile on fresh boxes. The EditSlotDrawer now hides the Model field for
+  `device = "npu"` slots (the NPU capability matrix replaces it).
+
+### Changed
+- **Slot routing key is now the slot `name`, not `role` (ADR-0023 §2.1).**
+  The legacy `role` field on `SlotConfig` is gone — slot identity IS the
+  routing key for `hal0/<slot>` aliases. Resolution chains in
+  `src/hal0/normalize/resolver.py` now use `_slot_matches_name` (case-
+  insensitive exact match on `name`), with one silicon-class escape
+  hatch: the special name `npu` additionally matches any slot with
+  `device == "npu"`, so a container that calls the trio's chat edge by
+  a different slot name (`flm`, `npuchat`, …) still answers `hal0/npu`.
+  Operator-custom seeds (`saber-fpx`, `deckard-fpx*`) and live slot
+  TOMLs that used the old `role` tag now resolve by name. Live installs
+  with the old `role` field in any slot TOML continue to parse (the
+  field is parked under `extra` via Pydantic) and resolve to the slot
+  by its `name`.
+
+### Highlights
+- **New canonical ROCmFPX runner: `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`** —
+  built from `Hal0ai/Hal0_ROCmFPX@5b395660` plus a 4-line upstream cherry-pick
+  that wires the **minicpm5** pre-tokenizer (upstream PR #23384). Unblocks
+  loading the BRAINTRAIN-1B GGUFs on Strix Halo (the `tokenizer.ggml.pre =
+  minicpm5` field now resolves correctly). The new image serves both ROCm/HIP
+  and Vulkan backends from a single artifact; this consolidates the
+  previously-3-tag ROCmFPX image family into one.
+- **Slot-level image override** — `slot.image` (top-level string in the slot
+  TOML) now overrides the profile's `image`. Resolution order is
+  `slot.image` → `profile.image` → `DEFAULT_ROCMFPX_IMAGE`. Future image
+  bumps will be a code-only release (one constant in `schema.py`); operators
+  no longer have to chase profile clones to keep their stack current. The
+  EditSlotDrawer now exposes an **Image** form-row (free-form text input
+  with a live `will use:` preview of the effective ref, plus a Reset
+  button) so operators can pin/clear the override without editing TOMLs.
+
+### Breaking
+- **SEED_PROFILES reshuffled to a clean 2x2 grid.** The three old ROCmFPX
+  runner slugs (`rocmfpx-rocm`, `vkfpx-moe`, `vkfpx-dense`) are replaced by
+  four explicitly-named profiles that match the 2x2 (backend x {dense,moe})
+  matrix. The names are self-describing — the backend is the prefix, the
+  weight format is the suffix:
+
+    | Old slug         | New slug         | Backend | Format   |
+    |------------------|------------------|---------|----------|
+    | `rocmfpx-rocm`   | `rocm-dense`     | ROCm0   | ROCmFP4  |
+    | (new)            | `rocm-moe`       | ROCm0   | ROCmFPX  |
+    | `vkfpx-dense`    | `vulkan-dense`   | Vulkan0 | ROCmFP4  |
+    | `vkfpx-moe`      | `vulkan-moe`     | Vulkan0 | ROCmFPX  |
+
+  All four reference `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`
+  (the new canonical runner). `rocm-moe` is a NEW profile — pre-0.9.5 the
+  ROCmFPX MoEQuality format was Vulkan-only; this adds the ROCm0/HIP
+  variant for operators who want a single-backend fleet.
+- `profile.image` is now **deprecated** for new code paths. It still works as
+  a fallback when no slot override is set, but the plan is to drop it from
+  `SEED_PROFILES` entirely in **0.9.6**. Operator-custom profiles that
+  override `image` (e.g. `saber-fpx`, `rocmfpx-rocm-custom`, `vkfpx-moe-custom`,
+  `deckard-fpx*`) should migrate to per-slot `image` instead — a single
+  slot TOML is a single grep hit, a profile clone is a maintenance liability.
+
+### Migrations
+- **Re-pin your custom profiles' images via the slot, not the profile.** Edit
+  `/etc/hal0/slots/<name>.toml` and add a top-level `image = "ghcr.io/hal0ai/
+  hal0-rocmfpx:vulkan-minicpm5"` line. The slot-level value wins on next
+  `hal0 slot <name> restart`. Once your slots are migrated, you can remove
+  the `image` line from your operator-custom profile in `profiles.toml`.
+- **Rename operator-custom profile references in slot TOMLs.** If your slot
+  points at one of the old slugs (`profile = "rocmfpx-rocm"`, `"vkfpx-moe"`,
+  `"vkfpx-dense"`, or a `-custom` clone of those), update it to the matching
+  new name (`"rocm-dense"`, `"vulkan-moe"`, `"vulkan-dense"`, or your
+  custom variant of the new name). Example: `nano.toml`'s `profile` field
+  should change from `"vkfpx-moe-custom"` → `"vulkan-moe-custom"` (and your
+  `vulkan-moe-custom` profile in `profiles.toml` should mirror the new
+  `vulkan-moe` seed's image + flags).
+- **Verify the new image pulls cleanly on a non-production slot first**:
+  `hal0 slot <name> image ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5 && hal0
+  slot <name> restart`. Then `curl :PORT/v1/models` to confirm the slot
+  launched the new image (`system_fingerprint` carries the upstream commit
+  hash for traceability).
+- **The `image_mismatch` warning clears naturally** — it was a symptom of the
+  old `profiles.toml` carrying stale image refs; once slots own their image,
+  the mismatch can only happen on a manual `image` edit.
+
+## [0.9.4.1] — 2026-07-08
+
+### Changed
+- **Idempotent `hal0 setup`** — removed the install-closed guard that blocked
+  re-running `hal0 setup` after the first-run sentinel was written (#1161).
+  The three provisioning endpoints (`/apply`, `/apply-selections`, `/complete`)
+  are now idempotent and can be invoked at any time, fixing a Python traceback
+  when `install.sh` re-launched the interactive setup after the `--auto` seed.
+
+### Docs
+- **README updated** — corrected version, slot list, setup flow description,
+  and agent selection docs to match v0.9.4 reality.
+
+## [0.9.4] — 2026-07-08
+
+### Added
+- **Downloads pane** in footer with pull job tracking (#1165).
+- **Settings page reorganisation** with improved layout and navigation (#1163).
+- **Configurable `direct_read_timeout`** via `[dispatcher]` TOML section (#1160).
+
+### Fixed
+- **NPU double-free**: stop FLM health poll from double-freeing the NPU slot (#1077).
+- **Vision models**: add missing `mmproj_file` to curated vision model entries (#1162).
+- **Memory tools UI**: make documents card full-width (#1166).
+- **CI repair**: fix test failures post-settings-reorg (#1163).
+- **Lint**: ruff formatting and `__all__` ordering across several files.
+
+## [0.9.3] — 2026-07-06
+
+**The Guided Setup.** hal0 setup grows a review-gated TUI, headless answer
+files, hardware preflight, and a pick-free first-run workflow. The installer
+no longer ships model recommendations — every box starts clean and the
+operator chooses models interactively.
+
+### Highlights
+- **Guided Stage-2 setup TUI** with a review gate and two-stage handoff:
+  hardware detection, model selection, capability scaffolding — all
+  reviewed before writing config.
+- **Headless answer files** — `hal0 setup --emit-answers` captures
+  selections as JSON; `hal0 setup --answers <file>` replays them on
+  another box. Combine with `--yes` for fully automated provisioning.
+- **Pick-free install.** The installer no longer seeds model slots.
+  Instead, the guided TUI (or headless answers) scaffolds capability
+  slots and walks the operator through model selection interactively.
+- **Hardware preflight.** GPU detection runs during install with an
+  LXC smart-block and dev0 remedy; NPU functional state is persisted
+  in a hardware.json written at install time.
+- **hal0 doctor --verify** — a structured report card checking config,
+  slots, models, and service health.
+
+### Added
+- **Guided Stage-2 setup TUI** with review gate + two-stage handoff (#1144).
+- **Headless answer files** — `hal0 setup --answers` / `--emit-answers`
+  round-trip (#1119, #1120).
+- **`hal0 setup --plan` / `--dry-run` preview** (#1121).
+- **GPU preflight during install** — LXC smart-block + dev0 remedy (#1135).
+- **Authoritative hardware.json** persisted at install incl. NPU functional
+  result (#1118).
+- **Network coherence** — one `HAL0_BIND_HOST` + seeded origins (#1130).
+- **HF_TOKEN gathered + persisted** to `secrets/` EnvironmentFile, threaded
+  through in-process apply_setup (#1136, #1122).
+- **`hal0 doctor --verify` report card** — config, slots, models, service
+  health (#1145).
+- **Post-update drift surfacing** + `hal0 update --restart-slots` (#1142).
+- **Slot-render reconcile seam** shared by install + update (#1138).
+- **Safe slot activation** — enable-on-pull-success + clamp context (#1137).
+- **Clean seeded slots** — no model pins, derived device (#1140).
+- **NPU opt-in** threaded through suggest+apply; NPU introduction gated on
+  hardware present + healthy (#1134).
+- **Capability + NPU slot scaffolding** — pick-free, guide models
+  interactively (#1091).
+- **ComfyUI gen branch** — scaffold-only default + per-variant download
+  picker; repaired model fetch + shipped curated workflow JSONs (#1146,
+  #1128).
+- **First-run model workflow** — `hal0 models scan` / `add` / `store` /
+  `run` + `hal0 doctor models`.
+- **Pick-free install** — installer seeds zero model slots; the operator
+  chooses via the guided TUI or headless answers (#1104, #1140).
+- **Co-locate `[models].flm_store`** + free-space validation (#1132).
+- **Honor `Selections.storage_dir`** — thread to `[models].store` (#1127).
+- **Close `/api/install/*` provisioning** after first-run sentinel (#1126).
+- **Apps skip/defer parity** — `openwebui` install verb + gateway in
+  deferred hermes (#1125).
+- **Converge `/apply` onto `/apply-selections`** + write first-run sentinel
+  from endpoint (#1124).
+- **Platform-gate hardening** — bootstrap-prereq parity, disk-on-store,
+  early hal0 user (#1139).
+- **Runtime `advertise_models` toggle** for upstream catalog entries (#1152).
+
+### Fixed
+- Dashboard URL no longer leaks `hal0.thinmint.dev` as default (#1092).
+- Advertise all enabled LLM slots in `/v1/models` discovery, not just loaded
+  ones (#1153).
+- Support flat slot TOML shape in profile in-use scanning (#1129).
+- Don't persist hardware.json on `--plan`/`--emit` preview paths (#1131).
+- Delete stale `avahi/hal0.service` systemd unit (#1123).
+- HF vision mmproj sidecars (`.mmproj`) + remove backend-switch surface (#1089).
+- Seed `[models].store`, create FLM cache dir, add GPU/NPU preflight.
+- Rescan models immediately when the store path changes.
+- Honor `[models].flm_store` config + make NPU slot bind source
+  reboot-durable.
+- Auto-resolve a Hindsight-compatible Python instead of a raw pip wall.
+- Don't write through the seeded uname symlink in prereq-parity tests (#1143).
+- **HERMES.md.j2 rendering** — fix crash on empty env snapshots (Jinja2
+  `Undefined.__getattr__` raises immediately, bypassing `|default` filters).
+
+### Migrations
+- First-run sentinel closes `/api/install/*` — a one-way gate at install
+  time. The guided TUI or headless answer files are the canonical path
+  for future configuration changes.
+
 ## [0.9.2] — 2026-07-05
 
 Hotfix: restore the full model listing in every slot's model picker.

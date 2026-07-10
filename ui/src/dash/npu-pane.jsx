@@ -15,15 +15,18 @@
 // columns by the xrt-smi probe (/api/npu/occupancy). The shimmer is cosmetic
 // and honours prefers-reduced-motion. Per-tile load is NOT claimed as real.
 
+const { useState: useStateSM } = React;
+
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
-import { useSlotRestart, useSlotUnload, useSlotLoad } from '@/api/hooks/useSlots'
+import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import { SlotControls, slotCtrlPhase } from './inference-pane.jsx'
 import { slotIndicatorFromPhase } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the local copy (which also mis-classified backend tokens like "flm" —
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
+import { PillToggle } from './primitives.jsx'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -63,7 +66,7 @@ const isNpuSlot = (s) => s.device_class === 'npu' || devKind(s.device) === 'npu'
 // owner. Three cohesive accents (deep-indigo → teal → sage); single-tenant NPU
 // usually shows just the first. The hue fills the slot's claimed columns in the
 // grid AND its mini column strip; glow/line drive the active-tile halo.
-const HUES = [
+export const HUES = [
   { hue: 'var(--npu-s0)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
   { hue: 'var(--npu-s1)', glow: 'var(--npu-s1-glow)', line: 'var(--npu-s1-line)', dim: 'var(--npu-s1-dim)', fg: 'var(--npu-s1-fg)' },
   { hue: 'var(--npu-s2)', glow: 'var(--npu-s2-glow)', line: 'var(--npu-s2-line)', dim: 'var(--npu-s2-dim)', fg: 'var(--npu-s2-fg)' },
@@ -243,7 +246,7 @@ function AieGrid({ owners, available, act = 0, size = 30, cgap = 6, rgap = 5, sh
 }
 
 // mini single-row strip of the 8 columns, filtered to one owner (slot rail)
-function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
+export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
   const cols = Array.from({ length: NPU_COLS }, (_, c) => c)
   return (
     <div className="tstrip" style={{ '--ts-w': w + 'px', '--ts-h': h + 'px' }}>
@@ -268,18 +271,35 @@ function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
 }
 
 // ═══ per-slot card (right rail) ════════════════════════════════════════
-function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
+function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
   const ind = slotIndicatorFromPhase(slot)
-  const serving = ind.cls === 'serving'
+  // Signal from BOTH the slot's own phase and the NPU occupancy's synthesised
+  // state. The slot phase is authoritative for the anchor (esp. actively
+  // serving); the occupancy state knows the coresident stt/embed sub-slots are
+  // live off the anchor's [npu] toggles (their own phase reads "offline" since
+  // they run no unit of their own).
+  const occState = String(occ?.state || '').toLowerCase()
+  const RUNNING_STATES = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale']
+  const serving = ind.cls === 'serving' || occState === 'serving'
+  // "running" = up & resident on the NPU. These glow purple; offline/off/error
+  // stay dim. Previously every non-serving state (incl. offline) fell through
+  // to a flat green dot, so all three trio cards read green regardless.
+  const running =
+    serving ||
+    RUNNING_STATES.includes(occState) ||
+    ind.cls === 'stale' ||
+    ind.cls === 'warming'
+  const isError = ind.cls === 'error' || occState === 'error'
+  const dotCls = serving ? 'serving' : isError ? 'error' : running ? 'running' : 'offline'
   const m = slot.metrics || {}
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
   const gb = occ && typeof occ.gb === 'number' ? round1(occ.gb) : typeof m.mem === 'number' ? round1(m.mem) : null
   const model = String(slot.model_id || slot.model || occ?.model || '').replace(/-FLM$/, '')
   return (
-    <div className={'cslot' + (serving ? '' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
+    <div className={'cslot' + (running ? ' running' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
       <div className="cslot-top">
-        <span className={'ldot ' + (serving ? 'serving' : ind.cls === 'error' ? 'offline' : 'ready')} />
+        <span className={'ldot ' + dotCls} />
         <span className="nm">{slot.name}</span>
         <span className="md">{model || '—'}</span>
         <span className="grow" />
@@ -297,21 +317,31 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0 }) {
           </span>
         </span>
       </div>
-      <div className="cslot-row">
-        <span className="cslot-strip">
-          <TileStrip owners={owners} ownerName={slot.name} act={act} />
-        </span>
-      </div>
       <div className="cslot-foot">
         <span className="grow" />
-        <SlotControls
-          phase={slotCtrlPhase(slot)}
-          onStart={() => handlers.onStart(slot)}
-          onStop={() => handlers.onStop(slot)}
-          onRestart={() => handlers.onRestart(slot)}
-          onLogs={() => handlers.onLogs(slot)}
-          onEdit={() => handlers.onEdit(slot)}
-        />
+        {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
+          <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
+            <span style={{color: 'var(--fg-2)'}}>
+              {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+            </span>
+            <PillToggle
+              on={slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false}
+              label={slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+              className="npu-card-toggle"
+              onToggle={() => handlers.onEdit(slot)}
+            />
+          </span>
+        ) : (
+          <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
+            <span style={{color: 'var(--fg-2)'}}>Chat</span>
+            <PillToggle
+              on={mainFlmNpu?.chat !== false}
+              label="Chat"
+              className="npu-card-toggle"
+              onToggle={() => handlers.onEdit(slot)}
+            />
+          </span>
+        )}
       </div>
     </div>
   )
@@ -324,9 +354,17 @@ export function NpuOccupancyCard({ slots }) {
   const restartMut = useSlotRestart()
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
+  const editMut = useSlotEdit()
+  // Full npu dict (chat/asr/embed) via react-query so the drawer's edit
+  // (which invalidates ['slot-config','flm']) refreshes the card toggles in
+  // lockstep — the old one-shot fetch went stale after every drawer change.
+  const flmCfgQuery = useSlotConfig('flm')
 
   const npuSlots = (slots || []).filter(isNpuSlot)
   if (npuSlots.length === 0) return null
+
+  const flmSlot = npuSlots.find(s => s.name === 'flm')
+  const mainFlmNpu = flmCfgQuery.data?.npu || flmSlot?.npu || {}
 
   const occ = occQuery.data || {}
   const occSlots = occ.slots || []
@@ -381,6 +419,10 @@ export function NpuOccupancyCard({ slots }) {
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
+    onToggleShadow: (s) => {
+      // Open the FLM edit drawer — capability toggles are configured there
+      window.location.hash = '#slots/flm'
+    },
   }
 
   const dutySub = colsAvailable
@@ -404,15 +446,23 @@ export function NpuOccupancyCard({ slots }) {
             XDNA 2 · npu
           </span>
           <span className="grow" />
-          <span className="meta">
-            <b>{colsUsed * NPU_ROWS}</b>/{tiles} tiles claimed · <b>{NPU_ROWS}×{NPU_COLS}</b> AIE-ML
-            {/* telemetry-header handoff: the meta leads with how many slots
-                actually hold columns; single-tenant only shows when nothing
-                is live (once slots claim columns the free card carries it) */}
-            {liveCount > 0
-              ? <span className="st"> · {liveCount} slot{liveCount !== 1 ? 's' : ''} live</span>
-              : occ.single_tenant !== false && <span className="st"> · single-tenant</span>}
-          </span>
+          <button className="btn ghost sm" title="Start"
+            onClick={() => handlers.onStart(flmSlot)} disabled={!flmSlot}>
+            ▶
+          </button>
+          <button className="btn ghost sm" title="Stop"
+            onClick={() => handlers.onStop(flmSlot)} disabled={!flmSlot}>
+            ■
+          </button>
+          <button className="btn ghost sm" title="Restart"
+            onClick={() => handlers.onRestart(flmSlot)} disabled={!flmSlot}>
+            ↻
+          </button>
+          <button className="btn ghost sm" title="Logs"
+            onClick={() => handlers.onLogs(flmSlot)} disabled={!flmSlot}>
+            📋
+          </button>
+          <button className="btn ghost sm" title="Edit FLM slot" onClick={() => window.location.hash = '#slots/flm'} style={{fontSize: 13}}>✎ Edit</button>
         </div>
         <div className="wcard-b">
           <div className="combo">
@@ -449,24 +499,9 @@ export function NpuOccupancyCard({ slots }) {
                   hue={HUES[idx % HUES.length]}
                   handlers={handlers}
                   act={act}
+                  mainFlmNpu={mainFlmNpu}
                 />
               ))}
-              {/* third owner hue stays reserved — the dashed free card
-                  renders even at 0 free columns ("array full") so the
-                  single-tenant ceiling stays visible (handoff screen 2) */}
-              <div className="cslot free">
-                <div className="cslot-top">
-                  <span className="sw free" />
-                  <span className="nm">free</span>
-                  <span className="grow" />
-                  <span className="md">
-                    {colsTotal - colsUsed} columns ·{' '}
-                    {colsUsed >= colsTotal && occ.single_tenant !== false
-                      ? 'single-tenant array full'
-                      : 'idle'}
-                  </span>
-                </div>
-              </div>
             </div>
           </div>
         </div>

@@ -1,0 +1,16 @@
+# FLM LLM slot — FastFlowLM in a podman container (hal0-slot@flm).
+# The FLM trio serves chat + STT + embed on one AMDXDNA column.
+#
+# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
+# box boots a grey tile (no surprise FLM download, no crash-loop). The operator
+# assigns an FLM model later, which flips the slot enabled.
+name = "flm"
+port = 8088
+device = "npu"
+runtime = "container"
+profile = "flm"
+type = "llm"
+enabled = false
+
+[model]
+context_size = 16384

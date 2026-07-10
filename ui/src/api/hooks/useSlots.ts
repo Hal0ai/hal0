@@ -29,9 +29,13 @@ const slotDelete = <T = unknown>(path: string) =>
 
 export interface SlotMetrics {
   toks?: number
+  /** FLM / metrics-backed tok/s (preferred over local toks count). */
+  tokens_per_sec?: number
   ttft?: number | null
   ctx?: number
   kv?: number | null
+  /** FLM KV column occupancy ratio (0–1), surfaced as percentage. */
+  kv_cache_usage?: number | null
   mem?: number
   lat?: number | null
   dim?: number

@@ -40,11 +40,6 @@ const sumToks = (list) =>
     .reduce((a, b) => a + b, 0)
 // Deterministic per-tile hash → [0,1), stable across renders (mirrors the
 // npu-pane pattern — the desync is decorative, never claimed as per-tile load).
-const hash01 = (n) => {
-  const x = Math.sin(n) * 43758.5453
-  return x - Math.floor(x)
-}
-
 // Owner hues shared with the slots-page NPU card — tokens live on :root in
 // npu.css (npu-pane HUES mirrors this table).
 const TH_HUES = [
@@ -224,7 +219,7 @@ function ThCellGpu() {
             <div className="cap">temp C</div>
           </div>
           <div className="th-digit">
-            <div className="v sec">{watts != null ? Math.round(watts) : '—'}</div>
+            <div className="v">{watts != null ? Math.round(watts) : '—'}</div>
             <div className="cap">watts</div>
           </div>
         </div>
@@ -233,7 +228,7 @@ function ThCellGpu() {
   )
 }
 
-// Cell 3 · CPU · MEMORY — sys-ram gauge + cpu util (micro-bar) / temp digits.
+// Cell 3 · CPU · MEMORY — sys-ram gauge + cpu util / temp digits.
 function ThCellCpuMem() {
   const hw = useHardware()
   const stats = useStatsHardware()
@@ -254,20 +249,19 @@ function ThCellCpuMem() {
           pct={ramPct}
           stroke="var(--dev-cpu)"
           valueSmall
-          value={usedGb != null ? fmt1(round1(usedGb)) + ' GB' : '—'}
-          caption={totalGb ? `sys ram / ${Math.round(totalGb)} GB` : 'sys ram'}
+          value={usedGb != null ? fmt1(round1(usedGb)) : '—'}
+          caption={totalGb ? `/ ${Math.round(totalGb)} GB` : 'sys ram'}
         />
         <div className="th-digits c2">
           <div className="th-digit">
             <div className="v">{cpuUtil != null ? Math.round(cpuUtil * 100) + '%' : '—'}</div>
-            <div className="th-microbar">
-              <i style={{ width: `${cpuUtil != null ? Math.round(cpuUtil * 100) : 0}%` }} />
-            </div>
             <div className="cap">util</div>
           </div>
           <div className="th-digit">
-            <div className="v sec">{cpuTemp != null ? Math.round(cpuTemp) + '°' : '—'}</div>
-            <div className="cap push">temp C</div>
+            <div className={'v' + (cpuTemp != null && cpuTemp >= 75 ? ' warn' : '')}>
+              {cpuTemp != null ? Math.round(cpuTemp) + '°' : '—'}
+            </div>
+            <div className="cap">temp C</div>
           </div>
         </div>
       </div>
@@ -275,133 +269,56 @@ function ThCellCpuMem() {
   )
 }
 
-// Cell 4 · NPU — compact 4×8 AIE occupancy grid + partition bars + owner
-// tags. Column allocation comes from useNpuOccupancy().slots[].cols — the
-// grid, bars, tags and caption all derive from that one per-column owner
-// array (mirrors the owners[] pattern in npu-pane.jsx). Never hardcoded.
+// Cell 4 · NPU — semicircle util gauge (purple, mirrors GPU/CPU) + slot
+// tags and occupancy caption. The AIE tile grid is replaced by the gauge;
+// partition bars are dropped — tags alone identify active slots.
 function ThCellNpu({ slots }) {
   const occQ = useNpuOccupancy()
   const stats = useStatsHardware()
   const hw = useHardware()
   const occ = occQ.data || {}
-  const rows = occ.rows || 4
-  const cols = occ.cols || 8
   const occSlots = occ.slots || []
-  const tiles = occ.tiles || rows * cols
-
-  const owners = Array(cols).fill(null)
-  occSlots.forEach((sl, idx) => {
-    const hue = TH_HUES[idx % TH_HUES.length]
-    const o = { name: sl.name, idx, ...hue }
-    ;(sl.cols || []).forEach((c) => {
-      if (c >= 0 && c < cols) owners[c] = o
-    })
-  })
   const liveCount = occSlots.filter((sl) => (sl.cols || []).length > 0).length
-  const claimedTiles = owners.filter(Boolean).length * rows
-
-  // partition runs — consecutive columns with the same owner (by identity)
-  const parts = []
-  for (let i = 0; i < cols; ) {
-    const o = owners[i]
-    let span = 1
-    while (i + span < cols && owners[i + span] === o) span++
-    parts.push({ start: i, span, owner: o })
-    i += span
-  }
-  // bar spans exactly its claimed columns: cols*12 + (cols-1)*3
-  const partW = (span) => span * 12 + (span - 1) * 3
 
   const npuUtil = typeof stats.data?.npu_util === 'number' ? stats.data.npu_util : null
   const npuTps = sumToks((slots || []).filter(isNpuDev))
   const npuName = hw.data?.npu?.present ? hw.data.npu.name || 'XDNA' : null
   const sub = npuName ? `${npuName}${occSlots.length > 0 ? ' · flm' : ''}` : '—'
 
-  const tileEls = []
-  for (let i = 0; i < rows * cols; i++) {
-    const o = owners[Math.floor(i / rows)] // column-major fill
-    if (o) {
-      const dur = 2.2 + hash01(i * 12.9898) * 2.6
-      tileEls.push(
-        <i
-          key={i}
-          className="on"
-          style={{
-            background: o.hue,
-            boxShadow: `inset 0 0 0 1px ${o.line}, 0 0 6px -1px ${o.glow}`,
-            '--dur': dur.toFixed(2) + 's',
-            '--delay': (-hash01(i * 39.346) * dur).toFixed(2) + 's',
-          }}
-        />
-      )
-    } else {
-      tileEls.push(<i key={i} />)
-    }
-  }
-
   return (
     <div className="th-cell">
       <ThEyebrow dot="var(--dev-npu)" live={liveCount > 0} label="NPU" sub={sub} />
-      <div className="th-npu">
-        <div className="th-aie">
-          <div
-            className="th-aie-grid"
-            style={{ gridTemplateColumns: `repeat(${cols}, 12px)`, gridTemplateRows: `repeat(${rows}, 12px)` }}
-          >
-            {tileEls}
+      <div className="th-row">
+        <SemiGauge
+          pct={npuUtil != null ? npuUtil * 100 : null}
+          stroke="var(--dev-npu)"
+          value={npuUtil != null ? Math.round(npuUtil * 100) + '%' : '—'}
+          caption="util"
+        />
+        <div className="th-digits c2">
+          <div className="th-digit">
+            <div className="v">{npuTps > 0 ? fmt1(npuTps) : '—'}</div>
+            <div className="cap">tok/s</div>
           </div>
-          <div className="th-aie-parts">
-            {parts.map((p) => (
-              <div key={p.start} className="th-aie-part" style={{ width: partW(p.span) + 'px' }}>
-                <span
-                  className="br"
-                  style={{
-                    background: p.owner ? p.owner.hue : 'var(--bg-4)',
-                    boxShadow: p.owner ? `0 0 6px -1px ${p.owner.glow}` : 'none',
-                  }}
-                />
-                <span
-                  className="pl"
-                  style={{ color: p.owner ? (p.owner.idx === 0 ? 'var(--fg-3)' : p.owner.fg) : 'var(--fg-5)' }}
-                >
-                  {p.owner ? p.owner.name : 'free'} <span className="pc">· {p.span}c</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="th-npu-right">
-          <div className="th-npu-nums">
-            <div className="th-npu-num">
-              <span className="v npu">{npuUtil != null ? Math.round(npuUtil * 100) + '%' : '—'}</span>
-              <span className="u">util</span>
-            </div>
-            <div className="th-npu-num">
-              <span className="v">{npuTps > 0 ? fmt1(npuTps) : '—'}</span>
-              <span className="u">tok/s</span>
+          <div className="th-digit">
+            <div className="th-tags" style={{ marginTop: 2 }}>
+              {TH_HUES.map((hue, idx) => {
+                const o = occSlots[idx]
+                return o ? (
+                  <span
+                    key={idx}
+                    className="th-tag"
+                    style={{ border: `1px solid ${hue.line}`, background: hue.dim, color: hue.fg }}
+                  >
+                    <span className="sw" style={{ background: hue.hue, boxShadow: `inset 0 0 0 1px ${hue.line}` }} />
+                    {o.name}
+                  </span>
+                ) : (
+                  <span key={idx} className="th-tag off" />
+                )
+              })}
             </div>
           </div>
-          <div className="th-tags">
-            {TH_HUES.map((hue, idx) => {
-              const o = occSlots[idx]
-              return o ? (
-                <span
-                  key={idx}
-                  className="th-tag"
-                  style={{ border: `1px solid ${hue.line}`, background: hue.dim, color: hue.fg }}
-                >
-                  <span className="sw" style={{ background: hue.hue, boxShadow: `inset 0 0 0 1px ${hue.line}` }} />
-                  {o.name}
-                </span>
-              ) : (
-                <span key={idx} className="th-tag off" />
-              )
-            })}
-          </div>
-          <span className="th-npu-cap">
-            {claimedTiles}/{tiles} tiles claimed · {rows}×{cols} AIE-ML · {liveCount} slot
-            {liveCount !== 1 ? 's' : ''} live
-          </span>
         </div>
       </div>
     </div>

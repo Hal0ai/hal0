@@ -143,7 +143,7 @@ fail_count=0 run_count=0 skip_count=0
 for backend in "${SEL_BACKENDS[@]}"; do
   spec="${BACKENDS[$backend]:-}"
   [[ -n "$spec" ]] || { echo "[skip] unknown backend: $backend" >&2; continue; }
-  IFS='|' read -r image bench_bin ubatch envstr <<<"$spec"
+  IFS='|' read -r image bench_bin ubatch envstr devargs <<<"$spec"
   env_flags=()
   for kv in $envstr; do env_flags+=(-e "$kv"); done
 
@@ -171,16 +171,34 @@ for backend in "${SEL_BACKENDS[@]}"; do
         echo "[skip exists] $(basename "$out")"; ((skip_count++)); continue
       fi
 
-      # shellcheck disable=SC2206  # intentional word-split of ctxargs / EXTRA
+      # shellcheck disable=SC2206  # intentional word-split of ctxargs / EXTRA / devargs
       cmd=("$RUNTIME" run "${COMMON_RUN_FLAGS[@]}" "${env_flags[@]}"
            --entrypoint "$bench_bin" "$image"
-           -m "$model_path" "${COMMON_BENCH_ARGS[@]}" $ctxargs $EXTRA -r "$reps" -o json)
+           -m "$model_path" "${COMMON_BENCH_ARGS[@]}" $devargs $ctxargs $EXTRA -r "$reps" -o json)
 
       echo "[run] $backend / $mstem / $ctx${TAG:+ / $TAG} (reps=$reps)"
       if [[ $DRYRUN -eq 1 ]]; then printf '   '; printf '%q ' "${cmd[@]}"; echo; continue; fi
 
       ts="$(date -Iseconds)"
-      if "${cmd[@]}" >"$out" 2>"$log"; then
+      # The rocmfpx runner's llama-bench has a flaky init-time crash (SIGSEGV/
+      # GPF in libllama BEFORE any measurement — ~2/3 of launches, observed
+      # on-box 2026-07-10; llama-server in the same image is unaffected). A
+      # signal exit (rc>=128) therefore retries without biasing numbers — no
+      # rep ever ran. Real errors (rc<128, e.g. failed-to-load) never retry.
+      rc=1
+      for attempt in 1 2 3 4 5 6; do
+        "${cmd[@]}" >"$out" 2>"$log"; rc=$?
+        if (( rc == 0 )) && [[ -s "$out" ]]; then break; fi
+        # rc 0 with EMPTY output is the same crash: the container died to the
+        # SIGSEGV but `podman run --rm` raced its own cleanup and lost the real
+        # exit code (observed on-box 2026-07-10: kernel logged the segfault,
+        # podman returned 0, the JSON was 0 bytes). Normalize to a signal exit.
+        (( rc == 0 )) && rc=139
+        (( rc >= 128 )) || break
+        echo "   [retry $attempt/6] llama-bench crashed before emitting results (rc=$rc) — relaunching" >&2
+        sleep 1
+      done
+      if [[ $rc -eq 0 ]]; then
         extra_json="$(printf '%s' "$EXTRA" | sed 's/\\/\\\\/g; s/"/\\"/g')"
         cat >"$meta" <<META
 {"backend":"$backend","image":"$image","context":"$ctx","tag":"$TAG","extra":"$extra_json","reps":$reps,"ubatch":$ubatch,"model_rel":"$rel","model_path":"$model_path","host":"$HOST_LABEL","gpu":"$GPU_LABEL","timestamp":"$ts"}

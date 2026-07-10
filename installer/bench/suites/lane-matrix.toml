@@ -1,0 +1,36 @@
+# suites/lane-matrix.toml — feeds hal0-tune. Both lanes across the full
+# 2k/32k/128k depth axis, on a small set of profile-class representatives
+# — NOT the whole roster. This is a tuning signal, not a display board.
+# See the bench design handoff §4.
+
+[suite]
+id          = "lane-matrix"
+description = "Lane x depth sweep on profile-class representatives, for hal0-tune"
+schedule    = "monthly"
+budget_min  = 240
+exclusive   = true
+priority    = 40
+
+[selector]
+# Deliberately NOT caps_any/installed like roster.toml: this suite targets
+# one representative model per profile class (dense / MoE / MTP / vision
+# / ...), not every installed chat+coder model. The include list below is
+# operator-set — there is no auto-derived default because "representative"
+# is a judgment call. Update it when the profile-class lineup changes.
+include = [
+  # "REPLACE-ME-dense-class-representative",
+  # "REPLACE-ME-moe-class-representative",
+  # "REPLACE-ME-mtp-class-representative",   # e.g. a chadrock3-6-*-mtp-* build
+]
+
+[matrix]
+lanes    = ["rocm", "vulkan_radv"]     # both lanes, unlike roster's "default"
+depths   = [2048, 32768, 131072]        # the full 2k/32k/128k ctx-fill axis
+samplers = ["greedy"]
+reps     = 3
+
+[cells]
+kinds = ["pp", "tg"]
+
+[staleness]
+max_age_days = 30

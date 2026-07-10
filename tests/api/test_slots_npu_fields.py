@@ -100,7 +100,7 @@ def test_slot_list_includes_npu_toggles(
     assert "npu" in by_name, "npu slot must appear in list"
     slot = by_name["npu"]
     assert "npu" in slot, f"npu key must be present; got keys: {list(slot.keys())}"
-    assert slot["npu"] == {"asr": True, "embed": False}
+    assert slot["npu"] == {"asr": True, "embed": False, "chat": True}
 
 
 def test_slot_without_npu_table_omits_field(

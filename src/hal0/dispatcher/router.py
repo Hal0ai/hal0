@@ -417,6 +417,8 @@ class Dispatcher:
         model_registry:     Source of truth for model→upstream bindings.
         prefetch_timeout_s: Cold-cache prefetch fanout timeout
                             (PLAN.md §5 Tier 2 — was hardcoded 4s, now 8s).
+        direct_read_timeout_s: Non-streaming upstream read timeout in seconds.
+                            Configurable via [dispatcher].direct_read_timeout_s.
         prefetch_parallel_cap: Max concurrent cold-prefetch legs
                             ([dispatcher].prefetch_parallel_cap, default 4).
         cached_models:      Returns the cached /v1/models for an upstream.
@@ -431,6 +433,7 @@ class Dispatcher:
         model_registry: ModelRegistry | None = None,
         *,
         prefetch_timeout_s: float = 8.0,  # TIER2 — configurable (was hardcoded 4s)
+        direct_read_timeout_s: float = _DIRECT_READ_TIMEOUT_S,
         prefetch_parallel_cap: int = 4,  # max concurrent cold-prefetch legs
         cached_models: CachedModelsFn | None = None,
         is_online: IsOnlineFn | None = None,
@@ -454,6 +457,8 @@ class Dispatcher:
         # only exercise dispatch() don't open sockets.
         self._http_client: httpx.AsyncClient | None = http_client
         self._owns_http_client: bool = http_client is None
+        # Non-streaming read timeout — configurable via TOML (default 300s).
+        self._direct_read_timeout_s: float = direct_read_timeout_s
         # SlotManager — when supplied, forward() wraps slot-kind calls in
         # SlotManager.serving() so the slot transitions READY/IDLE →
         # SERVING → READY around each /v1 request (task #10 SERVING).
@@ -463,14 +468,14 @@ class Dispatcher:
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
             # Short connect/write/pool; non-streaming read capped at
-            # _DIRECT_READ_TIMEOUT_S (streaming paths ignore the read timeout
+            # _direct_read_timeout_s (streaming paths ignore the read timeout
             # once the first byte arrives — see httpx docs on stream=True).
             # Connection limits match registry.py to prevent pool starvation
             # under sustained slow-upstream load (#415).
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(
                     connect=5.0,
-                    read=_DIRECT_READ_TIMEOUT_S,
+                    read=self._direct_read_timeout_s,
                     write=10.0,
                     pool=5.0,
                 ),

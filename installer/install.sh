@@ -1010,6 +1010,33 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
         chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
+
+        # hal0.bench v2 (design 2026-07-05): suite seeds + politeness window are
+        # OPERATOR-OWNED under /etc — install only if absent (never clobber
+        # operator edits; the shipped copies in installer/bench/ are the seeds).
+        install -d /etc/hal0/bench/suites
+        for toml in "${BENCH_SRC}/suites"/*.toml; do
+            [[ -f "${toml}" ]] || continue
+            dst="/etc/hal0/bench/suites/$(basename "${toml}")"
+            [[ -f "${dst}" ]] || install -m 0644 "${toml}" "${dst}"
+        done
+        if [[ -f "${BENCH_SRC}/window.toml" && ! -f /etc/hal0/bench/window.toml ]]; then
+            install -m 0644 "${BENCH_SRC}/window.toml" /etc/hal0/bench/window.toml
+        fi
+        # Result store (append-only records.jsonl + derived bench.db + artifacts).
+        install -d /var/lib/hal0-bench /var/lib/hal0-bench/artifacts
+        chown -R hal0:hal0 /var/lib/hal0-bench 2>/dev/null || true
+        # Units: weekly scheduled session (timer→oneshot) + the run-queue worker
+        # (long-running, inert until Started from the dashboard).
+        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench.service" /etc/systemd/system/hal0-bench.service
+        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench.timer" /etc/systemd/system/hal0-bench.timer
+        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench-worker.service" /etc/systemd/system/hal0-bench-worker.service
+        if [[ "${DEV_MODE}" -eq 0 ]]; then
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true
+            systemctl enable --now hal0-bench.timer >/dev/null 2>&1 || true
+        fi
+        info "wrote /etc/hal0/bench + /var/lib/hal0-bench + bench units"
     else
         warn "${BENCH_SRC} not found — benchmark harness not installed"
     fi
@@ -1109,7 +1136,7 @@ ui_step "NPU prerequisites (FastFlowLM)"
 # ok. NOTE: 0.9.43 tightened CLI arg parsing — it rejects a flag passed
 # twice, so FLMProvider.container_spec must never repeat a mode flag
 # (--asr/--embed) the model already implies.
-FLM_DEB_VERSION="0.9.43"
+FLM_DEB_VERSION="0.9.44"
 # Upstream ships a SEPARATE .deb per distro, each built against that release's
 # ffmpeg/boost ABI: ubuntu24.04 (ffmpeg6/boost1.83), ubuntu25.10 + ubuntu26.04
 # (ffmpeg7/8 / boost1.90), and debian13. Pick the artefact matching THIS host
@@ -1121,10 +1148,10 @@ FLM_DEB_VERSION="0.9.43"
 # rebuilds under the same tag these drift — bump in lockstep with FLM_DEB_VERSION.
 _flm_sha_for_suffix() {
     case "$1" in
-        ubuntu24.04) echo "4173fa82f0043a4ff14cf7b84c7d24188fac4ac64346942601b7d2b915308479" ;;
-        ubuntu25.10) echo "7ff4d9a621c94aaa8bf783c05759dcd40ca43bdb5d07c31d4ccf04946dda0b69" ;;
-        ubuntu26.04) echo "20ab2ba4f338837be2aabdf463d1369ffe56ad7f7c6a3eacd112630d983aa357" ;;
-        debian13)    echo "acad5a520165956016bdadcb4983538f24f3ada9d1e5ac591c5e9ba11c0e22d1" ;;
+        ubuntu24.04) echo "ce51f73da998e7b3b3ec21851a4450087f05d9a446108cc2d18a5355872c2800" ;;
+        ubuntu25.10) echo "b58ca7875d5e462ff53d84145987f81a4855a577b72efedde389768fcd93ad15" ;;
+        ubuntu26.04) echo "5eeb7fffc62f44260d1d562749bde56e1e7ade7940c3764765cf8933bac67ac3" ;;
+        debian13)    echo "2a56c2d4447642968ce1698252d983e2ffc4f2169071307a295cf681b54cf9af" ;;
     esac
 }
 # Resolve host distro -> .deb suffix. For Ubuntu, pick the HIGHEST shipped build
@@ -1312,7 +1339,7 @@ fi
 # `cp -a installer "${STAGE}/"`), git checkouts carry it, and the prod
 # rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
 # that touches installer/.
-for seed_slot in npu tts rerank utility img; do
+for seed_slot in flm tts rerank utility img; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if [[ -f "${SLOT_TOML}" ]]; then

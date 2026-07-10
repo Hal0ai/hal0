@@ -173,8 +173,8 @@ def test_reconcile_device_flip_stays_non_mtp(tmp_hal0_home: str) -> None:
     """
     from hal0.slots.manager import _reconcile_device_profile
 
-    # Slot was on the rocmfpx-rocm (MTP) profile; operator flips the device only.
-    cfg_dict: dict[str, object] = {"device": "gpu-vulkan", "profile": "rocmfpx-rocm"}
+    # Slot was on the rocm-dense (MTP) profile; operator flips the device only.
+    cfg_dict: dict[str, object] = {"device": "gpu-vulkan", "profile": "rocm-dense"}
     _reconcile_device_profile(cfg_dict, changed={"device"})
     assert cfg_dict["profile"] == "vulkan"
-    assert cfg_dict["profile"] != "rocmfpx-rocm"
+    assert cfg_dict["profile"] != "rocm-dense"

@@ -31,6 +31,7 @@ haloai's lib/providers/flm.py.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
@@ -43,7 +44,7 @@ from hal0.providers.base import ContainerSpec, Provider
 # ── Toolbox image ─────────────────────────────────────────────────────────────
 # Default tag. Override via HAL0_TOOLBOX_IMAGE_FLM in api.env when running
 # on hal0-test before the GHCR org is provisioned (PLAN §17).
-_DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
+_DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
 
 # ── On-disk layout ────────────────────────────────────────────────────────────
 # The toolbox image is self-contained: it bundles FLM at /opt/fastflowlm/
@@ -200,6 +201,23 @@ def _npu_device_nodes() -> list[str]:
     return [accel or _DEFAULT_NPU_ACCEL_NODE, render or _DEFAULT_NPU_RENDER_NODE]
 
 
+def _flm_shadow_role_args(env: dict[str, str]) -> list[str]:
+    """Build the ``--embed`` / ``--asr`` argv tail.
+
+    Shared by :meth:`FLMProvider.start_cmd` (native) and
+    :meth:`FLMProvider.container_spec` (primary) so the two paths can never
+    drift. FLM's ``--embed`` / ``--asr`` are booleans: each loads FLM's single
+    bundled model (embed-gemma / whisper) — there is NO ``--embed-model`` /
+    ``--asr-model`` flag, so nothing per-role to emit here.
+    """
+    args: list[str] = []
+    if env.get("HAL0_FLM_LOAD_EMBED") == "1":
+        args += ["--embed", "1"]
+    if env.get("HAL0_FLM_LOAD_ASR") == "1":
+        args += ["--asr", "1"]
+    return args
+
+
 def _resolve_render_gid() -> int | None:
     """Look up the ``render`` group's numeric gid on the host.
 
@@ -223,9 +241,22 @@ def _resolve_render_gid() -> int | None:
 class FLMProvider(Provider):
     """Provider for the AMD NPU FLM backend.
 
-    Health probe REQUIRES a real /v1/chat/completions round-trip with
-    max_tokens=1, not just a populated /v1/models list. This is the
-    Tier 1 fix for the haloai lib/slots.py:899-920 bug.
+    Two-tier readiness (Option A — NPU double-free avoidance):
+
+      * :meth:`health` is the CHEAP liveness probe (non-empty ``/v1/models``).
+        It issues NO NPU work and is the ONLY probe safe to run on the hot
+        paths — the 2s fail-watcher and the per-request readiness gate. FLM
+        serialises the single NPU context and double-frees (SIGABRT, status
+        134) when an in-flight completion is cancelled or overlapped, so a
+        real-inference probe MUST NOT run on a repeating/concurrent path.
+      * :meth:`verify_inference` is the one-shot ``/v1/chat/completions``
+        sentinel (max_tokens=1). It runs EXACTLY ONCE at the warm→ready
+        promotion (:meth:`SlotManager._await_ready`), where there is no
+        contention — the slot is not yet dispatchable, the load lock is held,
+        and the warming fail-watcher skips health probes. This preserves the
+        Tier-1 "listing models is not the same as being able to infer" check
+        (haloai lib/slots.py:899-920) without the polling storm that crashed
+        the NPU.
     """
 
     name = "flm"
@@ -261,6 +292,7 @@ class FLMProvider(Provider):
             # win even if stale legacy defaults say otherwise.
             load_asr = "1" if npu_table.get("asr") else "0"
             load_embed = "1" if npu_table.get("embed") else "0"
+            load_chat = "1" if npu_table.get("chat", True) not in (False, "0", 0) else "0"
         else:
             # Legacy (pre-container) fallback — still reachable from legacy
             # TOMLs without an [npu] table (api/__init__.py reads the same
@@ -268,6 +300,8 @@ class FLMProvider(Provider):
             # before the [npu] table existed.
             load_asr = "1" if defaults.get("load_asr") else "0"
             load_embed = "1" if defaults.get("load_embed") else "0"
+            # chat defaults on (NpuConfig.chat=True); always enabled here.
+            load_chat = "1"
 
         return {
             "HAL0_FLM_TAG": str(flm_tag),
@@ -275,19 +309,21 @@ class FLMProvider(Provider):
             "HAL0_FLM_CTX": str(ctx),
             "HAL0_FLM_LOAD_ASR": load_asr,
             "HAL0_FLM_LOAD_EMBED": load_embed,
+            "HAL0_FLM_LOAD_CHAT": load_chat,
         }
 
     def start_cmd(self, env: dict[str, str]) -> list[str]:
         """Return argv for the native ``flm serve`` invocation.
 
         Used by tests and the fallback systemd-without-Docker path. The
-        primary deployment path is ``container_spec``.
+        primary deployment path is ``container_spec``. Shares the
+        ``--embed`` / ``--asr`` tail with it via :func:`_flm_shadow_role_args`.
         """
         binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
-        argv = [
-            binary,
-            "serve",
-            env["HAL0_FLM_TAG"],
+        argv = [binary, "serve"]
+        if env.get("HAL0_FLM_LOAD_CHAT", "1") == "1":
+            argv += [env["HAL0_FLM_TAG"]]
+        argv += [
             "--host",
             "0.0.0.0",
             "--port",
@@ -295,10 +331,7 @@ class FLMProvider(Provider):
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
-        if env.get("HAL0_FLM_LOAD_EMBED") == "1":
-            argv += ["--embed", "1"]
-        if env.get("HAL0_FLM_LOAD_ASR") == "1":
-            argv += ["--asr", "1"]
+        argv += _flm_shadow_role_args(env)
         return argv
 
     # ── Image / container spec ─────────────────────────────────────────────────
@@ -358,9 +391,15 @@ class FLMProvider(Provider):
         # subcommand + flags — NOT a binary path. Passing an absolute
         # binary path here would be treated by flm as a stray positional
         # argument and rejected with "too many positional options".
-        command: list[str] = [
-            "serve",
-            env["HAL0_FLM_TAG"],
+        command: list[str] = ["serve"]
+        # Chat modality is the positional tag. Gate it on HAL0_FLM_LOAD_CHAT so
+        # toggling NPU · Chat off actually stops serving chat on the container
+        # path (previously the tag was passed unconditionally, so the toggle
+        # only worked on the native start_cmd fallback). With chat off, FLM
+        # serves only the shadow roles (--embed / --asr) and has no LLM.
+        if env.get("HAL0_FLM_LOAD_CHAT", "1") == "1":
+            command += [env["HAL0_FLM_TAG"]]
+        command += [
             "--host",
             "0.0.0.0",
             "--port",
@@ -368,10 +407,7 @@ class FLMProvider(Provider):
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
-        if env["HAL0_FLM_LOAD_EMBED"] == "1":
-            command += ["--embed", "1"]
-        if env["HAL0_FLM_LOAD_ASR"] == "1":
-            command += ["--asr", "1"]
+        command += _flm_shadow_role_args(env)
 
         # render group resolves dynamically at run-time; use the numeric gid
         # so the spec doesn't depend on /etc/group in the container.
@@ -423,24 +459,69 @@ class FLMProvider(Provider):
     # ── Health / infer ─────────────────────────────────────────────────────────
 
     async def health(self, port: int) -> dict[str, Any]:
-        """Health probe with a real inference round-trip.
+        """Cheap liveness probe — non-empty ``/v1/models``, NO NPU work.
 
-        TIER1: PLAN.md §5 — the haloai version (lib/providers/flm.py)
-        reported "ok" as soon as `/v1/models` returned data, even when
-        the model failed to actually load on the NPU. We now require
-        BOTH:
-          1. non-empty /v1/models
-          2. a /v1/chat/completions with max_tokens=1 returning a
-             well-formed response with at least one choice
+        This is the ONLY health probe safe to run on the hot paths (the 2s
+        fail-watcher and the per-request readiness gate). It deliberately does
+        NOT issue a ``/v1/chat/completions`` sentinel: FLM serialises the
+        single NPU context and its request-cancel path double-frees (SIGABRT,
+        status 134), so a real-inference probe fired repeatedly — and
+        overlapping real traffic — crashes the container. Real inferability is
+        verified once, out of band, by :meth:`verify_inference` at the
+        warm→ready promotion.
+
+        Distinguishes "up but still loading" (``ok=False``,
+        ``models_endpoint_empty``) from "up and serving a model"
+        (``ok=True``). Transport errors surface as ``ok=False`` /
+        ``http_error`` so the manager's strike-based fail-watcher can act.
 
         Returns {"ok": bool, "status": str, "model": str|None, ...}.
         """
         models_url = f"http://127.0.0.1:{port}/v1/models"
-        chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
-
         try:
             async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
-                # Step 1: /v1/models must be non-empty.
+                models_resp = await client.get(models_url)
+                models_resp.raise_for_status()
+                data = models_resp.json()
+                models = data.get("data", [])
+                if not models:
+                    return {
+                        "ok": False,
+                        "status": "models_endpoint_empty",
+                        "detail": "/v1/models returned no entries",
+                    }
+                model_id = models[0].get("id")
+            return {"ok": True, "status": "ready", "model": model_id}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "status": "http_error", "detail": str(exc)}
+        except Exception as exc:
+            # Do not silently swallow — surface the failure to the fail-watcher.
+            return {"ok": False, "status": "exception", "detail": str(exc)}
+
+    async def verify_inference(self, port: int) -> dict[str, Any]:
+        """One-shot real-inference gate — a single ``/v1/chat/completions``.
+
+        Run EXACTLY ONCE at the warm→ready promotion (see
+        :meth:`SlotManager._await_ready`), never on a repeating/concurrent
+        path. This is the Tier-1 check that ``/v1/models`` listing a model is
+        not proof the NPU can actually produce a token (haloai
+        lib/slots.py:899-920).
+
+        The sentinel POST is wrapped in :func:`asyncio.shield`: if the load
+        coroutine is cancelled mid-flight we must NOT abort an in-progress NPU
+        prefill — that is exactly the cancellation FLM double-frees on. The
+        gate runs with no contention (slot not yet dispatchable, load lock
+        held, warming fail-watcher skips /health), so draining the shielded
+        request costs at most the read timeout.
+
+        Returns {"ok": bool, "status": str, "model": str|None, ...}. Never
+        raises; a transport failure resolves to ``ok=False`` so the caller can
+        hold the slot in the retryable WARMING state rather than a lying READY.
+        """
+        models_url = f"http://127.0.0.1:{port}/v1/models"
+        chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        try:
+            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
                 models_resp = await client.get(models_url)
                 models_resp.raise_for_status()
                 data = models_resp.json()
@@ -453,7 +534,6 @@ class FLMProvider(Provider):
                     }
                 model_id = models[0].get("id")
 
-            # Step 2: real inference round-trip.  # TIER1
             async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {
                     "model": model_id,
@@ -462,7 +542,8 @@ class FLMProvider(Provider):
                     "temperature": 0.0,
                     "stream": False,
                 }
-                chat_resp = await client.post(chat_url, json=probe_body)
+                # shield: never hand FLM a cancelled prefill (double-free).
+                chat_resp = await asyncio.shield(client.post(chat_url, json=probe_body))
                 if chat_resp.status_code != 200:
                     return {
                         "ok": False,
@@ -488,7 +569,58 @@ class FLMProvider(Provider):
         except httpx.HTTPError as exc:
             return {"ok": False, "status": "http_error", "detail": str(exc)}
         except Exception as exc:
-            # TIER1: do not silently swallow.
+            return {"ok": False, "status": "exception", "detail": str(exc)}
+
+    async def verify_embed(self, port: int) -> dict[str, Any]:
+        """One-shot embeddings gate — a single ``/v1/embeddings`` call.
+
+        The warm→ready sentinel for FLM slots serving EMBED without CHAT
+        (``[npu].chat=false``): :meth:`verify_inference`'s chat completion
+        would fail because no chat model is loaded, wedging the slot in
+        WARMING forever. This exercises the embed path instead — the actual
+        role the slot serves — so an embed-primary slot can promote to READY.
+
+        Mirrors :meth:`verify_inference`: reads ``/v1/models`` for the served
+        model id, then a single shielded ``/v1/embeddings`` POST (shield: never
+        hand FLM a cancelled request → NPU double-free). Never raises; a
+        transport failure resolves to ``ok=False`` (retryable WARMING).
+        """
+        models_url = f"http://127.0.0.1:{port}/v1/models"
+        embed_url = f"http://127.0.0.1:{port}/v1/embeddings"
+        try:
+            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+                models_resp = await client.get(models_url)
+                models_resp.raise_for_status()
+                data = models_resp.json()
+                models = data.get("data", [])
+                if not models:
+                    return {
+                        "ok": False,
+                        "status": "models_endpoint_empty",
+                        "detail": "/v1/models returned no entries",
+                    }
+                model_id = models[0].get("id")
+
+            async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
+                probe_body = {"model": model_id, "input": "ping"}
+                resp = await asyncio.shield(client.post(embed_url, json=probe_body))
+                if resp.status_code != 200:
+                    return {
+                        "ok": False,
+                        "status": f"sentinel_embed_http_{resp.status_code}",
+                        "detail": resp.text[:200],
+                        "model": model_id,
+                    }
+                try:
+                    body = resp.json()
+                except Exception:
+                    return {"ok": False, "status": "sentinel_embed_unparseable", "model": model_id}
+                if not body.get("data"):
+                    return {"ok": False, "status": "sentinel_embed_no_data", "model": model_id}
+            return {"ok": True, "status": "ready", "model": model_id}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "status": "http_error", "detail": str(exc)}
+        except Exception as exc:
             return {"ok": False, "status": "exception", "detail": str(exc)}
 
     async def infer(self, port: int, body: dict[str, Any]) -> dict[str, Any]:

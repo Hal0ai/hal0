@@ -1,4 +1,4 @@
-// hal0 dashboard — Slots view (SlotCard, NPU trio variants, group sections)
+// force cache bust v4 — 2026-07-08-toggle-deploy
 //
 // Phase B1 → slots wireup: live slot list + per-slot lifecycle mutations
 // via the typed `useSlots` family. The `slots` prop (HAL0_DATA fallback)
@@ -31,7 +31,7 @@ import { TelemetryHeader } from './telemetry-header.jsx'
 import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 
-const { useState: useStateS } = React;
+const { useState: useStateS, useRef, useEffect } = React;
 
 // ─── Slot indicator dot ────────────────────────────────────────────────
 //
@@ -339,6 +339,19 @@ function SlotCard({
           return <span className="chip" style={{color: chipColor}}>{ind.label}</span>;
         })()}
       </div>
+      {/* NPU column squares — animate when slot is actively serving */}
+      {slot.served_by === 'flm' && (
+        <div style={{display: 'flex', gap: 3, marginTop: 4, marginBottom: 4}}>
+          {[...Array(8)].map((_, i) => (
+            <div key={i} style={{
+              width: 8, height: 8, borderRadius: 2,
+              background: 'var(--dev-npu)',
+              boxShadow: '0 0 6px var(--dev-npu)',
+              opacity: 0.85,
+            }} />
+          ))}
+        </div>
+      )}
       {metricsRow.length > 0 && (
         <div className="slot-metrics">
           {metricsRow.map((m, i) => (
@@ -407,11 +420,32 @@ function SlotListRow({ slot, onEdit }) {
     });
     window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}…`, "info");
   };
-  // Only tok/s is backed by a real slot-payload field. The legacy rpm/xrt/avg
-  // metrics were never populated by the backend (same reasoning as the card
-  // variant's dead-chip cleanup, W6) — non-llm rows show an em-dash instead
-  // of a fabricated 0.
-  const tps = type === "llm" ? `${metrics.toks || 0} t/s` : "—";
+  // tok/s: prefer tokens_per_sec (from /api/slots/metrics, backed by FLM)
+  // fall back to metrics.toks (local streaming count).
+  const slotTps = metrics.tokens_per_sec || metrics.tps || metrics.toks || 0;
+  const tps = type === "llm" ? `${slotTps > 0 ? slotTps.toFixed(1) : 0} t/s` : "—";
+  const kvPct = metrics.kv_cache_usage;
+  // DEBUG: check served_by
+  if (slot.name && slot.name.startsWith('flm') && typeof window !== 'undefined') {
+    console.log('SlotListRow', slot.name, 'served_by:', slot.served_by, 'type:', slot.type, 'full:', slot);
+  }
+  // Track request_count changes for shadow-slot animation
+  const reqCount = metrics.request_count || 0;
+  const prevReq = useRef(reqCount);
+  const [flash, setFlash] = useStateS(false);
+  useEffect(() => {
+    if (reqCount > prevReq.current) {
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 600);
+      prevReq.current = reqCount;
+      return () => clearTimeout(t);
+    }
+    prevReq.current = reqCount;
+  }, [reqCount]);
+  // NPU shadow slot colors: flm=purple, flm-stt=green, flm-embed=teal
+  const npuAccent = slot.name === 'flm-stt' ? 'var(--npu-stt-accent, #22c55e)'
+    : slot.name === 'flm-embed' ? 'var(--npu-embed-accent, #14b8a6)'
+    : 'var(--dev-npu)';
   return (
     <div className="slot-list-row" onClick={goEdit}>
       <IndicatorDot slot={slot} />
@@ -426,10 +460,44 @@ function SlotListRow({ slot, onEdit }) {
       </span>
       <span className="met">
         <b>{tps}</b>
+        {type === "llm" && kvPct != null && <span>· {(kvPct * 100).toFixed(1)}% KV</span>}
         {type === "llm" && metrics.ttft && <span>· {metrics.ttft}ms ttft</span>}
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
-      <span className="ac">
+      {/* NPU column squares — animate when slot is actively serving */}
+      {slot.served_by === 'flm' && (
+        <div style={{display: 'flex', gap: 2, marginLeft: 6}}>
+          {[...Array(8)].map((_, i) => (
+            <div key={i} style={{
+              width: 6, height: 6, borderRadius: 1.5,
+              background: npuAccent,
+              boxShadow: flash ? `0 0 10px ${npuAccent}` : `0 0 4px ${npuAccent}`,
+              opacity: flash ? 1 : 0.85,
+              transition: 'all 0.25s ease',
+            }} />
+          ))}
+        </div>
+      )}
+      {/* NPU shadow slots: replace Restart with on/off toggle */}
+      {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
+        <span className="ac" style={{gap: 6}}>
+          <span style={{fontSize: 11, color: 'var(--fg-2)'}}>
+            {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+          </span>
+          <span style={{
+            background: slot.enabled ? 'var(--dev-npu)' : 'transparent',
+            border: '1px solid var(--dev-npu)', borderRadius: 10,
+            padding: '1px 10px', fontSize: 11,
+            color: slot.enabled ? '#fff' : 'var(--dev-npu)',
+          }}>
+            {slot.enabled ? 'ON' : 'OFF'}
+          </span>
+          <button className="btn ghost sm" title="Edit"
+            onClick={e => { e.stopPropagation(); goEdit(); }}
+          >{Icons.edit}</button>
+        </span>
+      ) : (
+        <span className="ac">
         <button
           className="btn ghost sm"
           title="Restart"
@@ -440,7 +508,8 @@ function SlotListRow({ slot, onEdit }) {
           title="Edit"
           onClick={e => { e.stopPropagation(); goEdit(); }}
         >{Icons.edit}</button>
-      </span>
+        </span>
+      )}
     </div>
   );
 }
@@ -581,9 +650,11 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const groups = {
     chat:  cardSlots.filter(s => dc(s) === "gpu" && s.type === "llm"),
     caps:  cardSlots.filter(s =>
-             dc(s) !== "npu" && dc(s) !== "img" &&
+             dc(s) !== "npu" && dc(s) !== "img" && !s.served_by &&
              ["embedding", "reranking", "transcription", "tts"].includes(s.type)),
     img:   cardSlots.filter(s => dc(s) === "img" || s.type === "image"),
+    npuStt: cardSlots.filter(s => s.name === "flm-stt"),
+    npuEmb: cardSlots.filter(s => s.name === "flm-embed"),
   };
 
   // Any non-image slot currently holding GPU/loaded → drives the Inference-tab

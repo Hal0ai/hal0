@@ -1,0 +1,39 @@
+{
+  "timestamp": "20260704T212737Z",
+  "mode": "reuse",
+  "slot": "agent",
+  "n": 3,
+  "max_tokens": 256,
+  "results": {
+    "cache-reuse-256": {
+      "extra_args": "--cache-reuse 256",
+      "second_call": {
+        "cache_n": 3755,
+        "prompt_n": 510,
+        "prompt_ms": 520.104,
+        "prompt_per_token_ms": 1.0198117647058824,
+        "prompt_per_second": 980.5731161460016,
+        "predicted_n": 32,
+        "predicted_ms": 533.651,
+        "predicted_per_token_ms": 16.67659375,
+        "predicted_per_second": 59.964283773477426,
+        "wall_s": 1.06
+      }
+    },
+    "cache-reuse-0": {
+      "extra_args": "--cache-reuse 0",
+      "second_call": {
+        "cache_n": 3755,
+        "prompt_n": 510,
+        "prompt_ms": 529.459,
+        "prompt_per_token_ms": 1.0381549019607843,
+        "prompt_per_second": 963.2473902606247,
+        "predicted_n": 32,
+        "predicted_ms": 532.698,
+        "predicted_per_token_ms": 16.6468125,
+        "predicted_per_second": 60.07156024614322,
+        "wall_s": 1.068
+      }
+    }
+  }
+}

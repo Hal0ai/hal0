@@ -1,0 +1,44 @@
+[Unit]
+Description=hal0 scheduled benchmark session (hal0 bench run --scheduled)
+Documentation=https://github.com/Hal0ai/hal0/blob/main/handoffs/benchmark-system-design-2026-07-05.md
+# No hard dependency on hal0-api being up: `hal0 bench run --scheduled` checks
+# it itself as part of the politeness policy (/etc/hal0/bench/window.toml,
+# design §6) and exits 0 if it can't confirm an idle window — that's "skip
+# this tick", not a unit failure.
+After=network-online.target
+# Bound how fast consecutive manual `systemctl start` retries can fire.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+# The weekly scheduled session. `--scheduled` applies the design §6 politeness
+# policy (maintenance window + no live traffic) and exits 0 to skip a tick
+# cleanly. `run` requires an explicit --suite; roster is the weekly board suite.
+ExecStart=/usr/lib/hal0/venv/bin/hal0 bench run --suite roster --scheduled
+
+# Runs as the EXISTING unprivileged `hal0` user. Deliberate and load-bearing:
+# the bench runner has no privileged code path of its own — every root-touching
+# operation (exclusive GPU-slot stop/restart, Tier A llama-bench cells) goes
+# through the `hal0-benchctl` sudoers seam, the single audited choke point the
+# `hal0` user already has a narrow `sudo -n` grant for (design §12).
+User=hal0
+Group=hal0
+
+# Session length varies with the suite's budget_min (up to 240 min for roster)
+# plus GPU-quiesce bracketing; give headroom rather than have systemd kill a
+# slow-but-healthy session. A hung session is caught by the runner's own
+# per-cell watchdog (3x expected duration, design §5), not by systemd here.
+TimeoutStartSec=6h
+
+# INTENTIONALLY NOT systemd-sandboxed: NoNewPrivileges=yes blocks the sudo
+# seam call outright, and ProtectSystem=strict / PrivateTmp break the seam's
+# rootful podman. The unit stays unprivileged via User=hal0 and delegates all
+# privilege to the seam.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hal0-bench
+
+# No [Install] section: driven exclusively by hal0-bench.timer. A manual
+# `systemctl start hal0-bench.service` still works for an on-demand run.

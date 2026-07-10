@@ -125,6 +125,9 @@ NPU_SEEDED_SLOTS: tuple[str, ...] = ("stt-npu", "embed-npu")
 #: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
 SLOT_ALIASES: dict[str, str] = {
     "agent-hermes": "agent",
+    # Route curated NPU model IDs to the FLM trio slot.
+    "qwen3:4b": "flm",
+    "qwen3-4b": "flm",
 }
 
 #: Slot ``type`` vocabulary (plan §4.1) — sourced from the canonical
@@ -428,7 +431,7 @@ class SlotManager:
 
         upstream = Upstream(
             name=slot_name,
-            kind="remote",
+            kind="slot",
             url=f"http://127.0.0.1:{port}/v1",
             auth_style="none",
             warmup_strategy="none",
@@ -3233,11 +3236,10 @@ class SlotManager:
 
         # Wait for /health 200 on the container port.
         slot_port = port or int(_cfg_to_dict(cfg).get("port", 0))
-        from hal0.providers.container import container_provider
+        from hal0.providers.container import _spec_provider_for, container_provider
 
         try:
             await container_provider().wait_ready(slot_port)
-            return SlotState.READY
         except TimeoutError as exc:
             log.warning(
                 "slot.container_await_ready_timeout",
@@ -3250,6 +3252,47 @@ class SlotManager:
             # request re-drives load() — the fail watcher / reload governs
             # recovery instead of live traffic hitting a wedged server.
             return SlotState.WARMING
+
+        # One-shot inference gate for FLM/NPU slots. The hot health paths (2s
+        # fail-watch + per-request readiness) use only the cheap /v1/models
+        # liveness probe — a repeating/overlapping real completion double-frees
+        # the single NPU context (SIGABRT, status 134). We still verify real
+        # inferability ONCE, here, where there is no contention: the slot is
+        # not yet dispatchable, this load holds the slot lock, and the warming
+        # fail-watcher skips /health. A wedged NPU that lists models but can't
+        # infer resolves to retryable WARMING instead of a lying READY.
+        from hal0.providers.flm import FLMProvider
+
+        provider = _spec_provider_for(cfg)
+        if isinstance(provider, FLMProvider):
+            # Pick the sentinel by which modality the slot actually serves.
+            # An embed/STT-primary slot ([npu].chat=false) has no chat model,
+            # so the chat completion sentinel would fail and wedge it in
+            # WARMING forever. Probe the real role instead.
+            npu_cfg = cfg.get("npu") or (cfg.get("extra") or {}).get("npu") or {}
+            chat_on = npu_cfg.get("chat", True) is not False
+            embed_on = bool(npu_cfg.get("embed"))
+            if chat_on:
+                verdict = await provider.verify_inference(slot_port)
+            elif embed_on:
+                verdict = await provider.verify_embed(slot_port)
+            else:
+                # ASR-only (no chat, no embed): a transcription sentinel needs
+                # an audio upload, so fall back to the cheap /v1/models liveness
+                # — the slot is ready once it lists its served model.
+                verdict = await provider.health(slot_port)
+            if not verdict.get("ok"):
+                log.warning(
+                    "slot.flm_inference_gate_failed",
+                    extra={
+                        "slot": slot_name,
+                        "port": slot_port,
+                        "status": verdict.get("status"),
+                        "detail": verdict.get("detail"),
+                    },
+                )
+                return SlotState.WARMING
+        return SlotState.READY
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
 

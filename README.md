@@ -24,11 +24,24 @@ control plane — it owns slot state machines, dispatches OpenAI-compatible
 `/v1/*` requests to the right slot port, and serves the dashboard. No
 shared inference daemon; no extra process to babysit.
 
+> **⚡ If you just installed or upgraded, run `hal0 setup`** for the
+> guided interactive setup. It walks you through network binding, model
+> storage, HuggingFace token, capability slots, NPU opt-in, image
+> generation, and extensions — then downloads your chosen models with
+> live progress. Run it anytime:
+>
+> ```sh
+> hal0 setup
+> ```
+>
+> Non-interactive: `hal0 setup --auto` scaffolds defaults without
+> prompting. Skipped during install? Just run it now.
+
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.9.0 — first public beta.** Container-runtime era,
+> **Status:** **v0.9.4 — public beta.** Container-runtime era,
 > declarative config. Each slot (`agent`, `utility`, `embed`, `rerank`,
 > `stt`, `tts`, `img`, `vision`, NPU trio) runs as a dedicated podman
 > container (`hal0-slot@<name>.service`). Slot definitions live in
@@ -135,12 +148,15 @@ be evicted out from under a streaming request.
   rerank, audio transcriptions, audio speech, image generations,
   image edits, models. Drop-in for any OpenAI SDK; point your client
   at `http://localhost:8080/v1` and go.
-- **Slots** — each named target in `capabilities.toml` carries a
-  `type` (`llm | embedding | reranking | transcription | tts | image`),
+- **Slots** — each named target carries a `type`
+  (`llm | embedding | reranking | transcription | tts | image`),
   a `device` (`gpu-rocm | gpu-vulkan | cpu | npu | img`), a `model`,
-  plus `enabled` and optional `default`. Eight seeded slots (`agent`,
-  `utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`) plus NPU
-  slots (`npu`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
+  plus `enabled` and optional `default`. Five seeded slots (`npu`,
+  `tts`, `rerank`, `utility`, `img`) are written to
+  `/etc/hal0/slots/<name>.toml` during install; `hal0 setup` scaffolds
+  additional capability slots (chat, coder, embed, stt, vision) with
+  empty model picks for the operator to fill. NPU slots (`npu`,
+  `embed-npu`, `stt-npu`) are seeded when FastFlowLM is installed.
   User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
   Slots refer to a **profile** in `/etc/hal0/profiles.toml` that pins
   the container image + flag bundle for that backend.
@@ -150,13 +166,14 @@ be evicted out from under a streaming request.
   seeds). No shared inference daemon. See
   [docs/concepts/architecture.mdx](./docs/concepts/architecture.mdx).
 - **`hal0 setup` TUI** — after install (or anytime), `hal0 setup`
-  walks you through storage, Extensions (Apps / Agents), Main and
-  Agent model selection, and NPU opt-in, then downloads models with
-  live progress. Non-interactive: `hal0 setup --auto` applies
-  recommended defaults without prompting. Other flags: `--storage-dir
+  walks you through network binding, model storage, HuggingFace token,
+  capability slot scaffolding, NPU opt-in, image generation, and
+  extensions (Apps + Agents), then applies the plan with live model
+  download progress. Non-interactive: `hal0 setup --auto` scaffolds
+  capability slots without prompting. Other flags: `--storage-dir
   PATH`, `--no-pull` (seed slots without downloading models),
-  `--no-extensions`. Set `HAL0_SKIP_SETUP=1` to skip first-run setup
-  entirely during install.
+  `--no-extensions`, `--plan` (dry-run). Set `HAL0_SKIP_SETUP=1`
+  to skip first-run setup entirely during install.
 - **Hardware-aware probe** — detects GPU / NPU / unified memory,
   writes `/etc/hal0/hardware.json`, surfaces VRAM/RAM fit warnings
   inline in the slot form and during `hal0 setup`.
@@ -175,8 +192,9 @@ be evicted out from under a streaming request.
   tab operates the ComfyUI container (live GTT/RAM gauges, queue
   depth, model inventory) with a gated inference ⇄ generation iGPU
   switchover behind a blast-radius confirm.
-- **Extensions** — selectable Apps (Open WebUI) and Agents (Hermes,
-  Pi) that `hal0 setup` auto-wires into the platform.
+- **Extensions** — select multiple Apps (Open WebUI) and Agents (Hermes,
+  Pi) during `hal0 setup`; all checked items are installed and wired
+  into the platform.
 - **Companion-service management** — `/api/services` is the declarative
   source of truth for OpenWebUI, Hermes, Hindsight, ComfyUI, and n8n:
   audit-logged systemd lifecycle actions (start/stop/restart/enable/
@@ -209,6 +227,8 @@ be evicted out from under a streaming request.
   manifest, sha256-verifies the tarball, cosign-verifies the signature
   against the workflow OIDC identity, then hands off to
   [`installer/install.sh`](./installer/install.sh).
+  Rerun `hal0 setup` at any time to add slots, change storage, or
+  install extensions — the provisioning endpoints are idempotent.
 - **One-line Proxmox VE install** — on a Proxmox host, `bash -c "$(curl
   -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"`
   creates an unprivileged Debian 13 LXC and runs the standard bootstrap
@@ -219,18 +239,18 @@ be evicted out from under a streaming request.
 
 ### Bundled agents
 
-hal0 ships **two MCP servers** and **one bundled agent app**. The MCP
+hal0 ships **two MCP servers** and **two bundled agents**. The MCP
 servers (`/mcp/admin` for slot / model / capability / config / hardware
 / log admin and `/mcp/memory` for Hindsight-backed long-term memory) are
 reachable by any MCP-speaking client — Claude Code, future RAG
-services, external scripts. The bundled agent is single-pick at install:
-`pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
-`@earendil-works/pi-coding-agent` on npm) or `Hermes-Agent` (service
+services, external scripts. Both bundled agents can be installed
+simultaneously: `pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
+`@earendil-works/pi-coding-agent` on npm) and `Hermes-Agent` (service
 shape, installed via the hal0-owned `hermes` wrapper — `hal0-hermes` is
 kept as a back-compat symlink; connects to
 `hal0-api` via `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Select
-one during `hal0 setup` (Extensions step) or any time via `hal0 agent
-install <name>`; swap atomically with `--switch`. Capital-D destructive MCP calls
+one or both during `hal0 setup` (Extensions step) or any time via `hal0 agent
+install <name>`. Capital-D destructive MCP calls
 (`model_pull`, `slot_delete`, `config_write`, etc.) gate through a
 header bell + inbox modal in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`. See
@@ -286,7 +306,7 @@ hal0/
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
 ├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3)
 ├── installer/        # install.sh (writes /etc/hal0/, systemd units, hal0-api.service)
-│   ├── etc-hal0/     # seed slot TOMLs + profiles.toml
+│   ├── etc-hal0/     # seed slot TOMLs (npu, tts, rerank, utility, img) + profiles.toml
 │   └── systemd/      # hal0-agent@ template units
 ├── tests/            # pytest suite (α unit, β integration, γ release-gate)
 ├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/

@@ -2860,12 +2860,11 @@ def _resolve_auxiliary_tasks(
         tasks[task] = {"provider": "main", "model": "", "base_url": ""}
 
     utility = _find_named_ready_slot(slots, _UTILITY_SLOT_NAME)
-    # The utility role can live on a slot NOT named ``utility`` — e.g. the NPU
-    # slot (name ``npu``, ``role='utility'``) when the NPU serves utility
-    # inference. ``/api/slots`` doesn't surface ``role``, so we can't match it
-    # by name; instead, when no named utility slot exists but a ready NPU llm
-    # slot does, target the ``hal0/utility`` virtual and let the gateway resolve
-    # to it (the resolver falls back to chat if it is ever not loaded).
+    # When no utility-slot named ``utility`` exists but a ready NPU llm slot
+    # does (device="npu"), route aux tasks to hal0/npu. The retired ``role``
+    # tag was removed (slot ``name`` is the routing key) so hal0/utility
+    # resolves only to a slot literally named `utility`. hal0/npu is
+    # special-cased to match by device, then falls back to the anchor.
     npu_utility = utility is None and _has_ready_npu_llm_slot(slots)
     for task in _UTILITY_AUX_TASKS:
         if utility is not None:
@@ -2877,7 +2876,7 @@ def _resolve_auxiliary_tasks(
         elif npu_utility:
             tasks[task] = {
                 "provider": "custom",
-                "model": "hal0/utility",
+                "model": "hal0/npu",
                 "base_url": hal0_base_url,
             }
         else:

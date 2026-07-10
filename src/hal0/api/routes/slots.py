@@ -49,6 +49,91 @@ from hal0.slots.manager import Slot, SlotManager
 router = APIRouter()
 
 
+@router.get("/flm/models")
+async def list_flm_models(request: Request):
+    """Return the full FLM catalog for the drawer's NPU model dropdowns.
+
+    The dashboard shows the WHOLE catalog (installed or not) so the operator
+    can pick any tag and trigger a download for the ones not yet on disk
+    (``POST /api/models/{tag}/pull`` handles FLM tags). Each entry carries an
+    ``installed`` flag so the UI can mark/act on the difference.
+
+    Two sources, container-exec primary:
+
+      1. ``<runtime> exec`` into the running FLM container and run ``flm list``.
+         This reads the store the slot ACTUALLY serves with — on a box that
+         relocates the model store (``[models].flm_store``) the store is a
+         bind-mount that only exists inside the container, so the container is
+         the only place ``installed`` is accurate. Full list + correct flags.
+      2. When the container is down (cold/disabled slot), fall back to the HOST
+         ``flm list`` probe (:func:`flm_served_models`). It still knows every
+         catalog tag (from the bundled ``model_list.json``) so the dropdowns
+         populate; ``installed`` may read false on relocated-store boxes since
+         the host can't see the container-only mount — acceptable for the cold
+         case, and correct on default-store boxes.
+
+    Shape: ``{"models": [{"model": tag, "installed": bool,
+    "capabilities": [...], "family": str}]}`` — ``model``/``installed`` keep the
+    dashboard filter contract.
+    """
+    import json as _json
+    import subprocess
+
+    from hal0.providers.flm import _classify_flm_model, flm_served_models
+
+    def _from_container() -> list[dict[str, Any]] | None:
+        # Container name convention: hal0-slot-<name>; the NPU anchor is "flm".
+        try:
+            raw = subprocess.run(
+                ["podman", "exec", "hal0-slot-flm", "/opt/fastflowlm/bin/flm", "list", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            raw.check_returncode()
+            data = _json.loads(raw.stdout)
+        except Exception:
+            return None
+        entries = data if isinstance(data, list) else data.get("models", [])
+        out: list[dict[str, Any]] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            tag = e.get("model") or e.get("name")
+            if not tag:
+                continue
+            details = e.get("details") if isinstance(e.get("details"), dict) else {}
+            out.append(
+                {
+                    "model": tag,
+                    "installed": bool(e.get("installed")),
+                    "capabilities": _classify_flm_model(e),
+                    "family": str(details.get("family") or ""),
+                }
+            )
+        return out or None
+
+    models = _from_container()
+    if models is None:
+        # Cold-slot fallback — host probe knows every tag; installed may be
+        # understated on relocated-store boxes (see docstring).
+        try:
+            catalog = flm_served_models()
+        except Exception:
+            catalog = []
+        models = [
+            {
+                "model": e.get("tag"),
+                "installed": bool(e.get("installed")),
+                "capabilities": e.get("capabilities", []),
+                "family": e.get("family", ""),
+            }
+            for e in catalog
+            if e.get("tag")
+        ]
+    return {"models": models}
+
+
 class NotImplementedYet(Hal0Error):
     code = "system.not_implemented"
     status = 501
@@ -843,6 +928,38 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
             entry = {"name": name}
             merged[name] = entry
         entry.update(ttft)
+    # FLM / NPU per-slot throughput + KV column occupancy — captured
+    # from the ``usage`` block of non-streaming chat completions.
+    flm_tps = getattr(request.app.state, "slot_throughput", {})
+    flm_kv = getattr(request.app.state, "slot_kv_occupancy", {})
+    for name, tps in flm_tps.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["tokens_per_sec"] = tps
+    for name, kv in flm_kv.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["kv_cache_usage"] = kv
+    # Per-slot request counts (shadow slots inherit from parent)
+    req_store = getattr(request.app.state, "slot_request_count", {})
+    for name, count in req_store.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["request_count"] = count
+    # Per-slot last-use timestamps (drives most-recent animation)
+    last_used = getattr(request.app.state, "slot_last_used", {})
+    for name, ts in last_used.items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry["last_used_ts"] = ts
     return merged
 
 

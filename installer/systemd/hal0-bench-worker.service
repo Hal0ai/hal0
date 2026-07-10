@@ -1,0 +1,38 @@
+[Unit]
+Description=hal0 benchmark run-queue worker (hal0 bench worker)
+Documentation=https://github.com/Hal0ai/hal0/blob/main/handoffs/benchmark-system-design-2026-07-05.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Long-running poller draining the queue the dashboard writes (POST
+# /api/benchmarks/queue) — sessions run out-of-request; the API process never
+# drives the GPU inline. SAFE BY DEFAULT: control state defaults to "stopped",
+# so this does NOTHING (never touches the GPU or competing slots) until an
+# operator hits Start in the UI. When Started it drives each queued item
+# exactly like `hal0 bench run` — same GPU gate, same seam --exclusive for
+# competing-slot shutdown; Pause/Stop are honoured between cells.
+Type=simple
+ExecStart=/usr/lib/hal0/venv/bin/hal0 bench worker --poll 10
+Restart=on-failure
+RestartSec=10
+
+User=hal0
+Group=hal0
+
+# INTENTIONALLY NOT systemd-sandboxed. The worker has no privileged code of
+# its own; it reaches privilege ONLY through the hal0-benchctl sudo seam (the
+# sole security boundary — it validates every arg, design §12). That is
+# incompatible with the usual hardening:
+#   * NoNewPrivileges=yes BLOCKS sudo outright.
+#   * ProtectSystem=strict / PrivateTmp / ProtectKernelModules break the
+#     seam's ROOTFUL podman (root's container storage, /tmp, devices, modules).
+# PYTHONUNBUFFERED so [worker] progress lines reach the journal promptly.
+Environment=PYTHONUNBUFFERED=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hal0-bench-worker
+
+[Install]
+WantedBy=multi-user.target

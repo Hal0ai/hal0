@@ -1,0 +1,8 @@
+id,amount,status
+1,120,shipped
+2,80,pending
+3,200,shipped
+4,50,cancelled
+5,75,shipped
+6,40,pending
+7,130,shipped

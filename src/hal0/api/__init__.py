@@ -50,6 +50,9 @@ from hal0.api.routes import (
     backends as backends_routes,
 )
 from hal0.api.routes import (
+    benchmarks as benchmarks_routes,
+)
+from hal0.api.routes import (
     board as board_routes,
 )
 from hal0.api.routes import (
@@ -413,10 +416,11 @@ async def hal0_llm_slot_views(
     slot_manager: SlotManager,
     model_registry: ModelRegistry | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one dict per enabled llm slot: {name, role, device, model_id, context_length}.
+    """Return one dict per enabled llm slot: {name, device, model_id, context_length}.
 
     Source for normalize.LiveSlotResolver's SlotView list. Mirrors
-    hal0_chat_slot_alias_map's iteration but carries role + device + context.
+    hal0_chat_slot_alias_map's iteration but carries device + context (the
+    legacy ``role`` field was retired — slot identity is the name).
     """
     try:
         cfgs = await slot_manager.iter_configs()
@@ -448,7 +452,6 @@ async def hal0_llm_slot_views(
         out.append(
             {
                 "name": name,
-                "role": cfg.get("role"),
                 "device": (cfg.get("device") or "").strip(),
                 "model_id": model_id,
                 "context_length": int(_slot_ctx_size(cfg, model_registry, model_id) or 0),
@@ -782,6 +785,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         upstream_registry=upstreams,
         model_registry=model_registry,
         prefetch_timeout_s=hal0_cfg.dispatcher.prefetch_timeout_s,
+        direct_read_timeout_s=hal0_cfg.dispatcher.direct_read_timeout_s,
         prefetch_parallel_cap=hal0_cfg.dispatcher.prefetch_parallel_cap,
         cached_models=lambda name: model_cache.get(name, []),
         fetch_models=_fetch_and_cache,
@@ -946,6 +950,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         return collections.deque(maxlen=128)
 
     app.state.ttft_events = collections.defaultdict(_new_ttft_deque)
+
+    # FLM / NPU per-slot metrics — updated by v1._record_nonstreaming_throughput
+    # when the upstream (FLM container) returns decoding_speed_tps and
+    # kv_token_occupancy_rate_percentage in the usage block.
+    app.state.slot_throughput: dict[str, float] = {}
+    app.state.slot_kv_occupancy: dict[str, float] = {}
+    app.state.slot_request_count: dict[str, int] = {}
+    app.state.slot_last_used: dict[str, float] = {}
 
     log.info(
         "hal0.api.upstreams_loaded",
@@ -1229,6 +1241,13 @@ def create_app() -> FastAPI:
     # diff → atomic commit → lifecycle converge) + export/import/snapshot.
     # Public on the local network (ADR-0012), same rationale as profiles.
     app.include_router(stacks_routes.router, prefix="/api/stacks", tags=["stacks"])
+
+    # Benchmarks — roster board, run detail, history, evals, and the run-queue
+    # actions (queue/control; the API process never drives the GPU — the
+    # `hal0 bench worker` service drains the queue). Public on the local
+    # network (same rationale as profiles/stacks: admin-only by network
+    # convention, no creds). Router carries its own /api/benchmarks prefix.
+    app.include_router(benchmarks_routes.router)
 
     # Chat-template catalog — bundled templates seeded into the model store at
     # startup; operator can add custom templates via POST. Read + write, public

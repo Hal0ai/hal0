@@ -806,10 +806,8 @@ def _current_symlink() -> Path:
 def _is_editable_install() -> bool:
     """True when hal0 runs from an editable/dev checkout, not the FHS venv.
 
-    FHS/prod (#495): hal0 is pip-installed into the venv site-packages (under
-    ``sys.prefix``). Editable/dev: ``hal0.__file__`` resolves to a source tree
-    outside the venv (e.g. ``/opt/hal0/src/hal0``). apply()'s re-pip step is a
-    no-op-and-skip in editable mode — there is no FHS venv to refresh.
+    Returns ``False`` for git-tracked installs under the FHS layout
+    (``/usr/lib/hal0/hal0-<version>/``)— those are hosted by `prepare_git()`.
     """
     import hal0
 
@@ -817,7 +815,24 @@ def _is_editable_install() -> bool:
         Path(hal0.__file__).resolve().relative_to(Path(sys.prefix).resolve())
         return False
     except ValueError:
-        return True
+        pass
+    # Git-tracked FHS installs: code lives in a versioned dir under
+    # /usr/lib/hal0/ — not truly editable. Let prepare_git handle them.
+    return not _is_git_install()
+
+
+def _is_git_install() -> bool:
+    """True when hal0 is installed from a git clone under the FHS layout.
+
+    Detects versioned directories like ``/usr/lib/hal0/hal0-0.9.4/`` that
+    contain a ``.git`` directory (or are a git worktree). These installs
+    can be updated via ``prepare_git()`` instead of downloading release
+    tarballs.
+    """
+    import hal0
+
+    here = Path(hal0.__file__).resolve()
+    return any((parent / ".git").is_dir() for parent in here.parents)
 
 
 def _reinstall_into_venv(install_dir: Path, *, job_id: str | None = None) -> None:
@@ -1130,6 +1145,116 @@ def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None
             ),
         )
     return cleared
+
+
+def retag_stale_slot_images(*, job_id: str | None = None) -> int:
+    """Retag slot ``image`` pins that are stale FORMER DEFAULTS (upgrade migration).
+
+    Slot creation historically materialised the then-current default runner
+    image into the slot TOML (``image = "..."``, top-level or under
+    ``[slot]``). Those pins freeze the default at creation time, so a release
+    that bumps :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` never reaches
+    existing slots. For every slot whose pin is in
+    :data:`~hal0.config.schema.STALE_ROCMFPX_IMAGE_REFS` — exactly equal to a
+    known former default, so demonstrably NOT a deliberate operator pin —
+    rewrite it to the current default and log loudly. Any other value is an
+    intentional per-slot override (debug build, A/B test) and is never
+    touched: the escape hatch stands.
+
+    The same policy covers CUSTOM (non-seed-named) profiles in
+    ``profiles.toml``: a custom profile is typically cloned from a seed, so
+    its ``image`` field carries the same materialised-default debris. Only
+    the ``image`` value is rewritten — the operator's flags/name are theirs.
+    (Seed-NAMED profiles are ensure_seed_profiles' job, not ours.)
+
+    Runs before :func:`rerender_slot_units` in the update flow, so the
+    re-rendered units carry the new ref in the same pass; nothing is bounced —
+    the new image applies (and is pulled by podman if absent) on each slot's
+    next start.
+
+    Returns:
+        Number of pins retagged (slot TOMLs + custom profile entries).
+    """
+    import tomllib
+
+    from hal0.config.loader import _read_toml, write_toml_atomic
+    from hal0.config.paths import profiles_toml, slots_config_dir
+    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, STALE_ROCMFPX_IMAGE_REFS
+
+    retagged = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("updater.image_retag_slot_unreadable", slot=slot_name, error=str(exc))
+            continue
+        # An image REF is a top-level or [slot]-nested STRING. The ``[image]``
+        # TOML table (image-gen settings, #599) shares the key and must be
+        # ignored — same trap as providers.container._resolve_image_ref.
+        holder: dict | None = None
+        if isinstance(raw.get("image"), str):
+            holder = raw
+        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
+            holder = raw["slot"]
+        if holder is None or holder["image"] not in STALE_ROCMFPX_IMAGE_REFS:
+            continue
+        old_ref = holder["image"]
+        holder["image"] = DEFAULT_ROCMFPX_IMAGE
+        try:
+            write_toml_atomic(toml_path, raw)
+        except Exception as exc:
+            log.warning("updater.image_retag_write_failed", slot=slot_name, error=str(exc))
+            continue
+        retagged += 1
+        log.warning(
+            "updater.slot_image_retagged",
+            job_id=job_id,
+            slot=slot_name,
+            old=old_ref,
+            new=DEFAULT_ROCMFPX_IMAGE,
+            note=(
+                "slot image pin matched a stale former default runner; rolled to "
+                "the current default (applies on the slot's next start)"
+            ),
+        )
+
+    # Custom (non-seed-named) profiles: same stale-former-default policy,
+    # image field only.
+    prof_path = profiles_toml()
+    if prof_path.exists():
+        try:
+            raw = _read_toml(prof_path)
+        except Exception as exc:
+            log.warning("updater.image_retag_profiles_unreadable", error=str(exc))
+            return retagged
+        changed = False
+        for name, entry in (raw.get("profile") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("image") in STALE_ROCMFPX_IMAGE_REFS:
+                old_ref = entry["image"]
+                entry["image"] = DEFAULT_ROCMFPX_IMAGE
+                changed = True
+                retagged += 1
+                log.warning(
+                    "updater.profile_image_retagged",
+                    job_id=job_id,
+                    profile=name,
+                    old=old_ref,
+                    new=DEFAULT_ROCMFPX_IMAGE,
+                    note=(
+                        "custom profile image matched a stale former default "
+                        "runner; rolled to the current default (flags untouched)"
+                    ),
+                )
+        if changed:
+            try:
+                write_toml_atomic(prof_path, raw)
+            except Exception as exc:
+                log.warning("updater.image_retag_profiles_write_failed", error=str(exc))
+    return retagged
 
 
 def rerender_slot_units(*, job_id: str | None = None) -> int:
@@ -1497,6 +1622,19 @@ class Updater:
             # Non-fatal: the affected slot simply fails to load until the
             # operator flips MTP to Auto/Off in the drawer.
 
+        # Step 7d: roll stale former-default runner-image pins to the current
+        # DEFAULT_ROCMFPX_IMAGE (runs before the unit re-render below so the
+        # rewritten units carry the new ref; applies on next slot start).
+        try:
+            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.image_retag_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: a stale pin just keeps the previous runner image.
+
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()
         try:
@@ -1601,6 +1739,190 @@ class Updater:
         """
         prepared = await self.prepare(version)
         return await self.commit(str(prepared["version"]))
+
+    # ── git-based update ──────────────────────────────────────────────────────
+
+    async def prepare_git(self, remote: str = "origin", branch: str = "main") -> dict[str, Any]:
+        """Stage an update from a git remote instead of a release tarball.
+
+        Clones (first time) or fetches the remote into
+        ``/usr/lib/hal0/hal0-<latest-tag>/`` and returns the version to commit.
+        Does NOT activate — call :meth:`commit_git` to swap + pip install.
+
+        The update repo is a bare git clone at ``/var/lib/hal0/cache/repo.git``
+        that is fetch-only.  Versioned install trees are sparse checkouts of
+        the tag under ``/usr/lib/hal0/`` — the same layout the tarball path
+        uses, so ``commit_git`` can reuse the same symlink-swap logic.
+        """
+        cache = paths.var_lib() / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        repo_dir = cache / "repo.git"
+        remote_url = "https://github.com/Hal0ai/hal0.git"
+
+        if (repo_dir / "HEAD").is_file():
+            log.info("updater.git_fetch", repo=str(repo_dir), remote=remote_url)
+            await asyncio.to_thread(
+                _git,
+                "-C",
+                str(repo_dir),
+                "fetch",
+                remote_url,
+                "+refs/tags/*:refs/tags/*",
+            )
+        else:
+            log.info("updater.git_clone_bare", repo=str(repo_dir), remote=remote_url)
+            # Remove a leftover partial clone from a prior aborted run.
+            with contextlib.suppress(OSError):
+                shutil.rmtree(repo_dir)
+            await asyncio.to_thread(
+                _git,
+                "clone",
+                "--bare",
+                remote_url,
+                str(repo_dir),
+            )
+
+        # Find the latest stable tag (highest semver, ignoring -nightly/-beta).
+        latest_tag = await asyncio.to_thread(_latest_stable_tag, repo_dir)
+        if not latest_tag:
+            raise UpdateError(
+                "no stable release tags found in the git remote",
+                details={"remote": remote_url},
+            )
+        log.info("updater.git_latest_tag", tag=latest_tag)
+
+        # Check out the tag into the versioned install dir.
+        target_version = latest_tag.lstrip("v")
+        install_dir = _versioned_install_dir(target_version)
+        if not install_dir.exists():
+            await asyncio.to_thread(
+                _git,
+                "-C",
+                str(repo_dir),
+                "--work-tree",
+                str(install_dir),
+                "checkout",
+                latest_tag,
+                "--",
+                ".",
+            )
+        log.info("updater.git_prepared", version=target_version, install_dir=str(install_dir))
+        return {"version": target_version, "install_dir": str(install_dir)}
+
+    async def commit_git(self, version: str) -> dict[str, Any]:
+        """Activate a git-prepared version: pip install + symlink swap.
+
+        Uses the same commit logic as :meth:`commit` (migrations, seed pruning,
+        MTP override cleanup, symlink swap, venv re-pip, slot unit re-render)
+        but reads ``min_data_version`` from the git tree's ``pyproject.toml``
+        instead of a release manifest.
+        """
+        target_version = (version or "").strip()
+        if not target_version:
+            raise UpdateManifestInvalid("commit_git requires a prepared version")
+        install_dir = _versioned_install_dir(target_version)
+        if not install_dir.exists():
+            raise UpdateError(
+                f"nothing staged for {target_version} — call prepare_git() before commit_git()",
+                details={"version": target_version, "install_dir": str(install_dir)},
+            )
+
+        log.info("updater.commit_git_start", job_id=self.job_id, version=target_version)
+
+        # Derive min_data_version from the tree's pyproject.toml.
+        min_data_version = _read_min_data_version(install_dir)
+
+        # Step 7: config migrations.
+        migration_info: tuple[int, int]
+        try:
+            migration_info = await asyncio.to_thread(
+                _maybe_run_config_migrations,
+                min_data_version,
+                job_id=self.job_id,
+            )
+        except Hal0Error as exc:
+            raise UpdateError(
+                f"config migration failed during update: {exc.message}",
+                details={**exc.details, "version": target_version},
+            ) from exc
+
+        # Step 7b: virtual-seed migration.
+        try:
+            await asyncio.to_thread(ensure_seed_profiles, job_id=self.job_id)
+        except Exception as exc:
+            log.warning("updater.seed_profiles_prune_failed", job_id=self.job_id, error=str(exc))
+
+        # Step 7c: stale MTP overrides.
+        try:
+            await asyncio.to_thread(clear_stale_mtp_overrides, job_id=self.job_id)
+        except Exception as exc:
+            log.warning("updater.mtp_migration_failed", job_id=self.job_id, error=str(exc))
+
+        # Step 7d: stale former-default runner-image pins → current default.
+        try:
+            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
+        except Exception as exc:
+            log.warning("updater.image_retag_failed", job_id=self.job_id, error=str(exc))
+
+        # Step 8 + 9: atomic symlink swap + record previous.
+        link = _current_symlink()
+        try:
+            prior = _atomic_symlink_swap(install_dir, link)
+        except OSError as exc:
+            raise UpdateSwapError(
+                f"atomic symlink swap failed: {exc}",
+                details={"link": str(link), "target": str(install_dir), "error": str(exc)},
+            ) from exc
+
+        # Re-pip into the shared venv.
+        try:
+            await asyncio.to_thread(_reinstall_into_venv, install_dir, job_id=self.job_id)
+        except UpdateError:
+            if prior is not None:
+                with contextlib.suppress(OSError):
+                    _atomic_symlink_swap(prior, link)
+            raise
+
+        # Re-render slot units through the new code.
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    "-c",
+                    "from hal0.updater.updater import rerender_slot_units; "
+                    "print(rerender_slot_units())",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if proc.returncode == 0:
+                log.info(
+                    "updater.unit_rerender_done",
+                    job_id=self.job_id,
+                    rewritten=(proc.stdout or "").strip(),
+                )
+            else:
+                log.warning(
+                    "updater.unit_rerender_failed",
+                    job_id=self.job_id,
+                    rc=proc.returncode,
+                    stderr=(proc.stderr or "")[-500:],
+                )
+        except Exception as exc:
+            log.warning("updater.unit_rerender_failed", job_id=self.job_id, error=str(exc))
+
+        if prior is not None:
+            _write_atomic_text(_previous_record(), str(prior))
+        log.info("updater.commit_git_ok", job_id=self.job_id, version=target_version)
+        return {
+            "version": target_version,
+            "previous": str(prior) if prior else None,
+            "install_dir": str(install_dir),
+            "migrations": {"from": migration_info[0], "to": migration_info[1]},
+            "installed_at": time.time(),
+        }
 
     # ── rollback ───────────────────────────────────────────────────────────────
 
@@ -1715,6 +2037,48 @@ class Updater:
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
         }
+
+
+def _git(*args: str) -> None:
+    """Run a git command, raising UpdateError on failure."""
+    proc = subprocess.run(["git", *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise UpdateError(
+            f"git {' '.join(args[:3])}... failed (rc={proc.returncode})",
+            details={"stderr": proc.stderr[-1000:]},
+        )
+
+
+def _latest_stable_tag(repo_dir: Path) -> str | None:
+    """Return the highest semver tag (v0.x.y) skipping -nightly/-beta."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), "tag", "--sort=-version:refname"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.strip().splitlines():
+        tag = line.strip()
+        if re.match(r"^v\d+\.\d+\.\d+(\.\d+)?$", tag):
+            return tag
+    return None
+
+
+def _read_min_data_version(install_dir: Path) -> int:
+    """Parse min_data_version from a git tree's pyproject.toml."""
+    pp = install_dir / "pyproject.toml"
+    if not pp.is_file():
+        return 1
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        data = tomllib.loads(pp.read_text(encoding="utf-8"))
+        return int(data.get("tool", {}).get("hal0", {}).get("min_data_version", 1) or 1)
+    except Exception:
+        return 1
 
 
 __all__ = [

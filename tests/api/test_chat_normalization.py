@@ -174,7 +174,6 @@ async def test_omni_path_receives_normalized_body(monkeypatch):
         return [
             SlotView(
                 name="agent",
-                role=None,
                 device="gpu-vulkan",
                 model_id="big",
                 context_length=4096,

@@ -16,7 +16,7 @@ import {
   useSlotResolved,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
-import { useModels } from '@/api/hooks/useModels'
+import { useModels, usePullJob } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useMetaEnums } from '@/api/hooks/useMeta'
@@ -247,6 +247,27 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
       </div>
 
+      {/* Image preview (v0.9.5). Read-only in create mode — shows the
+          profile's image (or DEFAULT_ROCMFPX_IMAGE if the profile omits one).
+          Image override is available in the EditSlotDrawer instead. */}
+      {(() => {
+        const profMeta = (profilesQuery.data ?? []).find(p => p.name === profile);
+        const img = profMeta?.image || "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5";
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Image</span>
+              <span className="sub">from profile</span>
+            </div>
+            <div className="form-ctl">
+              <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-3)", fontSize: 12, wordBreak: "break-all"}}>
+                {img}
+              </span>
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="form-row">
         <div className="form-lbl">
           <span>Model</span>
@@ -373,6 +394,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [parallel, setParallel] = useStateSM(
     slot?.parallel != null ? String(slot.parallel) : ""
   );
+  // Per-slot image override. Empty = use profile default (DEFAULT_ROCMFPX_IMAGE
+  // in schema.py, v0.9.5+). The current 0.9.4.1 backend ignores this field
+  // on the wire; 0.9.5+ reads it via _resolve_image_ref. Sibling fields
+  // (profile, model) keep their own state — image is a third independent
+  // axis, not a sub-set of profile.
+  const [image, setImage] = useStateSM(slot?.image || "");
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Dirty-close confirms through the shared ConfirmDialog (state-driven),
@@ -422,8 +449,92 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // revert-on-error.
   const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
   const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
+  const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
+  const [npuChatModel, setNpuChatModel] = useStateSM(slot?.model_id || slot?.model || 'qwen3:4b');
   const [npuPending, setNpuPending] = useStateSM(false);
   const [npuErr, setNpuErr] = useStateSM(null);
+  const [flmModels, setFlmModels] = useStateSM([]);
+  // Pull-on-select: usePullJob owns one FLM download (SSE progress). pullTarget
+  // remembers which role+tag is downloading so we auto-apply it on completion.
+  const pull = usePullJob();
+  const [pullTarget, setPullTarget] = useStateSM(null); // {role, field, tag} | null
+
+  // Fetch the full FLM catalogue (installed + downloadable) when the NPU slot
+  // editor is open. Extracted so we can re-fetch after a download completes
+  // (the tag flips installed=true).
+  const refreshFlmModels = React.useCallback(() => {
+    fetch('/api/slots/flm/models').then(r => r.json()).then(d => {
+      setFlmModels(d.models || d || []);
+    }).catch(() => {});
+  }, []);
+  React.useEffect(() => {
+    if (slot?.device !== 'npu') return;
+    refreshFlmModels();
+  }, [slot?.name]);
+
+  // Apply an NPU modality/model change and cold-restart the container. Lifted
+  // to component scope (out of the render IIFE) so the pull-completion effect
+  // can call it too. `over` carries only the changed field(s); the rest fall
+  // back to current state — which is also what we revert to on error.
+  const applyNpu = async (over = {}, field = "modality") => {
+    const chat = over.chat ?? npuChat;
+    const asr = over.asr ?? npuAsr;
+    const embed = over.embed ?? npuEmbed;
+    const chatModel = over.chatModel ?? npuChatModel;
+    setNpuPending(true);
+    setNpuErr(null);
+    // [npu] carries the modality toggles (asr/embed are boolean — FLM loads its
+    // one bundled whisper / embed-gemma, no per-role model choice). The chat
+    // model is FLM's positional tag, sent as a nested [model] table so the
+    // backend merge preserves sibling keys (context_size, n_gpu_layers)
+    // instead of clobbering them with a bare string.
+    const body = { npu: { chat, asr, embed } };
+    if (chat && chatModel) body.model = { default: chatModel };
+    try {
+      await editMut.mutateAsync({ name: slot.name, body });
+      restartMut.mutate(slot.name, {
+        onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
+      });
+      window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${field} updated — restarting`, "info");
+    } catch (err) {
+      setNpuChat(npuChat); setNpuAsr(npuAsr); setNpuEmbed(npuEmbed);
+      setNpuChatModel(npuChatModel);
+      setNpuErr(err?.message || "NPU toggle failed");
+    } finally {
+      setNpuPending(false);
+    }
+  };
+
+  // Pick the chat model. Installed → apply immediately. Not-yet-downloaded →
+  // start the FLM pull and remember the target; the completion effect below
+  // auto-applies it once the weights land. (ASR/Embed have no model choice.)
+  const onPickNpuModel = (role, field, tag) => {
+    setNpuChatModel(tag);
+    const entry = flmModels.find(m => m.model === tag);
+    if (entry && entry.installed === false) {
+      setNpuErr(null);
+      setPullTarget({ role, field, tag });
+      pull.start(tag).catch(() => {}); // failure surfaces via the effect below
+    } else {
+      applyNpu({ [field]: tag }, role);
+    }
+  };
+
+  // Auto-apply a freshly-downloaded model, or surface a failed/cancelled pull.
+  React.useEffect(() => {
+    if (!pullTarget || pull.modelId !== pullTarget.tag) return;
+    if (pull.state === "completed") {
+      refreshFlmModels();
+      applyNpu({ [pullTarget.field]: pullTarget.tag }, pullTarget.role);
+      setPullTarget(null);
+      pull.reset();
+    } else if (pull.state === "failed" || pull.state === "cancelled") {
+      setNpuErr(pull.error?.message || `Download ${pull.state}`);
+      setPullTarget(null);
+      pull.reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pull.state, pull.modelId, pullTarget]);
 
   // Resolved command provenance — only fetched while the drawer is open.
   // Falls back gracefully when null (non-llama slots) or on error.
@@ -446,6 +557,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setFieldErrs({});
       // C7: re-seed profile from the (possibly-updated) slot prop.
       setSelectedProfile(slot.profile || "");
+      // Re-seed per-slot image override from the (possibly-updated) slot prop.
+      setImage(slot.image || "");
       // Task 5: re-seed chat_template override from the slot prop.
       setChatTemplate(slot.chat_template || "");
       setOverrideOpen(!!(slot.chat_template));
@@ -457,6 +570,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setVisionErr(null);
       setNpuAsr(slot.npu?.asr === true);
       setNpuEmbed(slot.npu?.embed === true);
+      // Re-seed the chat pill + all three model selects too, so a save +
+      // refetch keeps the drawer in sync with server truth instead of
+      // drifting until the drawer is remounted.
+      setNpuChat(slot.npu?.chat !== false);
+      setNpuChatModel(slot.model_id || slot.model || 'qwen3:4b');
       setNpuPending(false);
       setNpuErr(null);
     }
@@ -496,6 +614,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
       ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
     if (profileDeviceClass === "gpu" && !selectedProfile) {
       errs.profile = "Profile is required";
+    }
+    // Image: empty is allowed (use profile default). When set, must look like
+    // a registry ref — at minimum contains ":" (host:tag or repo:tag) and
+    // doesn't contain whitespace. Keep the regex loose; the actual pull
+    // happens in load_sync and reports its own errors.
+    const imgTrim = (image || "").trim();
+    if (imgTrim && (!imgTrim.includes(":") || /\s/.test(imgTrim))) {
+      errs.image = "Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
     }
     // Block Save on malformed extra_args (unbalanced quotes) the same way
     // numeric fields block — the resolved command can't be built from it.
@@ -540,6 +666,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
       }
       if (chatTemplateChanged) {
         slotBody.chat_template = chatTemplate;
+      }
+      // Per-slot image override. Empty → null (use profile default). Ship
+      // only when the normalized (trimmed) value differs from the persisted
+      // baseline so a no-op Save stays quiet. The backend's
+      // _resolve_image_ref (v0.9.5+) prefers this field over profile.image.
+      const imgValue = imgTrim === "" ? null : imgTrim;
+      if (imgValue !== (slot.image || null)) {
+        slotBody.image = imgValue;
       }
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
@@ -874,6 +1008,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       </FieldGroup>
 
+      {slot.device !== "npu" && (
       <FieldGroup label="Model" hint="what it loads">
       {/* Task 1: live model swap — mirrors the card's ModelPicker but with the
           full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
@@ -1018,6 +1153,84 @@ function EditSlotDrawer({ open, slot, onClose }) {
         );
       })()}
       </FieldGroup>
+      )}
+      {/* NPU capability matrix — replaces Model+Template for NPU slots */}
+      {slot.device === "npu" && (() => {
+        // Full catalogue per lane (installed + downloadable) — NOT filtered by
+        // `installed`, so any tag can be picked and pulled on demand. Lane
+        // split by tag family (whisper → ASR, embed → Embed, else Chat).
+        const chatModels = flmModels.filter(m => m.model && !m.model?.toLowerCase().includes('whisper') && !m.model?.toLowerCase().includes('embed'));
+        // Non-installed options carry a ⬇ marker; picking one downloads first.
+        const optLabel = (m) => m.installed ? m.model : `${m.model}  ⬇ download`;
+        // True while THIS tag is downloading (used to gate + show progress).
+        const pulling = (tag) => pull.inFlight && pull.modelId === tag;
+        const pullPct = pull.pct != null ? `${pull.pct}%` : '…';
+        return (
+          <>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · Chat</span>
+                <span className="sub">LLM served on the NPU. Pick any catalogue model{'\u2014'}{'\u2b07'} entries download first, then apply. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                    on={npuChat}
+                    disabled={npuPending || saving}
+                    label="Chat"
+                    stateText={npuChat ? "On" : "Off"}
+                    onToggle={(next) => { setNpuChat(next); applyNpu({ chat: next }, "chat"); }}
+                  />
+                  <select className="input mono" style={{width: 200}} value={npuChatModel}
+                    onChange={e => onPickNpuModel("chat", "chatModel", e.target.value)}
+                    disabled={npuPending || saving || !npuChat || pull.inFlight}
+                  >
+                    {chatModels.map(m => <option key={m.model} value={m.model}>{optLabel(m)}</option>)}
+                  </select>
+                  {pulling(npuChatModel) && <span style={{fontSize:11,color:'var(--accent)'}}>⬇ {pullPct}</span>}
+                </span>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · ASR</span>
+                <span className="sub">Serve speech-to-text (whisper) on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                    on={npuAsr}
+                    disabled={npuPending || saving || pull.inFlight}
+                    label="ASR"
+                    stateText={npuAsr ? "On" : "Off"}
+                    onToggle={(next) => { setNpuAsr(next); applyNpu({ asr: next }, "ASR"); }}
+                  />
+                  <span style={{fontSize:11,color:'var(--fg-5)'}}>whisper-v3 (fixed)</span>
+                </span>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · Embed</span>
+                <span className="sub">Serve embeddings (embed-gemma) on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                  <PillToggle
+                    on={npuEmbed}
+                    disabled={npuPending || saving || pull.inFlight}
+                    label="Embed"
+                    stateText={npuEmbed ? "On" : "Off"}
+                    onToggle={(next) => { setNpuEmbed(next); applyNpu({ embed: next }, "Embed"); }}
+                  />
+                  <span style={{fontSize:11,color:'var(--fg-5)'}}>embed-gemma (fixed)</span>
+                </span>
+              </div>
+            </div>
+            {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
+          </>
+        );
+      })()}
 
       <FieldGroup label="Inference" hint="behavior">
       {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
@@ -1213,67 +1426,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
               {visionErr && <div className="hint" style={{ color: "var(--err)" }}>{visionErr}</div>}
             </div>
           </div>
-        );
-      })()}
-      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only.
-          Seeded from slot.npu; each toggle sends the full {asr,embed} object via
-          PUT /config {npu:{...}} (the backend one-level merge replaces the [npu]
-          table wholesale) + a non-blocking cold restart. Optimistic with
-          revert-on-error. */}
-      {slot.device === "npu" && (() => {
-        const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
-          setNpuPending(true);
-          setNpuErr(null);
-          setSubmitErr(null);
-          try {
-            await editMut.mutateAsync({ name: slot.name, body: { npu: { asr: nextAsr, embed: nextEmbed } } });
-            restartMut.mutate(slot.name, {
-              onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
-            });
-            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
-          } catch (err) {
-            // Revert both to their pre-toggle values.
-            setNpuAsr(prevAsr);
-            setNpuEmbed(prevEmbed);
-            setNpuErr(err?.message || "NPU toggle failed");
-          } finally {
-            setNpuPending(false);
-          }
-        };
-        return (
-          <>
-            <div className="form-row">
-              <div className="form-lbl">
-                <span>NPU · ASR</span>
-                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
-              </div>
-              <div className="form-ctl">
-                <PillToggle
-                  on={npuAsr}
-                  disabled={npuPending || saving}
-                  label="NPU ASR"
-                  stateText={npuAsr ? "On" : "Off"}
-                  onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
-                />
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-lbl">
-                <span>NPU · Embed</span>
-                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
-              </div>
-              <div className="form-ctl">
-                <PillToggle
-                  on={npuEmbed}
-                  disabled={npuPending || saving}
-                  label="NPU Embed"
-                  stateText={npuEmbed ? "On" : "Off"}
-                  onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
-                />
-              </div>
-            </div>
-            {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
-          </>
         );
       })()}
       </FieldGroup>

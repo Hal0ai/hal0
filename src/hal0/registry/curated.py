@@ -71,7 +71,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -178,6 +178,21 @@ class CuratedModel(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _validate_deployable_source(self) -> CuratedModel:
+        """Every curated model must have a deployable source: either HF pull
+        coordinates (``hf_repo`` + ``hf_file``) or an FLM-served NPU entry
+        (``npu`` tag with ``recommended_slot="flm"``). Guards against catalogue
+        entries that appear in the UI but have nothing to pull or serve."""
+        if self.hf_repo and self.hf_file:
+            return self
+        if "npu" in self.tags and self.recommended_slot == "flm":
+            return self
+        raise ValueError(
+            f"curated model {self.id!r} has no deployable source: needs "
+            "hf_repo + hf_file, or an 'npu' tag with recommended_slot='flm'"
+        )
+
 
 # ── The catalogue ──────────────────────────────────────────────────────────
 # Picking Q4_K_M as the default quant: best size/quality trade-off in the
@@ -186,6 +201,22 @@ class CuratedModel(BaseModel):
 # call it out in ``notes``.
 
 CURATED_MODELS: list[CuratedModel] = [
+    # NPU (FLM) models — served through the NPU slot container, no GGUF pull.
+    CuratedModel(
+        id="qwen3-4b-npu",
+        display_name="Qwen3 4B (NPU)",
+        description="Qwen3 4B running on the AMD XDNA NPU via FastFlowLM. Chat + STT + embed on one column.",
+        family="qwen",
+        size_gb=0.0,
+        vram_gb_min=0.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="",
+        hf_file="",
+        context_length=64000,
+        recommended_slot="flm",
+        tags=["npu", "chat"],
+    ),
     # ── 2026-05 refresh: featured chat picks the wizard surfaces first ────
     # Sized for a Strix Halo unified memory pool (~100 GB).  The wizard
     # renders entries in the order listed below; legacy entries below the
@@ -218,6 +249,7 @@ CURATED_MODELS: list[CuratedModel] = [
         license_url="https://huggingface.co/plunderstruck/Qwen3.6-27B-MTP-ROCmFP4-GGUF",
         hf_repo="plunderstruck/Qwen3.6-27B-MTP-ROCmFP4-GGUF",
         hf_file="Qwen3.6-27B-MTP-ROCmFP4-STRIX-imatrix-embF16-headQ6.gguf",
+        mmproj_file="mmproj-F32.gguf",
         context_length=262144,
         recommended_slot="chat",
         tags=["chat", "reasoning", "multilingual", "default", "vision", "mtp", "rocmfp4"],
@@ -768,6 +800,7 @@ CURATED_MODELS: list[CuratedModel] = [
         license_url="https://www.apache.org/licenses/LICENSE-2.0",
         hf_repo="unsloth/Qwen3.6-27B-MTP-GGUF",
         hf_file="Qwen3.6-27B-UD-Q4_K_XL.gguf",
+        mmproj_file="mmproj-F16.gguf",
         context_length=131072,
         recommended_slot="chat",
         tags=["chat", "vision", "tool-calling", "mtp"],
@@ -787,6 +820,7 @@ CURATED_MODELS: list[CuratedModel] = [
         license_url="https://www.apache.org/licenses/LICENSE-2.0",
         hf_repo="unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
         hf_file="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        mmproj_file="mmproj-F16.gguf",
         context_length=131072,
         recommended_slot="chat",
         tags=["chat", "vision", "tool-calling", "mtp"],

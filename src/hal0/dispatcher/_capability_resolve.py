@@ -186,7 +186,7 @@ def resolve_by_capability(  # TIER1
             m = model.lower()
             # Rule 5 — FLM tag format "name:tag" routes to NPU.
             if ":" in model:
-                candidate = "npu"
+                candidate = "flm"
             # Rule 6 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
             # path_pinned here means "deterministically pinned": the curated
             # sdxl-/sd-1.5-/flux- prefixes are exact catalogue prefixes, the

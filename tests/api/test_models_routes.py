@@ -280,6 +280,65 @@ def test_inspect_surfaces_bare_mmproj_sidecar(
     assert "mmproj" in variants["mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj"]["info"]
 
 
+def test_inspect_surfaces_flm_npu_repo(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An FLM/NPU repo (config.json + tokenizer + ``.q4nx`` weights, no GGUF)
+    surfaces a single whole-repo variant flagged ``flm`` rather than inspecting
+    as "no variants" — the GGUF/mmproj filter alone would skip every file.
+    """
+    tree = [
+        {"path": "config.json", "size": 2048},
+        {"path": "tokenizer.json", "size": 1_800_000},
+        {"path": "model.q4nx", "lfs": {"size": 2_400_000_000}, "size": 133},
+        {"path": "README.md", "size": 4096},
+    ]
+    _patch_httpx_transport(
+        monkeypatch,
+        _hf_handler(meta_body={"tags": ["npu", "fastflowlm"]}, tree_body=tree),
+    )
+
+    r = inspect_client.post(
+        "/api/models/inspect",
+        json={"hf_repo": "fastflowlm/Qwen3-4B-NPU"},
+    )
+    assert r.status_code == 200, r.text
+    variants = r.json()["variants"]
+    assert len(variants) == 1
+    v = variants[0]
+    assert v["flm"] is True
+    assert v["id"] == "fastflowlm/Qwen3-4B-NPU"  # whole-repo id, routes to flm pull
+    assert "FLM (NPU)" in v["info"]
+    # Sum of all files (config + tokenizer + weight + readme), LFS-aware.
+    assert v["size_bytes"] == 2048 + 1_800_000 + 2_400_000_000 + 4096
+
+
+def test_inspect_safetensors_repo_is_not_flm(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain safetensors transformers repo shares config.json + tokenizer but
+    must NOT be misread as FLM — it has no ``…nx`` NPU weight, so it yields no
+    variants (nothing GGUF/mmproj/FLM to pull)."""
+    tree = [
+        {"path": "config.json", "size": 2048},
+        {"path": "tokenizer.json", "size": 1_800_000},
+        {"path": "model.safetensors", "lfs": {"size": 8_000_000_000}, "size": 133},
+    ]
+    _patch_httpx_transport(
+        monkeypatch,
+        _hf_handler(meta_body={"tags": []}, tree_body=tree),
+    )
+
+    r = inspect_client.post(
+        "/api/models/inspect",
+        json={"hf_repo": "Qwen/Qwen3-4B"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["variants"] == []
+
+
 def test_inspect_ignores_non_mmproj_non_gguf_files(
     inspect_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

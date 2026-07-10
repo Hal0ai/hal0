@@ -597,7 +597,7 @@ function FieldGroup({ label, hint, children }) {
 // ─── PillToggle — two-state sliding pill ─────────────────────────────────
 // Generalized from slots.jsx NpuSwitch.
 // Fixed label; the on/off STATE is shown by the pill, never by a changing label.
-function PillToggle({ on, disabled, label, stateText, onToggle }) {
+export function PillToggle({ on, disabled, label, stateText, onToggle }) {
   return (
     <div className="pill-toggle-row">
       <button

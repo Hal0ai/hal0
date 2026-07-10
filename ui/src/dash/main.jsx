@@ -27,7 +27,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services"];
+const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services", "benchmarks"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -129,7 +129,7 @@ function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const { active: activeBanners } = useBanners();
   const [{ route, param }, setRouteState] = useStateA(parseRoute());
-  const [bellOpen, setBellOpen] = useStateA(false);
+  const [approvalsOpen, setApprovalsOpen] = useStateA(false);
   const [heroDismissed, setHeroDismissed] = useStateA(false);
   const [toast, setToast] = useStateA(null);
   const [composerState, setComposerState] = useStateA("idle");
@@ -200,7 +200,7 @@ function App() {
   useEffectA(() => {
     // global keyboard shortcuts
     const onKey = (e) => {
-      if (e.key === "Escape") { setBellOpen(false); setNavOpen(false); setChatOpen(false); return; }
+      if (e.key === "Escape") { setApprovalsOpen(false); setNavOpen(false); setChatOpen(false); return; }
       const tgt = e.target;
       const typing = tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable);
       if (typing) return;
@@ -226,7 +226,7 @@ function App() {
 
   useEffectA(() => {
     // bridge command-palette actions into App state
-    const onApprovals = () => setBellOpen(true);
+    const onApprovals = () => setApprovalsOpen(true);
     window.addEventListener("hal0:open-approvals", onApprovals);
     // dashboard-redesign: the Activity card's "Open journal →" expands the
     // footer journal pane from anywhere.
@@ -317,6 +317,12 @@ function App() {
         return typeof ServicesView === "function"
           ? <ServicesView />
           : <div className="view">Services unavailable — bundle stale.</div>;
+      // Benchmarks (#benchmarks): roster board / run detail / evals / run
+      // queue over /api/benchmarks/* (hal0.bench store).
+      case "benchmarks":
+        return typeof BenchmarksView === "function"
+          ? <BenchmarksView />
+          : <div className="view">Benchmarks unavailable — bundle stale.</div>;
       case "settings": return <SettingsView param={param} />;
       default:         return <div className="view">Not found.</div>;
     }
@@ -376,8 +382,8 @@ function App() {
       />
 
       <ApprovalModal
-        open={bellOpen}
-        onClose={() => setBellOpen(false)}
+        open={approvalsOpen}
+        onClose={() => setApprovalsOpen(false)}
         items={approvalItems}
         onApprove={id => approveApproval && approveApproval.mutate(id)}
         onDeny={id => denyApproval && denyApproval.mutate(id)}

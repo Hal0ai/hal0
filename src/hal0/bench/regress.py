@@ -1,0 +1,117 @@
+"""regress.py — regression detection (DESIGN §11).
+
+Cheap and dumb on purpose (no ML, runs at session end): for each cell with
+enough history, compare the newest ok record's governing metric against the
+trailing median of the last few, and flag a drop past a threshold — but ONLY
+when nothing is *known* to have changed. A provenance change is a different
+cell_key (schema.py), so within a single cell_key's history the identity is
+already constant by construction; the extra provenance-equality guard here
+catches the environment axis (host/hal0 version/image) that is intentionally NOT
+in the key but can still explain a step, so a hal0 upgrade or image rebuild is
+annotated (dashboard vertical marker, §8/§11) rather than flagged as a
+regression.
+
+Governing metric: ``summary.decode_ts_med`` (higher is better). A regression is
+a DECREASE, so we flag when the new value is worse (lower) than the trailing
+median by more than ``THRESHOLD_PCT``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from .store import Store
+
+THRESHOLD_PCT = 10.0  # DESIGN §11: flag if worse by >10%
+TRAILING_N = 5  # DESIGN §11: trailing median of the last 5
+MIN_HISTORY = 3  # DESIGN §11: needs ≥3 historical ok records
+
+
+@dataclass
+class Flag:
+    """One flagged cell (DESIGN §11 output → ``bench.regression`` journal event
+    + board task when >2 flag in a session)."""
+
+    cell_key: str
+    model_id: str
+    delta_pct: float  # signed: negative = slower than trailing median
+    newest_ts: float | None
+    trailing_median: float | None
+    run_ids: list[str]  # [previous_run_id, newest_run_id]
+
+
+def _provenance_key(rec: dict[str, Any]) -> tuple:
+    """The environment provenance that, if unchanged, makes a drop a genuine
+    regression (DESIGN §11 "provenance equals the previous record's"). cell_key
+    already pins model/engine/config/workload identity, so the only remaining
+    axis is the host environment: a hal0/kernel/rocm/image change is an
+    *explained* step, not a regression."""
+    host = rec.get("host") or {}
+    engine = (rec.get("identity") or {}).get("engine") or {}
+    return (
+        host.get("hal0_version"),
+        host.get("kernel"),
+        host.get("rocm"),
+        engine.get("image_digest"),
+    )
+
+
+def _metric(rec: dict[str, Any]) -> float | None:
+    return (rec.get("summary") or {}).get("decode_ts_med")
+
+
+def _median(values: list[float]) -> float | None:
+    import statistics
+
+    vals = [v for v in values if isinstance(v, (int, float))]
+    return statistics.median(vals) if vals else None
+
+
+def check(store: Store) -> list[Flag]:
+    """Scan every cell_key's ok history and return the flagged regressions
+    (DESIGN §11). Runs at session end over the whole store — cheap enough that
+    it does not need to be scoped to the session's cells."""
+    # Group ok records by cell_key in chronological (append) order.
+    by_cell: dict[str, list[dict[str, Any]]] = {}
+    for rec in store.iter_records():
+        if rec.get("outcome") != "ok" or not rec.get("cell_key"):
+            continue
+        by_cell.setdefault(rec["cell_key"], []).append(rec)
+
+    flags: list[Flag] = []
+    for key, history in by_cell.items():
+        if len(history) < MIN_HISTORY:
+            continue
+        newest = history[-1]
+        previous = history[-2]
+        new_val = _metric(newest)
+        if new_val is None:
+            continue
+
+        # Trailing median of the last TRAILING_N records *before* the newest.
+        prior = history[-(TRAILING_N + 1) : -1]
+        baseline = _median([m for m in (_metric(r) for r in prior) if m is not None])
+        if baseline is None or baseline <= 0:
+            continue
+
+        delta_pct = 100.0 * (new_val - baseline) / baseline
+        if delta_pct >= -THRESHOLD_PCT:
+            continue  # not worse by more than the threshold
+
+        # Only a regression if nothing known changed vs the previous record.
+        if _provenance_key(newest) != _provenance_key(previous):
+            continue  # explained by an env/provenance step — annotate, don't flag
+
+        model_id = (newest.get("identity") or {}).get("model", {}).get("id") or ""
+        flags.append(
+            Flag(
+                cell_key=key,
+                model_id=model_id,
+                delta_pct=round(delta_pct, 1),
+                newest_ts=None,
+                trailing_median=round(baseline, 2),
+                run_ids=[previous.get("run_id"), newest.get("run_id")],
+            )
+        )
+    return flags

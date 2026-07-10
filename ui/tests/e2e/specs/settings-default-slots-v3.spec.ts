@@ -22,7 +22,7 @@ test('Default slots pane sets the chosen slot default and clears the prior one',
     })
   }
   await seedSlots(page, [A, B])
-  await page.goto('/#settings/defaults')
+  await page.goto('/#settings/slots')
   const row = page.locator('.default-slot-row', { hasText: 'llm' })
   await expect(row).toBeVisible()
   await row.locator('select').selectOption('backup')

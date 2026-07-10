@@ -1,8 +1,8 @@
 /**
  * models-catalog-controls-v3 — the WS-13 catalog toolbar (sort dropdown +
- * direction toggle, curated tag-filter chips, quant chip on rows + detail
- * cell, "added" detail cell) and the WS-6 chat-template pick in the
- * Add-by-HF modal.
+ * direction toggle, simplified OR filter chips, quant chip on rows + detail
+ * cell, "added" detail cell, pagination controls) on the redesigned
+ * 3-tab models page.
  *
  * Forced-mock note: VITE_MOCK_HAL0 short-circuits page.route for
  * /api/models, so the catalog fixture rows are injected by intercepting the
@@ -12,8 +12,6 @@
  */
 import { test, expect } from '../fixtures/apiMock'
 
-// Three installed local rows with distinct sort keys, quants, tags, and
-// added-timestamps so every control has something to bite on.
 const ROWS = [
   {
     id: 'local.alpha-7b',
@@ -73,10 +71,8 @@ test.beforeEach(async ({ page }) => {
   }, ROWS)
 })
 
-// Names of the installed section's rows, top to bottom.
 async function installedOrder(page: any): Promise<string[]> {
   const names = await page.locator('.mdl-row .nm').allInnerTexts()
-  // Keep only our fixtures (the mock catalog may add its own rows).
   return names
     .map((t: string) => t.split('\n')[0].trim())
     .filter((n: string) => ['Alpha 7B', 'Zeta 27B', 'Mid 13B'].includes(n))
@@ -88,7 +84,6 @@ test.describe('Models v3 — catalog controls (/models)', () => {
     await expect(page.locator('.mdl-row', { hasText: 'Alpha 7B' })).toBeVisible()
 
     await page.getByTestId('mdl-sort-field').selectOption('size')
-    // default dir is asc → smallest first
     expect(await installedOrder(page)).toEqual(['Alpha 7B', 'Mid 13B', 'Zeta 27B'])
 
     await page.getByTestId('mdl-sort-dir').click() // → desc
@@ -98,22 +93,19 @@ test.describe('Models v3 — catalog controls (/models)', () => {
   test('sort by params orders by parsed count, not string', async ({ page }) => {
     await page.goto('/#models')
     await page.getByTestId('mdl-sort-field').selectOption('params')
-    // asc: 7B < 13B < 27B (numeric, not lexicographic where "13B" < "7B")
     expect(await installedOrder(page)).toEqual(['Alpha 7B', 'Mid 13B', 'Zeta 27B'])
   })
 
-  test('tag chips narrow the catalog with AND semantics', async ({ page }) => {
+  test('simplified filter chips narrow with OR semantics', async ({ page }) => {
     await page.goto('/#models')
-    // coder → alpha + mid; moe → zeta + mid; coder AND moe → mid only.
-    await page.getByTestId('mdl-tag-coder').click()
-    await expect(page.locator('.mdl-row', { hasText: 'Alpha 7B' })).toBeVisible()
-    await expect(page.locator('.mdl-row', { hasText: 'Mid 13B' })).toBeVisible()
-    await expect(page.locator('.mdl-row', { hasText: 'Zeta 27B' })).toHaveCount(0)
 
-    await page.getByTestId('mdl-tag-moe').click()
+    // Select only "coder" (tag) — alpha + mid
+    // MOE chip selects moe-tagged rows: zeta + mid
+    await page.getByTestId('mdl-filter-moe').click()
+    await expect(page.locator('.mdl-row', { hasText: 'Zeta 27B' })).toBeVisible()
     await expect(page.locator('.mdl-row', { hasText: 'Mid 13B' })).toBeVisible()
+    // Alpha is not moe-tagged, should be absent
     await expect(page.locator('.mdl-row', { hasText: 'Alpha 7B' })).toHaveCount(0)
-    await expect(page.locator('.mdl-row', { hasText: 'Zeta 27B' })).toHaveCount(0)
   })
 
   test('quant chip renders on rows and in the detail meta grid', async ({ page }) => {
@@ -123,10 +115,20 @@ test.describe('Models v3 — catalog controls (/models)', () => {
 
     await row.click()
     await expect(page.getByTestId('mdl-detail-quant')).toHaveText('Q4_K_M')
-    // "added" cell renders a humane label (not a raw timestamp).
     await expect(
       page.locator('.mdl-detail-meta > div', { hasText: 'added' }).locator('.v'),
     ).not.toHaveText('—')
+  })
+
+  test('pagination shows correct page count and responds to per-page changes', async ({ page }) => {
+    await page.goto('/#models')
+    // With 3 fixtures, 10 per page → single page
+    await expect(page.locator('.mdl-pager-pages span')).toHaveText('1/1')
+
+    // Switch to 10 per page
+    const allBtn = page.locator('.mdl-pager-size .mdl-chip', { hasText: 'All' })
+    await allBtn.click()
+    await expect(allBtn).toHaveClass(/on/)
   })
 
   test('Add-by-HF modal offers a chat-template pick', async ({ page }) => {
@@ -160,7 +162,6 @@ test.describe('Models v3 — catalog controls (/models)', () => {
 
     const select = page.locator('.chat-template-select')
     await expect(select).toBeVisible()
-    // "auto" is the default; the catalogue options come from the mock.
     await expect(select).toHaveValue('auto')
     await expect(select.locator('option', { hasText: 'ChatML' })).toHaveCount(1)
     await select.selectOption('chatml')

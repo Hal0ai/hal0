@@ -176,7 +176,7 @@
 /* Combined main section — one card that updates as a bank is selected, folding
    in the memories-retained spark + the (moved-down) graph-extraction panel +
    operations + danger zone. Nested cards are flattened so it reads as one. */
-.mo-main { padding: 18px; margin-top: 4px; }
+.mo-main { padding: 18px; margin-top: 4px; min-height: 320px; }
 .mo-main-mission { font-size: 12.5px; color: var(--fg-3); line-height: 1.5; margin: -2px 0 12px; }
 .mo-main-rule { margin: 16px 0; }
 
@@ -194,6 +194,9 @@
 /* Embedded tools grid inside the primary bank display — keeps its own sub-card
    chrome; just trims the standalone-page top spacing. */
 .mo-main .mt-embedded { margin: 4px 0 6px; }
+/* Documents card sits below the 2×2 grid as a full-width sibling. */
+.mt > .mt-card { margin-top: 14px; }
+.mt-embedded > .mt-card { margin-top: 14px; }
 
 /* Consolidate action sits under the operations list. */
 .mo-ops-actions { display: flex; justify-content: flex-end; margin: 10px 0 4px; }
@@ -277,11 +280,12 @@
 .mt-bankbar .input { padding: 6px 9px; }
 .mt-hint { color: var(--fg-5); margin-left: 6px; }
 .mt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-/* Two independent stacks: left = reflect · recall · documents, right =
-   mental models · directives. Flex columns (not grid auto-flow) so each side
+/* Two independent stacks: left = reflect · recall, right =
+   directives · mental models. Flex columns (not grid auto-flow) so each side
    stacks on its own regardless of the other's height. */
 .mt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .mt-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.mt-col > .mt-card { flex: 1; }
 @media (max-width: 760px) {
   .mt-cols { grid-template-columns: 1fr; }
 }

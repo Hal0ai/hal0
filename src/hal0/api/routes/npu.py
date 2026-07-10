@@ -18,6 +18,8 @@ every error path (no SlotManager, accessor errors, etc.).
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -28,6 +30,12 @@ from hal0.dispatcher.npu_swap_status import (
 )
 
 router = APIRouter()
+
+
+def _slots_dir() -> Path:
+    """Return /etc/hal0/slots/ — the TOML config directory."""
+    return Path("/etc/hal0/slots")
+
 
 # Strix Halo XDNA NPU geometry — fixed silicon: 4 rows by 8 cols = 32 AIE
 # tiles, ~50 TOPS peak (single-tenant). These never change at runtime; the
@@ -41,6 +49,10 @@ _NPU_TOPS_PEAK = 50
 # the NPU and therefore owns AIE columns. SERVING/READY/WARMING/IDLE all
 # hold weights in GTT; OFFLINE/PULLING/STARTING/UNLOADING/ERROR do not.
 _LOADED_STATES = frozenset({"serving", "ready", "warming", "idle"})
+# The _map_slot_state() outputs that count as "loaded" (warming → "loaded").
+# Used by the degraded single-tenant fallback, which works off the already-
+# mapped slot_view["state"] rather than the raw SlotState.
+_LOADED_VIEW_STATES = frozenset({"serving", "ready", "loaded", "idle"})
 
 
 def _occupancy_absent() -> dict[str, Any]:
@@ -152,6 +164,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
 
     # Gather flm/npu slots first — presence is "hw present OR a flm slot".
     flm_slots: list[Any] = []
+    all_slots: list[Any] = []
     if sm is not None:
         try:
             all_slots = await sm.list()
@@ -161,6 +174,15 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             meta = getattr(s, "metadata", None) or {}
             provider = str(meta.get("provider") or "").lower()
             backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
+            # Skip shadow slots — they ride on the FLM trio, no separate process
+            served = getattr(s, "served_by", None)
+            if served:
+                continue
+            # flm-stt / flm-embed are companion slots whose occupancy is
+            # reported via virtual synthesis from the FLM anchor's TOML —
+            # they never appear as standalone entries.
+            if s.name.endswith("-stt") or s.name.endswith("-embed"):
+                continue
             if provider == "flm" or backend in ("flm", "npu"):
                 flm_slots.append(s)
 
@@ -214,16 +236,73 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             }
         )
 
+        # Synthesise virtual sub-slots for STT + embed so the NPU pane
+        # shows three glowing cards when the FLM trio is running.
+        npu_cfg = getattr(s, "npu", None) or {}
+        # The slot object may not carry the [npu] table — read from the TOML.
+        if not npu_cfg:
+            try:
+                toml_path = _slots_dir() / f"{s.name}.toml"
+                if toml_path.exists():
+                    raw = tomllib.loads(toml_path.read_text())
+                    npu_cfg = raw.get("npu") or {}
+            except Exception:
+                pass
+
+        # Virtual subs ride coresident with the FLM anchor: the [npu] toggle
+        # (asr/embed) IS the operator control — the single `flm serve` child
+        # serves them, so they're live whenever the modality is on and the
+        # anchor is loaded. (The old code gated on the shadow slot's own
+        # `enabled` flag, which reads false in embed/STT-primary mode where
+        # the operator disables chat but the modality is still served — so
+        # the sub-card wrongly showed "off"/dim.)
+        if npu_cfg.get("asr"):
+            stt_live = is_loaded
+            slots_out.append(
+                {
+                    "name": s.name + "-stt",
+                    "model": "whisper-v3:turbo",
+                    "state": mapped_state if stt_live else "off",
+                    "cols": list(range(_NPU_COLS)) if stt_live else [],
+                    "gb": None,
+                }
+            )
+        if npu_cfg.get("embed"):
+            embed_live = is_loaded
+            slots_out.append(
+                {
+                    "name": s.name + "-embed",
+                    "model": "embedding-gemma",
+                    "state": mapped_state if embed_live else "off",
+                    "cols": list(range(_NPU_COLS)) if embed_live else [],
+                    "gb": None,
+                }
+            )
+
+    # Sort: flm first, then flm-stt, flm-embed in alphabetical order
+    slots_out.sort(
+        key=lambda s: (
+            0
+            if s["name"] == "flm"
+            else 1
+            if s["name"] == "flm-stt"
+            else 2
+            if s["name"] == "flm-embed"
+            else 9
+        )
+    )
+
     # Degraded fallback: if xrt-smi never succeeded, every loaded slot owns
-    # all 8 columns (single-tenant binary occupancy).
+    # all 8 columns (single-tenant binary occupancy). Iterate slots_out on its
+    # own using each view's already-mapped state — the old code zipped it with
+    # flm_slots (strict=True), which crashed the whole endpoint: slots_out also
+    # carries the synthesised -stt/-embed sub-views AND is re-sorted, so it is
+    # both longer than and mis-ordered vs flm_slots. Triggered exactly when the
+    # NPU column probe is unavailable — i.e. while the FLM slot is offline.
     if not columns_available:
         any_loaded = False
-        for slot_view, s in zip(slots_out, flm_slots, strict=True):
-            raw_state = str(getattr(s, "state", "") or "").lower()
-            state_val = getattr(getattr(s, "state", None), "value", None)
-            if isinstance(state_val, str):
-                raw_state = state_val.lower()
-            if raw_state in _LOADED_STATES:
+        for slot_view in slots_out:
+            if slot_view["state"] in _LOADED_VIEW_STATES:
                 slot_view["cols"] = list(range(_NPU_COLS))
                 any_loaded = True
             else:

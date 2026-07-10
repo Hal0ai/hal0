@@ -117,8 +117,57 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
         return _resolve_profile(base)
 
 
-def _profile_image_and_flags(profile: Any, mtp_override: bool | None = None) -> tuple[str, str]:
-    """Extract ``(image, resolved_flags)`` from a profile object.
+def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
+    """Resolve the container image ref for a slot launch.
+
+    Resolution order (matches :meth:`ComfyUIProvider.image_ref`):
+
+      1. ``slot_cfg["image"]`` (top-level string override in the slot TOML).
+      2. ``slot_cfg["slot"]["image"]`` (nested under the ``[slot]`` table).
+      3. ``profile.image`` (the profile's own image — kept for back-compat
+         so existing operator-custom profiles that pin ``image`` round-trip
+         cleanly through 0.9.5; targeted for removal in 0.9.6).
+      4. ``DEFAULT_ROCMFPX_IMAGE`` (the code-pinned ROCmFPX runner tag).
+
+    Only STRING values are treated as image-ref overrides. The
+    ``[image]`` TOML section that holds image-gen settings (#599) shares
+    the ``image`` key — treating that dict as a ref renders ``str(dict)``
+    into ExecStart and podman fails with 'invalid reference format'.
+    """
+    if slot_cfg is not None:
+        # Walk both possible nestings; first non-empty string wins.
+        candidates: list[Any] = []
+        for key in ("image",):
+            v = slot_cfg.get(key)  # type: ignore[union-attr]
+            if v is not None:
+                candidates.append(v)
+        nested = slot_cfg.get("slot") if isinstance(slot_cfg, Mapping) else None
+        if isinstance(nested, Mapping):
+            v = nested.get("image")
+            if v is not None:
+                candidates.append(v)
+        for c in candidates:
+            if isinstance(c, str) and c:
+                return c
+    profile_image = getattr(profile, "image", None)
+    if isinstance(profile_image, str) and profile_image:
+        return profile_image
+    # Code default — imported lazily to avoid an import cycle (schema imports
+    # from providers in some test fixtures).
+    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+
+    return DEFAULT_ROCMFPX_IMAGE
+
+
+def _profile_image_and_flags(
+    profile: Any,
+    mtp_override: bool | None = None,
+    slot_cfg: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Extract ``(image, resolved_flags)`` for a slot launch.
+
+    Image resolution walks the priority chain in :func:`_resolve_image_ref`:
+    slot-level override → profile.image → ``DEFAULT_ROCMFPX_IMAGE``.
 
     Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
     ``resolved_flags`` is already MTP-expanded) and a plain ``ProfileConfig``
@@ -142,7 +191,7 @@ def _profile_image_and_flags(profile: Any, mtp_override: bool | None = None) -> 
         flags = getattr(profile, "resolved_flags", None)
         if flags is None:
             flags = resolve_profile_flags(profile)
-    return str(profile.image), str(flags)
+    return _resolve_image_ref(slot_cfg, profile), str(flags)
 
 
 def _effective_mtp(
@@ -794,7 +843,7 @@ def _resolve_llama_scalars(
     effective_mtp = _effective_mtp(
         slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch
     )
-    image, flags_str = _profile_image_and_flags(profile, effective_mtp)
+    image, flags_str = _profile_image_and_flags(profile, effective_mtp, slot_cfg=slot_cfg)
 
     slot_parallel = _effective_parallel(slot_cfg)
     if for_launch:
@@ -1036,16 +1085,18 @@ class ContainerProvider(Provider):
         ``model_loaded is True``. Bodies without the key (llama-server) keep
         the plain-200 behavior.
 
-        FLM Tier-1 delegation: when ``slot_cfg`` is supplied and the slot
-        resolves to :class:`~hal0.providers.flm.FLMProvider` (via
-        :func:`_spec_provider_for`), delegate to that provider's health probe —
-        a real ``/v1/chat/completions`` round-trip (non-empty /v1/models is a
-        known-insufficient check for a wedged NPU). The probe distinguishes
-        "up but still loading" (ok=False, status ``models_endpoint_empty`` /
-        ``sentinel_completion_*``) from "dead" (transport error), preserving
-        FLMProvider.health's semantics for the manager's strike-based
-        fail-watcher. Callers without slot context (the legacy port-only path)
-        keep the weak /v1/models fallback below.
+        FLM delegation: when ``slot_cfg`` is supplied and the slot resolves to
+        :class:`~hal0.providers.flm.FLMProvider` (via :func:`_spec_provider_for`),
+        delegate to that provider's CHEAP liveness probe — non-empty
+        ``/v1/models``, no NPU work. A real-inference sentinel must NOT run on
+        this path: it is the hot path (2s fail-watch + per-request readiness),
+        and a repeating/overlapping NPU completion double-frees the single NPU
+        context (status 134). Real inferability is verified once, out of band,
+        by ``FLMProvider.verify_inference`` at the warm→ready promotion. The
+        probe still distinguishes "up but still loading" (ok=False,
+        ``models_endpoint_empty``) from "dead" (transport error) for the
+        manager's strike-based fail-watcher. Callers without slot context (the
+        legacy port-only path) keep the weak /v1/models fallback below.
 
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to

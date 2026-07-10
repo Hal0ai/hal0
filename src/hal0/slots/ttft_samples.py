@@ -40,11 +40,19 @@ class SlotSamples:
     ``window_s`` is treated as stale (excluded from current/avg reads).
     ``maxlen`` is a memory bound only; the window is the real cutoff,
     so a burst of requests can't push a recent slow sample out of view.
+
+    Added for NPU (FLM) metrics: throughput captures the last
+    per-request decoding speed (tok/s) and KV column occupancy (0-100%).
+    FLM reports these in the ``usage`` block of every chat completion
+    response; the dispatcher extracts them and records them here.
     """
 
     window_s: float = DEFAULT_WINDOW_S
     ttft_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=128))
     inflight: dict[str, float] = field(default_factory=dict)
+    # FLM / NPU metrics — updated per non-streaming chat completion.
+    throughput_tps: float = 0.0
+    kv_occupancy_pct: float = 0.0
 
     def request_started(self, req_id: str, now: float | None = None) -> None:
         self.inflight[req_id] = time.monotonic() if now is None else now

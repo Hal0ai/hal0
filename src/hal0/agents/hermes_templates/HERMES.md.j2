@@ -6,8 +6,8 @@
    hal0_version, hermes_version.
 #}# Where you are
 
-- Host: {{ env.container.product_name | default("unknown") }}{% if env.container.kind %} ({{ env.container.kind }}){% endif %}
-- Platform: {{ env.cpu.model | default("unknown") }}
+- Host: {{ env.get('container', {}).get('product_name', 'unknown') }}{% if env.get('container', {}).get('kind') %} ({{ env.get('container', {}).get('kind') }}){% endif %}
+- Platform: {{ env.get('cpu', {}).get('model', 'unknown') }}
 - hal0 version: {{ hal0_version }} / hermes-agent: {{ hermes_version }}
 - Memory MCP: `hal0_memory` (auto-loaded; you have full read/write on `private:hermes`)
 - Admin MCP: `hal0_admin` (auto-loaded; autonomous read on all status tools, gated on destructive)

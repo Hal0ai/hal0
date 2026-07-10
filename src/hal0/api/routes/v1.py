@@ -72,6 +72,30 @@ def _slot_ttft_events(app_state: Any, slot_name: str | None) -> Any:
     return events_store[slot_name]
 
 
+def _update_slot_throughput(app_state: Any, slot_name: str | None, tps: float) -> None:
+    """Record a FLM decoding-speed sample (tok/s) for the slot.
+
+    Stored on ``app_state.slot_throughput`` keyed by slot name so
+    ``/api/slots/metrics`` surfaces it in the tile throughput gauge.
+    """
+    store = getattr(app_state, "slot_throughput", None)
+    if store is None or not slot_name:
+        return
+    store[slot_name] = tps
+
+
+def _update_slot_kv_occupancy(app_state: Any, slot_name: str | None, pct: float) -> None:
+    """Record a FLM KV-column occupancy sample (0-100%) for the slot.
+
+    Stored on ``app_state.slot_kv_occupancy`` per slot so the dashboard
+    NPU gauge reads the latest column utilisation.
+    """
+    store = getattr(app_state, "slot_kv_occupancy", None)
+    if store is None or not slot_name:
+        return
+    store[slot_name] = pct
+
+
 def _instrument_streaming_throughput(
     response: StreamingResponse,
     app_state: Any,
@@ -132,6 +156,16 @@ def _record_nonstreaming_throughput(
     events = _slot_events(app_state, slot_name)
     if events is None or not body_bytes:
         return
+    # Increment per-slot request counter (shadow slots share with parent)
+    req_store = getattr(app_state, "slot_request_count", None)
+    if req_store is not None and slot_name:
+        req_store[slot_name] = req_store.get(slot_name, 0) + 1
+        # Also record last-use timestamp for recency-based animation
+        import time
+
+        last_used = getattr(app_state, "slot_last_used", None)
+        if last_used is not None:
+            last_used[slot_name] = time.monotonic()
     try:
         data = json.loads(body_bytes)
     except (ValueError, TypeError):
@@ -146,6 +180,35 @@ def _record_nonstreaming_throughput(
     # — the rolling window will smear it across the lookback. Better
     # alternatives need start-time tracking through forward().
     events.append((time.monotonic(), int(completion)))
+
+    # FLM (NPU) metrics: extract decoding speed + KV column occupancy from
+    # the ``usage`` block so the dashboard can show NPU tok/s and column
+    # usage gauge. These fields are FLM-specific; llama.cpp responses
+    # don't carry them.
+    flm_tps = usage.get("decoding_speed_tps")
+    flm_kv = usage.get("kv_token_occupancy_rate_percentage")
+    if isinstance(flm_tps, (int, float)):
+        _update_slot_throughput(app_state, slot_name, float(flm_tps))
+    if isinstance(flm_kv, (int, float)):
+        _update_slot_kv_occupancy(app_state, slot_name, float(flm_kv))
+
+
+def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
+    """Increment the per-slot request counter and record a last-use timestamp.
+
+    Called after STT/embed dispatch via the NPU trio router so the
+    flm-stt / flm-embed cards show activity even though they don't have
+    their own server process.  The timestamp drives which column squares
+    get animated (most recent capability wins the glow).
+    """
+    import time
+
+    store = getattr(request.app.state, "slot_request_count", None)
+    last_used = getattr(request.app.state, "slot_last_used", None)
+    if store is not None:
+        store[slot_name] = store.get(slot_name, 0) + 1
+    if last_used is not None:
+        last_used[slot_name] = time.monotonic()
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:
@@ -296,7 +359,6 @@ async def _normalize_slot_views(request: Request) -> list:
     return [
         SlotView(
             name=r["name"],
-            role=r.get("role"),
             device=r.get("device", ""),
             model_id=r["model_id"],
             context_length=int(r.get("context_length") or 0),
@@ -862,6 +924,7 @@ async def _dispatch_via_npu_trio(
     if router_obj is None:
         return None
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
+    _touch_npu_shadow_count(request, "flm-embed")
     return _wrap_npu_trio_response(upstream_resp)
 
 
@@ -1397,6 +1460,7 @@ async def _forward_multipart(
                     body=raw_body,
                     content_type=content_type,
                 )
+                _touch_npu_shadow_count(request, "flm-stt")
                 return _wrap_npu_trio_response(upstream_resp)
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})

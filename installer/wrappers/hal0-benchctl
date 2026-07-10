@@ -14,6 +14,10 @@
 # shell — so the grant in /etc/sudoers.d/hal0-benchctl can never be widened into
 # arbitrary command execution. The harness it execs is root-owned and not
 # writable by the hal0 user.
+#
+# NEW (2026-07-09): Added gpu-quiesce and telemetry verbs for the new
+# benchmark system (v2 store, planner, runner).
+
 set -euo pipefail
 
 HARNESS=/usr/lib/hal0/bench
@@ -90,6 +94,77 @@ case "$cmd" in
   list)
     ls -1 "$RESULTS/runs" 2>/dev/null || true ;;
 
+  # NEW VERBS (2026-07-09)
+  gpu-quiesce)               # bracket an exclusive SESSION
+    action="${1:-start}"
+    shift || true
+    case "$action" in
+      start)
+        echo "[gpu-quiesce] stopping GPU slots..."
+        for slot in hal0-slot@agent hal0-slot@brain hal0-slot@flm hal0-slot@rerank; do
+          systemctl stop "$slot.service" 2>/dev/null || true
+          echo "  stopped $slot"
+        done
+        echo "[gpu-quiesce] GPU quiesced"
+        ;;
+      end)
+        echo "[gpu-quiesce] restarting GPU slots..."
+        for slot in hal0-slot@agent hal0-slot@brain hal0-slot@flm hal0-slot@rerank; do
+          systemctl start "$slot.service" 2>/dev/null || true
+          echo "  restarted $slot"
+        done
+        echo "[gpu-quiesce] GPU restored"
+        ;;
+      *) die "gpu-quiesce: bad action: $action (use start|end)" ;;
+    esac
+    ;;
+
+  telemetry)                 # 1 Hz amdgpu sampler → artifacts/<run_id>/telemetry.jsonl
+    action="${1:-start}"
+    run_id="${2:-}"
+    shift 2 2>/dev/null || true
+    case "$action" in
+      start)
+        if [[ -z "$run_id" ]]; then
+          die "telemetry start: missing run_id"
+        fi
+        ARTIFACTS_DIR="$RESULTS/v2/artifacts/$run_id"
+        mkdir -p "$ARTIFACTS_DIR"
+        TELEMETRY_FILE="$ARTIFACTS_DIR/telemetry.jsonl"
+        echo "[telemetry] starting 1 Hz sampler for $run_id → $TELEMETRY_FILE"
+        # Background process: sample amdgpu hwmon every second
+        (
+          while true; do
+            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            # Sample GPU metrics
+            GPU_TEMP=$(cat /sys/class/hwmon/hwmon*/temp1_input 2>/dev/null || echo "0")
+            GPU_POWER=$(cat /sys/class/hwmon/hwmon*/power1_average 2>/dev/null || echo "0")
+            GPU_FREQ=$(cat /sys/class/drm/card0/gpu_busy_percent 2>/dev/null || echo "0")
+            echo "{\"ts\":\"$TIMESTAMP\",\"temp_c\":$GPU_TEMP,\"power_mw\":$GPU_POWER,\"gpu_busy_pct\":$GPU_FREQ}" >> "$TELEMETRY_FILE"
+            sleep 1
+          done
+        ) &
+        echo $! > "$ARTIFACTS_DIR/telemetry.pid"
+        echo "[telemetry] started (PID $!)"
+        ;;
+      end)
+        if [[ -z "$run_id" ]]; then
+          die "telemetry end: missing run_id"
+        fi
+        ARTIFACTS_DIR="$RESULTS/v2/artifacts/$run_id"
+        PID_FILE="$ARTIFACTS_DIR/telemetry.pid"
+        if [[ -f "$PID_FILE" ]]; then
+          kill $(cat "$PID_FILE") 2>/dev/null || true
+          rm -f "$PID_FILE"
+          echo "[telemetry] stopped"
+        else
+          echo "[telemetry] no running telemetry for $run_id"
+        fi
+        ;;
+      *) die "telemetry: bad action: $action (use start|end)" ;;
+    esac
+    ;;
+
   help|"")
     cat <<EOF
 usage: hal0-benchctl <command>
@@ -98,6 +173,8 @@ usage: hal0-benchctl <command>
   sweep <rel.gguf> <backend> [--exclusive] FLAGS  tuning sweep (whitelisted flags)
   aggregate                                      rebuild index.json + SUMMARY.md
   list                                           list result files
+  gpu-quiesce start|end                          bracket exclusive session
+  telemetry start|end <run_id>                  1 Hz amdgpu sampler
 backends: rocm | vulkan_radv ; results: $RESULTS
 EOF
     ;;

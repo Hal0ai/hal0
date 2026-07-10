@@ -109,9 +109,9 @@ RUN mkdir -p build && cd build \
 FROM ubuntu:24.04 AS flm-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-# Pinned to v0.9.43 (latest, 2026-05-26) — matches the host model cache and
-# clears the "0.9.43 > 0.9.42" incompatibility warning the old image emitted.
-ARG FLM_REF=v0.9.43
+# Pinned to v0.9.44 (portable Linux support, 2026-07) — matches the host
+# model cache and adds portable Linux build alongside per-distro .deb.
+ARG FLM_REF=v0.9.44
 
 # Pull the freshly-built XRT in so FLM can link against it.
 COPY --from=xrt-builder /opt/xilinx/xrt /opt/xilinx/xrt
