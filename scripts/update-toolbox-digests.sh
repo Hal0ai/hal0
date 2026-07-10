@@ -3,11 +3,12 @@
 # update-toolbox-digests.sh — refresh the published image digests pinned in
 # the repo-root manifest.json under `toolbox_images`.
 #
-# This is the real, runnable replacement for the never-built
-# `.github/workflows/toolbox.yml`. Run it on `main` BEFORE cutting a release
-# so the pinned `toolbox_images.<name>.digest` values track what is actually
+# Companion to `.github/workflows/toolbox.yml` (the CI build/push path for
+# the toolbox images). Run it on `main` BEFORE cutting a release so the
+# pinned `toolbox_images.<name>.digest` values track what is actually
 # published on ghcr.io. `release.yml` refuses to publish a release manifest
-# while any digest is null/missing.
+# while any digest is null/missing. It also syncs the manifest's
+# informational `version` field from pyproject.toml so it can't rot.
 #
 # For each entry under `toolbox_images`, the script:
 #   1. parses `ghcr.io/hal0ai/<image>:<tag>` out of the `.tag` field,
@@ -137,7 +138,30 @@ with open(path, "w") as fh:
 PY
 }
 
+# Sync the informational version field from pyproject.toml — the manifest
+# had drifted several minors behind the release line before this existed.
+sync_version() {
+    python3 - "${MANIFEST}" "${REPO_ROOT}/pyproject.toml" <<'PY'
+import json
+import sys
+import tomllib
+
+manifest_path, pyproject_path = sys.argv[1], sys.argv[2]
+with open(pyproject_path, "rb") as fh:
+    version = tomllib.load(fh)["project"]["version"]
+with open(manifest_path) as fh:
+    manifest = json.load(fh)
+if manifest.get("version") != version:
+    manifest["version"] = version
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    print(f"  version: -> {version}")
+PY
+}
+
 echo "Refreshing toolbox image digests in ${MANIFEST}"
+sync_version
 
 updated=0
 warned=0
