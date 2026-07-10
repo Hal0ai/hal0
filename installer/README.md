@@ -50,7 +50,7 @@ install (GPU/Vulkan/ROCm and CPU paths are fully supported everywhere).
 7. **systemd units** — writes `hal0-api.service`, copies `hal0-openwebui.service` and the `hal0-agent@.service` template (+ hermes drop-in), reloads the daemon, enables and starts `hal0-api` + `hal0-openwebui` (unless `--no-start`). Per-slot `hal0-slot@<name>.service` units are managed by hal0 itself when slots are loaded.
 8. **Hardware probe** — writes `/etc/hal0/hardware.json`, prints detected backends, and seeds a recommended `slots/chat.toml` (disabled until you pull a model). Skip with `HAL0_NO_PROBE=1`.
 9. **NPU prerequisites** — on apt hosts, installs the FLM runtime libs (ffmpeg6, boost1.83, fftw3), `libxrt-npu2` when the host's apt sources provide it, and the pinned FastFlowLM `.deb` (SHA-256 verified). FastFlowLM ships an Ubuntu `.deb` only upstream, so on non-apt distros (Fedora, Arch, openSUSE…) this step is skipped with an honest message naming the distro — GPU/CPU paths are unaffected; the NPU/FLM trio waits on a manual FastFlowLM install. All fail-soft: a GPU-only host still installs fine.
-10. **Container slot seeds** — copies `installer/etc-hal0/slots/{npu,tts,rerank,utility,img}.toml` into `/etc/hal0/slots/` (never overwriting operator edits). Each slot gates on its own runtime validation at load time.
+10. **Container slot seeds** — copies `installer/etc-hal0/slots/{flm,tts,rerank,utility,img}.toml` into `/etc/hal0/slots/` (never overwriting operator edits). Each slot gates on its own runtime validation at load time.
 
 The installer is **idempotent** — safe to re-run after a partial failure or to update configuration defaults.
 

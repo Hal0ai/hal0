@@ -4,6 +4,16 @@
 # Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
 # box boots a grey tile (no surprise FLM download, no crash-loop). The operator
 # assigns an FLM model later, which flips the slot enabled.
+#
+# Chat is on by default (NpuConfig.chat defaults true), so this is a
+# chat-ready NPU slot out of the box. To flip the rest of the trio on,
+# drop a `[npu]` table next to [model] with `asr = true` and/or
+# `embed = true` — or use the dashboard's NPU drawer, which drives the
+# same toggles on the running `flm serve`:
+#
+#   [npu]
+#   asr = true
+#   embed = true
 name = "flm"
 port = 8088
 device = "npu"

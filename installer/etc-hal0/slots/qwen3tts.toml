@@ -3,7 +3,7 @@
 # implement the OpenAI /v1/audio/speech contract.
 #
 # EXPLICITLY OUT of the installer's seed loop (WS-E, #1107): install.sh only
-# copies `npu tts rerank utility img` into /etc/hal0/slots. This file is an
+# copies `flm tts rerank utility img` into /etc/hal0/slots. This file is an
 # opt-in TEMPLATE the operator drops in by hand (or a future picker enables) to
 # add the GPU multilingual engine alongside the lighter default CPU Kokoro slot.
 # Like the seeded slots it ships DISABLED with no `[model].default` pin, so

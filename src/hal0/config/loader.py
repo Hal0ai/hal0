@@ -684,18 +684,27 @@ def _find_manifest_path() -> Path | None:
     """Locate the release manifest.
 
     Resolution order:
-      1. ``paths.manifest_json()`` — /etc/hal0/manifest.json (installed).
-      2. Repo root sibling of /usr/lib/hal0/current — dev installs that
-         keep the manifest next to the source tree.  Only consulted when
+      1. ``paths.manifest_json()`` — /etc/hal0/manifest.json, a deliberate
+         operator override (nothing installs it by default).
+      2. ``paths.usr_lib() / "manifest.json"`` — the manifest shipped inside
+         the current release tree (/usr/lib/hal0/current/manifest.json).
+         The ``current`` symlink is atomically swapped by both install and
+         update, so these pins track the running release with no separate
+         migration. Production installs resolve here: the venv's hal0 is a
+         plain (non-editable) pip install, so the source-file fallback in
+         (3) lands in the venv's lib/ where no manifest exists.
+      3. Repo root relative to this source file — editable/dev installs
+         that import hal0 straight from the checkout.  Only consulted when
          ``HAL0_HOME`` is NOT set, so unit tests with isolated
          tmp_hal0_home don't accidentally pick up the repo-root copy.
 
-    Returns the first existing path, or None if neither is found.  The
+    Returns the first existing path, or None if none is found.  The
     loader's callers fall back to ":v1" tag pulls in that case.
     """
     candidates: list[Path] = []
     installed = paths.manifest_json()
     candidates.append(installed)
+    candidates.append(paths.usr_lib() / "manifest.json")
     # Repo-root candidate: src/hal0/config/loader.py → ../../../manifest.json
     # Skip when HAL0_HOME is set — that env var means "isolated test home,
     # don't fall back to the source tree".

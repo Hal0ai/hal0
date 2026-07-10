@@ -88,10 +88,13 @@ The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
    swapped.
 
 4. **Extract** the tarball and run any forward config migrations the
-   release needs, plus two self-healing passes over on-disk state: pruning
-   any materialized seed profiles back to the code-defined catalog, and
-   clearing crash-only `mtp = true` slot overrides that no longer match
-   their model.
+   release needs, plus three self-healing passes over on-disk state:
+   pruning any materialized seed profiles back to the code-defined
+   catalog, clearing crash-only `mtp = true` slot overrides that no longer
+   match their model, and retagging slot/custom-profile `image` pins that
+   exactly match a *former* default runner image to the current default
+   (a deliberate operator override — any other ref — is left alone; the
+   new image is pulled by podman on the slot's next start).
 
 5. **Swap** the `/usr/lib/hal0/current` symlink atomically using the POSIX
    `symlink(tmp) + os.replace(tmp, current)` pattern, then reinstall the
@@ -114,7 +117,8 @@ The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
 `hal0 update` verifies every release with `cosign verify-blob` before
 swapping anything in. There is an escape hatch — `HAL0_UPDATE_SKIP_COSIGN=1`
 — but it's only honored while the installed hal0 is itself on a pre-1.0
-version, which covers every release up through v0.8.5b2. Once hal0 reaches
+(0.x or pre-release) version, which covers every current release line.
+Once hal0 reaches
 a v1.x tag the variable is silently ignored and verified releases become
 truly mandatory. A missing `cosign` binary always aborts the update unless
 that skip hatch is active.
@@ -122,7 +126,7 @@ that skip hatch is active.
 
 <Aside type="note">
 This mandatory check is for the ongoing `hal0 update` path above. The
-**initial one-line installer** is more lenient (v0.8.4b1): it no longer
+**initial one-line installer** is more lenient: it does not
 hard-requires the `cosign` binary to be present — a missing `cosign` logs a
 warning and the install proceeds without publisher-signature verification
 (the tarball's checksum is still checked). Set

@@ -1012,31 +1012,45 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
 
         # hal0.bench v2 (design 2026-07-05): suite seeds + politeness window are
-        # OPERATOR-OWNED under /etc — install only if absent (never clobber
+        # OPERATOR-OWNED under etc — install only if absent (never clobber
         # operator edits; the shipped copies in installer/bench/ are the seeds).
-        install -d /etc/hal0/bench/suites
+        install -d "${ETC_DIR}/bench/suites"
         for toml in "${BENCH_SRC}/suites"/*.toml; do
             [[ -f "${toml}" ]] || continue
-            dst="/etc/hal0/bench/suites/$(basename "${toml}")"
+            dst="${ETC_DIR}/bench/suites/$(basename "${toml}")"
             [[ -f "${dst}" ]] || install -m 0644 "${toml}" "${dst}"
         done
-        if [[ -f "${BENCH_SRC}/window.toml" && ! -f /etc/hal0/bench/window.toml ]]; then
-            install -m 0644 "${BENCH_SRC}/window.toml" /etc/hal0/bench/window.toml
+        if [[ -f "${BENCH_SRC}/window.toml" && ! -f "${ETC_DIR}/bench/window.toml" ]]; then
+            install -m 0644 "${BENCH_SRC}/window.toml" "${ETC_DIR}/bench/window.toml"
         fi
         # Result store (append-only records.jsonl + derived bench.db + artifacts).
-        install -d /var/lib/hal0-bench /var/lib/hal0-bench/artifacts
-        chown -R hal0:hal0 /var/lib/hal0-bench 2>/dev/null || true
+        # Prefix-relative under --dev so a dev install never touches the host
+        # (matches every other path in this block; HAL0_BENCH_STATE points the
+        # engine at it).
+        if [[ "${DEV_MODE}" -eq 1 ]]; then
+            BENCH_STATE_DIR="${PREFIX}/var/lib/hal0-bench"
+        else
+            BENCH_STATE_DIR="/var/lib/hal0-bench"
+        fi
+        install -d "${BENCH_STATE_DIR}" "${BENCH_STATE_DIR}/artifacts"
+        chown -R hal0:hal0 "${BENCH_STATE_DIR}" 2>/dev/null || true
         # Units: weekly scheduled session (timer→oneshot) + the run-queue worker
-        # (long-running, inert until Started from the dashboard).
-        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench.service" /etc/systemd/system/hal0-bench.service
-        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench.timer" /etc/systemd/system/hal0-bench.timer
-        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench-worker.service" /etc/systemd/system/hal0-bench-worker.service
+        # (long-running, inert until Started from the dashboard). The shipped
+        # ExecStart hardcodes the default FHS venv; rewrite it when this install
+        # uses a different prefix (HAL0_PREFIX override or --dev) so the units
+        # stay truthful about the binary they'd run.
+        for _bench_unit in hal0-bench.service hal0-bench.timer hal0-bench-worker.service; do
+            install -m 0644 "${REPO_ROOT}/installer/systemd/${_bench_unit}" "${UNIT_DIR}/${_bench_unit}"
+            if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" ]]; then
+                sed -i "s|/usr/lib/hal0/venv|${VENV_DIR}|g" "${UNIT_DIR}/${_bench_unit}"
+            fi
+        done
         if [[ "${DEV_MODE}" -eq 0 ]]; then
             systemctl daemon-reload 2>/dev/null || true
             systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true
             systemctl enable --now hal0-bench.timer >/dev/null 2>&1 || true
         fi
-        info "wrote /etc/hal0/bench + /var/lib/hal0-bench + bench units"
+        info "wrote ${ETC_DIR}/bench + ${BENCH_STATE_DIR} + bench units"
     else
         warn "${BENCH_SRC} not found — benchmark harness not installed"
     fi
@@ -1130,12 +1144,10 @@ fi
 # Refs: ADR-0009 (FLM trio NPU packing).
 ui_step "NPU prerequisites (FastFlowLM)"
 
-# Pinned FLM .deb — bump in lockstep with ADR-0009. v0.9.43 revalidated
-# 2026-06-03 (LXC 105, Strix Halo NPU passthrough): flm validate ok
-# (NPU FW 1.1.2.65), embed-gemma-300m-FLM → 768-dim, gemma3-1b-FLM chat
-# ok. NOTE: 0.9.43 tightened CLI arg parsing — it rejects a flag passed
-# twice, so FLMProvider.container_spec must never repeat a mode flag
-# (--asr/--embed) the model already implies.
+# Pinned FLM .deb — bump in lockstep with ADR-0009 and the toolbox image
+# tag in manifest.json (both 0.9.44 as of v0.9.6). NOTE (since 0.9.43):
+# FLM rejects a CLI flag passed twice, so FLMProvider.container_spec must
+# never repeat a mode flag (--asr/--embed) the model already implies.
 FLM_DEB_VERSION="0.9.44"
 # Upstream ships a SEPARATE .deb per distro, each built against that release's
 # ffmpeg/boost ABI: ubuntu24.04 (ffmpeg6/boost1.83), ubuntu25.10 + ubuntu26.04
@@ -1276,7 +1288,7 @@ else
             # Operators who set the env explicitly accept the trust trade.
             ACTUAL_SHA="$(sha256sum "${FLM_DEB_TMP}" | awk '{print $1}')"
             if [[ "${FLM_DEB_SHA256}" == "0000000000000000000000000000000000000000000000000000000000000000" ]]; then
-                warn "FLM_DEB_SHA256 is the placeholder — pin the real checksum in install.sh before v0.2 ships"
+                warn "FLM_DEB_SHA256 is the placeholder — pin the real checksum in _flm_sha_for_suffix before release"
                 warn "  observed: ${ACTUAL_SHA}"
                 if [[ "${HAL0_SKIP_FLM_SHA:-0}" != "1" ]]; then
                     warn "  skipping FLM install (set HAL0_SKIP_FLM_SHA=1 to accept the placeholder)"
@@ -1326,7 +1338,8 @@ else
 fi
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{npu,tts}.toml if absent. Idempotent: never
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img}.toml if absent
+# (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
 # runtime validation at load time. runtime=container + profile=<X> routes

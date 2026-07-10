@@ -639,9 +639,13 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
     # 7. NPU intro (only when present + healthy)
     npu_opt_in = False
     if "npu" in steps:
-        # Present + healthy: offer to route the NPU trio.
-        _draw("npu", "Run embed + STT + TTS on the NPU?", hw)
-        npu_opt_in = Confirm.ask("Enable NPU trio?", default=True)
+        # Present + healthy: offer to route STT to the NPU. This is what
+        # apply_setup actually provisions on opt-in (derive_device sends
+        # stt→npu; embed stays on the GPU lane, tts on cpu). The full FLM
+        # trio (chat/ASR/embed on one column) is a per-slot dashboard
+        # setting, not a setup-time selection — don't promise it here.
+        _draw("npu", "Run speech-to-text on the NPU?", hw)
+        npu_opt_in = Confirm.ask("Enable NPU inference (STT offload)?", default=True)
     elif "npu_broken" in steps:
         # Present but NOT healthy (npu.validated is False/None): show the remedy,
         # never the enable offer — apply_setup would skip an NPU lane here.
