@@ -136,6 +136,8 @@ const Icons = {
   chat:      <Icon><path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h8a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5z"/></Icon>,
   // Operator Board — three kanban columns of differing heights.
   board:     <Icon><rect x="2" y="2.5" width="3.2" height="11" rx="0.8"/><rect x="6.4" y="2.5" width="3.2" height="7" rx="0.8"/><rect x="10.8" y="2.5" width="3.2" height="9" rx="0.8"/></Icon>,
+  // Benchmarks — an ascending measurement path with sample points.
+  bench:     <Icon><path d="M3 13V9l2.5-2.5M3 13l2.5-2.5M3 13h3M13 3v4l-2.5 2.5M13 3l-2.5 2.5M13 3h-3M8 8l-2 2"/><circle cx="4" cy="13" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="12" cy="3" r="1.5"/></Icon>,
 };
 
 // ─── TopBar ───
@@ -165,6 +167,7 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     connections: ["Network", "Connections"],
     profiles:  ["iGPU Slots", "Profiles"],
     board:     ["Orchestration", "Board"],
+    benchmarks: ["Performance", "Benchmarks"],
     services:  ["Companions", "Services"],
   };
   const [eyebrow, title] = labels[route] || ["", ""];
@@ -248,6 +251,7 @@ function useNavItems() {
     // backend. No live count here (it's per-board; the board's own selector
     // shows task counts).
     { id: "board", label: "Board", icon: Icons.board },
+    { id: "benchmarks", label: "Benchmarks", icon: Icons.bench },
     // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
     // with Hermes wired live) — that's the parent row's target, so no separate
     // Overview sub-link. It then hosts Memory (full Hindsight page, gated on
