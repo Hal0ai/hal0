@@ -933,8 +933,13 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
         <div className="card" style={{ padding: '0.8rem 0.9rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <span style={{ fontFamily: mono, fontSize: 12, color: stateColor }}>
-              {'●'} {state}
+              {'●'} {state === 'running' && !active ? 'armed — idle' : state}
             </span>
+            {state === 'running' && !active && (
+              <span style={{ fontFamily: mono, fontSize: 10, color: 'var(--fg-4)' }}>
+                nothing running; queued items start immediately
+              </span>
+            )}
             <span className="vh-spacer" style={{ flex: 1 }} />
             <button className="btn sm" disabled={state === 'running'} onClick={() => control({ action: 'start' }, 'Worker started')}>Start</button>
             <button className="btn ghost sm" disabled={state !== 'running'} onClick={() => control({ action: 'pause' }, 'Worker pausing (between cells)')}>Pause</button>
