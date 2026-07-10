@@ -224,7 +224,7 @@ function ThCellGpu() {
             <div className="cap">temp C</div>
           </div>
           <div className="th-digit">
-            <div className="v sec">{watts != null ? Math.round(watts) : '—'}</div>
+            <div className="v">{watts != null ? Math.round(watts) : '—'}</div>
             <div className="cap">watts</div>
           </div>
         </div>
@@ -266,7 +266,7 @@ function ThCellCpuMem() {
             <div className="cap">util</div>
           </div>
           <div className="th-digit">
-            <div className="v sec">{cpuTemp != null ? Math.round(cpuTemp) + '°' : '—'}</div>
+            <div className="v">{cpuTemp != null ? Math.round(cpuTemp) + '°' : '—'}</div>
             <div className="cap push">temp C</div>
           </div>
         </div>

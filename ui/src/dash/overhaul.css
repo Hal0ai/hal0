@@ -1567,7 +1567,7 @@
 /* shared cell body row: gauge | digit grid */
 .th-row {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 18px;
   min-width: 0;
 }
