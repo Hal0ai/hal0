@@ -1147,6 +1147,116 @@ def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None
     return cleared
 
 
+def retag_stale_slot_images(*, job_id: str | None = None) -> int:
+    """Retag slot ``image`` pins that are stale FORMER DEFAULTS (upgrade migration).
+
+    Slot creation historically materialised the then-current default runner
+    image into the slot TOML (``image = "..."``, top-level or under
+    ``[slot]``). Those pins freeze the default at creation time, so a release
+    that bumps :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` never reaches
+    existing slots. For every slot whose pin is in
+    :data:`~hal0.config.schema.STALE_ROCMFPX_IMAGE_REFS` — exactly equal to a
+    known former default, so demonstrably NOT a deliberate operator pin —
+    rewrite it to the current default and log loudly. Any other value is an
+    intentional per-slot override (debug build, A/B test) and is never
+    touched: the escape hatch stands.
+
+    The same policy covers CUSTOM (non-seed-named) profiles in
+    ``profiles.toml``: a custom profile is typically cloned from a seed, so
+    its ``image`` field carries the same materialised-default debris. Only
+    the ``image`` value is rewritten — the operator's flags/name are theirs.
+    (Seed-NAMED profiles are ensure_seed_profiles' job, not ours.)
+
+    Runs before :func:`rerender_slot_units` in the update flow, so the
+    re-rendered units carry the new ref in the same pass; nothing is bounced —
+    the new image applies (and is pulled by podman if absent) on each slot's
+    next start.
+
+    Returns:
+        Number of pins retagged (slot TOMLs + custom profile entries).
+    """
+    import tomllib
+
+    from hal0.config.loader import _read_toml, write_toml_atomic
+    from hal0.config.paths import profiles_toml, slots_config_dir
+    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, STALE_ROCMFPX_IMAGE_REFS
+
+    retagged = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("updater.image_retag_slot_unreadable", slot=slot_name, error=str(exc))
+            continue
+        # An image REF is a top-level or [slot]-nested STRING. The ``[image]``
+        # TOML table (image-gen settings, #599) shares the key and must be
+        # ignored — same trap as providers.container._resolve_image_ref.
+        holder: dict | None = None
+        if isinstance(raw.get("image"), str):
+            holder = raw
+        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
+            holder = raw["slot"]
+        if holder is None or holder["image"] not in STALE_ROCMFPX_IMAGE_REFS:
+            continue
+        old_ref = holder["image"]
+        holder["image"] = DEFAULT_ROCMFPX_IMAGE
+        try:
+            write_toml_atomic(toml_path, raw)
+        except Exception as exc:
+            log.warning("updater.image_retag_write_failed", slot=slot_name, error=str(exc))
+            continue
+        retagged += 1
+        log.warning(
+            "updater.slot_image_retagged",
+            job_id=job_id,
+            slot=slot_name,
+            old=old_ref,
+            new=DEFAULT_ROCMFPX_IMAGE,
+            note=(
+                "slot image pin matched a stale former default runner; rolled to "
+                "the current default (applies on the slot's next start)"
+            ),
+        )
+
+    # Custom (non-seed-named) profiles: same stale-former-default policy,
+    # image field only.
+    prof_path = profiles_toml()
+    if prof_path.exists():
+        try:
+            raw = _read_toml(prof_path)
+        except Exception as exc:
+            log.warning("updater.image_retag_profiles_unreadable", error=str(exc))
+            return retagged
+        changed = False
+        for name, entry in (raw.get("profile") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("image") in STALE_ROCMFPX_IMAGE_REFS:
+                old_ref = entry["image"]
+                entry["image"] = DEFAULT_ROCMFPX_IMAGE
+                changed = True
+                retagged += 1
+                log.warning(
+                    "updater.profile_image_retagged",
+                    job_id=job_id,
+                    profile=name,
+                    old=old_ref,
+                    new=DEFAULT_ROCMFPX_IMAGE,
+                    note=(
+                        "custom profile image matched a stale former default "
+                        "runner; rolled to the current default (flags untouched)"
+                    ),
+                )
+        if changed:
+            try:
+                write_toml_atomic(prof_path, raw)
+            except Exception as exc:
+                log.warning("updater.image_retag_profiles_write_failed", error=str(exc))
+    return retagged
+
+
 def rerender_slot_units(*, job_id: str | None = None) -> int:
     """Re-render every existing container slot unit through current code.
 
@@ -1512,6 +1622,19 @@ class Updater:
             # Non-fatal: the affected slot simply fails to load until the
             # operator flips MTP to Auto/Off in the drawer.
 
+        # Step 7d: roll stale former-default runner-image pins to the current
+        # DEFAULT_ROCMFPX_IMAGE (runs before the unit re-render below so the
+        # rewritten units carry the new ref; applies on next slot start).
+        try:
+            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.image_retag_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: a stale pin just keeps the previous runner image.
+
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()
         try:
@@ -1734,6 +1857,12 @@ class Updater:
             await asyncio.to_thread(clear_stale_mtp_overrides, job_id=self.job_id)
         except Exception as exc:
             log.warning("updater.mtp_migration_failed", job_id=self.job_id, error=str(exc))
+
+        # Step 7d: stale former-default runner-image pins → current default.
+        try:
+            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
+        except Exception as exc:
+            log.warning("updater.image_retag_failed", job_id=self.job_id, error=str(exc))
 
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()
