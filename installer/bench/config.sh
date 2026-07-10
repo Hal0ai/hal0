@@ -48,9 +48,15 @@ COMMON_RUN_FLAGS=(
 # on-box 2026-07-10 with Hal0-BRAINTRAIN-1B-FPX6-AGENT). Anything servable
 # is now benchable. The image exposes BOTH devices, so each lane pins its
 # device via dev_args (`llama-bench --list-devices`: ROCm0, Vulkan0).
+#
+# bench_bin MUST be /opt/rocmfpx/bin/llama-bench — the binary matched to the
+# ROCmFPX libllama. The image ALSO carries the base toolbox's stale
+# /usr/local/bin/llama-bench, which the image-wide LD_LIBRARY_PATH points at
+# the NEW libs: that ABI mismatch segfaults ~2/3 of launches (root-caused
+# on-box 2026-07-10). Never use the /usr/local one.
 declare -A BACKENDS=(
-  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5|/usr/local/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-dev ROCm0"
-  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5|/usr/local/bin/llama-bench|512||-dev Vulkan0"
+  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5|/opt/rocmfpx/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-dev ROCm0"
+  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5|/opt/rocmfpx/bin/llama-bench|512||-dev Vulkan0"
 )
 # Order backends are swept in.
 BACKEND_ORDER=(rocm vulkan_radv)
