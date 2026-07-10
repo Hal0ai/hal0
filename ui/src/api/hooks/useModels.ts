@@ -532,7 +532,10 @@ export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
     refetchInterval: enabled ? 2_000 : false,
   })
 
-  const jobs = query.data ?? []
+  // Guard: a mocked/misbehaving backend can answer /api/models/pulls with a
+  // non-array (the e2e fixture's catch-all returns {}); jobs.some on that
+  // TypeErrors during render and unmounts the whole app tree.
+  const jobs = Array.isArray(query.data) ? query.data : []
   const hasActive = jobs.some((j: PullJob) => j.state === 'queued' || j.state === 'running')
 
   return { jobs, hasActive, ...query }

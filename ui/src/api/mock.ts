@@ -335,6 +335,13 @@ function buildUpdateState() {
   }
 }
 
+// HF model update check — a "nothing checked yet" snapshot so mock/dev
+// renders without hammering the (absent) backend with 500-retries. A live
+// backend or a page.route override stays authoritative via networkFirst.
+function buildModelUpdatesCheck() {
+  return { checked_at: 0, checked: 0, updates_available: 0, models: {} }
+}
+
 function buildAuthToken() {
   return {
     token_masked: 'hal0-•••••••••••••••••••••••••••••••••',
@@ -1034,6 +1041,7 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/slots$/, build: buildSlots },
   { re: /^\/api\/slots\/[^/]+$/, build: () => null }, // 404-style — Slot detail not in mock
   { re: /^\/api\/models$/, build: buildModels },
+  { re: /^\/api\/models\/updates\/check$/, build: buildModelUpdatesCheck, networkFirst: true },
   { re: /^\/api\/backends$/, build: buildBackends },
   { re: /^\/api\/capabilities$/, build: buildCapabilities },
   { re: /^\/api\/hardware$/, build: buildHardware },
