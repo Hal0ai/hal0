@@ -59,6 +59,11 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // HF update check + in-place update. Check is GET (TTL-cached server-side,
+  // ?refresh=1 forces); update re-pulls the row's hf_repo/hf_filename over
+  // its installed path and reports through the standard pull job surface.
+  modelUpdatesCheck: '/api/models/updates/check',
+  modelUpdate: (id: string) => `/api/models/${encodeURIComponent(id)}/update`,
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',

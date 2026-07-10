@@ -41,6 +41,7 @@ from hal0.registry.pull import (
 )
 from hal0.registry.pull import persist_pull_job as _persist_pull_job
 from hal0.registry.pull import pull_job_file as _pull_job_file
+from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 
 # See slots.py for the writer-gate rationale.
 
@@ -234,9 +235,29 @@ async def list_models(request: Request) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     seen: set[str] = set()
     filtered = 0
+    # Last HF update-check snapshot (populated by /api/models/updates/check;
+    # never fetched on this hot path). The flag is recomputed against the
+    # row's CURRENT metadata.sha256 rather than replayed from the snapshot,
+    # so applying an update clears the badge on the next poll without
+    # waiting for the check TTL to expire.
+    update_checks: dict[str, Any] = {}
+    _upd_state = getattr(request.app.state, "model_update_state", None)
+    if isinstance(_upd_state, dict):
+        update_checks = _upd_state.get("models") or {}
     for entry in registry.list():
         dumped = _model_to_dict(entry)
         dumped["installed"] = True
+        chk = update_checks.get(entry.id)
+        if isinstance(chk, dict):
+            remote_sha = chk.get("remote_sha256")
+            local_sha = (entry.metadata or {}).get("sha256")
+            dumped["update_available"] = bool(
+                isinstance(remote_sha, str)
+                and remote_sha
+                and isinstance(local_sha, str)
+                and local_sha
+                and remote_sha != local_sha.lower()
+            )
         dumped.setdefault("object", "model")
         dumped.setdefault("created", now)
         dumped.setdefault("owned_by", "local")
@@ -1058,6 +1079,152 @@ def _hf_repo_for_model(registry: Any, model_id: str) -> str | None:
         return None
 
 
+# ── HF update check (models with newer bytes on the Hub) ─────────────────────
+#
+# NOTE: registered BEFORE the ``/{model_id}`` catch-all below — FastAPI
+# matches in definition order, same reason ``/pulls`` sits above it.
+
+_UPDATE_CHECK_TTL_S = 3600.0
+
+
+@router.get("/updates/check")
+async def check_model_updates(request: Request, refresh: bool = False) -> dict[str, Any]:
+    """Probe HuggingFace for newer versions of installed HF-pulled models.
+
+    Compares each registry row's recorded ``metadata.sha256`` against the
+    repo's current LFS sha256 for the same ``hf_repo``/``hf_filename``
+    (one tree fetch per unique repo). The result snapshot is cached on
+    app state for an hour — ``?refresh=1`` forces a re-probe — and
+    :func:`list_models` merges a per-row ``update_available`` flag from
+    it so the catalog poll never touches huggingface.co.
+
+    Fail-soft: an unreachable repo marks its models ``reason=
+    "repo_unreachable"`` rather than failing the whole check; the route
+    never 500s on upstream trouble.
+    """
+    state = request.app.state
+    lock = getattr(state, "model_update_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state.model_update_lock = lock
+    async with lock:
+        cached = getattr(state, "model_update_state", None)
+        now = time.time()
+        if (
+            not refresh
+            and isinstance(cached, dict)
+            and now - cached.get("checked_at", 0) < _UPDATE_CHECK_TTL_S
+        ):
+            return cached
+
+        registry = state.model_registry
+        entries = [
+            m
+            for m in registry.list()
+            if (m.hf_repo or "").strip() and (m.hf_filename or "").strip()
+        ]
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        repo_files = await fetch_remote_lfs_shas(
+            {m.hf_repo.strip() for m in entries}, hf_token=hf_token
+        )
+        checks: dict[str, dict[str, Any]] = {}
+        for m in entries:
+            verdict = evaluate_model_update(m, repo_files)
+            if verdict is not None:
+                checks[m.id] = verdict
+        payload: dict[str, Any] = {
+            "checked_at": now,
+            "checked": len(checks),
+            "updates_available": sum(1 for v in checks.values() if v["update_available"]),
+            "models": checks,
+        }
+        state.model_update_state = payload
+        return payload
+
+
+@router.post("/{model_id}/update", status_code=202)
+async def update_model_from_hf(
+    model_id: str,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, object]:
+    """Re-pull a model's HF file over its installed bytes (in place).
+
+    The pull streams to staging, verifies HF's advertised sha256, then
+    atomically replaces the file at the registry row's EXISTING ``path``
+    (``dest_override``) — deliberately not re-deriving the destination,
+    which would relocate pre-capability-layout models and orphan their
+    old bytes. Job tracking, SSE progress, and the downloads pane all
+    reuse the standard pull machinery under the same ``model_id`` key.
+
+    Idempotent-ish like ``pull_model``: an in-flight job for the id is
+    returned rather than duplicated.
+    """
+    registry = request.app.state.model_registry
+    try:
+        existing = registry.get(model_id)
+    except Exception:
+        raise NotFound(f"model {model_id!r} not found", code="model.not_found") from None
+    hf_repo = (existing.hf_repo or "").strip()
+    hf_file = (existing.hf_filename or "").strip()
+    if not hf_repo or not hf_file:
+        raise PullInvalidSource(
+            f"model {model_id!r} has no hugging face source — set hf_repo + hf_filename",
+            details={"model_id": model_id},
+        )
+    dest = (existing.path or "").strip()
+    if not dest or Path(dest).is_dir():
+        raise PullInvalidSource(
+            f"model {model_id!r} has no single-file install path to update in place",
+            details={"model_id": model_id, "path": dest},
+        )
+
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    in_flight = jobs.get(model_id)
+    if in_flight is not None and in_flight.state in ("queued", "running"):
+        return {
+            "id": in_flight.job_id,
+            "model_id": model_id,
+            "state": in_flight.state,
+            "resumed": True,
+        }
+
+    job = make_job(model_id)
+    jobs[model_id] = job
+    _persist_pull_job(job)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "pull.queued",
+            "info",
+            f"pull:{model_id}",
+            f"{model_id}: update queued ({hf_repo}/{hf_file})",
+            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file, "update": True},
+        )
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    background.add_task(
+        _run_pull_with_events,
+        job,
+        hf_repo=hf_repo,
+        hf_file=hf_file,
+        registry=registry,
+        hf_token=hf_token,
+        event_bus=event_bus,
+        dest_override=dest,
+    )
+    return {
+        "id": job.job_id,
+        "model_id": model_id,
+        "state": job.state,
+        "hf_repo": hf_repo,
+        "hf_file": hf_file,
+        "dest_path": dest,
+        "update": True,
+    }
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
@@ -1524,6 +1691,7 @@ async def _run_pull_with_events(
     capability: str | None = None,
     comfyui_subdir: str | None = None,
     mmproj_file: str | None = None,
+    dest_override: str | None = None,
 ) -> None:
     """Wrap ``run_pull`` so footer-visible progress events fan out.
 
@@ -1547,6 +1715,7 @@ async def _run_pull_with_events(
                 capability=capability,
                 comfyui_subdir=comfyui_subdir,
                 mmproj_file=mmproj_file,
+                dest_override=dest_override,
             )
         finally:
             # Persist terminal state so a restart-surviving status poll resolves
@@ -1596,6 +1765,7 @@ async def _run_pull_with_events(
             capability=capability,
             comfyui_subdir=comfyui_subdir,
             mmproj_file=mmproj_file,
+            dest_override=dest_override,
         )
     finally:
         progress_task.cancel()

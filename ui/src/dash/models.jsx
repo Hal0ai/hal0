@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -79,6 +79,34 @@ function ModelsView() {
 
   const modelsQuery = useModels();
   const modelList = modelsQuery.data ?? [];
+
+  // HF update check — the hook triggers the (server-TTL-cached) probe on
+  // mount; /api/models then carries per-row `update_available` flags.
+  useModelUpdatesCheck();
+  const updateAll = useModelUpdateAll();
+  const updatable = modelList.filter(m => m.installed && m.update_available);
+  const onUpdateAll = async () => {
+    if (!updatable.length) return;
+    try {
+      const res = await updateAll.mutateAsync(updatable.map(m => m.id));
+      if (res.started.length) {
+        window.__hal0Toast && window.__hal0Toast(
+          `Updating ${res.started.length} model${res.started.length === 1 ? "" : "s"} from Hugging Face`,
+          "info",
+        );
+      }
+      if (res.failed.length) {
+        window.__hal0Toast && window.__hal0Toast(
+          `${res.failed.length} update${res.failed.length === 1 ? "" : "s"} failed to start — ${res.failed[0].message}`,
+          "err",
+        );
+      }
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Update all failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
 
   // Auto-pick the first installed model on first render so the detail
   // pane never opens empty.
@@ -189,6 +217,15 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
+        {updatable.length > 0 && (
+          <button
+            className="btn"
+            data-testid="mdl-update-all"
+            disabled={updateAll.isPending}
+            title="Re-pull every installed model whose HuggingFace file has changed"
+            onClick={onUpdateAll}
+          >{Icons.download} {updateAll.isPending ? "Starting…" : `Update all (${updatable.length})`}</button>
+        )}
         <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
         <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
@@ -459,7 +496,9 @@ function ModelRow({ model, selected, onSelect }) {
           ? <span className="chip info" title={`Advertised by the "${model.upstream}" upstream — not stored on this host`}>upstream</span>
           : !model.installed
             ? <span className="chip" style={{color: model.ns === "blessed" ? "var(--accent)" : "var(--fg-3)", borderColor: model.ns === "blessed" ? "var(--accent-line)" : "var(--line)", background: model.ns === "blessed" ? "var(--accent-soft)" : "transparent"}}>{model.ns}</span>
-            : null}
+            : model.update_available
+              ? <span className="chip amber" data-testid="mdl-row-update" title="A newer version of this file is available on Hugging Face">update ↑</span>
+              : null}
       </span>
     </div>
   );
@@ -470,6 +509,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   const pull = usePullJob();
   const slotsQuery = useSlots();
   const swap = useSlotSwap();
+  const hfUpdate = useModelUpdateApply();
   const [cancelling, setCancelling] = useStateM(false);
   if (!model) {
     return (
@@ -529,7 +569,10 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
               : <span style={{color: "var(--fg-5)"}}>{Icons.download}</span>}
           </span>
           <div className="nm mono">{model.longName || model.name || model.id}</div>
-          <span style={{marginLeft: "auto"}}>
+          <span style={{marginLeft: "auto", display: "inline-flex", gap: 6}}>
+            {model.installed && model.update_available && (
+              <span className="chip amber" title="A newer version of this file is available on Hugging Face">update available</span>
+            )}
             {model.installed
               ? <span className="chip ok">installed</span>
               : isUpstreamModel(model)
@@ -575,6 +618,27 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       <div className="mdl-detail-actions">
         {model.installed ? (
           <>
+            {model.update_available && (
+              <button
+                className="btn"
+                data-testid="mdl-detail-update"
+                disabled={hfUpdate.isPending}
+                title="Re-pull the newer file from Hugging Face over the installed one"
+                onClick={async () => {
+                  try {
+                    await hfUpdate.mutateAsync(model.id);
+                    window.__hal0Toast && window.__hal0Toast(
+                      `Updating ${model.longName || model.id} from ${model.hf_repo || "Hugging Face"}`,
+                      "info",
+                    );
+                  } catch (e) {
+                    window.__hal0Toast && window.__hal0Toast(
+                      `Update failed — ${e?.message || "see logs"}`, "err",
+                    );
+                  }
+                }}
+              >{Icons.download} {hfUpdate.isPending ? "Starting…" : "Update"}</button>
+            )}
             <button
               className="btn"
               disabled={swap.isPending}
