@@ -182,9 +182,10 @@ test.describe('BoardView — agent chat', () => {
     await expect(msgs.nth(1)).toBeVisible({ timeout: FIVE_S })
     await expect(msgs.nth(1)).toContainText('Hello')
 
-    // Board chat must run on the agent slot (orchestrator model), and send
-    // OpenAI-style `messages` (not the legacy `{message}`).
-    expect(postBody.model).toBe('hal0/agent')
+    // Board chat embodies the hal0-brain profile — it must run on the brain
+    // slot (falls back to `agent` via the resolver chain) and send OpenAI-style
+    // `messages` (not the legacy `{message}`).
+    expect(postBody.model).toBe('hal0/brain')
     expect(Array.isArray(postBody.messages)).toBe(true)
     expect(postBody.messages.at(-1)).toMatchObject({ role: 'user', content: 'what is blocked?' })
   })
@@ -239,6 +240,81 @@ test.describe('BoardView — agent chat', () => {
     const msgs = page.locator('[data-testid="board-chat-msg"]')
     await expect(msgs.nth(1)).toBeVisible({ timeout: FIVE_S })
     await expect(msgs.nth(1)).toContainText('Moving task')
+  })
+
+  // ── Reply formatting: thinking fold, markdown, structured tool card ────
+
+  test('thinking frame folds away, markdown renders, tool card shows result', async ({ page }) => {
+    await page.route('**/api/board/chat', async (route) => {
+      if (route.request().method() !== 'POST') { await route.fallback(); return }
+      const sseBody = [
+        'data: {"type":"thinking","text":"checking the slots first"}\n\n',
+        'data: {"type":"tool_call","name":"list_slots","id":"c1","arguments":{}}\n\n',
+        'data: {"type":"tool_result","name":"list_slots","id":"c1","result":{"slots":[]}}\n\n',
+        'data: {"type":"token","text":"The `brain` slot is **ready**."}\n\n',
+        'data: {"type":"done"}\n\n',
+      ].join('')
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sseBody })
+    })
+
+    await gotoBoardAndWait(page)
+    await openChat(page)
+
+    await page.locator('[data-testid="board-chat-input"]').fill('is the brain slot up?')
+    await page.locator('[data-testid="board-chat-send"]').click()
+
+    // Structured tool card with the call name; result is folded behind <details>.
+    const toolCard = page.locator('[data-testid="board-chat-tool"]')
+    await expect(toolCard).toBeVisible({ timeout: FIVE_S })
+    await expect(toolCard).toContainText('list_slots')
+    await expect(toolCard.locator('.tool-result pre')).not.toBeVisible()
+    await toolCard.locator('.tool-result summary').click()
+    await expect(toolCard.locator('.tool-result pre')).toContainText('slots')
+
+    // Thinking is present but folded (collapsed <details>), never inline text.
+    const think = page.locator('[data-testid="board-chat-thinking"]')
+    await expect(think).toBeVisible({ timeout: FIVE_S })
+    await expect(think.locator('pre')).not.toBeVisible()
+    await think.locator('summary').click()
+    await expect(think.locator('pre')).toContainText('checking the slots first')
+
+    // Markdown: inline code + bold rendered as elements, not raw markers.
+    const reply = page.locator('[data-testid="board-chat-msg"]').last()
+    await expect(reply.locator('code.md-code')).toHaveText('brain')
+    await expect(reply.locator('strong')).toHaveText('ready')
+    await expect(reply).not.toContainText('**')
+  })
+
+  test('inline <think> tags in token stream never render raw', async ({ page }) => {
+    await page.route('**/api/board/chat', async (route) => {
+      if (route.request().method() !== 'POST') { await route.fallback(); return }
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type":"token","text":"<think>hidden reasoning</think>visible reply"}\n\ndata: {"type":"done"}\n\n',
+      })
+    })
+
+    await gotoBoardAndWait(page)
+    await openChat(page)
+    await page.locator('[data-testid="board-chat-input"]').fill('hi')
+    await page.locator('[data-testid="board-chat-send"]').click()
+
+    const reply = page.locator('[data-testid="board-chat-msg"]').nth(1)
+    await expect(reply).toContainText('visible reply', { timeout: FIVE_S })
+    await expect(reply.locator('.msg-b')).not.toContainText('<think>')
+    // Reasoning still reachable behind the fold.
+    const think = reply.locator('[data-testid="board-chat-thinking"]')
+    await think.locator('summary').click()
+    await expect(think.locator('pre')).toContainText('hidden reasoning')
+  })
+
+  test('suggestion chips are the hal0-brain starters', async ({ page }) => {
+    await gotoBoardAndWait(page)
+    await openChat(page)
+    await expect(page.locator('[data-testid="board-chat-suggest-0"]')).toContainText('create a new slot')
+    await expect(page.locator('[data-testid="board-chat-suggest-1"]')).toContainText('set up a model')
+    await expect(page.locator('[data-testid="board-chat-suggest-2"]')).toContainText('Benchmark')
   })
 
   // Ref-chip rendering is driven through a CONTROLLED hook (the stub-reply

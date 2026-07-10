@@ -1049,13 +1049,27 @@ export function useBoardEventsStream(
 
 // ── Board chat (SSE via fetch) ────────────────────────────────────────
 
+export interface ChatToolCall {
+  name?: string
+  arguments?: unknown
+  id?: string
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool'
   body: string
   at?: string
   refs?: string[]
   streaming?: boolean
-  tool_call?: unknown
+  tool_call?: ChatToolCall
+  /** Model reasoning (`thinking` SSE frames / `<think>` blocks) — folded away by the UI. */
+  thinking?: string
+  /** Tool messages: the matched tool_result payload once it lands. */
+  result?: unknown
+  /** Tool messages: running → done | error as the result frame arrives. */
+  status?: 'running' | 'done' | 'error'
+  /** Internal streaming marker: which assistant segment of which turn this bubble is. */
+  seg?: string
 }
 
 export interface UseBoardChatResult {
@@ -1064,10 +1078,42 @@ export interface UseBoardChatResult {
   streaming: boolean
 }
 
-// Board chat runs on the `agent` slot (the tool-calling orchestrator model),
-// not the conversational `chat` slot. Sent explicitly so it routes correctly
-// regardless of the backend's PRIMARY_SLOT_MODEL default.
-const BOARD_CHAT_MODEL = 'hal0/agent'
+// The agent chat embodies the hal0-brain profile, which targets the dedicated
+// `brain` slot by default (hal0/brain falls back to the `agent` slot via the
+// resolver chain when no brain slot is loaded). Sent explicitly so it routes
+// correctly regardless of the backend's default.
+const BOARD_CHAT_MODEL = 'hal0/brain'
+
+// Client-side guard for reasoning models that inline `<think>…</think>` in
+// content: the backend already splits these into `thinking` frames, but an
+// older backend streaming raw think-tags must never show them in the bubble.
+function splitThink(text: string): { thinking: string; visible: string } {
+  if (!text.includes('<think>')) {
+    // R1-style templates prefill the opening tag, so content may carry only
+    // the closing tag — everything before it is reasoning.
+    const close = text.indexOf('</think>')
+    if (close !== -1) {
+      return {
+        thinking: text.slice(0, close).trim(),
+        visible: text.slice(close + '</think>'.length).replace(/^\s+/, ''),
+      }
+    }
+    return { thinking: '', visible: text }
+  }
+  const parts: string[] = []
+  let visible = text.replace(/<think>([\s\S]*?)<\/think>/g, (_m, inner: string) => {
+    if (inner.trim()) parts.push(inner.trim())
+    return ''
+  })
+  const open = visible.indexOf('<think>')
+  if (open !== -1) {
+    // Unterminated trailing block — everything after the tag is reasoning.
+    const inner = visible.slice(open + '<think>'.length)
+    if (inner.trim()) parts.push(inner.trim())
+    visible = visible.slice(0, open)
+  }
+  return { thinking: parts.join('\n'), visible }
+}
 
 export function useBoardChat(board?: string): UseBoardChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -1134,39 +1180,51 @@ export function useBoardChat(board?: string): UseBoardChatResult {
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let accBody = ''
-        let assistantIdx = -1
+        let accThinking = ''
         let buf = ''
+        // Assistant "segment" tracking. Tool calls split the assistant text
+        // into separate bubbles (before/after the call). React batches the
+        // queued setMessages updaters, so the updater must not read shared
+        // mutable stream state — everything it needs is captured BY VALUE at
+        // queue time and the target bubble is found by its segment tag.
+        const turnTag = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+        let segment = 0
 
-        const appendAssistant = (delta: string) => {
-          accBody += delta
+        const upsertAssistant = () => {
+          // Re-split on every delta: think-tags can close in a later chunk.
+          const { thinking, visible } = splitThink(accBody)
+          const allThinking = [accThinking, thinking].filter(Boolean).join('\n')
+          const seg = `${turnTag}:${segment}`
           setMessages((prev) => {
             const next = [...prev]
-            if (assistantIdx === -1 || assistantIdx >= next.length) {
-              next.push({
-                role: 'assistant',
-                body: accBody,
-                streaming: true,
-              })
-              assistantIdx = next.length - 1
-            } else {
-              next[assistantIdx] = {
-                ...next[assistantIdx],
-                body: accBody,
-                streaming: true,
-              }
+            const msg: ChatMessage = {
+              role: 'assistant',
+              body: visible,
+              thinking: allThinking || undefined,
+              streaming: true,
+              seg,
             }
+            const idx = next.findIndex((m) => m.role === 'assistant' && m.seg === seg)
+            if (idx === -1) next.push(msg)
+            else next[idx] = { ...next[idx], ...msg }
             return next
           })
         }
 
+        const appendAssistant = (delta: string) => {
+          accBody += delta
+          upsertAssistant()
+        }
+
+        const appendThinking = (delta: string) => {
+          accThinking = accThinking ? `${accThinking}\n${delta}` : delta
+          upsertAssistant()
+        }
+
         const finaliseAssistant = () => {
-          setMessages((prev) => {
-            const next = [...prev]
-            if (assistantIdx >= 0 && assistantIdx < next.length) {
-              next[assistantIdx] = { ...next[assistantIdx], streaming: false }
-            }
-            return next
-          })
+          setMessages((prev) =>
+            prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
+          )
         }
 
         // eslint-disable-next-line no-constant-condition
@@ -1207,21 +1265,57 @@ export function useBoardChat(board?: string): UseBoardChatResult {
                 // Assistant text delta (backend sends per-round content).
                 if (frame.text) appendAssistant(frame.text)
                 break
+              case 'thinking':
+                // Model reasoning — kept off the reply body, folded in the UI.
+                if (frame.text) appendThinking(frame.text)
+                break
               case 'tool_call':
-                // The orchestrator is invoking an audited board mutation.
+                // The steward is invoking a platform/board tool. Any assistant
+                // text that follows belongs to a NEW bubble, not the one
+                // preceding the call.
+                accBody = ''
+                accThinking = ''
+                segment += 1
                 setMessages((prev) => [
                   ...prev,
                   {
                     role: 'tool',
-                    body: `→ ${frame.name ?? 'tool'}(${JSON.stringify(frame.arguments ?? {})})`,
+                    body: frame.name ?? 'tool',
                     tool_call: { name: frame.name, arguments: frame.arguments, id: frame.id },
+                    status: 'running',
                   },
                 ])
                 break
-              case 'tool_result':
-                // Mutation landed — refresh the board so the change shows live.
+              case 'tool_result': {
+                // Attach the result to its tool message (matched by call id,
+                // falling back to the last unresolved call with that name),
+                // then refresh the board so mutations show live.
+                const rFrame = frame
+                setMessages((prev) => {
+                  const next = [...prev]
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    const m = next[i]
+                    if (m.role !== 'tool' || m.status !== 'running') continue
+                    const idMatch = rFrame.id && m.tool_call?.id === rFrame.id
+                    const nameMatch = !rFrame.id && m.tool_call?.name === rFrame.name
+                    if (idMatch || nameMatch) {
+                      const isErr =
+                        !!rFrame.result &&
+                        typeof rFrame.result === 'object' &&
+                        'error' in (rFrame.result as Record<string, unknown>)
+                      next[i] = {
+                        ...m,
+                        result: rFrame.result,
+                        status: isErr ? 'error' : 'done',
+                      }
+                      break
+                    }
+                  }
+                  return next
+                })
                 qc.invalidateQueries({ queryKey: boardKey(board) })
                 break
+              }
               case 'error':
                 setMessages((prev) => [
                   ...prev,

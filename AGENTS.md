@@ -56,7 +56,9 @@ A persona is a TOML file under `/var/lib/hal0/agents/hermes/personas/`
 declaring (`id`, `display_name`, `summary`, `system_prompt`,
 `tools_allowed`, `memory_namespace`, `preferred_upstream`,
 `preferred_model`, `approval.{default_policy, auto_approve,
-require_approval}`). The provisioner seeds two: `hermes` (general) and `coder`.
+require_approval}`). The provisioner seeds three: `hermes` (general), `coder`,
+and `hal0-brain` (the dashboard agent-chat platform steward — own memory
+namespace, targets the `brain` slot via `hal0/brain` by default).
 The active persona is the contents of `active.txt`; switching personas
 swaps the system-prompt scope on the next turn without restarting the
 agent process. Configured per-agent via `GET/POST

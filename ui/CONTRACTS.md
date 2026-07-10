@@ -233,9 +233,12 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 - Orchestration popover: only the 4 PUT knobs are editable (no auto/manual "mode" — the
   server has no such field). tick-interval / failure-limit / claim-TTL / max-in-flight are
   read from `/config` and rendered **read-only with a note**.
-- The `/chat` agent is the PLATFORM assistant: board tools (reads + audited mutations,
-  incl. get/update_orchestration) plus hal0-api self-HTTP tools (slots list/get/
-  load/unload/restart, models, hardware stats, installed agents). Same SSE frame contract.
+- The `/chat` agent is the hal0-brain PLATFORM steward (profile `hal0-brain`, default
+  model `hal0/brain` → falls back to the `agent` slot via the resolver chain): board
+  tools (reads + audited mutations, incl. get/update_orchestration) plus hal0-api
+  self-HTTP tools (slots list/get/load/unload/restart, models, hardware stats,
+  installed agents). SSE frame contract adds `{type:"thinking",text}` (model
+  reasoning, rendered folded) alongside token/tool_call/tool_result/done/error.
 - Drag-and-drop outside any lane ARCHIVES the card (`board-drop-archive` /
   `board-archive-veil`); nothing on the board hard-deletes without an explicit action.
 - "Nudge dispatcher" = one-shot `POST /dispatch?max=N`. No continuous start/stop.

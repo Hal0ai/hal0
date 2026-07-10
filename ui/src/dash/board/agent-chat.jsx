@@ -10,13 +10,144 @@ function Icon(props) {
   return BI ? <BI {...props} /> : null;
 }
 
-// Grounded in real tools: board reads/mutations + slot/model/hardware reads.
+// Grounded in the hal0-brain profile's real responsibilities: slot lifecycle,
+// model download/setup, benchmarking, hardware.
 const AGENT_SUGGEST = window.AGENT_SUGGEST || [
-  "what's blocked?",
-  "which slots are serving?",
-  "triage everything",
-  "how's the hardware doing?",
+  "Help me create a new slot",
+  "Download and set up a model",
+  "Benchmark the model on a slot",
+  "How's the hardware doing?",
 ];
+
+// ─── Minimal markdown → React (no deps, no innerHTML) ─────────────────
+// The brain slot replies in markdown; render the common subset (fences,
+// lists, headings, bold/italic/inline-code, links) instead of raw text.
+// Anything unrecognised falls through as plain text — never worse than before.
+
+function mdInline(text, keyBase) {
+  const out = [];
+  // Tokenise inline code first so `**x**` inside backticks stays literal.
+  const parts = String(text).split(/(`[^`]+`)/g);
+  parts.forEach((part, pi) => {
+    if (!part) return;
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      out.push(<code className="md-code" key={`${keyBase}-c${pi}`}>{part.slice(1, -1)}</code>);
+      return;
+    }
+    // bold / italic / links on the remaining plain runs
+    const rx = /(\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g;
+    part.split(rx).forEach((seg, si) => {
+      if (!seg) return;
+      const key = `${keyBase}-${pi}-${si}`;
+      if (seg.startsWith("**") && seg.endsWith("**")) {
+        out.push(<strong key={key}>{seg.slice(2, -2)}</strong>);
+      } else if (seg.startsWith("*") && seg.endsWith("*") && seg.length > 2) {
+        out.push(<em key={key}>{seg.slice(1, -1)}</em>);
+      } else if (seg.startsWith("[")) {
+        const m = seg.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+        // Model output is attacker-influenceable (tool results, task titles fed
+        // back into context) — only linkify http(s); anything else stays text.
+        if (m && /^https?:\/\//i.test(m[2].trim())) {
+          out.push(<a href={m[2].trim()} target="_blank" rel="noreferrer" key={key}>{m[1]}</a>);
+        } else {
+          out.push(seg);
+        }
+      } else {
+        out.push(seg);
+      }
+    });
+  });
+  return out;
+}
+
+function Markdown({ text }) {
+  const src = String(text || "");
+  const blocks = [];
+  // Split out fenced code blocks first; everything between is prose.
+  const segments = src.split(/```(\w*)\n?([\s\S]*?)(?:```|$)/g);
+  // split() with 2 capture groups yields [prose, lang, code, prose, ...]
+  for (let i = 0; i < segments.length; i += 3) {
+    const prose = segments[i];
+    if (prose && prose.trim()) {
+      let list = null;
+      const flushList = (key) => {
+        if (!list) return;
+        blocks.push(list.ordered
+          ? <ol className="md-list" key={key}>{list.items}</ol>
+          : <ul className="md-list" key={key}>{list.items}</ul>);
+        list = null;
+      };
+      prose.split("\n").forEach((line, li) => {
+        const key = `b${i}-l${li}`;
+        const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+        const ordered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+        const heading = line.match(/^\s*#{1,4}\s+(.*)$/);
+        if (bullet || ordered) {
+          const item = <li key={key}>{mdInline((bullet || ordered)[1], key)}</li>;
+          if (list && list.ordered === !!ordered) list.items.push(item);
+          else { flushList(key + "-fl"); list = { ordered: !!ordered, items: [item] }; }
+        } else {
+          flushList(key + "-fl");
+          if (heading) blocks.push(<div className="md-h" key={key}>{mdInline(heading[1], key)}</div>);
+          else if (line.trim()) blocks.push(<p className="md-p" key={key}>{mdInline(line, key)}</p>);
+        }
+      });
+      flushList(`b${i}-end`);
+    }
+    const code = segments[i + 2];
+    if (code != null && code.trim()) {
+      blocks.push(
+        <pre className="md-pre" key={`b${i}-pre`} data-lang={segments[i + 1] || undefined}>
+          <code>{code.replace(/\n$/, "")}</code>
+        </pre>
+      );
+    }
+  }
+  return <React.Fragment>{blocks}</React.Fragment>;
+}
+
+// ─── Folded model reasoning ───────────────────────────────────────────
+function Thinking({ text }) {
+  if (!text) return null;
+  return (
+    <details className="msg-think" data-testid="board-chat-thinking">
+      <summary>thinking</summary>
+      <pre>{text}</pre>
+    </details>
+  );
+}
+
+// ─── Tool-call card (call + matched result) ───────────────────────────
+function ToolCard({ msg }) {
+  const tc = msg.tool_call || {};
+  const args = tc.arguments && Object.keys(tc.arguments).length > 0
+    ? JSON.stringify(tc.arguments)
+    : "";
+  const status = msg.status || "done";
+  let resultText = "";
+  if (msg.result !== undefined) {
+    try { resultText = JSON.stringify(msg.result, null, 2); }
+    catch { resultText = String(msg.result); }
+    if (resultText && resultText.length > 1200) resultText = resultText.slice(0, 1200) + " …";
+  }
+  return (
+    <div className={"tool-card " + status} data-testid="board-chat-tool">
+      <div className="tool-card-h">
+        <span className={"kdot " + (status === "running" ? "live" : "")}
+          style={{ "--st": status === "error" ? "var(--err)" : status === "running" ? "var(--info)" : "var(--ok)" }} />
+        <span className="tool-name">{tc.name || msg.body || "tool"}</span>
+        {args && <span className="tool-args" title={args}>{args}</span>}
+        <span className="tool-status">{status}</span>
+      </div>
+      {resultText && (
+        <details className="tool-result">
+          <summary>result</summary>
+          <pre>{resultText}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
 
 // ─── Agent chat slide-out (the orchestrator) ──────────────────────────
 function AgentChat({ chat, byId, onClose, onOpenTask }) {
@@ -47,9 +178,9 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
     chatHook.send(t);
   };
 
-  // `tool` frames are the orchestrator's audited board mutations — label them
-  // as tool activity, not as operator messages.
-  const roleLabel = (role) => role === "assistant" ? "agent" : role === "tool" ? "tool" : "operator";
+  // `tool` frames are the steward's audited platform/board mutations — label
+  // them as tool activity, not as operator messages.
+  const roleLabel = (role) => role === "assistant" ? "hal0-brain" : role === "tool" ? "tool" : "operator";
   const roleCls   = (role) => role === "assistant" ? "agent" : role === "tool" ? "tool" : "operator";
 
   return (
@@ -58,13 +189,13 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
       <aside
         className="b-drawer chat"
         role="dialog"
-        aria-label="platform assistant"
+        aria-label="hal0-brain platform steward"
         data-testid="board-chat"
       >
         <div className="b-drawer-h">
           <span className="dh-title">
             <span className="kdot live" style={{ "--st": "var(--ok)" }} />
-            agent · platform assistant
+            hal0-brain · platform steward
           </span>
           <span className="spacer" />
           <span className="dh-x" onClick={onClose}><Icon name="close" /></span>
@@ -73,7 +204,7 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
         <div className="chat-thread" ref={threadRef}>
           <div className="chat-intro">
             {chatHook
-              ? "administers this hal0 instance · board · slots · models · settings"
+              ? "stewards this hal0 instance · slots · models · benchmarks · board"
               : "chat backend unavailable — hook bridge not loaded"}
           </div>
 
@@ -87,30 +218,35 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
                 <span className="who">{roleLabel(m.role)}</span>
                 <span>{m.at}</span>
               </div>
-              <div className="msg-b">
-                {m.body}
-                {m.refs && m.refs.length > 0 && (
-                  <div className="msg-refs">
-                    {m.refs.map(id => byId[id] && (
-                      <span
-                        className="msg-ref"
-                        key={id}
-                        data-testid={`board-chat-ref-${id}`}
-                        onClick={() => onOpenTask(id)}
-                      >
-                        <span className={window.liveDot ? window.liveDot(byId[id].status) : "kdot glow"} />
-                        {id}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {m.role === "tool" && m.tool_call ? (
+                <ToolCard msg={m} />
+              ) : (
+                <div className="msg-b">
+                  {m.role === "assistant" && <Thinking text={m.thinking} />}
+                  {m.role === "assistant" ? <Markdown text={m.body} /> : m.body}
+                  {m.refs && m.refs.length > 0 && (
+                    <div className="msg-refs">
+                      {m.refs.map(id => byId[id] && (
+                        <span
+                          className="msg-ref"
+                          key={id}
+                          data-testid={`board-chat-ref-${id}`}
+                          onClick={() => onOpenTask(id)}
+                        >
+                          <span className={window.liveDot ? window.liveDot(byId[id].status) : "kdot glow"} />
+                          {id}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ))}
 
           {isTyping && (
             <div className="msg agent" data-testid="board-chat-msg">
-              <div className="msg-meta"><span className="who">agent</span></div>
+              <div className="msg-meta"><span className="who">hal0-brain</span></div>
               <div className="msg-b"><span className="typing"><i /><i /><i /></span></div>
             </div>
           )}
@@ -131,7 +267,7 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
           <textarea
             value={draft}
             disabled={!chatHook}
-            placeholder={chatHook ? "Ask the orchestrator…  (Enter to send)" : "chat unavailable"}
+            placeholder={chatHook ? "Ask hal0-brain…  (Enter to send)" : "chat unavailable"}
             data-testid="board-chat-input"
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}

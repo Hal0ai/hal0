@@ -28,6 +28,10 @@ DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     # hal0/utility → the cheap helper slot; falls back to the anchor when unloaded.
     "hal0/utility": ("utility", _ANCHOR_NAME),
     "hal0/npu": ("npu", "utility", _ANCHOR_NAME),
+    # hal0/brain → the dashboard agent-chat persona. No installer seeds a `brain`
+    # slot, so without a canonical entry the generalized chain below would pass the
+    # name through unresolved and every chat turn would 404 on a stock box.
+    "hal0/brain": ("brain", _ANCHOR_NAME),
 }
 
 

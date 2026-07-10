@@ -116,12 +116,26 @@ def test_set_active_refuses_missing_persona(tmp_path: Path) -> None:
         P.set_active("ghost", root=tmp_path)
 
 
-def test_seed_default_personas_writes_two_files_and_pointer(tmp_path: Path) -> None:
+def test_seed_default_personas_writes_files_and_pointer(tmp_path: Path) -> None:
     written = P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
-    assert {p.id for p in written} == {"hermes", "coder"}
+    assert {p.id for p in written} == {"hermes", "coder", "hal0-brain"}
     assert (tmp_path / "hermes.toml").exists()
     assert (tmp_path / "coder.toml").exists()
+    assert (tmp_path / "hal0-brain.toml").exists()
     assert (tmp_path / P.ACTIVE_POINTER).read_text().strip() == "hermes"
+
+
+def test_seed_hal0_brain_targets_brain_slot_with_own_memory(tmp_path: Path) -> None:
+    """The dashboard agent-chat profile: brain slot default + separate memory."""
+    P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
+    brain = P.load_persona("hal0-brain", root=tmp_path)
+    assert brain.preferred_model == "hal0/brain"
+    assert brain.preferred_upstream == "hal0"
+    assert brain.memory_namespace == "private:hal0-brain"
+    # Its memory bank is its own — distinct from the other seeds.
+    others = {P.load_persona(p, root=tmp_path).memory_namespace for p in ("hermes", "coder")}
+    assert brain.memory_namespace not in others
+    assert "platform steward" in brain.system_prompt
 
 
 def test_seed_default_personas_idempotent_no_overwrite(tmp_path: Path) -> None:
@@ -147,7 +161,7 @@ def test_seed_default_personas_overwrite_restores_defaults(tmp_path: Path) -> No
         encoding="utf-8",
     )
     written = P.seed_default_personas(agent_id="hermes-agent", root=tmp_path, overwrite=True)
-    assert {p.id for p in written} == {"hermes", "coder"}
+    assert {p.id for p in written} == {"hermes", "coder", "hal0-brain"}
     loaded = P.load_persona("hermes", root=tmp_path)
     assert loaded.display_name == "Hermes"
 
