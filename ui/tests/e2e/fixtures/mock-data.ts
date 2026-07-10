@@ -345,6 +345,48 @@ export const MOCK_DATA = {
 
 export type MockData = typeof MOCK_DATA
 
+// ── HF model updates + model card (feat: hf-model-updates) ────────────────
+//
+// IDs match HAL0_DATA.models (src/dash/data.jsx) — the forced-mock
+// (VITE_MOCK_HAL0=1) catalog the e2e suite renders — NOT the
+// MOCK_DATA.models list above. One installed model (qwen3.6-27b-mtp) is
+// flagged update_available so the row badge + "Update all" header button
+// render; the coder row is up_to_date so specs can assert the badge is
+// per-row, not global.
+
+export const MODEL_UPDATES = {
+  updates: [
+    {
+      model_id: 'qwen3.6-27b-mtp',
+      hf_repo: 'unsloth/Qwen3.6-27B-A3B-MTP-GGUF',
+      hf_filename: 'Qwen3.6-27B-MTP-Q4_K_M.gguf',
+      local_sha256: 'a'.repeat(64),
+      remote_sha256: 'b'.repeat(64),
+      status: 'update_available',
+      update_available: true,
+      checked_at: 1_720_000_000,
+      error: null,
+    },
+    {
+      model_id: 'qwen3-coder-30b',
+      hf_repo: 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF',
+      hf_filename: 'Qwen3-Coder-30B-A3B-Q4_K_M.gguf',
+      local_sha256: 'c'.repeat(64),
+      remote_sha256: 'c'.repeat(64),
+      status: 'up_to_date',
+      update_available: false,
+      checked_at: 1_720_000_000,
+      error: null,
+    },
+  ],
+  available: ['qwen3.6-27b-mtp'],
+  count: 2,
+  available_count: 1,
+}
+
+export const MODEL_CARD_MARKDOWN =
+  '# Qwen3.6 27B\n\nMock model card for e2e — quantised GGUF build.\n'
+
 // ── Operator Board mock data (feat/operator-board) ─────────────────────────
 //
 // Ported from /home/halo/Development/Projects/hal0/kanban/board/board-data.jsx.

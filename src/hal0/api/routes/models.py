@@ -1282,6 +1282,11 @@ async def delete_model(
         # startup sweep reaps anything we miss here.
         with contextlib.suppress(OSError):
             _pull_job_file(model_id).unlink(missing_ok=True)
+        # Same for the cached model card — reference material for a row
+        # that no longer exists.
+        from hal0.registry.cards import drop_cached_card
+
+        drop_cached_card(model_id)
         rec.after = {
             "id": model_id,
             "deleted": bool(removed),
@@ -1839,6 +1844,39 @@ async def _start_flm_pull(
         "state": job.state,
         "source": "flm",
     }
+
+
+@router.get("/{model_id}/card")
+async def model_card(model_id: str, request: Request, refresh: bool = False) -> dict[str, Any]:
+    """Return the model's HF README (model card), cached locally on disk.
+
+    First hit downloads ``README.md`` from the row's ``hf_repo`` and
+    persists it under ``<var_lib>/model-cards/``; subsequent reads are
+    served from disk so the card stays referenceable offline.
+    ``?refresh=true`` re-fetches (falling back to the stale cache when
+    huggingface.co is unreachable).
+
+    Errors: 404 ``model.not_found`` / ``model.card_no_source`` (row has
+    no ``hf_repo``) / ``model.card_not_found`` (repo has no README);
+    502 ``model.card_unavailable`` (no cache and HF unreachable).
+    """
+    from hal0.registry.cards import get_card
+    from hal0.registry.store import ModelNotFound
+
+    registry = request.app.state.model_registry
+    if not registry.has(model_id):
+        raise ModelNotFound(
+            f"model {model_id!r} not in registry",
+            details={"model_id": model_id},
+        )
+    model = registry.get(model_id)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    return await get_card(
+        model_id,
+        (model.hf_repo or "").strip(),
+        refresh=refresh,
+        hf_token=hf_token,
+    )
 
 
 @router.get("/{model_id}/pull/status")

@@ -70,6 +70,7 @@ from hal0.api.routes import (
     images,
     installer,
     logs,
+    model_updates,
     models,
     npu,
     power,
@@ -1118,6 +1119,9 @@ def create_app() -> FastAPI:
     # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
     # tab (docker + systemd + ComfyUI HTTP), plus arbiter switchover controls.
     app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
+    # HF update checks — registered BEFORE the main models router so the
+    # literal /api/models/updates path wins over its /{model_id} route.
+    app.include_router(model_updates.router, prefix="/api/models/updates", tags=["models"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a

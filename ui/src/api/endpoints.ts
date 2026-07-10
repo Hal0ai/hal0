@@ -59,6 +59,12 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // HF update checks — which installed models have a newer file in their
+  // HF repo (sha probe), and the "Update all" re-pull action.
+  modelUpdates: '/api/models/updates',
+  modelUpdatesApply: '/api/models/updates/apply',
+  // Model card (README.md) — fetched from HF once, cached server-side.
+  modelCard: (id: string) => `/api/models/${encodeURIComponent(id)}/card`,
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',

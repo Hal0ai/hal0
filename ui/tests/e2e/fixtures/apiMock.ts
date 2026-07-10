@@ -16,6 +16,8 @@
 import { test as base, Page, Route } from '@playwright/test'
 import {
   MOCK_DATA,
+  MODEL_UPDATES,
+  MODEL_CARD_MARKDOWN,
   BOARD_BOARDS,
   BOARD_PROFILES,
   BOARD_ASSIGNEES,
@@ -89,6 +91,38 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route('**/api/models', (route) =>
     json(route, { models: state.models, count: state.models.length }),
   )
+  // Downloads-pane job list. Must be an ARRAY — the broad `{}` catch-all
+  // crashes usePullsList (`jobs.some is not a function`) which takes the
+  // Footer (and with it the whole page) down in mock mode.
+  await page.route('**/api/models/pulls', (route) => json(route, []))
+  // HF update-availability probe + update-all apply + cached model card.
+  // Regexes anchor the path segment so `updates` never swallows
+  // `updates/apply` and `card` matches with or without ?refresh=.
+  await page.route(/\/api\/models\/updates(\?|$)/, (route) =>
+    json(route, MODEL_UPDATES),
+  )
+  await page.route('**/api/models/updates/apply', (route) =>
+    json(route, {
+      started: MODEL_UPDATES.available.map((id, i) => ({
+        model_id: id,
+        job_id: `mock-upd-${i}`,
+        state: 'queued',
+      })),
+      skipped: [],
+      count: MODEL_UPDATES.available.length,
+    }, 202),
+  )
+  await page.route(/\/api\/models\/[^/]+\/card(\?|$)/, (route) => {
+    const m = route.request().url().match(/\/api\/models\/([^/]+)\/card/)
+    return json(route, {
+      model_id: decodeURIComponent(m?.[1] ?? ''),
+      hf_repo: 'unsloth/Qwen3.6-27B-GGUF',
+      markdown: MODEL_CARD_MARKDOWN,
+      cached: false,
+      stale: false,
+      fetched_at: 1_720_000_000,
+    })
+  })
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))

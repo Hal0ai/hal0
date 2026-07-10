@@ -21,6 +21,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+- HF model update checks: `GET /api/models/updates` probes each HF-sourced registry row's `resolve/main` URL (HEAD, `X-Linked-ETag` sha256 vs the sha recorded at pull time) and reports which installed models have a newer build upstream; results are TTL-cached and shared per (repo, file) coordinate.
+- `POST /api/models/updates/apply` — "Update all": re-pulls every outdated model (or an explicit `model_ids` subset) through the existing pull machinery (same jobs, SSE progress, footer events, atomic in-place swap).
+- Models dashboard: an amber `update` chip on catalog rows with a newer HF build, an `Update all · N` header button, and an update chip + one-click `Update` action in the detail pane.
+- Model cards: `GET /api/models/{id}/card` downloads the repo's `README.md` once and caches it under `/var/lib/hal0/model-cards/` (stale-cache fallback when HF is unreachable; cache dropped on model delete). The detail sidebar grows a collapsible "Model card" section with a View README toggle and a Refresh action.
+
 ## [0.9.6] — 2026-07-10
 
 ### Highlights

@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdates, useModelUpdatesApply, useModelCard, useModelCardRefresh, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -79,6 +79,27 @@ function ModelsView() {
 
   const modelsQuery = useModels();
   const modelList = modelsQuery.data ?? [];
+
+  // HF update availability — server-side sha probe, cached. availableSet
+  // drives the per-row indicator; the header button updates everything.
+  const updates = useModelUpdates();
+  const updatesApply = useModelUpdatesApply();
+  const onUpdateAll = async () => {
+    try {
+      const res = await updatesApply.mutateAsync();
+      const n = res?.count ?? 0;
+      window.__hal0Toast && window.__hal0Toast(
+        n > 0
+          ? `Updating ${n} model${n === 1 ? "" : "s"} from Hugging Face…`
+          : "Nothing to update.",
+        "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Update all failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
 
   // Auto-pick the first installed model on first render so the detail
   // pane never opens empty.
@@ -189,6 +210,17 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
+        {updates.available.length > 0 && (
+          <button
+            className="btn"
+            data-testid="mdl-update-all"
+            disabled={updatesApply.isPending}
+            title={`Newer builds on Hugging Face: ${updates.available.join(", ")}`}
+            onClick={onUpdateAll}
+          >
+            {Icons.restart} {updatesApply.isPending ? "Updating…" : `Update all · ${updates.available.length}`}
+          </button>
+        )}
         <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
         <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
@@ -301,16 +333,16 @@ function ModelsView() {
             sectionedInference.map(item =>
               item.type === "label"
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
+                : <ModelRow key={item.model.id} model={item.model} updatable={updates.availableSet.has(item.model.id)} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
             )
           ) : tab === "image" ? (
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} updatable={updates.availableSet.has(m.id)} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
             ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} updatable={updates.availableSet.has(m.id)} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
             ))
           )}
 
@@ -348,6 +380,7 @@ function ModelsView() {
         <div className="models-sidebar">
           <ModelDetail
             model={selected}
+            updatable={selected ? updates.availableSet.has(selected.id) : false}
             onDelete={() => setDelModel(selected)}
             onEdit={() => setRecipeOpen(true)}
           />
@@ -433,7 +466,7 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 }
 
 // ── ModelRow ──────────────────────────────────────────────────────────
-function ModelRow({ model, selected, onSelect }) {
+function ModelRow({ model, selected, onSelect, updatable }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
@@ -447,6 +480,11 @@ function ModelRow({ model, selected, onSelect }) {
         <span className="sub">{model.repo || ""}</span>
       </span>
       <span className="mdl-row-tags">
+        {updatable && (
+          <span className="chip amber" data-testid="mdl-row-update-available" title="A newer build of this file is available in the HF repo">
+            {Icons.restart} update
+          </span>
+        )}
         {model.type && <span className="chip">{model.type}</span>}
         {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
         {backends.map(b => (
@@ -465,8 +503,85 @@ function ModelRow({ model, selected, onSelect }) {
   );
 }
 
+// ── ModelCardPanel ────────────────────────────────────────────────────
+// Collapsible "Model card" section in the detail sidebar. The README is
+// fetched lazily on first expand (then served from the backend's disk
+// cache under /var/lib/hal0/model-cards/) so selecting models stays
+// cheap and the card stays readable offline. Hidden entirely for rows
+// with no hf_repo — there is nowhere to fetch a card from.
+function ModelCardPanel({ model }) {
+  const [open, setOpen] = useStateM(false);
+  // hf_repo is authoritative; the normalizer's derived `repo` is the
+  // fallback for rows serialised before hf_repo surfaced (or mock rows).
+  // `local/<id>` and `via <upstream>` repos have no HF card to fetch.
+  const repo = String(model?.hf_repo || model?.repo || "").trim();
+  const hasSource = !!repo && !repo.startsWith("local/") && !repo.startsWith("via ");
+  const card = useModelCard(open && hasSource ? model.id : null);
+  const refresh = useModelCardRefresh();
+  if (!hasSource) return null;
+  return (
+    <div className="mdl-detail-recipe">
+      <div style={{display: "flex", alignItems: "center", gap: 6}}>
+        <div className="lbl" style={{marginBottom: 0}}>Model card</div>
+        <span className="vh-spacer" />
+        {open && (
+          <button
+            className="btn ghost sm"
+            disabled={refresh.isPending}
+            title="Re-fetch the README from Hugging Face"
+            onClick={async () => {
+              try {
+                await refresh.mutateAsync(model.id);
+              } catch (e) {
+                window.__hal0Toast && window.__hal0Toast(
+                  `Card refresh failed — ${e?.message || "see logs"}`, "err",
+                );
+              }
+            }}
+          >{refresh.isPending ? "Refreshing…" : "↻ Refresh"}</button>
+        )}
+        <button className="btn ghost sm" data-testid="mdl-card-toggle" onClick={() => setOpen(v => !v)}>
+          {open ? "Hide" : "View README"}
+        </button>
+      </div>
+      {open && (
+        <div style={{marginTop: 8}}>
+          {card.isPending && (
+            <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>Fetching model card…</div>
+          )}
+          {card.isError && (
+            <div className="mono" style={{fontSize: 11, color: "var(--err)"}}>
+              {card.error?.message || "Model card unavailable."}
+            </div>
+          )}
+          {card.data && (
+            <>
+              {card.data.stale && (
+                <div className="mono" style={{fontSize: 10.5, color: "var(--warn)", marginBottom: 6}}>
+                  huggingface.co unreachable — showing the cached copy.
+                </div>
+              )}
+              <pre
+                data-testid="mdl-card-body"
+                style={{
+                  margin: 0, maxHeight: 320, overflow: "auto",
+                  whiteSpace: "pre-wrap", wordBreak: "break-word",
+                  fontFamily: "var(--jbm)", fontSize: 11, lineHeight: 1.55,
+                  color: "var(--fg-3)", background: "transparent",
+                  padding: "8px 10px", border: "1px solid var(--line-soft)",
+                  borderRadius: "var(--rad-sm)",
+                }}
+              >{card.data.markdown}</pre>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ModelDetail ───────────────────────────────────────────────────────
-function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
+function ModelDetail({ model, onDelete, onEdit, onPullStarted, updatable }) {
   const pull = usePullJob();
   const slotsQuery = useSlots();
   const swap = useSlotSwap();
@@ -529,7 +644,12 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
               : <span style={{color: "var(--fg-5)"}}>{Icons.download}</span>}
           </span>
           <div className="nm mono">{model.longName || model.name || model.id}</div>
-          <span style={{marginLeft: "auto"}}>
+          <span style={{marginLeft: "auto", display: "inline-flex", gap: 6}}>
+            {updatable && (
+              <span className="chip amber" data-testid="mdl-detail-update-available" title="A newer build of this file is available in the HF repo">
+                {Icons.restart} update available
+              </span>
+            )}
             {model.installed
               ? <span className="chip ok">installed</span>
               : isUpstreamModel(model)
@@ -572,9 +692,31 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       </div>
       <UsedByPanel model={model} />
       <OnDiskPanel model={model} />
+      <ModelCardPanel key={model.id} model={model} />
       <div className="mdl-detail-actions">
         {model.installed ? (
           <>
+            {updatable && (
+              <button
+                className="btn"
+                data-testid="mdl-detail-update"
+                disabled={pull.inFlight}
+                title="Re-pull this file from the HF repo (atomic in-place swap)"
+                onClick={async () => {
+                  try {
+                    await pull.start(model.id);
+                    window.dispatchEvent(new CustomEvent("hal0:pull-started", { detail: { modelId: model.id } }));
+                    window.__hal0Toast && window.__hal0Toast(
+                      `Updating ${model.longName || model.id} from ${model.hf_repo || "HF"}…`, "info",
+                    );
+                  } catch (e) {
+                    window.__hal0Toast && window.__hal0Toast(
+                      `Update failed — ${e?.message || "see logs"}`, "err",
+                    );
+                  }
+                }}
+              >{Icons.restart} {pull.inFlight ? `Updating ${pull.pct ?? 0}%` : "Update"}</button>
+            )}
             <button
               className="btn"
               disabled={swap.isPending}
@@ -746,4 +888,4 @@ function DownloadsPane() {
   );
 }
 
-Object.assign(window, { ModelsView, ModelRow, ModelDetail, DownloadsPane, DownloadRow, HfSearchPanel });
+Object.assign(window, { ModelsView, ModelRow, ModelDetail, ModelCardPanel, DownloadsPane, DownloadRow, HfSearchPanel });

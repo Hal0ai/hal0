@@ -169,6 +169,125 @@ export function useHfSearch(q: string, type?: string | null) {
   })
 }
 
+// ─── HF model updates (update-available check + update-all) ────────────
+
+export interface ModelUpdateStatus {
+  model_id: string
+  hf_repo: string
+  hf_filename: string
+  local_sha256: string | null
+  remote_sha256: string | null
+  status: 'update_available' | 'up_to_date' | 'unknown' | 'error' | string
+  update_available: boolean
+  checked_at: number | null
+  error: string | null
+}
+
+export interface ModelUpdatesResponse {
+  updates: ModelUpdateStatus[]
+  available: string[]
+  count: number
+  available_count: number
+}
+
+const MODEL_UPDATES_POLL_MS = 5 * 60_000
+
+export function useModelUpdates() {
+  // GET /api/models/updates — server-side TTL-cached HF sha probe. The
+  // poll here just re-reads the cache; the backend only re-HEADs
+  // huggingface.co when its own TTL lapses. Fail-soft: an old backend
+  // (or the e2e catch-all mock) returns {} → no badges, no errors.
+  const query = useQuery<ModelUpdatesResponse>({
+    queryKey: ['model-updates'],
+    queryFn: async () => {
+      const body = await apiGet<any>(ENDPOINTS.modelUpdates)
+      return {
+        updates: Array.isArray(body?.updates) ? body.updates : [],
+        available: Array.isArray(body?.available) ? body.available : [],
+        count: body?.count ?? 0,
+        available_count: body?.available_count ?? 0,
+      }
+    },
+    refetchInterval: MODEL_UPDATES_POLL_MS,
+    retry: false,
+  })
+  const available = query.data?.available ?? []
+  return {
+    ...query,
+    available,
+    availableSet: new Set(available),
+    statuses: query.data?.updates ?? [],
+  }
+}
+
+export interface ModelUpdatesApplyResponse {
+  started: { model_id: string; job_id: string; state: string }[]
+  skipped: { model_id: string; reason: string }[]
+  count: number
+}
+
+export function useModelUpdatesApply() {
+  // POST /api/models/updates/apply — re-pulls every outdated model (or an
+  // explicit subset). Each update is a normal pull job, so invalidating
+  // ['pulls'] + firing hal0:pull-started lights up the Downloads pane.
+  const qc = useQueryClient()
+  return useMutation<ModelUpdatesApplyResponse, Hal0Error, { model_ids?: string[] } | void>({
+    mutationFn: (body) =>
+      apiPost<ModelUpdatesApplyResponse>(
+        ENDPOINTS.modelUpdatesApply,
+        (body ?? undefined) as Record<string, unknown> | undefined,
+      ),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['pulls'] })
+      qc.invalidateQueries({ queryKey: ['model-updates'] })
+      if (typeof window !== 'undefined') {
+        for (const s of res?.started ?? []) {
+          window.dispatchEvent(
+            new CustomEvent('hal0:pull-started', { detail: { modelId: s.model_id } }),
+          )
+        }
+      }
+    },
+  })
+}
+
+// ─── Model card (HF README, cached server-side) ─────────────────────────
+
+export interface ModelCardResponse {
+  model_id: string
+  hf_repo: string
+  markdown: string
+  cached: boolean
+  stale: boolean
+  fetched_at: number
+}
+
+export function useModelCard(id: string | null | undefined) {
+  // GET /api/models/{id}/card — lazy (enabled only once the detail pane's
+  // Model-card section is opened, callers pass null until then). The
+  // backend serves its disk cache after the first fetch, so re-opening
+  // the section is instant and works offline.
+  return useQuery<ModelCardResponse, Hal0Error>({
+    queryKey: ['model-card', id],
+    queryFn: () => apiGet<ModelCardResponse>(ENDPOINTS.modelCard(id as string)),
+    enabled: !!id,
+    staleTime: Infinity,
+    retry: false,
+  })
+}
+
+export function useModelCardRefresh() {
+  // Force a re-fetch from HF (?refresh=true) and update the cache entry.
+  const qc = useQueryClient()
+  return useMutation<ModelCardResponse, Hal0Error, string>({
+    mutationFn: (id: string) =>
+      apiGet<ModelCardResponse>(`${ENDPOINTS.modelCard(id)}?refresh=true`),
+    onSuccess: (data, id) => {
+      qc.setQueryData(['model-card', id], data)
+    },
+  })
+}
+
 export interface ModelDeleteResponse {
   id: string
   deleted: boolean
