@@ -195,6 +195,85 @@ export function useModelUpdate() {
   })
 }
 
+// ─── Model updates (HF sha vs repo main) ────────────────────────────
+//
+// A separate, slower-polled surface from useModels(): the /api/models list
+// stays a cheap disk read, while freshness needs a per-repo HF probe. The
+// dashboard fetches this report and joins it onto rows by model_id so a
+// stale model shows an "update" indicator and the "Update all" button knows
+// how many pulls to kick.
+
+export interface ModelUpdateInfo {
+  model_id: string
+  hf_repo: string
+  hf_filename: string
+  update_available: boolean
+  current_sha: string | null
+  remote_sha: string | null
+  reason: string | null
+}
+
+export interface ModelUpdatesResponse {
+  updates: ModelUpdateInfo[]
+  count: number
+  available: number
+}
+
+const MODEL_UPDATES_POLL_MS = 5 * 60_000 // 5 min — matches the backend tree cache TTL
+
+export function useModelUpdates({ enabled = true }: { enabled?: boolean } = {}) {
+  const query = useQuery<ModelUpdatesResponse>({
+    queryKey: ['model-updates'],
+    queryFn: () => apiGet<ModelUpdatesResponse>(ENDPOINTS.modelUpdates),
+    enabled,
+    refetchInterval: enabled ? MODEL_UPDATES_POLL_MS : false,
+    // A soft failure (HF down) should keep the last verdict rather than
+    // flash the indicator off — react-query keeps previous data by default.
+    staleTime: MODEL_UPDATES_POLL_MS,
+  })
+  const updates = query.data?.updates ?? []
+  // Set of model ids with an available update — cheap membership test for rows.
+  const staleIds = new Set(updates.filter(u => u.update_available).map(u => u.model_id))
+  return { ...query, updates, staleIds, available: query.data?.available ?? 0 }
+}
+
+// Force a fresh HF probe (cache bypass), then re-pull every stale model.
+export function useCheckModelUpdates() {
+  const qc = useQueryClient()
+  return useMutation<ModelUpdatesResponse, Hal0Error, void>({
+    mutationFn: () => apiPost<ModelUpdatesResponse>(ENDPOINTS.modelUpdatesCheck, {}),
+    onSuccess: (data) => {
+      // Seed the query cache with the fresh verdict so the indicator updates
+      // immediately, then invalidate to resume the normal poll cadence.
+      qc.setQueryData(['model-updates'], data)
+      qc.invalidateQueries({ queryKey: ['model-updates'] })
+    },
+  })
+}
+
+export interface UpdateAllResponse {
+  started: Array<{ model_id: string; id: string; state: string }>
+  skipped: Array<{ model_id: string; id?: string; state: string }>
+  count: number
+}
+
+export function useUpdateAllModels() {
+  const qc = useQueryClient()
+  return useMutation<UpdateAllResponse, Hal0Error, void>({
+    mutationFn: () => apiPost<UpdateAllResponse>(ENDPOINTS.modelUpdateAll, {}),
+    onSuccess: () => {
+      // Pulls started — refresh the downloads pane + models list, and let the
+      // update report re-probe once the re-pulls complete.
+      qc.invalidateQueries({ queryKey: ['pulls'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['model-updates'] })
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hal0:pull-started', { detail: { modelId: null } }))
+      }
+    },
+  })
+}
+
 // ─── usePullJob ─────────────────────────────────────────────────────
 
 export type PullState =

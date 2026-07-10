@@ -2024,6 +2024,29 @@ select.npu-sel {
 .mdl-row .nm .sub { color: var(--fg-4); font-weight: 400; font-size: 10.5px; display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
 .mdl-row-tags { display: flex; flex-wrap: nowrap; gap: 4px; justify-content: flex-end; overflow: hidden; }
 .mdl-row-tags .chip { text-transform: lowercase; }
+
+/* "update available" — a newer file exists on the model's HF repo. Warm
+   accent so it reads as an actionable nudge, not an error. */
+.chip.mdl-update-chip {
+  background: color-mix(in srgb, var(--warming, #f2792b) 16%, transparent);
+  color: var(--warming, #f2792b);
+  border-color: color-mix(in srgb, var(--warming, #f2792b) 40%, transparent);
+  display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
+}
+.chip.mdl-update-chip svg { width: 10px; height: 10px; }
+
+/* Top-of-page "Update all" — same warm accent as the per-row chip so the
+   two read as one feature. */
+.btn.mdl-update-all {
+  background: color-mix(in srgb, var(--warming, #f2792b) 16%, transparent);
+  color: var(--warming, #f2792b);
+  border-color: color-mix(in srgb, var(--warming, #f2792b) 40%, transparent);
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.btn.mdl-update-all:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warming, #f2792b) 26%, transparent);
+}
+.btn.mdl-update-all svg { width: 12px; height: 12px; }
 .mdl-row .sz { color: var(--fg-3); text-align: right; font-size: 11px; }
 .mdl-row .tg { color: var(--fg-3); font-size: 10.5px; text-align: right; }
 .mdl-row-icon { width: 14px; display: flex; align-items: center; justify-content: center; font-size: 12px; }

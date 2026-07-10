@@ -1058,6 +1058,120 @@ def _hf_repo_for_model(registry: Any, model_id: str) -> str | None:
         return None
 
 
+# ── HF model updates (compare installed sha vs repo main) ─────────────────────
+#
+# These static-path routes are declared BEFORE ``/{model_id}`` so FastAPI's
+# in-order matcher resolves ``/updates`` / ``/update-all`` here instead of
+# treating "updates" as a model id (same ordering trick as ``/pulls``).
+
+
+@router.get("/updates")
+async def list_model_updates(request: Request, force: bool = False) -> dict[str, Any]:
+    """Report which installed HF models have a newer file on their repo.
+
+    Compares each checkable registry row's pull-time content sha256 against
+    the repo's current ``main`` LFS oid (see :mod:`hal0.registry.updates`).
+    ``?force=true`` bypasses the per-repo tree cache to re-probe HF.
+
+    Response::
+
+        {
+          "updates": [{"model_id", "hf_repo", "hf_filename",
+                       "update_available", "current_sha", "remote_sha",
+                       "reason"}, ...],
+          "count": <models checked>,
+          "available": <models with an update>
+        }
+
+    Never 500s the dashboard: an unreachable repo degrades that row to
+    ``update_available=false`` with ``reason="repo_unreachable"``.
+    """
+    from hal0.registry.updates import check_updates
+
+    registry = request.app.state.model_registry
+    infos = await check_updates(list(registry.list()), force=force)
+    updates = [i.as_dict() for i in infos]
+    available = sum(1 for u in updates if u["update_available"])
+    return {"updates": updates, "count": len(updates), "available": available}
+
+
+@router.post("/updates/check")
+async def check_model_updates(request: Request) -> dict[str, Any]:
+    """Force a fresh HF probe (cache-bypass) and return the update report.
+
+    POST sibling of ``GET /updates`` mirroring the app-updater's
+    ``/api/updates/check`` — the dashboard's "Check for updates" affordance
+    calls this to re-probe HF regardless of the tree cache.
+    """
+    return await list_model_updates(request, force=True)
+
+
+@router.post("/update-all", status_code=202)
+async def update_all_models(request: Request, background: BackgroundTasks) -> dict[str, Any]:
+    """Re-pull every installed HF model that has an available update.
+
+    Detection reuses the cached ``/updates`` report (no ``force``); each stale
+    model is re-pulled from its repo's ``main`` via the same background-pull
+    plumbing as a single pull, so progress streams over the existing SSE /
+    footer-event rails and the registry row's sha256 is refreshed on
+    completion. A model already mid-pull is skipped (its in-flight job is
+    returned instead of a duplicate).
+
+    Response (202)::
+
+        {"started": [{"model_id", "id", "state"}...], "skipped": [...],
+         "count": <jobs started>}
+    """
+    from hal0.registry.updates import check_updates
+
+    registry = request.app.state.model_registry
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+
+    infos = await check_updates(list(registry.list()))
+    stale = [i for i in infos if i.update_available]
+
+    started: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for info in stale:
+        model_id = info.model_id
+        existing = jobs.get(model_id)
+        if existing is not None and existing.state in ("queued", "running"):
+            skipped.append({"model_id": model_id, "id": existing.job_id, "state": existing.state})
+            continue
+        try:
+            hf_repo, hf_file, mmproj_file, _ = _resolve_pull_source_with_body(
+                request, model_id, None
+            )
+        except Hal0Error:
+            # A row that reported stale but whose source no longer resolves
+            # (coords cleared between the check and the kick) — skip, don't 500.
+            skipped.append({"model_id": model_id, "state": "unresolved"})
+            continue
+        capability, comfyui_subdir = _resolve_pull_capability(request, model_id, None)
+        job = await _spawn_hf_pull(
+            request,
+            background,
+            jobs,
+            model_id=model_id,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            capability=capability,
+            comfyui_subdir=comfyui_subdir,
+            mmproj_file=mmproj_file,
+        )
+        started.append({"model_id": model_id, "id": job.job_id, "state": job.state})
+
+    async with record_action(
+        request,
+        category="model",
+        action="model.update_all",
+        target=None,
+        message=f"{len(started)} started, {len(skipped)} skipped",
+    ):
+        pass
+    return {"started": started, "skipped": skipped, "count": len(started)}
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
@@ -1745,35 +1859,17 @@ async def pull_model(
         if not isinstance(chat_template, str):
             chat_template = None
         _seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template)
-    job = make_job(model_id)
-    jobs[model_id] = job
-    # Persist the queued snapshot before returning so a status poll resolves
-    # even if the daemon restarts before the background task runs (#626).
-    _persist_pull_job(job)
 
-    event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "pull.queued",
-            "info",
-            f"pull:{model_id}",
-            f"{model_id}: queued ({hf_repo}/{hf_file})",
-            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file},
-        )
-
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    registry = request.app.state.model_registry
     # P3: route the download into the capability-grouped store layout when the
     # capability is resolvable (body → registry → curated); None → flat fallback.
     capability, comfyui_subdir = _resolve_pull_capability(request, model_id, body)
-    background.add_task(
-        _run_pull_with_events,
-        job,
+    job = await _spawn_hf_pull(
+        request,
+        background,
+        jobs,
+        model_id=model_id,
         hf_repo=hf_repo,
         hf_file=hf_file,
-        registry=registry,
-        hf_token=hf_token,
-        event_bus=event_bus,
         capability=capability,
         comfyui_subdir=comfyui_subdir,
         mmproj_file=mmproj_file,
@@ -1788,6 +1884,58 @@ async def pull_model(
     if mmproj_file:
         out["mmproj_file"] = mmproj_file
     return out
+
+
+async def _spawn_hf_pull(
+    request: Request,
+    background: BackgroundTasks,
+    jobs: dict[str, PullJob],
+    *,
+    model_id: str,
+    hf_repo: str,
+    hf_file: str,
+    capability: str | None,
+    comfyui_subdir: str | None,
+    mmproj_file: str | None,
+) -> PullJob:
+    """Queue a background HF pull for ``model_id`` and return the job record.
+
+    Owns the shared plumbing every HF-pull entrypoint needs: make the job,
+    register it on ``app.state.model_pull_jobs``, persist the queued snapshot
+    (so a status poll resolves across a restart, #626), emit the ``pull.queued``
+    footer event, and schedule the streaming background task. Both the
+    per-model pull route and the batch ``update-all`` route go through here so
+    they stay in lockstep.
+    """
+    job = make_job(model_id)
+    jobs[model_id] = job
+    _persist_pull_job(job)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "pull.queued",
+            "info",
+            f"pull:{model_id}",
+            f"{model_id}: queued ({hf_repo}/{hf_file})",
+            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file},
+        )
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    registry = request.app.state.model_registry
+    background.add_task(
+        _run_pull_with_events,
+        job,
+        hf_repo=hf_repo,
+        hf_file=hf_file,
+        registry=registry,
+        hf_token=hf_token,
+        event_bus=event_bus,
+        capability=capability,
+        comfyui_subdir=comfyui_subdir,
+        mmproj_file=mmproj_file,
+    )
+    return job
 
 
 async def _start_flm_pull(

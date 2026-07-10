@@ -59,6 +59,11 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // HF model-update detection: report stale installed models (current sha vs
+  // repo main LFS oid), force-refresh, and re-pull every stale model.
+  modelUpdates: '/api/models/updates',
+  modelUpdatesCheck: '/api/models/updates/check',
+  modelUpdateAll: '/api/models/update-all',
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',

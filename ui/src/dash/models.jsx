@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdates, useUpdateAllModels, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -178,6 +178,28 @@ function ModelsView() {
 
   const pullsList = usePullsList();
 
+  // ── HF model updates (freshness vs repo main) ───────────────────────
+  const modelUpdates = useModelUpdates();
+  const staleIds = modelUpdates.staleIds;
+  const updatesAvailable = modelUpdates.available;
+  const updateAll = useUpdateAllModels();
+
+  const onUpdateAll = async () => {
+    try {
+      const res = await updateAll.mutateAsync();
+      window.__hal0Toast && window.__hal0Toast(
+        res.count > 0
+          ? `Updating ${res.count} model${res.count === 1 ? "" : "s"} from HuggingFace…`
+          : "No updates to apply — models are up to date.",
+        res.count > 0 ? "info" : "success",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Update all failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
+
   // ── Render ──────────────────────────────────────────────────────────
   const tabLabel = tab === "inference" ? `Inference Models${inferenceRows.length ? ` · ${inferenceRows.length}` : ""}`
     : tab === "upstream" ? `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`
@@ -189,6 +211,17 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
+        {updatesAvailable > 0 && (
+          <button
+            className="btn mdl-update-all"
+            data-testid="mdl-update-all"
+            disabled={updateAll.isPending}
+            onClick={onUpdateAll}
+            title={`${updatesAvailable} model${updatesAvailable === 1 ? "" : "s"} have a newer file on HuggingFace`}
+          >
+            {Icons.restart} {updateAll.isPending ? "Updating…" : `Update all · ${updatesAvailable}`}
+          </button>
+        )}
         <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
         <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
@@ -301,16 +334,16 @@ function ModelsView() {
             sectionedInference.map(item =>
               item.type === "label"
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
+                : <ModelRow key={item.model.id} model={item.model} updateAvailable={staleIds.has(item.model.id)} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
             )
           ) : tab === "image" ? (
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} updateAvailable={staleIds.has(m.id)} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
             ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} updateAvailable={staleIds.has(m.id)} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
             ))
           )}
 
@@ -433,7 +466,7 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 }
 
 // ── ModelRow ──────────────────────────────────────────────────────────
-function ModelRow({ model, selected, onSelect }) {
+function ModelRow({ model, selected, onSelect, updateAvailable }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
@@ -447,6 +480,13 @@ function ModelRow({ model, selected, onSelect }) {
         <span className="sub">{model.repo || ""}</span>
       </span>
       <span className="mdl-row-tags">
+        {updateAvailable && (
+          <span
+            className="chip mdl-update-chip"
+            data-testid="mdl-row-update"
+            title="A newer file is available on this model's HuggingFace repo"
+          >{Icons.restart} update</span>
+        )}
         {model.type && <span className="chip">{model.type}</span>}
         {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
         {backends.map(b => (

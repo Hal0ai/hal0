@@ -89,6 +89,17 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route('**/api/models', (route) =>
     json(route, { models: state.models, count: state.models.length }),
   )
+  // Pull-job list — returns a bare array (usePullsList calls .some on it, so a
+  // catch-all object would crash the Models view). Empty = no active pulls.
+  await page.route('**/api/models/pulls', (route) => json(route, []))
+  // Model-update report — default "nothing stale" so the Update-all button and
+  // per-row update chips stay hidden unless a spec overrides this route.
+  await page.route('**/api/models/updates', (route) =>
+    json(route, { updates: [], count: 0, available: 0 }),
+  )
+  await page.route('**/api/models/update-all', (route) =>
+    json(route, { started: [], skipped: [], count: 0 }),
+  )
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))
