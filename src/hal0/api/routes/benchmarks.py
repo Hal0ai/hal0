@@ -20,6 +20,7 @@ try:
 except ImportError:
     # Fallback for direct execution
     import sys
+
     sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "installer" / "bench"))
     from planner import plan
     from v2_store import (
@@ -54,12 +55,14 @@ def get_roster():
             continue
         try:
             summary_data = json.loads(summary) if summary else {}
-            roster["models"].append({
-                "run_id": run_id,
-                "suite": suite,
-                "cell_key": cell_key,
-                "summary": summary_data,
-            })
+            roster["models"].append(
+                {
+                    "run_id": run_id,
+                    "suite": suite,
+                    "cell_key": cell_key,
+                    "summary": summary_data,
+                }
+            )
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -84,12 +87,14 @@ def get_cells(
             continue
         try:
             summary_data = json.loads(summary) if summary else {}
-            results.append({
-                "run_id": run_id,
-                "suite": suite,
-                "cell_key": cell_key,
-                "summary": summary_data,
-            })
+            results.append(
+                {
+                    "run_id": run_id,
+                    "suite": suite,
+                    "cell_key": cell_key,
+                    "summary": summary_data,
+                }
+            )
         except (json.JSONDecodeError, TypeError):
             pass
     return results
@@ -145,6 +150,7 @@ def post_run(suite: str):
     """Kick a session (guarded; same GPU gate applies)."""
     # TODO: Add proper auth/gating
     from installer.bench.runner import run_worklist
+
     worklist = plan(suite_id=suite)
     if not worklist:
         return {"status": "no_stale_cells", "worklist": []}
