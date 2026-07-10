@@ -273,16 +273,28 @@ export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
 // ═══ per-slot card (right rail) ════════════════════════════════════════
 function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
   const ind = slotIndicatorFromPhase(slot)
-  const serving = ind.cls === 'serving'
+  // Prefer the NPU occupancy's synthesised state: it knows the coresident
+  // stt/embed sub-slots are live off the anchor's [npu] toggles (the shadow
+  // slot's own phase reads "offline" since it runs no unit of its own). Fall
+  // back to the slot's own phase for the anchor / non-trio cases.
+  const occState = String(occ?.state || '').toLowerCase()
+  const rawCls = occState || ind.cls
+  const serving = rawCls === 'serving'
+  // "running" = up & resident on the NPU (serving, ready/idle/loaded/warming,
+  // or the "stale" ready alias). These glow purple; offline/off/error stay
+  // dim. Previously every non-serving state (incl. offline) fell through to a
+  // flat green dot, so all three trio cards read green regardless of reality.
+  const running = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(rawCls)
+  const dotCls = serving ? 'serving' : rawCls === 'error' ? 'error' : running ? 'running' : 'offline'
   const m = slot.metrics || {}
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
   const gb = occ && typeof occ.gb === 'number' ? round1(occ.gb) : typeof m.mem === 'number' ? round1(m.mem) : null
   const model = String(slot.model_id || slot.model || occ?.model || '').replace(/-FLM$/, '')
   return (
-    <div className={'cslot' + (serving ? '' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
+    <div className={'cslot' + (running ? ' running' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
       <div className="cslot-top">
-        <span className={'ldot ' + (serving ? 'serving' : ind.cls === 'error' ? 'offline' : 'ready')} />
+        <span className={'ldot ' + dotCls} />
         <span className="nm">{slot.name}</span>
         <span className="md">{model || '—'}</span>
         <span className="grow" />

@@ -132,21 +132,37 @@
   background: var(--fg-5);
   flex-shrink: 0;
 }
+/* Actively serving a request — strong, fast purple pulse. */
 .npu-card .ldot.serving {
   background: var(--npu);
   box-shadow: 0 0 7px var(--npu-glow);
   animation: pulse 1.5s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) infinite;
 }
+/* Up & resident on the NPU but not mid-request — a steady purple glow that
+   gently breathes, so "running" reads clearly as alive (distinct from the
+   flat green that used to blanket every state). */
+.npu-card .ldot.running {
+  background: var(--npu);
+  box-shadow:
+    0 0 6px var(--npu-glow),
+    0 0 12px -2px var(--npu-glow);
+  animation: pulse 2.6s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) infinite;
+}
 .npu-card .ldot.ready {
   background: var(--ok);
+}
+.npu-card .ldot.error {
+  background: var(--err);
+  box-shadow: 0 0 6px -1px var(--err);
 }
 .npu-card .ldot.offline {
   background: var(--fg-5);
 }
 /* @keyframes pulse is defined globally in dashboard.css — do NOT redefine it
-   (overhaul.css carries the same warning). .ldot.serving reuses that one. */
+   (overhaul.css carries the same warning). .ldot.serving/.running reuse it. */
 @media (prefers-reduced-motion: reduce) {
-  .npu-card .ldot.serving {
+  .npu-card .ldot.serving,
+  .npu-card .ldot.running {
     animation: none;
   }
 }
@@ -481,6 +497,16 @@
 }
 .npu-card .cslot.dim {
   opacity: 0.62;
+}
+/* Running slot — faint purple halo + a lit accent bar so a live NPU slot is
+   unmistakable at a glance. The pulsing purple .ldot is the primary signal;
+   this reinforces it without flattening the per-slot hue on the bar. */
+.npu-card .cslot.running {
+  box-shadow: 0 0 16px -6px var(--npu-glow);
+}
+.npu-card .cslot.running::before {
+  opacity: 1;
+  box-shadow: 0 0 10px var(--slot-hue);
 }
 .npu-card .cslot.free {
   background: transparent;
