@@ -134,6 +134,98 @@ export function useModelInspect() {
   })
 }
 
+// ─── Model update check (HF re-pull refresh) ──────────────────────────
+
+export interface ModelUpdateRow {
+  id: string
+  hf_repo: string
+  hf_filename: string
+  installed_sha256: string | null
+  latest_sha256: string | null
+  update_available: boolean
+  error: string | null
+}
+
+export interface ModelUpdatesResponse {
+  checked_at: number
+  cached: boolean
+  count: number
+  updates_available: number
+  models: ModelUpdateRow[]
+}
+
+const UPDATE_CHECK_POLL_MS = 60_000
+
+export function useModelUpdates() {
+  // POST /api/models/check-updates — sha-compares every installed
+  // HF-backed row against the LFS sha256 HF currently advertises at
+  // main. The backend caches the HF side per file for ~15 minutes and
+  // re-reads the registry sha on every call, so this 60s poll is a
+  // cheap local cross-check that clears row badges as soon as a
+  // re-pull lands new bytes — no HF hammering.
+  return useQuery<ModelUpdatesResponse, Hal0Error>({
+    queryKey: ['model-updates'],
+    queryFn: async () => {
+      const res = await apiPost<ModelUpdatesResponse>(ENDPOINTS.modelCheckUpdates, {})
+      const outdated = (res.models ?? []).filter((m) => m.update_available)
+      if (outdated.length > 0 && typeof window !== 'undefined') {
+        // Notification-bell handoff: the topbar bell (dash/chrome.jsx)
+        // listens for 'hal0:notify' and dedupes + persists dismissal by
+        // stable id, so this fires on every poll without re-nagging — the
+        // id changes (and the bell re-notifies) only when the outdated SET
+        // changes. Dispatching with no listener is a harmless no-op.
+        const ids = outdated.map((m) => m.id).sort()
+        window.dispatchEvent(
+          new CustomEvent('hal0:notify', {
+            detail: {
+              id: `model-updates:${ids.join(',')}`,
+              title: `${ids.length} model update${ids.length === 1 ? '' : 's'} available`,
+              body: ids.slice(0, 3).join(', ') + (ids.length > 3 ? ` +${ids.length - 3} more` : ''),
+              kind: 'update',
+              link: '#models',
+            },
+          }),
+        )
+      }
+      return res
+    },
+    refetchInterval: UPDATE_CHECK_POLL_MS,
+    staleTime: 30_000,
+    retry: 1,
+  })
+}
+
+export function useUpdateAllModels() {
+  // Re-pull every outdated model: an "update" is a plain POST /pull per
+  // id (the server upserts the row, re-verifies the hash, and dedups
+  // queued/running jobs). Progress lands in the Downloads pane via the
+  // existing 2s pulls poll; the per-id 'hal0:pull-started' event nudges
+  // that poll awake immediately. One failed start must not block the
+  // rest, so errors are collected rather than thrown — the mutation
+  // resolves with the ids that actually started.
+  const qc = useQueryClient()
+  return useMutation<string[], Hal0Error, string[]>({
+    mutationFn: async (ids: string[]) => {
+      const started: string[] = []
+      for (const id of ids) {
+        try {
+          await apiPost(ENDPOINTS.modelPull(id))
+          started.push(id)
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('hal0:pull-started', { detail: { modelId: id } }))
+          }
+        } catch {
+          /* keep going — surfaced as started.length < ids.length */
+        }
+      }
+      return started
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['pulls'] })
+    },
+  })
+}
+
 // ─── HF Hub free-text search (issue #311) ─────────────────────────────
 
 export interface HfSearchResult {

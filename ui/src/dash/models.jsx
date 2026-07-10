@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, useModelUpdates, useUpdateAllModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -79,6 +79,33 @@ function ModelsView() {
 
   const modelsQuery = useModels();
   const modelList = modelsQuery.data ?? [];
+
+  // ── HF update check ─────────────────────────────────────────────────
+  // outdatedSet holds ids whose recorded sha256 no longer matches what HF
+  // serves at main — the row badge + "Update all" button key off it.
+  const updatesQuery = useModelUpdates();
+  const updateRows = updatesQuery.data?.models ?? [];
+  const outdatedSet = useMemoM(
+    () => new Set(updateRows.filter(u => u.update_available).map(u => u.id)),
+    [updateRows],
+  );
+  const updateAll = useUpdateAllModels();
+  const onUpdateAll = async () => {
+    const ids = [...outdatedSet];
+    try {
+      const started = await updateAll.mutateAsync(ids);
+      window.__hal0Toast && window.__hal0Toast(
+        started.length === ids.length
+          ? `Updating ${started.length} model${started.length === 1 ? "" : "s"} — progress in Downloads`
+          : `Started ${started.length}/${ids.length} updates — see Downloads`,
+        started.length === ids.length ? "info" : "warn",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Update all failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
 
   // Auto-pick the first installed model on first render so the detail
   // pane never opens empty.
@@ -189,6 +216,15 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
+        {outdatedSet.size > 0 && (
+          <button
+            className="btn"
+            data-testid="mdl-update-all"
+            disabled={updateAll.isPending}
+            title="Re-pull every installed model whose file changed on HuggingFace"
+            onClick={onUpdateAll}
+          >{Icons.download} {updateAll.isPending ? "Updating…" : `Update all · ${outdatedSet.size}`}</button>
+        )}
         <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
         <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
@@ -301,16 +337,16 @@ function ModelsView() {
             sectionedInference.map(item =>
               item.type === "label"
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
+                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} updateAvailable={outdatedSet.has(item.model.id)} onSelect={() => setSelId(item.model.id)} />
             )
           ) : tab === "image" ? (
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} updateAvailable={outdatedSet.has(m.id)} onSelect={() => setSelId(m.id)} />
             ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} updateAvailable={outdatedSet.has(m.id)} onSelect={() => setSelId(m.id)} />
             ))
           )}
 
@@ -348,6 +384,7 @@ function ModelsView() {
         <div className="models-sidebar">
           <ModelDetail
             model={selected}
+            updateAvailable={!!selected && outdatedSet.has(selected.id)}
             onDelete={() => setDelModel(selected)}
             onEdit={() => setRecipeOpen(true)}
           />
@@ -433,7 +470,7 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 }
 
 // ── ModelRow ──────────────────────────────────────────────────────────
-function ModelRow({ model, selected, onSelect }) {
+function ModelRow({ model, selected, updateAvailable, onSelect }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
@@ -455,6 +492,13 @@ function ModelRow({ model, selected, onSelect }) {
       </span>
       <span className="sz num">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "")}</span>
       <span className="tg">
+        {updateAvailable && (
+          <span
+            className="chip amber"
+            data-testid="mdl-row-update"
+            title="A newer build of this file is on HuggingFace — re-pull to update"
+          >update</span>
+        )}
         {isUpstreamModel(model)
           ? <span className="chip info" title={`Advertised by the "${model.upstream}" upstream — not stored on this host`}>upstream</span>
           : !model.installed
@@ -466,7 +510,7 @@ function ModelRow({ model, selected, onSelect }) {
 }
 
 // ── ModelDetail ───────────────────────────────────────────────────────
-function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
+function ModelDetail({ model, updateAvailable, onDelete, onEdit, onPullStarted }) {
   const pull = usePullJob();
   const slotsQuery = useSlots();
   const swap = useSlotSwap();
@@ -529,7 +573,10 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
               : <span style={{color: "var(--fg-5)"}}>{Icons.download}</span>}
           </span>
           <div className="nm mono">{model.longName || model.name || model.id}</div>
-          <span style={{marginLeft: "auto"}}>
+          <span style={{marginLeft: "auto", display: "inline-flex", gap: 6}}>
+            {model.installed && updateAvailable && (
+              <span className="chip amber" title="A newer build of this file is on HuggingFace">update available</span>
+            )}
             {model.installed
               ? <span className="chip ok">installed</span>
               : isUpstreamModel(model)
@@ -575,6 +622,15 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       <div className="mdl-detail-actions">
         {model.installed ? (
           <>
+            {updateAvailable && (
+              <button
+                className="btn"
+                data-testid="mdl-detail-update"
+                disabled={pull.inFlight}
+                title="Re-pull this model — its file changed on HuggingFace"
+                onClick={onPull}
+              >{Icons.download} {pull.inFlight ? `Updating ${pull.pct ?? 0}%` : "Update"}</button>
+            )}
             <button
               className="btn"
               disabled={swap.isPending}

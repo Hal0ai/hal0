@@ -34,6 +34,8 @@ from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
     PullJobNotFound,
+    _expected_sha256_from_response,
+    hf_download_url,
     list_persisted_jobs,
     make_job,
     run_flm_pull,
@@ -2236,6 +2238,184 @@ async def inspect_model(request: Request) -> dict[str, Any]:
     result = await _fetch_hf_repo(repo)
     _INSPECT_CACHE[repo] = (now, result)
     return {"repo": repo, "cached": False, **result}
+
+
+# ── HF update check (POST /api/models/check-updates) ─────────────────────────
+#
+# The pull engine treats a downloaded file as immutable (content-addressed,
+# no revalidation — registry/pull.py), but GGUF repos do move: quant authors
+# force-push fixed tensors under the same filename at ``main``. This check
+# compares each installed row's recorded content sha256 (written by
+# ``_register_pulled`` on every pull) against the LFS sha256 HF currently
+# advertises for the same repo/filename — the ``X-Linked-ETag`` on the
+# ``resolve/main`` endpoint, i.e. the exact digest the pull path verifies
+# against. "Update available" therefore means: a re-pull of this id would
+# land different bytes. Applying an update IS a re-pull
+# (POST /api/models/{id}/pull upserts the row and re-verifies the hash).
+#
+# The HF side is cached per (repo, filename) for ~15 minutes so the
+# dashboard can poll cheaply; the installed sha is read fresh from the
+# registry on every call, so a badge clears as soon as a re-pull lands
+# without any cache invalidation dance.
+
+_UPDATE_CHECK_TTL_SECONDS = 900.0
+_UPDATE_CHECK_CONCURRENCY = 6
+# (repo, filename) → (checked_at, latest_sha256 | None, error | None)
+_UPDATE_CHECK_CACHE: dict[tuple[str, str], tuple[float, str | None, str | None]] = {}
+
+
+async def _fetch_latest_sha256(
+    client: httpx.AsyncClient, repo: str, filename: str
+) -> tuple[str | None, str | None]:
+    """HEAD HF's ``resolve/main`` URL and return ``(lfs_sha256, error)``.
+
+    The client must be constructed with ``follow_redirects=False`` — HF
+    advertises the LFS sha256 as ``X-Linked-ETag`` on the huggingface.co
+    hop (a 302 to the CDN for LFS files), and following the redirect
+    would HEAD the CDN object for nothing.
+    """
+    url = hf_download_url(repo, filename)
+    try:
+        resp = await client.head(url)
+    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+        return None, f"unreachable: {exc.__class__.__name__}"
+    if resp.status_code in (401, 403):
+        return None, f"HTTP {resp.status_code} (gated repo? set HF_TOKEN)"
+    if resp.status_code == 404:
+        return None, "file no longer exists in the repo at main"
+    if resp.status_code >= 400:
+        return None, f"HTTP {resp.status_code}"
+    sha = _expected_sha256_from_response(resp)
+    if sha is None:
+        # Non-LFS file (git-blob etag only) — no sha256 exists upstream,
+        # so there is nothing to compare against.
+        return None, "no LFS sha256 advertised"
+    return sha, None
+
+
+@router.post("/check-updates")
+async def check_model_updates(request: Request) -> dict[str, Any]:
+    """Compare every installed HF-backed model against HuggingFace ``main``.
+
+    Body (optional)::
+
+        {"force": true}   # bypass the per-file TTL cache
+
+    Response::
+
+        {
+          "checked_at": 1730000000,
+          "cached": true,              # every row answered from cache
+          "count": 3,                  # HF-backed rows examined
+          "updates_available": 1,
+          "models": [
+            {
+              "id": "qwen3-8b-q4_k_m",
+              "hf_repo": "unsloth/Qwen3-8B-GGUF",
+              "hf_filename": "qwen3-8b-q4_k_m.gguf",
+              "installed_sha256": "…" | null,
+              "latest_sha256": "…" | null,
+              "update_available": false,
+              "error": null | "HTTP 404"
+            }, …
+          ]
+        }
+
+    Rows without HF coordinates (hand-registered files, FLM tags) are
+    skipped; rows without a recorded local sha256 (registered before the
+    hash was captured) are reported but never flagged — hashing tens of
+    GB on request is not worth a badge. Per-file HF failures land in
+    ``error`` on that row; the endpoint itself stays 200.
+    """
+    force = False
+    try:
+        if int(request.headers.get("content-length") or 0) > 0:
+            body = await request.json()
+            if isinstance(body, dict):
+                force = bool(body.get("force"))
+    except Exception:
+        force = False
+
+    registry = request.app.state.model_registry
+    rows: list[tuple[str, str, str, str | None]] = []
+    for entry in registry.list():
+        repo = (entry.hf_repo or "").strip()
+        filename = (entry.hf_filename or "").strip()
+        if not repo or not filename:
+            continue
+        sha = entry.metadata.get("sha256") if isinstance(entry.metadata, dict) else None
+        installed_sha = sha.strip().lower() if isinstance(sha, str) and sha.strip() else None
+        rows.append((entry.id, repo, filename, installed_sha))
+
+    now = time.time()
+    stale = [
+        key
+        for key in {(repo, filename) for _, repo, filename, _ in rows}
+        if force
+        or key not in _UPDATE_CHECK_CACHE
+        or now - _UPDATE_CHECK_CACHE[key][0] >= _UPDATE_CHECK_TTL_SECONDS
+    ]
+    if stale:
+        headers = {"Accept": "application/json"}
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        sem = asyncio.Semaphore(_UPDATE_CHECK_CONCURRENCY)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS),
+            follow_redirects=False,
+            headers=headers,
+        ) as client:
+
+            async def _check_one(key: tuple[str, str]) -> None:
+                async with sem:
+                    latest, error = await _fetch_latest_sha256(client, *key)
+                _UPDATE_CHECK_CACHE[key] = (now, latest, error)
+
+            await asyncio.gather(*(_check_one(key) for key in stale))
+
+    models_out: list[dict[str, Any]] = []
+    updates_available = 0
+    for model_id, repo, filename, installed_sha in rows:
+        _, latest_sha, error = _UPDATE_CHECK_CACHE.get((repo, filename), (0.0, None, "not checked"))
+        available = bool(installed_sha and latest_sha and installed_sha != latest_sha)
+        if available:
+            updates_available += 1
+        models_out.append(
+            {
+                "id": model_id,
+                "hf_repo": repo,
+                "hf_filename": filename,
+                "installed_sha256": installed_sha,
+                "latest_sha256": latest_sha,
+                "update_available": available,
+                "error": error,
+            }
+        )
+
+    # Footer signal only when a live (non-cached) sweep found something new —
+    # the dashboard's poll would otherwise re-announce the same updates every
+    # cycle for the whole TTL window.
+    if stale and updates_available:
+        event_bus = getattr(request.app.state, "events", None)
+        if event_bus is not None:
+            outdated_ids = [m["id"] for m in models_out if m["update_available"]]
+            await event_bus.emit(
+                "models.updates_available",
+                "info",
+                "models:check-updates",
+                f"{updates_available} model update{'s' if updates_available != 1 else ''} "
+                "available on HuggingFace",
+                data={"count": updates_available, "ids": outdated_ids},
+            )
+
+    return {
+        "checked_at": int(now),
+        "cached": not stale,
+        "count": len(models_out),
+        "updates_available": updates_available,
+        "models": models_out,
+    }
 
 
 @router.post("/{model_id}/pull/cancel")

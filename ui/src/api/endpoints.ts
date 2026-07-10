@@ -59,6 +59,9 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // HF re-pull refresh: sha-compares installed rows against what HF
+  // currently serves at main; applying an update is a normal re-pull.
+  modelCheckUpdates: '/api/models/check-updates',
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',

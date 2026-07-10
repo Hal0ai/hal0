@@ -21,6 +21,9 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+- Model update checks against HuggingFace: `POST /api/models/check-updates` compares each installed model's recorded sha256 against the LFS sha HF currently serves at `main` (per-file 15-min cache, per-row errors). The Models page shows an amber `update` badge on outdated rows, an `Update all · N` header button that re-pulls every outdated model through the existing pull pipeline, a per-model Update button in the detail pane, and publishes a `hal0:notify` event for the topbar notification bell.
+
 ## [0.9.6] — 2026-07-10
 
 ### Highlights

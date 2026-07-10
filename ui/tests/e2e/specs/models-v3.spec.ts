@@ -204,4 +204,123 @@ test.describe('Models v3 (/models)', () => {
     await page.locator('button:has-text("Delete model")').click()
     await expect.poll(() => deleted).toBe(true)
   })
+  // ── HF update check (check-updates + Update all) ─────────────────────
+  const UPDATES_PAYLOAD = {
+    checked_at: 1730000000,
+    cached: false,
+    count: 2,
+    updates_available: 1,
+    models: [
+      {
+        id: 'qwen3.6-27b-mtp',
+        hf_repo: 'unsloth/Qwen3.6-27B-A3B-MTP-GGUF',
+        hf_filename: 'qwen3.6-27b-q4_k_m.gguf',
+        installed_sha256: 'a'.repeat(64),
+        latest_sha256: 'b'.repeat(64),
+        update_available: true,
+        error: null,
+      },
+      {
+        id: 'qwen3-coder-30b',
+        hf_repo: 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF',
+        hf_filename: 'qwen3-coder-30b-q4_k_m.gguf',
+        installed_sha256: 'c'.repeat(64),
+        latest_sha256: 'c'.repeat(64),
+        update_available: false,
+        error: null,
+      },
+    ],
+  }
+
+  test('update-available badge renders only on outdated rows', async ({ page }) => {
+    await page.route('**/api/models/check-updates', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(UPDATES_PAYLOAD),
+      }),
+    )
+    await page.goto('/#models')
+    // Exactly one row is outdated in the payload → exactly one badge.
+    await expect(page.getByTestId('mdl-row-update')).toHaveCount(1)
+    const badged = page.locator('.mdl-row', { has: page.getByTestId('mdl-row-update') })
+    await expect(badged).toContainText('Qwen3.6-27B-MTP')
+  })
+
+  test('Update all button shows the outdated count and re-pulls each id', async ({ page }) => {
+    await page.route('**/api/models/check-updates', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(UPDATES_PAYLOAD),
+      }),
+    )
+    const pulled: string[] = []
+    await page.route('**/api/models/qwen3.6-27b-mtp/pull', async (route) => {
+      if (route.request().method() === 'POST') {
+        pulled.push('qwen3.6-27b-mtp')
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ id: 'job-1', model_id: 'qwen3.6-27b-mtp', state: 'queued' }),
+        })
+      }
+      return route.fallback()
+    })
+
+    await page.goto('/#models')
+    const btn = page.getByTestId('mdl-update-all')
+    await expect(btn).toBeVisible()
+    await expect(btn).toContainText('Update all · 1')
+    await btn.click()
+    await expect.poll(() => pulled).toEqual(['qwen3.6-27b-mtp'])
+  })
+
+  test('no updates → no badge, no Update all button', async ({ page }) => {
+    await page.route('**/api/models/check-updates', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          checked_at: 1730000000,
+          cached: true,
+          count: 0,
+          updates_available: 0,
+          models: [],
+        }),
+      }),
+    )
+    await page.goto('/#models')
+    await expect(page.locator('.mdl-row').first()).toBeVisible()
+    await expect(page.getByTestId('mdl-row-update')).toHaveCount(0)
+    await expect(page.getByTestId('mdl-update-all')).toHaveCount(0)
+  })
+
+  test('outdated models publish a hal0:notify event for the topbar bell', async ({ page }) => {
+    // The notification bell (dash/chrome.jsx, separate PR) consumes
+    // 'hal0:notify' CustomEvents keyed by stable id — assert the update
+    // check publishes the contract shape even before the bell lands.
+    await page.addInitScript(() => {
+      ;(window as any).__notifEvents = []
+      window.addEventListener('hal0:notify', (e) =>
+        (window as any).__notifEvents.push((e as CustomEvent).detail),
+      )
+    })
+    await page.route('**/api/models/check-updates', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(UPDATES_PAYLOAD),
+      }),
+    )
+    await page.goto('/#models')
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__notifEvents.length))
+      .toBeGreaterThan(0)
+    const detail = await page.evaluate(() => (window as any).__notifEvents[0])
+    expect(detail.id).toBe('model-updates:qwen3.6-27b-mtp')
+    expect(detail.kind).toBe('update')
+    expect(detail.link).toBe('#models')
+    expect(detail.title).toContain('1 model update')
+  })
 })
