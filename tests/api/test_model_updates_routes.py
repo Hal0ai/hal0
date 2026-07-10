@@ -75,7 +75,9 @@ def _register(app: FastAPI, model_id: str, *, sha: str = SHA_OLD) -> None:
 def _patch_check(monkeypatch: pytest.MonkeyPatch, infos: list[ModelUpdateInfo]) -> dict[str, Any]:
     seen: dict[str, Any] = {"force": None, "calls": 0}
 
-    async def fake_check(models: list[Any], *, force: bool = False, client: Any = None) -> list[ModelUpdateInfo]:
+    async def fake_check(
+        models: list[Any], *, force: bool = False, client: Any = None
+    ) -> list[ModelUpdateInfo]:
         seen["force"] = force
         seen["calls"] += 1
         return infos

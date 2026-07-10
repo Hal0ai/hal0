@@ -19,7 +19,9 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 
 
-def _model(model_id: str, *, sha: str | None, repo: str = "org/repo", filename: str = "m.gguf") -> Model:
+def _model(
+    model_id: str, *, sha: str | None, repo: str = "org/repo", filename: str = "m.gguf"
+) -> Model:
     meta: dict[str, Any] = {}
     if sha is not None:
         meta["sha256"] = sha
@@ -153,5 +155,7 @@ async def test_shared_repo_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None
 def test_is_checkable_gates_on_coords_and_sha() -> None:
     assert upd.is_checkable(_model("ok", sha=SHA_A)) is True
     assert upd.is_checkable(_model("no-sha", sha=None)) is False
-    flm = Model(id="flm", name="flm", path="/x", hf_repo="", hf_filename="", metadata={"sha256": SHA_A})
+    flm = Model(
+        id="flm", name="flm", path="/x", hf_repo="", hf_filename="", metadata={"sha256": SHA_A}
+    )
     assert upd.is_checkable(flm) is False
