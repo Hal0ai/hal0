@@ -36,6 +36,11 @@ export interface ApiModelRaw {
   tags?: string[]
   /** Unix seconds the row was registered / first seen. */
   created?: number
+  /** True when the last HF update check (GET /api/models/updates/check)
+   * found a newer LFS sha256 for this row's hf_repo/hf_filename than the
+   * one recorded at pull time. Merged server-side into /api/models rows;
+   * absent until a check has run or for rows without HF provenance. */
+  update_available?: boolean
   // ── Legacy HAL0_DATA mock shape (data.jsx fixtures / mock.ts 404
   // fallback). Real /api/models rows never carry these; the normalizer
   // tolerates them so mock mode keeps working through the same code path.

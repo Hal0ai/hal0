@@ -927,6 +927,7 @@ async def run_pull(
     comfyui_subdir: str | None = None,
     capability: str | None = None,
     mmproj_file: str | None = None,
+    dest_override: str | None = None,
 ) -> None:
     """Background-task body: stream the file(s), hash, install, register.
 
@@ -953,6 +954,13 @@ async def run_pull(
         mmproj_file: Optional multimodal-projector filename within the same
             HF repo (the Add-by-HF modal's vision pick, or a curated
             entry's ``mmproj_file``). Downloaded after the main file.
+        dest_override: Absolute final path for the MAIN file. The update
+            flow (``POST /api/models/{id}/update``) pins this to the
+            registry row's existing ``path`` so a re-pull replaces the
+            installed bytes in place — never relocating an older
+            flat-layout model into the capability-grouped tree and
+            orphaning the previous file. When set, ``capability`` /
+            ``comfyui_subdir`` routing is bypassed for the main file.
     """
     job.state = "running"
     job.started_at = time.time()
@@ -976,7 +984,10 @@ async def run_pull(
     try:
         # ── Main model file ────────────────────────────────────────────────
         main_rec = job.files[0]
-        final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
+        if dest_override:
+            final = Path(dest_override)
+        else:
+            final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
         digest = await _download_one(
             job,
             main_rec,
@@ -1109,12 +1120,16 @@ def _register_pulled(
     no directory scan needed. ``None`` leaves any existing association
     (e.g. one a prior scan discovered) untouched.
     """
+    # ``pulled_at`` provenance lets the dashboard show when the installed
+    # bytes were fetched — and thereby how stale they are vs an available
+    # HF update (registry/update_check.py compares the shas).
+    fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
         "hf_repo": hf_repo,
         "hf_filename": hf_filename,
-        "metadata": {"sha256": sha256},
+        "metadata": fresh_meta,
     }
     if mmproj is not None:
         updates["mmproj"] = mmproj
@@ -1136,7 +1151,7 @@ def _register_pulled(
                 capabilities=caps,
                 backends=backends,
                 mmproj=mmproj,
-                metadata={"sha256": sha256},
+                metadata=dict(fresh_meta),
             )
         )
         return
@@ -1144,7 +1159,7 @@ def _register_pulled(
     # call (e.g. pick-default seeded the entry from the curated catalogue
     # before kicking off the pull).
     merged_meta = dict(existing.metadata)
-    merged_meta["sha256"] = sha256
+    merged_meta.update(fresh_meta)
     updates["metadata"] = merged_meta
     registry.update(model_id, updates)
 

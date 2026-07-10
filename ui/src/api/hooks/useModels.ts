@@ -195,6 +195,91 @@ export function useModelUpdate() {
   })
 }
 
+// ─── HF update check + in-place update ────────────────────────────────
+
+export interface ModelUpdateVerdict {
+  hf_repo: string
+  hf_filename: string
+  local_sha256: string | null
+  remote_sha256: string | null
+  update_available: boolean
+  reason: string | null
+}
+
+export interface ModelUpdatesCheckResponse {
+  checked_at: number
+  checked: number
+  updates_available: number
+  models: Record<string, ModelUpdateVerdict>
+}
+
+const MODEL_UPDATES_POLL_MS = 30 * 60_000
+
+export function useModelUpdatesCheck() {
+  // GET /api/models/updates/check — the server probes HF (one tree fetch
+  // per unique repo, TTL-cached an hour) and stashes the snapshot that
+  // /api/models merges per-row `update_available` flags from. Invalidate
+  // the catalog after each check so badges appear on the next render
+  // instead of waiting out the 30s models poll.
+  const qc = useQueryClient()
+  return useQuery<ModelUpdatesCheckResponse, Hal0Error>({
+    queryKey: ['model-updates'],
+    queryFn: async () => {
+      const res = await apiGet<ModelUpdatesCheckResponse>(ENDPOINTS.modelUpdatesCheck)
+      qc.invalidateQueries({ queryKey: ['models'] })
+      return res
+    },
+    staleTime: MODEL_UPDATES_POLL_MS,
+    refetchInterval: MODEL_UPDATES_POLL_MS,
+  })
+}
+
+export function useModelUpdateApply() {
+  // POST /api/models/{id}/update — re-pull the row's HF file over its
+  // installed path. Progress reports through the standard pull surface
+  // (usePullsList / DownloadsPane pick the job up via the started event).
+  // NOT the same as useModelUpdate above, which is the PUT metadata edit.
+  const qc = useQueryClient()
+  return useMutation<unknown, Hal0Error, string>({
+    mutationFn: (id: string) => apiPost(ENDPOINTS.modelUpdate(id)),
+    onSuccess: (_res, id) => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hal0:pull-started', { detail: { modelId: id } }))
+      }
+      qc.invalidateQueries({ queryKey: ['pulls'] })
+    },
+  })
+}
+
+export interface ModelUpdateAllResult {
+  started: string[]
+  failed: { id: string; message: string }[]
+}
+
+export function useModelUpdateAll() {
+  // Fan a POST /update out to every id. Failures are collected, not
+  // thrown — one gated repo must not abort the rest of the batch.
+  const qc = useQueryClient()
+  return useMutation<ModelUpdateAllResult, Hal0Error, string[]>({
+    mutationFn: async (ids: string[]) => {
+      const settled = await Promise.allSettled(ids.map((id) => apiPost(ENDPOINTS.modelUpdate(id))))
+      const started: string[] = []
+      const failed: { id: string; message: string }[] = []
+      settled.forEach((r, i) => {
+        if (r.status === 'fulfilled') started.push(ids[i])
+        else failed.push({ id: ids[i], message: (r.reason as Error)?.message ?? String(r.reason) })
+      })
+      return { started, failed }
+    },
+    onSuccess: () => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hal0:pull-started', { detail: {} }))
+      }
+      qc.invalidateQueries({ queryKey: ['pulls'] })
+    },
+  })
+}
+
 // ─── usePullJob ─────────────────────────────────────────────────────
 
 export type PullState =
