@@ -58,7 +58,7 @@ def test_npu_tucked_into_extra_on_dump() -> None:
     )
     data = slot.model_dump()
     assert "npu" not in data
-    # chat defaults to True (4d7a5745 feat(schema): add chat field to NpuConfig)
+    # chat defaults to True (4d7a5745 feat(schema): add chat field to NpuConfig).
     assert data["extra"]["npu"] == {"asr": True, "embed": False, "chat": True}
 
 
@@ -76,7 +76,7 @@ def test_npu_chat_default_on() -> None:
 
 def test_flm_npu_seed_profile() -> None:
     prof = SEED_PROFILES["flm"]
-    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
+    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
     assert prof["flags"] == ""
     assert prof["mtp"] is False
 

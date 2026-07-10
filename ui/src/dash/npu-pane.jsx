@@ -19,7 +19,7 @@ const { useState: useStateSM } = React;
 
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
-import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit } from '@/api/hooks/useSlots'
+import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import { SlotControls, slotCtrlPhase } from './inference-pane.jsx'
 import { slotIndicatorFromPhase } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -338,20 +338,16 @@ export function NpuOccupancyCard({ slots }) {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const editMut = useSlotEdit()
-  const [flmNpuConfig, setFlmNpuConfig] = useStateSM({})
-
-  // Fetch flm slot config for full npu dict (asr/embed/chat)
-  React.useEffect(() => {
-    fetch('/api/slots/flm/config').then(r => r.json()).then(d => {
-      setFlmNpuConfig(d?.npu || {})
-    }).catch(() => {})
-  }, [])
+  // Full npu dict (chat/asr/embed) via react-query so the drawer's edit
+  // (which invalidates ['slot-config','flm']) refreshes the card toggles in
+  // lockstep — the old one-shot fetch went stale after every drawer change.
+  const flmCfgQuery = useSlotConfig('flm')
 
   const npuSlots = (slots || []).filter(isNpuSlot)
   if (npuSlots.length === 0) return null
 
   const flmSlot = npuSlots.find(s => s.name === 'flm')
-  const mainFlmNpu = flmNpuConfig || flmSlot?.npu || {}
+  const mainFlmNpu = flmCfgQuery.data?.npu || flmSlot?.npu || {}
 
   const occ = occQuery.data || {}
   const occSlots = occ.slots || []

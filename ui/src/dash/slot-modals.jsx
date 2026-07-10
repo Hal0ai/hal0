@@ -16,7 +16,7 @@ import {
   useSlotResolved,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
-import { useModels } from '@/api/hooks/useModels'
+import { useModels, usePullJob } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useMetaEnums } from '@/api/hooks/useMeta'
@@ -451,19 +451,90 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
   const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
   const [npuChatModel, setNpuChatModel] = useStateSM(slot?.model_id || slot?.model || 'qwen3:4b');
-  const [npuAsrModel, setNpuAsrModel] = useStateSM(slot?.npu?.asr_model || 'whisper-v3:turbo');
-  const [npuEmbedModel, setNpuEmbedModel] = useStateSM(slot?.npu?.embed_model || 'embed-gemma:300m');
   const [npuPending, setNpuPending] = useStateSM(false);
   const [npuErr, setNpuErr] = useStateSM(null);
   const [flmModels, setFlmModels] = useStateSM([]);
+  // Pull-on-select: usePullJob owns one FLM download (SSE progress). pullTarget
+  // remembers which role+tag is downloading so we auto-apply it on completion.
+  const pull = usePullJob();
+  const [pullTarget, setPullTarget] = useStateSM(null); // {role, field, tag} | null
 
-  // Fetch available FLM models when NPU slot editor is open
-  React.useEffect(() => {
-    if (slot?.device !== 'npu') return;
+  // Fetch the full FLM catalogue (installed + downloadable) when the NPU slot
+  // editor is open. Extracted so we can re-fetch after a download completes
+  // (the tag flips installed=true).
+  const refreshFlmModels = React.useCallback(() => {
     fetch('/api/slots/flm/models').then(r => r.json()).then(d => {
       setFlmModels(d.models || d || []);
     }).catch(() => {});
+  }, []);
+  React.useEffect(() => {
+    if (slot?.device !== 'npu') return;
+    refreshFlmModels();
   }, [slot?.name]);
+
+  // Apply an NPU modality/model change and cold-restart the container. Lifted
+  // to component scope (out of the render IIFE) so the pull-completion effect
+  // can call it too. `over` carries only the changed field(s); the rest fall
+  // back to current state — which is also what we revert to on error.
+  const applyNpu = async (over = {}, field = "modality") => {
+    const chat = over.chat ?? npuChat;
+    const asr = over.asr ?? npuAsr;
+    const embed = over.embed ?? npuEmbed;
+    const chatModel = over.chatModel ?? npuChatModel;
+    setNpuPending(true);
+    setNpuErr(null);
+    // [npu] carries the modality toggles (asr/embed are boolean — FLM loads its
+    // one bundled whisper / embed-gemma, no per-role model choice). The chat
+    // model is FLM's positional tag, sent as a nested [model] table so the
+    // backend merge preserves sibling keys (context_size, n_gpu_layers)
+    // instead of clobbering them with a bare string.
+    const body = { npu: { chat, asr, embed } };
+    if (chat && chatModel) body.model = { default: chatModel };
+    try {
+      await editMut.mutateAsync({ name: slot.name, body });
+      restartMut.mutate(slot.name, {
+        onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
+      });
+      window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${field} updated — restarting`, "info");
+    } catch (err) {
+      setNpuChat(npuChat); setNpuAsr(npuAsr); setNpuEmbed(npuEmbed);
+      setNpuChatModel(npuChatModel);
+      setNpuErr(err?.message || "NPU toggle failed");
+    } finally {
+      setNpuPending(false);
+    }
+  };
+
+  // Pick the chat model. Installed → apply immediately. Not-yet-downloaded →
+  // start the FLM pull and remember the target; the completion effect below
+  // auto-applies it once the weights land. (ASR/Embed have no model choice.)
+  const onPickNpuModel = (role, field, tag) => {
+    setNpuChatModel(tag);
+    const entry = flmModels.find(m => m.model === tag);
+    if (entry && entry.installed === false) {
+      setNpuErr(null);
+      setPullTarget({ role, field, tag });
+      pull.start(tag).catch(() => {}); // failure surfaces via the effect below
+    } else {
+      applyNpu({ [field]: tag }, role);
+    }
+  };
+
+  // Auto-apply a freshly-downloaded model, or surface a failed/cancelled pull.
+  React.useEffect(() => {
+    if (!pullTarget || pull.modelId !== pullTarget.tag) return;
+    if (pull.state === "completed") {
+      refreshFlmModels();
+      applyNpu({ [pullTarget.field]: pullTarget.tag }, pullTarget.role);
+      setPullTarget(null);
+      pull.reset();
+    } else if (pull.state === "failed" || pull.state === "cancelled") {
+      setNpuErr(pull.error?.message || `Download ${pull.state}`);
+      setPullTarget(null);
+      pull.reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pull.state, pull.modelId, pullTarget]);
 
   // Resolved command provenance — only fetched while the drawer is open.
   // Falls back gracefully when null (non-llama slots) or on error.
@@ -499,6 +570,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setVisionErr(null);
       setNpuAsr(slot.npu?.asr === true);
       setNpuEmbed(slot.npu?.embed === true);
+      // Re-seed the chat pill + all three model selects too, so a save +
+      // refetch keeps the drawer in sync with server truth instead of
+      // drifting until the drawer is remounted.
+      setNpuChat(slot.npu?.chat !== false);
+      setNpuChatModel(slot.model_id || slot.model || 'qwen3:4b');
       setNpuPending(false);
       setNpuErr(null);
     }
@@ -1080,37 +1156,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
       )}
       {/* NPU capability matrix — replaces Model+Template for NPU slots */}
       {slot.device === "npu" && (() => {
-        const applyNpu = async (nextChat, nextAsr, nextEmbed, field) => {
-          setNpuPending(true);
-          setNpuErr(null);
-          // Determine primary model from first ON capability
-          const npuBody = { chat: nextChat, asr: nextAsr, embed: nextEmbed };
-          const body = { npu: npuBody };
-          if (nextChat && npuChatModel) body.model = npuChatModel;
-          else if (nextAsr && npuAsrModel) body.model = npuAsrModel;
-          else if (nextEmbed && npuEmbedModel) body.model = npuEmbedModel;
-          try {
-            await editMut.mutateAsync({ name: slot.name, body });
-            restartMut.mutate(slot.name, {
-              onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
-            });
-            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${field} updated — restarting`, "info");
-          } catch (err) {
-            setNpuChat(npuChat); setNpuAsr(npuAsr); setNpuEmbed(npuEmbed);
-            setNpuErr(err?.message || "NPU toggle failed");
-          } finally {
-            setNpuPending(false);
-          }
-        };
-        const chatModels = flmModels.filter(m => m.model && !m.model?.toLowerCase().includes('whisper') && !m.model?.toLowerCase().includes('embed') && m.installed);
-        const sttModels = flmModels.filter(m => m.model?.toLowerCase().includes('whisper'));
-        const embedModels = flmModels.filter(m => m.model?.toLowerCase().includes('embed'));
+        // Full catalogue per lane (installed + downloadable) — NOT filtered by
+        // `installed`, so any tag can be picked and pulled on demand. Lane
+        // split by tag family (whisper → ASR, embed → Embed, else Chat).
+        const chatModels = flmModels.filter(m => m.model && !m.model?.toLowerCase().includes('whisper') && !m.model?.toLowerCase().includes('embed'));
+        // Non-installed options carry a ⬇ marker; picking one downloads first.
+        const optLabel = (m) => m.installed ? m.model : `${m.model}  ⬇ download`;
+        // True while THIS tag is downloading (used to gate + show progress).
+        const pulling = (tag) => pull.inFlight && pull.modelId === tag;
+        const pullPct = pull.pct != null ? `${pull.pct}%` : '…';
         return (
           <>
             <div className="form-row">
               <div className="form-lbl">
                 <span>NPU · Chat</span>
-                <span className="sub">Primary LLM model. First ON capability becomes the slot{'\u2019'}s model. Restarts the container.</span>
+                <span className="sub">LLM served on the NPU. Pick any catalogue model{'\u2014'}{'\u2b07'} entries download first, then apply. Restarts the container.</span>
               </div>
               <div className="form-ctl">
                 <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
@@ -1119,63 +1179,51 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     disabled={npuPending || saving}
                     label="Chat"
                     stateText={npuChat ? "On" : "Off"}
-                    onToggle={(next) => { setNpuChat(next); applyNpu(next, npuAsr, npuEmbed, "chat"); }}
+                    onToggle={(next) => { setNpuChat(next); applyNpu({ chat: next }, "chat"); }}
                   />
-                  <select className="input mono" style={{width: 160}} value={npuChatModel}
-                    onChange={e => setNpuChatModel(e.target.value)}
-                    disabled={npuPending || saving || !npuChat}
+                  <select className="input mono" style={{width: 200}} value={npuChatModel}
+                    onChange={e => onPickNpuModel("chat", "chatModel", e.target.value)}
+                    disabled={npuPending || saving || !npuChat || pull.inFlight}
                   >
-                    {chatModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
+                    {chatModels.map(m => <option key={m.model} value={m.model}>{optLabel(m)}</option>)}
                   </select>
-                  {!npuChat && npuAsr && npuAsrModel === npuChatModel && <span style={{fontSize:11,color:'var(--fg-5)'}}>→ primary</span>}
+                  {pulling(npuChatModel) && <span style={{fontSize:11,color:'var(--accent)'}}>⬇ {pullPct}</span>}
                 </span>
               </div>
             </div>
             <div className="form-row">
               <div className="form-lbl">
                 <span>NPU · ASR</span>
-                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
+                <span className="sub">Serve speech-to-text (whisper) on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
                 <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
                   <PillToggle
                     on={npuAsr}
-                    disabled={npuPending || saving}
+                    disabled={npuPending || saving || pull.inFlight}
                     label="ASR"
                     stateText={npuAsr ? "On" : "Off"}
-                    onToggle={(next) => { setNpuAsr(next); applyNpu(npuChat, next, npuEmbed, "ASR"); }}
+                    onToggle={(next) => { setNpuAsr(next); applyNpu({ asr: next }, "ASR"); }}
                   />
-                  <select className="input mono" style={{width: 160}} value={npuAsrModel}
-                    onChange={e => setNpuAsrModel(e.target.value)}
-                    disabled={npuPending || saving || !npuAsr}
-                  >
-                    {sttModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
-                  </select>
-                  {!npuChat && npuAsr && <span style={{fontSize:11,color:'var(--ok)'}}>primary</span>}
+                  <span style={{fontSize:11,color:'var(--fg-5)'}}>whisper-v3 (fixed)</span>
                 </span>
               </div>
             </div>
             <div className="form-row">
               <div className="form-lbl">
                 <span>NPU · Embed</span>
-                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
+                <span className="sub">Serve embeddings (embed-gemma) on the coresident NPU process. Restarts the container.</span>
               </div>
               <div className="form-ctl">
                 <span style={{display: 'flex', alignItems: 'center', gap: 8}}>
                   <PillToggle
                     on={npuEmbed}
-                    disabled={npuPending || saving}
+                    disabled={npuPending || saving || pull.inFlight}
                     label="Embed"
                     stateText={npuEmbed ? "On" : "Off"}
-                    onToggle={(next) => { setNpuEmbed(next); applyNpu(npuChat, npuAsr, next, "Embed"); }}
+                    onToggle={(next) => { setNpuEmbed(next); applyNpu({ embed: next }, "Embed"); }}
                   />
-                  <select className="input mono" style={{width: 160}} value={npuEmbedModel}
-                    onChange={e => setNpuEmbedModel(e.target.value)}
-                    disabled={npuPending || saving || !npuEmbed}
-                  >
-                    {embedModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
-                  </select>
-                  {!npuChat && !npuAsr && npuEmbed && <span style={{fontSize:11,color:'var(--ok)'}}>primary</span>}
+                  <span style={{fontSize:11,color:'var(--fg-5)'}}>embed-gemma (fixed)</span>
                 </span>
               </div>
             </div>

@@ -14,16 +14,16 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).parent.parent.parent.parent / "installer" / "bench"
 sys.path.insert(0, str(BENCH_DIR))
 
-from planner import plan, load_suites, get_installed_models
-from runner import run_worklist
-from v2_store import (
-    ensure_v2_dir,
-    DEFAULT_V2_DIR,
-    DEFAULT_RECORDS_PATH,
+from planner import plan  # noqa: E402
+from runner import run_worklist  # noqa: E402
+from v2_store import (  # noqa: E402
     DEFAULT_DB_PATH,
-    search_records,
+    DEFAULT_RECORDS_PATH,
+    DEFAULT_V2_DIR,
     count_records,
+    ensure_v2_dir,
     get_trend,
+    search_records,
 )
 
 
@@ -35,9 +35,11 @@ def cmd_plan(args):
     else:
         print(f"Planned {len(worklist)} cells")
         for item in worklist[:10]:
-            print(f"  {item['cell']['model']} / {item['cell']['lane']} / "
-                  f"{item['cell']['kind']} / {item['cell']['depth']} "
-                  f"({item['stale_reason']})")
+            print(
+                f"  {item['cell']['model']} / {item['cell']['lane']} / "
+                f"{item['cell']['kind']} / {item['cell']['depth']} "
+                f"({item['stale_reason']})"
+            )
         if len(worklist) > 10:
             print(f"  ... and {len(worklist) - 10} more")
 
@@ -56,9 +58,11 @@ def cmd_run(args):
         dry_run=args.dry_run,
     )
 
-    print(f"\n{'='*60}")
-    print(f"Results: {results['ok']} ok, {results['failed']} failed, "
-          f"{results['skipped']} skipped, {results['total']} total")
+    print(f"\n{'=' * 60}")
+    print(
+        f"Results: {results['ok']} ok, {results['failed']} failed, "
+        f"{results['skipped']} skipped, {results['total']} total"
+    )
 
 
 def cmd_status(args):
@@ -78,7 +82,7 @@ def cmd_status(args):
     # Show recent records
     records = search_records(limit=5)
     if records:
-        print(f"\nRecent records:")
+        print("\nRecent records:")
         for row in records:
             print(f"  {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]}")
 
@@ -112,11 +116,11 @@ def cmd_history(args):
 def cmd_reindex(args):
     """Rebuild bench.db from records.jsonl."""
     ensure_v2_dir()
-    from v2_store import _refresh_sqlite
     # Rebuild by reading all records
     import json
-    from v2_store import DEFAULT_RECORDS_PATH, DEFAULT_DB_PATH
     import sqlite3
+
+    from v2_store import DEFAULT_DB_PATH, DEFAULT_RECORDS_PATH
 
     db_path = DEFAULT_DB_PATH
     conn = sqlite3.connect(str(db_path))
@@ -160,7 +164,7 @@ def cmd_reindex(args):
                                 row.get("cell_key"),
                                 row.get("outcome"),
                                 json.dumps(row.get("summary", {})),
-                            )
+                            ),
                         )
                 except (json.JSONDecodeError, KeyError):
                     pass
@@ -168,6 +172,7 @@ def cmd_reindex(args):
     conn.close()
     # Count from SQLite now
     import sqlite3
+
     conn2 = sqlite3.connect(str(db_path))
     count = conn2.execute("SELECT COUNT(*) FROM records").fetchone()[0]
     conn2.close()
@@ -193,17 +198,19 @@ def cmd_publish(args):
     }
 
     for row in records:
-        run_id, suite, trigger, cell_key, outcome, summary = row
+        run_id, suite, _trigger, cell_key, outcome, summary = row
         if outcome != "ok":
             continue
         try:
             summary_data = json.loads(summary) if summary else {}
-            roster["models"].append({
-                "run_id": run_id,
-                "suite": suite,
-                "cell_key": cell_key,
-                "summary": summary_data,
-            })
+            roster["models"].append(
+                {
+                    "run_id": run_id,
+                    "suite": suite,
+                    "cell_key": cell_key,
+                    "summary": summary_data,
+                }
+            )
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -223,6 +230,7 @@ def cmd_import_v1(args):
         return
 
     import json
+
     with open(v1_index) as f:
         index = json.load(f)
 
@@ -247,6 +255,7 @@ def cmd_import_v1(args):
             "artifacts": "",
         }
         from v2_store import write_record
+
         write_record(v2_record)
         records_written += 1
 
@@ -254,10 +263,7 @@ def cmd_import_v1(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="hal0 bench",
-        description="Benchmarks CLI for hal0"
-    )
+    parser = argparse.ArgumentParser(prog="hal0 bench", description="Benchmarks CLI for hal0")
     subparsers = parser.add_subparsers(dest="command")
 
     # plan

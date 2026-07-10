@@ -201,6 +201,23 @@ def _npu_device_nodes() -> list[str]:
     return [accel or _DEFAULT_NPU_ACCEL_NODE, render or _DEFAULT_NPU_RENDER_NODE]
 
 
+def _flm_shadow_role_args(env: dict[str, str]) -> list[str]:
+    """Build the ``--embed`` / ``--asr`` argv tail.
+
+    Shared by :meth:`FLMProvider.start_cmd` (native) and
+    :meth:`FLMProvider.container_spec` (primary) so the two paths can never
+    drift. FLM's ``--embed`` / ``--asr`` are booleans: each loads FLM's single
+    bundled model (embed-gemma / whisper) — there is NO ``--embed-model`` /
+    ``--asr-model`` flag, so nothing per-role to emit here.
+    """
+    args: list[str] = []
+    if env.get("HAL0_FLM_LOAD_EMBED") == "1":
+        args += ["--embed", "1"]
+    if env.get("HAL0_FLM_LOAD_ASR") == "1":
+        args += ["--asr", "1"]
+    return args
+
+
 def _resolve_render_gid() -> int | None:
     """Look up the ``render`` group's numeric gid on the host.
 
@@ -299,11 +316,8 @@ class FLMProvider(Provider):
         """Return argv for the native ``flm serve`` invocation.
 
         Used by tests and the fallback systemd-without-Docker path. The
-        primary deployment path is ``container_spec``.
-
-        Reads per-capability model preferences from shadow TOMLs
-        (flm-stt.toml, flm-embed.toml) so the operator can change
-        STT/embed models without editing the flm slot config.
+        primary deployment path is ``container_spec``. Shares the
+        ``--embed`` / ``--asr`` tail with it via :func:`_flm_shadow_role_args`.
         """
         binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
         argv = [binary, "serve"]
@@ -317,16 +331,7 @@ class FLMProvider(Provider):
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
-        if env.get("HAL0_FLM_LOAD_EMBED") == "1":
-            embed_model = _read_shadow_model("flm-embed")
-            argv += ["--embed", "1"]
-            if embed_model and embed_model != "embed-gemma:300m":
-                argv += ["--embed-model", embed_model]
-        if env.get("HAL0_FLM_LOAD_ASR") == "1":
-            stt_model = _read_shadow_model("flm-stt")
-            argv += ["--asr", "1"]
-            if stt_model and stt_model != "whisper-v3:turbo":
-                argv += ["--asr-model", stt_model]
+        argv += _flm_shadow_role_args(env)
         return argv
 
     # ── Image / container spec ─────────────────────────────────────────────────
@@ -386,9 +391,15 @@ class FLMProvider(Provider):
         # subcommand + flags — NOT a binary path. Passing an absolute
         # binary path here would be treated by flm as a stray positional
         # argument and rejected with "too many positional options".
-        command: list[str] = [
-            "serve",
-            env["HAL0_FLM_TAG"],
+        command: list[str] = ["serve"]
+        # Chat modality is the positional tag. Gate it on HAL0_FLM_LOAD_CHAT so
+        # toggling NPU · Chat off actually stops serving chat on the container
+        # path (previously the tag was passed unconditionally, so the toggle
+        # only worked on the native start_cmd fallback). With chat off, FLM
+        # serves only the shadow roles (--embed / --asr) and has no LLM.
+        if env.get("HAL0_FLM_LOAD_CHAT", "1") == "1":
+            command += [env["HAL0_FLM_TAG"]]
+        command += [
             "--host",
             "0.0.0.0",
             "--port",
@@ -396,10 +407,7 @@ class FLMProvider(Provider):
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
-        if env["HAL0_FLM_LOAD_EMBED"] == "1":
-            command += ["--embed", "1"]
-        if env["HAL0_FLM_LOAD_ASR"] == "1":
-            command += ["--asr", "1"]
+        command += _flm_shadow_role_args(env)
 
         # render group resolves dynamically at run-time; use the numeric gid
         # so the spec doesn't depend on /etc/group in the container.
@@ -557,6 +565,58 @@ class FLMProvider(Provider):
                         "status": "sentinel_completion_no_choices",
                         "model": model_id,
                     }
+            return {"ok": True, "status": "ready", "model": model_id}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "status": "http_error", "detail": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "status": "exception", "detail": str(exc)}
+
+    async def verify_embed(self, port: int) -> dict[str, Any]:
+        """One-shot embeddings gate — a single ``/v1/embeddings`` call.
+
+        The warm→ready sentinel for FLM slots serving EMBED without CHAT
+        (``[npu].chat=false``): :meth:`verify_inference`'s chat completion
+        would fail because no chat model is loaded, wedging the slot in
+        WARMING forever. This exercises the embed path instead — the actual
+        role the slot serves — so an embed-primary slot can promote to READY.
+
+        Mirrors :meth:`verify_inference`: reads ``/v1/models`` for the served
+        model id, then a single shielded ``/v1/embeddings`` POST (shield: never
+        hand FLM a cancelled request → NPU double-free). Never raises; a
+        transport failure resolves to ``ok=False`` (retryable WARMING).
+        """
+        models_url = f"http://127.0.0.1:{port}/v1/models"
+        embed_url = f"http://127.0.0.1:{port}/v1/embeddings"
+        try:
+            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+                models_resp = await client.get(models_url)
+                models_resp.raise_for_status()
+                data = models_resp.json()
+                models = data.get("data", [])
+                if not models:
+                    return {
+                        "ok": False,
+                        "status": "models_endpoint_empty",
+                        "detail": "/v1/models returned no entries",
+                    }
+                model_id = models[0].get("id")
+
+            async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
+                probe_body = {"model": model_id, "input": "ping"}
+                resp = await asyncio.shield(client.post(embed_url, json=probe_body))
+                if resp.status_code != 200:
+                    return {
+                        "ok": False,
+                        "status": f"sentinel_embed_http_{resp.status_code}",
+                        "detail": resp.text[:200],
+                        "model": model_id,
+                    }
+                try:
+                    body = resp.json()
+                except Exception:
+                    return {"ok": False, "status": "sentinel_embed_unparseable", "model": model_id}
+                if not body.get("data"):
+                    return {"ok": False, "status": "sentinel_embed_no_data", "model": model_id}
             return {"ok": True, "status": "ready", "model": model_id}
         except httpx.HTTPError as exc:
             return {"ok": False, "status": "http_error", "detail": str(exc)}
@@ -744,31 +804,6 @@ def flm_validate() -> bool | None:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     return proc.returncode == 0
-
-
-def _read_shadow_model(slot_name: str) -> str | None:
-    """Read the model.default from a shadow slot TOML.
-
-    Returns the model tag (e.g. 'whisper-v3:turbo') or None if the
-    shadow TOML doesn't exist or can't be parsed.
-    """
-    from pathlib import Path
-
-    toml_path = Path("/etc/hal0/slots") / f"{slot_name}.toml"
-    if not toml_path.exists():
-        return None
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib
-    try:
-        data = tomllib.loads(toml_path.read_text())
-        model = data.get("model", {})
-        if isinstance(model, dict):
-            return str(model.get("default", "")).strip() or None
-    except Exception:
-        pass
-    return None
 
 
 def flm_served_models() -> list[dict[str, Any]]:

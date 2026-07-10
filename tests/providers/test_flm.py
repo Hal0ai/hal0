@@ -311,6 +311,40 @@ async def test_verify_inference_requires_round_trip(provider: FLMProvider) -> No
 
 
 @pytest.mark.asyncio
+async def test_verify_embed_exercises_embeddings(provider: FLMProvider) -> None:
+    """The embed gate (chat-off slots) MUST POST /v1/embeddings, not chat.
+
+    An embed/STT-primary slot has no chat model, so the chat sentinel would
+    fail; verify_embed probes the real embed path so the slot can promote.
+    """
+    models_payload = {"data": [{"id": "embed-gemma:300m"}]}
+    embed_payload = {"data": [{"embedding": [0.1, 0.2]}]}
+
+    sentinel_was_called = {"value": False}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        assert url.endswith("/v1/models")
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        assert url.endswith("/v1/embeddings")
+        assert json["model"] == "embed-gemma:300m"
+        sentinel_was_called["value"] = True
+        return _mock_response(status_code=200, json_payload=embed_payload)
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_embed(8086)
+
+    assert sentinel_was_called["value"], "verify_embed MUST issue the embeddings sentinel."
+    assert result["ok"] is True
+    assert result["status"] == "ready"
+    assert result["model"] == "embed-gemma:300m"
+
+
+@pytest.mark.asyncio
 async def test_verify_inference_rejects_empty_models(provider: FLMProvider) -> None:
     """Empty /v1/models → not ready; the gate must not POST."""
 
