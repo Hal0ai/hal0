@@ -633,3 +633,45 @@ class TestManifestLoader:
         (manifest_dir / "manifest.json").write_text("{not json")
         with pytest.raises(ConfigParseError):
             load_manifest()
+
+    def _write_tree_manifest(self, home: str, payload: dict[str, object]) -> None:
+        """Write a manifest into the release-tree slot (usr_lib/current)."""
+        import json
+
+        tree = Path(home) / "usr-lib" / "hal0" / "current"
+        tree.mkdir(parents=True, exist_ok=True)
+        (tree / "manifest.json").write_text(json.dumps(payload))
+
+    def test_load_manifest_falls_back_to_release_tree(self, tmp_hal0_home: str) -> None:
+        """With no /etc override, the manifest ships inside the current
+        release tree (/usr/lib/hal0/current/manifest.json) — the copy that
+        the install/update symlink swap keeps fresh. Production installs
+        resolve here because the venv's hal0 is a plain pip install with
+        no repo-root manifest next to it."""
+        from hal0.config.loader import load_manifest
+
+        payload = {
+            "_schema": "hal0.manifest.v1",
+            "toolbox_images": {
+                "flm": {"tag": "ghcr.io/o/hal0-toolbox-flm:0.9.44", "digest": "sha256:f1a"},
+            },
+        }
+        self._write_tree_manifest(tmp_hal0_home, payload)
+        loaded = load_manifest()
+        assert loaded["toolbox_images"]["flm"]["digest"] == "sha256:f1a"
+
+    def test_etc_manifest_overrides_release_tree(self, tmp_hal0_home: str) -> None:
+        """/etc/hal0/manifest.json is a deliberate operator override and
+        wins over the release-tree copy."""
+        from hal0.config.loader import load_manifest
+
+        self._write_tree_manifest(
+            tmp_hal0_home,
+            {"toolbox_images": {"flm": {"tag": "t", "digest": "sha256:tree"}}},
+        )
+        self._write_manifest(
+            tmp_hal0_home,
+            {"toolbox_images": {"flm": {"tag": "t", "digest": "sha256:etc"}}},
+        )
+        loaded = load_manifest()
+        assert loaded["toolbox_images"]["flm"]["digest"] == "sha256:etc"
