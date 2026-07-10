@@ -1,0 +1,43 @@
+# suites/smoke.toml — fires on model-pull. Gives a freshly pulled model a
+# number (and an OOM/breakage signal) within minutes, automatically,
+# instead of waiting for the weekly roster window. See the bench design handoff §4
+# ("smoke") and §6 ("Model pulled/registered" trigger row).
+
+[suite]
+id          = "smoke"
+description = "First-light check for a freshly pulled/registered model"
+schedule    = "trigger:model-pull"   # fired by the pull-completion hook, not the weekly timer
+budget_min  = 3                      # ~3 min: one pp+tg pair at one depth, nothing more
+exclusive   = false                  # allowed to run even while GPU slots are busy...
+priority    = 90                     # ...but jumps the queue when it does get a window
+
+[selector]
+# The pull-completion hook invokes `hal0 bench run --suite smoke --trigger
+# model-pull <id>`; the runner scopes this invocation to exactly that
+# model id. caps_any/installed below are only the fallback used if this
+# suite is ever run standalone (e.g. a manual re-check).
+caps_any  = ["chat", "coder"]
+installed = true
+
+[matrix]
+lanes    = ["default"]   # whatever profile lane the model actually pulls up on
+depths   = [2048]
+samplers = ["greedy"]
+reps     = 1              # smoke != roster: one sample is enough to catch OOM/hang
+
+[cells]
+kinds = ["pp", "tg"]
+
+[staleness]
+# Smoke doesn't re-run on an age timer — the model-pull event is its only
+# trigger. max_age_days is set effectively-infinite so the planner never
+# re-queues a smoke cell on its own.
+max_age_days = 36500
+
+# NOTE — contended runs (the bench design handoff §4): because exclusive=false, a smoke
+# cell may execute while other GPU slots are active. The runner still
+# records it (a noisy number beats none for "did it even run"), but
+# stamps outcome="skipped-contended" instead of "ok" whenever
+# `host.exclusive` was false at measurement time. Contended records are
+# never surfaced on the public roster and never feed regression
+# detection (§11) — they exist purely as a fast breakage signal.

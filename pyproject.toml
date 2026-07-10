@@ -101,6 +101,9 @@ packages = ["src/hal0"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# Agentic-eval fixtures are TASK CONTENT (deliberately quirky code the agent
+# under eval must read/trace), not hal0 source — linting must never "fix" them.
+extend-exclude = ["src/hal0/bench/evals/agentic/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]

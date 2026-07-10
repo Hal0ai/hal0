@@ -1,0 +1,3 @@
+cluster: main
+SEATS_PER_POD: 6
+replicas: 3

@@ -144,6 +144,10 @@ import './dash/board/new-board-modal.jsx'
 import './dash/board/new-task-modal.jsx'
 import './dash/board/board-view.jsx'
 
+// Benchmarks page — registers window.BenchmarksView for the #benchmarks route.
+import Benchmarks from './dash/Benchmarks'
+;(window as any).BenchmarksView = Benchmarks
+
 // 3) main.jsx mounts <App /> into #root.
 import './dash/main.jsx'
 

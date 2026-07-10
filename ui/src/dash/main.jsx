@@ -27,7 +27,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services"];
+const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services", "benchmarks"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -317,6 +317,12 @@ function App() {
         return typeof ServicesView === "function"
           ? <ServicesView />
           : <div className="view">Services unavailable — bundle stale.</div>;
+      // Benchmarks (#benchmarks): roster board / run detail / evals / run
+      // queue over /api/benchmarks/* (hal0.bench store).
+      case "benchmarks":
+        return typeof BenchmarksView === "function"
+          ? <BenchmarksView />
+          : <div className="view">Benchmarks unavailable — bundle stale.</div>;
       case "settings": return <SettingsView param={param} />;
       default:         return <div className="view">Not found.</div>;
     }

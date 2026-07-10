@@ -50,6 +50,9 @@ from hal0.api.routes import (
     backends as backends_routes,
 )
 from hal0.api.routes import (
+    benchmarks as benchmarks_routes,
+)
+from hal0.api.routes import (
     board as board_routes,
 )
 from hal0.api.routes import (
@@ -1238,6 +1241,13 @@ def create_app() -> FastAPI:
     # diff → atomic commit → lifecycle converge) + export/import/snapshot.
     # Public on the local network (ADR-0012), same rationale as profiles.
     app.include_router(stacks_routes.router, prefix="/api/stacks", tags=["stacks"])
+
+    # Benchmarks — roster board, run detail, history, evals, and the run-queue
+    # actions (queue/control; the API process never drives the GPU — the
+    # `hal0 bench worker` service drains the queue). Public on the local
+    # network (same rationale as profiles/stacks: admin-only by network
+    # convention, no creds). Router carries its own /api/benchmarks prefix.
+    app.include_router(benchmarks_routes.router)
 
     # Chat-template catalog — bundled templates seeded into the model store at
     # startup; operator can add custom templates via POST. Read + write, public

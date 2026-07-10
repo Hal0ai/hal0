@@ -371,6 +371,12 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     rm_path "/etc/sudoers.d/hal0-benchctl"
     # hal0-comfyui sudoers removed in #984 (hardened-perms abandoned, ADR-0023)
     rm_path "/etc/sudoers.d/hal0-comfyui"
+    # hal0.bench units (timer + scheduled session + run-queue worker). The
+    # result store /var/lib/hal0-bench is data, kept unless --purge.
+    systemctl disable --now hal0-bench.timer hal0-bench-worker.service >/dev/null 2>&1 || true
+    rm_path "/etc/systemd/system/hal0-bench.timer"
+    rm_path "/etc/systemd/system/hal0-bench.service"
+    rm_path "/etc/systemd/system/hal0-bench-worker.service"
 fi
 
 # The install PREFIX (default /opt/hal0). install.sh rsyncs the source
