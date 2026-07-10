@@ -447,7 +447,9 @@ export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
     refetchInterval: enabled ? 2_000 : false,
   })
 
-  const jobs = query.data ?? []
+  // Defensive: an unrouted mock (or an older backend) can answer `{}` —
+  // never let a non-array shape throw inside every subscriber's render.
+  const jobs = Array.isArray(query.data) ? query.data : []
   const hasActive = jobs.some((j: PullJob) => j.state === 'queued' || j.state === 'running')
 
   return { jobs, hasActive, ...query }

@@ -11,12 +11,12 @@ import { useModels, usePullsList, useClearPullJob, fmtSpeed, fmtEta } from '@/ap
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
-import { useUpdateState } from '@/api/hooks/useUpdates'
+import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 
-const { useState: useStateC, useEffect: useEffectC } = React;
+const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
 
 // ─── Wordmark — inline SVG, "hal" in currentColor + amber "0" ───
 function Wordmark({ size = 16, mono = false }) {
@@ -140,6 +140,298 @@ const Icons = {
   bench:     <Icon><path d="M3 13V9l2.5-2.5M3 13l2.5-2.5M3 13h3M13 3v4l-2.5 2.5M13 3l-2.5 2.5M13 3h-3M8 8l-2 2"/><circle cx="4" cy="13" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="12" cy="3" r="1.5"/></Icon>,
 };
 
+// ─── Notification center (topbar bell) ───
+// One aggregation point for everything that wants the operator's eye:
+//   - items needing attention (pending approvals + slots in error) — the same
+//     sources as the dashboard's Needs Attention card, so counts never drift;
+//   - model downloads (queued/running pulls, plus failed ones with retry);
+//   - updates (hal0 release available, post-update slot drift);
+//   - developer/system messages pushed via `window.hal0Notify({...})` or a
+//     `hal0:notify` CustomEvent (detail: {id?, title, body?, kind?, link?}).
+// The bell shows a live count badge; the panel groups rows by section. Rows
+// route to the surface that already owns the action (ApprovalModal, footer
+// downloads pane, Settings → Updates) instead of duplicating it.
+
+const NOTIF_LS_KEY = "hal0:notif-dismissed";
+function _notifLoadDismissed() {
+  try {
+    const v = JSON.parse(localStorage.getItem(NOTIF_LS_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+// Module-level store (not React state) so messages published before the bell
+// mounts — or while it's unmounted on a crashed view — are never lost.
+const _notifStore = {
+  msgs: [],
+  dismissed: new Set(_notifLoadDismissed()),
+  listeners: new Set(),
+};
+function _notifEmit() { _notifStore.listeners.forEach((l) => l()); }
+function hal0Notify(raw) {
+  const d = raw || {};
+  const title = String(d.title || d.msg || "").trim();
+  if (!title) return null;
+  const id = String(d.id || ("msg-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)));
+  // A stable id makes a message dismissible forever (localStorage) — the
+  // channel for "developer important messages" that shouldn't re-nag.
+  if (_notifStore.dismissed.has(id)) return id;
+  if (_notifStore.msgs.some((m) => m.id === id)) return id;
+  _notifStore.msgs = [
+    ..._notifStore.msgs,
+    {
+      id,
+      title,
+      body: d.body ? String(d.body) : "",
+      kind: ["info", "warn", "error", "update"].includes(d.kind) ? d.kind : "info",
+      link: typeof d.link === "string" ? d.link : "",
+      ts: Date.now(),
+    },
+  ];
+  _notifEmit();
+  return id;
+}
+function _notifDismiss(id) {
+  _notifStore.msgs = _notifStore.msgs.filter((m) => m.id !== id);
+  _notifStore.dismissed.add(id);
+  try {
+    localStorage.setItem(NOTIF_LS_KEY, JSON.stringify([..._notifStore.dismissed].slice(-100)));
+  } catch { /* private mode — dismissal just won't persist */ }
+  _notifEmit();
+}
+if (typeof window !== "undefined") {
+  window.hal0Notify = hal0Notify;
+  window.addEventListener("hal0:notify", (e) => hal0Notify(e.detail));
+}
+
+const _NOTIF_KIND_HUE = {
+  info: "var(--info, var(--fg-3))",
+  warn: "var(--warn)",
+  error: "var(--err)",
+  update: "var(--accent)",
+};
+
+function NotificationBell() {
+  const [open, setOpen] = useStateC(false);
+  const [, bump] = useStateC(0);
+  useEffectC(() => {
+    const l = () => bump((t) => t + 1);
+    _notifStore.listeners.add(l);
+    return () => _notifStore.listeners.delete(l);
+  }, []);
+  const devMsgs = _notifStore.msgs;
+
+  // Attention sources — same rule as the dashboard's Needs Attention card.
+  const slots = useSlots().data ?? [];
+  const approvals = useApprovalList()?.data?.approvals ?? [];
+  const errorSlots = slots.filter((s) => s.state === "error" || s.container_status === "crashed");
+
+  // Downloads — the pulls list is a tiny local endpoint; the shared query key
+  // dedupes against the footer pane's copy when both are live.
+  const pulls = usePullsList({ enabled: true });
+  const jobs = Array.isArray(pulls.jobs) ? pulls.jobs : [];
+  const activePulls = jobs.filter((j) => j.state === "queued" || j.state === "running");
+  const failedPulls = jobs.filter((j) => j.state === "failed");
+  const clearJob = useClearPullJob();
+
+  // Updates — hal0 release channel + post-update slot drift (WS-J).
+  const updates = useUpdateState();
+  const hal0Ch = updates.data?.hal0;
+  const hasUpdate = !!(hal0Ch && hal0Ch.available && hal0Ch.available !== hal0Ch.current);
+  const drift = useSlotDrift();
+  const driftCount = drift.data?.count ?? 0;
+  const restartDrifted = useRestartDriftedSlots();
+
+  const count =
+    approvals.length + errorSlots.length +
+    activePulls.length + failedPulls.length +
+    (hasUpdate ? 1 : 0) + (driftCount > 0 ? 1 : 0) +
+    devMsgs.length;
+
+  // Close on outside click / Escape while open.
+  const popRef = useRefC(null);
+  useEffectC(() => {
+    if (!open) return;
+    const onDown = (e) => { if (popRef.current && !popRef.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Any surface can pop the panel (command palette, banners, …).
+  useEffectC(() => {
+    const onOpen = () => setOpen(true);
+    window.addEventListener("hal0:open-notifications", onOpen);
+    return () => window.removeEventListener("hal0:open-notifications", onOpen);
+  }, []);
+
+  const go = (hash) => { setOpen(false); window.location.hash = hash; };
+  const sections = [];
+
+  if (approvals.length + errorSlots.length > 0) {
+    sections.push(
+      <div className="notif-sec" data-testid="notif-sec-attention" key="attention">
+        <div className="notif-sec-h mono">needs attention</div>
+        {approvals.map((a) => (
+          <div className="notif-row" key={"ap-" + a.id}>
+            <span className="notif-dot" style={{ background: "var(--warn)" }} />
+            <span className="notif-msg">
+              <b>{a.client_id || "hermes"}</b> wants <span className="mono">{a.tool}</span> — approval pending
+            </span>
+            <button
+              className="notif-act"
+              onClick={() => { setOpen(false); window.dispatchEvent(new CustomEvent("hal0:open-approvals")); }}
+            >Review</button>
+          </div>
+        ))}
+        {errorSlots.map((s) => (
+          <div className="notif-row" key={"slot-" + s.name}>
+            <span className="notif-dot" style={{ background: "var(--err)" }} />
+            <span className="notif-msg">
+              slot <b className="mono">{s.name}</b> failed — restart to recover
+            </span>
+            <button
+              className="notif-act"
+              onClick={() => window.dispatchEvent(new CustomEvent("hal0:slot-restart", { detail: { name: s.name } }))}
+            >Restart</button>
+            <button className="notif-act" onClick={() => go("#slots/" + s.name)}>View</button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (activePulls.length + failedPulls.length > 0) {
+    sections.push(
+      <div className="notif-sec" data-testid="notif-sec-downloads" key="downloads">
+        <div className="notif-sec-h mono">downloads</div>
+        {activePulls.map((j) => {
+          const pct = j.bytes_total ? Math.round((j.bytes_downloaded / (j.bytes_total || 1)) * 100) : 0;
+          return (
+            <div className="notif-row" key={"dl-" + (j.job_id || j.model_id)}>
+              <span className="notif-dot pulse" style={{ background: "var(--accent)" }} />
+              <span className="notif-msg">
+                <span className="mono">{j.hf_repo || j.model_id}</span>
+                {j.state === "queued"
+                  ? " — queued"
+                  : <> — {pct}%{j.speed_bps > 0 && <> · {fmtSpeed(j.speed_bps)}</>}{j.eta_s > 0 && <> · {fmtEta(j.eta_s)} left</>}</>}
+              </span>
+              <button
+                className="notif-act"
+                onClick={() => apiPost(ENDPOINTS.modelPullCancel(j.model_id))}
+              >Cancel</button>
+            </div>
+          );
+        })}
+        {failedPulls.map((j) => (
+          <div className="notif-row" key={"dlf-" + (j.job_id || j.model_id)}>
+            <span className="notif-dot" style={{ background: "var(--err)" }} />
+            <span className="notif-msg">
+              <span className="mono">{j.hf_repo || j.model_id}</span> — download failed
+            </span>
+            <button className="notif-act" onClick={() => apiPost(ENDPOINTS.modelPull(j.model_id))}>Retry</button>
+            <button className="notif-act" onClick={() => clearJob.mutate(j.model_id)}>Clear</button>
+          </div>
+        ))}
+        <button
+          className="notif-link mono"
+          onClick={() => { setOpen(false); window.dispatchEvent(new CustomEvent("hal0:open-downloads")); }}
+        >Open downloads pane →</button>
+      </div>
+    );
+  }
+
+  if (hasUpdate || driftCount > 0) {
+    sections.push(
+      <div className="notif-sec" data-testid="notif-sec-updates" key="updates">
+        <div className="notif-sec-h mono">updates</div>
+        {hasUpdate && (
+          <div className="notif-row">
+            <span className="notif-dot" style={{ background: "var(--accent)" }} />
+            <span className="notif-msg">
+              hal0 <b className="mono">{hal0Ch.available}</b> available
+              {hal0Ch.current && <> (current {hal0Ch.current})</>}
+            </span>
+            <button className="notif-act" onClick={() => go("#settings/updates")}>Update</button>
+          </div>
+        )}
+        {driftCount > 0 && (
+          <div className="notif-row">
+            <span className="notif-dot" style={{ background: "var(--warn)" }} />
+            <span className="notif-msg">
+              {driftCount} slot{driftCount !== 1 ? "s" : ""} running a pre-update config — restart to apply
+            </span>
+            <button
+              className="notif-act"
+              disabled={restartDrifted.isPending}
+              onClick={() => restartDrifted.mutate(undefined)}
+            >{restartDrifted.isPending ? "Restarting…" : "Restart"}</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (devMsgs.length > 0) {
+    sections.push(
+      <div className="notif-sec" data-testid="notif-sec-messages" key="messages">
+        <div className="notif-sec-h mono">messages</div>
+        {devMsgs.map((m) => (
+          <div className="notif-row" key={m.id} data-testid="notif-msg">
+            <span className="notif-dot" style={{ background: _NOTIF_KIND_HUE[m.kind] }} />
+            <span className="notif-msg">
+              <b>{m.title}</b>
+              {m.body && <span className="notif-body">{m.body}</span>}
+            </span>
+            {m.link && (
+              <button className="notif-act" onClick={() => {
+                if (/^#/.test(m.link)) go(m.link);
+                else window.open(m.link, "_blank", "noopener");
+              }}>Open</button>
+            )}
+            <button className="notif-act" onClick={() => _notifDismiss(m.id)} aria-label="Dismiss message">×</button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="tb-bell-wrap" ref={popRef}>
+      <button
+        className={"tb-bell" + (count > 0 ? " has" : "") + (open ? " on" : "")}
+        data-testid="tb-bell"
+        onClick={() => setOpen((o) => !o)}
+        title="Notifications"
+        aria-label={"Notifications" + (count > 0 ? ` (${count})` : "")}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        {Icons.bell}
+        {count > 0 && <span className="tb-bell-badge num" data-testid="tb-bell-badge">{count > 99 ? "99+" : count}</span>}
+      </button>
+      {open && (
+        <div className="notif-pop" data-testid="notif-pop" role="dialog" aria-label="Notifications">
+          <div className="notif-pop-h mono">
+            <span>Notifications</span>
+            <span className="ct">{count > 0 ? count : "all clear"}</span>
+          </div>
+          <div className="notif-pop-body">
+            {sections.length > 0 ? sections : (
+              <div className="notif-empty mono" data-testid="notif-empty">
+                nothing needs your attention
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── TopBar ───
 function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false }) {
   // Mirror the global agent-chat open state so the Agent Chat launcher lights
@@ -208,6 +500,7 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
           {Icons.agent}<span>Agent Chat</span>
         </button>
       </div>
+      <NotificationBell />
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button
         className="tb-menu"
@@ -494,7 +787,13 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       if (!expanded && onToggle) onToggle();
     };
     window.addEventListener("hal0:pull-started", onPullStarted);
-    return () => window.removeEventListener("hal0:pull-started", onPullStarted);
+    // The notification bell's "Open downloads pane →" row reuses the same
+    // expand-and-switch behaviour.
+    window.addEventListener("hal0:open-downloads", onPullStarted);
+    return () => {
+      window.removeEventListener("hal0:pull-started", onPullStarted);
+      window.removeEventListener("hal0:open-downloads", onPullStarted);
+    };
   }, [expanded, onToggle]);
   const { jobs, hasActive } = usePullsList({ enabled: expanded && footerTab === "downloads" });
   const clearJob = useClearPullJob();
@@ -931,7 +1230,7 @@ function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
   );
 }
 
-Object.assign(window, { Wordmark, Icons, GLYPHS, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer });
+Object.assign(window, { Wordmark, Icons, GLYPHS, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer, NotificationBell });
 
 // Bridge approval hooks so main.jsx (strict no-ES-imports prototype) can call
 // them via window globals — same pattern as memory-tab-hook-bridge.ts.
