@@ -17,7 +17,7 @@
     "flm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
       "digest": "sha256:644c7d1ec0463a21159e291c91a01eeba256b5a0b29fea3ffa54ffd8a065f53b",
-      "_notes": "FastFlowLM v0.9.44 on AMD XDNA2 NPU; requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest (confirmed post-push 2026-07-10)."
+      "_notes": "hal0 toolbox image 0.9.44 — bundles FastFlowLM binary v0.9.43 (the image tag is the toolbox build number, NOT the FLM version; 0.9.44 is a toolbox rebuild over the same FLM v0.9.43 binary). AMD XDNA2 NPU; requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest (confirmed post-push 2026-07-10). To ship FLM v0.9.44, rebuild the toolbox with the newer flm binary before bumping again."
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
