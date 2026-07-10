@@ -346,14 +346,14 @@ async def test_legacy_fallback_routes_embeddings_to_embed_slot() -> None:
 
 @pytest.mark.asyncio
 async def test_legacy_fallback_routes_colon_model_to_npu_slot() -> None:
-    """Rule 5: an FLM tag-style ``name:tag`` model id routes to the npu slot.
+    """Rule 5: an FLM tag-style ``name:tag`` model id routes to the flm slot.
 
     Locks the capability/path heuristic that pins ``qwen3:0.6b`` (and any
-    ``name:tag`` id) to the ``npu`` slot when the registry and warm caches
+    ``name:tag`` id) to the ``flm`` slot when the registry and warm caches
     have nothing to say — the last-resort step in ``dispatch()``.
     """
-    npu = make_slot("npu", "http://127.0.0.1:8089/v1")
-    upstreams = FakeUpstreamRegistry([npu])
+    flm = make_slot("flm", "http://127.0.0.1:8089/v1")
+    upstreams = FakeUpstreamRegistry([flm])
     models = FakeModelRegistry(routes={})
 
     dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
@@ -361,8 +361,8 @@ async def test_legacy_fallback_routes_colon_model_to_npu_slot() -> None:
         make_request(),
         body={"model": "qwen3:0.6b"},
     )
-    assert call.resolution_path == "legacy_slot:npu"
-    assert call.upstream_name == "npu"
+    assert call.resolution_path == "legacy_slot:flm"
+    assert call.upstream_name == "flm"
 
 
 @pytest.mark.asyncio

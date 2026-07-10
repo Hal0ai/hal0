@@ -57,15 +57,15 @@ def _seed_slot_toml(home: str, name: str, lines: list[str]) -> Path:
 def seed_npu_trio(tmp_hal0_home: str) -> None:
     """Lay down the NPU trio slot TOMLs on disk.
 
-    ``npu`` is the containerized anchor (static port, runtime=container);
+    ``flm`` is the containerized anchor (static port, runtime=container);
     ``stt-npu`` / ``embed-npu`` are the shadow-role records whose model
     ids gate the trio dispatch in v1.py.
     """
     _seed_slot_toml(
         tmp_hal0_home,
-        "npu",
+        "flm",
         [
-            'name = "npu"',
+            'name = "flm"',
             f"port = {_NPU_PORT}",
             'device = "npu"',
             'type = "llm"',
@@ -131,18 +131,18 @@ def _make_capture_transport(captures: dict[str, Any]) -> httpx.MockTransport:
 
 
 def _pin_npu_ready(client: TestClient) -> None:
-    """Force the npu slot into the dispatchable ready-set (READY).
+    """Force the flm slot into the dispatchable ready-set (READY).
 
     ``NpuTrioRouter.resolve_npu_url`` gates on
-    ``SlotManager.is_ready_for_dispatch("npu")`` — no container runs under
+    ``SlotManager.is_ready_for_dispatch("flm")`` — no container runs under
     test, so the slot would otherwise be OFFLINE and every trio dispatch
     would 503.
     """
     from hal0.slots.state import SlotState, SlotStateRecord
 
     sm = client.app.state.slot_manager
-    sm._states["npu"] = SlotStateRecord(
-        name="npu",
+    sm._states["flm"] = SlotStateRecord(
+        name="flm",
         state=SlotState.READY,
         model_id="gemma3:1b",
         port=_NPU_PORT,
