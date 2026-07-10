@@ -49,6 +49,85 @@ def test_npu_table_overrides_legacy_defaults() -> None:
     assert "--asr" not in spec.command
 
 
+def test_chat_off_drops_positional_tag() -> None:
+    """[npu].chat=false must stop the container serving chat.
+
+    Regression: container_spec passed the positional chat tag
+    unconditionally, so toggling Chat off in the drawer still served chat
+    (only the native start_cmd honoured HAL0_FLM_LOAD_CHAT). With chat off
+    the tag must be absent — 'serve' then flags, no model positional.
+    """
+    spec = FLMProvider().container_spec(
+        _slot_cfg(npu={"chat": False, "embed": True}), _model_info()
+    )
+    assert "gemma3:4b" not in spec.command
+    assert spec.command[0] == "serve"
+    # First arg after 'serve' is a flag, not a positional model tag.
+    assert spec.command[1].startswith("--")
+    assert "--embed" in spec.command
+
+
+def test_chat_on_keeps_positional_tag() -> None:
+    spec = FLMProvider().container_spec(_slot_cfg(npu={"chat": True}), _model_info())
+    assert spec.command[:2] == ["serve", "gemma3:4b"]
+
+
+def test_asr_model_override_emits_flag() -> None:
+    """A non-default [npu].asr_model reaches --asr-model on the container path."""
+    spec = FLMProvider().container_spec(
+        _slot_cfg(npu={"asr": True, "asr_model": "whisper-v3:large"}), _model_info()
+    )
+    idx = spec.command.index("--asr-model")
+    assert spec.command[idx + 1] == "whisper-v3:large"
+
+
+def test_embed_model_override_emits_flag() -> None:
+    spec = FLMProvider().container_spec(
+        _slot_cfg(npu={"embed": True, "embed_model": "embed-gemma:1b"}), _model_info()
+    )
+    idx = spec.command.index("--embed-model")
+    assert spec.command[idx + 1] == "embed-gemma:1b"
+
+
+def test_default_role_model_is_elided() -> None:
+    """An override equal to FLM's default is NOT re-emitted — the bare
+    ``--asr 1`` / ``--embed 1`` already selects it."""
+    spec = FLMProvider().container_spec(
+        _slot_cfg(
+            npu={
+                "asr": True,
+                "asr_model": "whisper-v3:turbo",
+                "embed": True,
+                "embed_model": "embed-gemma:300m",
+            }
+        ),
+        _model_info(),
+    )
+    assert "--asr-model" not in spec.command
+    assert "--embed-model" not in spec.command
+
+
+def test_role_model_ignored_when_modality_off() -> None:
+    """A model override for a disabled modality is not emitted."""
+    spec = FLMProvider().container_spec(
+        _slot_cfg(npu={"asr": False, "asr_model": "whisper-v3:large"}), _model_info()
+    )
+    assert "--asr" not in spec.command
+    assert "--asr-model" not in spec.command
+
+
+def test_start_cmd_matches_container_role_args() -> None:
+    """Native start_cmd and container_spec build the same shadow-role tail so
+    the two paths can never drift (they share _flm_shadow_role_args)."""
+    cfg = _slot_cfg(npu={"asr": True, "asr_model": "whisper-v3:large", "embed": True})
+    provider = FLMProvider()
+    env = provider.build_env(cfg, _model_info())
+    argv = provider.start_cmd(env)
+    spec = provider.container_spec(cfg, _model_info())
+    for flag in ("--asr", "--asr-model", "whisper-v3:large", "--embed"):
+        assert flag in argv and flag in spec.command
+
+
 def test_default_models_dir_is_flm_cache() -> None:
     spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
     # Source follows the resolver default (HAL0_HOME-aware); the target is

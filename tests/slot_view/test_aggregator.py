@@ -327,7 +327,13 @@ class TestConfigEnrichment:
         assert e["idle_timeout_s"] == 900
         assert e["workers"] == 2
         assert e["llamacpp_args"] == "--flash-attn on"
-        assert e["npu"] == {"asr": True, "embed": False}
+        assert e["npu"] == {
+            "asr": True,
+            "embed": False,
+            "chat": True,
+            "asr_model": None,
+            "embed_model": None,
+        }
 
     def test_ctx_max_from_context_size(self) -> None:
         # The Inference engine pane reads ctx_max to render "ctx used / max".
@@ -528,7 +534,13 @@ class TestContainerEnrichment:
             pull_jobs={},
             provider=FakeContainerProvider(active=False),
         )
-        assert out["gpu-chat"]["npu"] == {"asr": True, "embed": True}
+        assert out["gpu-chat"]["npu"] == {
+            "asr": True,
+            "embed": True,
+            "chat": True,
+            "asr_model": None,
+            "embed_model": None,
+        }
 
 
 class MapContainerProvider(FakeContainerProvider):
