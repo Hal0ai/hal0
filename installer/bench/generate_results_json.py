@@ -25,6 +25,7 @@ if len(sys.argv) > 1:
 else:
     RESULT_DIR = os.environ.get("HAL0_BENCH_RESULTS", "/var/lib/hal0/benchmarks")
 RUNS_DIR = os.path.join(RESULT_DIR, "runs")
+EMIT_V2 = "--emit-v2" in sys.argv
 
 
 def test_kind(row):
@@ -330,6 +331,85 @@ def main():
 
     print(f"Wrote {index_path} ({len(records)} measurements, {len(server_ab)} server-ab files)")
     print(f"Wrote {summary_path}")
+
+    # Emit v2 records (new benchmark system)
+    if EMIT_V2:
+        from pathlib import Path
+        V2_DIR = Path(RESULT_DIR) / "v2"
+        V2_DIR.mkdir(parents=True, exist_ok=True)
+        RECORDS_PATH = V2_DIR / "records.jsonl"
+        import hashlib
+        from datetime import datetime, timezone
+
+        for rec in records:
+            # Build identity block for cell_key
+            identity = {
+                "model_id": rec["model"]["name"],
+                "engine_kind": "llama-bench",
+                "engine_image": rec.get("runtime_image"),
+                "llamacpp_build": f"{rec['llamacpp_build'].get('commit', '')}-{rec['llamacpp_build'].get('number', '')}",
+                "lane": rec.get("backend"),
+                "config": {
+                    "argv": [
+                        f"-n_prompt={rec['config']['n_prompt']}",
+                        f"-n_gen={rec['config']['n_gen']}",
+                        f"-n_depth={rec['config']['n_depth']}",
+                        f"-n_batch={rec['config']['n_batch']}",
+                        f"-n_ubatch={rec['config']['n_ubatch']}",
+                        f"-n_threads={rec['config']['n_threads']}",
+                        f"-ngl={rec['config']['n_gpu_layers']}",
+                        f"-fa={'1' if rec['config']['flash_attn'] else '0'}",
+                        f"-ctk={rec['config']['type_k']}",
+                        f"-ctv={rec['config']['type_v']}",
+                    ],
+                    "kv": {"main_k": rec["config"]["type_k"], "main_v": rec["config"]["type_v"]},
+                    "parallel": 1,
+                },
+                "workload": {
+                    "kind": rec["test"],
+                    "depth": rec["config"]["n_depth"],
+                    "n_prompt": rec["config"]["n_prompt"],
+                    "n_gen": rec["config"]["n_gen"],
+                    "sampler": "greedy",
+                    "concurrency": 1,
+                },
+            }
+            raw = json.dumps(identity, sort_keys=True, default=str)
+            cell_key = hashlib.sha256(raw.encode()).hexdigest()
+
+            v2_record = {
+                "schema": 2,
+                "run_id": f"v1-imported-{rec.get('timestamp', '')}-{rec.get('backend', '')}",
+                "suite": "imported",
+                "trigger": "import-v1",
+                "cell_key": cell_key,
+                "model": {"id": rec["model"]["name"], "gguf": rec["model"]["path"]},
+                "engine": {
+                    "kind": "llama-bench",
+                    "image": rec.get("runtime_image"),
+                    "llamacpp_build": f"{rec['llamacpp_build'].get('commit', '')}-{rec['llamacpp_build'].get('number', '')}",
+                },
+                "lane": rec.get("backend"),
+                "config": identity["config"],
+                "workload": identity["workload"],
+                "host": {
+                    "name": "hal0",
+                    "platform": "strix-halo",
+                    "gpu": rec.get("gpu"),
+                    "exclusive": True,
+                },
+                "reps": [{"t_s": rec["metric"]["avg_ts"]}],
+                "summary": {
+                    "decode_ts_med": rec["metric"]["avg_ts"] if rec["test"] == "tg" else None,
+                    "prefill_ts_med": rec["metric"]["avg_ts"] if rec["test"] == "pp" else None,
+                },
+                "outcome": "ok",
+                "artifacts": "",
+            }
+            with open(RECORDS_PATH, "a") as f:
+                f.write(json.dumps(v2_record, default=str) + "\n")
+
+        print(f"Wrote {RECORDS_PATH} ({len(records)} v2 records)")
 
 
 if __name__ == "__main__":

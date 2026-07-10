@@ -1,0 +1,18 @@
+[Unit]
+Description=hal0 benchmark runner (weekly)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hal0
+Group=hal0
+ExecStart=/usr/bin/python3 /usr/lib/hal0/bench/runner.py --no-exclusive --budget-min 240
+ExecStartPost=/usr/bin/python3 /usr/lib/hal0/bench/regression.py
+ExecStartPost=/usr/bin/python3 /usr/lib/hal0/bench/planner.py --json > /var/lib/hal0/benchmarks/v2/last-plan.json
+WorkingDirectory=/usr/lib/hal0/bench
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

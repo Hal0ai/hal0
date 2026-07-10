@@ -1,0 +1,25 @@
+# /etc/hal0/bench/suites/roster.toml  (the suite behind the public table)
+[suite]
+id          = "roster"
+description = "Uniform head-to-head across the chat+coding roster"
+schedule    = "weekly"           # consumed by the timer policy (§6)
+budget_min  = 240                # hard wall-clock cap per session; planner orders cells by value
+exclusive   = true               # uses --exclusive windows; never publishes contended numbers
+priority    = 50
+
+[selector]                        # which models — resolved against the registry at plan time
+caps_any    = ["chat", "coder"]  # registry capability tags
+installed   = true               # only models present under /mnt/ai-models
+# explicit include/exclude lists also supported
+
+[matrix]                          # the axes; identity fields not listed are pinned to model defaults
+lanes    = ["default"]           # "default" = the model's preferred profile lane; or ["rocm","vulkan_radv"]
+depths   = [2048]                # roster is the uniform 2k board; tune suites use [2048,32768,131072]
+samplers = ["greedy"]
+reps     = 3
+
+[cells]                           # which measurement kinds
+kinds = ["pp", "tg"]             # roster: prefill + decode (+ MTP acceptance implied when model has MTP)
+
+[staleness]                       # when is a cell's newest record too old anyway?
+max_age_days = 30                # even with no provenance drift, refresh monthly

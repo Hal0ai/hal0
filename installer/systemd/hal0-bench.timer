@@ -1,0 +1,10 @@
+[Unit]
+Description=hal0 benchmark weekly timer
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
