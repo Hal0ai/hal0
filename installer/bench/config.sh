@@ -39,11 +39,18 @@ COMMON_RUN_FLAGS=(
 )
 
 # --- Backends ---------------------------------------------------------------
-# key -> "image | bench_bin | ubatch | extra_env (space-separated KEY=VAL)"
-# Images already present in root's podman (no pull/build needed); both ship llama-bench.
+# key -> "image | bench_bin | ubatch | extra_env (space-separated KEY=VAL) | dev_args"
+#
+# Both lanes use the SAME unified runner image the production slots run
+# (hal0-rocmfpx:vulkan-minicpm5): it ships ROCm + Vulkan backends AND loads
+# every quant the slots can serve — including the custom ROCmFPX/FPX families
+# that the stock toolboxes reject with "failed to load model" (verified
+# on-box 2026-07-10 with Hal0-BRAINTRAIN-1B-FPX6-AGENT). Anything servable
+# is now benchable. The image exposes BOTH devices, so each lane pins its
+# device via dev_args (`llama-bench --list-devices`: ROCm0, Vulkan0).
 declare -A BACKENDS=(
-  [rocm]="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server|/usr/local/bin/llama-bench|2048|HSA_OVERRIDE_GFX_VERSION=11.5.1 GGML_HIP_ENABLE_UNIFIED_MEMORY=1"
-  [vulkan_radv]="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server|/usr/bin/llama-bench|512|"
+  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5|/usr/local/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-dev ROCm0"
+  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5|/usr/local/bin/llama-bench|512||-dev Vulkan0"
 )
 # Order backends are swept in.
 BACKEND_ORDER=(rocm vulkan_radv)
