@@ -99,5 +99,25 @@ async def test_oversized_card_is_truncated(tmp_hal0_home):
     assert "truncated by hal0" in out["markdown"]
 
 
+async def test_truncation_cap_is_byte_accurate_for_multibyte(tmp_hal0_home):
+    # 300 KiB of a 3-byte CJK char = ~900 KiB on the wire. A character-count
+    # cap would store ~4x the limit; the byte cap must hold regardless of
+    # encoding width, and the split trailing char must not corrupt the text.
+    big = "模" * (300 * 1024)
+    async with _client(_ok_handler(body=big)) as client:
+        out = await get_card("m1", "org/repo", client=client)
+    marker_budget = 200  # truncation marker + at most one dropped char
+    assert len(out["markdown"].encode("utf-8")) <= 512 * 1024 + marker_budget
+    assert "truncated by hal0" in out["markdown"]
+    assert out["markdown"].startswith("模")
+
+
+async def test_exact_cap_body_is_not_marked_truncated(tmp_hal0_home):
+    body = "x" * (512 * 1024)
+    async with _client(_ok_handler(body=body)) as client:
+        out = await get_card("m1", "org/repo", client=client)
+    assert out["markdown"] == body
+
+
 async def test_read_cached_card_absent(tmp_hal0_home):
     assert read_cached_card("nope") is None

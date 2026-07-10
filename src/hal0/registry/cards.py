@@ -92,8 +92,12 @@ async def fetch_card(
 ) -> str:
     """Download the README for ``hf_repo``; raises :class:`CardUnavailable`.
 
-    Truncates past the size cap so one image-base64-laden card can't
-    balloon the response or the on-disk cache.
+    Streams the body and stops reading at the byte cap, so one
+    image-base64-laden card can neither balloon the on-disk cache nor
+    get fully buffered in memory first. The cap is byte-accurate (a
+    CJK-heavy README truncates at the same stored size as an ASCII one);
+    a multi-byte character split at the cut is dropped by the tolerant
+    decode.
     """
     headers: dict[str, str] = {"User-Agent": "hal0/model-card"}
     if hf_token:
@@ -104,8 +108,38 @@ async def fetch_card(
             timeout=httpx.Timeout(_CARD_TIMEOUT_S),
             follow_redirects=True,
         )
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
     try:
-        resp = await client.get(card_url(hf_repo), headers=headers)
+        async with client.stream("GET", card_url(hf_repo), headers=headers) as resp:
+            if resp.status_code == 404:
+                raise CardUnavailable(
+                    f"hugging face repo {hf_repo!r} has no README.md at main",
+                    code="model.card_not_found",
+                    details={"repo": hf_repo},
+                )
+            if resp.status_code >= 400:
+                raise CardUnavailable(
+                    f"hugging face returned HTTP {resp.status_code} for {hf_repo!r} model card",
+                    details={"repo": hf_repo, "status": resp.status_code},
+                )
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                if total >= _CARD_MAX_BYTES:
+                    # Cap already reached and the stream has more — mark and
+                    # stop pulling bytes off the wire.
+                    truncated = True
+                    break
+                room = _CARD_MAX_BYTES - total
+                if len(chunk) > room:
+                    chunks.append(chunk[:room])
+                    total = _CARD_MAX_BYTES
+                    truncated = True
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
     except httpx.HTTPError as exc:
         raise CardUnavailable(
             f"failed to reach huggingface.co for {hf_repo!r} model card: {exc.__class__.__name__}",
@@ -114,20 +148,9 @@ async def fetch_card(
     finally:
         if owns_client:
             await client.aclose()
-    if resp.status_code == 404:
-        raise CardUnavailable(
-            f"hugging face repo {hf_repo!r} has no README.md at main",
-            code="model.card_not_found",
-            details={"repo": hf_repo},
-        )
-    if resp.status_code >= 400:
-        raise CardUnavailable(
-            f"hugging face returned HTTP {resp.status_code} for {hf_repo!r} model card",
-            details={"repo": hf_repo, "status": resp.status_code},
-        )
-    text = resp.text
-    if len(text.encode("utf-8", errors="ignore")) > _CARD_MAX_BYTES:
-        text = text[:_CARD_MAX_BYTES] + _TRUNCATION_MARKER
+    text = b"".join(chunks).decode("utf-8", errors="ignore")
+    if truncated:
+        text += _TRUNCATION_MARKER
     return text
 
 
