@@ -1010,6 +1010,33 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
         chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
+
+        # hal0.bench v2 (design 2026-07-05): suite seeds + politeness window are
+        # OPERATOR-OWNED under /etc — install only if absent (never clobber
+        # operator edits; the shipped copies in installer/bench/ are the seeds).
+        install -d /etc/hal0/bench/suites
+        for toml in "${BENCH_SRC}/suites"/*.toml; do
+            [[ -f "${toml}" ]] || continue
+            dst="/etc/hal0/bench/suites/$(basename "${toml}")"
+            [[ -f "${dst}" ]] || install -m 0644 "${toml}" "${dst}"
+        done
+        if [[ -f "${BENCH_SRC}/window.toml" && ! -f /etc/hal0/bench/window.toml ]]; then
+            install -m 0644 "${BENCH_SRC}/window.toml" /etc/hal0/bench/window.toml
+        fi
+        # Result store (append-only records.jsonl + derived bench.db + artifacts).
+        install -d /var/lib/hal0-bench /var/lib/hal0-bench/artifacts
+        chown -R hal0:hal0 /var/lib/hal0-bench 2>/dev/null || true
+        # Units: weekly scheduled session (timer→oneshot) + the run-queue worker
+        # (long-running, inert until Started from the dashboard).
+        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench.service" /etc/systemd/system/hal0-bench.service
+        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench.timer" /etc/systemd/system/hal0-bench.timer
+        install -m 0644 "${REPO_ROOT}/installer/systemd/hal0-bench-worker.service" /etc/systemd/system/hal0-bench-worker.service
+        if [[ "${DEV_MODE}" -eq 0 ]]; then
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true
+            systemctl enable --now hal0-bench.timer >/dev/null 2>&1 || true
+        fi
+        info "wrote /etc/hal0/bench + /var/lib/hal0-bench + bench units"
     else
         warn "${BENCH_SRC} not found — benchmark harness not installed"
     fi

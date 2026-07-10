@@ -1,0 +1,18 @@
+{
+  "timestamp": "20260704T213106Z",
+  "mode": "embed",
+  "slot": "embed",
+  "n": 5,
+  "max_tokens": 256,
+  "results": {
+    "dims": 1024,
+    "latency_s": [
+      0.418,
+      0.011,
+      0.014,
+      0.01,
+      0.01
+    ],
+    "median_latency_s": 0.01
+  }
+}

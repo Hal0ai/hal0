@@ -30,6 +30,8 @@ from hal0.cli._shared import (
 )
 from hal0.cli.agent_commands import app as agent_app
 from hal0.cli.app_commands import app as app_ext_app
+from hal0.cli.bench_commands import BENCH_CONTEXT_SETTINGS, BENCH_HELP
+from hal0.cli.bench_commands import bench as bench_command
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
@@ -75,6 +77,10 @@ app.add_typer(registry_app, name="registry")
 # CLI over /api/mcp/*. Mounted after registry before setup.
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(setup_app, name="setup", help="First-run setup")
+# `hal0 bench <verb>` — a single passthrough command (not a typer group): the
+# bench CLI is argparse-based (design §5), so the raw argv forwards to
+# hal0.bench.cli.main. See bench_commands.py for why the context settings.
+app.command("bench", help=BENCH_HELP, context_settings=BENCH_CONTEXT_SETTINGS)(bench_command)
 
 
 # ---------------------------------------------------------------------------

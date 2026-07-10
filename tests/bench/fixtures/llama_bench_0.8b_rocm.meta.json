@@ -1,0 +1,1 @@
+{"backend":"rocm","image":"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server","context":"default","tag":"","extra":"","reps":2,"ubatch":2048,"model_rel":"qwen3.5-0.8b/Qwen3.5-0.8B-UD-Q4_K_XL.gguf","model_path":"/mnt/ai-models/qwen3.5-0.8b/Qwen3.5-0.8B-UD-Q4_K_XL.gguf","host":"hal0","gpu":"Radeon 8060S (gfx1151)","timestamp":"2026-06-24T12:18:04-04:00"}
