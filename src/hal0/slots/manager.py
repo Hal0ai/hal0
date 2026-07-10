@@ -3265,7 +3265,22 @@ class SlotManager:
 
         provider = _spec_provider_for(cfg)
         if isinstance(provider, FLMProvider):
-            verdict = await provider.verify_inference(slot_port)
+            # Pick the sentinel by which modality the slot actually serves.
+            # An embed/STT-primary slot ([npu].chat=false) has no chat model,
+            # so the chat completion sentinel would fail and wedge it in
+            # WARMING forever. Probe the real role instead.
+            npu_cfg = cfg.get("npu") or (cfg.get("extra") or {}).get("npu") or {}
+            chat_on = npu_cfg.get("chat", True) is not False
+            embed_on = bool(npu_cfg.get("embed"))
+            if chat_on:
+                verdict = await provider.verify_inference(slot_port)
+            elif embed_on:
+                verdict = await provider.verify_embed(slot_port)
+            else:
+                # ASR-only (no chat, no embed): a transcription sentinel needs
+                # an audio upload, so fall back to the cheap /v1/models liveness
+                # — the slot is ready once it lists its served model.
+                verdict = await provider.health(slot_port)
             if not verdict.get("ok"):
                 log.warning(
                     "slot.flm_inference_gate_failed",

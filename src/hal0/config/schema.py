@@ -192,6 +192,10 @@ class NpuConfig(BaseModel):
         default=True,
         description="Enable chat (LLM) modality on the FLM slot. Default ON.",
     )
+    # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
+    # boolean flags that load FLM's single bundled whisper + embed-gemma. There
+    # is deliberately no asr_model/embed_model here; the chat model is the
+    # ``flm serve`` positional tag ([model].default) and is the only choice.
 
 
 class ImageGenConfig(BaseModel):
@@ -1017,7 +1021,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "",
     },
     "flm": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
+        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
         "flags": "",
         "mtp": False,
         "device_class": "npu",

@@ -341,6 +341,9 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             entry["npu"] = {
                 "asr": bool(npu_table.get("asr")),
                 "embed": bool(npu_table.get("embed")),
+                # chat defaults ON (NpuConfig.chat=True) when the key is absent,
+                # so the drawer's Chat pill seeds from the real persisted value.
+                "chat": npu_table.get("chat", True) is not False,
             }
 
         # declared_backend: normalized token (rocm|vulkan|cpu|flm) from the
@@ -457,6 +460,9 @@ async def container_enrichment(
             entry["npu"] = {
                 "asr": bool(npu_table.get("asr")),
                 "embed": bool(npu_table.get("embed")),
+                # chat defaults ON (NpuConfig.chat=True) when the key is absent,
+                # so the drawer's Chat pill seeds from the real persisted value.
+                "chat": npu_table.get("chat", True) is not False,
             }
 
         # Emit runtime / profile / image so the UI doesn't have to dig

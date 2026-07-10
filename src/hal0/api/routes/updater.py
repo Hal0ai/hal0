@@ -388,7 +388,7 @@ def _parse_flm_version(raw: str | None) -> str | None:
 
 
 def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
-    """``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`` → ``0.9.43``.
+    """``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44`` → ``0.9.44``.
 
     Parses the tag off an OCI image reference (everything after the last
     ``:``) and returns it, or ``None`` if the ref is empty / has no tag.

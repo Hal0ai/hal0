@@ -70,7 +70,7 @@ def test_state_returns_shape_expected_by_dashboard(
 
     # Stub the image-ref helper so the test is independent of the real constant.
     monkeypatch.setattr(
-        u_mod, "_flm_toolbox_image", lambda: "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
+        u_mod, "_flm_toolbox_image", lambda: "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
     )
 
     r = isolated_client.get("/api/updates/state")
@@ -82,7 +82,7 @@ def test_state_returns_shape_expected_by_dashboard(
     assert body["hal0"]["available"] == "9.9.9"
     assert body["hal0"]["channel"] == "stable"
     # flm.current comes from the image tag; source is "toolbox-image".
-    assert body["flm"]["current"] == "0.9.43"
+    assert body["flm"]["current"] == "0.9.44"
     assert body["flm"]["source"] == "toolbox-image"
     assert body["autoCheck"] is True
 
@@ -93,7 +93,7 @@ def test_state_flm_version_from_image_tag(
     """flm.current is derived from the bundled toolbox image tag, not a probe.
 
     The source of truth post-PR #822 is the ``_DEFAULT_FLM_IMAGE`` /
-    ``_FLM_TOOLBOX_IMAGE`` constant (``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43``).
+    ``_FLM_TOOLBOX_IMAGE`` constant (``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44``).
     The route parses the tag off the image ref and reports it with
     ``source="toolbox-image"`` — no subprocess probe required.
     """
@@ -104,13 +104,13 @@ def test_state_flm_version_from_image_tag(
     monkeypatch.setattr(
         u_mod,
         "_flm_toolbox_image",
-        lambda: "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
+        lambda: "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
     )
 
     r = isolated_client.get("/api/updates/state")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["flm"]["current"] == "0.9.43"
+    assert body["flm"]["current"] == "0.9.44"
     assert body["flm"]["source"] == "toolbox-image"
 
 

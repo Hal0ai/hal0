@@ -263,7 +263,9 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 }
             )
         if npu_cfg.get("embed"):
-            embed_live = is_loaded and real_embed is not None and getattr(real_embed, "enabled", False)
+            embed_live = (
+                is_loaded and real_embed is not None and getattr(real_embed, "enabled", False)
+            )
             slots_out.append(
                 {
                     "name": s.name + "-embed",
