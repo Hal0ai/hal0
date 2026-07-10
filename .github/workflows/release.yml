@@ -481,23 +481,55 @@ jobs:
   # Uses PyPI Trusted Publishing (OIDC) — no API token stored in secrets.
   # Requires the PyPI project to have a Trusted Publisher configured for:
   #   owner: hal0ai, repo: hal0, workflow: release.yml, environment: pypi
+  #
+  # Runs only for explicit tag events (tag push / workflow_dispatch of a tag).
+  # Never on nightly's workflow_call: PyPI versions are immutable, so nightly
+  # snapshots don't belong there.
   pypi-publish:
     name: PyPI wheel
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: []  # parallel to the tarball job; no dependency
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: release  # never ship a wheel for a release the tarball job couldn't verify
     environment: pypi
     permissions:
+      contents: read
       id-token: write  # required for PyPI OIDC
 
     steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [[ -z "${TAG}" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -z "${TAG}" ]]; then
+            echo "::error::could not resolve tag"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Verify pyproject version matches tag
+        run: |
+          EXPECT="${TAG#v}"
+          ACTUAL="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [[ "${ACTUAL}" != "${EXPECT}" ]]; then
+            echo "::error::pyproject.toml version (${ACTUAL}) does not match tag (${TAG})"
+            exit 1
+          fi
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
 
       - name: Build wheel + sdist
         run: |
