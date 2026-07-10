@@ -56,7 +56,7 @@ on:
 
 permissions:
   contents: write     # required to upload Release assets
-  id-token: write     # required for cosign keyless OIDC
+  id-token: write     # required for cosign keyless OIDC + PyPI OIDC
   packages: read      # in case we ever pull a private image at build time
 
 concurrency:
@@ -473,3 +473,68 @@ jobs:
             echo "  hal0 update --check"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 8. PyPI wheel — convenience install, not the production path ────────────
+  # Published as a complement to the tarball + bootstrap above.
+  # The wheel is NOT the supported prod path (no systemd units, no UI bundle,
+  # no FHS layout); it is purely for `pip install hal0` convenience.
+  # Uses PyPI Trusted Publishing (OIDC) — no API token stored in secrets.
+  # Requires the PyPI project to have a Trusted Publisher configured for:
+  #   owner: hal0ai, repo: hal0, workflow: release.yml, environment: pypi
+  #
+  # Runs only for explicit tag events (tag push / workflow_dispatch of a tag).
+  # Never on nightly's workflow_call: PyPI versions are immutable, so nightly
+  # snapshots don't belong there.
+  pypi-publish:
+    name: PyPI wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: release  # never ship a wheel for a release the tarball job couldn't verify
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # required for PyPI OIDC
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [[ -z "${TAG}" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -z "${TAG}" ]]; then
+            echo "::error::could not resolve tag"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify pyproject version matches tag
+        run: |
+          EXPECT="${TAG#v}"
+          ACTUAL="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [[ "${ACTUAL}" != "${EXPECT}" ]]; then
+            echo "::error::pyproject.toml version (${ACTUAL}) does not match tag (${TAG})"
+            exit 1
+          fi
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+
+      - name: Build wheel + sdist
+        run: |
+          pip install hatchling
+          python -m hatchling build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

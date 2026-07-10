@@ -49,6 +49,26 @@ one-line installer's automatic hardware seeding, so assign it to a slot
 manually from the dashboard after install.
 </Aside>
 
+## pip install (convenience only — not the full install)
+
+hal0 is also published to PyPI as a convenience for scripting, tool
+discovery, and Python-level imports:
+
+```sh
+pip install hal0
+```
+
+This installs the `hal0` and `hal0-agent` console scripts and the
+`hal0.*` package namespace — enough to run `hal0 --version`, import
+`hal0.*` in your own Python code, or invoke the CLI from a virtualenv.
+
+<Aside type="danger" title="Not the supported production path">
+`pip install hal0` does **not** set up systemd units, podman containers,
+the dashboard UI, OpenWebUI, model registry, or the FHS `/usr/lib/hal0`
+layout. It is a lightweight complement for scripting and development.
+For a full production deployment, use the bootstrap script above.
+</Aside>
+
 ## What the bootstrap does
 
 <Steps>
