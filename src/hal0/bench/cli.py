@@ -84,7 +84,9 @@ def _load_window() -> tuple[set[int], tuple[int, int], tuple[int, int], int]:
             doc = tomllib.loads(WINDOW_FILE.read_text())
             w = doc.get("window", {})
             raw_days = w.get("days") or ([w["day"]] if w.get("day") else [])
-            parsed = {_DAY_IDX[str(d)[:3].lower()] for d in raw_days if str(d)[:3].lower() in _DAY_IDX}
+            parsed = {
+                _DAY_IDX[str(d)[:3].lower()] for d in raw_days if str(d)[:3].lower() in _DAY_IDX
+            }
             if parsed:
                 days = parsed
             start = _parse_hm(w.get("start"), start)
@@ -310,7 +312,9 @@ def cmd_worker(args: argparse.Namespace) -> int:
     from . import control
 
     store = Store()
-    print(f"[worker] started; polling every {args.poll}s (state defaults to 'stopped' — idle until Start)")
+    print(
+        f"[worker] started; polling every {args.poll}s (state defaults to 'stopped' — idle until Start)"
+    )
     while True:
         if not control.worker_should_run():
             control.write_status(None, _now_stamp())
@@ -344,18 +348,31 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
             cells = plan(suite, models, store)
             control.write_status(
-                {"item": item, "suite": suite.id, "cells": len(cells), "started": _now_stamp(),
-                 "exclusive": ctrl["exclusive"]},
+                {
+                    "item": item,
+                    "suite": suite.id,
+                    "cells": len(cells),
+                    "started": _now_stamp(),
+                    "exclusive": ctrl["exclusive"],
+                },
                 _now_stamp(),
             )
-            print(f"[worker] running {suite.id}: {len(cells)} cell(s), exclusive={ctrl['exclusive']}")
+            print(
+                f"[worker] running {suite.id}: {len(cells)} cell(s), exclusive={ctrl['exclusive']}"
+            )
             result = run_session(
-                cells, store, _session_host(args.api, ctrl["exclusive"]),
-                suite_id=suite.id, api=args.api, exclusive=ctrl["exclusive"],
+                cells,
+                store,
+                _session_host(args.api, ctrl["exclusive"]),
+                suite_id=suite.id,
+                api=args.api,
+                exclusive=ctrl["exclusive"],
                 should_continue=control.worker_should_run,
             )
             if result.aborted == "stopped":
-                print(f"[worker] {suite.id} stopped after {result.cells_ok} cell(s) — item stays queued")
+                print(
+                    f"[worker] {suite.id} stopped after {result.cells_ok} cell(s) — item stays queued"
+                )
                 control.write_status(None, _now_stamp())
                 continue  # leave the item queued; resumes on next Start
             if result.aborted == "gpu-contended":
@@ -484,8 +501,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
         for model in models:
             for task in tasks:
                 if not args.force and traffic_in_flight(args.api):
-                    print(json.dumps({"event": "bench.eval.declined", "task": task.id,
-                                      "model": model, "reason": "live-traffic"}))
+                    print(
+                        json.dumps(
+                            {
+                                "event": "bench.eval.declined",
+                                "task": task.id,
+                                "model": model,
+                                "reason": "live-traffic",
+                            }
+                        )
+                    )
                     continue
                 print(f"[eval] {model} :: {task.id} …", flush=True)
                 rec = evalrun.run_task(task, model, run_id, args.api, workroot)
@@ -493,10 +518,12 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 rows.append(rec)
                 mark = "OK " if rec.correct else ("~  " if rec.score > 0 else "X  ")
                 m = rec.metrics
-                print(f"  {mark} score={rec.score} got={rec.answer!r} "
-                      f"want={rec.expected!r} wall={m.get('wall_s')}s "
-                      f"tools={m.get('tool_calls')} tok_out={m.get('tokens_out')} "
-                      f"steps={len(rec.checkpoints_hit)}/{rec.checkpoints_total}")
+                print(
+                    f"  {mark} score={rec.score} got={rec.answer!r} "
+                    f"want={rec.expected!r} wall={m.get('wall_s')}s "
+                    f"tools={m.get('tool_calls')} tok_out={m.get('tokens_out')} "
+                    f"steps={len(rec.checkpoints_hit)}/{rec.checkpoints_total}"
+                )
 
     if rows:
         print("\n" + _eval_table(rows))
@@ -527,7 +554,11 @@ def _eval_table(rows: list) -> str:
 
 
 def _shquote(s: str) -> str:
-    return s if s and all(c.isalnum() or c in "-_./:=" for c in s) else "'" + s.replace("'", "'\\''") + "'"
+    return (
+        s
+        if s and all(c.isalnum() or c in "-_./:=" for c in s)
+        else "'" + s.replace("'", "'\\''") + "'"
+    )
 
 
 def cmd_import_v1(args: argparse.Namespace) -> int:
@@ -612,7 +643,7 @@ def _norm_v1_model_id(name: str | None) -> str:
     ``/mnt/ai-models/dir/File.gguf`` (verified on-box) — strip the model-root
     prefix + leading slash so both collapse to one id."""
     n = (name or "unknown").lstrip("/")
-    return n[len("mnt/ai-models/"):] if n.startswith("mnt/ai-models/") else n
+    return n[len("mnt/ai-models/") :] if n.startswith("mnt/ai-models/") else n
 
 
 def _v1_lane(backend: str | None) -> str:
@@ -690,8 +721,15 @@ def _import_v1_server_ab(sa_dir: Path, store: Store) -> int:
             if runs is None and "second_call" in block:
                 runs = [block["second_call"]]
             rec = _sa_generative_record(
-                mode, kind, slot, variant, block.get("extra_args", ""),
-                runs or [], max_tokens, stamp, path.name,
+                mode,
+                kind,
+                slot,
+                variant,
+                block.get("extra_args", ""),
+                runs or [],
+                max_tokens,
+                stamp,
+                path.name,
             )
             if rec is not None:
                 store.append_record(rec)
@@ -836,7 +874,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run", help="execute the plan (or a slice)")
     p.add_argument("--suite", required=True)
     p.add_argument("--budget-min", type=int, default=0, help="override suite budget")
-    p.add_argument("--dry-run", action="store_true", help="print the worklist + commands, run nothing")
+    p.add_argument(
+        "--dry-run", action="store_true", help="print the worklist + commands, run nothing"
+    )
     p.add_argument(
         "--scheduled",
         action="store_true",
@@ -874,12 +914,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--site-ts", default=None, help="also emit the site data .ts to this path")
     p.set_defaults(func=cmd_publish)
 
-    p = sub.add_parser("eval", help="agentic task eval (quality tier): score a model as a real agent")
+    p = sub.add_parser(
+        "eval", help="agentic task eval (quality tier): score a model as a real agent"
+    )
     p.add_argument("--models", required=True, help="comma-separated model ids to eval/compare")
     p.add_argument("--task", action="append", help="limit to task id(s); repeatable (default: all)")
     p.add_argument("--api", default=DEFAULT_API, help=f"hal0 API base (default {DEFAULT_API})")
     p.add_argument("--dry-run", action="store_true", help="print the exact hermes commands; no GPU")
-    p.add_argument("--force", action="store_true", help="run even over live traffic (skip politeness)")
+    p.add_argument(
+        "--force", action="store_true", help="run even over live traffic (skip politeness)"
+    )
     p.set_defaults(func=cmd_eval)
 
     p = sub.add_parser("import-v1", help="import hal0 v1 results into v2 records")

@@ -298,7 +298,9 @@ def get_history(cell_key: str | None = None, model: str | None = None) -> dict[s
 
 
 @router.get("/runs")
-def list_runs(suite: str | None = None, model: str | None = None, limit: int = 50) -> dict[str, Any]:
+def list_runs(
+    suite: str | None = None, model: str | None = None, limit: int = 50
+) -> dict[str, Any]:
     """Run records, newest first, optionally filtered by suite and/or model,
     with an outcome tally over the listed page. ``model`` filtering is what the
     model-detail panel's "Runs" list uses (design §8.2)."""
@@ -442,7 +444,9 @@ def post_control(body: dict[str, Any]) -> dict[str, Any]:
     bool}`` (the "shut down competing slots" toggle). Start arms the worker;
     Pause/Stop take effect between cells."""
     action = body.get("action")
-    state = {"start": "running", "pause": "paused", "stop": "stopped"}.get(action) if action else None
+    state = (
+        {"start": "running", "pause": "paused", "stop": "stopped"}.get(action) if action else None
+    )
     if action and state is None:
         raise HTTPException(status_code=400, detail=f"bad action {action!r} (start|pause|stop)")
     return control.set_control(state=state, exclusive=body.get("exclusive"))

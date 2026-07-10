@@ -105,16 +105,17 @@ def test_profile_image_and_flags_default_when_nothing_set() -> None:
     "seed_name,expected_image",
     [
         # The 2x2 (backend x {dense,moe}) ROCmFPX grid consolidated in 0.9.5.
-        ("rocm-dense", "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"),
-        ("rocm-moe", "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"),
-        ("vulkan-dense", "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"),
-        ("vulkan-moe", "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"),
+        # c077206 became the default runner in #1173 (hal0-bench in-tree).
+        ("rocm-dense", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
+        ("rocm-moe", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
+        ("vulkan-dense", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
+        ("vulkan-moe", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
     ],
 )
-def test_seed_profiles_image_pinned_to_vulkan_minicpm5(seed_name: str, expected_image: str) -> None:
-    """The three ROCmFPX runner seed profiles use the new default image.
+def test_seed_profiles_image_pinned_to_c077206(seed_name: str, expected_image: str) -> None:
+    """The ROCmFPX runner seed profiles use the current default image.
 
-    Pins the rollout: every fresh install gets the v0.9.5 ROCmFPX
+    Pins the rollout: every fresh install gets the c077206 ROCmFPX
     runner on its first launch unless the operator pins a different
     image in their slot TOML.
     """

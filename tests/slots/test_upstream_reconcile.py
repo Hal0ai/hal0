@@ -1,6 +1,6 @@
 """#732: upstream-registry restart drop — reconciliation + idempotent load.
 
-Per-slot ``kind="remote"`` upstreams live only in the in-memory
+Per-slot ``kind="slot"`` upstreams live only in the in-memory
 ``UpstreamRegistry`` and die with the api process, while the podman
 containers (and their loaded models) survive a restart. Pre-fix, every
 ``systemctl restart hal0-api`` left "ready" slots unroutable
@@ -54,7 +54,7 @@ class TestReconcileContainerUpstreams:
         assert restored == ["chat"]
         up = reg2.get("chat")
         assert up is not None
-        assert up.kind == "remote"
+        assert up.kind == "slot"
         assert up.slot_name == "chat"
         assert ":8081" in up.url
 
@@ -120,7 +120,7 @@ class TestReconcileAdoptsOfflineButActive:
         assert restored == ["chat"]
         up = reg.get("chat")
         assert up is not None
-        assert up.kind == "remote"
+        assert up.kind == "slot"
         assert ":8081" in up.url
         # FSM state reconciled to READY by the reconcile pass itself, so
         # /api/status stops emitting "offline" over the running container.
@@ -155,7 +155,7 @@ class TestIdempotentLoadReregisters:
         # …but the route comes back.
         up = reg2.get("chat")
         assert up is not None
-        assert up.kind == "remote"
+        assert up.kind == "slot"
         assert ":8081" in up.url
 
     async def test_load_on_ready_trio_shadow_does_not_register(

@@ -37,7 +37,9 @@ DEFAULT_STATE_ROOT = "/var/lib/hal0-bench"
 def state_root() -> Path:
     """Resolve the state root: ``$BENCHLAB_STATE`` or the default. Read live (not
     a module constant) so tests can point it at a tmp dir per-call."""
-    return Path(os.environ.get("HAL0_BENCH_STATE", os.environ.get("BENCHLAB_STATE", DEFAULT_STATE_ROOT)))
+    return Path(
+        os.environ.get("HAL0_BENCH_STATE", os.environ.get("BENCHLAB_STATE", DEFAULT_STATE_ROOT))
+    )
 
 
 class Store:

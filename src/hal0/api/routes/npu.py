@@ -49,6 +49,10 @@ _NPU_TOPS_PEAK = 50
 # the NPU and therefore owns AIE columns. SERVING/READY/WARMING/IDLE all
 # hold weights in GTT; OFFLINE/PULLING/STARTING/UNLOADING/ERROR do not.
 _LOADED_STATES = frozenset({"serving", "ready", "warming", "idle"})
+# The _map_slot_state() outputs that count as "loaded" (warming → "loaded").
+# Used by the degraded single-tenant fallback, which works off the already-
+# mapped slot_view["state"] rather than the raw SlotState.
+_LOADED_VIEW_STATES = frozenset({"serving", "ready", "loaded", "idle"})
 
 
 def _occupancy_absent() -> dict[str, Any]:
@@ -245,14 +249,15 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             except Exception:
                 pass
 
-        # Look up the real companion slot states — virtual subs ride
-        # coresident with the FLM anchor. They only claim columns when
-        # the corresponding real slot is enabled (operator-controlled).
-        real_stt = next((rs for rs in all_slots if rs.name == f"{s.name}-stt"), None)
-        real_embed = next((rs for rs in all_slots if rs.name == f"{s.name}-embed"), None)
-
+        # Virtual subs ride coresident with the FLM anchor: the [npu] toggle
+        # (asr/embed) IS the operator control — the single `flm serve` child
+        # serves them, so they're live whenever the modality is on and the
+        # anchor is loaded. (The old code gated on the shadow slot's own
+        # `enabled` flag, which reads false in embed/STT-primary mode where
+        # the operator disables chat but the modality is still served — so
+        # the sub-card wrongly showed "off"/dim.)
         if npu_cfg.get("asr"):
-            stt_live = is_loaded and real_stt is not None and getattr(real_stt, "enabled", False)
+            stt_live = is_loaded
             slots_out.append(
                 {
                     "name": s.name + "-stt",
@@ -263,9 +268,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 }
             )
         if npu_cfg.get("embed"):
-            embed_live = (
-                is_loaded and real_embed is not None and getattr(real_embed, "enabled", False)
-            )
+            embed_live = is_loaded
             slots_out.append(
                 {
                     "name": s.name + "-embed",
@@ -290,15 +293,16 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
     )
 
     # Degraded fallback: if xrt-smi never succeeded, every loaded slot owns
-    # all 8 columns (single-tenant binary occupancy).
+    # all 8 columns (single-tenant binary occupancy). Iterate slots_out on its
+    # own using each view's already-mapped state — the old code zipped it with
+    # flm_slots (strict=True), which crashed the whole endpoint: slots_out also
+    # carries the synthesised -stt/-embed sub-views AND is re-sorted, so it is
+    # both longer than and mis-ordered vs flm_slots. Triggered exactly when the
+    # NPU column probe is unavailable — i.e. while the FLM slot is offline.
     if not columns_available:
         any_loaded = False
-        for slot_view, s in zip(slots_out, flm_slots, strict=True):
-            raw_state = str(getattr(s, "state", "") or "").lower()
-            state_val = getattr(getattr(s, "state", None), "value", None)
-            if isinstance(state_val, str):
-                raw_state = state_val.lower()
-            if raw_state in _LOADED_STATES:
+        for slot_view in slots_out:
+            if slot_view["state"] in _LOADED_VIEW_STATES:
                 slot_view["cols"] = list(range(_NPU_COLS))
                 any_loaded = True
             else:

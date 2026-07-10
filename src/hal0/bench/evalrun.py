@@ -103,7 +103,9 @@ def _loop_answer() -> str:
 
     rows = list(csv.DictReader((_fx("loop-aggregate") / "orders.csv").read_text().splitlines()))
     shipped = sum(int(r["amount"]) for r in rows if r["status"] == "shipped")
-    refund = int(re.search(r"REFUND:\s*(\d+)", (_fx("loop-aggregate") / "notes.md").read_text()).group(1))
+    refund = int(
+        re.search(r"REFUND:\s*(\d+)", (_fx("loop-aggregate") / "notes.md").read_text()).group(1)
+    )
     return str(shipped - refund)
 
 
@@ -115,9 +117,15 @@ def _dep_answer() -> str:
 
 
 def _grep_answer() -> str:
-    seats = int(re.search(r"LICENSE_SEAT_COUNT\s*=\s*(\d+)",
-                          (_fx("grep-hunt") / "deep/nested/license.conf").read_text()).group(1))
-    per = int(re.search(r"SEATS_PER_POD:\s*(\d+)", (_fx("grep-hunt") / "pods.yaml").read_text()).group(1))
+    seats = int(
+        re.search(
+            r"LICENSE_SEAT_COUNT\s*=\s*(\d+)",
+            (_fx("grep-hunt") / "deep/nested/license.conf").read_text(),
+        ).group(1)
+    )
+    per = int(
+        re.search(r"SEATS_PER_POD:\s*(\d+)", (_fx("grep-hunt") / "pods.yaml").read_text()).group(1)
+    )
     return str(seats * per)
 
 
@@ -321,8 +329,17 @@ def hermes_cmd(task: Task, model: str, api: str) -> list[str]:
     """The exact headless Hermes invocation (pure — used by the runner and by
     `eval --dry-run`)."""
     return [
-        HERMES, "-z", task.prompt, "-m", model, "--provider", "custom",
-        "--yolo", "-t", task.toolsets, "--pass-session-id",
+        HERMES,
+        "-z",
+        task.prompt,
+        "-m",
+        model,
+        "--provider",
+        "custom",
+        "--yolo",
+        "-t",
+        task.toolsets,
+        "--pass-session-id",
     ]
 
 
@@ -338,8 +355,12 @@ def _collect_metrics(workdir: Path, wall_s: float) -> tuple[dict[str, Any], str]
     scan it for the intermediate checkpoint values. Falls back to wall time only
     if the export isn't available."""
     metrics: dict[str, Any] = {
-        "wall_s": round(wall_s, 1), "turns": None, "tool_calls": None,
-        "tokens_in": None, "tokens_out": None, "api_calls": None,
+        "wall_s": round(wall_s, 1),
+        "turns": None,
+        "tool_calls": None,
+        "tokens_in": None,
+        "tokens_out": None,
+        "api_calls": None,
     }
     trace = ""
     try:
@@ -360,8 +381,10 @@ def _collect_metrics(workdir: Path, wall_s: float) -> tuple[dict[str, Any], str]
         if not isinstance(d, dict) or d.get("cwd") != target:
             continue
         metrics.update(
-            turns=d.get("message_count"), tool_calls=d.get("tool_call_count"),
-            tokens_in=d.get("input_tokens"), tokens_out=d.get("output_tokens"),
+            turns=d.get("message_count"),
+            tool_calls=d.get("tool_call_count"),
+            tokens_in=d.get("input_tokens"),
+            tokens_out=d.get("output_tokens"),
             api_calls=d.get("api_call_count"),
         )
         msgs = d.get("messages")
@@ -456,19 +479,38 @@ def run_task(task: Task, model: str, run_id: str, api: str, workroot: Path) -> E
         expected = task.expected_fn()
     except Exception as exc:  # deriving the answer failed (e.g. hal0.dev unreachable)
         return EvalRecord(
-            run_id=run_id, suite="agentic", task_id=task.id, kind=task.kind, model=model,
-            outcome="failed", score=0.0, correct=False, expected="", answer="",
-            checkpoints_hit=[], checkpoints_total=len(task.checkpoints),
-            metrics={"wall_s": round(wall, 1)}, note=f"expected-derive failed: {exc}",
+            run_id=run_id,
+            suite="agentic",
+            task_id=task.id,
+            kind=task.kind,
+            model=model,
+            outcome="failed",
+            score=0.0,
+            correct=False,
+            expected="",
+            answer="",
+            checkpoints_hit=[],
+            checkpoints_total=len(task.checkpoints),
+            metrics={"wall_s": round(wall, 1)},
+            note=f"expected-derive failed: {exc}",
         )
 
     metrics, trace = _collect_metrics(workdir, wall)
     sc = score_task(task, stdout, expected, trace)
     note = f"{outcome}: {stdout[-200:]}" if outcome != "ok" and not sc.correct else ""
     return EvalRecord(
-        run_id=run_id, suite="agentic", task_id=task.id, kind=task.kind, model=model,
+        run_id=run_id,
+        suite="agentic",
+        task_id=task.id,
+        kind=task.kind,
+        model=model,
         outcome="ok" if sc.correct or outcome == "ok" else outcome,
-        score=sc.score, correct=sc.correct, expected=sc.expected, answer=sc.answer,
-        checkpoints_hit=sc.checkpoints_hit, checkpoints_total=sc.checkpoints_total,
-        metrics=metrics, note=note,
+        score=sc.score,
+        correct=sc.correct,
+        expected=sc.expected,
+        answer=sc.answer,
+        checkpoints_hit=sc.checkpoints_hit,
+        checkpoints_total=sc.checkpoints_total,
+        metrics=metrics,
+        note=note,
     )
