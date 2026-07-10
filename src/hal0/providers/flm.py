@@ -141,6 +141,14 @@ def _ensure_flm_models_dir(path: str) -> None:
         pass
 
 
+# ── FLM per-role model defaults ────────────────────────────────────────────────
+# The tags FLM loads for the shadow roles when no explicit override is given.
+# An override equal to the default is elided from the argv (the bare ``--asr 1``
+# / ``--embed 1`` already selects it), so these must match FLM's own defaults.
+_DEFAULT_ASR_MODEL = "whisper-v3:turbo"
+_DEFAULT_EMBED_MODEL = "embed-gemma:300m"
+
+
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
@@ -199,6 +207,29 @@ def _npu_device_nodes() -> list[str]:
     except Exception:
         pass
     return [accel or _DEFAULT_NPU_ACCEL_NODE, render or _DEFAULT_NPU_RENDER_NODE]
+
+
+def _flm_shadow_role_args(env: dict[str, str]) -> list[str]:
+    """Build the ``--embed`` / ``--asr`` (+ per-role ``--*-model``) argv tail.
+
+    Shared by :meth:`FLMProvider.start_cmd` (native) and
+    :meth:`FLMProvider.container_spec` (primary) so the two paths can never
+    drift. A per-role model override is emitted only when it is set AND
+    differs from FLM's bundled default — the bare ``--embed 1`` / ``--asr 1``
+    already selects the default, and passing it explicitly is redundant.
+    """
+    args: list[str] = []
+    if env.get("HAL0_FLM_LOAD_EMBED") == "1":
+        args += ["--embed", "1"]
+        embed_model = env.get("HAL0_FLM_EMBED_MODEL") or ""
+        if embed_model and embed_model != _DEFAULT_EMBED_MODEL:
+            args += ["--embed-model", embed_model]
+    if env.get("HAL0_FLM_LOAD_ASR") == "1":
+        args += ["--asr", "1"]
+        asr_model = env.get("HAL0_FLM_ASR_MODEL") or ""
+        if asr_model and asr_model != _DEFAULT_ASR_MODEL:
+            args += ["--asr-model", asr_model]
+    return args
 
 
 def _resolve_render_gid() -> int | None:
@@ -270,6 +301,12 @@ class FLMProvider(Provider):
 
         npu_table = slot_cfg.get("npu") or {}
         defaults = slot_cfg.get("defaults") or {}
+        # Per-role model overrides live on the [npu] table (asr_model /
+        # embed_model). Empty string when unset → argv construction elides
+        # the ``--asr-model`` / ``--embed-model`` flag and FLM serves its
+        # bundled default.
+        asr_model = str(npu_table.get("asr_model") or "")
+        embed_model = str(npu_table.get("embed_model") or "")
         if slot_cfg.get("npu") is not None:
             # [npu] table is PRIMARY when present — explicit asr=false must
             # win even if stale legacy defaults say otherwise.
@@ -293,6 +330,8 @@ class FLMProvider(Provider):
             "HAL0_FLM_LOAD_ASR": load_asr,
             "HAL0_FLM_LOAD_EMBED": load_embed,
             "HAL0_FLM_LOAD_CHAT": load_chat,
+            "HAL0_FLM_ASR_MODEL": asr_model,
+            "HAL0_FLM_EMBED_MODEL": embed_model,
         }
 
     def start_cmd(self, env: dict[str, str]) -> list[str]:
@@ -301,9 +340,10 @@ class FLMProvider(Provider):
         Used by tests and the fallback systemd-without-Docker path. The
         primary deployment path is ``container_spec``.
 
-        Reads per-capability model preferences from shadow TOMLs
-        (flm-stt.toml, flm-embed.toml) so the operator can change
-        STT/embed models without editing the flm slot config.
+        Per-role model overrides come from the [npu] table via
+        :meth:`build_env` (``HAL0_FLM_ASR_MODEL`` / ``HAL0_FLM_EMBED_MODEL``);
+        an override equal to FLM's default is elided so the argv matches the
+        container path exactly.
         """
         binary = os.environ.get("HAL0_FLM_BINARY", f"{_NATIVE_FLM_ROOT}/bin/flm")
         argv = [binary, "serve"]
@@ -317,16 +357,7 @@ class FLMProvider(Provider):
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
-        if env.get("HAL0_FLM_LOAD_EMBED") == "1":
-            embed_model = _read_shadow_model("flm-embed")
-            argv += ["--embed", "1"]
-            if embed_model and embed_model != "embed-gemma:300m":
-                argv += ["--embed-model", embed_model]
-        if env.get("HAL0_FLM_LOAD_ASR") == "1":
-            stt_model = _read_shadow_model("flm-stt")
-            argv += ["--asr", "1"]
-            if stt_model and stt_model != "whisper-v3:turbo":
-                argv += ["--asr-model", stt_model]
+        argv += _flm_shadow_role_args(env)
         return argv
 
     # ── Image / container spec ─────────────────────────────────────────────────
@@ -386,9 +417,15 @@ class FLMProvider(Provider):
         # subcommand + flags — NOT a binary path. Passing an absolute
         # binary path here would be treated by flm as a stray positional
         # argument and rejected with "too many positional options".
-        command: list[str] = [
-            "serve",
-            env["HAL0_FLM_TAG"],
+        command: list[str] = ["serve"]
+        # Chat modality is the positional tag. Gate it on HAL0_FLM_LOAD_CHAT so
+        # toggling NPU · Chat off actually stops serving chat on the container
+        # path (previously the tag was passed unconditionally, so the toggle
+        # only worked on the native start_cmd fallback). With chat off, FLM
+        # serves only the shadow roles (--embed / --asr) and has no LLM.
+        if env.get("HAL0_FLM_LOAD_CHAT", "1") == "1":
+            command += [env["HAL0_FLM_TAG"]]
+        command += [
             "--host",
             "0.0.0.0",
             "--port",
@@ -396,10 +433,7 @@ class FLMProvider(Provider):
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
-        if env["HAL0_FLM_LOAD_EMBED"] == "1":
-            command += ["--embed", "1"]
-        if env["HAL0_FLM_LOAD_ASR"] == "1":
-            command += ["--asr", "1"]
+        command += _flm_shadow_role_args(env)
 
         # render group resolves dynamically at run-time; use the numeric gid
         # so the spec doesn't depend on /etc/group in the container.
@@ -744,31 +778,6 @@ def flm_validate() -> bool | None:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     return proc.returncode == 0
-
-
-def _read_shadow_model(slot_name: str) -> str | None:
-    """Read the model.default from a shadow slot TOML.
-
-    Returns the model tag (e.g. 'whisper-v3:turbo') or None if the
-    shadow TOML doesn't exist or can't be parsed.
-    """
-    from pathlib import Path
-
-    toml_path = Path("/etc/hal0/slots") / f"{slot_name}.toml"
-    if not toml_path.exists():
-        return None
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib
-    try:
-        data = tomllib.loads(toml_path.read_text())
-        model = data.get("model", {})
-        if isinstance(model, dict):
-            return str(model.get("default", "")).strip() or None
-    except Exception:
-        pass
-    return None
 
 
 def flm_served_models() -> list[dict[str, Any]]:

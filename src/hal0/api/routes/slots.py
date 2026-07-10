@@ -51,23 +51,35 @@ router = APIRouter()
 
 @router.get("/flm/models")
 async def list_flm_models(request: Request):
-    """Return installed FLM models (parsed from the NPU slot's container)."""
-    import json as _json
-    import subprocess
+    """Return the FLM catalog for the drawer's NPU model dropdowns.
+
+    Sourced from the HOST ``flm list`` probe (:func:`flm_served_models`), NOT
+    ``podman exec`` into the running container: the drawer is most often opened
+    to *enable* a cold/disabled NPU slot, and an exec against a stopped
+    container returns nothing — leaving every model dropdown empty exactly when
+    the operator needs to pick one. The host probe reads the same on-disk cache
+    the slot serves with and works whether or not the container is up.
+
+    Shape is ``{"models": [{"model": tag, "installed": bool,
+    "capabilities": [...]}]}`` — ``model`` (not the probe's native ``tag``) so
+    the dashboard filter contract (``m.model``, ``m.installed``) is preserved.
+    """
+    from hal0.providers.flm import flm_served_models
 
     try:
-        raw = subprocess.run(
-            ["podman", "exec", "hal0-slot-flm", "/opt/fastflowlm/bin/flm", "list", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        raw.check_returncode()
-        data = _json.loads(raw.stdout)
-        models = data if isinstance(data, list) else data.get("models", [])
-        return {"models": models}
+        catalog = flm_served_models()
     except Exception:
         return {"models": []}
+    models = [
+        {
+            "model": e.get("tag"),
+            "installed": bool(e.get("installed")),
+            "capabilities": e.get("capabilities", []),
+        }
+        for e in catalog
+        if e.get("tag")
+    ]
+    return {"models": models}
 
 
 class NotImplementedYet(Hal0Error):

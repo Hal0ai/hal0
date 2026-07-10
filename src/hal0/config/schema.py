@@ -192,6 +192,22 @@ class NpuConfig(BaseModel):
         default=True,
         description="Enable chat (LLM) modality on the FLM slot. Default ON.",
     )
+    asr_model: str | None = Field(
+        default=None,
+        description=(
+            "FLM tag to serve for ASR (e.g. 'whisper-v3:turbo'). None → FLM's "
+            "default whisper model. Emitted as ``--asr-model`` only when it "
+            "differs from the default. Ignored unless ``asr`` is on."
+        ),
+    )
+    embed_model: str | None = Field(
+        default=None,
+        description=(
+            "FLM tag to serve for embeddings (e.g. 'embed-gemma:300m'). None → "
+            "FLM's default embed model. Emitted as ``--embed-model`` only when "
+            "it differs from the default. Ignored unless ``embed`` is on."
+        ),
+    )
 
 
 class ImageGenConfig(BaseModel):

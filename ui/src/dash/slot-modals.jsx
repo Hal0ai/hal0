@@ -499,6 +499,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setVisionErr(null);
       setNpuAsr(slot.npu?.asr === true);
       setNpuEmbed(slot.npu?.embed === true);
+      // Re-seed the chat pill + all three model selects too, so a save +
+      // refetch keeps the drawer in sync with server truth instead of
+      // drifting until the drawer is remounted.
+      setNpuChat(slot.npu?.chat !== false);
+      setNpuChatModel(slot.model_id || slot.model || 'qwen3:4b');
+      setNpuAsrModel(slot.npu?.asr_model || 'whisper-v3:turbo');
+      setNpuEmbedModel(slot.npu?.embed_model || 'embed-gemma:300m');
       setNpuPending(false);
       setNpuErr(null);
     }
@@ -1080,15 +1087,31 @@ function EditSlotDrawer({ open, slot, onClose }) {
       )}
       {/* NPU capability matrix — replaces Model+Template for NPU slots */}
       {slot.device === "npu" && (() => {
-        const applyNpu = async (nextChat, nextAsr, nextEmbed, field) => {
+        // Persist a modality/model change and cold-restart the container.
+        // `over` carries only the field(s) the caller changed; everything
+        // else falls back to the current (pre-change) state captured in this
+        // closure — which is also what we revert to on error. Model selects
+        // and toggles both route here so every control actually takes effect.
+        const applyNpu = async (over = {}, field = "modality") => {
+          const chat = over.chat ?? npuChat;
+          const asr = over.asr ?? npuAsr;
+          const embed = over.embed ?? npuEmbed;
+          const chatModel = over.chatModel ?? npuChatModel;
+          const asrModel = over.asrModel ?? npuAsrModel;
+          const embedModel = over.embedModel ?? npuEmbedModel;
           setNpuPending(true);
           setNpuErr(null);
-          // Determine primary model from first ON capability
-          const npuBody = { chat: nextChat, asr: nextAsr, embed: nextEmbed };
+          // [npu] carries the modality toggles + the per-role model overrides;
+          // FLM emits --asr-model / --embed-model from these (elided when they
+          // equal the default). The chat model is FLM's positional tag, sent
+          // as a nested [model] table so the backend merge preserves sibling
+          // keys (context_size, n_gpu_layers) instead of clobbering them with
+          // a bare string.
+          const npuBody = { chat, asr, embed };
+          if (asr && asrModel) npuBody.asr_model = asrModel;
+          if (embed && embedModel) npuBody.embed_model = embedModel;
           const body = { npu: npuBody };
-          if (nextChat && npuChatModel) body.model = npuChatModel;
-          else if (nextAsr && npuAsrModel) body.model = npuAsrModel;
-          else if (nextEmbed && npuEmbedModel) body.model = npuEmbedModel;
+          if (chat && chatModel) body.model = { default: chatModel };
           try {
             await editMut.mutateAsync({ name: slot.name, body });
             restartMut.mutate(slot.name, {
@@ -1097,14 +1120,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
             window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${field} updated — restarting`, "info");
           } catch (err) {
             setNpuChat(npuChat); setNpuAsr(npuAsr); setNpuEmbed(npuEmbed);
+            setNpuChatModel(npuChatModel); setNpuAsrModel(npuAsrModel); setNpuEmbedModel(npuEmbedModel);
             setNpuErr(err?.message || "NPU toggle failed");
           } finally {
             setNpuPending(false);
           }
         };
         const chatModels = flmModels.filter(m => m.model && !m.model?.toLowerCase().includes('whisper') && !m.model?.toLowerCase().includes('embed') && m.installed);
-        const sttModels = flmModels.filter(m => m.model?.toLowerCase().includes('whisper'));
-        const embedModels = flmModels.filter(m => m.model?.toLowerCase().includes('embed'));
+        const sttModels = flmModels.filter(m => m.model?.toLowerCase().includes('whisper') && m.installed);
+        const embedModels = flmModels.filter(m => m.model?.toLowerCase().includes('embed') && m.installed);
         return (
           <>
             <div className="form-row">
@@ -1119,10 +1143,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     disabled={npuPending || saving}
                     label="Chat"
                     stateText={npuChat ? "On" : "Off"}
-                    onToggle={(next) => { setNpuChat(next); applyNpu(next, npuAsr, npuEmbed, "chat"); }}
+                    onToggle={(next) => { setNpuChat(next); applyNpu({ chat: next }, "chat"); }}
                   />
                   <select className="input mono" style={{width: 160}} value={npuChatModel}
-                    onChange={e => setNpuChatModel(e.target.value)}
+                    onChange={e => { const v = e.target.value; setNpuChatModel(v); applyNpu({ chatModel: v }, "chat model"); }}
                     disabled={npuPending || saving || !npuChat}
                   >
                     {chatModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
@@ -1143,10 +1167,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     disabled={npuPending || saving}
                     label="ASR"
                     stateText={npuAsr ? "On" : "Off"}
-                    onToggle={(next) => { setNpuAsr(next); applyNpu(npuChat, next, npuEmbed, "ASR"); }}
+                    onToggle={(next) => { setNpuAsr(next); applyNpu({ asr: next }, "ASR"); }}
                   />
                   <select className="input mono" style={{width: 160}} value={npuAsrModel}
-                    onChange={e => setNpuAsrModel(e.target.value)}
+                    onChange={e => { const v = e.target.value; setNpuAsrModel(v); applyNpu({ asrModel: v }, "ASR model"); }}
                     disabled={npuPending || saving || !npuAsr}
                   >
                     {sttModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
@@ -1167,10 +1191,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     disabled={npuPending || saving}
                     label="Embed"
                     stateText={npuEmbed ? "On" : "Off"}
-                    onToggle={(next) => { setNpuEmbed(next); applyNpu(npuChat, npuAsr, next, "Embed"); }}
+                    onToggle={(next) => { setNpuEmbed(next); applyNpu({ embed: next }, "Embed"); }}
                   />
                   <select className="input mono" style={{width: 160}} value={npuEmbedModel}
-                    onChange={e => setNpuEmbedModel(e.target.value)}
+                    onChange={e => { const v = e.target.value; setNpuEmbedModel(v); applyNpu({ embedModel: v }, "Embed model"); }}
                     disabled={npuPending || saving || !npuEmbed}
                   >
                     {embedModels.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
