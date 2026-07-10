@@ -227,11 +227,14 @@ test.describe('NPU occupancy card (/slots · Inference tab)', () => {
     await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
   })
 
-  test('lists a per-FLM-slot card with lifecycle controls', async ({ page }) => {
+  test('lists a per-FLM-slot card with its toggle + header lifecycle controls', async ({ page }) => {
     await page.goto('/#slots')
     const card = page.locator('.npu-card')
     await expect(card.locator('.cslot').first()).toBeVisible()
-    await expect(card.locator('.cslot .slot-ctrls').first()).toBeVisible()
+    // Per-card control is now the modality pill toggle (trio-drawer rework,
+    // #1172); slot lifecycle moved to the card-header ▶/■/↻ buttons.
+    await expect(card.locator('.cslot .npu-switch').first()).toBeVisible()
+    await expect(card.locator('.wcard-h button[title="Stop"]')).toBeVisible()
   })
 })
 

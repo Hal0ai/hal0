@@ -89,23 +89,25 @@ test.describe('NPU occupancy card', () => {
     await expect(cslot.locator('.cslot-mx .tps')).toContainText('52')
   })
 
-  test('serving slot Stop control issues POST /api/slots/npu/unload', async ({ page }) => {
+  test('header Stop control issues POST /api/slots/flm/unload', async ({ page }) => {
     const unloads: string[] = []
-    await page.route('**/api/slots/npu/unload', async (route) => {
+    await page.route('**/api/slots/flm/unload', async (route) => {
       unloads.push(route.request().url())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
 
-    await seedNpu(page, NPU_SERVING_SLOT)
+    // Lifecycle moved off the per-slot cards to the card-header ▶/■/↻
+    // buttons, which target the 'flm' anchor slot (npu→flm rename; the
+    // .sctrl controls were replaced by modality pill toggles in #1172).
+    await seedNpu(page, { ...NPU_SERVING_SLOT, name: 'flm' })
     await page.goto('/#slots')
 
-    const cslot = page.locator('.npu-card .cslot').filter({ hasText: 'npu' }).first()
-    const stop = cslot.locator('.sctrl.stop')
-    await expect(stop).toHaveCount(1)
+    const stop = page.locator('.npu-card .wcard-h button[title="Stop"]')
+    await expect(stop).toBeEnabled()
     await stop.click()
 
     await expect.poll(() => unloads.length, { timeout: 5_000 }).toBeGreaterThan(0)
-    expect(unloads[0]).toContain('/api/slots/npu/unload')
+    expect(unloads[0]).toContain('/api/slots/flm/unload')
   })
 
   test('degraded probe greys the grid and labels the gauge', async ({ page }) => {
