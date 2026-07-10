@@ -160,6 +160,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
 
     # Gather flm/npu slots first — presence is "hw present OR a flm slot".
     flm_slots: list[Any] = []
+    all_slots: list[Any] = []
     if sm is not None:
         try:
             all_slots = await sm.list()
@@ -172,6 +173,11 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             # Skip shadow slots — they ride on the FLM trio, no separate process
             served = getattr(s, "served_by", None)
             if served:
+                continue
+            # flm-stt / flm-embed are companion slots whose occupancy is
+            # reported via virtual synthesis from the FLM anchor's TOML —
+            # they never appear as standalone entries.
+            if s.name.endswith("-stt") or s.name.endswith("-embed"):
                 continue
             if provider == "flm" or backend in ("flm", "npu"):
                 flm_slots.append(s)
@@ -238,23 +244,32 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     npu_cfg = raw.get("npu") or {}
             except Exception:
                 pass
+
+        # Look up the real companion slot states — virtual subs ride
+        # coresident with the FLM anchor. They only claim columns when
+        # the corresponding real slot is enabled (operator-controlled).
+        real_stt = next((rs for rs in all_slots if rs.name == f"{s.name}-stt"), None)
+        real_embed = next((rs for rs in all_slots if rs.name == f"{s.name}-embed"), None)
+
         if npu_cfg.get("asr"):
+            stt_live = is_loaded and real_stt is not None and getattr(real_stt, "enabled", False)
             slots_out.append(
                 {
                     "name": s.name + "-stt",
                     "model": "whisper-v3:turbo",
-                    "state": mapped_state,
-                    "cols": list(range(_NPU_COLS)),
+                    "state": mapped_state if stt_live else "off",
+                    "cols": list(range(_NPU_COLS)) if stt_live else [],
                     "gb": None,
                 }
             )
         if npu_cfg.get("embed"):
+            embed_live = is_loaded and real_embed is not None and getattr(real_embed, "enabled", False)
             slots_out.append(
                 {
                     "name": s.name + "-embed",
                     "model": "embedding-gemma",
-                    "state": mapped_state,
-                    "cols": list(range(_NPU_COLS)),
+                    "state": mapped_state if embed_live else "off",
+                    "cols": list(range(_NPU_COLS)) if embed_live else [],
                     "gb": None,
                 }
             )
