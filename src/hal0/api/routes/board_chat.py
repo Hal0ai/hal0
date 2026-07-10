@@ -1,9 +1,12 @@
 """Platform assistant chat orchestrator — ``POST /api/board/chat`` (SSE).
 
 SPEC §2.D grown into the platform surface: a hal0-NATIVE conversational agent
-that administers the whole instance, not just the board. hal0-api runs a
-client-side OpenAI tool-calling loop whose LLM is the hal0 ``agent`` slot
-(reached via hal0-api's own ``/v1/chat/completions`` surface, mirroring
+that administers the whole instance, not just the board. The surface embodies
+the ``hal0-brain`` profile (separate memory namespace, hal0-heavy context;
+persona TOML overrides the built-in prompt/model when present) and hal0-api
+runs a client-side OpenAI tool-calling loop whose LLM is the hal0 ``brain``
+slot, falling back to ``agent`` via the resolver chain (reached via hal0-api's
+own ``/v1/chat/completions`` surface, mirroring
 :class:`hal0.omni_router.OmniRouter`). Three tool families:
 
 * **Board reads** (unaudited, via :class:`HermesKanbanClient` — mirrors the
@@ -25,6 +28,7 @@ Hermes agent via chat_proxy WITHOUT any UI change):
 
     SSE events, one JSON object per ``data:`` line:
       {"type": "token",  "text": "..."}            assistant token delta
+      {"type": "thinking", "text": "..."}           model reasoning (never shown inline)
       {"type": "tool_call",   "name": "...", "arguments": {...}, "id": "..."}
       {"type": "tool_result", "name": "...", "id": "...", "result": {...}}
       {"type": "done"}                              end of turn
@@ -40,6 +44,7 @@ production it is wired to hal0-api's ``/v1/chat/completions`` against the
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -56,32 +61,59 @@ log = structlog.get_logger(__name__)
 # forever (mirrors OmniRouter._MAX_LOOP_ROUNDS).
 _MAX_ROUNDS = 8
 
-# The slot the orchestrator drives. Points at the `agent` slot — the
-# tool-calling orchestrator model — rather than the conversational `chat`
-# slot (hal0/chat): board chat IS an agentic surface (it drives audited
-# board mutations via tool-calls), so the agent model is the correct brain.
-# (Named PRIMARY_SLOT_MODEL for back-compat; resolves via the resolver chains.)
-PRIMARY_SLOT_MODEL = "hal0/agent"
+# The slot the steward drives. Points at the dedicated `brain` slot (the
+# hal0-brain profile's default model) — the resolver's generalized chain
+# (`hal0/<slot>` → (<slot>, agent)) falls back to the `agent` slot when no
+# brain slot is loaded, so the chat degrades to the orchestrator model
+# instead of failing. (PRIMARY_SLOT_MODEL kept as a back-compat alias.)
+BRAIN_SLOT_MODEL = "hal0/brain"
+PRIMARY_SLOT_MODEL = BRAIN_SLOT_MODEL
+
+# The agent profile (persona) this surface embodies. When a persona TOML with
+# this id exists in the personas store, its system prompt / preferred model
+# override the built-in defaults below — the operator edits ONE file and the
+# slide-out chat follows.
+BRAIN_PERSONA_ID = "hal0-brain"
 
 # Injected as the leading system message when the client doesn't send one.
 # Without it the LLM had ten write tools, no read tools, and no idea what the
 # lanes mean — it could mutate the board but never see it, so "what's
 # blocked?" or "move the auth task to review" was unanswerable.
 _SYSTEM_PROMPT = """\
-You are the hal0 platform assistant: a terse operations agent that
-administers this hal0 instance via tools — the Operator Board (kanban),
-inference slots, models, agent profiles, and orchestration settings.
+You are hal0-brain: the resident platform steward of this hal0 home AI box.
+You run as the dashboard's agent chat and administer the whole instance via
+tools — inference slots, the model library, benchmarks, hardware, the
+Operator Board (kanban), and orchestration settings. You keep your own
+memory, separate from the Hermes chat agent (namespace private:hal0-brain).
 
-Surfaces:
+hal0 context:
+- A *slot* is a named inference unit (systemd hal0-slot@<name>) binding one
+  model to a backend (llama.cpp Vulkan/ROCm, FLM on the NPU) with device,
+  context-length and throughput settings. Canonical slots: `agent` (the
+  tool-calling anchor every fallback chain ends in), `brain` (you),
+  `utility` (cheap helper), `npu` (NPU chat edge). Any enabled slot X is
+  addressable as the virtual model `hal0/X` via /v1/chat/completions.
+- Setting up a model means: find it in the library (list_models), download
+  the artifact (GGUF or FLM package), then bind it to a slot and load it.
+  Walk the operator through it step by step and confirm before each
+  disruptive move.
+- Benchmarking: hal0-bench drives a model on a slot and records throughput/
+  latency runs (dash → Benchmarks). You can prepare the slot (right model
+  loaded, others unloaded on request) and read hardware_stats to sanity-check
+  headroom before a run.
 - Board: lanes (the `status` values) are triage (new, awaiting spec), todo
   (specified and queued), scheduled (time-triggered), ready (claimed for
   dispatch), running (worker active), blocked (waiting on input; carries
   block_reason), review (needs operator sign-off), done, archived.
-- Slots: list_slots / get_slot report each inference slot's state (serving,
-  ready, warming, idle, offline, error), model and throughput;
-  slot_load / slot_unload / slot_restart change them.
+
+Tool surfaces:
+- Slots: list_slots / get_slot report each slot's state (serving, ready,
+  warming, idle, offline, error), model and throughput; slot_load /
+  slot_unload / slot_restart change them.
 - Catalogue: list_models (model library), list_agents (installed platform
   agents), hardware_stats (RAM/VRAM/GTT, GPU util, NPU status).
+- Board reads + audited mutations (get_board, move/assign/create/comment,
+  dependencies, specify/decompose, nudge_dispatcher).
 - Settings: get_orchestration / update_orchestration (board dispatcher knobs:
   orchestrator_profile, default_assignee, auto_decompose,
   auto_promote_children).
@@ -93,8 +125,31 @@ Rules:
 - Slot load/unload/restart are DISRUPTIVE (they can evict models and drop
   in-flight requests): do them only when the operator explicitly asks, and
   state what you did.
+- For multi-step work (create a slot, set up a model, run a benchmark) lay
+  out the short plan first, then execute step by step, reporting progress.
 - Prefer a clarifying question over a destructive guess. Keep replies short.
 """
+
+
+def _resolve_profile(request: Request) -> tuple[str, str]:
+    """Resolve (system_prompt, default_model) from the hal0-brain profile.
+
+    Reads the ``hal0-brain`` persona TOML from the personas store (root
+    overridable via ``app.state.brain_persona_root`` for tests). A missing or
+    malformed persona falls back to the built-in ``_SYSTEM_PROMPT`` /
+    ``BRAIN_SLOT_MODEL`` so the chat never breaks on a half-provisioned box.
+    """
+    from hal0.agents.personas import PersonaError, load_persona
+
+    root = getattr(request.app.state, "brain_persona_root", None)
+    try:
+        persona = load_persona(BRAIN_PERSONA_ID, root=root)
+    except (FileNotFoundError, PersonaError, OSError):
+        return _SYSTEM_PROMPT, BRAIN_SLOT_MODEL
+    prompt = persona.system_prompt.strip() or _SYSTEM_PROMPT
+    model = persona.preferred_model.strip() or BRAIN_SLOT_MODEL
+    return prompt, model
+
 
 #: LLM backend signature: an OpenAI chat-completion request body in, the
 #: parsed response dict out.
@@ -635,6 +690,40 @@ def _assistant_text(response: dict[str, Any]) -> str:
     return content if isinstance(content, str) else ""
 
 
+# Reasoning models interleave chain-of-thought with the reply, either as a
+# separate message field (DeepSeek-style ``reasoning_content``) or inline
+# ``<think>…</think>`` tags (Qwen-style). Both are split out and streamed as
+# ``thinking`` frames so the UI can fold them away instead of rendering raw
+# think-tags in the chat bubble.
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def _split_thinking(content: str) -> tuple[str, str]:
+    """Split ``<think>`` blocks out of assistant content → (thinking, visible)."""
+    if "<think>" not in content:
+        return "", content
+    thinking_parts = _THINK_RE.findall(content)
+    visible = _THINK_RE.sub("", content)
+    rest = visible.split("<think>", 1)
+    if len(rest) == 2:  # unterminated trailing <think> — all of it is reasoning
+        visible = rest[0]
+        thinking_parts.append(rest[1])
+    return "\n".join(p.strip() for p in thinking_parts if p.strip()), visible.strip()
+
+
+def _assistant_thinking(response: dict[str, Any]) -> str:
+    """Pull explicit reasoning fields off the assistant message."""
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    for key in ("reasoning_content", "reasoning"):
+        value = msg.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _assistant_message(response: dict[str, Any]) -> dict[str, Any] | None:
     choices = response.get("choices") or []
     if not choices:
@@ -656,14 +745,15 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
 
     llm = _resolve_llm(request)
     board = payload.get("board")
+    system_prompt, default_model = _resolve_profile(request)
     messages: list[dict[str, Any]] = list(payload.get("messages") or [])
     # Seed the system prompt unless the client sent its own — the model needs
     # the lane vocabulary and the read-before-write rule to act on the board.
     if not messages or not (isinstance(messages[0], dict) and messages[0].get("role") == "system"):
-        messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
+        messages.insert(0, {"role": "system", "content": system_prompt})
 
     body: dict[str, Any] = {
-        "model": payload.get("model") or PRIMARY_SLOT_MODEL,
+        "model": payload.get("model") or default_model,
         "messages": messages,
         "tools": _tool_schemas(),
         "stream": False,
@@ -677,7 +767,11 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
                 yield _sse({"type": "done"})
                 return
 
-            text = _assistant_text(response)
+            explicit_thinking = _assistant_thinking(response)
+            inline_thinking, text = _split_thinking(_assistant_text(response))
+            thinking = "\n".join(t for t in (explicit_thinking, inline_thinking) if t)
+            if thinking:
+                yield _sse({"type": "thinking", "text": thinking})
             if text:
                 yield _sse({"type": "token", "text": text})
 
@@ -740,6 +834,8 @@ async def run_board_chat(request: Request) -> StreamingResponse:
 
 
 __all__ = [
+    "BRAIN_PERSONA_ID",
+    "BRAIN_SLOT_MODEL",
     "PRIMARY_SLOT_MODEL",
     "_chat_stream",
     "_compact_board",

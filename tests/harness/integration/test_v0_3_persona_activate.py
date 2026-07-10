@@ -65,7 +65,7 @@ def test_persona_list_reflects_seeded_personas(
     assert body["agent_id"] == "hermes"
     assert body["active"] == "hermes"
     ids = sorted(row["id"] for row in body["personas"])
-    assert ids == ["coder", "hermes"]
+    assert ids == ["coder", "hal0-brain", "hermes"]
 
 
 def test_persona_activate_writes_active_txt(

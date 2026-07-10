@@ -83,7 +83,7 @@ def test_update_cannot_change_id(client: TestClient, seeded: Path) -> None:
     assert r.status_code == 200, r.text
     assert r.json()["id"] == "hermes"
     # No stray persona file was created.
-    assert {p.stem for p in seeded.glob("*.toml")} == {"hermes", "coder"}
+    assert {p.stem for p in seeded.glob("*.toml")} == {"hermes", "coder", "hal0-brain"}
 
 
 def test_update_preserves_budget(client: TestClient, seeded: Path) -> None:

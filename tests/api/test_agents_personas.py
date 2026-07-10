@@ -56,7 +56,7 @@ def test_list_returns_seeded_personas(client: TestClient, seeded_personas: Path)
     assert body["agent_id"] == "hermes"
     assert body["active"] == "hermes"
     ids = sorted(row["id"] for row in body["personas"])
-    assert ids == ["coder", "hermes"]
+    assert ids == ["coder", "hal0-brain", "hermes"]
     hermes_row = next(row for row in body["personas"] if row["id"] == "hermes")
     assert hermes_row["active"] is True
     assert hermes_row["display_name"] == "Hermes"

@@ -23,11 +23,13 @@ from hal0.api.middleware import error_codes
 from hal0.api.routes import board
 from hal0.api.routes.board_chat import (
     _SYSTEM_PROMPT,
+    BRAIN_SLOT_MODEL,
     _compact_board,
     _extract_tool_calls,
     _resolve_platform_tool,
     _resolve_read_tool,
     _resolve_tool,
+    _split_thinking,
     _tool_schemas,
 )
 from hal0.board import KANBAN_BASE_PATH, HermesKanbanClient
@@ -173,6 +175,9 @@ def _make_app(
     store.init_schema()
     app.state.audit = store
     app.state.board_chat_llm = stub
+    # Isolate from any real hal0-brain persona on the test box — an empty
+    # root makes _resolve_profile fall back to the built-in prompt/model.
+    app.state.brain_persona_root = tmp_path / "personas"
     return app, TestClient(app)
 
 
@@ -593,6 +598,103 @@ def test_system_prompt_not_duplicated_when_client_sends_one(tmp_path) -> None:
     sent = stub.calls[0]["messages"]
     assert sent[0] == {"role": "system", "content": "custom"}
     assert sum(1 for m in sent if m.get("role") == "system") == 1
+
+
+# ── hal0-brain profile (model default + persona override) ───────────────────
+
+
+def test_default_model_is_brain_slot(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    _app, client = _make_app(rec, stub, tmp_path)
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
+    assert stub.calls[0]["model"] == BRAIN_SLOT_MODEL == "hal0/brain"
+
+
+def test_payload_model_overrides_default(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    _app, client = _make_app(rec, stub, tmp_path)
+    client.post(
+        "/api/board/chat",
+        json={"messages": [{"role": "user", "content": "hello"}], "model": "hal0/utility"},
+    )
+    assert stub.calls[0]["model"] == "hal0/utility"
+
+
+def test_hal0_brain_persona_overrides_prompt_and_model(tmp_path) -> None:
+    from hal0.agents.personas import Persona, save_persona
+
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    save_persona(
+        Persona(
+            id="hal0-brain",
+            display_name="hal0 Brain",
+            system_prompt="operator-tuned steward prompt",
+            preferred_model="hal0/custom-brain",
+        ),
+        root=app.state.brain_persona_root,
+    )
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
+    sent = stub.calls[0]
+    assert sent["model"] == "hal0/custom-brain"
+    assert sent["messages"][0] == {"role": "system", "content": "operator-tuned steward prompt"}
+
+
+# ── thinking frames (reasoning models) ──────────────────────────────────────
+
+
+def test_reasoning_content_streams_as_thinking_frame(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM(
+        [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "the answer",
+                            "reasoning_content": "let me check the slots",
+                        }
+                    }
+                ]
+            }
+        ]
+    )
+    _app, client = _make_app(rec, stub, tmp_path)
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    events = _sse_events(resp.text)
+    thinking = next(e for e in events if e["type"] == "thinking")
+    assert thinking["text"] == "let me check the slots"
+    token = next(e for e in events if e["type"] == "token")
+    assert token["text"] == "the answer"
+    assert events.index(thinking) < events.index(token)
+
+
+def test_inline_think_tags_split_into_thinking_frame(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("<think>ponder ponder</think>the reply")])
+    _app, client = _make_app(rec, stub, tmp_path)
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    events = _sse_events(resp.text)
+    thinking = next(e for e in events if e["type"] == "thinking")
+    assert thinking["text"] == "ponder ponder"
+    token = next(e for e in events if e["type"] == "token")
+    assert token["text"] == "the reply"
+
+
+def test_split_thinking_unterminated_tag() -> None:
+    thinking, visible = _split_thinking("<think>still going")
+    assert thinking == "still going"
+    assert visible == ""
+
+
+def test_split_thinking_passthrough_without_tags() -> None:
+    thinking, visible = _split_thinking("plain reply")
+    assert thinking == ""
+    assert visible == "plain reply"
 
 
 # ── loop termination + errors ───────────────────────────────────────────────

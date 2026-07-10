@@ -21,6 +21,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+- `hal0-brain` agent profile: a third seeded persona (alongside `hermes` and `coder`) that stewards the platform from the dashboard's agent-chat slide-out — its own memory namespace (`private:hal0-brain`), a hal0-heavy system prompt (slot lifecycle, model setup, benchmarking), and the dedicated `brain` slot (`hal0/brain`) as the default model.
+- Board/agent chat streams a `{type:"thinking"}` SSE frame: explicit `reasoning_content` and inline `<think>…</think>` blocks are split out of the reply and rendered as a folded "thinking" section instead of raw tags.
+
+### Changed
+- The top-bar agent chat now embodies the `hal0-brain` profile: it runs on `hal0/brain` (falls back to the `agent` slot via the resolver chain), and an operator-edited `hal0-brain` persona TOML overrides its system prompt/model without a code change.
+- Agent-chat suggestion chips are now platform-steward starters ("Help me create a new slot", "Download and set up a model", "Benchmark the model on a slot", "How's the hardware doing?").
+- Agent-chat replies render markdown (fences, lists, headings, bold/italic/inline code, links); tool calls render as structured cards with args, live status, and a folded result — replacing the raw `→ tool({json})` text rows.
+
 ## [0.9.6] — 2026-07-10
 
 ### Highlights

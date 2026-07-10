@@ -375,10 +375,11 @@ def activate(
 
 # ── Seed personas (Phase 8) ─────────────────────────────────────────────────
 #
-# The two personas seeded at provision time. Per master-plan §6 the
-# user picked ``hermes`` (default) + ``coder`` — they share the hal0 MCP
-# tooling but differ on tone, tools-allowed, and memory namespace so
-# context from coding sessions doesn't bleed into general chat.
+# The personas seeded at provision time. Per master-plan §6 the user picked
+# ``hermes`` (default) + ``coder``; ``hal0-brain`` was added for the
+# dashboard's agent-chat slide-out. They share the hal0 MCP tooling but
+# differ on tone, tools-allowed, and memory namespace so context from one
+# surface doesn't bleed into another.
 
 
 def _seed_hermes(agent_id: str) -> Persona:
@@ -450,21 +451,77 @@ def _seed_coder(agent_id: str) -> Persona:
     )
 
 
+def _seed_hal0_brain(agent_id: str) -> Persona:
+    """The dashboard agent-chat profile — the platform steward.
+
+    This is the persona the top-bar slide-out chat embodies (see
+    ``hal0.api.routes.board_chat``): its own memory bank so platform-admin
+    context never bleeds into the operator's general Hermes chat, a
+    hal0-heavy system prompt, and the dedicated ``brain`` slot as the
+    default model (``hal0/brain`` falls back to the ``agent`` slot via the
+    resolver chain when the brain slot isn't loaded).
+    """
+    return Persona(
+        id="hal0-brain",
+        display_name="hal0 Brain",
+        summary="Platform steward behind the dashboard agent chat — slots, models, benchmarks.",
+        system_prompt=(
+            "You are hal0-brain, the resident platform steward of this hal0 home "
+            "AI box, embedded in the dashboard's agent chat. You administer the "
+            "instance itself: inference slots (create, configure, load/unload/"
+            "restart), the model library (find, download, set up models), "
+            "benchmarks (prepare a slot and interpret hal0-bench runs), hardware "
+            "headroom (RAM/VRAM/GTT, GPU/NPU), the Operator Board, and "
+            "orchestration settings. Read state before mutating it and never "
+            "guess slot names or task ids. Slot load/unload/restart are "
+            "disruptive — only on explicit operator request. For multi-step work "
+            "(new slot, model setup, benchmark run) lay out a short plan, then "
+            "execute step by step. Keep replies short and technical."
+        ),
+        tools_allowed=("*",),
+        # A dedicated private bank: platform-admin context (slot layouts, model
+        # choices, benchmark history) stays out of the general Hermes chat and
+        # the coder persona. Created lazily by Hindsight on first write.
+        memory_namespace="private:hal0-brain",
+        approval=PersonaApproval(
+            default_policy="ask",
+            auto_approve=(
+                "memory.read.*",
+                "search.*",
+                "slot.read.*",
+                "hal0_admin.read.*",
+                "kanban.read.*",
+                "bench.read.*",
+            ),
+            require_approval=(
+                "files.*",
+                "shell.*",
+                "admin.*",
+                "slot.write.*",
+                "hal0_admin.write.*",
+                "kanban.write.*",
+            ),
+        ),
+        preferred_upstream="hal0",
+        preferred_model="hal0/brain",
+    )
+
+
 def seed_default_personas(
     agent_id: str = "hermes",
     *,
     root: Path | None = None,
     overwrite: bool = False,
 ) -> list[Persona]:
-    """Idempotently seed the ``hermes`` + ``coder`` personas + active pointer.
+    """Idempotently seed ``hermes`` + ``coder`` + ``hal0-brain`` + active pointer.
 
-    On first install both files are written and ``active.txt`` is set to
+    On first install the files are written and ``active.txt`` is set to
     ``hermes``. On re-run (``overwrite=False``) existing files are left
     alone so operator edits survive — only missing personas get written.
     With ``overwrite=True`` the seeds are forcibly re-written; used by
     ``--repair`` to recover from a corrupted operator edit.
     """
-    seeds = [_seed_hermes(agent_id), _seed_coder(agent_id)]
+    seeds = [_seed_hermes(agent_id), _seed_coder(agent_id), _seed_hal0_brain(agent_id)]
     written: list[Persona] = []
     for persona in seeds:
         path = _personas_root(root) / f"{persona.id}.toml"
