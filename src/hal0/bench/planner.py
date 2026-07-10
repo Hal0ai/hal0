@@ -259,7 +259,11 @@ def _flag_tokens(flags: dict) -> list[str]:
 
 
 def _build_identity(
-    model: dict[str, Any], lane: str, kind: str, depth: int, sampler: str,
+    model: dict[str, Any],
+    lane: str,
+    kind: str,
+    depth: int,
+    sampler: str,
     flags: dict | None = None,
 ) -> Identity:
     """Resolve one candidate cell's identity from a registry entry + axis point.
@@ -320,7 +324,9 @@ def _validated_configs(configs: list[dict]) -> list[dict]:
             if k in _TUNE_FLAGS:
                 flags[k] = v
             else:
-                print(f"[plan] ignoring non-whitelisted config flag {k!r} in variant {c.get('label')!r}")
+                print(
+                    f"[plan] ignoring non-whitelisted config flag {k!r} in variant {c.get('label')!r}"
+                )
         out.append({"label": c.get("label") or "default", "flags": flags})
     return out or [{"label": "default", "flags": {}}]
 

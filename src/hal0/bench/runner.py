@@ -62,8 +62,14 @@ MODEL_ROOT = "/mnt/ai-models/"
 # Rough per-cell expected wall-clock (seconds) for the watchdog (fires at 3x).
 # Generous on purpose — it catches a hang, it is not an SLA.
 _EXPECTED_S = {
-    "pp": 120, "tg": 180, "chat": 240, "reuse": 180,
-    "embed": 120, "rerank": 120, "batch": 600, "mtp": 300,
+    "pp": 120,
+    "tg": 180,
+    "chat": 240,
+    "reuse": 180,
+    "embed": 120,
+    "rerank": 120,
+    "batch": 600,
+    "mtp": 300,
 }
 _TIER_A_KINDS = {"pp", "tg"}
 # Tier-B cell kind -> server_ab.py --mode (this build: ab/reuse/embed/rerank).
@@ -184,7 +190,7 @@ def _gpu_slot_serving(api: str) -> bool:
 def _rel_gguf(gguf: str) -> str:
     """The model path the seam expects: relative to /mnt/ai-models, ending .gguf
     (hal0-benchctl validate_model). Absolute registry paths are stripped."""
-    return gguf[len(MODEL_ROOT):] if gguf.startswith(MODEL_ROOT) else gguf.lstrip("/")
+    return gguf[len(MODEL_ROOT) :] if gguf.startswith(MODEL_ROOT) else gguf.lstrip("/")
 
 
 def _run_subprocess(cmd: list[str], timeout_s: float, log_path: Path) -> tuple[int, str]:
@@ -226,8 +232,7 @@ def _locate_sweep_output(lane: str, since_wall: float) -> tuple[list[dict], dict
     if not V1_RUNS_DIR.is_dir():
         return None
     cands = [
-        p for p in V1_RUNS_DIR.glob(f"*__{lane}__sweep.json")
-        if p.stat().st_mtime >= since_wall - 5
+        p for p in V1_RUNS_DIR.glob(f"*__{lane}__sweep.json") if p.stat().st_mtime >= since_wall - 5
     ]
     if not cands:
         return None
@@ -276,11 +281,22 @@ def _tier_a_cmd(cell, exclusive: bool, tg_gen: int) -> list[str]:
     return cmd
 
 
-def _tier_bc_cmd(cell, slot: str, api: str, out: Path | str = "<artifacts>/server-ab.json") -> list[str]:
+def _tier_bc_cmd(
+    cell, slot: str, api: str, out: Path | str = "<artifacts>/server-ab.json"
+) -> list[str]:
     """The exact `server_ab.py` argv for a Tier-B/C cell."""
     return [
-        SERVER_AB, "--mode", _KIND_TO_MODE.get(cell.kind, "ab"),
-        "--slot", slot, "--api", api, "--n", str(cell.reps), "--out", str(out),
+        SERVER_AB,
+        "--mode",
+        _KIND_TO_MODE.get(cell.kind, "ab"),
+        "--slot",
+        slot,
+        "--api",
+        api,
+        "--n",
+        str(cell.reps),
+        "--out",
+        str(out),
     ]
 
 
@@ -293,7 +309,9 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
     seen: set[tuple] = set()
     lines: list[str] = []
     for i, c in enumerate(cells, 1):
-        cfg = f"  cfg:{c.config_label}" if getattr(c, "config_label", "default") != "default" else ""
+        cfg = (
+            f"  cfg:{c.config_label}" if getattr(c, "config_label", "default") != "default" else ""
+        )
         label = f"{i:2d}. {c.model_id}  {c.lane}  {c.kind}  d{c.depth}{cfg}  ({c.reason})"
         if c.kind in _TIER_A_KINDS:
             key = _group_key(c)
@@ -367,12 +385,27 @@ def run_session(
 
             if cell.kind in _TIER_A_KINDS:
                 record = _tier_a_record(
-                    cell, artifacts, watchdog_s, exclusive, tg_gen, sweep_cache,
-                    host, suite_id, run_id, api,
+                    cell,
+                    artifacts,
+                    watchdog_s,
+                    exclusive,
+                    tg_gen,
+                    sweep_cache,
+                    host,
+                    suite_id,
+                    run_id,
+                    api,
                 )
             else:
                 record = _tier_bc_record(
-                    cell, artifacts, watchdog_s, api, exclusive, host, suite_id, run_id,
+                    cell,
+                    artifacts,
+                    watchdog_s,
+                    api,
+                    exclusive,
+                    host,
+                    suite_id,
+                    run_id,
                 )
 
             store.append_record(record)  # append-as-we-go = resumable
@@ -409,7 +442,16 @@ def _tg_gen_by_group(cells: list[Cell]) -> dict[tuple, int]:
 
 
 def _tier_a_record(
-    cell, artifacts, timeout_s, exclusive, tg_gen_map, cache, host, suite_id, run_id, api,
+    cell,
+    artifacts,
+    timeout_s,
+    exclusive,
+    tg_gen_map,
+    cache,
+    host,
+    suite_id,
+    run_id,
+    api,
 ) -> Record:
     """Run (or reuse) the Tier-A sweep for this cell's group and parse its kind."""
     key = _group_key(cell)
@@ -445,7 +487,14 @@ def _tier_a_record(
 
 
 def _tier_bc_record(
-    cell, artifacts, timeout_s, api, exclusive, host, suite_id, run_id,
+    cell,
+    artifacts,
+    timeout_s,
+    api,
+    exclusive,
+    host,
+    suite_id,
+    run_id,
 ) -> Record:
     """Run a Tier-B/C server_ab cell and parse it. Slot name resolves from the
     registry model id via /api/slots (a live server_ab slot), falling back to the
@@ -479,7 +528,15 @@ def _slot_for_model(api: str, model_id: str) -> str | None:
 
 
 def _assemble(
-    cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api,
+    cell,
+    parsed,
+    outcome,
+    host,
+    suite_id,
+    run_id,
+    artifacts,
+    tail,
+    api,
 ) -> Record:
     """Build the schema-2 record from a Parsed result + the planned cell.
 
@@ -508,7 +565,11 @@ def _assemble(
     # to publish (DESIGN §4 smoke): downgrade an otherwise-ok outcome.
     if outcome is Outcome.OK and not host.exclusive and _gpu_slot_serving(api):
         outcome = Outcome.SKIPPED_CONTENDED
-    note = "" if outcome is Outcome.OK else (f"{outcome.value}: {tail[-200:]}" if tail else outcome.value)
+    note = (
+        ""
+        if outcome is Outcome.OK
+        else (f"{outcome.value}: {tail[-200:]}" if tail else outcome.value)
+    )
     return Record(
         run_id=run_id,
         suite=suite_id,
