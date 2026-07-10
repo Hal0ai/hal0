@@ -81,13 +81,17 @@ def test_flm_npu_seed_profile() -> None:
     assert prof["mtp"] is False
 
 
-def test_seed_npu_toml_validates() -> None:
-    raw = tomllib.loads((_SEEDED_SLOTS_DIR / "npu.toml").read_text(encoding="utf-8"))
+def test_seed_flm_toml_validates() -> None:
+    """flm.toml is THE seeded NPU slot (install.sh seed loop); the old
+    npu.toml near-duplicate was never in the loop and has been removed."""
+    raw = tomllib.loads((_SEEDED_SLOTS_DIR / "flm.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
     assert slot.profile == "flm"
     assert slot.device == "npu"
-    # chat-only utility: no [npu] trio table, role aliased to utility
+    assert slot.port == 8088
+    # chat-only seed: no [npu] trio table (chat defaults on; asr/embed are
+    # flipped per-slot via the dashboard's NPU drawer)
     assert slot.npu is None
     # Clean seed (WS-E, #1107): no FLM model pin — boots grey, no surprise
     # download, no crash-loop. context_size is a tuning default for later.

@@ -1326,7 +1326,8 @@ else
 fi
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{npu,tts}.toml if absent. Idempotent: never
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img}.toml if absent
+# (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
 # runtime validation at load time. runtime=container + profile=<X> routes
