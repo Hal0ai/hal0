@@ -523,9 +523,10 @@ class MemoryUninstallOutcome:
         ``not_found`` / ``unreachable`` (we never got to the delete).
     leftover_count
         Rows the post-delete verify search saw matching
-        ``agent_id=hermes-agent``. ``None`` when the verify call itself
-        couldn't run (transport error, unparseable response, etc.) —
-        distinct from a confirmed zero.
+        ``agent_id=hermes`` (the identity card's real slug — see
+        ``BootstrapState.agent_id``). ``None`` when the verify call
+        itself couldn't run (transport error, unparseable response,
+        etc.) — distinct from a confirmed zero.
     url
         The hal0 API base we tried (handy in stderr warnings so the
         operator knows what endpoint to check).
