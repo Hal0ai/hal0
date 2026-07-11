@@ -375,11 +375,13 @@ def activate(
 
 # ── Seed personas (Phase 8) ─────────────────────────────────────────────────
 #
-# The personas seeded at provision time. Per master-plan §6 the user picked
-# ``hermes`` (default) + ``coder``; ``hal0-brain`` was added for the
-# dashboard's agent-chat slide-out. They share the hal0 MCP tooling but
-# differ on tone, tools-allowed, and memory namespace so context from one
-# surface doesn't bleed into another.
+# The personas seeded at provision time: ``hermes`` (default) and
+# ``hal0-brain`` (the dashboard's agent-chat slide-out). They share the
+# hal0 MCP tooling but differ on tone, tools-allowed, and memory namespace
+# so context from one surface doesn't bleed into another. ``coder`` (per
+# master-plan §6) was a third seed until it was retired; its canonical
+# definition stays below so the seeder can recognise — and remove —
+# pristine copies left on boxes seeded before the retirement.
 
 
 def _seed_hermes(agent_id: str) -> Persona:
@@ -409,6 +411,9 @@ def _seed_hermes(agent_id: str) -> Persona:
 
 
 def _seed_coder(agent_id: str) -> Persona:
+    """RETIRED seed — kept only so :func:`seed_default_personas` can match
+    (and delete) untouched ``coder.toml`` files written by older seeders.
+    Never add this back to the seeds list."""
     return Persona(
         id="coder",
         display_name="Coder",
@@ -483,23 +488,29 @@ def _seed_hal0_brain(agent_id: str) -> Persona:
         # choices, benchmark history) stays out of the general Hermes chat and
         # the coder persona. Created lazily by Hindsight on first write.
         memory_namespace="private:hal0-brain",
+        # Patterns are fnmatch globs over ADMIN TOOL NAMES (slot_create,
+        # model_pull, …) — enforced on the sidebar chat via
+        # hal0.mcp.admin.ToolPolicy, layered onto the server-side
+        # read/write/gated classification. Conservative canonical: nothing
+        # is loosened (gated tools still queue for operator approval);
+        # require_approval redundantly pins the destructive floor
+        # (POLICY_NO_LOOSEN) so the operator sees it in the TOML. To let
+        # the Brain e.g. download models without per-pull approval, add
+        # "model_pull" to auto_approve.
         approval=PersonaApproval(
             default_policy="ask",
             auto_approve=(
-                "memory.read.*",
-                "search.*",
-                "slot.read.*",
-                "hal0_admin.read.*",
-                "kanban.read.*",
-                "bench.read.*",
+                "memory_search",
+                "memory_list",
+                "memory_add",
             ),
             require_approval=(
-                "files.*",
-                "shell.*",
-                "admin.*",
-                "slot.write.*",
-                "hal0_admin.write.*",
-                "kanban.write.*",
+                "model_delete",
+                "slot_delete",
+                "stack_delete",
+                "profile_delete",
+                "config_write",
+                "provider_credential_write",
             ),
         ),
         preferred_upstream="hal0",
@@ -513,15 +524,20 @@ def seed_default_personas(
     root: Path | None = None,
     overwrite: bool = False,
 ) -> list[Persona]:
-    """Idempotently seed ``hermes`` + ``coder`` + ``hal0-brain`` + active pointer.
+    """Idempotently seed ``hermes`` + ``hal0-brain`` + active pointer.
 
     On first install the files are written and ``active.txt`` is set to
     ``hermes``. On re-run (``overwrite=False``) existing files are left
     alone so operator edits survive — only missing personas get written.
     With ``overwrite=True`` the seeds are forcibly re-written; used by
     ``--repair`` to recover from a corrupted operator edit.
+
+    Retired seeds (``coder``) are swept on every run: an on-disk copy is
+    deleted only when it still equals its canonical seed AND isn't the
+    active persona — an operator edit or an active selection turns the
+    file into operator data the seeder must not touch.
     """
-    seeds = [_seed_hermes(agent_id), _seed_coder(agent_id), _seed_hal0_brain(agent_id)]
+    seeds = [_seed_hermes(agent_id), _seed_hal0_brain(agent_id)]
     written: list[Persona] = []
     for persona in seeds:
         path = _personas_root(root) / f"{persona.id}.toml"
@@ -529,6 +545,16 @@ def seed_default_personas(
             continue
         save_persona(persona, root=root)
         written.append(persona)
+    for retired in (_seed_coder(agent_id),):
+        path = _personas_root(root) / f"{retired.id}.toml"
+        if not path.exists() or get_active(root=root) == retired.id:
+            continue
+        try:
+            existing = load_persona(retired.id, root=root)
+        except (FileNotFoundError, PersonaError, OSError):
+            continue  # malformed = operator territory; leave it alone
+        if existing == retired:
+            path.unlink()
     # active pointer: only set if missing or pointing at a now-missing
     # persona. Operator-chosen active values survive re-seeding.
     pointer = _personas_root(root) / ACTIVE_POINTER

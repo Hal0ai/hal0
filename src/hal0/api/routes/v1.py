@@ -850,7 +850,7 @@ async def _is_npu_trio_request(
          ``device == "npu"`` AND ``type == slot_type``. We look at both
          ``slot.model.default`` AND ``slot.name`` so callers that pass
          either the model id or the slot name (e.g. dashboard cards
-         using ``model="stt-npu"``) hit the same path.
+         using ``model="flm-stt"``) hit the same path.
       2. The :class:`NpuTrioRouter` itself is attached on ``app.state``
          (lifespan didn't fail to construct it).
 

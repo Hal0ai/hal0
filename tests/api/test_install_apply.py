@@ -107,11 +107,12 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
     body = r.json()
     # The default tier's primary is a curated chat model → a job + slot exist.
     assert "qwen3.5-9b" in body["model_ids"]
-    chat = next(s for s in body["slots"] if s["slot"] == "chat")
+    # chat.primary -> slot_name "agent" (ADR-0023 LLM anchor).
+    chat = next(s for s in body["slots"] if s["slot"] == "agent")
     assert chat["profile"] in ("rocm", "vulkan")
     assert chat["created"] is True
     # Slot TOML written OFFLINE (not started).
-    toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "chat.toml"
+    toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent.toml"
     cfg = tomllib.loads(toml.read_text())
     assert cfg["model"]["default"] == "qwen3.5-9b"
     assert "profile" in cfg
@@ -143,22 +144,23 @@ def test_apply_honors_per_slot_override(isolated_app_client, tmp_hal0_home, monk
             "tier": "hal0-default",
             "storage_dir": tmp_hal0_home,
             "npu_opt_in": False,
-            # Override chat: a different curated model + the vulkan profile/device
-            # (coherent pair) instead of the auto-derived rocm.
+            # Override the agent slot (chat.primary -> "agent"): a different
+            # curated model + the vulkan profile/device (coherent pair)
+            # instead of the auto-derived rocm.
             "overrides": {
-                "chat": {"model_id": "qwen3.6-27b", "profile": "vulkan", "device": "gpu-vulkan"}
+                "agent": {"model_id": "qwen3.6-27b", "profile": "vulkan", "device": "gpu-vulkan"}
             },
         },
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    chat = next(s for s in body["slots"] if s["slot"] == "chat")
+    chat = next(s for s in body["slots"] if s["slot"] == "agent")
     assert chat["model_id"] == "qwen3.6-27b"
     assert chat["profile"] == "vulkan"
     assert chat["device"] == "gpu-vulkan"
     assert "qwen3.6-27b" in body["model_ids"]
 
-    cfg = tomllib.loads((Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "chat.toml").read_text())
+    cfg = tomllib.loads((Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent.toml").read_text())
     assert cfg["model"]["default"] == "qwen3.6-27b"
     assert cfg["profile"] == "vulkan"
     assert cfg["device"] == "gpu-vulkan"

@@ -17,7 +17,7 @@ PR-11 (plan §11 + ADR-0008 §5): list responses are enriched with
 config-derived fields (drawer seeds, declared backend) plus live
 container state (``container_status`` / ``container_health``), and a
 ``coresident_group`` ID grouping slots that back the same FLM process
-(the NPU trio: ``agent`` + ``stt-npu`` + ``embed-npu``). This is
+(the NPU trio: ``flm`` + ``flm-stt`` + ``flm-embed``). This is
 backward-compatible — every legacy field is preserved; new keys are
 purely additive.
 """
@@ -1044,17 +1044,18 @@ async def _safe_config(sm: Any, name: str) -> dict[str, Any] | None:
 
 
 @router.delete("/{name}")
-async def delete_slot(name: str, request: Request) -> dict[str, object]:
+async def delete_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
     """Delete a slot. If the slot is running, it is stopped first.
 
-    Built-in slots (primary/embed/stt/tts) cannot be deleted — the
-    SlotManager raises a typed error which the envelope middleware
-    surfaces as 4xx.
+    Built-in (seeded) slots — primary/embed/stt/tts + the NPU trio — are
+    protected: the SlotManager raises a typed error the envelope middleware
+    surfaces as 4xx. Pass ``?force=true`` to delete a seeded slot anyway (an
+    install/update reconcile may re-seed it later).
     """
     sm = _get_slot_manager(request)
     async with record_action(request, category="slot", action="slot.delete", target=name):
-        await sm.delete(name)
-    return {"name": name, "deleted": True}
+        await sm.delete(name, force=force)
+    return {"name": name, "deleted": True, "forced": force}
 
 
 @router.get("/{name}/config")

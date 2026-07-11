@@ -409,13 +409,40 @@ def _admin_tool_names() -> frozenset[str]:
     return (AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS) - _ADMIN_TOOL_EXCLUDES
 
 
-def _admin_tool_schemas() -> list[dict[str, Any]]:
+def _brain_tool_policy(request: Request) -> Any | None:
+    """The hal0-brain persona's :class:`ToolPolicy` overlay, or ``None``.
+
+    Loaded per request from the persona TOML (same store + fallback
+    semantics as :func:`_resolve_profile`): missing/malformed persona or
+    absent mcp SDK → ``None`` → the server classification stands. This
+    is what makes the persona's ``tools_allowed`` / ``[persona.approval]``
+    tables ENFORCED on the sidebar surface rather than decorative — the
+    operator edits one file to hide tools, tighten an autonomous tool
+    behind approval, or grant standing approval to a gated one
+    (destructive tools excepted; see admin.POLICY_NO_LOOSEN).
+    """
+    try:
+        from hal0.agents.personas import PersonaError, load_persona
+        from hal0.mcp.admin import ToolPolicy
+    except ImportError:
+        return None
+    root = getattr(request.app.state, "brain_persona_root", None)
+    try:
+        persona = load_persona(BRAIN_PERSONA_ID, root=root)
+    except (FileNotFoundError, PersonaError, OSError):
+        return None
+    return ToolPolicy.from_persona(persona)
+
+
+def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
     """OpenAI tool schemas for the surfaced admin catalog.
 
     Path args (from the admin server's ``_PATH_ARGS``) become required
     string properties; ``additionalProperties`` stays open so the model
     can pass body/query fields the descriptions call out (e.g.
-    ``model_pull``'s ``hf_repo``/``hf_filename``).
+    ``model_pull``'s ``hf_repo``/``hf_filename``). A ``policy`` narrows
+    the surface to its ``tools_allowed`` globs — hidden tools never
+    reach the LLM's tool list (dispatch still refuses them if guessed).
     """
     try:
         from hal0.mcp.admin import _PATH_ARGS, TOOL_DESCRIPTIONS
@@ -424,6 +451,8 @@ def _admin_tool_schemas() -> list[dict[str, Any]]:
     schemas: list[dict[str, Any]] = []
     for name, description in TOOL_DESCRIPTIONS.items():
         if name in _ADMIN_TOOL_EXCLUDES:
+            continue
+        if policy is not None and not policy.allows(name):
             continue
         path_args = _PATH_ARGS.get(name, ())
         schemas.append(
@@ -442,6 +471,20 @@ def _admin_tool_schemas() -> list[dict[str, Any]]:
             }
         )
     return schemas
+
+
+def _surfaced_tool_schemas(request: Request) -> list[dict[str, Any]]:
+    """The combined tool list the LLM sees, persona-policy filtered.
+
+    Local board/platform schemas plus the admin catalog, both narrowed
+    to the hal0-brain persona's ``tools_allowed`` globs when a policy
+    resolves (no persona / default ``["*"]`` → everything surfaces).
+    """
+    policy = _brain_tool_policy(request)
+    local = _tool_schemas()
+    if policy is not None:
+        local = [s for s in local if policy.allows(s["function"]["name"])]
+    return local + _admin_tool_schemas(policy)
 
 
 async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]) -> Any:
@@ -469,6 +512,7 @@ async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]
         base_url=base,
         approval_queue=queue,
         memory_dispatcher=getattr(request.app.state, "memory_dispatcher", None),
+        policy=_brain_tool_policy(request),
     )
 
 
@@ -687,6 +731,14 @@ async def _dispatch_tool(
     audit row with ``rec.after`` = result; reads write none — matching the
     REST proxy's audited-mutations / unaudited-reads split.
     """
+    # Persona surface filter applies to LOCAL tools too — the admin path
+    # enforces it inside admin.dispatch, but a narrowed tools_allowed
+    # must also hold against board/platform tools the model might guess
+    # (they're filtered from its schema list, but never trust the list).
+    policy = _brain_tool_policy(request)
+    if policy is not None and not policy.allows(name):
+        return {"error": f"tool {name!r} is outside the hal0-brain persona's tools_allowed"}
+
     read_method, read_path = _resolve_read_tool(name, args)
     if read_method is not None:
         params = {"board": board} if board else None
@@ -887,7 +939,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     body: dict[str, Any] = {
         "model": payload.get("model") or default_model,
         "messages": messages,
-        "tools": _tool_schemas() + _admin_tool_schemas(),
+        "tools": _surfaced_tool_schemas(request),
         "stream": False,
     }
 
@@ -971,6 +1023,7 @@ __all__ = [
     "PRIMARY_SLOT_MODEL",
     "_admin_tool_names",
     "_admin_tool_schemas",
+    "_brain_tool_policy",
     "_chat_stream",
     "_compact_board",
     "_dispatch_admin_tool",
@@ -979,6 +1032,7 @@ __all__ = [
     "_resolve_platform_tool",
     "_resolve_read_tool",
     "_resolve_tool",
+    "_surfaced_tool_schemas",
     "_tool_schemas",
     "run_board_chat",
 ]

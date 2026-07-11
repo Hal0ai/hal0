@@ -1,0 +1,23 @@
+# Brain LLM slot — vulkan llama-server container (hal0-slot@brain).
+#
+# The dashboard's sidebar agent chat (the hal0-brain platform steward)
+# targets the virtual model `hal0/brain`, which resolves here once a model
+# is bound and falls back to the `agent` slot meanwhile. Seeding the slot
+# makes that intent visible as a grey tile instead of the chat's model
+# routing failing opaquely on fresh boxes. `hal0 setup` scaffolds the same
+# slot when this seed is absent (setup_command._BRAIN_SLOT — chat
+# capability, same name + port), and never overwrites an existing file.
+#
+# Clean seed (WS-E, #1107 pattern): ships WITHOUT a `[model].default` and
+# DISABLED — the operator assigns a model later (dashboard / `hal0 setup`),
+# which flips the slot enabled. Port 8089: 8088 belongs to the flm seed.
+name = "brain"
+type = "llm"
+device = "gpu-vulkan"
+runtime = "container"
+profile = "vulkan"
+enabled = false
+port = 8089
+
+[model]
+context_size = 65536

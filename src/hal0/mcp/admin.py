@@ -107,10 +107,12 @@ install missing the SDK still boots — the dashboard surfaces the
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -628,6 +630,92 @@ def _audit(*, client_id: str, tool: str, args: dict[str, Any], gated: bool, outc
     )
 
 
+# ── Per-persona tool policy (overlay on the server classification) ──────────
+#
+# The classification frozensets above are the FLOOR every caller gets.
+# A persona TOML (hal0.agents.personas) can overlay them per agent:
+# hide tools entirely (tools_allowed), force approval onto autonomous
+# tools (require_approval), or grant standing approval to gated ones
+# (auto_approve / default_policy="auto-approve"). Loosening is an
+# operator decision — the TOML is operator-owned, editing it IS the
+# approval, granted standingly instead of per-call — EXCEPT for the
+# no-loosen floor below: destructive/secret-bearing tools stay at the
+# server verdict no matter what the persona says, so a persona edit can
+# never fully disarm the approval queue.
+
+#: Tools whose server gating can never be loosened by persona policy.
+POLICY_NO_LOOSEN: frozenset[str] = frozenset(
+    {
+        "model_delete",
+        "slot_delete",
+        "stack_delete",
+        "profile_delete",
+        "memory_delete",  # keeps the bulk-delete arity gate intact
+        "config_write",
+        "provider_credential_write",
+    }
+)
+
+
+def _matches(patterns: tuple[str, ...], tool: str) -> bool:
+    return any(fnmatch.fnmatchcase(tool, p) for p in patterns)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPolicy:
+    """One persona's tool-policy overlay, resolved at dispatch time.
+
+    Field semantics mirror the persona TOML 1:1 (``[persona.tools]`` +
+    ``[persona.approval]``); patterns are fnmatch globs matched against
+    ADMIN TOOL NAMES (``slot_create``, ``model_pull``, …), not REST
+    paths. Precedence per call: tools_allowed (hide) → require_approval
+    (tighten) → auto_approve / default_policy (loosen, no-loosen floor
+    permitting) → server classification.
+    """
+
+    tools_allowed: tuple[str, ...] = ("*",)
+    default_policy: str = "ask"  # ask | auto-approve | never
+    auto_approve: tuple[str, ...] = ()
+    require_approval: tuple[str, ...] = ()
+
+    @classmethod
+    def from_persona(cls, persona: Any) -> ToolPolicy:
+        """Build from a :class:`hal0.agents.personas.Persona` (duck-typed
+        so this module keeps zero imports from the agents package)."""
+        return cls(
+            tools_allowed=tuple(persona.tools_allowed or ("*",)),
+            default_policy=str(persona.approval.default_policy or "ask"),
+            auto_approve=tuple(persona.approval.auto_approve),
+            require_approval=tuple(persona.approval.require_approval),
+        )
+
+    def allows(self, tool: str) -> bool:
+        """Whether the tool is on this persona's surface at all."""
+        return _matches(self.tools_allowed or ("*",), tool)
+
+    def classify(self, tool: str, *, server_gated: bool) -> str:
+        """Resolve one call → ``run`` | ``gated`` | ``denied`` | ``refused``.
+
+        ``denied`` = not in tools_allowed (the tool shouldn't even be
+        surfaced); ``refused`` = the call needs approval but the persona's
+        default_policy is ``never`` (refuse outright instead of queueing).
+        """
+        if not self.allows(tool):
+            return "denied"
+        gated = server_gated
+        if _matches(self.require_approval, tool):
+            gated = True
+        elif (
+            gated
+            and tool not in POLICY_NO_LOOSEN
+            and (_matches(self.auto_approve, tool) or self.default_policy == "auto-approve")
+        ):
+            gated = False
+        if gated and self.default_policy == "never":
+            return "refused"
+        return "gated" if gated else "run"
+
+
 # ── Dispatch core ────────────────────────────────────────────────────────────
 
 
@@ -655,6 +743,7 @@ async def dispatch(
     base_url: str,
     approval_queue: ApprovalQueue,
     memory_dispatcher: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    policy: ToolPolicy | None = None,
 ) -> dict[str, Any]:
     """Run one tool. Autonomous tools execute now; gated tools enqueue.
 
@@ -666,11 +755,40 @@ async def dispatch(
     exposes for direct invocation (avoiding the HTTP round-trip for
     Cognee calls). When ``None``, memory tools route through REST like
     everything else, which is the safer default.
+
+    ``policy`` is the caller persona's :class:`ToolPolicy` overlay;
+    ``None`` (every pre-existing caller) means the server classification
+    stands unmodified.
     """
     if tool not in (AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS):
         return {"status": "error", "error": {"code": "mcp.unknown_tool", "tool": tool}}
 
     gated = is_gated(tool, args)
+    if policy is not None:
+        verdict = policy.classify(tool, server_gated=gated)
+        if verdict == "denied":
+            _audit(client_id=client_id, tool=tool, args=args, gated=gated, outcome="denied")
+            return {
+                "status": "error",
+                "error": {
+                    "code": "mcp.tool_not_allowed",
+                    "tool": tool,
+                    "detail": "tool is outside this persona's tools_allowed surface",
+                },
+            }
+        if verdict == "refused":
+            _audit(client_id=client_id, tool=tool, args=args, gated=True, outcome="refused")
+            return {
+                "status": "error",
+                "error": {
+                    "code": "mcp.gated_tool_refused",
+                    "tool": tool,
+                    "detail": (
+                        "call requires approval but the persona's default_policy is 'never'"
+                    ),
+                },
+            }
+        gated = verdict == "gated"
 
     if gated:
         # Build the bound executor that runs when the owner approves.
@@ -1267,8 +1385,10 @@ __all__ = [
     "AUTONOMOUS_READ_TOOLS",
     "AUTONOMOUS_WRITE_TOOLS",
     "GATED_TOOLS",
+    "POLICY_NO_LOOSEN",
     "TOOL_DESCRIPTIONS",
     "_ANNOTATIONS",
+    "ToolPolicy",
     "build_server",
     "dispatch",
     "is_gated",

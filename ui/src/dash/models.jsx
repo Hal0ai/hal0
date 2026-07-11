@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -84,6 +84,22 @@ function ModelsView() {
   // mount; /api/models then carries per-row `update_available` flags.
   useModelUpdatesCheck();
   const updateAll = useModelUpdateAll();
+  const forceCheck = useModelUpdatesForceCheck();
+  const onCheckUpdates = async () => {
+    try {
+      const res = await forceCheck.mutateAsync();
+      window.__hal0Toast && window.__hal0Toast(
+        res.updates_available > 0
+          ? `${res.updates_available} model update${res.updates_available === 1 ? "" : "s"} available`
+          : `All ${res.checked} checked model${res.checked === 1 ? "" : "s"} up to date`,
+        "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Update check failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
   const updatable = modelList.filter(m => m.installed && m.update_available);
   const onUpdateAll = async () => {
     if (!updatable.length) return;
@@ -217,7 +233,7 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
-        {updatable.length > 0 && (
+        {updatable.length > 0 ? (
           <button
             className="btn"
             data-testid="mdl-update-all"
@@ -225,6 +241,17 @@ function ModelsView() {
             title="Re-pull every installed model whose HuggingFace file has changed"
             onClick={onUpdateAll}
           >{Icons.download} {updateAll.isPending ? "Starting…" : `Update all (${updatable.length})`}</button>
+        ) : (
+          /* Everything current → the update surface would otherwise be
+             invisible. Keep an explicit check affordance so the feature is
+             discoverable and the TTL cache can be bypassed on demand. */
+          <button
+            className="btn ghost"
+            data-testid="mdl-check-updates"
+            disabled={forceCheck.isPending}
+            title="Compare every installed model against its HuggingFace repo now"
+            onClick={onCheckUpdates}
+          >{Icons.download} {forceCheck.isPending ? "Checking…" : "Check updates"}</button>
         )}
         <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
