@@ -3,8 +3,8 @@
 A single ``flm serve`` process inside the containerized ``npu`` slot answers
 chat + STT + embed on ONE static port (from the npu slot's TOML). When a
 request lands on ``/v1/embeddings`` or ``/v1/audio/transcriptions`` and its
-``model`` matches an enabled ``device=npu`` shadow-role slot (``embed-npu``
-/ ``stt-npu``), v1.py forwards it straight to that port via
+``model`` matches an enabled ``device=npu`` shadow-role slot (``flm-embed``
+/ ``flm-stt``), v1.py forwards it straight to that port via
 ``app.state.npu_trio_router`` (:class:`hal0.dispatcher.npu_trio.NpuTrioRouter`).
 
 These tests drive the live FastAPI app via ``TestClient`` and verify:
@@ -58,8 +58,10 @@ def seed_npu_trio(tmp_hal0_home: str) -> None:
     """Lay down the NPU trio slot TOMLs on disk.
 
     ``flm`` is the containerized anchor (static port, runtime=container);
-    ``stt-npu`` / ``embed-npu`` are the shadow-role records whose model
-    ids gate the trio dispatch in v1.py.
+    ``flm-stt`` / ``flm-embed`` are the canonical shadow-role records whose
+    model ids gate the trio dispatch in v1.py. (These are already the names
+    ``reconcile_npu_trio_slots`` migrates legacy ``stt-npu``/``embed-npu`` to,
+    so the startup reconcile is a no-op here.)
     """
     _seed_slot_toml(
         tmp_hal0_home,
@@ -77,9 +79,9 @@ def seed_npu_trio(tmp_hal0_home: str) -> None:
     )
     _seed_slot_toml(
         tmp_hal0_home,
-        "stt-npu",
+        "flm-stt",
         [
-            'name = "stt-npu"',
+            'name = "flm-stt"',
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
@@ -90,9 +92,9 @@ def seed_npu_trio(tmp_hal0_home: str) -> None:
     )
     _seed_slot_toml(
         tmp_hal0_home,
-        "embed-npu",
+        "flm-embed",
         [
-            'name = "embed-npu"',
+            'name = "flm-embed"',
             "port = 8085",
             'device = "npu"',
             'type = "embedding"',
@@ -298,14 +300,14 @@ def test_embed_request_matches_trio_by_slot_name(
     trio_client: tuple[TestClient, dict[str, Any]],
 ) -> None:
     """Callers can pass either the slot's ``model.default`` OR the slot
-    name itself (``embed-npu``) as ``model`` — both route through the
-    trio. UI surfaces that show "embed-npu" as a dropdown option must
+    name itself (``flm-embed``) as ``model`` — both route through the
+    trio. UI surfaces that show "flm-embed" as a dropdown option must
     work without exposing the underlying model id."""
     client, captures = trio_client
 
     r = client.post(
         "/v1/embeddings",
-        json={"model": "embed-npu", "input": "by slot name"},
+        json={"model": "flm-embed", "input": "by slot name"},
     )
 
     assert r.status_code == 200, r.text
@@ -384,11 +386,11 @@ def test_stt_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
 def test_stt_request_matches_trio_by_slot_name(
     trio_client: tuple[TestClient, dict[str, Any]],
 ) -> None:
-    """Passing ``model="stt-npu"`` (slot name) also routes through the trio."""
+    """Passing ``model="flm-stt"`` (slot name) also routes through the trio."""
     client, captures = trio_client
 
     files = {"file": ("clip.wav", b"RIFF\x00\x00", "audio/wav")}
-    data = {"model": "stt-npu"}
+    data = {"model": "flm-stt"}
     r = client.post("/v1/audio/transcriptions", files=files, data=data)
     assert r.status_code == 200, r.text
     stt_calls = [c for c in captures["calls"] if c["path"] == "/v1/audio/transcriptions"]
