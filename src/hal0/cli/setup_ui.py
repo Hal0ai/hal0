@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +38,102 @@ _GEN_MODES_ON = ("scaffold_only", "scaffold_and_download")
 _con = Console()
 
 
+# ── Raw-key TUI primitives ──────────────────────────────────────────────────
+#
+# The guided setup is keyboard-driven: ↑↓ (or j/k) to move, space to toggle,
+# enter to confirm. That needs raw-tty single-keypress reads. When stdin/stdout
+# isn't a terminal — a piped answer file, CI, the test suite — we fall back to
+# the numbered ``Prompt.ask`` paths further down (same choices, no arrow keys),
+# so automation and tests keep working unchanged.
+
+#: sentinel indices returned by the model picker for the non-model rows.
+_SCAFFOLD = "__scaffold__"
+_SKIP = "__skip__"
+
+
+def _interactive() -> bool:
+    """True when a raw-tty arrow-key UI is drivable: both std streams are TTYs
+    and we're not under pytest or an explicit opt-out (``HAL0_SETUP_NO_TUI``).
+    Callers fall back to the numbered ``Prompt.ask`` flow otherwise."""
+    if os.environ.get("HAL0_SETUP_NO_TUI") or os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _read_key() -> str:
+    """Block for one keypress on a raw tty and return a normalized token:
+    ``up`` ``down`` ``left`` ``right`` ``enter`` ``space`` ``esc``, or the
+    literal character (digit / letter, lower-cased). Ctrl-C raises
+    ``KeyboardInterrupt``. POSIX only — gate on :func:`_interactive` first.
+
+    Arrow keys arrive as a CSI escape sequence (``ESC [ A/B/C/D``); we poll for
+    the tail with a short ``select`` timeout so a lone ESC returns promptly
+    instead of blocking on bytes that never come."""
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = os.read(fd, 1).decode("utf-8", "ignore")
+        if ch == "\x03":  # Ctrl-C
+            raise KeyboardInterrupt
+        if ch in ("\r", "\n"):
+            return "enter"
+        if ch == " ":
+            return "space"
+        if ch != "\x1b":
+            return ch.lower()
+        if not select.select([fd], [], [], 0.05)[0]:
+            return "esc"
+        if os.read(fd, 1).decode("utf-8", "ignore") != "[":
+            return "esc"
+        if not select.select([fd], [], [], 0.05)[0]:
+            return "esc"
+        final = os.read(fd, 1).decode("utf-8", "ignore")
+        return {"A": "up", "B": "down", "C": "right", "D": "left"}.get(final, "esc")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _nav_footer(*, multi: bool = False) -> Text:
+    """Consistent key-hint footer for the interactive pickers."""
+    tail = "space toggle · enter confirm" if multi else "enter select"
+    return Text(f"↑↓/jk move · {tail}", style="dim")
+
+
+def _select_index(
+    step_key: str,
+    hw: HardwareInfo,
+    *,
+    render,
+    count: int,
+    default: int = 0,
+) -> int:
+    """Raw-tty single-select loop. ``render(cursor)`` returns the body for a
+    given highlighted row; returns the chosen 0-based index. ↑↓/jk wrap-move,
+    enter selects, and a digit key jumps to that 1-based row and selects it."""
+    cursor = max(0, min(default, count - 1))
+    while True:
+        _draw(step_key, render(cursor), hw)
+        key = _read_key()
+        if key in ("up", "k"):
+            cursor = (cursor - 1) % count
+        elif key in ("down", "j"):
+            cursor = (cursor + 1) % count
+        elif key == "enter":
+            return cursor
+        elif key.isdigit():
+            n = int(key)
+            if 1 <= n <= count:
+                return n - 1
+
+
 def render_shell(*, step_key: str, left_body: RenderableType, hw_footer: str) -> RenderableType:
     """Two-column renderable: left step body, right context pane + hw footer."""
     copy = PANE_COPY[step_key]
@@ -55,10 +152,19 @@ def render_shell(*, step_key: str, left_body: RenderableType, hw_footer: str) ->
     return Panel(layout, title="hal0 setup", border_style="yellow")
 
 
+def _extensions_in_display_order(extensions) -> list:
+    """Apps first, then Agents — the flat order the checklist renders, so a row
+    number / cursor index refers to the same entry in the render and in the
+    numbered-toggle fallback. ``sorted`` is stable, so original order within
+    each kind is preserved."""
+    rank = {"app": 0, "agent": 1}
+    return sorted(extensions, key=lambda e: rank.get(e.kind, 9))
+
+
 def render_extension_checklist(extensions, state: dict, cursor: int) -> RenderableType:
     """Grouped Apps/Agents checklist. ``state`` maps id→bool; ``cursor`` is the
     highlighted row index across the flat ordered list (Apps then Agents).
-    Pass cursor=-1 for no highlight."""
+    Pass cursor=-1 for no highlight (the numbered-toggle fallback)."""
     grouped: dict[str, list] = {"app": [], "agent": []}
     for e in extensions:
         grouped[e.kind].append(e)
@@ -70,11 +176,59 @@ def render_extension_checklist(extensions, state: dict, cursor: int) -> Renderab
             mark = "[x]" if state.get(e.id) else "[ ]"
             arrow = ">" if idx == cursor else " "
             style = "bold yellow" if idx == cursor else ""
-            lines.append(Text(f" {arrow} {mark} {e.name:<12} {e.summary}", style=style))
+            lines.append(Text(f" {arrow} {idx + 1}. {mark} {e.name:<12} {e.summary}", style=style))
             idx += 1
     lines.append(Text(""))
-    lines.append(Text("↑↓ move · space toggle · enter confirm", style="dim"))
+    if cursor >= 0:
+        lines.append(_nav_footer(multi=True))
+    else:
+        lines.append(Text("type numbers (comma-separated) · enter confirms", style="dim"))
     return Group(*lines)
+
+
+def render_provision_picker(slot_name, suggestions, cursor: int) -> RenderableType:
+    """Model picker as navigable rows: each fitting model, then an explicit
+    'Scaffold empty' and 'Skip' row. ``cursor`` highlights a row across the flat
+    list ``[*suggestions, scaffold, skip]``; pass -1 for no highlight.
+
+    Scaffold/skip are real rows (not a dim legend line) so they read cleanly and
+    are selectable with the same ↑↓/enter as a model."""
+    t = Table(expand=True, box=None, pad_edge=False)
+    t.add_column(" ", width=2)  # cursor
+    t.add_column(" ", width=3)  # number / key
+    t.add_column(" ", width=2)  # recommended star
+    t.add_column("Model")
+    t.add_column("Size", justify="right")
+    t.add_column("Ctx", justify="right")
+    t.add_column("Backend")
+    row = 0
+    for s in suggestions:
+        highlight = row == cursor
+        t.add_row(
+            ">" if highlight else " ",
+            f"{row + 1}.",
+            "★" if s.recommended else " ",
+            s.display_name,
+            f"{s.size_gb:.1f}GB",
+            f"{s.context_length or '—'}",
+            s.profile or "—",
+            style="bold yellow" if highlight else "",
+        )
+        row += 1
+    for key, label in (("s)", "Scaffold empty (choose later)"), ("x)", "Skip this slot")):
+        highlight = row == cursor
+        t.add_row(
+            ">" if highlight else " ",
+            key,
+            " ",
+            label,
+            "",
+            "",
+            "",
+            style="bold yellow" if highlight else "",
+        )
+        row += 1
+    return Group(Text(f"{slot_name} slot", style="bold"), t, _nav_footer())
 
 
 def render_suggestion_table(suggestions) -> RenderableType:
@@ -167,8 +321,37 @@ def _provision_slot(
 
     ``npu_opt_in`` is passed straight through to :func:`suggest_models` so the
     advertised ``device`` matches the lane ``apply_setup`` will use (e.g. the
-    NPU-only ``stt`` slot only shows an NPU device once the operator opted in)."""
+    NPU-only ``stt`` slot only shows an NPU device once the operator opted in).
+
+    Arrow-key picker on a real terminal; numbered ``Prompt.ask`` fallback over a
+    pipe / in CI / under pytest."""
     sugg = suggest_models(capability, hw, limit=3, prefer_coder=prefer_coder, npu_opt_in=npu_opt_in)
+    if _interactive():
+        return _provision_slot_tui(step_key, capability, hw, slot_name, port, sugg)
+    return _provision_slot_numbered(step_key, capability, hw, slot_name, port, sugg)
+
+
+def _provision_slot_tui(step_key, capability, hw, slot_name, port, sugg):
+    """Arrow-key model picker. Rows are ``[*sugg, scaffold, skip]``; the default
+    cursor is the recommended model, else the scaffold row."""
+    n = len(sugg)
+    default = next((i for i, s in enumerate(sugg) if s.recommended), n)  # scaffold if none fit
+    chosen = _select_index(
+        step_key,
+        hw,
+        render=lambda cur: render_provision_picker(slot_name, sugg, cur),
+        count=n + 2,
+        default=default,
+    )
+    if chosen < n:
+        return SlotSelection(capability, slot_name, port, sugg[chosen].model_id)
+    if chosen == n:  # scaffold empty
+        return SlotSelection(capability, slot_name, port, None)
+    return None  # skip
+
+
+def _provision_slot_numbered(step_key, capability, hw, slot_name, port, sugg):
+    """Numbered fallback (no raw tty): render the legend + a single Prompt.ask."""
     _draw(step_key, _provision_body(slot_name, sugg), hw)
     choices = [str(i + 1) for i in range(len(sugg))] + ["s", "x"]
     # Default to the recommended pick when one fits; otherwise to "scaffold".
@@ -186,8 +369,42 @@ def _provision_slot(
 
 
 def _toggle_extensions(state: dict, hw: HardwareInfo) -> None:
+    """Apps/Agents multi-select. Arrow-key checklist (↑↓/jk move, space toggle,
+    enter confirm) on a real terminal; numbered-toggle fallback over a pipe / in
+    CI / under pytest."""
+    if _interactive():
+        _toggle_extensions_tui(state, hw)
+    else:
+        _toggle_extensions_numbered(state, hw)
+
+
+def _toggle_extensions_tui(state: dict, hw: HardwareInfo) -> None:
+    """Raw-tty checklist: move the cursor, space toggles the row, enter confirms.
+    A digit key toggles that 1-based row directly (discoverable shortcut)."""
+    flat = _extensions_in_display_order(EXTENSIONS)
+    cursor = 0
+    while True:
+        _draw("extensions", render_extension_checklist(EXTENSIONS, state, cursor=cursor), hw)
+        key = _read_key()
+        if key in ("up", "k"):
+            cursor = (cursor - 1) % len(flat)
+        elif key in ("down", "j"):
+            cursor = (cursor + 1) % len(flat)
+        elif key == "space":
+            eid = flat[cursor].id
+            state[eid] = not state.get(eid, False)
+        elif key == "enter":
+            return
+        elif key.isdigit():
+            n = int(key)
+            if 1 <= n <= len(flat):
+                eid = flat[n - 1].id
+                state[eid] = not state.get(eid, False)
+
+
+def _toggle_extensions_numbered(state: dict, hw: HardwareInfo) -> None:
     """Numbered-toggle loop (works without raw-tty, e.g. over a pipe)."""
-    flat = list(EXTENSIONS)
+    flat = _extensions_in_display_order(EXTENSIONS)
     while True:
         _draw("extensions", render_extension_checklist(EXTENSIONS, state, cursor=-1), hw)
         ans = Prompt.ask("Toggle by number (comma-separated) or Enter to confirm", default="")
@@ -307,9 +524,34 @@ def _step_hf_token(hw: HardwareInfo) -> str | None:
     return tok or None
 
 
+#: (label, mode) rows for the generation step — index 1 (scaffold_only) is the
+#: default so pressing enter keeps a first install fast.
+_GEN_CHOICES = (
+    ("off — no image/video generation", "off"),
+    ("scaffold only — wire ComfyUI, download weights later  [default]", "scaffold_only"),
+    ("scaffold + download — wire ComfyUI and pull default models now", "scaffold_and_download"),
+)
+
+
 def _step_gen(hw: HardwareInfo) -> str:
     """ComfyUI image/video generation mode. Default is scaffold-only (wire the
-    slot, download weights later) so a first install stays fast."""
+    slot, download weights later) so a first install stays fast. Arrow-key select
+    on a real terminal; numbered ``Prompt.ask`` fallback otherwise."""
+    if _interactive():
+
+        def _render(cur: int) -> RenderableType:
+            lines: list[RenderableType] = [Text("Image / video generation", style="bold")]
+            for i, (label, _mode) in enumerate(_GEN_CHOICES):
+                arrow = ">" if i == cur else " "
+                style = "bold yellow" if i == cur else ""
+                lines.append(Text(f" {arrow} {i + 1}. {label}", style=style))
+            lines.append(Text(""))
+            lines.append(_nav_footer())
+            return Group(*lines)
+
+        idx = _select_index("gen", hw, render=_render, count=len(_GEN_CHOICES), default=1)
+        return _GEN_CHOICES[idx][1]
+
     _draw(
         "gen",
         Group(
@@ -385,6 +627,12 @@ def _pick_gen_variants(hw: HardwareInfo) -> tuple[tuple[str, str], ...]:
 
     picks: list[tuple[str, str]] = []
     for cap_id, cap in _CAPS.items():
+        if _interactive():
+            idx = _pick_one_variant_tui(cap, hw)
+            if idx is None:  # scaffolded — download later
+                continue
+            picks.append((cap_id, cap.alternatives[idx].family))
+            continue
         _draw("gen", _render_gen_variants(cap), hw)
         choices = [str(i + 1) for i in range(len(cap.alternatives))] + ["s"]
         choice = Prompt.ask(
@@ -396,6 +644,44 @@ def _pick_gen_variants(hw: HardwareInfo) -> tuple[tuple[str, str], ...]:
             continue
         picks.append((cap_id, cap.alternatives[int(choice) - 1].family))
     return tuple(picks)
+
+
+def _pick_one_variant_tui(cap, hw):
+    """Arrow-key variant picker for a single capability. Rows are the variants
+    then a 'Scaffold (download later)' row. Returns the chosen 0-based variant
+    index, or ``None`` for scaffold."""
+    n = len(cap.alternatives)
+
+    def _render(cur: int) -> RenderableType:
+        t = Table(title=f"{cap.label}", expand=True, box=None, pad_edge=False)
+        t.add_column(" ", width=2)
+        t.add_column(" ", width=3)
+        t.add_column("Variant")
+        t.add_column("Size", justify="right")
+        t.add_column("Est. time", justify="right")
+        for i, v in enumerate(cap.alternatives):
+            hl = i == cur
+            t.add_row(
+                ">" if hl else " ",
+                f"{i + 1}.",
+                _variant_label(v),
+                f"~{v.approx_gb:.1f}GB",
+                f"~{_fmt_duration(v.est_seconds)}",
+                style="bold yellow" if hl else "",
+            )
+        hl = cur == n
+        t.add_row(
+            ">" if hl else " ",
+            "s)",
+            "Scaffold (download later)",
+            "",
+            "",
+            style="bold yellow" if hl else "",
+        )
+        return Group(t, _nav_footer())
+
+    idx = _select_index("gen", hw, render=_render, count=n + 1, default=0)
+    return None if idx == n else idx
 
 
 # ── REVIEW gate ──────────────────────────────────────────────────────────────

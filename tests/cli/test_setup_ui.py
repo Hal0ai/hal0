@@ -421,6 +421,160 @@ def test_provision_gen_downloads_runs_for_scaffold_and_download(monkeypatch):
     assert seen["defaults"] == (("txt2img", "sdxl"),)
 
 
+# ── Raw-key arrow-nav TUI (feat/setup-tui-arrow-keys) ────────────────────────
+
+
+def _feed_keys(monkeypatch, keys):
+    """Force _interactive() true, silence _draw, and make _read_key() yield the
+    given normalized key tokens in order. Returns the setup_ui module."""
+    from hal0.cli import setup_ui
+
+    monkeypatch.setattr(setup_ui, "_interactive", lambda: True)
+    monkeypatch.setattr(setup_ui, "_draw", lambda *a, **k: None)
+    seq = iter(keys)
+    monkeypatch.setattr(setup_ui, "_read_key", lambda: next(seq))
+    return setup_ui
+
+
+def test_read_key_decodes_arrows_enter_space(monkeypatch):
+    import select as _select
+    import termios
+    import tty
+
+    from hal0.cli import setup_ui
+
+    monkeypatch.setattr(termios, "tcgetattr", lambda fd: None)
+    monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, old: None)
+    monkeypatch.setattr(tty, "setraw", lambda fd: None)
+
+    class _Stdin:
+        def fileno(self):
+            return 0
+
+    monkeypatch.setattr(setup_ui.sys, "stdin", _Stdin())
+
+    def run(byte_seq):
+        data = iter(byte_seq)
+        monkeypatch.setattr(setup_ui.os, "read", lambda fd, n: next(data))
+        monkeypatch.setattr(_select, "select", lambda r, w, x, t: (list(r), [], []))
+        return setup_ui._read_key()
+
+    assert run([b"\x1b", b"[", b"A"]) == "up"
+    assert run([b"\x1b", b"[", b"B"]) == "down"
+    assert run([b"\r"]) == "enter"
+    assert run([b"\n"]) == "enter"
+    assert run([b" "]) == "space"
+    assert run([b"K"]) == "k"  # letters are lower-cased
+
+
+def test_read_key_lone_esc_does_not_block(monkeypatch):
+    import select as _select
+    import termios
+    import tty
+
+    from hal0.cli import setup_ui
+
+    monkeypatch.setattr(termios, "tcgetattr", lambda fd: None)
+    monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, old: None)
+    monkeypatch.setattr(tty, "setraw", lambda fd: None)
+
+    class _Stdin:
+        def fileno(self):
+            return 0
+
+    monkeypatch.setattr(setup_ui.sys, "stdin", _Stdin())
+    monkeypatch.setattr(setup_ui.os, "read", lambda fd, n: b"\x1b")
+    # no follow-on bytes ready → returns 'esc' instead of blocking
+    monkeypatch.setattr(_select, "select", lambda r, w, x, t: ([], [], []))
+    assert setup_ui._read_key() == "esc"
+
+
+def test_toggle_extensions_tui_moves_and_toggles(monkeypatch):
+    from hal0.install.extensions import EXTENSIONS
+
+    setup_ui = _feed_keys(monkeypatch, ["down", "space", "enter"])
+    order = setup_ui._extensions_in_display_order(EXTENSIONS)
+    state = {e.id: False for e in EXTENSIONS}
+    setup_ui._toggle_extensions(state, None)
+    # cursor 0 → down → row 1, space toggles row 1 only
+    assert state[order[1].id] is True
+    assert state[order[0].id] is False
+
+
+def test_toggle_extensions_tui_digit_shortcut(monkeypatch):
+    from hal0.install.extensions import EXTENSIONS
+
+    setup_ui = _feed_keys(monkeypatch, ["2", "enter"])
+    order = setup_ui._extensions_in_display_order(EXTENSIONS)
+    state = {e.id: False for e in EXTENSIONS}
+    setup_ui._toggle_extensions(state, None)
+    assert state[order[1].id] is True
+
+
+def test_provision_slot_tui_arrow_picks_model(monkeypatch):
+    from hal0.install.suggest import Suggestion
+
+    sugg = [
+        Suggestion("m1", "M1", 1.0, 0.0, 4096, "gpu-rocm", "rocm", "chat", False, recommended=True),
+        Suggestion(
+            "m2", "M2", 2.0, 0.0, 4096, "gpu-rocm", "rocm", "chat", False, recommended=False
+        ),
+    ]
+    su = _feed_keys(monkeypatch, ["down", "enter"])  # default=recommended(0) → down → m2
+    monkeypatch.setattr(su, "suggest_models", lambda *a, **k: sugg)
+    sel = su._provision_slot("main", "chat", None, "main", 8081)
+    assert sel.model_id == "m2"
+
+
+def test_provision_slot_tui_scaffold_then_skip(monkeypatch):
+    from hal0.install.suggest import Suggestion
+
+    sugg = [
+        Suggestion("m1", "M1", 1.0, 0.0, 4096, "gpu-rocm", "rocm", "embed", False, recommended=True)
+    ]
+    # rows: m1(0), scaffold(1), skip(2); default cursor = 0
+    su = _feed_keys(monkeypatch, ["down", "enter"])  # → scaffold
+    monkeypatch.setattr(su, "suggest_models", lambda *a, **k: sugg)
+    scaffold = su._provision_slot("capabilities", "embed", None, "embed", 8083)
+    assert scaffold is not None and scaffold.model_id is None
+
+    su = _feed_keys(monkeypatch, ["down", "down", "enter"])  # → skip
+    monkeypatch.setattr(su, "suggest_models", lambda *a, **k: sugg)
+    assert su._provision_slot("capabilities", "embed", None, "embed", 8083) is None
+
+
+def test_step_gen_tui_arrow_and_digit(monkeypatch):
+    su = _feed_keys(monkeypatch, ["down", "enter"])  # default idx1 → down → scaffold_and_download
+    assert su._step_gen(None) == "scaffold_and_download"
+    su = _feed_keys(monkeypatch, ["1"])  # digit jump → off
+    assert su._step_gen(None) == "off"
+
+
+def test_render_provision_picker_has_scaffold_and_skip_rows():
+    from hal0.cli import setup_ui
+    from hal0.install.suggest import Suggestion
+
+    sugg = [
+        Suggestion(
+            "m1", "Qwen X", 1.0, 0.0, 4096, "gpu-rocm", "rocm", "chat", False, recommended=True
+        )
+    ]
+    con = Console(width=100, record=True)
+    con.print(setup_ui.render_provision_picker("main", sugg, cursor=0))
+    text = con.export_text()
+    assert "Qwen X" in text
+    assert "Scaffold empty" in text and "Skip this slot" in text
+    assert ">" in text  # cursor marker present
+
+
+def test_extension_checklist_numbers_rows():
+    state = {"openwebui": False, "comfyui": False, "hermes": False, "pi": False}
+    con = Console(width=80, record=True)
+    con.print(render_extension_checklist(EXTENSIONS, state, cursor=0))
+    text = con.export_text()
+    assert "1." in text and "2." in text
+
+
 def test_render_review_shows_gen_download_estimate():
     from hal0.cli import setup_ui
     from hal0.cli.setup_ui import NetworkChoice, SetupPlan
