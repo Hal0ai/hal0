@@ -60,8 +60,9 @@
 }
 .cpane.live .cpane-glyph { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
 .cpane-titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.engine-title,
-.cpane-title { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); white-space: nowrap; }
+.engine-title { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); white-space: nowrap; }
+/* Match the inference/NPU engine-pane titles (.infer-pane .sec-label → 12px). */
+.cpane-title { font-family: var(--jbm); font-size: 12px; font-weight: 500; color: var(--fg); white-space: nowrap; }
 .engine-sub,
 .cpane-sub { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cpane-h .grow { flex: 1; }
