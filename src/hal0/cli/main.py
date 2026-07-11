@@ -215,7 +215,22 @@ def serve(
 ) -> None:
     """Start the hal0 API server (used by hal0-api.service)."""
     console.print(f"Starting hal0 API on [bold]{host}:{port}[/bold]")
-    uvicorn.run("hal0.api:app", host=host, port=port, reload=reload)
+    # Bounded graceful shutdown (issue #1225): uvicorn's default
+    # timeout_graceful_shutdown is None (wait forever for open connections —
+    # e.g. an in-flight model pull request or a live SSE progress stream —
+    # to close on their own) before it ever sends the ASGI lifespan.shutdown
+    # event. Since hal0-api's lifespan is where in-flight pulls get cancelled
+    # (see hal0.api.lifespan), that cancellation would never run in time and
+    # `systemctl restart hal0-api` would hang until systemd's own
+    # TimeoutStopSec (default ~90s) SIGKILLs the process mid-download. This
+    # bound guarantees lifespan.shutdown fires promptly either way.
+    uvicorn.run(
+        "hal0.api:app",
+        host=host,
+        port=port,
+        reload=reload,
+        timeout_graceful_shutdown=20,
+    )
 
 
 # ---------------------------------------------------------------------------

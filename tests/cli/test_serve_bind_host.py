@@ -55,3 +55,17 @@ def test_serve_flag_overrides_env(
     result = runner.invoke(cli_main.app, ["serve", "--host", "192.0.2.7"])
     assert result.exit_code == 0, result.output
     assert captured_bind["host"] == "192.0.2.7"
+
+
+def test_serve_bounds_graceful_shutdown(captured_bind: dict[str, Any]) -> None:
+    """Issue #1225: uvicorn's default timeout_graceful_shutdown is None (wait
+    forever for open connections before ever dispatching ASGI lifespan.shutdown),
+    which is what let a live model pull or SSE stream hang `systemctl restart
+    hal0-api` until systemd's own stop timeout SIGKILLed the process. `serve`
+    must pass a positive bound so hal0.api.lifespan's shutdown path (which
+    cancels in-flight pulls) always gets a chance to run.
+    """
+    result = runner.invoke(cli_main.app, ["serve"])
+    assert result.exit_code == 0, result.output
+    assert isinstance(captured_bind.get("timeout_graceful_shutdown"), int)
+    assert captured_bind["timeout_graceful_shutdown"] > 0

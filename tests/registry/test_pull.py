@@ -7,6 +7,7 @@ redirect handling, and partial downloads / cancellation.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -545,6 +546,95 @@ async def test_run_pull_resumes_from_partial_with_range(tmp_hal0_home: str) -> N
     assert job2.sha256 == digest, "resume must produce a byte-identical hash"
     assert job2.bytes_downloaded == total
     # Staging cleaned up on success.
+    assert not part.exists()
+    assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_pull_task_cancel_preserves_partial_for_resume(tmp_hal0_home: str) -> None:
+    """Issue #1225: cancelling the asyncio TASK running a pull (what hal0-api's
+    lifespan shutdown does to every in-flight pull so a `systemctl restart`
+    doesn't have to wait out a multi-GB download) must land the partial file
+    at a consistent checkpoint and write a resume sidecar — same contract as
+    a transient transport error — so the NEXT run_pull for the same model_id
+    resumes via Range instead of restarting from zero. This is deliberately
+    different from the cooperative ``job.cancel_requested`` user-cancel path
+    (test_run_pull_cancellation_removes_partial), which discards on purpose.
+    """
+    total = _CHUNK_BYTES * 3
+    body = _payload(total)
+    digest = hashlib.sha256(body).hexdigest()
+    registry = ModelRegistry()
+
+    reached_second_chunk = asyncio.Event()
+    hang_forever = asyncio.Event()
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        async def agen():  # type: ignore[no-untyped-def]
+            yield body[:_CHUNK_BYTES]
+            reached_second_chunk.set()
+            await hang_forever.wait()  # never set — task.cancel() interrupts this
+            yield body[_CHUNK_BYTES:]
+
+        return httpx.Response(200, headers={"Content-Length": str(len(body))}, content=agen())
+
+    job = make_job("cancel-resume")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    task = asyncio.create_task(
+        run_pull(
+            job,
+            hf_repo="Org/CancelResume-GGUF",
+            hf_file="cr.gguf",
+            registry=registry,
+            client=client,
+        )
+    )
+    try:
+        await asyncio.wait_for(reached_second_chunk.wait(), timeout=2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await client.aclose()
+
+    assert job.state == "cancelled"
+    part, sidecar = _part_paths("cancel-resume", "cr.gguf")
+    assert part.exists(), "a task-cancelled pull must PRESERVE the .part for resume"
+    assert sidecar.exists(), "a task-cancelled pull must write a resume sidecar"
+    assert part.stat().st_size == _CHUNK_BYTES
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["bytes"] == _CHUNK_BYTES
+
+    # ── Resume: fresh job, same model_id → continues via a Range request. ──
+    job2 = make_job("cancel-resume")
+    seen: dict[str, str] = {}
+
+    async def resume_handler(req: httpx.Request) -> httpx.Response:
+        seen["range"] = req.headers.get("range", "")
+        remainder = body[_CHUNK_BYTES:]
+        return httpx.Response(
+            206,
+            headers={
+                "Content-Length": str(len(remainder)),
+                "Content-Range": f"bytes {_CHUNK_BYTES}-{total - 1}/{total}",
+            },
+            content=remainder,
+        )
+
+    client2 = httpx.AsyncClient(transport=httpx.MockTransport(resume_handler))
+    try:
+        await run_pull(
+            job2,
+            hf_repo="Org/CancelResume-GGUF",
+            hf_file="cr.gguf",
+            registry=registry,
+            client=client2,
+        )
+    finally:
+        await client2.aclose()
+
+    assert seen["range"] == f"bytes={_CHUNK_BYTES}-"
+    assert job2.state == "completed", f"got {job2.state}: {job2.error}"
+    assert job2.sha256 == digest, "resume must produce a byte-identical hash"
     assert not part.exists()
     assert not sidecar.exists()
 
