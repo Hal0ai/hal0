@@ -22,6 +22,7 @@ applying. Add those subsections to a version's section to surface them; see
 ## [Unreleased]
 
 ### Added
+- Model updates surface in the topbar notification bell: the update check now runs app-level, so "N model updates available" appears (with an Update all action) without opening the Models page, and the row self-clears once updates land. The Models page gains an always-visible "Check updates" button that bypasses the check's TTL cache when nothing is currently flagged.
 - `hal0-brain` agent profile: a third seeded persona (alongside `hermes` and `coder`) that stewards the platform from the dashboard's agent-chat slide-out — its own memory namespace (`private:hal0-brain`), a hal0-heavy system prompt (slot lifecycle, model setup, benchmarking), and the dedicated `brain` slot (`hal0/brain`) as the default model.
 - Board/agent chat streams a `{type:"thinking"}` SSE frame: explicit `reasoning_content` and inline `<think>…</think>` blocks are split out of the reply and rendered as a folded "thinking" section instead of raw tags.
 
