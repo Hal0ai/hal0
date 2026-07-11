@@ -983,3 +983,37 @@ def test_is_read_tool_classification() -> None:
     assert _is_read_tool("slot_load", {"name": "img"}) is False
     # An unknown tool fails closed (treated as NOT a read).
     assert _is_read_tool("definitely_not_a_tool", {}) is False
+
+
+def test_model_override_from_config_drives_target_slot(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    # Operator points the steward at the NPU chat slot.
+    _set_brain_chat_config(app, model="hal0/npu")
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.calls[0]["model"] == "hal0/npu"
+
+
+def test_empty_model_override_keeps_default(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, model="")  # explicit empty → persona/default
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.calls[0]["model"] == BRAIN_SLOT_MODEL == "hal0/brain"
+
+
+def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, model="hal0/npu")
+
+    client.post(
+        "/api/board/chat",
+        json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert stub.calls[0]["model"] == "hal0/utility"

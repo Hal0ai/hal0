@@ -38,11 +38,16 @@ class TestBrainChatConfig:
         bc = BrainChatConfig()
         assert bc.enabled is True
         assert bc.read_only is False
+        assert bc.model == ""
         assert bc.max_rounds == 8
         assert bc.completion_timeout_s == 300.0
 
     def test_present_on_hal0config_by_default(self) -> None:
         assert Hal0Config().brain_chat == BrainChatConfig()
+
+    def test_model_override_round_trips(self) -> None:
+        cfg = Hal0Config(**tomllib.loads('[brain_chat]\nmodel = "hal0/npu"\n'))
+        assert cfg.brain_chat.model == "hal0/npu"
 
     def test_guardrail_flags_round_trip_from_toml(self) -> None:
         raw = tomllib.loads(
