@@ -69,17 +69,12 @@ test.describe('BoardView — render', () => {
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
 
-  test('entry via sidebar nav-board link', async ({ page }) => {
+  test('entry via sidebar Services Kanban link', async ({ page }) => {
+    // Kanban moved from the top-level nav + topbar launcher into the sidebar
+    // Services zone as the only in-app option there.
     await page.goto('/')
     await page.waitForLoadState('domcontentloaded')
-    await page.locator('[data-testid="nav-board"]').click()
-    await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
-  })
-
-  test('entry via topbar Kanban launcher', async ({ page }) => {
-    await page.goto('/')
-    await page.waitForLoadState('domcontentloaded')
-    await page.locator('[data-testid="tb-launch-board"]').click()
+    await page.locator('[data-testid="svc-board"]').click()
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
 
