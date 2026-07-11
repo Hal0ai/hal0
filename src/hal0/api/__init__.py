@@ -72,7 +72,6 @@ from hal0.api.routes import (
     logs,
     models,
     npu,
-    ports as ports_routes,
     power,
     providers,
     services_health,
@@ -102,6 +101,9 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     meta as meta_routes,
+)
+from hal0.api.routes import (
+    ports as ports_routes,
 )
 from hal0.api.routes import (
     profiles as profiles_routes,
