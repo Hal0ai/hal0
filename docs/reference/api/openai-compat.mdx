@@ -31,7 +31,7 @@ probe the catalog before sending any `Authorization` header.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/v1/models` | List all models advertised across every configured upstream, plus per-slot aliases and virtual `hal0/*` names. |
+| GET | `/v1/models` | List all models advertised across every configured upstream, plus one entry per enabled chat slot addressed by its alias. |
 | GET | `/v1/models/{id}` | Look up one model from the aggregated catalog. |
 | POST | `/v1/chat/completions` | Chat completion. Supports streaming and the optional omni tool-calling loop. |
 | POST | `/v1/completions` | Legacy text completion. |
@@ -53,20 +53,18 @@ Returns the OpenAI listing shape:
 { "object": "list", "data": [ /* model objects */ ] }
 ```
 
-The list combines three kinds of entries:
+The list combines two kinds of entries:
 
-- **Per-slot alias entries** — every enabled, currently-served chat slot
-  (`type == "llm"`) appears once, with `id` equal to the slot alias (the slot
+- **Per-slot alias entries** — every enabled chat slot (`type == "llm"`) with
+  a configured model appears once, with `id` equal to the slot alias (the slot
   name, e.g. `agent`, the canonical default/anchor slot per ADR-0023, or
-  `utility`), a human `name`, and the slot's `context_length`.
-  Unloaded/disabled slots are omitted.
+  `utility`), a human `name`, and the slot's `context_length`. Both warm and
+  cold slots are advertised — dispatch cold-loads a cold slot on demand when a
+  request addresses it by alias. Only disabled slots, or slots with no
+  configured model, are omitted.
 - **Upstream catalog entries** — the raw model ids each `advertise_models`
   upstream reports, so non-chat models (embed, rerank, image) keep their
   direct-addressing ids.
-- **Virtual `hal0/*` names** — the canonical live-resolve names (`hal0/agent`,
-  `hal0/utility`, `hal0/npu`, plus `hal0/<any-enabled-llm-slot>`) so clients can
-  pin a role rather than a model. Each carries `context_length` and a `_hal0`
-  metadata block describing what it resolves to.
 
 ## `POST /v1/chat/completions`
 

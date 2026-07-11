@@ -204,9 +204,10 @@ curl -fsSL https://hal0.dev/install.sh | bash
 
 The installer auto-installs **podman**, builds the Python venv, writes the
 systemd units, probes the hardware (it should now see the iGPU and NPU
-via the passed-through nodes), seeds a hardware-recommended slot, and
-starts `hal0-api` on port `8080`. See [Install hal0](/docs/getting-started/install/)
-for the full breakdown of what the bootstrap does.
+via the passed-through nodes), scaffolds empty capability slots (no model
+assigned to any of them), and starts `hal0-api` on port `8080`. See
+[Install hal0](/docs/getting-started/install/) for the full breakdown of
+what the bootstrap does.
 
 <Aside type="tip">
 In an unprivileged LXC, `podman info` can fail without newuidmap/subuid

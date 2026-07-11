@@ -40,7 +40,7 @@ State (registry, models, slot state, memory banks) lives under
 | `device` (hardware preference) | `gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu` |
 | `provider` (slot engine label) | `llama-server`, `flm`, `moonshine`, `kokoro`, `qwen3tts`, `comfyui` |
 | slot `type` (dispatch routing) | `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image` |
-| seed profiles | `rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui` |
+| seed profiles | `rocm`, `rocm-dense`, `rocm-moe`, `vulkan`, `vulkan-dense`, `vulkan-moe`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui` |
 
 <Aside type="caution">
 Use `device`, not the legacy `backend` field. `backend` is deprecated: a slot
@@ -208,7 +208,7 @@ A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
 | `gpu_index` | int \| null (≥0) | `null` | Pins the slot to one GPU on multi-GPU hosts (`HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` on ROCm, `GGML_VK_VISIBLE_DEVICES` on Vulkan, CDI device mapping on CUDA). `null` = all GPUs. No dashboard control yet — TOML/CLI only. |
 | `provider` | str | `llama-server` | Engine label (round-trips for compatibility/UI). |
 | `profile` | str \| null | `null` | Profile name from `profiles.toml` (image + tuned flags). |
-| `role` | str \| null | `null` | Role hint: `primary`, `utility`, `npu`. Derived from name when unset. |
+| `image` | str \| null | `null` | Top-level image-ref override. Resolution order: `image` (this field) → `profile.image` → the code-pinned default runner. Wins over the profile's own image without cloning the profile. **Not** the `[image]` table below (that's ComfyUI's image-gen settings) — this is a bare string key named `image` directly under `[slot]`. |
 | `enabled` | bool | `true` | Start this slot on hal0 startup. |
 | `enable_thinking` | bool \| null | `null` | Per-slot reasoning default; overridable per request. |
 | `mtp` | bool \| null | `null` | Tri-state multi-token-prediction override: `true` forces on, `false` forces off, `null` (Auto) enables MTP only when the profile opts in (`profile.mtp`) **and** the model itself ships MTP heads (registry `mtp` tag, or a delimited `mtp` marker in the model id/filename, e.g. `-MTP-`/`_mtp`/`.MTP`). |
@@ -219,6 +219,17 @@ A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
 | `default_voice` | str \| null | `null` | TTS slots only. Voice id injected into `/v1/audio/speech` when the request omits `voice`. `null` = engine default. Set from Settings → Voice. |
 | `default_speed` | float \| null (0.25–4.0) | `null` | TTS slots only. Playback speed injected when the request omits `speed`. Engines clamp further (Kokoro: 0.5–2.0). |
 | `default_response_format` | str \| null | `null` | TTS slots only. One of `mp3` \| `wav` \| `opus` \| `flac` \| `pcm`, injected when the request omits `response_format`. `null` = engine default (mp3). |
+
+<Aside type="note">
+Slot routing is name-based, not role-based (v0.9.5, ADR-0023 §2.1). The legacy
+`role` field is gone — a slot's `name` IS the routing key for `hal0/<slot>`
+aliases (`hal0/agent`, `hal0/utility`, …). One escape hatch: the special name
+`npu` also matches any slot with `device = "npu"`, so a container that names
+its NPU slot something else (`flm`, `npuchat`, …) still answers `hal0/npu`.
+Old slot TOMLs that still set `role` keep loading — the field is parked under
+`extra` (harmless) — but it no longer does anything; remove it when you next
+touch the file.
+</Aside>
 
 <Aside type="note">
 `backend` (deprecated) and `runtime` (always `container`) still round-trip but
@@ -246,6 +257,7 @@ container provider.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
+| `chat` | bool | `true` | Enable chat (LLM) modality on the FLM slot. Default ON — a bare `[npu]` table is chat-ready out of the box. Set `false` for an asr-only or embed-only NPU slot. |
 | `asr` | bool | `false` | Enable ASR via FLM `--asr 1`. |
 | `embed` | bool | `false` | Enable embeddings via FLM `--embed 1`. |
 
@@ -268,7 +280,6 @@ name = "chat"
 port = 8081
 device = "gpu-rocm"
 profile = "rocm"
-role = "primary"
 
 [model]
 default = "qwen3-4b-q4_k_m"
@@ -327,9 +338,9 @@ Seeds cannot be edited or deleted in place — the dashboard's "Edit a copy" /
 Clone flow forks a `<name>-custom` profile with `cloned_from` set instead.
 </Aside>
 
-Current seed profiles (12): `rocm`, `rocm-dnse`, `rocm-moe`, `vulkan` (GPU/ROCm
+Current seed profiles (14): `rocm`, `rocm-dense`, `rocm-moe`, `vulkan`, `vulkan-dense`, `vulkan-moe` (GPU/ROCm
 and Vulkan chat profiles — `rocm` is the `gpu-rocm` default, MoE/agents, FP4, no
-MTP; `rocm-dnse`/`rocm-moe` opt into MTP), `cuda` (experimental NVIDIA, upstream
+MTP; `rocm-dense`/`rocm-moe` and their Vulkan counterparts opt into MTP), `cuda` (experimental NVIDIA, upstream
 llama.cpp CUDA image), `embed` and `rerank` (dedicated GPU lanes — these must
 run as separate slots, since combining `--embedding` and `--reranking` on one
 `llama-server` instance yields all-zero scores), `flm` (NPU), `tts` (CPU /

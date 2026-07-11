@@ -26,9 +26,9 @@ with it.
 | `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — provider secrets plus env knobs like `HAL0_MODEL_STORE`, `HAL0_MCP_ALLOWED_HOSTS`, and the `HAL0_*_PUBLIC_URL` reverse-proxy overrides. |
 | `upstreams.toml` | External / upstream provider routing. |
 | `providers.toml` | Provider credential references (key **names**, never plaintext secrets). |
-| `profiles.toml` | Optional custom profile catalogue. The built-in seed profiles (`rocm`, `rocm-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui`, …) are always overlaid from code on load and are never written back here, even if the file exists. |
+| `profiles.toml` | Optional custom profile catalogue. The built-in seed profiles (`rocm`, `rocm-dense`, `rocm-moe`, `vulkan-dense`, `vulkan-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui`) are always overlaid from code on load and are never written back here, even if the file exists. |
 | `capabilities.toml` | Persisted capability selections (embed / voice / img / vision). Carries its own `schema_version`. |
-| `slots/<name>.toml` | One file per slot — `name`, `port`, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), `gpu_index` (multi-GPU pinning), `profile`, `mtp` (tri-state Auto/on/off), `vision` (mmproj toggle), the TTS request-default trio (`default_voice`/`default_speed`/`default_response_format`), plus nested `[model]`, `[server]`, `[npu]` (`asr`/`embed`), and — on the `img` slot only — `[image]`. |
+| `slots/<name>.toml` | One file per slot — `name`, `port`, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), `gpu_index` (multi-GPU pinning), `profile`, `image` (optional per-slot container-image override — see [Manage slots](/docs/guides/manage-slots)), `mtp` (tri-state Auto/on/off), `vision` (mmproj toggle), the TTS request-default trio (`default_voice`/`default_speed`/`default_response_format`), plus nested `[model]`, `[server]`, `[npu]` (`asr`/`embed`), and — on the `img` slot only — `[image]`. |
 
 Other files the runtime drops here: `hardware.json` (cached hardware
 probe), `manifest.json` (release image pins), `openwebui.env`.
