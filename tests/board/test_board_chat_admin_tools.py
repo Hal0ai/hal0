@@ -74,7 +74,8 @@ def test_admin_schemas_require_path_args() -> None:
     """Path args (slot name, model id…) surface as required string props."""
     by_name = {s["function"]["name"]: s["function"]["parameters"] for s in bc._admin_tool_schemas()}
     assert by_name["model_pull"]["required"] == ["model_id"]
-    assert by_name["model_pull"]["properties"]["model_id"] == {"type": "string"}
+    # Overrides may enrich with a description, but the type is pinned.
+    assert by_name["model_pull"]["properties"]["model_id"]["type"] == "string"
     # Body/query fields stay open for description-driven args (hf_repo etc.).
     assert by_name["model_pull"]["additionalProperties"] is True
     assert by_name["profile_list"]["required"] == []
