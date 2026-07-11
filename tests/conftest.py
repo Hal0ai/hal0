@@ -22,6 +22,23 @@ os.environ.setdefault("HAL0_MEMORY_ENABLED", "1")
 pytest_plugins = ()
 
 
+@pytest.fixture(autouse=True)
+def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the lifespan's static slot-TOML seeding (flm/tts/rerank/
+    utility/img/agent/brain — #1218) for the whole suite by default.
+
+    That hook exists so `hal0 update` converges an existing box; every
+    other test's contract (documented on ``app`` below) is an EMPTY
+    config tree on TestClient boot — first_run flags, slot-capacity
+    math, and install/apply model-pick logic all assume zero slots
+    pre-exist. tests/api/test_startup_slot_seed.py overrides this
+    fixture (same name) to exercise the real behavior.
+    """
+    import hal0.install.static_seeds as static_seeds_mod
+
+    monkeypatch.setattr(static_seeds_mod, "seed_static_slots", lambda **_kw: [])
+
+
 @pytest.fixture(scope="function")
 def app(tmp_hal0_home: str) -> FastAPI:
     """Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.
