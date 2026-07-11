@@ -141,6 +141,97 @@ def _ensure_flm_models_dir(path: str) -> None:
         pass
 
 
+def ensure_host_flm_store_link() -> str:
+    """Point flm's hardcoded host cache at the resolved store; return the store.
+
+    The host ``flm pull`` (and ``flm list``) always read/write
+    ``$HOME/.config/flm/models`` — flm hardcodes it, with no dir flag or env
+    override (confirmed via ``flm --help``). When the operator relocates the
+    store via ``[models].flm_store`` / ``HAL0_FLM_MODELS_DIR``
+    (:func:`~hal0.config.paths.flm_models_dir`), that path diverges from flm's
+    default (:func:`~hal0.config.paths.default_flm_models_dir`), so a host pull
+    silently lands weights on the default root-fs cache instead of the store —
+    where the serving container (which bind-mounts the store at flm's hardcoded
+    path) can't see them, and where the pull-progress poller (which watches the
+    store) reads 0 bytes for the whole download.
+
+    Make flm's default path a **symlink** to the store — the host analog of the
+    container bind-mount — so one host pull lands in the store, progress tracks
+    it, and serving finds it. When the default path is already a real directory
+    with content (legacy / previously-mispulled weights), best-effort migrate
+    its children into the store first (never clobbering existing store files),
+    then replace it with the symlink.
+
+    Best-effort and idempotent: a no-op when the store IS the default, or when
+    the link already points at the store. Any error leaves the filesystem
+    untouched and still returns the store path, so a pull is never crashed by
+    store housekeeping (progress may read 0 on that one box until resolved).
+
+    Not for the async event loop's thread: the one-time migration can copy
+    multi-GB weights across filesystems. Callers on the loop must offload it
+    (e.g. ``asyncio.to_thread``).
+    """
+    import logging
+    import shutil
+    from pathlib import Path
+
+    from hal0.config.paths import default_flm_models_dir
+
+    log = logging.getLogger(__name__)
+    store = _host_flm_models_dir()
+    default = default_flm_models_dir()
+    store_p = Path(store)
+    default_p = Path(default)
+
+    # Default box: flm already writes to the store — nothing to reconcile.
+    if os.path.normpath(store) == os.path.normpath(default):
+        return store
+
+    try:
+        _ensure_flm_models_dir(store)
+
+        # Already a symlink → repoint only if it aims elsewhere.
+        if default_p.is_symlink():
+            if os.path.realpath(default_p) != os.path.realpath(store_p):
+                default_p.unlink()
+                default_p.symlink_to(store_p)
+                log.info(
+                    "flm.store_link_repointed",
+                    extra={"link": default, "target": store},
+                )
+            return store
+
+        if default_p.exists():
+            if not default_p.is_dir():
+                # A file where the models dir should be — don't touch it.
+                log.warning("flm.store_link_unexpected_file", extra={"path": default})
+                return store
+            # Real dir: migrate children into the store, skipping name
+            # collisions so we never clobber weights already in the store.
+            for child in default_p.iterdir():
+                dest = store_p / child.name
+                if dest.exists():
+                    continue
+                shutil.move(str(child), str(dest))
+            if any(default_p.iterdir()):
+                # Something couldn't move (collision) — leave the dir in place
+                # rather than orphan it behind a symlink.
+                log.warning("flm.store_link_skipped_nonempty", extra={"path": default})
+                return store
+            default_p.rmdir()
+
+        # Path now absent → create the symlink.
+        default_p.parent.mkdir(parents=True, exist_ok=True)
+        default_p.symlink_to(store_p)
+        log.info("flm.store_link_created", extra={"link": default, "target": store})
+    except OSError as exc:
+        log.warning(
+            "flm.store_link_failed",
+            extra={"error": str(exc), "store": store, "default": default},
+        )
+    return store
+
+
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
@@ -702,7 +793,7 @@ def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
 
 
 def flm_host_spawn_kwargs() -> dict[str, Any]:
-    """subprocess/asyncio kwargs to run host ``flm`` as the hal0 identity.
+    """``subprocess.run`` kwargs to run host ``flm`` as the hal0 identity.
 
     Sets ``HOME`` so flm resolves ``~/.config/flm/models`` to the real on-disk
     cache, and drops to the ``hal0`` user/group when we have the privilege
@@ -710,9 +801,10 @@ def flm_host_spawn_kwargs() -> dict[str, Any]:
     user (dev/test), ``user=`` would raise ``PermissionError``, so we skip it
     and rely on the caller already being the model owner.
 
-    Accepted by both :func:`subprocess.run` and
-    :func:`asyncio.create_subprocess_exec` (the ``user``/``group`` kwargs are
-    available on Python ≥ 3.9).
+    SYNC CALLERS ONLY: ``user``/``group`` are Popen kwargs (Python ≥ 3.9) that
+    uvloop's ``subprocess_exec`` rejects (``ValueError: unexpected kwargs``),
+    and hal0-api serves under uvicorn/uvloop — async callers must use
+    :func:`flm_host_async_spawn` instead.
     """
     import pwd
 
@@ -726,6 +818,32 @@ def flm_host_spawn_kwargs() -> dict[str, Any]:
         # Unknown user, or geteuid unavailable (non-POSIX) — run as-is.
         pass
     return kwargs
+
+
+def flm_host_async_spawn(argv: list[str]) -> tuple[list[str], dict[str, Any]]:
+    """Return ``(argv, kwargs)`` for spawning host ``flm`` from async code.
+
+    Same identity semantics as :func:`flm_host_spawn_kwargs`, but safe for
+    ``asyncio.create_subprocess_exec`` under uvloop: uvloop rejects the
+    ``user``/``group`` Popen kwargs (``ValueError: unexpected kwargs``), so
+    the drop to the hal0 user happens on the command line instead — via
+    ``setpriv`` (util-linux), falling back to ``runuser``. If neither tool
+    exists we spawn undemoted rather than fail the pull; the weights then
+    land root-owned but world-readable, so serving still works.
+    """
+    import shutil
+
+    kwargs = flm_host_spawn_kwargs()
+    user = kwargs.pop("user", None)
+    kwargs.pop("group", None)
+    if user:
+        setpriv = shutil.which("setpriv")
+        runuser = shutil.which("runuser")
+        if setpriv:
+            argv = [setpriv, f"--reuid={user}", f"--regid={user}", "--init-groups", "--", *argv]
+        elif runuser:
+            argv = [runuser, "-u", user, "--", *argv]
+    return argv, kwargs
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -954,9 +1072,14 @@ def flm_pull_command(tag: str) -> tuple[list[str], str]:
     Uses the host ``/usr/bin/flm`` (same binary the NPU slot serves with),
     NOT a docker toolbox. The caller spawns ``argv`` with
     :func:`flm_host_spawn_kwargs` so it runs as the ``hal0`` user with ``HOME``
-    set; downloads land in ``~/.config/flm/models`` (the real cache) owned by
-    ``hal0``, matching serving. ``host_models_dir`` is returned so callers can
-    locate the weights for progress polling + registry bookkeeping.
+    set; flm writes to its hardcoded ``$HOME/.config/flm/models``. The returned
+    ``host_models_dir`` is the RESOLVED store (:func:`_host_flm_models_dir`),
+    which the caller uses for progress polling + registry bookkeeping and which
+    the serving container bind-mounts — so when the store is relocated it
+    differs from flm's default path. :func:`ensure_host_flm_store_link` (call
+    it before the pull) symlinks flm's default path onto the store so the two
+    agree; without it a relocated-store pull lands weights on the root-fs cache
+    and progress reads 0.
 
     No ``--device``: ``flm pull`` downloads files; it doesn't touch the NPU,
     so it still runs on dev hosts without XDNA passthrough.

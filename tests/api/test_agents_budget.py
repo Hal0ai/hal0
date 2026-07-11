@@ -43,7 +43,7 @@ def state_root(
 
 @pytest.fixture
 def seeded(state_root: Path) -> Path:
-    """Seed the hermes + coder personas at the redirected root."""
+    """Seed the hermes + hal0-brain personas at the redirected root."""
     personas_dir = state_root / "hermes-agent" / "personas"
     personas_mod.seed_default_personas(agent_id="hermes-agent", root=personas_dir)
     return state_root

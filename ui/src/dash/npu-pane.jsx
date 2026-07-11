@@ -393,8 +393,16 @@ export function NpuOccupancyCard({ slots }) {
   // One owner object per slot, shared by reference across every column it
   // owns — the grid's partition-merge keys off identity, so distinct objects
   // would fragment a single slot into one bracket per column.
+  // The single-tenant NPU is held by ONE FLM process — the anchor (type=llm).
+  // The stt/embed shadows are coresident modalities of that same process and
+  // report the SAME columns in the occupancy probe; letting them paint would
+  // overwrite the anchor's colour (grid turns green + labels "flm-stt"). Only
+  // non-shadow slots own grid columns, so the grid always reads as the primary
+  // FLM slot. Shadow cards keep their own accent via ComboSlot's `hue` prop.
+  const isNpuShadow = (s) => s.type === 'transcription' || s.type === 'embedding'
   const owners = Array(NPU_COLS).fill(null)
   npuSlots.forEach((s, idx) => {
+    if (isNpuShadow(s)) return
     const o = occByName[s.name]
     const cols = o?.cols || []
     const ind = slotIndicatorFromPhase(s)

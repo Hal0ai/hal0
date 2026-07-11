@@ -15,6 +15,7 @@ import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hook
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 
 const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
 
@@ -103,6 +104,8 @@ const Icons = {
   // issue #549 — two linked rings echo the "remote ↔ local" connection metaphor.
   connections: <Icon><circle cx="6" cy="8" r="2.5"/><circle cx="11" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M8 9.5l2 1M3.5 4.5h4M3.5 6.5h3"/></Icon>,
   agent:     <Icon><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/><circle cx="13" cy="3" r="1.5"/></Icon>,
+  // Two-hemisphere brain (reuses the GLYPHS.brain glyph) — the Agent Chat launcher.
+  brain:     <Icon name="brain" />,
   // Hindsight memory — stacked store with an orbiting fact node.
   memory:    <Icon><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v5c0 1.1 2.2 2 5 2s5-.9 5-2V4"/><path d="M3 6.5c0 1.1 2.2 2 5 2s5-.9 5-2"/><circle cx="13" cy="12.5" r="1.5"/></Icon>,
   settings:  <Icon><circle cx="8" cy="8" r="2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></Icon>,
@@ -154,100 +157,21 @@ const Icons = {
 // route to the surface that already owns the action (ApprovalModal, footer
 // downloads pane, Settings → Updates) instead of duplicating it.
 
-const NOTIF_LS_KEY = "hal0:notif-dismissed";
-function _notifLoadDismissed() {
-  try {
-    const v = JSON.parse(localStorage.getItem(NOTIF_LS_KEY) || "[]");
-    return Array.isArray(v) ? v : [];
-  } catch { return []; }
-}
-// Module-level store (not React state) so messages published before the bell
-// mounts — or while it's unmounted on a crashed view — are never lost.
-const _notifStore = {
-  msgs: [],
-  dismissed: new Set(_notifLoadDismissed()),
-  listeners: new Set(),
-};
-function _notifEmit() { _notifStore.listeners.forEach((l) => l()); }
-function hal0Notify(raw) {
-  const d = raw || {};
-  const title = String(d.title || d.msg || "").trim();
-  if (!title) return null;
-  const id = String(d.id || ("msg-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)));
-  // A stable id makes a message dismissible forever (localStorage) — the
-  // channel for "developer important messages" that shouldn't re-nag.
-  if (_notifStore.dismissed.has(id)) return id;
-  if (_notifStore.msgs.some((m) => m.id === id)) return id;
-  _notifStore.msgs = [
-    ..._notifStore.msgs,
-    {
-      id,
-      title,
-      body: d.body ? String(d.body) : "",
-      kind: ["info", "warn", "error", "update"].includes(d.kind) ? d.kind : "info",
-      link: typeof d.link === "string" ? d.link : "",
-      ts: Date.now(),
-    },
-  ];
-  _notifEmit();
-  return id;
-}
-function _notifDismiss(id) {
-  _notifStore.msgs = _notifStore.msgs.filter((m) => m.id !== id);
-  _notifStore.dismissed.add(id);
-  try {
-    localStorage.setItem(NOTIF_LS_KEY, JSON.stringify([..._notifStore.dismissed].slice(-100)));
-  } catch { /* private mode — dismissal just won't persist */ }
-  _notifEmit();
-}
-if (typeof window !== "undefined") {
-  window.hal0Notify = hal0Notify;
-  window.addEventListener("hal0:notify", (e) => hal0Notify(e.detail));
-}
-
-const _NOTIF_KIND_HUE = {
-  info: "var(--info, var(--fg-3))",
-  warn: "var(--warn)",
-  error: "var(--err)",
-  update: "var(--accent)",
-};
+// The dev-message store, hal0Notify(), dismissNotifMessage(), NOTIF_KIND_HUE,
+// and the whole data-gathering for the bell now live in ./notifications.jsx —
+// the single source shared with the dashboard's Needs Attention card so their
+// counts can never drift. This component only renders that shared data.
 
 function NotificationBell() {
   const [open, setOpen] = useStateC(false);
-  const [, bump] = useStateC(0);
-  useEffectC(() => {
-    const l = () => bump((t) => t + 1);
-    _notifStore.listeners.add(l);
-    return () => _notifStore.listeners.delete(l);
-  }, []);
-  const devMsgs = _notifStore.msgs;
 
-  // Attention sources — same rule as the dashboard's Needs Attention card.
-  const slots = useSlots().data ?? [];
-  const approvals = useApprovalList()?.data?.approvals ?? [];
-  const errorSlots = slots.filter((s) => s.state === "error" || s.container_status === "crashed");
-
-  // Downloads — the pulls list is a tiny local endpoint; the shared query key
-  // dedupes against the footer pane's copy when both are live.
-  const pulls = usePullsList({ enabled: true });
-  const jobs = Array.isArray(pulls.jobs) ? pulls.jobs : [];
-  const activePulls = jobs.filter((j) => j.state === "queued" || j.state === "running");
-  const failedPulls = jobs.filter((j) => j.state === "failed");
-  const clearJob = useClearPullJob();
-
-  // Updates — hal0 release channel + post-update slot drift (WS-J).
-  const updates = useUpdateState();
-  const hal0Ch = updates.data?.hal0;
-  const hasUpdate = !!(hal0Ch && hal0Ch.available && hal0Ch.available !== hal0Ch.current);
-  const drift = useSlotDrift();
-  const driftCount = drift.data?.count ?? 0;
-  const restartDrifted = useRestartDriftedSlots();
-
-  const count =
-    approvals.length + errorSlots.length +
-    activePulls.length + failedPulls.length +
-    (hasUpdate ? 1 : 0) + (driftCount > 0 ? 1 : 0) +
-    devMsgs.length;
+  // One shared source for every "needs the operator's eye" signal.
+  const {
+    approvals, errorSlots, activePulls, failedPulls,
+    hasUpdate, hal0Ch, driftCount,
+    devMsgs, clearJob, restartDrifted,
+    count,
+  } = useNotifications();
 
   // Close on outside click / Escape while open.
   const popRef = useRefC(null);
@@ -383,7 +307,7 @@ function NotificationBell() {
         <div className="notif-sec-h mono">messages</div>
         {devMsgs.map((m) => (
           <div className="notif-row" key={m.id} data-testid="notif-msg">
-            <span className="notif-dot" style={{ background: _NOTIF_KIND_HUE[m.kind] }} />
+            <span className="notif-dot" style={{ background: NOTIF_KIND_HUE[m.kind] }} />
             <span className="notif-msg">
               <b>{m.title}</b>
               {m.body && <span className="notif-body">{m.body}</span>}
@@ -394,7 +318,7 @@ function NotificationBell() {
                 else window.open(m.link, "_blank", "noopener");
               }}>Open</button>
             )}
-            <button className="notif-act" onClick={() => _notifDismiss(m.id)} aria-label="Dismiss message">×</button>
+            <button className="notif-act" onClick={() => dismissNotifMessage(m.id)} aria-label="Dismiss message">×</button>
           </div>
         ))}
       </div>
@@ -479,27 +403,19 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
         </div>
       )}
       <div className="tb-spacer" />
-      {/* Primary launchers — Kanban board + the agent-chat slide-out. These
-          replace the old "Quick actions" button (the ⌘K command palette is
-          still reachable via the shortcut). White icons by default, glowing
-          amber on hover/active. */}
+      {/* Primary launcher — the agent-chat slide-out. (Kanban moved to the
+          sidebar Services zone; ⌘B still opens the board. The ⌘K command
+          palette is reachable via its shortcut.) White icon by default,
+          glowing amber on hover/active. */}
       <div className="tb-launch">
         <button
-          className={"tb-launch-btn" + (route === "board" ? " on" : "")}
-          data-testid="tb-launch-board"
-          onClick={onBoard}
-          title="Open the Kanban board (⌘B)"
-        >
-          {Icons.board}<span>Kanban</span>
-        </button>
-        <button
-          className={"tb-launch-btn" + (chatOn ? " on" : "")}
+          className={"tb-launch-btn tb-brain" + (chatOn ? " on" : "")}
           data-testid="tb-launch-chat"
           onClick={onAgentChat}
           title="Open the agent chat"
           aria-pressed={chatOn}
         >
-          {Icons.agent}<span>Agent Chat</span>
+          {Icons.brain}<span>Agent Chat</span>
         </button>
       </div>
       {/* Documentation — opens the hosted docs in a new tab. */}
@@ -554,10 +470,9 @@ function useNavItems() {
       { id: "slots/stacks",    label: "Stacks" },
     ] },
     { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
-    // Operator Board (#board) — hal0-skinned kanban over the Hermes kanban
-    // backend. No live count here (it's per-board; the board's own selector
-    // shows task counts).
-    { id: "board", label: "Board", icon: Icons.board },
+    // The Operator Board (#board) is no longer a top-level nav row — it lives
+    // in the sidebar Services zone (ServiceLinks) as the "Kanban" option, and
+    // stays reachable via ⌘B.
     { id: "benchmarks", label: "Benchmarks", icon: Icons.bench },
     // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
     // with Hermes wired live) — that's the parent row's target, so no separate
@@ -652,11 +567,11 @@ function NavList({ route, param, onGo, testPrefix }) {
 
 // ─── ServiceLinks (sidebar bottom) ───
 // A separate launch zone, pinned to the sidebar bottom below the spacer, away
-// from the app/config nav above. Holds the external sibling-service shortcuts:
+// from the app/config nav above. Holds:
+//   - Kanban    → the internal Operator Board (#board), the only in-app option
+//                 here (routes via onGo, not an external link); also on ⌘B.
 //   - OpenWebUI → external chat UI, link host-derived by GET /api/config/urls.
 //   - Hermes    → external Hermes dashboard, likewise host-derived.
-// (The Kanban shortcut moved to the topbar launcher; the Operator Board is
-// also in the main nav and on ⌘B.)
 // The external links come from `useConfigUrls`, whose backend resolves the
 // hostname from the *request* (loopback, LAN IP, mDNS, or proxy domain) — so
 // they resolve correctly on every install, not just this dev box. Each is gated
@@ -664,7 +579,7 @@ function NavList({ route, param, onGo, testPrefix }) {
 // is simply omitted when the service isn't reachable on this host.
 // `testPrefix` keeps desktop ("svc-") vs drawer ("svc-drawer-") ids apart;
 // `onLaunch` lets the mobile drawer close itself after a tap.
-function ServiceLinks({ onGo, onLaunch, testPrefix }) {
+function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
   const cfg = useConfigUrls();
   const owui = cfg.data?.openwebui_enabled ? (cfg.data.openwebui || "") : "";
   const hermes = cfg.data?.hermes_enabled ? (cfg.data.hermes || "") : "";
@@ -672,6 +587,18 @@ function ServiceLinks({ onGo, onLaunch, testPrefix }) {
     <div className="sb-services">
       <div className="sb-section">Services</div>
       <div className="sb-svc-list">
+        <div
+          className={"sb-row sb-svc" + (route === "board" ? " active" : "")}
+          data-testid={testPrefix + "board"}
+          role="button"
+          tabIndex={0}
+          onClick={() => { onGo("board"); onLaunch && onLaunch(); }}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onGo("board"); onLaunch && onLaunch(); } }}
+          title="Open the Kanban board (⌘B)"
+        >
+          {Icons.board}
+          <span className="lbl">Kanban</span>
+        </div>
         {owui && (
           <a
             className="sb-row sb-svc"
@@ -712,7 +639,7 @@ function Sidebar({ route, param, onGo }) {
       <div className="sb-section">Navigate</div>
       <NavList route={route} param={param} onGo={onGo} testPrefix="nav-" />
       <div className="sb-spacer" />
-      <ServiceLinks onGo={onGo} testPrefix="svc-" />
+      <ServiceLinks route={route} onGo={onGo} testPrefix="svc-" />
     </div>
   );
 }
@@ -1237,7 +1164,7 @@ function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
         </button>
         <NavList route={route} param={param} onGo={onGo} testPrefix="nav-drawer-" />
         <div className="sb-spacer" />
-        <ServiceLinks onGo={onGo} onLaunch={onClose} testPrefix="svc-drawer-" />
+        <ServiceLinks route={route} onGo={onGo} onLaunch={onClose} testPrefix="svc-drawer-" />
         </>)}
       </aside>
     </>

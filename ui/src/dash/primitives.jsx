@@ -1,7 +1,7 @@
 // hal0 dashboard — reusable primitives
 // Modal, Drawer, ConfirmDialog, Banner, BannerStack, Dropdown menu
 
-import { useUpdateState } from '@/api/hooks/useUpdates'
+import { useUpdateState, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
 import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
 import { useComfyui } from '@/api/hooks/useComfyui'
 
@@ -498,15 +498,51 @@ const BANNER_CATALOG = [
 // The catalog entry of the same id is kept around so the Tweaks panel
 // can still preview-toggle a static demo banner, but the source of truth
 // for the real surface is this component.
+// Public changelog on the marketing site (same URL the Settings → Updates
+// surface links to). Kept as a bare page URL — the site owns per-version
+// anchoring, and an unknown hash degrades gracefully to the page top.
+const HAL0_CHANGELOG_URL = "https://hal0.dev/changelog";
+
 function UpdateBanner() {
   const { data: state } = useUpdateState();
   const [dismissed, setDismissed] = useStateP(false);
+  const applyM = useUpdateApply();
+  const [jobId, setJobId] = useStateP(null);
+  const { job, terminal } = useUpdateJob(jobId);
+
+  // Fire one terminal toast when the self-update job resolves. hal0-api
+  // restarts mid-apply, so useUpdateJob tolerates transient poll failures;
+  // we only react once it lands on applied/failed.
+  useEffectP(() => {
+    if (!terminal || !job) return;
+    if (job.state === "applied") {
+      toast(`hal0 ${job.version || ""} applied — reload to load the new dashboard`, "ok");
+    } else if (job.state === "failed") {
+      toast(`Update failed: ${job.error || "see server logs"}`, "err");
+    }
+  }, [terminal, job]);
+
   const hal0 = state && state.hal0;
   const current = hal0 && hal0.current;
   const available = hal0 && hal0.available;
   const hasUpdate = !!available && available !== current;
   if (!hasUpdate || dismissed) return null;
   const channel = (hal0 && hal0.channel) || "stable";
+
+  // Busy across both phases: the POST /apply round-trip and the queued job
+  // running to a terminal state.
+  const updating = applyM.isPending || (!!jobId && !terminal);
+  const onUpdateNow = () => {
+    if (updating) return;
+    applyM.mutate(undefined, {
+      onSuccess: (j) => {
+        setJobId(j && j.id);
+        toast(`Updating hal0 to ${available}… expect a brief outage during restart`, "info");
+      },
+      onError: (e) => toast(`Couldn't start update: ${(e && e.message) || "see server logs"}`, "err"),
+    });
+  };
+
   return (
     <Banner
       kind="info"
@@ -519,12 +555,19 @@ function UpdateBanner() {
         </span>
       }
       actions={
-        <button
-          className="btn ghost sm"
-          onClick={() =>
-            window.__hal0Toast && window.__hal0Toast(`Opening hal0 ${available} release notes`, "info")
-          }
-        >Read release notes</button>
+        <>
+          <button
+            className="btn sm"
+            onClick={onUpdateNow}
+            disabled={updating}
+          >{updating ? "Updating…" : "Update now"}</button>
+          <a
+            className="btn ghost sm"
+            href={HAL0_CHANGELOG_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >Read release notes ↗</a>
+        </>
       }
       onDismiss={() => setDismissed(true)}
     />
