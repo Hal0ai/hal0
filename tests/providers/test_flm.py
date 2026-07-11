@@ -553,6 +553,39 @@ def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:
     assert "user" not in kw
 
 
+def test_async_spawn_demotes_via_setpriv_not_kwargs() -> None:
+    """As root, the drop to hal0 rides the argv (setpriv) — never user=/group=
+    kwargs, which uvloop's subprocess_exec rejects (the prod FLM-pull bug)."""
+    import os
+    import pwd
+
+    import hal0.providers.flm as flm
+
+    fake_pw = pwd.getpwuid(os.getuid())
+    with (
+        patch("os.geteuid", lambda: 0),
+        patch("pwd.getpwnam", lambda _name: fake_pw),
+        patch("shutil.which", lambda tool: f"/usr/bin/{tool}" if tool == "setpriv" else None),
+    ):
+        argv, kwargs = flm.flm_host_async_spawn(["/usr/bin/flm", "pull", "x:1b"])
+    assert "user" not in kwargs and "group" not in kwargs
+    assert kwargs["env"]["HOME"] == flm._HOST_FLM_HOME
+    assert argv[0] == "/usr/bin/setpriv"
+    assert argv[-3:] == ["/usr/bin/flm", "pull", "x:1b"]
+    u = flm._HOST_FLM_USER
+    assert f"--reuid={u}" in argv and f"--regid={u}" in argv
+
+
+def test_async_spawn_passes_through_when_not_root() -> None:
+    """Non-root (dev/test): argv untouched, no demotion tools involved."""
+    import hal0.providers.flm as flm
+
+    with patch("os.geteuid", lambda: 1000):
+        argv, kwargs = flm.flm_host_async_spawn(["/usr/bin/flm", "pull", "x:1b"])
+    assert argv == ["/usr/bin/flm", "pull", "x:1b"]
+    assert "user" not in kwargs and "group" not in kwargs
+
+
 # ─── is_installed_flm_id (slot-apply provider-resolvability) ─────────────────
 
 
