@@ -860,6 +860,16 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     return await _dispatch_and_forward(request, dispatcher, body=body)
 
 
+# Pre-canon NPU-trio slot names, kept as routable model aliases after the
+# rename to flm-stt/flm-embed so clients and UI dropdowns that still pass the
+# old capability id ("embed-npu"/"stt-npu") keep hitting the trio. Keyed by
+# the request's slot type.
+_NPU_TRIO_LEGACY_ALIAS: dict[str, str] = {
+    "embedding": "embed-npu",
+    "transcription": "stt-npu",
+}
+
+
 async def _is_npu_trio_request(
     request: Request,
     body: dict[str, Any],
@@ -874,7 +884,9 @@ async def _is_npu_trio_request(
          ``device == "npu"`` AND ``type == slot_type``. We look at both
          ``slot.model.default`` AND ``slot.name`` so callers that pass
          either the model id or the slot name (e.g. dashboard cards
-         using ``model="flm-stt"``) hit the same path.
+         using ``model="flm-stt"``) hit the same path. The pre-canon
+         capability aliases ``embed-npu`` / ``stt-npu`` also route here
+         (see ``_NPU_TRIO_LEGACY_ALIAS``).
       2. The :class:`NpuTrioRouter` itself is attached on ``app.state``
          (lifespan didn't fail to construct it).
 
@@ -919,7 +931,10 @@ async def _is_npu_trio_request(
             if isinstance(raw_default, str):
                 default = raw_default.strip()
         slot_name = str(cfg.get("name", "")).strip()
-        if requested in (default, slot_name) and (default or slot_name):
+        # Match the model.default, the (canon) slot name, or the legacy
+        # capability alias ("embed-npu"/"stt-npu") for backward compatibility.
+        alias = _NPU_TRIO_LEGACY_ALIAS.get(slot_type, "")
+        if requested in (default, slot_name, alias) and (default or slot_name):
             return True
     return False
 
