@@ -192,8 +192,9 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
   })
 
   // ── 6. Restart button fires POST /api/comfyui/restart ────────────────────
+  // Container controls moved from the footer into the card header (#1209).
 
-  test('footer Restart button fires POST /restart', async ({ page }) => {
+  test('header Restart button fires POST /restart', async ({ page }) => {
     const posts: string[] = []
     await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
     await page.route('**/api/comfyui/restart', (route: any) => {
@@ -203,7 +204,7 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
 
     await gotoImageTab(page)
 
-    const restartBtn = page.locator('.comfy-v2-pane .wfoot .sctrl.restart')
+    const restartBtn = page.locator('.comfy-v2-pane .wcard-h .sctrl.restart')
     await expect(restartBtn).toBeVisible()
     await restartBtn.click()
 
