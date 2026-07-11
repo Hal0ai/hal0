@@ -1623,11 +1623,11 @@ def _phase_mcp_wire(ctx: PhaseContext) -> PhaseResult:
 #
 # Seeds the operator-visible personas hal0 manages on top of Hermes's own
 # personality slot. Two personas land on first install — ``hermes``
-# (default, helpful) and ``coder`` (software focus, narrower auto-approve).
-# Operator edits survive re-runs; ``--repair`` re-writes the seeds back to
-# their canonical content. The active pointer flips to ``hermes`` only
-# when missing or dangling — an operator-chosen active persona survives
-# re-seed.
+# (default, helpful) and ``hal0-brain`` (the dashboard agent chat's
+# platform steward). Operator edits survive re-runs; ``--repair``
+# re-writes the seeds back to their canonical content. The active pointer
+# flips to ``hermes`` only when missing or dangling — an operator-chosen
+# active persona survives re-seed.
 
 
 def _phase_persona_seed(ctx: PhaseContext) -> PhaseResult:

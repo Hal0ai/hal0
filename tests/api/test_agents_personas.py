@@ -41,7 +41,7 @@ def personas_root(
 
 @pytest.fixture
 def seeded_personas(personas_root: Path) -> Path:
-    """Seed the hermes + coder personas + the active pointer (= hermes)."""
+    """Seed the hermes + hal0-brain personas + the active pointer (= hermes)."""
     personas_mod.seed_default_personas(agent_id="hermes-agent", root=personas_root)
     return personas_root
 
@@ -56,13 +56,13 @@ def test_list_returns_seeded_personas(client: TestClient, seeded_personas: Path)
     assert body["agent_id"] == "hermes"
     assert body["active"] == "hermes"
     ids = sorted(row["id"] for row in body["personas"])
-    assert ids == ["coder", "hal0-brain", "hermes"]
+    assert ids == ["hal0-brain", "hermes"]
     hermes_row = next(row for row in body["personas"] if row["id"] == "hermes")
     assert hermes_row["active"] is True
     assert hermes_row["display_name"] == "Hermes"
     assert "summary" in hermes_row
-    coder_row = next(row for row in body["personas"] if row["id"] == "coder")
-    assert coder_row["active"] is False
+    brain_row = next(row for row in body["personas"] if row["id"] == "hal0-brain")
+    assert brain_row["active"] is False
 
 
 def test_list_empty_when_store_empty(client: TestClient, personas_root: Path) -> None:
@@ -102,10 +102,10 @@ def test_detail_returns_parsed_and_raw_toml(client: TestClient, seeded_personas:
 def test_detail_inactive_persona_reports_active_false(
     client: TestClient, seeded_personas: Path
 ) -> None:
-    r = client.get("/api/agents/hermes/personas/coder")
+    r = client.get("/api/agents/hermes/personas/hal0-brain")
     assert r.status_code == 200
     body = r.json()
-    assert body["id"] == "coder"
+    assert body["id"] == "hal0-brain"
     assert body["active"] is False
 
 
@@ -187,16 +187,16 @@ def test_activate_switches_active_and_invokes_hot_reload(
 
     monkeypatch.setattr(personas_mod, "hermes_reload", _fake_reload)
 
-    r = client.post("/api/agents/hermes/personas/coder/activate", json={})
+    r = client.post("/api/agents/hermes/personas/hal0-brain/activate", json={})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["agent_id"] == "hermes"
-    assert body["active"] == "coder"
+    assert body["active"] == "hal0-brain"
     assert body["previous"] == "hermes"
     assert body["reloaded"] is True
     assert body["reload_error"] is None
     # The pointer file actually moved.
-    assert personas_mod.get_active(root=seeded_personas) == "coder"
+    assert personas_mod.get_active(root=seeded_personas) == "hal0-brain"
     # And the hot-reload nudge actually fired once.
     assert len(calls) == 1
 
@@ -216,17 +216,17 @@ def test_activate_reload_false_skips_hot_reload(
     monkeypatch.setattr(personas_mod, "hermes_reload", _fake_reload)
 
     r = client.post(
-        "/api/agents/hermes/personas/coder/activate",
+        "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": False},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["active"] == "coder"
+    assert body["active"] == "hal0-brain"
     assert body["previous"] == "hermes"
     assert body["reloaded"] is False
     assert body["reload_error"] is None
     # Pointer moved …
-    assert personas_mod.get_active(root=seeded_personas) == "coder"
+    assert personas_mod.get_active(root=seeded_personas) == "hal0-brain"
     # … but hermes_reload was NEVER called.
     assert calls == []
 
@@ -239,13 +239,13 @@ def test_activate_reports_failed_hot_reload(
     """Failed hot-reload is non-fatal; response carries ``reloaded=false``."""
     monkeypatch.setattr(personas_mod, "hermes_reload", lambda **_: (False, "connection refused"))
 
-    r = client.post("/api/agents/hermes/personas/coder/activate", json={})
+    r = client.post("/api/agents/hermes/personas/hal0-brain/activate", json={})
     assert r.status_code == 200
     body = r.json()
-    assert body["active"] == "coder"
+    assert body["active"] == "hal0-brain"
     assert body["reloaded"] is False
     assert body["reload_error"] == "connection refused"
-    assert personas_mod.get_active(root=seeded_personas) == "coder"
+    assert personas_mod.get_active(root=seeded_personas) == "hal0-brain"
 
 
 def test_activate_unknown_persona_returns_404(
@@ -286,7 +286,7 @@ def test_activate_no_body_defaults_to_reload_true(
         lambda **kwargs: calls.append(kwargs) or (True, None),
     )
 
-    r = client.post("/api/agents/hermes/personas/coder/activate")
+    r = client.post("/api/agents/hermes/personas/hal0-brain/activate")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["reloaded"] is True
