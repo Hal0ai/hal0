@@ -303,10 +303,15 @@ def migrate_hindsight_to_honcho(
                         if not session_ensured:
                             _ensure_session(honcho_client, workspace, session)  # type: ignore[arg-type]
                             session_ensured = True
+                        # observer = the user peer: dialectic retrieval for a
+                        # peer scopes to conclusions THAT PEER observed, so
+                        # imported facts must live in the user's own
+                        # perspective to surface for every client (agent-
+                        # observed rows are invisible to user-peer chat).
                         pending.append(
                             {
                                 "content": content,
-                                "observer_id": agent_id,
+                                "observer_id": user_peer,
                                 "observed_id": user_peer,
                                 "session_id": session,
                             }

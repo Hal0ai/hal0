@@ -110,7 +110,9 @@ def test_forward_migration_batches_and_ensures_resources(tmp_path):
     total_conclusions = sum(len(b["conclusions"]) for b in conclusion_calls)
     assert total_conclusions == 160
     first = conclusion_calls[0]["conclusions"][0]
-    assert first["observer_id"] == AGENT
+    # observer = user peer (not the agent): user-peer dialectic only
+    # retrieves conclusions the peer itself observed.
+    assert first["observer_id"] == USER_PEER
     assert first["observed_id"] == USER_PEER
     assert first["session_id"] == "migration__hindsight__shared"
 
