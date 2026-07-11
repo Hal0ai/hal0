@@ -7,7 +7,7 @@
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots } from '@/api/hooks/useSlots'
-import { useModels, usePullsList, useClearPullJob, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, useModelUpdatesCheck, useModelUpdateAll, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
@@ -241,10 +241,21 @@ function NotificationBell() {
   const driftCount = drift.data?.count ?? 0;
   const restartDrifted = useRestartDriftedSlots();
 
+  // Model updates (HF) — probed app-level so the bell fires without the
+  // Models page ever being opened. The row derives LIVE from /api/models
+  // update_available flags rather than a message store, so it self-clears
+  // the moment updates land and never duplicates when the outdated set
+  // changes (#1181 review follow-up).
+  useModelUpdatesCheck();
+  const models = useModels().data ?? [];
+  const updatableModels = models.filter((m) => m.installed && m.update_available);
+  const updateAllModels = useModelUpdateAll();
+
   const count =
     approvals.length + errorSlots.length +
     activePulls.length + failedPulls.length +
     (hasUpdate ? 1 : 0) + (driftCount > 0 ? 1 : 0) +
+    (updatableModels.length > 0 ? 1 : 0) +
     devMsgs.length;
 
   // Close on outside click / Escape while open.
@@ -344,10 +355,24 @@ function NotificationBell() {
     );
   }
 
-  if (hasUpdate || driftCount > 0) {
+  if (hasUpdate || driftCount > 0 || updatableModels.length > 0) {
     sections.push(
       <div className="notif-sec" data-testid="notif-sec-updates" key="updates">
         <div className="notif-sec-h mono">updates</div>
+        {updatableModels.length > 0 && (
+          <div className="notif-row" data-testid="notif-model-updates">
+            <span className="notif-dot" style={{ background: "var(--accent)" }} />
+            <span className="notif-msg">
+              {updatableModels.length} model update{updatableModels.length !== 1 ? "s" : ""} available on HuggingFace
+            </span>
+            <button
+              className="notif-act"
+              disabled={updateAllModels.isPending}
+              onClick={() => updateAllModels.mutate(updatableModels.map((m) => m.id))}
+            >{updateAllModels.isPending ? "Starting…" : "Update all"}</button>
+            <button className="notif-act" onClick={() => go("#models")}>View</button>
+          </div>
+        )}
         {hasUpdate && (
           <div className="notif-row">
             <span className="notif-dot" style={{ background: "var(--accent)" }} />
