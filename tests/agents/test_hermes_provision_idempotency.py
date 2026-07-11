@@ -239,7 +239,7 @@ def test_two_consecutive_runs_converge(
 
     persona_root = Path(hermetic_state.hermes_home) / "personas"
     hermes_toml_1 = (persona_root / "hermes.toml").read_text(encoding="utf-8")
-    coder_toml_1 = (persona_root / "coder.toml").read_text(encoding="utf-8")
+    brain_toml_1 = (persona_root / "hal0-brain.toml").read_text(encoding="utf-8")
     active_1 = (persona_root / "active.txt").read_text(encoding="utf-8")
 
     provision_1 = _strip_volatile(result_1.phases)
@@ -250,14 +250,16 @@ def test_two_consecutive_runs_converge(
     result_2 = hp.run(state_root=state_root, io=hermetic_io)
     config_after_2 = config_path.read_text(encoding="utf-8")
     hermes_toml_2 = (persona_root / "hermes.toml").read_text(encoding="utf-8")
-    coder_toml_2 = (persona_root / "coder.toml").read_text(encoding="utf-8")
+    brain_toml_2 = (persona_root / "hal0-brain.toml").read_text(encoding="utf-8")
     active_2 = (persona_root / "active.txt").read_text(encoding="utf-8")
     provision_2 = _strip_volatile(result_2.phases)
 
     assert config_after_1 == config_after_2, "config.yaml drifted on re-run"
     assert hermes_toml_1 == hermes_toml_2, "hermes persona TOML drifted"
-    assert coder_toml_1 == coder_toml_2, "coder persona TOML drifted"
+    assert brain_toml_1 == brain_toml_2, "hal0-brain persona TOML drifted"
     assert active_1 == active_2, "active pointer drifted"
+    # The retired coder seed must not reappear on either run.
+    assert not (persona_root / "coder.toml").exists()
     # Every phase status should be OK or SKIP on both runs.
     for name in hp.PHASE_NAMES:
         s1 = provision_1.get(name, {}).get("status")

@@ -118,9 +118,9 @@ def test_set_active_refuses_missing_persona(tmp_path: Path) -> None:
 
 def test_seed_default_personas_writes_files_and_pointer(tmp_path: Path) -> None:
     written = P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
-    assert {p.id for p in written} == {"hermes", "coder", "hal0-brain"}
+    assert {p.id for p in written} == {"hermes", "hal0-brain"}
     assert (tmp_path / "hermes.toml").exists()
-    assert (tmp_path / "coder.toml").exists()
+    assert not (tmp_path / "coder.toml").exists()  # retired seed never lands
     assert (tmp_path / "hal0-brain.toml").exists()
     assert (tmp_path / P.ACTIVE_POINTER).read_text().strip() == "hermes"
 
@@ -133,7 +133,7 @@ def test_seed_hal0_brain_targets_brain_slot_with_own_memory(tmp_path: Path) -> N
     assert brain.preferred_upstream == "hal0"
     assert brain.memory_namespace == "private:hal0-brain"
     # Its memory bank is its own — distinct from the other seeds.
-    others = {P.load_persona(p, root=tmp_path).memory_namespace for p in ("hermes", "coder")}
+    others = {P.load_persona(p, root=tmp_path).memory_namespace for p in ("hermes",)}
     assert brain.memory_namespace not in others
     assert "platform steward" in brain.system_prompt
 
@@ -161,7 +161,7 @@ def test_seed_default_personas_overwrite_restores_defaults(tmp_path: Path) -> No
         encoding="utf-8",
     )
     written = P.seed_default_personas(agent_id="hermes-agent", root=tmp_path, overwrite=True)
-    assert {p.id for p in written} == {"hermes", "coder", "hal0-brain"}
+    assert {p.id for p in written} == {"hermes", "hal0-brain"}
     loaded = P.load_persona("hermes", root=tmp_path)
     assert loaded.display_name == "Hermes"
 
@@ -169,8 +169,37 @@ def test_seed_default_personas_overwrite_restores_defaults(tmp_path: Path) -> No
 def test_seed_preserves_operator_active_choice(tmp_path: Path) -> None:
     """Operator-chosen active persona survives re-seeding."""
     P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
+    P.set_active("hal0-brain", root=tmp_path)
+    P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
+    assert P.get_active(root=tmp_path) == "hal0-brain"
+
+
+def test_seed_removes_pristine_retired_coder(tmp_path: Path) -> None:
+    """The retirement sweep: an untouched coder.toml from an older seeder
+    disappears on the next seed pass."""
+    P.save_persona(P._seed_coder("hermes-agent"), root=tmp_path)
+    P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
+    assert not (tmp_path / "coder.toml").exists()
+
+
+def test_seed_keeps_operator_edited_retired_coder(tmp_path: Path) -> None:
+    """Any divergence from the canonical retired seed = operator data."""
+    import dataclasses
+
+    edited = dataclasses.replace(
+        P._seed_coder("hermes-agent"), system_prompt="operator-edited prompt"
+    )
+    P.save_persona(edited, root=tmp_path)
+    P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
+    assert P.load_persona("coder", root=tmp_path).system_prompt == "operator-edited prompt"
+
+
+def test_seed_keeps_active_retired_coder(tmp_path: Path) -> None:
+    """A pristine but ACTIVE coder is in use — never delete it."""
+    P.save_persona(P._seed_coder("hermes-agent"), root=tmp_path)
     P.set_active("coder", root=tmp_path)
     P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
+    assert (tmp_path / "coder.toml").exists()
     assert P.get_active(root=tmp_path) == "coder"
 
 
@@ -218,10 +247,10 @@ def test_activate_writes_active_and_returns_payload(
     propagation on failure."""
     P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
     monkeypatch.setattr(P, "hermes_reload", lambda **_: (False, "unreachable"))
-    result = P.activate("coder", root=tmp_path)
-    assert result["persona_id"] == "coder"
-    assert result["display_name"] == "Coder"
-    assert P.get_active(root=tmp_path) == "coder"
+    result = P.activate("hal0-brain", root=tmp_path)
+    assert result["persona_id"] == "hal0-brain"
+    assert result["display_name"] == "hal0 Brain"
+    assert P.get_active(root=tmp_path) == "hal0-brain"
     assert result["hot_reload"]["ok"] is False
     assert result["hot_reload"]["error"] == "unreachable"
 
