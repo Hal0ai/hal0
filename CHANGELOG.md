@@ -21,6 +21,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.6.1] — 2026-07-11
+
 ### Added
 - `hal0-brain` agent profile: a third seeded persona (alongside `hermes` and `coder`) that stewards the platform from the dashboard's agent-chat slide-out — its own memory namespace (`private:hal0-brain`), a hal0-heavy system prompt (slot lifecycle, model setup, benchmarking), and the dedicated `brain` slot (`hal0/brain`) as the default model.
 - Board/agent chat streams a `{type:"thinking"}` SSE frame: explicit `reasoning_content` and inline `<think>…</think>` blocks are split out of the reply and rendered as a folded "thinking" section instead of raw tags.
@@ -29,6 +31,12 @@ applying. Add those subsections to a version's section to surface them; see
 - The top-bar agent chat now embodies the `hal0-brain` profile: it runs on `hal0/brain` (falls back to the `agent` slot via the resolver chain), and an operator-edited `hal0-brain` persona TOML overrides its system prompt/model without a code change.
 - Agent-chat suggestion chips are now platform-steward starters ("Help me create a new slot", "Download and set up a model", "Benchmark the model on a slot", "How's the hardware doing?").
 - Agent-chat replies render markdown (fences, lists, headings, bold/italic/inline code, links); tool calls render as structured cards with args, live status, and a folded result — replacing the raw `→ tool({json})` text rows.
+
+### Fixed
+- FLM NPU slots no longer wedge in `warming` forever: the warm→ready inference sentinel now probes the slot's **assigned** model instead of `models[0]` from FLM's full catalogue. Probing an arbitrary other model forced FLM to reload the wrong weights onto its single NPU context mid-gate and deadlocked the load (#1171).
+- `hal0 setup` no longer aborts with a raw `HTTPStatusError` traceback when `apply-selections` returns `409 Conflict`: the setup CLI now treats a 409 (install already applied / a concurrent apply in flight) as a recoverable no-op with a clean message, and still raises on genuine errors (#1158).
+- Unified the dashboard warming-state color to a single canonical `--warn: #f2792b` token in `dashboard.css`, removing the divergent local redefinitions in `engine-panes.css`/`overhaul.css` so every warming indicator renders the same orange-yellow (#1156, #1155).
+- Added an ESLint `no-undef` guard (enforced in CI) over the dash `.jsx` prototype so an undefined identifier like the one behind the Create Slot crash can't ship again (#1170).
 
 ## [0.9.6] — 2026-07-10
 
