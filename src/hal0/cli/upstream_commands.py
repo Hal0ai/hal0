@@ -1,6 +1,12 @@
 """hal0 upstream subcommands — thin HTTP client to the hal0 API.
 
 Provides ``hal0 upstream {list,show,create,update,delete,test,set-credentials}``.
+
+Request/response shapes mirror ``hal0.api.routes.providers`` exactly:
+create/update bodies are ``extra="forbid"`` on the server, so every flag
+here maps 1:1 onto a real body field. Credentials go through the separate
+``/api/providers/{name}/credentials`` route (``{key, value}``) so secrets
+never transit the CRUD surface; ``create --api-key`` chains the two calls.
 """
 
 from __future__ import annotations
@@ -29,14 +35,34 @@ app = typer.Typer(help="Manage upstream LLM providers.")
 console = Console()
 
 
+def _filters_summary(filters: Any) -> str:
+    if not isinstance(filters, dict):
+        return "all"
+    parts = []
+    for key in ("models", "include", "exclude"):
+        vals = filters.get(key) or []
+        if vals:
+            parts.append(f"{key}:{len(vals)}")
+    return ", ".join(parts) if parts else "all"
+
+
+def _print_json(data: Any) -> None:
+    console.print(
+        Syntax(
+            jsonlib.dumps(data, indent=2),
+            "json",
+            theme="ansi_dark",
+            background_color="default",
+        )
+    )
+
+
 # ── list ──────────────────────────────────────────────────────────────────
 
 
 @app.command("list")
 def list_upstreams(
-    json_out: bool = typer.Option(
-        False, "--json", help="Output raw JSON instead of a table."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
 ) -> None:
     """List every configured upstream provider."""
     url = _api_base()
@@ -61,33 +87,25 @@ def list_upstreams(
     table.add_column("Kind")
     table.add_column("URL")
     table.add_column("Enabled")
-    table.add_column("Models")
+    table.add_column("Advertise")
+    table.add_column("Auth")
+    table.add_column("Filters")
 
     for u in ups:
-        enabled = "✓" if u.get("enabled", True) else "✗"
-        filters = u.get("model_filters")
-        models = ""
-        if isinstance(filters, dict):
-            allow = filters.get("allow") or []
-            deny = filters.get("deny") or []
-            has_filters = allow or deny
-            if has_filters:
-                parts = []
-                if allow:
-                    parts.append(f"allow:{len(allow)}")
-                if deny:
-                    parts.append(f"deny:{len(deny)}")
-                models = ", ".join(parts)
-            else:
-                models = "all"
+        if u.get("auth_key_present"):
+            auth = "✓ key set"
+        elif u.get("auth_value_env"):
+            auth = f"✗ {u['auth_value_env']} unset"
         else:
-            models = "all"
+            auth = "—"
         table.add_row(
             u.get("name", "—"),
             u.get("kind", "—"),
-            u.get("openai_base_url", "—"),
-            enabled,
-            models,
+            u.get("url", "—"),
+            "✓" if u.get("enabled", True) else "✗",
+            "✓" if u.get("advertise_models", True) else "✗",
+            auth,
+            _filters_summary(u.get("model_filters")),
         )
     console.print(table)
 
@@ -98,9 +116,7 @@ def list_upstreams(
 @app.command("show")
 def show_upstream(
     name: str = typer.Argument(..., help="Upstream name."),
-    json_out: bool = typer.Option(
-        False, "--json", help="Output raw JSON."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
     """Show full detail for one upstream provider."""
     url = _api_base()
@@ -136,20 +152,43 @@ def show_upstream(
 @app.command("create")
 def create_upstream(
     name: str = typer.Argument(..., help="Upstream name (unique, lowercase)."),
-    kind: str = typer.Option(
-        "remote",
-        "--kind",
-        help="Provider kind: 'remote' (default) or 'slot'.",
+    catalog: str = typer.Option(
+        None,
+        "--catalog",
+        "-c",
+        help="Prefill url/auth from the provider catalog (e.g. openrouter, anthropic).",
     ),
     base_url: str = typer.Option(
-        ...,
+        None,
+        "--url",
         "--base-url",
-        help="OpenAI-compatible base URL (e.g. https://api.openai.com/v1).",
+        help="OpenAI-compatible base URL (required unless --catalog supplies one).",
+    ),
+    auth_style: str = typer.Option(
+        None,
+        "--auth-style",
+        help="Auth style: bearer | anthropic | google_query | header | none.",
     ),
     auth_header: str = typer.Option(
         None,
         "--auth-header",
-        help="HTTP header for auth (default: Authorization: Bearer <key>).",
+        help="Header NAME when --auth-style header (e.g. X-Api-Key).",
+    ),
+    auth_env: str = typer.Option(
+        None,
+        "--auth-env",
+        help="Env-var name holding the API key (e.g. OPENROUTER_API_KEY).",
+    ),
+    timeout: float = typer.Option(
+        None,
+        "--timeout",
+        help="Request timeout in seconds (default 300).",
+    ),
+    api_key: str = typer.Option(
+        None,
+        "--api-key",
+        "-k",
+        help="API key value — written via the credentials route after create.",
     ),
     advertise_models: bool = typer.Option(
         True,
@@ -162,20 +201,28 @@ def create_upstream(
         help="Enable or disable this upstream (disabled = no routing).",
     ),
 ) -> None:
-    """Register a new upstream LLM provider."""
+    """Register a new upstream LLM provider (always kind=remote)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
 
     body: dict[str, Any] = {
         "name": name,
-        "kind": kind,
-        "openai_base_url": base_url.rstrip("/"),
         "advertise_models": advertise_models,
         "enabled": enabled,
     }
+    if catalog is not None:
+        body["catalog_id"] = catalog
+    if base_url is not None:
+        body["url"] = base_url.rstrip("/")
+    if auth_style is not None:
+        body["auth_style"] = auth_style
     if auth_header is not None:
         body["auth_header"] = auth_header
+    if auth_env is not None:
+        body["auth_value_env"] = auth_env
+    if timeout is not None:
+        body["timeout_seconds"] = timeout
 
     try:
         result = api_post("/api/upstreams", json=body)
@@ -184,7 +231,25 @@ def create_upstream(
         return
 
     console.print(f"[green]✓[/green] Created upstream [bold]{name}[/bold]")
-    console.print(Syntax(jsonlib.dumps(result, indent=2), "json", theme="ansi_dark", background_color="default"))
+    _print_json(result)
+
+    env_name = result.get("auth_value_env") or ""
+    if api_key is not None:
+        if not env_name:
+            die(f"upstream {name!r} declares no auth_value_env; cannot store a key")
+            return
+        try:
+            api_post(
+                f"/api/providers/{name}/credentials",
+                json={"key": env_name, "value": api_key},
+            )
+        except CliApiError as exc:
+            die(f"upstream created, but storing the key failed: {exc}")
+            return
+        console.print(f"[green]✓[/green] Credential stored in api.env as [bold]{env_name}[/bold]")
+        console.print(f"[dim]Try it: hal0 upstream test {name}[/dim]")
+    elif hint := result.get("hint"):
+        console.print(f"[dim]{hint}[/dim]")
 
 
 # ── update ────────────────────────────────────────────────────────────────
@@ -193,16 +258,17 @@ def create_upstream(
 @app.command("update")
 def update_upstream(
     name: str = typer.Argument(..., help="Upstream name to update."),
-    base_url: str = typer.Option(
+    base_url: str = typer.Option(None, "--url", "--base-url", help="New base URL."),
+    auth_style: str = typer.Option(
         None,
-        "--base-url",
-        help="New base URL.",
+        "--auth-style",
+        help="Auth style: bearer | anthropic | google_query | header | none.",
     ),
     auth_header: str = typer.Option(
-        None,
-        "--auth-header",
-        help="New auth header.",
+        None, "--auth-header", help="Header NAME when auth-style is 'header'."
     ),
+    auth_env: str = typer.Option(None, "--auth-env", help="Env-var name holding the API key."),
+    timeout: float = typer.Option(None, "--timeout", help="Request timeout in seconds."),
     advertise_models: bool | None = typer.Option(
         None,
         "--advertise-models/--hide-models",
@@ -213,20 +279,25 @@ def update_upstream(
         "--enabled/--disabled",
         help="Toggle routing enable/disable.",
     ),
-    allow_models: list[str] | None = typer.Option(
+    models: list[str] | None = typer.Option(
         None,
-        "--allow",
-        help="Model allowlist glob (repeatable, e.g. --allow 'gpt-4*').",
+        "--model",
+        help="Exact model id to allowlist (repeatable).",
     ),
-    deny_models: list[str] | None = typer.Option(
+    include: list[str] | None = typer.Option(
         None,
-        "--deny",
-        help="Model denylist glob (repeatable, e.g. --deny '*vision*').",
+        "--include",
+        help="Glob of model ids to advertise (repeatable, e.g. --include 'anthropic/*').",
+    ),
+    exclude: list[str] | None = typer.Option(
+        None,
+        "--exclude",
+        help="Glob of model ids to hide (repeatable, e.g. --exclude '*:free'). Wins over include.",
     ),
     clear_filters: bool = typer.Option(
         False,
         "--clear-filters",
-        help="Clear all model allow/deny filters.",
+        help="Clear all model filters (advertise everything again).",
     ),
 ) -> None:
     """Update an upstream provider's settings (partial update)."""
@@ -236,19 +307,27 @@ def update_upstream(
 
     body: dict[str, Any] = {}
     if base_url is not None:
-        body["openai_base_url"] = base_url.rstrip("/")
+        body["url"] = base_url.rstrip("/")
+    if auth_style is not None:
+        body["auth_style"] = auth_style
     if auth_header is not None:
         body["auth_header"] = auth_header
+    if auth_env is not None:
+        body["auth_value_env"] = auth_env
+    if timeout is not None:
+        body["timeout_seconds"] = timeout
     if advertise_models is not None:
         body["advertise_models"] = advertise_models
     if enabled is not None:
         body["enabled"] = enabled
     if clear_filters:
-        body["model_filters"] = {}
-    elif allow_models is not None or deny_models is not None:
+        # All-empty filters ≡ clear on the API side.
+        body["model_filters"] = {"models": [], "include": [], "exclude": []}
+    elif models is not None or include is not None or exclude is not None:
         body["model_filters"] = {
-            "allow": allow_models or [],
-            "deny": deny_models or [],
+            "models": models or [],
+            "include": include or [],
+            "exclude": exclude or [],
         }
 
     if not body:
@@ -262,7 +341,7 @@ def update_upstream(
         return
 
     console.print(f"[green]✓[/green] Updated upstream [bold]{name}[/bold]")
-    console.print(Syntax(jsonlib.dumps(result, indent=2), "json", theme="ansi_dark", background_color="default"))
+    _print_json(result)
 
 
 # ── delete ────────────────────────────────────────────────────────────────
@@ -278,11 +357,9 @@ def delete_upstream(
         help="Skip confirmation prompt.",
     ),
 ) -> None:
-    """Remove an upstream provider."""
+    """Remove an upstream provider (its api.env credential is retained)."""
     if not force:
-        confirm = typer.confirm(
-            f"Delete upstream [bold]{name}[/bold]? This cannot be undone."
-        )
+        confirm = typer.confirm(f"Delete upstream {name!r}? This cannot be undone.")
         if not confirm:
             console.print("Aborted.")
             raise typer.Exit(0)
@@ -292,12 +369,14 @@ def delete_upstream(
         raise typer.Exit(1)
 
     try:
-        api_delete(f"/api/upstreams/{name}")
+        result = api_delete(f"/api/upstreams/{name}")
     except CliApiError as exc:
         die(str(exc))
         return
 
     console.print(f"[green]✓[/green] Deleted upstream [bold]{name}[/bold]")
+    if isinstance(result, dict) and (hint := result.get("hint")):
+        console.print(f"[dim]{hint}[/dim]")
 
 
 # ── test ──────────────────────────────────────────────────────────────────
@@ -319,11 +398,20 @@ def test_upstream(
         return
 
     ok = result.get("ok", False)
-    status = result.get("status", "unknown")
     if ok:
-        console.print(f"[green]✓[/green] Upstream [bold]{name}[/bold] is reachable ({status})")
+        latency = result.get("latency_ms")
+        count = result.get("models_count")
+        detail = []
+        if latency is not None:
+            detail.append(f"{latency:.0f} ms")
+        if count is not None:
+            detail.append(f"{count} models")
+        suffix = f" ({', '.join(detail)})" if detail else ""
+        console.print(f"[green]✓[/green] Upstream [bold]{name}[/bold] is reachable{suffix}")
     else:
-        console.print(f"[red]✗[/red] Upstream [bold]{name}[/bold] is unreachable: {result.get('error', status)}")
+        err = result.get("error") or result.get("status", "unknown")
+        console.print(f"[red]✗[/red] Upstream [bold]{name}[/bold] is unreachable: {err}")
+        raise typer.Exit(1)
 
 
 # ── set-credentials ───────────────────────────────────────────────────────
@@ -337,7 +425,12 @@ def set_credentials(
         "--key",
         prompt="API key",
         hide_input=True,
-        help="API key (secret; prompted securely if omitted).",
+        help="API key VALUE (secret; prompted securely if omitted).",
+    ),
+    env_var: str = typer.Option(
+        None,
+        "--env-var",
+        help="Env-var name to write (defaults to the upstream's declared auth_value_env).",
     ),
 ) -> None:
     """Set an API key for a provider (writes to api.env)."""
@@ -345,13 +438,32 @@ def set_credentials(
     if _api_unreachable(url):
         raise typer.Exit(1)
 
+    if env_var is None:
+        # The credentials route binds the key to the upstream's declared
+        # env-var — resolve it so the caller doesn't have to look it up.
+        try:
+            up = api_get(f"/api/upstreams/{name}")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        env_var = up.get("auth_value_env") or ""
+        if not env_var:
+            die(
+                f"upstream {name!r} declares no auth_value_env; "
+                "pass --env-var or set one via `hal0 upstream update --auth-env`"
+            )
+            return
+
     try:
-        result = api_post(f"/api/providers/{name}/credentials", json={"api_key": key})
+        api_post(
+            f"/api/providers/{name}/credentials",
+            json={"key": env_var, "value": key},
+        )
     except CliApiError as exc:
         die(str(exc))
         return
 
     console.print(
-        f"[green]✓[/green] Credentials stored for provider [bold]{name}[/bold] "
-        f"({result.get('provider')})"
+        f"[green]✓[/green] Credential stored for [bold]{name}[/bold] "
+        f"in api.env as [bold]{env_var}[/bold]"
     )
