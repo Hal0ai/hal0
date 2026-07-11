@@ -307,6 +307,30 @@ a { color: inherit; text-decoration: none; }
   box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
 }
 
+/* Agent Chat launcher — brain icon with a persistent pinkish-purple glow
+   (overrides the amber launcher default). Intensifies on hover / when the
+   chat slide-out is open. */
+.tb-launch-btn.tb-brain svg {
+  color: #d074ff;
+  filter: drop-shadow(0 0 5px rgba(208, 116, 255, 0.75)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+.tb-launch-btn.tb-brain:hover svg,
+.tb-launch-btn.tb-brain.on svg {
+  color: #e29bff;
+  filter: drop-shadow(0 0 8px rgba(208, 116, 255, 0.95)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+.tb-launch-btn.tb-brain:hover {
+  color: var(--fg);
+  border-color: rgba(208, 116, 255, 0.5);
+  background: rgba(208, 116, 255, 0.10);
+}
+.tb-launch-btn.tb-brain.on {
+  color: #e29bff;
+  border-color: rgba(208, 116, 255, 0.5);
+  background: rgba(208, 116, 255, 0.10);
+  box-shadow: 0 0 0 1px rgba(208, 116, 255, 0.4), 0 0 14px -4px #d074ff;
+}
+
 /* Notification bell — icon-only launcher + anchored dropdown panel. */
 .tb-bell-wrap { position: relative; display: inline-flex; }
 .tb-bell {
