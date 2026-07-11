@@ -1867,6 +1867,75 @@ def test_gateway_secrets_wire_refuses_real_etc_dropin_under_pytest(
     assert "pytest" in out.reason.lower()
 
 
+# ── write_gateway_secrets_dropin — extracted writer (pre-gateway-install use) ──
+
+
+def test_write_gateway_secrets_dropin_writes_and_reloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropin_file, fake, _io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+
+    res = hp.write_gateway_secrets_dropin(run=fake.run)
+
+    assert res.outcome == "written"
+    assert res.daemon_reload is True
+    assert res.content_hash
+    assert dropin_file.exists()
+    assert "EnvironmentFile=-/var/lib/hal0/secrets/agents/hermes.env" in dropin_file.read_text(
+        encoding="utf-8"
+    )
+    assert (dropin_file.stat().st_mode & 0o777) == 0o644
+    assert fake.calls == [["systemctl", "daemon-reload"]]
+
+
+def test_write_gateway_secrets_dropin_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropin_file, fake, _io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+
+    first = hp.write_gateway_secrets_dropin(run=fake.run)
+    mtime = dropin_file.stat().st_mtime_ns
+    second = hp.write_gateway_secrets_dropin(run=fake.run)
+
+    assert first.outcome == "written"
+    assert second.outcome == "unchanged"
+    assert second.daemon_reload is False
+    assert second.content_hash == first.content_hash
+    # Hash-skip: file untouched, only ONE daemon-reload total.
+    assert dropin_file.stat().st_mtime_ns == mtime
+    assert fake.calls == [["systemctl", "daemon-reload"]]
+
+
+def test_write_gateway_secrets_dropin_skips_non_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropin_file, fake, _io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+
+    res = hp.write_gateway_secrets_dropin(run=fake.run)
+
+    assert res.outcome == "skipped"
+    assert res.reason is not None and ("root" in res.reason.lower() or "euid" in res.reason.lower())
+    assert not dropin_file.exists()
+    assert fake.calls == []
+
+
+def test_write_gateway_secrets_dropin_refuses_real_etc_under_pytest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pytest-sandbox guard must fire BEFORE the euid check: root-under-
+    pytest with the real /etc default path is a no-op, never a host write."""
+    assert str(hp.GATEWAY_SYSTEMD_DROPIN_DIR).startswith("/etc/")
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+
+    def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("touched the real systemd bus")
+
+    res = hp.write_gateway_secrets_dropin(run=_boom)
+    assert res.outcome == "skipped"
+    assert res.reason is not None and "pytest" in res.reason.lower()
+
+
 # ── #437 — canonical home / wrapper consolidation ───────────────────────────
 
 

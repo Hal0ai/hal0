@@ -34,6 +34,24 @@ def test_lifespan_seeds_default_personas(tmp_hal0_home: str) -> None:
     assert (root / "active.txt").read_text(encoding="utf-8").strip() == "hermes"
 
 
+def test_lifespan_stamps_hal0_managed_marker_before_seed(tmp_hal0_home: str) -> None:
+    """Fresh-install bug fix: the startup seed populates HERMES_HOME before
+    `hal0 agent install hermes` runs. The lifespan must stamp `.hal0-managed`
+    so the later bootstrap home-claim doesn't abort as 'unclaimed HERMES_HOME'.
+    A home hal0 itself seeded must NOT read as foreign afterwards."""
+    from hal0.agents import hermes_provision as hp
+
+    home = _personas_root(tmp_hal0_home).parent  # .../.hermes
+    assert not home.exists()
+
+    with TestClient(create_app()):
+        pass
+
+    assert (home / hp._HAL0_MANAGED_MARKER).is_file()
+    # The seed populated the home, but the marker keeps it from looking foreign.
+    assert hp._home_is_foreign(home) is False
+
+
 def test_lifespan_seed_converges_old_box_without_touching_edits(
     tmp_hal0_home: str,
 ) -> None:
