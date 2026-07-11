@@ -365,3 +365,45 @@
   .ep-cols { grid-template-columns: 1fr; }
   .mcp-tools { grid-template-columns: 1fr; }
 }
+
+/* ─── Upstream providers pane ─────────────────────────────────────── */
+/* Row grid mirrors .eprow but with auth/filter columns instead of
+   device/port/tps. */
+.up-head, .uprow .up-main { grid-template-columns: 9px 110px minmax(0,1fr) 140px 150px 24px; }
+.uprow .ep-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); }
+.up-auth { display: flex; }
+.up-filters { font-size: 10px; color: var(--fg-4); text-align: right; }
+.up-head span:nth-child(5) { text-align: right; }
+
+.up-controls { display: flex; align-items: center; gap: 18px; padding: 4px 0 10px; flex-wrap: wrap; }
+.up-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg-2); cursor: pointer; }
+.up-toggle input { accent-color: var(--accent); }
+.up-toggle .meta { color: var(--fg-4); font-size: 11px; }
+
+.up-test { padding: 6px 10px; margin-bottom: 10px; border-radius: var(--rad-sm); font-size: 11px; border: 1px solid var(--line); }
+.up-test.ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
+.up-test.err { color: var(--err); border-color: var(--err-line); background: rgba(255,90,90,0.07); }
+
+.up-filter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px 0; }
+.up-filter-grid label, .up-add-grid label { display: flex; flex-direction: column; gap: 4px; }
+.up-filter-grid .k, .up-add-grid .k { font-family: var(--jbm); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-5); }
+.up-input { height: 28px; padding: 4px 8px; font-size: 11.5px; background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); border-radius: var(--rad-sm); }
+.up-input:focus { outline: none; border-color: var(--accent); }
+.up-filter-actions { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+.up-filter-actions .meta { font-size: 10.5px; color: var(--fg-5); }
+
+.up-foot { display: flex; align-items: center; gap: 10px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+.up-key { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.up-key .k { font-size: 10px; color: var(--fg-4); white-space: nowrap; }
+.up-key .up-input { flex: 1 1 220px; min-width: 140px; }
+
+.up-add { padding: 12px 14px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: var(--rad); background: var(--bg-1); }
+.up-add-grid { display: grid; grid-template-columns: 160px 140px minmax(0,1fr) minmax(0,1fr); gap: 10px; }
+.up-add-notes { padding-top: 8px; font-size: 11px; color: var(--fg-4); }
+
+@media (max-width: 900px) {
+  .up-head, .uprow .up-main { grid-template-columns: 9px 90px minmax(0,1fr) 24px; }
+  .up-head span:nth-child(4), .up-head span:nth-child(5),
+  .uprow .up-main .up-auth, .uprow .up-main .up-filters { display: none; }
+  .up-filter-grid, .up-add-grid { grid-template-columns: 1fr; }
+}

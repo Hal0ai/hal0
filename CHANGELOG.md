@@ -21,6 +21,21 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+- **Upstream model controls** — full management surface for external LLM providers (OpenRouter, Anthropic, OpenAI, Google AI Studio, Ollama, custom):
+  - Reactive CRUD: `POST/PATCH/DELETE /api/upstreams` (create prefills from the provider catalog via `catalog_id`); `upstreams.toml` stays canonical — every write rewrites it atomically before touching the running registry.
+  - `hal0 upstream` CLI group (`list/show/create/update/delete/test/set-credentials`); `create --catalog openrouter --api-key` wires a provider end-to-end in one command.
+  - MCP admin tools `upstream_create`/`upstream_update`/`upstream_delete` (gated) + `upstream_test`.
+  - Dashboard **Upstream providers** panel (Slots → Endpoints / Connections): add-from-catalog form, write-only key entry, test-connection with latency + model count, enable/advertise toggles, filter editor with live preview, delete-with-confirm.
+  - Per-upstream `model_filters` (`models` allowlist + `include`/`exclude` globs, exclude wins) curating `/v1/models` and `/api/models` advertising — dispatch stays unfiltered so hidden models remain addressable by name (per the 2026-07-06 upstream-model-filters spec).
+  - `enabled` kill-switch on every upstream: `false` removes it from dispatch routing and the model catalog while retaining config + credentials.
+  - `auth_key_present` in upstream serializations — whether the declared env-var actually holds a key (drives the dashboard auth badge), distinct from `auth_configured`.
+
+### Fixed
+- `upstreams.toml` schema drift: `auth_style = "anthropic"`/`"google_query"` (long implemented by the dispatcher) now validate; `auth_header` is a real schema field so `auth_style = "header"` works; warmup vocabulary canonicalized to `none|ondemand|always` with `lazy`/`eager` accepted as normalizing aliases — a TOML authored in the runtime vocabulary no longer fails validation and silently empties the upstream registry.
+- `/api/models` no longer stamps slot-backed advertisements as `origin="upstream"`: the composite `hal0` aggregate and container slots serve local models, but a raw GGUF id whose casing differed from the registry id (e.g. `Qwopus3.5-4B-Coder-MTP-Q6_K`) surfaced in the Models page Upstream tab as "via hal0". Only genuine remotes contribute upstream rows, honoring `enabled`/`advertise_models`/`model_filters`.
+- `hal0 upstream` first cut sent field names the API rejects (`openai_base_url`, `kind`, `allow`/`deny`, `api_key`) — every write 422'd; request bodies now match the route contracts exactly and are pinned by tests.
+
 ## [0.9.6.1] — 2026-07-11
 
 ### Added

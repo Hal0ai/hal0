@@ -22,6 +22,16 @@
 import { useSlots } from '@/api/hooks/useSlots'
 import { useMcpServers } from '@/api/hooks/useMcp'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import {
+  isManagedRemote,
+  useProviderCredentialSet,
+  useProvidersCatalog,
+  useUpstreamCreate,
+  useUpstreamDelete,
+  useUpstreams,
+  useUpstreamTest,
+  useUpstreamUpdate,
+} from '@/api/hooks/useUpstreams'
 
 const { useState: useCS } = React
 
@@ -1007,6 +1017,469 @@ function McpServersPanel() {
   )
 }
 
+// ─── Upstream providers (external LLM endpoints) ──────────────────────
+// The reactive editor over /api/upstreams: add a cloud provider from the
+// catalog, store its key (via the credentials route — the CRUD surface
+// never carries secrets), test the connection, curate which models it
+// advertises (include/exclude globs, exclude wins), toggle routing on/off,
+// delete. Slot-backed upstreams and the composite `hal0` aggregate are
+// hidden here — they're owned by the slot lifecycle (Slots page).
+
+// fnmatch-lite for the client-side filter preview: * and ? only, mirroring
+// the server's fnmatchcase semantics (case-sensitive, no regex).
+function globMatch(id, pat) {
+  const rx = new RegExp(
+    '^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$',
+  )
+  return rx.test(id)
+}
+
+function filterPreview(ids, { models, include, exclude }) {
+  return ids.filter((id) => {
+    if (exclude.some((p) => globMatch(id, p))) return false
+    if (!models.length && !include.length) return true
+    return models.includes(id) || include.some((p) => globMatch(id, p))
+  })
+}
+
+function csvList(text) {
+  return String(text || '')
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function upFilterSummary(f) {
+  if (!f) return 'all models'
+  const parts = []
+  if (f.models?.length) parts.push(`${f.models.length} pinned`)
+  if (f.include?.length) parts.push(`include ${f.include.length}`)
+  if (f.exclude?.length) parts.push(`exclude ${f.exclude.length}`)
+  return parts.length ? parts.join(' · ') : 'all models'
+}
+
+function UpstreamAuthChip({ up }) {
+  if (!up.auth_value_env) return <span className="chip outlined">no auth</span>
+  if (up.auth_key_present) return <span className="chip ok">key set</span>
+  return <span className="chip warn">{up.auth_value_env} unset</span>
+}
+
+function UpstreamRow({ up, defaultOpen }) {
+  const [open, setOpen] = useCS(!!defaultOpen)
+  const [testResult, setTestResult] = useCS(null)
+  const [keyValue, setKeyValue] = useCS('')
+  const [confirmDelete, setConfirmDelete] = useCS(false)
+  const [modelsText, setModelsText] = useCS((up.model_filters?.models || []).join(', '))
+  const [includeText, setIncludeText] = useCS((up.model_filters?.include || []).join(', '))
+  const [excludeText, setExcludeText] = useCS((up.model_filters?.exclude || []).join(', '))
+
+  const update = useUpstreamUpdate()
+  const remove = useUpstreamDelete()
+  const test = useUpstreamTest()
+  const setCredential = useProviderCredentialSet()
+
+  const draft = {
+    models: csvList(modelsText),
+    include: csvList(includeText),
+    exclude: csvList(excludeText),
+  }
+  const known = up.models || []
+  const previewCount = known.length ? filterPreview(known, draft).length : null
+
+  function runTest() {
+    setTestResult(null)
+    test.mutate(up.name, {
+      onSuccess: setTestResult,
+      onError: (e) => setTestResult({ ok: false, error: String(e?.message || e) }),
+    })
+  }
+
+  function applyFilters() {
+    update.mutate({ name: up.name, patch: { model_filters: draft } })
+  }
+
+  function clearFilters() {
+    setModelsText('')
+    setIncludeText('')
+    setExcludeText('')
+    update.mutate({
+      name: up.name,
+      patch: { model_filters: { models: [], include: [], exclude: [] } },
+    })
+  }
+
+  function saveKey() {
+    if (!keyValue || !up.auth_value_env) return
+    setCredential.mutate(
+      { name: up.name, key: up.auth_value_env, value: keyValue },
+      { onSuccess: () => setKeyValue('') }, // write-only: never keep the secret around
+    )
+  }
+
+  return (
+    <div className={'eprow uprow' + (open ? ' expanded' : '') + (up.enabled ? '' : ' dim')}>
+      <div className="eprow-main up-main" onClick={() => setOpen((o) => !o)}>
+        <span className={'ep-dot ' + (up.enabled ? 'serving' : 'offline')} />
+        <span className="ep-name">{up.name}</span>
+        <span className="ep-model">{up.url}</span>
+        <span className="up-auth">
+          <UpstreamAuthChip up={up} />
+        </span>
+        <span className="up-filters mono">{upFilterSummary(up.model_filters)}</span>
+        <span className="ep-caret">
+          <CIcon name="chev" size={14} />
+        </span>
+      </div>
+
+      <div className="ep-drawer">
+        <div className="ep-drawer-in">
+          <div className="up-controls">
+            <label className="up-toggle">
+              <input
+                type="checkbox"
+                checked={up.enabled}
+                onChange={(e) =>
+                  update.mutate({ name: up.name, patch: { enabled: e.target.checked } })
+                }
+              />
+              <span>
+                enabled <span className="meta">— off removes it from routing entirely</span>
+              </span>
+            </label>
+            <label className="up-toggle">
+              <input
+                type="checkbox"
+                checked={up.advertise_models}
+                onChange={(e) =>
+                  update.mutate({ name: up.name, patch: { advertise_models: e.target.checked } })
+                }
+              />
+              <span>
+                advertise models <span className="meta">— list in /v1/models</span>
+              </span>
+            </label>
+            <span className="grow" />
+            <button className="btn sm" onClick={runTest} disabled={test.isPending}>
+              {test.isPending ? 'Testing…' : 'Test connection'}
+            </button>
+          </div>
+
+          {testResult && (
+            <div className={'up-test mono ' + (testResult.ok ? 'ok' : 'err')}>
+              {testResult.ok
+                ? `✓ reachable · ${Math.round(testResult.latency_ms ?? 0)} ms · ${testResult.models_count ?? '?'} models`
+                : `✗ ${testResult.error || testResult.status || 'unreachable'}`}
+            </div>
+          )}
+
+          <div className="ep-block">
+            <div className="ep-block-h">
+              <span className="ic">
+                <CIcon name="gauge" size={12} />
+              </span>{' '}
+              model filters<span className="grow" />
+              <span className="chip outlined">
+                {previewCount == null
+                  ? 'no catalog cached'
+                  : `${previewCount}/${known.length} advertised`}
+              </span>
+            </div>
+            <div className="up-filter-grid">
+              <label>
+                <span className="k">pinned ids</span>
+                <input
+                  className="up-input mono"
+                  placeholder="anthropic/claude-sonnet-4, …"
+                  value={modelsText}
+                  onChange={(e) => setModelsText(e.target.value)}
+                />
+              </label>
+              <label>
+                <span className="k">include globs</span>
+                <input
+                  className="up-input mono"
+                  placeholder="anthropic/*, google/*"
+                  value={includeText}
+                  onChange={(e) => setIncludeText(e.target.value)}
+                />
+              </label>
+              <label>
+                <span className="k">exclude globs (win)</span>
+                <input
+                  className="up-input mono"
+                  placeholder="*:free, nvidia/*"
+                  value={excludeText}
+                  onChange={(e) => setExcludeText(e.target.value)}
+                />
+              </label>
+            </div>
+            <div className="up-filter-actions">
+              <span className="meta">
+                curates /v1/models only — filtered-out models stay dispatchable by name
+              </span>
+              <span className="grow" />
+              <button className="btn sm" onClick={clearFilters} disabled={update.isPending}>
+                Clear
+              </button>
+              <button className="btn sm primary" onClick={applyFilters} disabled={update.isPending}>
+                Apply filters
+              </button>
+            </div>
+          </div>
+
+          <div className="up-foot">
+            {up.auth_value_env ? (
+              <span className="up-key">
+                <span className="k mono">{up.auth_value_env}</span>
+                <input
+                  className="up-input mono"
+                  type="password"
+                  placeholder={up.auth_key_present ? '•••••• (set — paste to replace)' : 'paste API key'}
+                  value={keyValue}
+                  onChange={(e) => setKeyValue(e.target.value)}
+                  autoComplete="off"
+                />
+                <button
+                  className="btn sm"
+                  onClick={saveKey}
+                  disabled={!keyValue || setCredential.isPending}
+                >
+                  {setCredential.isPending ? 'Saving…' : 'Save key'}
+                </button>
+              </span>
+            ) : (
+              <span className="meta">no credential declared (auth: {up.auth_style})</span>
+            )}
+            <span className="grow" />
+            {confirmDelete ? (
+              <>
+                <span className="meta">delete {up.name}? key in api.env is kept</span>
+                <button className="btn sm" onClick={() => setConfirmDelete(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn sm danger"
+                  onClick={() => remove.mutate(up.name)}
+                  disabled={remove.isPending}
+                >
+                  Confirm delete
+                </button>
+              </>
+            ) : (
+              <button className="btn sm danger" onClick={() => setConfirmDelete(true)}>
+                Delete
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AddUpstreamForm({ onClose }) {
+  const catalogQuery = useProvidersCatalog()
+  const create = useUpstreamCreate()
+  const setCredential = useProviderCredentialSet()
+
+  const [catalogId, setCatalogId] = useCS('')
+  const [name, setName] = useCS('')
+  const [url, setUrl] = useCS('')
+  const [apiKey, setApiKey] = useCS('')
+  const [error, setError] = useCS(null)
+
+  const catalog = catalogQuery.data || {}
+  const entry = catalogId ? catalog[catalogId] : null
+
+  function pickCatalog(id) {
+    setCatalogId(id)
+    const e = catalog[id]
+    if (e) {
+      if (!name) setName(id.replace(/_/g, '-'))
+      setUrl(e.base_url || '')
+    }
+  }
+
+  function submit() {
+    setError(null)
+    const body = { name: name.trim() }
+    if (catalogId) body.catalog_id = catalogId
+    if (url.trim()) body.url = url.trim()
+    create.mutate(body, {
+      onSuccess: (created) => {
+        const env = created?.auth_value_env
+        if (apiKey && env) {
+          setCredential.mutate(
+            { name: created.name, key: env, value: apiKey },
+            { onSettled: () => onClose() },
+          )
+        } else {
+          onClose()
+        }
+      },
+      onError: (e) => setError(String(e?.message || e)),
+    })
+  }
+
+  return (
+    <div className="up-add">
+      <div className="up-add-grid">
+        <label>
+          <span className="k">provider</span>
+          <select
+            className="up-input"
+            value={catalogId}
+            onChange={(e) => pickCatalog(e.target.value)}
+          >
+            <option value="">custom…</option>
+            {Object.values(catalog)
+              .filter((c) => c.id !== 'hal0')
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+          </select>
+        </label>
+        <label>
+          <span className="k">name</span>
+          <input
+            className="up-input mono"
+            placeholder="openrouter"
+            value={name}
+            onChange={(e) => setName(e.target.value.toLowerCase())}
+          />
+        </label>
+        <label>
+          <span className="k">base url</span>
+          <input
+            className="up-input mono"
+            placeholder="https://…/v1"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+        </label>
+        <label>
+          <span className="k">api key {entry?.auth === 'none' ? '(not needed)' : '(optional)'}</span>
+          <input
+            className="up-input mono"
+            type="password"
+            placeholder="stored via api.env, never echoed"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            autoComplete="off"
+          />
+        </label>
+      </div>
+      {entry?.notes && <div className="meta up-add-notes">{entry.notes}</div>}
+      {error && <div className="up-test mono err">✗ {error}</div>}
+      <div className="up-filter-actions">
+        <span className="grow" />
+        <button className="btn sm" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="btn sm primary"
+          onClick={submit}
+          disabled={!name.trim() || (!url.trim() && !catalogId) || create.isPending}
+        >
+          {create.isPending ? 'Adding…' : 'Add upstream'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function UpstreamProvidersPanel() {
+  const upstreamsQuery = useUpstreams()
+  const [adding, setAdding] = useCS(false)
+
+  const remotes = (upstreamsQuery.data ?? []).filter(isManagedRemote)
+  const enabledCount = remotes.filter((u) => u.enabled).length
+  const keyed = remotes.filter((u) => u.auth_key_present).length
+
+  return (
+    <EnginePane
+      glyph="connections"
+      eyebrow={
+        <>
+          <b>upstreams</b>
+          <span className="dim">·</span>
+          <span className="meta">external providers</span>
+          <span className="dim">·</span>
+          <span className="mono" style={{ color: 'var(--fg-3)' }}>
+            {remotes.length} configured
+          </span>
+          <span className="grow" />
+          <span className="meta">upstreams.toml · reactive</span>
+        </>
+      }
+      title="Upstream providers"
+      sub="cloud + remote endpoints · /api/upstreams"
+      pill={{
+        tone: enabledCount ? 'live' : 'off',
+        text: `${enabledCount} enabled · ${keyed} with keys`,
+      }}
+      headRight={
+        <button
+          className="btn sm primary"
+          onClick={(e) => {
+            e.stopPropagation()
+            setAdding((a) => !a)
+          }}
+        >
+          {adding ? 'Close' : '+ Add upstream'}
+        </button>
+      }
+      strip={
+        <>
+          <span className="ss-summary">
+            <b>{enabledCount}</b> enabled · {remotes.length} configured · {keyed} with keys
+          </span>
+          <span className="grow" />
+          <span className="ss-summary" style={{ fontFamily: 'var(--jbm)', color: 'var(--fg-4)' }}>
+            OpenRouter · Anthropic · OpenAI · custom
+          </span>
+        </>
+      }
+      foot={
+        <>
+          <span className="k">source</span>
+          <span className="v">/etc/hal0/upstreams.toml</span>
+          <span className="sep">·</span>
+          <span className="k">keys</span>
+          <span className="v">api.env · never echoed</span>
+          <span className="sep">·</span>
+          <span className="k">filters</span>
+          <span className="v amber">exclude wins</span>
+        </>
+      }
+    >
+      {adding && <AddUpstreamForm onClose={() => setAdding(false)} />}
+      <div className="eplist uplist">
+        <div className="ep-head up-head">
+          <span />
+          <span>name</span>
+          <span>base url</span>
+          <span>auth</span>
+          <span>advertising</span>
+          <span />
+        </div>
+        {upstreamsQuery.isPending && <div className="cn-empty mono">Loading upstreams…</div>}
+        {!upstreamsQuery.isPending && remotes.length === 0 && (
+          <div className="cn-empty mono">
+            No external providers configured. Add one from the catalog, or author
+            /etc/hal0/upstreams.toml by hand.
+          </div>
+        )}
+        {remotes.map((u, i) => (
+          <UpstreamRow key={u.name} up={u} defaultOpen={remotes.length === 1 && i === 0} />
+        ))}
+      </div>
+    </EnginePane>
+  )
+}
+
 // ─── the view (legacy #connections → redirected to #slots/endpoints) ──
 // Kept as a composed fallback so any direct render still works; the route
 // alias in main.jsx means users no longer land here.
@@ -1019,10 +1492,19 @@ function ConnectionsView() {
       </div>
       <div className="conn">
         <LocalEndpointsPanel />
+        <UpstreamProvidersPanel />
         <McpServersPanel />
       </div>
     </div>
   )
 }
 
-Object.assign(window, { ConnectionsView, LocalEndpointsPanel, McpServersPanel, EnginePane, EndpointRow, McpServerRow })
+Object.assign(window, {
+  ConnectionsView,
+  LocalEndpointsPanel,
+  UpstreamProvidersPanel,
+  McpServersPanel,
+  EnginePane,
+  EndpointRow,
+  McpServerRow,
+})

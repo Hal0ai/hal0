@@ -559,3 +559,91 @@ def test_list_models_surfaces_installed_flm_models(
     assert rows["embed-gemma-300m-FLM"]["type"] == "embedding"
     # not-installed FLM tag omitted.
     assert "qwen3-0.6b-FLM" not in rows
+
+
+# ── upstream provenance in /api/models ─────────────────────────────────────
+
+
+def test_slot_backed_upstreams_never_stamp_origin_upstream(
+    inspect_client: TestClient,
+) -> None:
+    """The composite ``hal0`` aggregate and container slots serve LOCAL
+    models — their advertised ids must not appear as origin="upstream"
+    rows. Regression: a chat slot's raw GGUF id (casing differs from the
+    normalized registry id) surfaced in the Models page Upstream tab as
+    "via hal0"."""
+    from hal0.upstreams.registry import Upstream
+
+    app = inspect_client.app
+    reg = app.state.upstreams
+    for u in list(reg.list()):
+        reg.remove(u.name)
+    reg.add(Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1"))
+    reg.add(
+        Upstream(
+            name="ops",
+            kind="remote",
+            url="http://127.0.0.1:8091/v1",
+            slot_name="ops",
+        )
+    )
+    reg.add(
+        Upstream(
+            name="openrouter",
+            kind="remote",
+            url="https://openrouter.ai/api/v1",
+        )
+    )
+    app.state.upstream_models = {
+        "hal0": ["Qwopus3.5-4B-Coder-MTP-Q6_K"],
+        "ops": ["qwopus3-5-4b-coder-mtp-q6-k"],
+        "openrouter": ["anthropic/claude-sonnet-4"],
+    }
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    # Slot-backed advertisements are suppressed entirely.
+    assert "Qwopus3.5-4B-Coder-MTP-Q6_K" not in rows
+    assert "qwopus3-5-4b-coder-mtp-q6-k" not in rows
+    # Genuine remotes still contribute upstream rows.
+    assert rows["anthropic/claude-sonnet-4"]["origin"] == "upstream"
+    assert rows["anthropic/claude-sonnet-4"]["upstream"] == "openrouter"
+
+
+def test_disabled_or_filtered_remote_curates_api_models(
+    inspect_client: TestClient,
+) -> None:
+    """/api/models honors enabled + advertise_models + model_filters for
+    remote upstreams (same curation as /v1/models)."""
+    import dataclasses
+
+    from hal0.upstreams.filters import ModelFilters
+    from hal0.upstreams.registry import Upstream
+
+    app = inspect_client.app
+    reg = app.state.upstreams
+    for u in list(reg.list()):
+        reg.remove(u.name)
+    base = Upstream(name="openrouter", kind="remote", url="https://openrouter.ai/api/v1")
+    reg.add(
+        dataclasses.replace(
+            base,
+            model_filters=ModelFilters.from_lists(include=["anthropic/*"], exclude=["*:free"]),
+        )
+    )
+    reg.add(
+        dataclasses.replace(base, name="disabled-one", enabled=False),
+    )
+    app.state.upstream_models = {
+        "openrouter": [
+            "anthropic/claude-sonnet-4",
+            "anthropic/claude-haiku:free",
+            "nvidia/nemotron-70b",
+        ],
+        "disabled-one": ["mistral/mistral-large"],
+    }
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    assert "anthropic/claude-sonnet-4" in rows
+    assert "anthropic/claude-haiku:free" not in rows  # exclude wins
+    assert "nvidia/nemotron-70b" not in rows  # not included
+    assert "mistral/mistral-large" not in rows  # disabled upstream

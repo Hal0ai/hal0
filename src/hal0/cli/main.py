@@ -35,7 +35,6 @@ from hal0.cli.bench_commands import bench as bench_command
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
-from hal0.cli.upstream_commands import app as upstream_app
 from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
@@ -44,6 +43,7 @@ from hal0.cli.registry_commands import app as registry_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update as _update_impl
+from hal0.cli.upstream_commands import app as upstream_app
 
 console = Console()
 
