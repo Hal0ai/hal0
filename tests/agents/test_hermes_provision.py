@@ -22,7 +22,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -558,15 +560,106 @@ def test_install_phase_runs_venv_install_when_binary_missing(
     assert install_calls == [venv]
 
 
-def test_resolve_python311_prefers_explicit_when_available() -> None:
-    out = hp._resolve_python311(prober=lambda _name: "/opt/python3.11/bin/python3.11")
-    assert out == "/opt/python3.11/bin/python3.11"
+def test_resolve_python_prefers_newest_explicit_in_range() -> None:
+    # All of 3.11-3.13 on PATH → the newest wins; 3.14 is never probed.
+    probed: list[str] = []
+
+    def _prober(name: str) -> str | None:
+        probed.append(name)
+        return f"/opt/{name}/bin/{name}"
+
+    out = hp._resolve_supported_python(prober=_prober)
+    assert out == "/opt/python3.13/bin/python3.13"
+    assert "python3.14" not in probed
 
 
-def test_resolve_python311_falls_back_to_sys_executable() -> None:
-    out = hp._resolve_python311(prober=lambda _name: None)
-    # CI runs on >= 3.11 (pyproject pin); falls back to sys.executable.
-    assert out is not None
+def test_resolve_python_walks_down_to_oldest_supported() -> None:
+    out = hp._resolve_supported_python(
+        prober=lambda name: "/usr/bin/python3.11" if name == "python3.11" else None
+    )
+    assert out == "/usr/bin/python3.11"
+
+
+def test_resolve_python_falls_back_to_sys_executable_in_range() -> None:
+    out = hp._resolve_supported_python(prober=lambda _name: None, running=(3, 12))
+    assert out == sys.executable
+
+
+def test_resolve_python_rejects_unsupported_running_interpreter() -> None:
+    # The Ubuntu 26.04 case (#1248): only a 3.14 interpreter exists. The old
+    # ">= 3.11" fallback accepted it and pip resolved the broken
+    # hermes-agent 0.15.2; now the resolver must return None so the
+    # preflight fails with the actionable range message.
+    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 14)) is None
+    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 10)) is None
+
+
+def test_preflight_fails_actionably_when_no_supported_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    state = hp.BootstrapState(
+        venv=str(var_lib / "venvs" / "hermes"), hermes_home=str(var_lib / ".hermes")
+    )
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
+    monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
+    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "3.11-3.13" in (out.reason or "")
+    assert "deadsnakes" in (out.reason or "")
+
+
+def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -> None:
+    # A venv already built on 3.14 (the pre-guard fallback) can never
+    # converge by pip alone — _install_venv must detect it from the
+    # lib/pythonX.Y layout and rebuild on the resolved interpreter.
+    venv = tmp_path / "venv"
+    (venv / "lib" / "python3.14" / "site-packages").mkdir(parents=True)
+    stale_marker = venv / "lib" / "python3.14" / "site-packages" / "hermes_cli"
+    stale_marker.mkdir()
+    calls: list[list[str]] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], check: bool) -> None:
+            calls.append(argv)
+
+    hp._install_venv(
+        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.13"
+    )
+    assert not stale_marker.exists()  # stale 3.14 tree removed
+    assert calls[0][:3] == ["/usr/bin/python3.13", "-m", "venv"]
+
+
+def test_install_venv_keeps_supported_venv(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    (venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], check: bool) -> None:
+            calls.append(argv)
+
+    hp._install_venv(
+        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.12"
+    )
+    # No `-m venv` call — straight to pip into the existing venv.
+    assert all(argv[2] != "venv" for argv in calls if len(argv) > 2)
+
+
+def test_requirements_floor_blocks_broken_hermes_agent() -> None:
+    # Regression guard for #1247: hermes-agent 0.15.2's wheel is broken
+    # (imports hermes_cli.dashboard_auth, ships without it). The floor must
+    # stay >= 0.16.0 so no resolver — including old-Python fallbacks — can
+    # ever select it.
+    req = hp.HERMES_REQUIREMENTS
+    line = next(ln for ln in req.read_text().splitlines() if ln.startswith("hermes-agent"))
+    m = re.search(r">=\s*(\d+)\.(\d+)\.(\d+)", line)
+    assert m, f"no version floor in: {line!r}"
+    assert tuple(int(g) for g in m.groups()) >= (0, 16, 0)
 
 
 # ── #241 phase impls — env_probe / config_write ─────────────────────────────
