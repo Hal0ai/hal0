@@ -14,11 +14,12 @@ import json
 import logging
 import os
 import time
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Request, Response
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
@@ -1162,7 +1163,6 @@ async def check_model_updates(request: Request, refresh: bool = False) -> dict[s
 async def update_model_from_hf(
     model_id: str,
     request: Request,
-    background: BackgroundTasks,
 ) -> dict[str, object]:
     """Re-pull a model's HF file over its installed bytes (in place).
 
@@ -1220,15 +1220,18 @@ async def update_model_from_hf(
         )
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    background.add_task(
-        _run_pull_with_events,
-        job,
-        hf_repo=hf_repo,
-        hf_file=hf_file,
-        registry=registry,
-        hf_token=hf_token,
-        event_bus=event_bus,
-        dest_override=dest,
+    _schedule_pull_task(
+        request.app.state,
+        model_id,
+        _run_pull_with_events(
+            job,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            registry=registry,
+            hf_token=hf_token,
+            event_bus=event_bus,
+            dest_override=dest,
+        ),
     )
     return {
         "id": job.job_id,
@@ -1696,6 +1699,37 @@ def _resolve_pull_source_with_body(
     return repo, file, mmproj, False
 
 
+def _schedule_pull_task(
+    app_state: Any,
+    model_id: str,
+    coro: Coroutine[Any, Any, None],
+) -> asyncio.Task[None]:
+    """Launch a pull body as a detached ``asyncio.Task``, tracked for shutdown.
+
+    Deliberately NOT a Starlette ``BackgroundTasks`` entry (issue #1225):
+    those run to completion inside the same ASGI call that sent the
+    response, which keeps the HTTP connection "in flight" for the whole
+    download — uvicorn won't dispatch the ASGI ``lifespan.shutdown`` event
+    until every connection (including that one) closes, so a live multi-GB
+    pull blocks `systemctl restart hal0-api` until systemd's own stop
+    timeout SIGKILLs the process mid-write. Scheduling a detached task lets
+    the request return immediately (closing its connection) while the
+    download keeps running independently; ``app_state.model_pull_tasks``
+    gives the lifespan shutdown path (hal0.api._shutdown_pull_jobs) a
+    handle to find and cancel it with a bounded wait.
+    """
+    task = asyncio.create_task(coro)
+    tasks: dict[str, asyncio.Task[None]] = app_state.model_pull_tasks
+    tasks[model_id] = task
+
+    def _untrack(t: asyncio.Task[None], _model_id: str = model_id) -> None:
+        if tasks.get(_model_id) is t:
+            tasks.pop(_model_id, None)
+
+    task.add_done_callback(_untrack)
+    return task
+
+
 async def _run_pull_with_events(
     job: PullJob,
     *,
@@ -1771,6 +1805,7 @@ async def _run_pull_with_events(
                     )
 
     progress_task = asyncio.create_task(_emit_progress())
+    task_cancelled = False
     try:
         await run_pull(
             job,
@@ -1783,12 +1818,25 @@ async def _run_pull_with_events(
             mmproj_file=mmproj_file,
             dest_override=dest_override,
         )
+    except asyncio.CancelledError:
+        # The TASK was cancelled (issue #1225: hal0-api's lifespan shutdown
+        # does this to every in-flight pull). run_pull already recorded
+        # job.state = "cancelled" before re-raising, but the terminal
+        # footer event below sits AFTER this try/finally, which a
+        # propagating CancelledError would otherwise skip — the operator
+        # would never see a "pull cancelled" toast. Emit it from here
+        # instead, then let the cancellation continue propagating.
+        task_cancelled = True
+        raise
     finally:
         progress_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await progress_task
         # Persist terminal state so a restart-surviving status poll resolves (#626).
         _persist_pull_job(job)
+        if task_cancelled:
+            with contextlib.suppress(Exception):
+                await _emit_terminal_pull_event(event_bus, job)
 
     await _emit_terminal_pull_event(event_bus, job)
 
@@ -1861,7 +1909,6 @@ def _eta_s(job: PullJob, speed_bps: float) -> float | None:
 async def pull_model(
     model_id: str,
     request: Request,
-    background: BackgroundTasks,
 ) -> dict[str, object]:
     """Start a background HuggingFace pull and return a job handle.
 
@@ -1907,7 +1954,7 @@ async def pull_model(
     from hal0.providers.flm import is_flm_tag
 
     if is_flm_tag(model_id):
-        return await _start_flm_pull(model_id, request, background, jobs)
+        return await _start_flm_pull(model_id, request, jobs)
 
     # Body is optional — an empty / non-JSON request is the legacy
     # "pull by id" path used by the wizard's Pull-against-curated row.
@@ -1952,17 +1999,20 @@ async def pull_model(
     # P3: route the download into the capability-grouped store layout when the
     # capability is resolvable (body → registry → curated); None → flat fallback.
     capability, comfyui_subdir = _resolve_pull_capability(request, model_id, body)
-    background.add_task(
-        _run_pull_with_events,
-        job,
-        hf_repo=hf_repo,
-        hf_file=hf_file,
-        registry=registry,
-        hf_token=hf_token,
-        event_bus=event_bus,
-        capability=capability,
-        comfyui_subdir=comfyui_subdir,
-        mmproj_file=mmproj_file,
+    _schedule_pull_task(
+        request.app.state,
+        model_id,
+        _run_pull_with_events(
+            job,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            registry=registry,
+            hf_token=hf_token,
+            event_bus=event_bus,
+            capability=capability,
+            comfyui_subdir=comfyui_subdir,
+            mmproj_file=mmproj_file,
+        ),
     )
     out: dict[str, object] = {
         "id": job.job_id,
@@ -1979,7 +2029,6 @@ async def pull_model(
 async def _start_flm_pull(
     model_id: str,
     request: Request,
-    background: BackgroundTasks,
     jobs: dict[str, PullJob],
 ) -> dict[str, object]:
     """Spawn a background ``flm pull`` job and return the job handle.
@@ -2018,7 +2067,7 @@ async def _start_flm_pull(
             if event_bus is not None:
                 await _emit_terminal_pull_event(event_bus, job)
 
-    background.add_task(_run_flm_with_events)
+    _schedule_pull_task(request.app.state, model_id, _run_flm_with_events())
     return {
         "id": job.job_id,
         "model_id": model_id,
@@ -2084,15 +2133,31 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
             details={"model_id": model_id},
         )
 
+    shutting_down: asyncio.Event | None = getattr(request.app.state, "shutting_down", None)
+
     async def _gen() -> Any:
         # Emit an immediate snapshot so SSE clients don't sit at zero
         # while waiting for the first progress signal.
         yield f"data: {json.dumps(job.as_dict())}\n\n"
         while job.state in ("queued", "running"):
+            # hal0-api shutdown (issue #1225): don't leave this generator
+            # dangling open — it's a live HTTP connection that would
+            # otherwise block uvicorn's graceful-shutdown connection drain
+            # for as long as the job stays non-terminal. In the common case
+            # the job itself flips to "cancelled" promptly once the
+            # lifespan shutdown path cancels its pull task (see
+            # hal0.api._shutdown_pull_jobs), which already unblocks the
+            # loop condition above; this flag additionally bounds the wait
+            # for any stream whose job doesn't (e.g. one already terminal
+            # on disk but still being polled by a stale in-memory handle).
+            if shutting_down is not None and shutting_down.is_set():
+                break
             event = job.progress_event
             try:
                 await asyncio.wait_for(event.wait(), timeout=5.0)
             except TimeoutError:
+                if shutting_down is not None and shutting_down.is_set():
+                    break
                 # Keep-alive — surfaces stuck downloads without closing
                 # the stream.
                 yield f"data: {json.dumps(job.as_dict())}\n\n"

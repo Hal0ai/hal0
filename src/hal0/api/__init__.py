@@ -670,6 +670,121 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
             )
 
 
+def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
+    """Auto-resume pulls that were mid-flight when a prior process died.
+
+    A persisted pull-job snapshot in a non-terminal state (``queued`` or
+    ``running``) means the process that owned it never reached a terminal
+    state — either a pre-#1225 build that got SIGKILLed by systemd
+    mid-download, or a genuine crash. ``run_pull`` only durably persists a
+    snapshot at pull START (``queued``) and again at a TERMINAL state
+    (``completed``/``failed``/``cancelled``) — there is no mid-flight
+    "running" flush — so ``queued`` left on disk is the normal footprint
+    of an interrupted download, not just a job that never started.
+
+    The download's own resume sidecar (hal0.registry.pull's Range-request
+    support) means picking the pull back up is just calling ``run_pull``
+    again with the same ``(model_id, hf_repo, hf_filename)``; this does
+    that automatically instead of leaving it to the operator to notice and
+    re-POST.
+
+    Scope: only plain HF pulls whose registry row still carries
+    ``hf_repo`` + ``hf_filename``, and whose bytes aren't already sitting
+    on disk (a terminal persist can itself fail-soft, leaving a stale
+    non-terminal snapshot for a pull that actually completed — nothing to
+    resume there). FLM/NPU tag pulls and ad-hoc (hand-registered, no HF
+    coords) entries are left alone — there is no safe way to resume those
+    here, and the reconciliation in
+    ``routes.models._reconcile_persisted_pull_job`` already surfaces them
+    as ``failed`` (or ``completed``, if the bytes actually landed) on the
+    next status poll.
+    """
+    from pathlib import Path
+
+    from hal0.registry.curated import get_curated
+    from hal0.registry.pull import list_persisted_jobs, make_job, persist_pull_job
+
+    registry = app.state.model_registry
+    jobs: dict[str, Any] = app.state.model_pull_jobs
+    event_bus = getattr(app.state, "events", None)
+
+    for snapshot in list_persisted_jobs():
+        if snapshot.get("state") not in ("queued", "running"):
+            continue
+        model_id = snapshot.get("model_id")
+        if not isinstance(model_id, str) or not model_id or model_id in jobs:
+            continue
+        try:
+            entry = registry.get(model_id)
+        except Exception:
+            continue
+        hf_repo = (getattr(entry, "hf_repo", "") or "").strip()
+        hf_file = (getattr(entry, "hf_filename", "") or "").strip()
+        if not hf_repo or not hf_file:
+            continue
+        existing_path = (getattr(entry, "path", "") or "").strip()
+        if existing_path and Path(existing_path).exists():
+            continue  # bytes already landed — the terminal persist just didn't
+
+        caps = list(getattr(entry, "capabilities", None) or [])
+        capability = caps[0] if caps else None
+        curated = get_curated(model_id)
+        comfyui_subdir = (getattr(curated, "comfyui_subdir", "") or "").strip() or None
+
+        job = make_job(model_id)
+        jobs[model_id] = job
+        persist_pull_job(job)
+
+        from hal0.api.routes.models import _run_pull_with_events, _schedule_pull_task
+
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        _schedule_pull_task(
+            app.state,
+            model_id,
+            _run_pull_with_events(
+                job,
+                hf_repo=hf_repo,
+                hf_file=hf_file,
+                registry=registry,
+                hf_token=hf_token,
+                event_bus=event_bus,
+                capability=capability,
+                comfyui_subdir=comfyui_subdir,
+            ),
+        )
+        log.info("model.pull_auto_resumed", model_id=model_id, hf_repo=hf_repo, hf_file=hf_file)
+
+
+_PULL_SHUTDOWN_TIMEOUT_S = 10.0
+
+
+async def _shutdown_pull_jobs(app: FastAPI, timeout_s: float = _PULL_SHUTDOWN_TIMEOUT_S) -> None:
+    """Cancel every in-flight model pull so shutdown doesn't wait on them.
+
+    Issue #1225: pulls run as detached ``asyncio.Task``\\ s (see
+    ``routes.models._schedule_pull_task``) precisely so a live download
+    doesn't keep an HTTP connection open for the whole transfer — but a
+    detached task still has to be told to stop. Cancelling raises
+    ``asyncio.CancelledError`` inside the download's chunk loop, which
+    (per ``_download_one``'s contract) preserves the partial file and
+    writes a resume sidecar, so the next pull attempt — a manual re-POST,
+    or the startup auto-resume above — continues from the last complete
+    chunk rather than restarting from zero. Bounded so shutdown itself
+    stays fast even if a task is slow to unwind.
+    """
+    app.state.shutting_down.set()
+    tasks: dict[str, asyncio.Task[None]] = getattr(app.state, "model_pull_tasks", {}) or {}
+    live = [t for t in tasks.values() if not t.done()]
+    if not live:
+        return
+    log.info("hal0.api.shutdown_cancelling_pulls", count=len(live))
+    for t in live:
+        t.cancel()
+    _done, pending = await asyncio.wait(live, timeout=timeout_s)
+    if pending:
+        log.warning("hal0.api.shutdown_pull_cancel_timed_out", count=len(pending))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("hal0.api.startup", version=__version__)
@@ -858,6 +973,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and status routes snapshot ``as_dict()`` rather than hold the
     # dataclass across event-loop ticks.
     app.state.model_pull_jobs = {}
+    # Task handles for the SAME keys (issue #1225). A pull is launched as a
+    # detached ``asyncio.Task`` (routes.models._schedule_pull_task), not a
+    # Starlette BackgroundTask, specifically so its HTTP request can return
+    # immediately instead of keeping the connection open for the whole
+    # download — this dict is what lets the shutdown path below (
+    # _shutdown_pull_jobs) find and cancel any still-running pull.
+    app.state.model_pull_tasks = {}
+    # Flipped at the START of shutdown (see the lifespan finally block) so
+    # long-lived generators (the pull SSE stream) can notice a restart is in
+    # progress and close promptly instead of blocking uvicorn's connection
+    # drain indefinitely.
+    app.state.shutting_down = asyncio.Event()
     # Reap orphaned *.part staging files left by a SIGKILL/OOM mid-pull
     # (MR-9). Age-gated so an in-flight pull from another worker is never
     # touched; housekeeping must never block startup.
@@ -878,6 +1005,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.info("model.pull_jobs_swept", count=reaped)
     except Exception as exc:
         log.warning("model.pull_jobs_sweep_failed", error=str(exc))
+    # Auto-resume any pull left mid-flight by a prior hal0-api process that
+    # died without a clean shutdown (issue #1225) — e.g. an older build (pre
+    # this fix) that got SIGKILLed by systemd, or a hard crash. Best-effort:
+    # only resumes plain HF pulls whose registry row still carries hf_repo +
+    # hf_filename; anything else is left for the operator to re-POST.
+    try:
+        _auto_resume_interrupted_pulls(app)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("model.pull_auto_resume_failed", error=str(exc))
     # Container image-pull job registry — keyed by slot name, value is a
     # dict with keys: state (pulling|completed|failed), layer, total_layers,
     # error, and a threading.Event for SSE fan-out.
@@ -1110,6 +1246,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             stack.push_async_callback(_stop_gpu_arbiter_idle_loop)
             yield
     finally:
+        # First — issue #1225: cancel any in-flight model pull before doing
+        # anything else, so a live multi-GB download doesn't keep this
+        # shutdown (and thus `systemctl restart hal0-api`) waiting.
+        with contextlib.suppress(Exception):
+            await _shutdown_pull_jobs(app)
         if omni_router_client is not None:
             with contextlib.suppress(Exception):
                 await omni_router_client.aclose()

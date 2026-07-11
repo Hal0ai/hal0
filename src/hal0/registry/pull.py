@@ -683,6 +683,15 @@ async def _download_one(
                              the sidecar, raise :class:`PullChecksumMismatch`
       * permanent Hal0Error→ discard partial + sidecar, re-raise
       * transient httpx err→ preserve ``.part`` + write resume sidecar, re-raise
+      * task cancelled     → preserve ``.part`` + write resume sidecar, re-raise
+                             (issue #1225: hal0-api's lifespan shutdown
+                             cancels in-flight pull TASKS so a
+                             ``systemctl restart`` doesn't hang — that must
+                             behave like a transient interruption, not a
+                             user-requested "stop and clean up", so the next
+                             pull attempt (manual or startup auto-resume)
+                             continues from the last complete chunk instead
+                             of restarting from zero)
       * anything else      → discard (unknown state must not poison a resume)
     """
     url = hf_download_url(hf_repo, rec.hf_filename)
@@ -895,9 +904,16 @@ async def _download_one(
     except PullChecksumMismatch:
         raise  # .part intentionally preserved for diagnosis (sidecar dropped)
     except asyncio.CancelledError:
-        # Task itself was cancelled by the event loop — treat as an explicit
-        # cancel: discard the partial + sidecar (MR-7).
-        _discard_partial(part, sidecar)
+        # The TASK was cancelled (issue #1225: hal0-api's lifespan shutdown
+        # does this to every in-flight pull so a `systemctl restart` doesn't
+        # have to wait out a multi-GB download). Unlike the cooperative
+        # ``job.cancel_requested`` flag above — an explicit user "stop and
+        # clean up" — this is an interruption outside the download's
+        # control, so it gets the same treatment as a transient transport
+        # error: preserve the ``.part`` and write a resume sidecar so the
+        # next pull attempt (manual re-POST or startup auto-resume) picks
+        # up from the last complete chunk rather than restarting from zero.
+        _write_resume_sidecar(part, sidecar, url=url, etag=captured_etag, total=rec.bytes_total)
         raise
     except Hal0Error:
         # Permanent failures (4xx PullError, insufficient disk) are not
