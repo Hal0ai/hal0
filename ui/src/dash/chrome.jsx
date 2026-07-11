@@ -15,6 +15,7 @@ import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hook
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 
 const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
 
@@ -152,100 +153,21 @@ const Icons = {
 // route to the surface that already owns the action (ApprovalModal, footer
 // downloads pane, Settings → Updates) instead of duplicating it.
 
-const NOTIF_LS_KEY = "hal0:notif-dismissed";
-function _notifLoadDismissed() {
-  try {
-    const v = JSON.parse(localStorage.getItem(NOTIF_LS_KEY) || "[]");
-    return Array.isArray(v) ? v : [];
-  } catch { return []; }
-}
-// Module-level store (not React state) so messages published before the bell
-// mounts — or while it's unmounted on a crashed view — are never lost.
-const _notifStore = {
-  msgs: [],
-  dismissed: new Set(_notifLoadDismissed()),
-  listeners: new Set(),
-};
-function _notifEmit() { _notifStore.listeners.forEach((l) => l()); }
-function hal0Notify(raw) {
-  const d = raw || {};
-  const title = String(d.title || d.msg || "").trim();
-  if (!title) return null;
-  const id = String(d.id || ("msg-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)));
-  // A stable id makes a message dismissible forever (localStorage) — the
-  // channel for "developer important messages" that shouldn't re-nag.
-  if (_notifStore.dismissed.has(id)) return id;
-  if (_notifStore.msgs.some((m) => m.id === id)) return id;
-  _notifStore.msgs = [
-    ..._notifStore.msgs,
-    {
-      id,
-      title,
-      body: d.body ? String(d.body) : "",
-      kind: ["info", "warn", "error", "update"].includes(d.kind) ? d.kind : "info",
-      link: typeof d.link === "string" ? d.link : "",
-      ts: Date.now(),
-    },
-  ];
-  _notifEmit();
-  return id;
-}
-function _notifDismiss(id) {
-  _notifStore.msgs = _notifStore.msgs.filter((m) => m.id !== id);
-  _notifStore.dismissed.add(id);
-  try {
-    localStorage.setItem(NOTIF_LS_KEY, JSON.stringify([..._notifStore.dismissed].slice(-100)));
-  } catch { /* private mode — dismissal just won't persist */ }
-  _notifEmit();
-}
-if (typeof window !== "undefined") {
-  window.hal0Notify = hal0Notify;
-  window.addEventListener("hal0:notify", (e) => hal0Notify(e.detail));
-}
-
-const _NOTIF_KIND_HUE = {
-  info: "var(--info, var(--fg-3))",
-  warn: "var(--warn)",
-  error: "var(--err)",
-  update: "var(--accent)",
-};
+// The dev-message store, hal0Notify(), dismissNotifMessage(), NOTIF_KIND_HUE,
+// and the whole data-gathering for the bell now live in ./notifications.jsx —
+// the single source shared with the dashboard's Needs Attention card so their
+// counts can never drift. This component only renders that shared data.
 
 function NotificationBell() {
   const [open, setOpen] = useStateC(false);
-  const [, bump] = useStateC(0);
-  useEffectC(() => {
-    const l = () => bump((t) => t + 1);
-    _notifStore.listeners.add(l);
-    return () => _notifStore.listeners.delete(l);
-  }, []);
-  const devMsgs = _notifStore.msgs;
 
-  // Attention sources — same rule as the dashboard's Needs Attention card.
-  const slots = useSlots().data ?? [];
-  const approvals = useApprovalList()?.data?.approvals ?? [];
-  const errorSlots = slots.filter((s) => s.state === "error" || s.container_status === "crashed");
-
-  // Downloads — the pulls list is a tiny local endpoint; the shared query key
-  // dedupes against the footer pane's copy when both are live.
-  const pulls = usePullsList({ enabled: true });
-  const jobs = Array.isArray(pulls.jobs) ? pulls.jobs : [];
-  const activePulls = jobs.filter((j) => j.state === "queued" || j.state === "running");
-  const failedPulls = jobs.filter((j) => j.state === "failed");
-  const clearJob = useClearPullJob();
-
-  // Updates — hal0 release channel + post-update slot drift (WS-J).
-  const updates = useUpdateState();
-  const hal0Ch = updates.data?.hal0;
-  const hasUpdate = !!(hal0Ch && hal0Ch.available && hal0Ch.available !== hal0Ch.current);
-  const drift = useSlotDrift();
-  const driftCount = drift.data?.count ?? 0;
-  const restartDrifted = useRestartDriftedSlots();
-
-  const count =
-    approvals.length + errorSlots.length +
-    activePulls.length + failedPulls.length +
-    (hasUpdate ? 1 : 0) + (driftCount > 0 ? 1 : 0) +
-    devMsgs.length;
+  // One shared source for every "needs the operator's eye" signal.
+  const {
+    approvals, errorSlots, activePulls, failedPulls,
+    hasUpdate, hal0Ch, driftCount,
+    devMsgs, clearJob, restartDrifted,
+    count,
+  } = useNotifications();
 
   // Close on outside click / Escape while open.
   const popRef = useRefC(null);
@@ -381,7 +303,7 @@ function NotificationBell() {
         <div className="notif-sec-h mono">messages</div>
         {devMsgs.map((m) => (
           <div className="notif-row" key={m.id} data-testid="notif-msg">
-            <span className="notif-dot" style={{ background: _NOTIF_KIND_HUE[m.kind] }} />
+            <span className="notif-dot" style={{ background: NOTIF_KIND_HUE[m.kind] }} />
             <span className="notif-msg">
               <b>{m.title}</b>
               {m.body && <span className="notif-body">{m.body}</span>}
@@ -392,7 +314,7 @@ function NotificationBell() {
                 else window.open(m.link, "_blank", "noopener");
               }}>Open</button>
             )}
-            <button className="notif-act" onClick={() => _notifDismiss(m.id)} aria-label="Dismiss message">×</button>
+            <button className="notif-act" onClick={() => dismissNotifMessage(m.id)} aria-label="Dismiss message">×</button>
           </div>
         ))}
       </div>

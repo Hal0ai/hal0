@@ -81,6 +81,21 @@ async function gotoDashboard(page: Page, slots: any[]) {
   await page.goto('/#dashboard')
 }
 
+// The forced-mock seed always offers a hal0 update, and the Needs Attention
+// card now surfaces update-available alongside approvals/error-slots (shared
+// with the topbar bell). Suppress it via the same override seam the bell spec
+// uses so the attention-specific assertions test one signal at a time.
+const NO_UPDATE = {
+  hal0: { current: '0.3.0-alpha.1', available: null, channel: 'stable' },
+  flm: { current: 'v0.9.44', source: 'manual-deb' },
+  autoCheck: true,
+}
+async function suppressAmbientUpdate(page: Page) {
+  await page.addInitScript((p) => {
+    ;(window as any).__hal0UpdateStateOverride = p
+  }, NO_UPDATE)
+}
+
 test.describe('dashboard redesign — status dot acceptance gate', () => {
   test('serving slot renders a GREEN dot with the looping pulse animation', async ({
     page,
@@ -234,6 +249,7 @@ test.describe('dashboard redesign — no stub data', () => {
 
 test.describe('dashboard redesign — needs attention', () => {
   test('derives real items with inline actions from an error slot', async ({ page }) => {
+    await suppressAmbientUpdate(page)
     const slots = [
       { ...servingSlot(), name: 'ok' },
       { name: 'broke', state: 'error', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', enabled: true, container_status: 'crashed', metrics: { toks: 0 } },
@@ -249,10 +265,31 @@ test.describe('dashboard redesign — needs attention', () => {
   })
 
   test('healthy board reads "nothing needs you" with an all-clear strip', async ({ page }) => {
+    await suppressAmbientUpdate(page)
     await gotoDashboard(page, [servingSlot(), readySlot()])
     const attn = page.locator('.rd-card', { has: page.locator('.rd-card-title', { hasText: /needs attention/i }) })
     await expect(attn).toBeVisible({ timeout: 10_000 })
     await expect(attn).toContainText(/nothing needs you/i)
     await expect(page.locator('.rd-health-cell').last()).toContainText(/all clear/i)
+  })
+
+  test('surfaces an available hal0 update as an actionable item (shared with the bell)', async ({ page }) => {
+    // The Needs Attention card and the topbar bell read ONE shared source, so an
+    // available update shows in the card too — with an Update action deep-linking
+    // to Settings → Updates.
+    await page.addInitScript((p) => {
+      ;(window as any).__hal0UpdateStateOverride = p
+    }, {
+      hal0: { current: '0.3.0-alpha.1', available: '0.9.9', channel: 'stable' },
+      flm: { current: 'v0.9.44', source: 'manual-deb' },
+      autoCheck: true,
+    })
+    await gotoDashboard(page, [servingSlot(), readySlot()])
+    const attn = page.locator('.rd-card', { has: page.locator('.rd-card-title', { hasText: /needs attention/i }) })
+    await expect(attn).toBeVisible({ timeout: 10_000 })
+    await expect(attn.locator('.rd-attn-eyebrow', { hasText: /update · available/i })).toBeVisible()
+    await expect(attn).toContainText('0.9.9')
+    await attn.getByRole('button', { name: 'Update' }).click()
+    await expect(page).toHaveURL(/#settings\/updates/)
   })
 })
