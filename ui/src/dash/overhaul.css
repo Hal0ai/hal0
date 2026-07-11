@@ -3,9 +3,10 @@
 /* (already defined in dashboard.css line 673). This file appends to that base. */
 
 /* ─── design tokens added for the overhaul ─────────────────────────────────── */
-/* --warming is NEW — not in dashboard.css. Amber-orange for warming/starting.  */
+/* --warming aliases the canonical --warn (dashboard.css) so the warming color   */
+/* has a single source of truth. --warming-glow is a glow rgba, kept local.      */
 :root {
-  --warming: #F2792B;
+  --warming: var(--warn);
   --warming-glow: rgba(242, 121, 43, 0.35);
   --ok-glow:  rgba(111, 207, 151, 0.35);
 }
