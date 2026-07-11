@@ -98,8 +98,10 @@ def test_classification_buckets_match_adr_0004() -> None:
     # `logs_tail` was promoted from autonomous-read to GATED per
     # security review MED-1 — it stays gated until the journald
     # redactor in routes/logs.py covers Bearer + X-API-Key + provider
-    # keys per ADR-0004 §7.
+    # keys per ADR-0004 §7. slot_logs proxies the same journald
+    # surface per-unit, so it carries the same classification.
     assert "logs_tail" in gated
+    assert "slot_logs" in gated
     # ADR-0004 §4 reads.
     for t in (
         "slot_list",
@@ -160,12 +162,13 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
     assert destructive_per_annotation == destructive_per_adr
 
 
-def test_open_world_tool_is_model_pull_only() -> None:
-    """model_pull is the only tool that reaches outside hal0's own
-    surface (HuggingFace + upstream registries). Anything else with
+def test_open_world_tools_are_the_hf_surface_only() -> None:
+    """Exactly three tools reach outside hal0's own surface — all of
+    them HuggingFace-facing: pull downloads weights, update re-pulls in
+    place, inspect fetches repo metadata. Anything else with
     openWorldHint=True needs a deliberate ADR update."""
     open_world = {name for name, ann in admin._ANNOTATIONS.items() if ann.openWorldHint}
-    assert open_world == {"model_pull"}
+    assert open_world == {"model_pull", "model_update", "model_inspect"}
 
 
 @pytest.mark.asyncio
@@ -439,9 +442,54 @@ async def test_list_wrap_does_not_touch_dict_payloads(
     assert result == {"status": "error", "http_status": 503}
 
 
-def test_wrap_list_payload_noop_for_other_tools() -> None:
-    """Only slot_list / provider_list get wrapped; other tools (e.g.
-    model_list, whose REST route already returns a dict) pass through."""
+def test_wrap_list_payload_generic_fallback_and_dict_passthrough() -> None:
+    """Any bare-list payload wraps (named key when mapped, ``items``
+    otherwise) so a newly-mapped bare-list route can't crash FastMCP's
+    dict result model; dict payloads always pass through untouched."""
     data = [{"id": "x"}]
-    assert admin._wrap_list_payload("model_list", data) is data
+    assert admin._wrap_list_payload("upstream_list", data) == {"upstreams": data, "count": 1}
+    assert admin._wrap_list_payload("bench_runs", data) == {"items": data, "count": 1}
     assert admin._wrap_list_payload("hardware_probe", {"ok": 1}) == {"ok": 1}
+    assert admin._wrap_list_payload("model_list", {"data": data}) == {"data": data}
+
+
+def test_catalog_validation_catches_rest_map_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A classified tool losing its _REST_MAP row must fail at import
+    validation, not at call time with an opaque envelope."""
+    admin._validate_catalog()  # coherent as shipped
+    monkeypatch.delitem(admin._REST_MAP, "slot_list")
+    with pytest.raises(RuntimeError, match="slot_list"):
+        admin._validate_catalog()
+
+
+def test_catalog_validation_catches_path_arg_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_PATH_ARGS must mirror the {placeholders} in each route template."""
+    monkeypatch.delitem(admin._PATH_ARGS, "model_pull")
+    with pytest.raises(RuntimeError, match="model_pull"):
+        admin._validate_catalog()
+
+
+@pytest.mark.asyncio
+async def test_build_server_rejects_registration_drift(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool classified but never _register()ed (or vice versa) fails
+    loudly at build time instead of 404ing in an agent's chat."""
+    monkeypatch.setattr(admin, "GATED_TOOLS", admin.GATED_TOOLS | {"ghost_tool"})
+    with pytest.raises(RuntimeError, match="ghost_tool"):
+        admin.build_server(approval_queue=queue, base_url="http://t")
+
+
+def test_model_edit_and_model_update_route_to_distinct_endpoints() -> None:
+    """model_edit is the metadata PUT; model_update is the in-place HF
+    re-pull POST. The two are easy to cross-wire — pin them apart."""
+    assert admin._REST_MAP["model_edit"] == ("PUT", "/api/models/{model_id}")
+    assert admin._REST_MAP["model_update"] == ("POST", "/api/models/{model_id}/update")
+
+
+def test_model_scan_is_a_write_and_preview_is_a_read() -> None:
+    """Scanning registers new files (a mutation); only the dry-run
+    preview classifies as an autonomous read."""
+    assert "model_scan" in admin.AUTONOMOUS_WRITE_TOOLS
+    assert "model_scan_preview" in admin.AUTONOMOUS_READ_TOOLS
+    assert "model_scan" not in admin.AUTONOMOUS_READ_TOOLS
