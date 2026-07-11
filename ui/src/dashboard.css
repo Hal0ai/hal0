@@ -383,6 +383,31 @@ a { color: inherit; text-decoration: none; }
   line-height: 1;
   box-shadow: 0 0 0 2px var(--bg-1);
 }
+/* Documentation launcher — same icon-button chrome as the notification bell. */
+.tb-docs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  cursor: pointer;
+  text-decoration: none;
+  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.tb-docs svg {
+  color: #fff;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55));
+  transition: color .16s ease, filter .16s ease;
+}
+.tb-docs:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.tb-docs:hover svg {
+  color: var(--accent);
+  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
 .notif-pop {
   position: absolute;
   top: calc(100% + 8px);
