@@ -43,14 +43,29 @@ def test_auto_selections_scaffolds_capability_slots_empty():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
     names = {s.slot_name for s in sel.slots}
     # the capability slot STRUCTURE is scaffolded (device/profile/port), but no
-    # model is chosen — pick-free: slots yes, models no.
-    assert {"chat", "embed", "rerank", "stt", "tts", "vision"} <= names
+    # model is chosen — pick-free: slots yes, models no. The chat capability's
+    # slot is NAMED `agent` (ADR-0023 LLM anchor) and the steward's `brain`
+    # scaffold rides along.
+    assert {"agent", "brain", "embed", "rerank", "stt", "tts", "vision"} <= names
     assert all(s.model_id is None for s in sel.slots)  # every slot empty
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True
     assert sel.extensions["pi"] is False
-    # an agent is enabled by default → coder slot is scaffolded too
+    # an agent extension is enabled by default → coder slot is scaffolded too
     assert "coder" in names
+
+
+def test_auto_selections_brain_scaffold_is_chat_capability():
+    """`brain` rides the chat-capability device/profile derivation and, like
+    every scaffold, ships without a model (hal0/brain falls back to `agent`
+    until the operator binds one)."""
+    sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
+    brain = next(s for s in sel.slots if s.slot_name == "brain")
+    assert brain.capability == "chat"
+    assert brain.model_id is None
+    agent = next(s for s in sel.slots if s.slot_name == "agent")
+    assert agent.capability == "chat"
+    assert brain.port != agent.port
 
 
 def test_auto_selections_no_slots_seeds_nothing():
@@ -62,8 +77,8 @@ def test_auto_selections_no_slots_seeds_nothing():
 def test_auto_selections_no_extensions_disables_all_and_skips_agent_slot():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models", with_extensions=False)
     assert all(v is False for v in sel.extensions.values())
-    # chat (Main) slot still seeded; agent/coder slot NOT seeded (no agent ext on)
-    assert any(s.slot_name == "chat" for s in sel.slots)
+    # agent (Main) slot still seeded; coder slot NOT seeded (no agent ext on)
+    assert any(s.slot_name == "agent" for s in sel.slots)
     assert not any(s.slot_name == "coder" for s in sel.slots)
 
 
@@ -77,13 +92,15 @@ def test_auto_selections_skips_existing_slots():
     sel = build_auto_selections(
         _hw(96),
         storage_dir="/var/lib/hal0/models",
-        existing_slots=frozenset({"chat"}),
+        existing_slots=frozenset({"agent", "brain"}),
     )
-    # chat already exists on disk → not re-seeded; coder (agent default on) still seeded
-    assert not any(s.slot_name == "chat" for s in sel.slots)
+    # agent + brain already exist on disk → not re-seeded; coder (agent
+    # extension default on) still seeded
+    assert not any(s.slot_name == "agent" for s in sel.slots)
+    assert not any(s.slot_name == "brain" for s in sel.slots)
     assert any(s.slot_name == "coder" for s in sel.slots)
 
 
 def test_auto_selections_no_existing_seeds_all_default():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
-    assert any(s.slot_name == "chat" for s in sel.slots)
+    assert any(s.slot_name == "agent" for s in sel.slots)

@@ -488,23 +488,29 @@ def _seed_hal0_brain(agent_id: str) -> Persona:
         # choices, benchmark history) stays out of the general Hermes chat and
         # the coder persona. Created lazily by Hindsight on first write.
         memory_namespace="private:hal0-brain",
+        # Patterns are fnmatch globs over ADMIN TOOL NAMES (slot_create,
+        # model_pull, …) — enforced on the sidebar chat via
+        # hal0.mcp.admin.ToolPolicy, layered onto the server-side
+        # read/write/gated classification. Conservative canonical: nothing
+        # is loosened (gated tools still queue for operator approval);
+        # require_approval redundantly pins the destructive floor
+        # (POLICY_NO_LOOSEN) so the operator sees it in the TOML. To let
+        # the Brain e.g. download models without per-pull approval, add
+        # "model_pull" to auto_approve.
         approval=PersonaApproval(
             default_policy="ask",
             auto_approve=(
-                "memory.read.*",
-                "search.*",
-                "slot.read.*",
-                "hal0_admin.read.*",
-                "kanban.read.*",
-                "bench.read.*",
+                "memory_search",
+                "memory_list",
+                "memory_add",
             ),
             require_approval=(
-                "files.*",
-                "shell.*",
-                "admin.*",
-                "slot.write.*",
-                "hal0_admin.write.*",
-                "kanban.write.*",
+                "model_delete",
+                "slot_delete",
+                "stack_delete",
+                "profile_delete",
+                "config_write",
+                "provider_credential_write",
             ),
         ),
         preferred_upstream="hal0",

@@ -493,3 +493,164 @@ def test_model_scan_is_a_write_and_preview_is_a_read() -> None:
     assert "model_scan" in admin.AUTONOMOUS_WRITE_TOOLS
     assert "model_scan_preview" in admin.AUTONOMOUS_READ_TOOLS
     assert "model_scan" not in admin.AUTONOMOUS_READ_TOOLS
+
+
+# ── per-persona ToolPolicy overlay ───────────────────────────────────────────
+
+
+def _policy(**kw: Any) -> admin.ToolPolicy:
+    return admin.ToolPolicy(**kw)
+
+
+def test_policy_classify_default_ask_mirrors_server_verdict() -> None:
+    p = _policy()
+    assert p.classify("slot_load", server_gated=False) == "run"
+    assert p.classify("model_pull", server_gated=True) == "gated"
+
+
+def test_policy_tools_allowed_hides_everything_else() -> None:
+    p = _policy(tools_allowed=("slot_*", "model_list"))
+    assert p.allows("slot_create")
+    assert p.allows("model_list")
+    assert not p.allows("model_pull")
+    assert p.classify("model_pull", server_gated=True) == "denied"
+
+
+def test_policy_require_approval_tightens_autonomous_tool() -> None:
+    p = _policy(require_approval=("slot_load",))
+    assert p.classify("slot_load", server_gated=False) == "gated"
+
+
+def test_policy_auto_approve_loosens_gated_tool_but_not_floor() -> None:
+    p = _policy(auto_approve=("model_pull", "model_delete"))
+    assert p.classify("model_pull", server_gated=True) == "run"
+    # model_delete is on POLICY_NO_LOOSEN — the grant is ignored.
+    assert p.classify("model_delete", server_gated=True) == "gated"
+
+
+def test_policy_default_auto_approve_respects_floor() -> None:
+    p = _policy(default_policy="auto-approve")
+    assert p.classify("stack_apply", server_gated=True) == "run"
+    assert p.classify("config_write", server_gated=True) == "gated"
+
+
+def test_policy_require_approval_beats_auto_approve() -> None:
+    p = _policy(auto_approve=("slot_*",), require_approval=("slot_edit",))
+    assert p.classify("slot_edit", server_gated=False) == "gated"
+
+
+def test_policy_never_refuses_gated_and_runs_autonomous() -> None:
+    p = _policy(default_policy="never")
+    assert p.classify("model_pull", server_gated=True) == "refused"
+    assert p.classify("slot_list", server_gated=False) == "run"
+
+
+def test_policy_from_persona_duck_types() -> None:
+    class _Approval:
+        default_policy = "ask"
+        auto_approve = ("model_pull",)
+        require_approval = ("slot_load",)
+
+    class _Persona:
+        tools_allowed = ("slot_*", "model_*")
+        approval = _Approval()
+
+    p = admin.ToolPolicy.from_persona(_Persona())
+    assert p.classify("model_pull", server_gated=True) == "run"
+    assert p.classify("slot_load", server_gated=False) == "gated"
+    assert p.classify("stack_apply", server_gated=True) == "denied"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_policy_denied_returns_typed_error(queue: ApprovalQueue) -> None:
+    result = await admin.dispatch(
+        tool="model_pull",
+        args={"model_id": "m"},
+        client_id="brain",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+        policy=_policy(tools_allowed=("slot_*",)),
+    )
+    assert result["error"]["code"] == "mcp.tool_not_allowed"
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_policy_never_refuses_instead_of_queueing(queue: ApprovalQueue) -> None:
+    result = await admin.dispatch(
+        tool="model_pull",
+        args={"model_id": "m"},
+        client_id="brain",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+        policy=_policy(default_policy="never"),
+    )
+    assert result["error"]["code"] == "mcp.gated_tool_refused"
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_policy_loosened_pull_runs_immediately(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """auto_approve=model_pull → no approval hop; REST POST fires now."""
+    result = await admin.dispatch(
+        tool="model_pull",
+        args={"model_id": "m"},
+        client_id="brain",
+        bearer="tok",
+        base_url="http://t",
+        approval_queue=queue,
+        policy=_policy(auto_approve=("model_pull",)),
+    )
+    assert result == {"ok": "post"}
+    assert queue.list_pending() == []
+    methods = [c[0] for c in mock_transport["calls"]]
+    assert methods == ["POST"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_policy_floor_still_queues_despite_grant(queue: ApprovalQueue) -> None:
+    result = await admin.dispatch(
+        tool="model_delete",
+        args={"model_id": "m"},
+        client_id="brain",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+        policy=_policy(auto_approve=("model_delete",)),
+    )
+    assert result["status"] == "pending_approval"
+    assert [p["tool"] for p in queue.list_pending()] == ["model_delete"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_policy_tightened_autonomous_tool_queues(queue: ApprovalQueue) -> None:
+    result = await admin.dispatch(
+        tool="slot_load",
+        args={"name": "agent"},
+        client_id="brain",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+        policy=_policy(require_approval=("slot_load",)),
+    )
+    assert result["status"] == "pending_approval"
+    assert [p["tool"] for p in queue.list_pending()] == ["slot_load"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_policy_bulk_memory_delete_stays_gated(queue: ApprovalQueue) -> None:
+    """memory_delete is on the floor — a grant can't disarm the bulk gate."""
+    result = await admin.dispatch(
+        tool="memory_delete",
+        args={"ids": ["a", "b"]},
+        client_id="brain",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+        policy=_policy(auto_approve=("memory_delete",)),
+    )
+    assert result["status"] == "pending_approval"

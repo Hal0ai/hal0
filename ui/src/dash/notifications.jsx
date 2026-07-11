@@ -15,7 +15,7 @@
 // captured even before either surface mounts.
 
 import { useSlots } from '@/api/hooks/useSlots'
-import { usePullsList, useClearPullJob } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, useModelUpdatesCheck, useModelUpdateAll } from '@/api/hooks/useModels'
 import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
 import { useApprovalList } from '@/api/hooks/useAgents'
 import { apiPost } from '@/api/client'
@@ -118,12 +118,23 @@ export function useNotifications() {
 
   const devMsgs = useDevMessages()
 
+  // Model updates (HF) — probed app-level so the bell fires without the
+  // Models page ever being opened. Derives LIVE from /api/models
+  // update_available flags rather than a message store, so it self-clears
+  // the moment updates land and never duplicates when the outdated set
+  // changes (#1181 review follow-up).
+  useModelUpdatesCheck()
+  const models = useModels().data ?? []
+  const updatableModels = models.filter((m) => m.installed && m.update_available)
+  const updateAllModels = useModelUpdateAll()
+
   // Badge count — every actionable/transient signal (unchanged from the
   // pre-refactor bell so the badge number is stable).
   const count =
     approvals.length + errorSlots.length +
     activePulls.length + failedPulls.length +
     (hasUpdate ? 1 : 0) + (driftCount > 0 ? 1 : 0) +
+    (updatableModels.length > 0 ? 1 : 0) +
     devMsgs.length
 
   const driftBusy = restartDrifted.isPending
@@ -273,6 +284,7 @@ export function useNotifications() {
     // raw derived values — the bell renders its existing per-section JSX from these
     approvals, errorSlots, activePulls, failedPulls,
     hasUpdate, hal0Ch, driftCount,
+    updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
     count,
     // normalized actionable subset — the dashboard card renders these

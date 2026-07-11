@@ -187,4 +187,40 @@ test.describe('Notification bell (topbar)', () => {
       'Nightly channel now available',
     )
   })
+
+  test('model updates — badge + row render app-level, Update all fans out', async ({ page }) => {
+    await withUpdateState(page, NO_UPDATE)
+    // Flag one installed mock model as updatable — forced-mock serves
+    // HAL0_DATA.models verbatim, and update_available flows through
+    // normalizeApiModel untouched. Note: no navigation to #models — the
+    // bell must fire from the app shell alone.
+    await page.addInitScript(() => {
+      document.addEventListener('DOMContentLoaded', () => {
+        const D = (window as any).HAL0_DATA
+        const m = D?.models?.find((x: any) => x.id === 'qwen3.6-27b-mtp')
+        if (m) m.update_available = true
+      })
+    })
+    const updates: string[] = []
+    await page.route('**/api/models/qwen3.6-27b-mtp/update', async (route) => {
+      updates.push(route.request().url())
+      await route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+    })
+    await page.goto('/')
+    await expect(page.getByTestId('tb-bell-badge')).toHaveText('1', { timeout: 6_000 })
+    await page.getByTestId('tb-bell').click()
+    const row = page.getByTestId('notif-model-updates')
+    await expect(row).toBeVisible()
+    await expect(row).toContainText('1 model update available on HuggingFace')
+    await row.getByRole('button', { name: 'Update all' }).click()
+    await expect.poll(() => updates.length).toBeGreaterThan(0)
+  })
+
+  test('no outdated models — the model-updates row self-clears (absent)', async ({ page }) => {
+    await withUpdateState(page, NO_UPDATE)
+    await page.goto('/')
+    await expect(page.getByTestId('tb-bell-badge')).toHaveCount(0)
+    await page.getByTestId('tb-bell').click()
+    await expect(page.getByTestId('notif-model-updates')).toHaveCount(0)
+  })
 })

@@ -42,7 +42,7 @@ from hal0.cli.model_commands import app as model_app
 from hal0.cli.registry_commands import app as registry_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
-from hal0.cli.update_commands import update as _update_impl
+from hal0.cli.update_commands import update_app
 
 console = Console()
 
@@ -184,10 +184,11 @@ def probe() -> None:
 
 # ---------------------------------------------------------------------------
 # hal0 update — real implementation lives in hal0.cli.update_commands.
-# Registered via app.command() so the function's typer.Options surface.
+# A Typer group: the bare `hal0 update` runs the self-update (group callback,
+# invoke_without_command), and `hal0 update owui` repins the OpenWebUI image.
 # ---------------------------------------------------------------------------
 
-app.command(name="update")(_update_impl)
+app.add_typer(update_app, name="update")
 
 
 # ---------------------------------------------------------------------------
