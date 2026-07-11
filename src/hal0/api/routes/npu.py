@@ -309,7 +309,9 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "state": mapped_state if embed_live else "off",
                     "cols": list(range(_NPU_COLS)) if embed_live else [],
                     "gb": None,
-                    "active": embed_live and embed_age is not None and embed_age <= _ACTIVE_WINDOW_S,
+                    "active": embed_live
+                    and embed_age is not None
+                    and embed_age <= _ACTIVE_WINDOW_S,
                     "last_used_age_s": round(embed_age, 1) if embed_age is not None else None,
                 }
             )

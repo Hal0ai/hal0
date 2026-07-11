@@ -35,7 +35,10 @@ def test_parse_pinned_digest_none_when_no_pin() -> None:
 
 
 def test_parse_pinned_digest_none_when_pins_disagree() -> None:
-    mixed = _UNIT.replace(f"run --rm ghcr.io/open-webui/open-webui@{_D1}", f"run --rm ghcr.io/open-webui/open-webui@{_D2}")
+    mixed = _UNIT.replace(
+        f"run --rm ghcr.io/open-webui/open-webui@{_D1}",
+        f"run --rm ghcr.io/open-webui/open-webui@{_D2}",
+    )
     assert image_pin.parse_pinned_digest(mixed) is None
 
 
@@ -52,7 +55,9 @@ def test_normalize_digest_accepts_valid_forms(value: str, expected: str) -> None
     assert image_pin.normalize_digest(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "sha256:zzz", "sha512:" + "a" * 64, "a" * 63, "not-a-digest"])
+@pytest.mark.parametrize(
+    "value", ["", "sha256:zzz", "sha512:" + "a" * 64, "a" * 63, "not-a-digest"]
+)
 def test_normalize_digest_rejects_garbage(value: str) -> None:
     assert image_pin.normalize_digest(value) is None
 
