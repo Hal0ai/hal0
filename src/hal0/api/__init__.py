@@ -946,6 +946,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # seeding must never block startup
         log.warning("personas.startup_seed_failed", error=str(exc))
 
+    # Static slot seeds (flm/tts/rerank/utility/img/agent/brain) — same
+    # fresh-install-only gap as the persona seed above: install.sh's copy
+    # loop never re-runs on `hal0 update`, so a box upgrading past a
+    # release that added a new seed (e.g. `brain`, the dashboard
+    # steward's slot) never grows the file. Copy-if-absent; an existing
+    # <name>.toml (operator edit or prior seed) is never touched.
+    try:
+        from hal0.install.static_seeds import seed_static_slots
+
+        seeded_slots = await asyncio.to_thread(seed_static_slots)
+        if seeded_slots:
+            log.info("slots.startup_seed", names=seeded_slots)
+    except Exception as exc:  # seeding must never block startup
+        log.warning("slots.startup_seed_failed", error=str(exc))
+
     # Capability orchestrator — overlay that maps the dashboard's
     # capability-grouped children (embed/voice/img) onto regular slots.
     # The orchestrator is intentionally constructed AFTER the slot
