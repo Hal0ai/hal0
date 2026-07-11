@@ -447,6 +447,17 @@ export function useMentalModelCreate() {
   })
 }
 
+export function useMentalModelDelete() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
+      apiDelete(`${ENDPOINTS.memoryBankMentalModels(bank)}/${encodeURIComponent(id)}`),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
+    },
+  })
+}
+
 // ── tools: directives ────────────────────────────────────────────────────────
 
 export interface Directive {

@@ -288,6 +288,108 @@ async def _augment_build_counters(request: Request, status: dict[str, Any]) -> N
         status["last_built_at"] = last_built
 
 
+# ── POST /api/memory/graph/retry ────────────────────────────────────────────
+
+
+async def _bank_failed_op_ids(client: Any, bank_id: str, *, page: int, cap: int) -> list[str]:
+    """Page the Hindsight ledger for ``bank_id`` and collect failed op ids.
+
+    The list endpoint caps ``limit`` (empties out above ~100), so we walk it
+    in ``page``-sized windows up to ``cap`` (a backstop against a runaway
+    ledger). Best-effort: a page that fails to fetch ends the walk.
+    """
+    ids: list[str] = []
+    offset = 0
+    while offset < cap:
+        try:
+            resp = await client.request_json(
+                "GET", f"/v1/default/banks/{bank_id}/operations?limit={page}&offset={offset}"
+            )
+        except Exception:
+            break
+        ops = resp.get("operations") if isinstance(resp, dict) else None
+        if not ops:
+            break
+        ids += [o["id"] for o in ops if str(o.get("status")).lower() == "failed" and o.get("id")]
+        if len(ops) < page:
+            break
+        offset += page
+    return ids
+
+
+@router.post("/graph/retry")
+async def retry_failed_extractions(request: Request) -> dict[str, Any]:
+    """Requeue every failed extraction/consolidation operation across banks.
+
+    Graph extraction runs inside the Hindsight daemon; when the extraction
+    slot is mis-pointed (ADR-0023) the ops pile up as ``failed``. Once the
+    slot resolves again, this re-runs them (failed→completed) — rebuilding the
+    graph for those memories and clearing the health panel's error count.
+
+    Best-effort and idempotent: each failed op is re-POSTed to Hindsight's
+    ``/operations/{id}/retry``; ops it declines (already running / no payload)
+    count as ``skipped``. Returns a per-bank tally so the dashboard can toast
+    ``N requeued``.
+    """
+    import asyncio
+
+    provider = getattr(request.app.state, "memory_provider", None)
+    client = getattr(provider, "hindsight_client", None) if provider is not None else None
+    if client is None:
+        raise MemoryUnavailable("memory engine is not available on this hal0 instance")
+
+    _PAGE = 100
+    _CAP = 2000  # backstop; far above any real failed-op count
+
+    banks_resp = None
+    try:
+        banks_resp = await client.request_json("GET", "/v1/default/banks")
+    except Exception as exc:
+        raise MemoryUnavailable("could not enumerate memory banks") from exc
+    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
+    if not isinstance(banks, list):
+        raise MemoryUnavailable("could not enumerate memory banks")
+
+    async def _retry_one(bank_id: str, op_id: str) -> bool:
+        try:
+            res = await client.request_json(
+                "POST", f"/v1/default/banks/{bank_id}/operations/{op_id}/retry"
+            )
+        except Exception:
+            return False
+        # Hindsight replies {success: true, ...}; treat a 2xx with no explicit
+        # success flag as queued too.
+        return not isinstance(res, dict) or bool(res.get("success", True))
+
+    per_bank: dict[str, dict[str, int]] = {}
+    total_queued = total_skipped = 0
+
+    async with record_action(
+        request, category="memory", action="memory.graph.retry_failed", target="*"
+    ) as rec:
+        for entry in banks:
+            bank_id = entry.get("bank_id") if isinstance(entry, dict) else entry
+            if not bank_id:
+                continue
+            failed_ids = await _bank_failed_op_ids(client, bank_id, page=_PAGE, cap=_CAP)
+            queued = skipped = 0
+            # Bounded concurrency: the retry POST only requeues (cheap); the
+            # heavy extraction runs later in the Hindsight worker pool.
+            for i in range(0, len(failed_ids), 10):
+                chunk = failed_ids[i : i + 10]
+                for ok in await asyncio.gather(*[_retry_one(bank_id, x) for x in chunk]):
+                    if ok:
+                        queued += 1
+                    else:
+                        skipped += 1
+            per_bank[bank_id] = {"queued": queued, "skipped": skipped, "failed": len(failed_ids)}
+            total_queued += queued
+            total_skipped += skipped
+        rec.after = {"queued": total_queued, "skipped": total_skipped}
+
+    return {"queued": total_queued, "skipped": total_skipped, "banks": per_bank}
+
+
 # ── PUT /api/memory/graph ──────────────────────────────────────────────────
 
 

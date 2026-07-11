@@ -108,7 +108,7 @@ function MemEngineCard({ engine, isLoading, graphEnabled, onOpenGraph }) {
 
 // ── Timeseries chart (stacked spark-bars, mo- house style) ────────────────────
 
-function MemTimeseries({ bank, period, setPeriod, onConsolidate }) {
+function MemTimeseries({ bank, period, setPeriod, onConsolidate, consolidating }) {
   const useBankTimeseries = window.__hal0UseBankTimeseries;
   const query = useBankTimeseries ? useBankTimeseries(bank, period) : { data: null };
   const buckets = query.data?.buckets || [];
@@ -182,9 +182,10 @@ function MemTimeseries({ bank, period, setPeriod, onConsolidate }) {
           className="btn ghost xs"
           style={{ color: 'var(--yellow)', borderColor: 'var(--yellow-line, var(--line))' }}
           onClick={onConsolidate}
+          disabled={consolidating}
           data-testid="mem-btn-consolidate"
         >
-          Consolidate
+          {consolidating ? 'Consolidating…' : 'Consolidate'}
         </button>
       </div>
     </div>
@@ -564,7 +565,15 @@ function MemoryView({ param } = {}) {
   }
 
   const doConsolidate = async () => {
-    if (!selected || !consolidate) return;
+    if (!selected) return;
+    // The consolidate hook is republished on `window` by memory-hook-bridge;
+    // if the bridge hasn't loaded, fail loudly instead of silently swallowing
+    // the click (the old `return` made the button look like it did nothing).
+    if (!consolidate) {
+      memToast('Consolidate unavailable — reload the page', 'err');
+      return;
+    }
+    if (consolidate.isPending) return; // guard double-fire
     try {
       const res = await consolidate.mutateAsync(selected.bank_id);
       const opId = res?.operation_id ?? res?.id ?? res?.operation;
@@ -616,7 +625,7 @@ function MemoryView({ param } = {}) {
           />
           <MemoryGraphPanel />
           {selected && (
-            <MemTimeseries bank={selected.bank_id} period={period} setPeriod={setPeriod} onConsolidate={doConsolidate} />
+            <MemTimeseries bank={selected.bank_id} period={period} setPeriod={setPeriod} onConsolidate={doConsolidate} consolidating={!!consolidate?.isPending} />
           )}
         </div>
         <div className="mo-banks-col">
