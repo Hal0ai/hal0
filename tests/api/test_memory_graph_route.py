@@ -270,9 +270,7 @@ class _RetryWrapper(StubWrapper):
                 if method == "GET" and path == "/v1/default/banks":
                     return {"banks": [{"bank_id": b} for b in parent._ops]}
                 for bank, ops in parent._ops.items():
-                    if method == "GET" and path.startswith(
-                        f"/v1/default/banks/{bank}/operations?"
-                    ):
+                    if method == "GET" and path.startswith(f"/v1/default/banks/{bank}/operations?"):
                         # A page shorter than the limit ends the walk, so return
                         # the whole ledger on offset 0 and nothing after.
                         return {"operations": ops if "offset=0" in path else []}

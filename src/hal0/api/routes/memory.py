@@ -310,11 +310,7 @@ async def _bank_failed_op_ids(client: Any, bank_id: str, *, page: int, cap: int)
         ops = resp.get("operations") if isinstance(resp, dict) else None
         if not ops:
             break
-        ids += [
-            o["id"]
-            for o in ops
-            if str(o.get("status")).lower() == "failed" and o.get("id")
-        ]
+        ids += [o["id"] for o in ops if str(o.get("status")).lower() == "failed" and o.get("id")]
         if len(ops) < page:
             break
         offset += page
