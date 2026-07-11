@@ -40,7 +40,11 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
-from hal0.memory.migrate import migrate_cognee_to_hindsight_dryrun
+from hal0.cli.memory_bank_commands import app as bank_app
+from hal0.cli.memory_migrate_commands import app as migrate_app
+from hal0.cli.memory_mm_commands import app as mm_app
+from hal0.cli.memory_ops_commands import app as ops_app
+from hal0.cli.memory_recall_commands import recall_cmd
 
 app = typer.Typer(help="Manage hal0 memory (Hindsight engine).")
 console = Console()
@@ -53,6 +57,18 @@ app.add_typer(graph_app, name="graph")
 # ``provider`` sub-sub-app — per-agent Hindsight/Honcho routing.
 provider_app = typer.Typer(help="Per-agent memory provider (Hindsight | Honcho).")
 app.add_typer(provider_app, name="provider")
+
+# Beefier Hindsight bank-admin CLI: bank/ops/mm sub-apps, a debug ``recall``,
+# and ``migrate`` (legacy Cognee dry-run default + honcho's --from/--to engine
+# migration + ``migrate unify``, all coexisting under one sub-app — see
+# memory_migrate_commands.py's docstring for how the three share the
+# ``migrate`` name). Implementations live in
+# hal0/cli/memory_{bank,ops,mm,recall,migrate}_commands.py so this file only
+# needs this import block + the add_typer/command calls below.
+app.add_typer(bank_app, name="bank")
+app.add_typer(ops_app, name="ops")
+app.add_typer(mm_app, name="mm")
+app.command("recall")(recall_cmd)
 
 
 # ── ``hal0 memory status`` ─────────────────────────────────────────────────
@@ -391,239 +407,18 @@ def provider_set_cmd(
     )
 
 
-# ── ``hal0 memory migrate`` ───────────────────────────────────────────────────
-
-_DEFAULT_COGNEE_DIR = "/var/lib/hal0/memory/cognee"
-
-
-_VALID_MIGRATE_ENGINES = ("hindsight", "honcho")
-
-
-@app.command("migrate")
-def migrate_cmd(
-    from_: str = typer.Option(
-        None,
-        "--from",
-        help="Source engine for a Hindsight<->Honcho migration: 'hindsight' or 'honcho'. "
-        "Omit both --from and --to to run the legacy Cognee→Hindsight dry-run report instead.",
-    ),
-    to: str = typer.Option(
-        None,
-        "--to",
-        help="Destination engine for a Hindsight<->Honcho migration: 'hindsight' or 'honcho'.",
-    ),
-    agent: str = typer.Option(
-        "hermes",
-        "--agent",
-        help="Agent id whose memory is being migrated (identity + private-bucket scope).",
-    ),
-    dataset: list[str] = typer.Option(
-        [],
-        "--dataset",
-        help="Hindsight dataset to migrate (repeatable). Default: shared + the agent's "
-        "own private bucket. Only meaningful for --from hindsight.",
-    ),
-    since: str = typer.Option(
-        None,
-        "--since",
-        help="ISO8601 watermark override for --from honcho (defaults to the saved watermark).",
-    ),
-    resume: bool = typer.Option(
-        False,
-        "--resume",
-        help="Resume from the last saved per-dataset cursor instead of rescanning from the start "
-        "(--from hindsight only). Id-level dedupe applies either way.",
-    ),
-    dry_run: bool = typer.Option(
-        None,
-        "--dry-run/--no-dry-run",
-        help="Report the migration plan without writing. Legacy Cognee path defaults to "
-        "True (apply mode is not implemented there); the Hindsight<->Honcho engine "
-        "(--from/--to) defaults to False.",
-    ),
-    cognee_dir: str = typer.Option(
-        _DEFAULT_COGNEE_DIR,
-        "--cognee-dir",
-        help="Path to the Cognee data directory (contains hal0_memory_index.sqlite). "
-        "Legacy Cognee path only.",
-    ),
-    json_out: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit raw JSON instead of the human-readable panel.",
-    ),
-) -> None:
-    """Migrate memory between engines.
-
-    Bare ``hal0 memory migrate`` runs the legacy Cognee→Hindsight dry-run
-    report (P2-4). ``--from hindsight --to honcho`` (or the reverse) runs
-    the Hindsight<->Honcho bidirectional migration engine in-process
-    against the local hal0-api + Honcho REST surfaces.
-    """
-    if from_ is None and to is None:
-        legacy_dry_run = True if dry_run is None else dry_run
-        if not legacy_dry_run:
-            die("--apply is not yet implemented; dry-run only.")
-            return
-        report = migrate_cognee_to_hindsight_dryrun(cognee_dir=cognee_dir)
-        if json_out:
-            typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))
-            return
-        noop_label = (
-            "[dim]yes — nothing to migrate[/dim]"
-            if report["noop"]
-            else "[bold yellow]no[/bold yellow]"
-        )
-        t = Table.grid(padding=(0, 2))
-        t.add_column("k", style="dim")
-        t.add_column("v")
-        t.add_row("Rows total", str(report["rows_total"]))
-        t.add_row("Rows mapped", str(report["rows_mapped"]))
-        t.add_row("Rows unmapped", str(report["rows_unmapped"]))
-        t.add_row("No-op", noop_label)
-        console.print(Panel(t, title="memory · migrate (dry-run)", border_style="dim"))
-        return
-
-    if from_ not in _VALID_MIGRATE_ENGINES or to not in _VALID_MIGRATE_ENGINES or from_ == to:
-        die(
-            "--from/--to must be one of 'hindsight'/'honcho' and differ, "
-            f"got --from={from_!r} --to={to!r}"
-        )
-        return
-
-    engine_dry_run = False if dry_run is None else dry_run
-    cfg = _load_honcho_cli_config()
-    honcho_base = f"http://127.0.0.1:{cfg.honcho.port}"
-    state = _migrate_state()
-
-    if from_ == "hindsight":
-        report = _run_migrate_hindsight_to_honcho(
-            honcho_base=honcho_base,
-            workspace=cfg.honcho.workspace,
-            user_peer=cfg.honcho.user_peer,
-            agent_id=agent,
-            datasets=list(dataset) or None,
-            dry_run=engine_dry_run,
-            resume=resume,
-            state=state,
-            json_out=json_out,
-        )
-    else:
-        report = _run_migrate_honcho_to_hindsight(
-            honcho_base=honcho_base,
-            workspace=cfg.honcho.workspace,
-            agent_id=agent,
-            since=since,
-            dry_run=engine_dry_run,
-            state=state,
-            json_out=json_out,
-        )
-    if not engine_dry_run:
-        state.save()
-    if json_out:
-        typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))
-
-
-def _load_honcho_cli_config() -> Any:
-    from hal0.config.loader import load_hal0_config
-
-    return load_hal0_config()
-
-
-def _migrate_state() -> Any:
-    from hal0.memory.honcho_migrate import MigrateState
-
-    return MigrateState()
-
-
-def _run_migrate_hindsight_to_honcho(
-    *,
-    honcho_base: str,
-    workspace: str,
-    user_peer: str,
-    agent_id: str,
-    datasets: list[str] | None,
-    dry_run: bool,
-    resume: bool,
-    state: Any,
-    json_out: bool,
-) -> dict[str, Any]:
-    from hal0.memory.honcho_migrate import migrate_hindsight_to_honcho
-
-    def on_progress(msg: str) -> None:
-        if not json_out:
-            console.print(f"[dim]{msg}[/dim]")
-
-    report = migrate_hindsight_to_honcho(
-        hal0_base=_api_base(),
-        honcho_base=honcho_base,
-        workspace=workspace,
-        user_peer=user_peer,
-        agent_id=agent_id,
-        datasets=datasets,
-        dry_run=dry_run,
-        resume=resume,
-        state=state,
-        on_progress=on_progress,
-    )
-    if not json_out:
-        t = Table.grid(padding=(0, 2))
-        t.add_column("k", style="dim")
-        t.add_column("v")
-        for ds, counts in report.items():
-            if ds == "total":
-                continue
-            t.add_row(
-                ds,
-                f"scanned={counts['scanned']} migrated={counts['migrated']} skipped={counts['skipped']}",
-            )
-        total = report["total"]
-        t.add_row(
-            "[bold]total[/bold]",
-            f"scanned={total['scanned']} migrated={total['migrated']} skipped={total['skipped']}",
-        )
-        title = "memory · migrate hindsight→honcho" + (" (dry-run)" if dry_run else "")
-        console.print(Panel(t, title=title, border_style="dim" if dry_run else "green"))
-    return report
-
-
-def _run_migrate_honcho_to_hindsight(
-    *,
-    honcho_base: str,
-    workspace: str,
-    agent_id: str,
-    since: str | None,
-    dry_run: bool,
-    state: Any,
-    json_out: bool,
-) -> dict[str, Any]:
-    from hal0.memory.honcho_migrate import migrate_honcho_to_hindsight
-
-    def on_progress(msg: str) -> None:
-        if not json_out:
-            console.print(f"[dim]{msg}[/dim]")
-
-    report = migrate_honcho_to_hindsight(
-        hal0_base=_api_base(),
-        honcho_base=honcho_base,
-        workspace=workspace,
-        agent_id=agent_id,
-        since=since,
-        dry_run=dry_run,
-        state=state,
-        on_progress=on_progress,
-    )
-    if not json_out:
-        t = Table.grid(padding=(0, 2))
-        t.add_column("k", style="dim")
-        t.add_column("v")
-        t.add_row("Scanned", str(report["scanned"]))
-        t.add_row("Migrated", str(report["migrated"]))
-        t.add_row("Skipped", str(report["skipped"]))
-        t.add_row("Watermark", str(report["watermark"]))
-        title = "memory · migrate honcho→hindsight" + (" (dry-run)" if dry_run else "")
-        console.print(Panel(t, title=title, border_style="dim" if dry_run else "green"))
-    return report
+# ── ``hal0 memory migrate`` / ``migrate unify`` ────────────────────────────────
+#
+# Three things now share the ``migrate`` name — the legacy Cognee→Hindsight
+# dry-run (P2-4), honcho's bidirectional --from/--to hindsight<->honcho
+# engine migration, and the new cross-bank ``unify`` — so ``migrate`` is a
+# Typer sub-app (memory_migrate_commands.py) instead of a single
+# ``@app.command``. honcho's migrate_cmd body (and its four helpers) moved
+# there verbatim as the sub-app's default callback; behaviour is
+# unchanged, only the registration shape is. ``sync-graph`` and ``honcho
+# render-env`` below still need those helpers, so they're imported rather
+# than redefined.
+app.add_typer(migrate_app, name="migrate")
 
 
 # ── ``hal0 memory sync-graph`` ─────────────────────────────────────────────────
@@ -642,6 +437,12 @@ def sync_graph_cmd(
     command for the recurring ``hal0-honcho-sync.timer`` job — no
     ``--resume``/``--dataset`` plumbing to think about, just "sync what's new".
     """
+    from hal0.cli.memory_migrate_commands import (
+        _load_honcho_cli_config,
+        _migrate_state,
+        _run_migrate_honcho_to_hindsight,
+    )
+
     cfg = _load_honcho_cli_config()
     honcho_base = f"http://127.0.0.1:{cfg.honcho.port}"
     state = _migrate_state()
@@ -682,6 +483,8 @@ def honcho_render_env_cmd(
     except ImportError as exc:
         die(f"honcho_env module not available yet: {exc}")
         return
+    from hal0.cli.memory_migrate_commands import _load_honcho_cli_config
+
     cfg = _load_honcho_cli_config()
     result = apply_honcho_env(cfg, restart=restart)
     if json_out:
