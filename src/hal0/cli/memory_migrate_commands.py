@@ -1,13 +1,21 @@
-"""``hal0 memory migrate`` — Cognee→Hindsight dry-run (legacy) + bank unify.
+"""``hal0 memory migrate`` — three migrations sharing one name, plus unify.
 
-The bare ``hal0 memory migrate`` command is unchanged from before this file
-existed (P2-4, dry-run only) — it now lives in a Typer sub-app's default
-callback so ``migrate unify`` (cross-bank unify) can nest under the same
-top-level name without colliding with it.
+The ``migrate`` name now covers three distinct jobs, so it's a Typer
+sub-app rather than a single ``@app.command``:
 
-``migrate unify`` folds one or more source Hindsight banks into a target
-bank by tag, so multiple per-agent private banks can be consolidated under
-a shared/unified bank without losing which agent a fact came from.
+* Bare ``hal0 memory migrate`` — the legacy Cognee→Hindsight dry-run
+  report (P2-4).
+* ``hal0 memory migrate --from <engine> --to <engine>`` — honcho's
+  bidirectional Hindsight<->Honcho engine migration (feat/honcho-memory,
+  PR #1243). Both of these live in the sub-app's default callback,
+  ``migrate_default``, whose body is honcho's ``migrate_cmd`` moved here
+  **verbatim** (same params, same branching, same helper functions below)
+  — only the registration shape changed to make room for ``unify`` as a
+  sibling subcommand instead of colliding on the flat command name.
+* ``hal0 memory migrate unify`` — cross-bank unify (this file, new).
+  Folds one or more source Hindsight banks into a target bank by tag, so
+  multiple per-agent private banks can be consolidated under a
+  shared/unified bank without losing which agent a fact came from.
 
 Upstream mechanics (source-verified against the hindsight-api v0.8.4 tag —
 the live instance this CLI was built against is still 0.7.2, which lacks
@@ -44,6 +52,7 @@ from __future__ import annotations
 
 import json as jsonlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -63,7 +72,7 @@ from hal0.cli._shared import (
 from hal0.memory.migrate import migrate_cognee_to_hindsight_dryrun
 
 app = typer.Typer(
-    help="Migrate memory stores (legacy Cognee→Hindsight dry-run; bank unify).",
+    help="Migrate memory stores (legacy Cognee dry-run; hindsight<->honcho; bank unify).",
     invoke_without_command=True,
 )
 console = Console()
@@ -72,6 +81,7 @@ console = Console()
 _progress = Console(stderr=True)
 
 _DEFAULT_COGNEE_DIR = "/var/lib/hal0/memory/cognee"
+_VALID_MIGRATE_ENGINES = ("hindsight", "honcho")
 _ON_CONFLICT_CHOICES = ("skip", "replace", "new-id")
 _TERMINAL_OP_STATUSES = ("completed", "failed", "cancelled")
 _POLL_INTERVAL_S = 2.0
@@ -82,15 +92,51 @@ _RETAG_MAX_WORKERS = 4
 @app.callback()
 def migrate_default(
     ctx: typer.Context,
+    from_: str = typer.Option(
+        None,
+        "--from",
+        help="Source engine for a Hindsight<->Honcho migration: 'hindsight' or 'honcho'. "
+        "Omit both --from and --to to run the legacy Cognee→Hindsight dry-run report instead.",
+    ),
+    to: str = typer.Option(
+        None,
+        "--to",
+        help="Destination engine for a Hindsight<->Honcho migration: 'hindsight' or 'honcho'.",
+    ),
+    agent: str = typer.Option(
+        "hermes",
+        "--agent",
+        help="Agent id whose memory is being migrated (identity + private-bucket scope).",
+    ),
+    dataset: list[str] = typer.Option(
+        [],
+        "--dataset",
+        help="Hindsight dataset to migrate (repeatable). Default: shared + the agent's "
+        "own private bucket. Only meaningful for --from hindsight.",
+    ),
+    since: str = typer.Option(
+        None,
+        "--since",
+        help="ISO8601 watermark override for --from honcho (defaults to the saved watermark).",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Resume from the last saved per-dataset cursor instead of rescanning from the start "
+        "(--from hindsight only). Id-level dedupe applies either way.",
+    ),
     dry_run: bool = typer.Option(
-        True,
-        "--dry-run",
-        help="Report the migration plan without writing. Dry-run only — apply/write mode is not yet implemented.",
+        None,
+        "--dry-run/--no-dry-run",
+        help="Report the migration plan without writing. Legacy Cognee path defaults to "
+        "True (apply mode is not implemented there); the Hindsight<->Honcho engine "
+        "(--from/--to) defaults to False.",
     ),
     cognee_dir: str = typer.Option(
         _DEFAULT_COGNEE_DIR,
         "--cognee-dir",
-        help="Path to the Cognee data directory (contains hal0_memory_index.sqlite).",
+        help="Path to the Cognee data directory (contains hal0_memory_index.sqlite). "
+        "Legacy Cognee path only.",
     ),
     json_out: bool = typer.Option(
         False,
@@ -98,27 +144,186 @@ def migrate_default(
         help="Emit raw JSON instead of the human-readable panel.",
     ),
 ) -> None:
-    """Migrate Cognee memory store → Hindsight banks (dry-run only, P2-4)."""
+    """Migrate memory between engines.
+
+    Bare ``hal0 memory migrate`` runs the legacy Cognee→Hindsight dry-run
+    report (P2-4). ``--from hindsight --to honcho`` (or the reverse) runs
+    the Hindsight<->Honcho bidirectional migration engine in-process
+    against the local hal0-api + Honcho REST surfaces. ``hal0 memory
+    migrate unify`` (a subcommand, not a flag here) is the cross-bank
+    Hindsight unify — see that command's own docstring.
+
+    Moved here verbatim from feat/honcho-memory's ``memory_commands.py``
+    (PR #1243) as this sub-app's default callback, so it coexists with
+    ``unify`` under the same ``migrate`` name — the body below is
+    unchanged from that PR, only where it lives moved.
+    """
     if ctx.invoked_subcommand is not None:
         return
-    if not dry_run:
-        die("--apply is not yet implemented; dry-run only.")
+    if from_ is None and to is None:
+        legacy_dry_run = True if dry_run is None else dry_run
+        if not legacy_dry_run:
+            die("--apply is not yet implemented; dry-run only.")
+            return
+        report = migrate_cognee_to_hindsight_dryrun(cognee_dir=cognee_dir)
+        if json_out:
+            typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))
+            return
+        noop_label = (
+            "[dim]yes — nothing to migrate[/dim]"
+            if report["noop"]
+            else "[bold yellow]no[/bold yellow]"
+        )
+        t = Table.grid(padding=(0, 2))
+        t.add_column("k", style="dim")
+        t.add_column("v")
+        t.add_row("Rows total", str(report["rows_total"]))
+        t.add_row("Rows mapped", str(report["rows_mapped"]))
+        t.add_row("Rows unmapped", str(report["rows_unmapped"]))
+        t.add_row("No-op", noop_label)
+        console.print(Panel(t, title="memory · migrate (dry-run)", border_style="dim"))
         return
-    report = migrate_cognee_to_hindsight_dryrun(cognee_dir=cognee_dir)
+
+    if from_ not in _VALID_MIGRATE_ENGINES or to not in _VALID_MIGRATE_ENGINES or from_ == to:
+        die(
+            "--from/--to must be one of 'hindsight'/'honcho' and differ, "
+            f"got --from={from_!r} --to={to!r}"
+        )
+        return
+
+    engine_dry_run = False if dry_run is None else dry_run
+    cfg = _load_honcho_cli_config()
+    honcho_base = f"http://127.0.0.1:{cfg.honcho.port}"
+    state = _migrate_state()
+
+    if from_ == "hindsight":
+        report = _run_migrate_hindsight_to_honcho(
+            honcho_base=honcho_base,
+            workspace=cfg.honcho.workspace,
+            user_peer=cfg.honcho.user_peer,
+            agent_id=agent,
+            datasets=list(dataset) or None,
+            dry_run=engine_dry_run,
+            resume=resume,
+            state=state,
+            json_out=json_out,
+        )
+    else:
+        report = _run_migrate_honcho_to_hindsight(
+            honcho_base=honcho_base,
+            workspace=cfg.honcho.workspace,
+            agent_id=agent,
+            since=since,
+            dry_run=engine_dry_run,
+            state=state,
+            json_out=json_out,
+        )
+    if not engine_dry_run:
+        state.save()
     if json_out:
         typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))
-        return
-    noop_label = (
-        "[dim]yes — nothing to migrate[/dim]" if report["noop"] else "[bold yellow]no[/bold yellow]"
+
+
+def _load_honcho_cli_config() -> Any:
+    from hal0.config.loader import load_hal0_config
+
+    return load_hal0_config()
+
+
+def _migrate_state() -> Any:
+    from hal0.memory.honcho_migrate import MigrateState
+
+    return MigrateState()
+
+
+def _run_migrate_hindsight_to_honcho(
+    *,
+    honcho_base: str,
+    workspace: str,
+    user_peer: str,
+    agent_id: str,
+    datasets: list[str] | None,
+    dry_run: bool,
+    resume: bool,
+    state: Any,
+    json_out: bool,
+) -> dict[str, Any]:
+    from hal0.memory.honcho_migrate import migrate_hindsight_to_honcho
+
+    def on_progress(msg: str) -> None:
+        if not json_out:
+            console.print(f"[dim]{msg}[/dim]")
+
+    report = migrate_hindsight_to_honcho(
+        hal0_base=_api_base(),
+        honcho_base=honcho_base,
+        workspace=workspace,
+        user_peer=user_peer,
+        agent_id=agent_id,
+        datasets=datasets,
+        dry_run=dry_run,
+        resume=resume,
+        state=state,
+        on_progress=on_progress,
     )
-    t = Table.grid(padding=(0, 2))
-    t.add_column("k", style="dim")
-    t.add_column("v")
-    t.add_row("Rows total", str(report["rows_total"]))
-    t.add_row("Rows mapped", str(report["rows_mapped"]))
-    t.add_row("Rows unmapped", str(report["rows_unmapped"]))
-    t.add_row("No-op", noop_label)
-    console.print(Panel(t, title="memory · migrate (dry-run)", border_style="dim"))
+    if not json_out:
+        t = Table.grid(padding=(0, 2))
+        t.add_column("k", style="dim")
+        t.add_column("v")
+        for ds, counts in report.items():
+            if ds == "total":
+                continue
+            t.add_row(
+                ds,
+                f"scanned={counts['scanned']} migrated={counts['migrated']} skipped={counts['skipped']}",
+            )
+        total = report["total"]
+        t.add_row(
+            "[bold]total[/bold]",
+            f"scanned={total['scanned']} migrated={total['migrated']} skipped={total['skipped']}",
+        )
+        title = "memory · migrate hindsight→honcho" + (" (dry-run)" if dry_run else "")
+        console.print(Panel(t, title=title, border_style="dim" if dry_run else "green"))
+    return report
+
+
+def _run_migrate_honcho_to_hindsight(
+    *,
+    honcho_base: str,
+    workspace: str,
+    agent_id: str,
+    since: str | None,
+    dry_run: bool,
+    state: Any,
+    json_out: bool,
+) -> dict[str, Any]:
+    from hal0.memory.honcho_migrate import migrate_honcho_to_hindsight
+
+    def on_progress(msg: str) -> None:
+        if not json_out:
+            console.print(f"[dim]{msg}[/dim]")
+
+    report = migrate_honcho_to_hindsight(
+        hal0_base=_api_base(),
+        honcho_base=honcho_base,
+        workspace=workspace,
+        agent_id=agent_id,
+        since=since,
+        dry_run=dry_run,
+        state=state,
+        on_progress=on_progress,
+    )
+    if not json_out:
+        t = Table.grid(padding=(0, 2))
+        t.add_column("k", style="dim")
+        t.add_column("v")
+        t.add_row("Scanned", str(report["scanned"]))
+        t.add_row("Migrated", str(report["migrated"]))
+        t.add_row("Skipped", str(report["skipped"]))
+        t.add_row("Watermark", str(report["watermark"]))
+        title = "memory · migrate honcho→hindsight" + (" (dry-run)" if dry_run else "")
+        console.print(Panel(t, title=title, border_style="dim" if dry_run else "green"))
+    return report
 
 
 def _derived_tags(bank_id: str, add_tags: list[str]) -> list[str]:
