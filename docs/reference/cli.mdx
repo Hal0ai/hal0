@@ -35,6 +35,7 @@ directly so they work without a running daemon.
 | `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots`, `--source {release\|git}` |
+| `hal0 update owui` | Repin the OpenWebUI companion image to the latest (or an explicit) digest, pull, and restart. | `--check`, `--tag TAG`, `--target DIGEST`, `--yes`/`-y`, `--force` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
 
 `hal0 update` with no flags checks the configured channel and applies the
