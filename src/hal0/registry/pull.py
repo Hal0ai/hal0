@@ -1198,7 +1198,7 @@ async def run_flm_pull(
     # base pull module's import graph (tests pull this module in
     # environments without docker).
     from hal0.providers.flm import (
-        flm_host_spawn_kwargs,
+        flm_host_async_spawn,
         flm_pull_command,
         flm_served_models,
         reset_flm_catalog_cache,
@@ -1225,6 +1225,10 @@ async def run_flm_pull(
         job.bytes_total = advertised_total
         job._signal()
 
+    # uvloop (hal0-api's event loop) rejects the user/group Popen kwargs, so
+    # the drop to the hal0 user rides the argv (setpriv/runuser) instead.
+    argv, spawn_kwargs = flm_host_async_spawn(argv)
+
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1232,7 +1236,7 @@ async def run_flm_pull(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            **flm_host_spawn_kwargs(),
+            **spawn_kwargs,
         )
         assert proc.stdout is not None
         last_emit = time.monotonic()

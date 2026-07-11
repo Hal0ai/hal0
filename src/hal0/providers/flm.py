@@ -702,7 +702,7 @@ def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
 
 
 def flm_host_spawn_kwargs() -> dict[str, Any]:
-    """subprocess/asyncio kwargs to run host ``flm`` as the hal0 identity.
+    """``subprocess.run`` kwargs to run host ``flm`` as the hal0 identity.
 
     Sets ``HOME`` so flm resolves ``~/.config/flm/models`` to the real on-disk
     cache, and drops to the ``hal0`` user/group when we have the privilege
@@ -710,9 +710,10 @@ def flm_host_spawn_kwargs() -> dict[str, Any]:
     user (dev/test), ``user=`` would raise ``PermissionError``, so we skip it
     and rely on the caller already being the model owner.
 
-    Accepted by both :func:`subprocess.run` and
-    :func:`asyncio.create_subprocess_exec` (the ``user``/``group`` kwargs are
-    available on Python ≥ 3.9).
+    SYNC CALLERS ONLY: ``user``/``group`` are Popen kwargs (Python ≥ 3.9) that
+    uvloop's ``subprocess_exec`` rejects (``ValueError: unexpected kwargs``),
+    and hal0-api serves under uvicorn/uvloop — async callers must use
+    :func:`flm_host_async_spawn` instead.
     """
     import pwd
 
@@ -726,6 +727,32 @@ def flm_host_spawn_kwargs() -> dict[str, Any]:
         # Unknown user, or geteuid unavailable (non-POSIX) — run as-is.
         pass
     return kwargs
+
+
+def flm_host_async_spawn(argv: list[str]) -> tuple[list[str], dict[str, Any]]:
+    """Return ``(argv, kwargs)`` for spawning host ``flm`` from async code.
+
+    Same identity semantics as :func:`flm_host_spawn_kwargs`, but safe for
+    ``asyncio.create_subprocess_exec`` under uvloop: uvloop rejects the
+    ``user``/``group`` Popen kwargs (``ValueError: unexpected kwargs``), so
+    the drop to the hal0 user happens on the command line instead — via
+    ``setpriv`` (util-linux), falling back to ``runuser``. If neither tool
+    exists we spawn undemoted rather than fail the pull; the weights then
+    land root-owned but world-readable, so serving still works.
+    """
+    import shutil
+
+    kwargs = flm_host_spawn_kwargs()
+    user = kwargs.pop("user", None)
+    kwargs.pop("group", None)
+    if user:
+        setpriv = shutil.which("setpriv")
+        runuser = shutil.which("runuser")
+        if setpriv:
+            argv = [setpriv, f"--reuid={user}", f"--regid={user}", "--init-groups", "--", *argv]
+        elif runuser:
+            argv = [runuser, "-u", user, "--", *argv]
+    return argv, kwargs
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
