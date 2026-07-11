@@ -3273,7 +3273,27 @@ class SlotManager:
             chat_on = npu_cfg.get("chat", True) is not False
             embed_on = bool(npu_cfg.get("embed"))
             if chat_on:
-                verdict = await provider.verify_inference(slot_port)
+                # Probe the slot's ASSIGNED model, not FLM's models[0]. FLM's
+                # /v1/models lists the whole installed catalogue, so models[0]
+                # is an arbitrary OTHER model; probing it reloads the wrong
+                # weights onto the single NPU context and deadlocks the load,
+                # wedging the slot in WARMING forever (#1171). Translate the
+                # persisted default to the served colon tag the same way the
+                # serve path does (build_env uses flm_tag), so the expected id
+                # matches what FLM advertises regardless of whether the config
+                # stores the "-FLM" id or the native tag.
+                expected_model = _model_default(cfg)
+                try:
+                    from hal0.providers.flm import flm_id_to_tag
+
+                    resolved_tag = flm_id_to_tag(expected_model)
+                    if resolved_tag:
+                        expected_model = resolved_tag
+                except ImportError:
+                    pass
+                verdict = await provider.verify_inference(
+                    slot_port, expected_model=expected_model or None
+                )
             elif embed_on:
                 verdict = await provider.verify_embed(slot_port)
             else:
