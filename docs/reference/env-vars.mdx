@@ -79,6 +79,8 @@ reverse proxy, or when a service binds loopback-only. See
 | `HAL0_HERMES_PUBLIC_URL`     | Public URL for Hermes. Hermes binds **loopback-only** (`:9119`); this is the *only* way a browser link is shown for it. | unset (no link shown) |
 | `HAL0_N8N_PUBLIC_URL`        | Public URL for an operator-run n8n instance (n8n is external/unmanaged). | unset |
 | `HAL0_N8N_PROBE_URL`         | Health-probe URL for n8n. n8n's status is **unmonitored** unless this is set. | unset |
+| `HAL0_HONCHO_PUBLIC_URL`     | Public URL for Honcho. Honcho binds **loopback-only** (`:8000`); this is the *only* way a browser link is shown for it. See [Honcho memory](/docs/guides/honcho-memory). | unset (no link shown) |
+| `HAL0_HONCHO_PROBE_URL`      | Health-probe URL override for Honcho's `/api/services` status. | unset (`http://127.0.0.1:8000/health`) |
 
 ## Memory & MCP
 
@@ -113,6 +115,8 @@ These are honoured by the installer / bootstrap scripts.
 | `HAL0_INSTALL_SKIP_VERIFY`  | Install from an unverified source (skip the cosign check). Not recommended. | `0`      |
 | `HAL0_UPDATE_SKIP_COSIGN`   | Skip cosign signature verify on updates. Only honoured on pre-release/dev builds — silently ignored on stable v1+. Not recommended. | `0`      |
 | `HAL0_NO_PROBE`             | Skip the hardware probe during install.                           | unset    |
+| `HAL0_INSTALL_HONCHO`       | Install the optional self-hosted Honcho v3 memory stack (docker compose: clone, build, `hal0-honcho.service`). See [Honcho memory](/docs/guides/honcho-memory). | `0` (skipped) |
+| `HONCHO_REF`                | Git ref of `plastic-labs/honcho` the installer clones when `HAL0_INSTALL_HONCHO=1`. | `v3.0.9` |
 
 <Aside type="caution">
 `HAL0_INSTALL_SKIP_VERIFY=1` and `HAL0_UPDATE_SKIP_COSIGN=1` disable the
@@ -125,5 +129,6 @@ checkout.
 - [Paths & files](/docs/reference/paths-and-files) — what each root holds and the `HAL0_HOME` remap.
 - [Devices, providers & profiles](/docs/reference/providers-profiles-devices) — the seed profile catalog and toolbox image refs.
 - [Companion services](/docs/operate/services) — the services registry, mDNS discovery, and the `/api/services` surface behind the `HAL0_*_PUBLIC_URL`/`PROBE_URL` knobs.
+- [Honcho memory](/docs/guides/honcho-memory) — the optional Honcho stack the `HAL0_INSTALL_HONCHO`/`HONCHO_REF`/`HAL0_HONCHO_*` variables control.
 - [Authentication & HTTPS](/docs/operate/auth) — the reverse-proxy threat model and what `HAL0_ALLOWED_ORIGINS`/`HAL0_MCP_ALLOWED_*` actually gate.
 - [REST API index](/docs/reference/api/rest-api).

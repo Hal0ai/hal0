@@ -1,0 +1,232 @@
+---
+title: Honcho memory (optional)
+description: Run self-hosted Honcho v3 as a second memory engine alongside Hindsight, switch agents onto it per-agent, migrate history either direction, and keep both engines' graphs in sync.
+sidebar:
+  order: 55
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+hal0's own memory engine is **Hindsight** — see [Enable memory](/docs/guides/enable-memory).
+**Honcho** is an optional second engine: a self-hosted
+[Honcho v3](https://github.com/plastic-labs/honcho) stack (FastAPI + pgvector +
+redis, run via docker compose) that gives agents a unified, cross-session
+memory workspace with its own dialectic/summary/dream reasoning. It's
+opt-in and per-agent — `[memory].engine` on the hal0 side always stays
+`hindsight`; Honcho is routed to via `memory.agent_providers`, agent by agent.
+
+<Aside type="note">
+Nothing about Honcho is required. If you don't enable the stack, every
+Honcho-specific CLI verb below degrades the same way the rest of the memory
+subsystem does when its engine is unreachable.
+</Aside>
+
+## Enable the stack
+
+<Steps>
+
+1. **At install time** — pass `HAL0_INSTALL_HONCHO=1` to the installer. It
+   shallow-clones the pinned Honcho ref, builds the image, installs the
+   `hal0-honcho` systemd unit, and starts it (loopback `:8000`):
+
+   ```sh
+   curl -fsSL https://hal0.dev/install.sh | HAL0_INSTALL_HONCHO=1 bash
+   ```
+
+   Override the pinned version with `HONCHO_REF=vX.Y.Z` if you need a
+   different tag than the installer's default (`v3.0.9`).
+
+2. **On an existing box** — re-run the same one-liner with the flag set; the
+   installer is idempotent (it skips the clone if the source is already at
+   `HONCHO_REF`, but re-runs the compose build, so expect the slow step
+   again):
+
+   ```sh
+   curl -fsSL https://hal0.dev/install.sh | HAL0_INSTALL_HONCHO=1 bash
+   ```
+
+3. **Confirm it's up:**
+
+   ```sh
+   curl -fsS http://127.0.0.1:8000/health
+   hal0 memory provider status
+   ```
+
+</Steps>
+
+<Aside type="caution">
+Port `5432` may already be taken by Hindsight's embedded pg0 postgres.
+Honcho's own postgres + redis are compose-network-internal only (no host
+port published) for exactly this reason — see
+`installer/honcho/docker-compose.yml` for the full list of deltas from
+upstream's example compose file.
+</Aside>
+
+## Config surface
+
+Honcho has no TOML/YAML of its own — it reads pure environment variables.
+hal0 owns the `[honcho]` / `[honcho.llm]` sections of `hal0.toml` and
+renders them to `/etc/hal0/honcho.env`, which the compose stack mounts via
+`env_file:`.
+
+| Key | Default | What it does |
+|-----|---------|---------------|
+| `honcho.enabled` | `false` | Provision + render config for the stack. |
+| `honcho.port` | `8000` | Host port Honcho's API listens on (loopback). |
+| `honcho.workspace` | `"hal0"` | Unified workspace name shared by non-private agents. |
+| `honcho.user_peer` | `"operator"` | Single human peer id shared by all clients in the unified workspace. |
+| `honcho.auth_enabled` | `false` | Require Bearer auth on the Honcho API (loopback-only posture by default — ADR-0012). |
+
+`[honcho.llm]` routes five features independently — `deriver`, `dialectic`,
+`summary`, `dream`, `embedding` — each with `transport` (`openai` \|
+`anthropic` \| `gemini`), `model`, `base_url`, `api_key_env`. Leave a
+feature's `model`/`base_url` empty and it defaults to the local hal0-api
+gateway (keyless, `http://host.docker.internal:8080/v1` from inside the
+container) with a sensible per-feature local model.
+
+To route one feature at a cloud provider instead, set `base_url` +
+`api_key_env`, and put the actual key value in
+`/var/lib/hal0/secrets/honcho.env` (operator-maintained, appended verbatim
+by the renderer — never templated into `hal0.toml`):
+
+```toml
+# /etc/hal0/hal0.toml
+[honcho.llm.dialectic]
+transport = "openai"
+model = "anthropic/claude-sonnet-4"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+```sh
+# /var/lib/hal0/secrets/honcho.env (root-owned, not managed by hal0)
+echo 'OPENROUTER_API_KEY=sk-...' | sudo tee -a /var/lib/hal0/secrets/honcho.env
+```
+
+Apply a config change:
+
+```sh
+hal0 memory honcho render-env
+```
+
+Re-renders `/etc/hal0/honcho.env` and restarts `hal0-honcho` — but only if
+the rendered content actually changed.
+
+## Switch an agent to Honcho
+
+```sh
+hal0 memory provider list
+hal0 memory provider set hermes honcho
+hal0 memory provider set hermes honcho --private   # isolated private workspace
+hal0 memory provider set hermes hindsight          # switch back
+```
+
+`provider set` persists the routing and restarts the agent's gateway unit by
+default (`--restart/--no-restart` to control that). `provider list` /
+`provider status` show both engines' health plus the live per-agent routing
+table.
+
+## Migrate existing history
+
+Bidirectional, dry-run by default off (pass `--dry-run` explicitly to
+preview):
+
+```sh
+# Hindsight -> Honcho
+hal0 memory migrate --from hindsight --to honcho --agent hermes --dry-run
+hal0 memory migrate --from hindsight --to honcho --agent hermes
+
+# Honcho -> Hindsight
+hal0 memory migrate --from honcho --to hindsight --agent hermes --dry-run
+hal0 memory migrate --from honcho --to hindsight --agent hermes
+```
+
+`--dataset` (repeatable, `--from hindsight` only) scopes which Hindsight
+datasets are migrated — default is `shared` plus the agent's own private
+bucket. `--resume` continues from the last saved per-dataset cursor instead
+of rescanning from the start; id-level dedupe applies either way. `--since`
+overrides the saved watermark for `--from honcho`.
+
+## Keep Hindsight's graph in sync
+
+If an agent writes to Honcho, Hindsight's knowledge-graph extraction never
+sees those facts unless something mirrors them over. `hal0-honcho-sync.timer`
+runs `hal0 memory sync-graph` hourly — equivalent to
+`migrate --from honcho --to hindsight`, but resumes from the saved watermark
+automatically (no flags to think about). It ships installed but **disabled**:
+
+```sh
+sudo systemctl enable --now hal0-honcho-sync.timer
+```
+
+## Claude Code wiring
+
+Point Claude Code's Honcho plugin at the local stack instead of Honcho's
+hosted service:
+
+```json
+// ~/.honcho/config.json
+{
+  "apiKey": "hal0-local-noauth",
+  "baseUrl": "http://127.0.0.1:8000",
+  "peerName": "<your honcho.user_peer from hal0.toml>",
+  "sessionStrategy": "per-directory"
+}
+```
+
+```sh
+/plugin marketplace add plastic-labs/claude-honcho
+/plugin install honcho@honcho
+# restart Claude Code
+```
+
+If the plugin ignores `baseUrl`, set `HONCHO_BASE_URL=http://127.0.0.1:8000`
+in its environment instead.
+
+## Rollback
+
+Honcho is additive — turning it off never touches Hindsight:
+
+```sh
+hal0 memory provider set hermes hindsight
+sudo systemctl disable --now hal0-honcho-sync.timer
+sudo systemctl stop hal0-honcho
+```
+
+<Aside type="caution">
+Stop the stack with `systemctl stop hal0-honcho` (which runs `docker compose
+... down`), never `docker compose ... down -v` — the `-v` flag deletes the
+named volumes. This stack doesn't use named volumes at all (pgdata/redis-data
+are bind mounts under `/var/lib/hal0/honcho/`), so a plain `down` always
+preserves your data on disk regardless.
+</Aside>
+
+## Embedding model note
+
+`EMBEDDING_VECTOR_DIMENSIONS` (`honcho.llm.embedding_dimensions`, default
+`1024`, matching the default `qwen3-embedding-0-6b-q8-0` embedding model)
+sizes Honcho's pgvector column. Honcho validates the configured dimension
+against existing rows at startup — **changing the embedding model after real
+data exists requires a fresh `pgdata`** (stop the stack, `rm -rf
+/var/lib/hal0/honcho/pgdata`, restart; Honcho reprovisions on next boot).
+
+To point Honcho at a different local embedding model, create or edit a slot
+named `embed`:
+
+```sh
+hal0 slot create embed --type embedding --model <model-id> --hardware vulkan
+```
+
+then set `[honcho.llm.embedding].model` to that model id and
+`honcho.llm.embedding_dimensions` to its true output dimensionality before
+the first `hal0 memory honcho render-env`.
+
+## Related
+
+- [Enable memory](/docs/guides/enable-memory) — Hindsight, hal0's own engine.
+- [Companion services](/docs/operate/services) — the `honcho` entry in the
+  services registry (`hal0-honcho.service`, `/api/services`).
+- [Manage slots](/docs/guides/manage-slots) — creating/editing the `embed`
+  slot referenced above.
+- [Environment variables](/docs/reference/env-vars) — `HAL0_INSTALL_HONCHO`,
+  `HONCHO_REF`, and the `HAL0_HONCHO_*` service knobs.
