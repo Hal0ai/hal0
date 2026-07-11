@@ -513,9 +513,7 @@ def _dev_mode() -> bool:
 def _run_cmd(argv: list[str], *, timeout: float) -> tuple[int | None, str, str]:
     """Run ``argv``; return ``(rc, stdout, stderr)``. rc=None on spawn/timeout."""
     try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            argv, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return None, "", f"{argv[0]} timed out after {timeout:.0f}s"
     except (FileNotFoundError, OSError) as exc:
@@ -612,7 +610,7 @@ def update_owui(
     else:
         try:
             target_digest = _resolve_owui_upstream_digest(resolve_tag)
-        except Exception as exc:  # noqa: BLE001 — httpx/OCI errors → clean die
+        except Exception as exc:
             die(f"could not resolve ghcr.io {image_pin.OPENWEBUI_IMAGE_REPO}:{resolve_tag}: {exc}")
             return
         if not image_pin.is_sha256_digest(target_digest):
@@ -626,14 +624,18 @@ def update_owui(
     table.add_column()
     table.add_row("pinned (now)", current)
     table.add_row(f"target ({source})", target_digest)
-    table.add_row("status", "[green]newer available[/green]" if drifted else "[dim]up to date[/dim]")
+    table.add_row(
+        "status", "[green]newer available[/green]" if drifted else "[dim]up to date[/dim]"
+    )
     console.print(table)
 
     if check:
         return
 
     if not drifted and not force:
-        console.print("[dim]already pinned to that digest — nothing to do (use --force to re-pull).[/dim]")
+        console.print(
+            "[dim]already pinned to that digest — nothing to do (use --force to re-pull).[/dim]"
+        )
         return
 
     dev = _dev_mode()
@@ -642,7 +644,11 @@ def update_owui(
         return
 
     short = target_digest[:19] + "…"
-    if not yes and _interactive() and not typer.confirm(f"Repin OpenWebUI → {short}?", default=True):
+    if (
+        not yes
+        and _interactive()
+        and not typer.confirm(f"Repin OpenWebUI → {short}?", default=True)
+    ):
         console.print("[dim]aborted — unit unchanged.[/dim]")
         return
 
@@ -674,7 +680,9 @@ def update_owui(
 
     rc, _out, err = _run_cmd(["systemctl", "daemon-reload"], timeout=30.0)
     if rc != 0:
-        console.print(f"[yellow]systemctl daemon-reload failed:[/yellow] {err.strip() or f'exit {rc}'}")
+        console.print(
+            f"[yellow]systemctl daemon-reload failed:[/yellow] {err.strip() or f'exit {rc}'}"
+        )
 
     console.print(f"[cyan]restarting[/cyan] {image_pin.OPENWEBUI_UNIT_NAME}")
     rc, _out, err = _run_cmd(["systemctl", "restart", image_pin.OPENWEBUI_UNIT_NAME], timeout=120.0)
