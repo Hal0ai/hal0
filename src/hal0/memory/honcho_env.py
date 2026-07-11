@@ -109,6 +109,11 @@ def render_env(cfg: Hal0Config) -> str:
     # messages then sit unprocessed indefinitely. Process immediately.
     lines.append("DERIVER_FLUSH_ENABLED=true")
     _emit_model_config(lines, "DERIVER_MODEL_CONFIG", llm.deriver, "deriver")
+    if not llm.deriver.base_url:
+        # llama-server (the local gateway's backend) 400s on json_schema
+        # response_format ("Failed to initialize samplers"); json_object mode
+        # works. Cloud overrides keep upstream's json_schema default.
+        lines.append("DERIVER_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=json_object")
     _emit_model_config(lines, "SUMMARY_MODEL_CONFIG", llm.summary, "summary")
 
     _emit_model_config(lines, "DREAM_DEDUCTION_MODEL_CONFIG", llm.dream, "dream")

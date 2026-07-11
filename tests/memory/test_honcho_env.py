@@ -175,3 +175,15 @@ def test_deriver_flush_enabled_by_default(monkeypatch):
 
     out = he.render_env(_honcho_cfg())
     assert "DERIVER_FLUSH_ENABLED=true" in out
+
+
+def test_deriver_json_object_mode_local_only(monkeypatch):
+    from hal0.memory import honcho_env as he
+
+    out = he.render_env(_honcho_cfg())
+    assert "DERIVER_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=json_object" in out
+
+    cfg = _honcho_cfg()
+    cfg.honcho.llm.deriver.base_url = "https://openrouter.ai/api/v1"
+    out = he.render_env(cfg)
+    assert "STRUCTURED_OUTPUT_MODE" not in out
