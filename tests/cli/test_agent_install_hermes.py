@@ -304,9 +304,7 @@ def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path)
     monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
     # No foreign gateway on this box → the enable gate is a no-op. Stub it so
     # the test is hermetic regardless of the host's real systemd/drop-in state.
-    monkeypatch.setattr(
-        "hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: []
-    )
+    monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
 
     ac._install_hermes_gateway()
 

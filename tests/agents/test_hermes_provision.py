@@ -62,9 +62,7 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
     # Foreign-gateway preflight scans user systemd dirs; point them at an empty
     # tmp dir so a run on a real host (which may have a live hermes-gateway) stays
     # hermetic. The pipeline_io `run` seam also stubs systemctl is-active/pgrep.
-    monkeypatch.setattr(
-        hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),)
-    )
+    monkeypatch.setattr(hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),))
     # ownership_reconcile chmods /var/lib/hal0/agents to 0711; redirect it under
     # tmp so a root test runner never touches the live agents dir.
     monkeypatch.setattr(hp, "AGENTS_DIR", tmp_path / "var" / "lib" / "hal0" / "agents")

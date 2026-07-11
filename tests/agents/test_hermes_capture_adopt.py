@@ -170,7 +170,7 @@ def test_copy_wrapper_backs_up_foreign_binary(tmp_path: Path) -> None:
     dst = tmp_path / "bin" / "hermes"
     dst.parent.mkdir(parents=True)
     # A pre-existing FOREIGN hermes (upstream shim / binary) with no hal0 marker.
-    dst.write_text("#!/bin/sh\n# upstream hermes, hand-installed\nexec /opt/hermes \"$@\"\n")
+    dst.write_text('#!/bin/sh\n# upstream hermes, hand-installed\nexec /opt/hermes "$@"\n')
 
     hp._copy_wrapper(src, dst)
 
@@ -252,7 +252,9 @@ def _fake_run_factory(*, active: bool, procs: str = ""):
     def _run(argv: Any, *_a: Any, **_kw: Any) -> Any:
         head = list(argv[:2])
         if head == ["systemctl", "is-active"]:
-            return _Completed(returncode=0 if active else 3, stdout="active" if active else "inactive")
+            return _Completed(
+                returncode=0 if active else 3, stdout="active" if active else "inactive"
+            )
         if argv and argv[0] == "pgrep":
             return _Completed(returncode=0 if procs else 1, stdout=procs)
         return _Completed()
@@ -313,7 +315,9 @@ def test_detect_foreign_gateway_best_effort_on_subprocess_error(tmp_path: Path) 
 
 
 def _preflight_ctx(state: hp.BootstrapState, *, adopt: bool, run: Any) -> hp.PhaseContext:
-    return hp.context_for("preflight", state, adopt=adopt, io=hp.PhaseIO(http_get=lambda *_a, **_k: 200, run=run))
+    return hp.context_for(
+        "preflight", state, adopt=adopt, io=hp.PhaseIO(http_get=lambda *_a, **_k: 200, run=run)
+    )
 
 
 def test_preflight_fatal_on_foreign_gateway_without_adopt(tmp_path: Path, monkeypatch) -> None:
@@ -325,14 +329,18 @@ def test_preflight_fatal_on_foreign_gateway_without_adopt(tmp_path: Path, monkey
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", tmp_path / "absent.conf")
 
     state = hp.BootstrapState(venv=str(tmp_path / "v"), hermes_home=str(tmp_path / "hh"))
-    out = hp._phase_preflight(_preflight_ctx(state, adopt=False, run=_fake_run_factory(active=False)))
+    out = hp._phase_preflight(
+        _preflight_ctx(state, adopt=False, run=_fake_run_factory(active=False))
+    )
     assert out.status == hp.PhaseStatus.FAIL
     assert out.fatal is True
     assert "foreign hermes gateway" in (out.reason or "")
     assert out.details["foreign_gateways"]
 
 
-def test_preflight_warns_not_fatal_on_foreign_gateway_with_adopt(tmp_path: Path, monkeypatch) -> None:
+def test_preflight_warns_not_fatal_on_foreign_gateway_with_adopt(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
     user_dir = tmp_path / "root" / ".config" / "systemd" / "user"
     user_dir.mkdir(parents=True)
@@ -341,7 +349,9 @@ def test_preflight_warns_not_fatal_on_foreign_gateway_with_adopt(tmp_path: Path,
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", tmp_path / "absent.conf")
 
     state = hp.BootstrapState(venv=str(tmp_path / "v"), hermes_home=str(tmp_path / "hh"))
-    out = hp._phase_preflight(_preflight_ctx(state, adopt=True, run=_fake_run_factory(active=False)))
+    out = hp._phase_preflight(
+        _preflight_ctx(state, adopt=True, run=_fake_run_factory(active=False))
+    )
     # Adopt downgrades the abort to a warning: preflight still passes.
     assert out.status == hp.PhaseStatus.OK
     assert out.fatal is False
@@ -365,7 +375,7 @@ def test_install_aborts_before_any_mutation_on_foreign_home_without_adopt(
     venv = tmp_path / "venv"
     wrapper_dst = tmp_path / "usr" / "bin" / "hermes"
     wrapper_dst.parent.mkdir(parents=True)
-    foreign_wrapper = "#!/bin/sh\n# foreign upstream hermes\nexec /opt/hermes \"$@\"\n"
+    foreign_wrapper = '#!/bin/sh\n# foreign upstream hermes\nexec /opt/hermes "$@"\n'
     wrapper_dst.write_text(foreign_wrapper)
     monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", wrapper_dst)
     monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "bin" / "hal0-hermes")
