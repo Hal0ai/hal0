@@ -168,3 +168,10 @@ class TestApplyHonchoEnv:
         assert result["restarted"] is False
         assert result["error"] is None
         assert env_path.exists()
+
+
+def test_deriver_flush_enabled_by_default(monkeypatch):
+    from hal0.memory import honcho_env as he
+
+    out = he.render_env(_honcho_cfg())
+    assert "DERIVER_FLUSH_ENABLED=true" in out

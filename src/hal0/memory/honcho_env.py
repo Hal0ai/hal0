@@ -104,6 +104,10 @@ def render_env(cfg: Hal0Config) -> str:
     lines.append(f"EMBEDDING_VECTOR_DIMENSIONS={llm.embedding_dimensions}")
     _emit_model_config(lines, "EMBEDDING_MODEL_CONFIG", llm.embedding, "embedding")
 
+    # Low-traffic posture: without flush the deriver batches representation
+    # work behind a token threshold a homelab may never reach — queued
+    # messages then sit unprocessed indefinitely. Process immediately.
+    lines.append("DERIVER_FLUSH_ENABLED=true")
     _emit_model_config(lines, "DERIVER_MODEL_CONFIG", llm.deriver, "deriver")
     _emit_model_config(lines, "SUMMARY_MODEL_CONFIG", llm.summary, "summary")
 
