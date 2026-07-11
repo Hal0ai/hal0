@@ -57,9 +57,10 @@ from hal0.api._audit import record_action
 
 log = structlog.get_logger(__name__)
 
-# Loop budget — terminate even against a pathological LLM emitting tool_calls
-# forever (mirrors OmniRouter._MAX_LOOP_ROUNDS).
-_MAX_ROUNDS = 8
+# Loop budget and per-round transport timeout live in ``[brain_chat]``
+# (max_rounds / completion_timeout_s), read per-request via
+# _brain_chat_config(); the BrainChatConfig defaults (8 rounds, 300 s) are the
+# single source of truth.
 
 # The slot the steward drives. Points at the dedicated `brain` slot (the
 # hal0-brain profile's default model) — the resolver's generalized chain
@@ -716,6 +717,45 @@ def _resolve_tool(
     return None, "", {}, None, None
 
 
+def _brain_chat_config(request: Request) -> Any:
+    """The ``[brain_chat]`` config off app.state, or defaults.
+
+    Falls back to a fresh ``BrainChatConfig()`` (enabled, not read-only, 8
+    rounds, 300 s) when app.state carries no ``hal0_config`` — so bare test
+    apps and older configs behave exactly as before.
+    """
+    from hal0.config.schema import BrainChatConfig
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    bc = getattr(cfg, "brain_chat", None)
+    return bc if isinstance(bc, BrainChatConfig) else BrainChatConfig()
+
+
+def _is_read_tool(name: str, args: dict[str, Any]) -> bool:
+    """True when ``name`` only READS state (safe under read-only mode).
+
+    Mirrors the branch order of :func:`_dispatch_tool`: board reads, then
+    non-mutating platform tools, then GET-method local tools, then the admin
+    catalog's autonomous-read set. An unknown tool is treated as NOT a read,
+    so read-only fails closed.
+    """
+    if _resolve_read_tool(name, args)[0] is not None:
+        return True
+    p_method, _p_path, p_mutating = _resolve_platform_tool(name, args)
+    if p_method is not None:
+        return not p_mutating
+    method, _path, _tool_params, _body, _target = _resolve_tool(name, args)
+    if method is not None:
+        return method.upper() == "GET"
+    if name in _admin_tool_names():
+        try:
+            from hal0.mcp.admin import AUTONOMOUS_READ_TOOLS
+        except ImportError:
+            return False
+        return name in AUTONOMOUS_READ_TOOLS
+    return False
+
+
 async def _dispatch_tool(
     request: Request,
     client: Any,
@@ -738,6 +778,17 @@ async def _dispatch_tool(
     policy = _brain_tool_policy(request)
     if policy is not None and not policy.allows(name):
         return {"error": f"tool {name!r} is outside the hal0-brain persona's tools_allowed"}
+
+    # Read-only guardrail — refuses every mutating/admin-write tool regardless
+    # of the persona's tools_allowed / approval policy ([brain_chat]
+    # read_only=true). Reads still pass so the steward can answer questions.
+    if _brain_chat_config(request).read_only and not _is_read_tool(name, args):
+        return {
+            "error": (
+                f"tool {name!r} refused: the hal0-brain chat is in read-only mode "
+                "([brain_chat] read_only=true) — mutating and admin-write tools are disabled"
+            )
+        }
 
     read_method, read_path = _resolve_read_tool(name, args)
     if read_method is not None:
@@ -809,9 +860,10 @@ def _resolve_llm(request: Request) -> LlmFn:
         return injected
 
     base_url = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
+    timeout_s = _brain_chat_config(request).completion_timeout_s
 
     async def _primary_completion(body: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=300.0) as http:
+        async with httpx.AsyncClient(timeout=timeout_s) as http:
             try:
                 resp = await http.post(f"{base_url.rstrip('/')}/v1/chat/completions", json=body)
             except httpx.HTTPError as exc:
@@ -927,6 +979,17 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
         yield _sse({"type": "done"})
         return
 
+    cfg = _brain_chat_config(request)
+    if not cfg.enabled:
+        yield _sse(
+            {
+                "type": "error",
+                "message": "the hal0-brain agent chat is disabled ([brain_chat] enabled=false)",
+            }
+        )
+        yield _sse({"type": "done"})
+        return
+
     llm = _resolve_llm(request)
     board = payload.get("board")
     system_prompt, default_model = _resolve_profile(request)
@@ -944,7 +1007,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     }
 
     try:
-        for _round in range(_MAX_ROUNDS):
+        for _round in range(cfg.max_rounds):
             response = await llm(body)
             if isinstance(response, dict) and response.get("error"):
                 yield _sse({"type": "error", "message": str(response["error"])})
@@ -1023,12 +1086,14 @@ __all__ = [
     "PRIMARY_SLOT_MODEL",
     "_admin_tool_names",
     "_admin_tool_schemas",
+    "_brain_chat_config",
     "_brain_tool_policy",
     "_chat_stream",
     "_compact_board",
     "_dispatch_admin_tool",
     "_dispatch_platform_tool",
     "_dispatch_tool",
+    "_is_read_tool",
     "_resolve_platform_tool",
     "_resolve_read_tool",
     "_resolve_tool",
