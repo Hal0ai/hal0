@@ -234,6 +234,22 @@ export function useModelUpdatesCheck() {
   })
 }
 
+export function useModelUpdatesForceCheck() {
+  // GET /api/models/updates/check?refresh=1 — bypass the server's TTL
+  // cache. Backs the Models page's explicit "Check updates" affordance:
+  // the fresh snapshot is written into ['model-updates'] and the catalog
+  // is refetched so row badges flip immediately.
+  const qc = useQueryClient()
+  return useMutation<ModelUpdatesCheckResponse, Hal0Error, void>({
+    mutationFn: () =>
+      apiGet<ModelUpdatesCheckResponse>(`${ENDPOINTS.modelUpdatesCheck}?refresh=1`),
+    onSuccess: (res) => {
+      qc.setQueryData(['model-updates'], res)
+      qc.invalidateQueries({ queryKey: ['models'] })
+    },
+  })
+}
+
 export function useModelUpdateApply() {
   // POST /api/models/{id}/update — re-pull the row's HF file over its
   // installed path. Progress reports through the standard pull surface

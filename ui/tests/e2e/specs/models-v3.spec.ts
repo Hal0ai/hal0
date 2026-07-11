@@ -204,4 +204,24 @@ test.describe('Models v3 (/models)', () => {
     await page.locator('button:has-text("Delete model")').click()
     await expect.poll(() => deleted).toBe(true)
   })
+
+  test('Check updates affordance forces a refresh when nothing is outdated', async ({ page }) => {
+    const checks: string[] = []
+    await page.route('**/api/models/updates/check*', async (route) => {
+      checks.push(route.request().url())
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ checked_at: 1730000000, checked: 5, updates_available: 0, models: {} }),
+      })
+    })
+    await page.goto('/#models')
+    // Nothing outdated in the mock catalog → the explicit check affordance
+    // renders instead of Update-all (the surface must never be invisible).
+    const btn = page.getByTestId('mdl-check-updates')
+    await expect(btn).toBeVisible()
+    await expect(page.getByTestId('mdl-update-all')).toHaveCount(0)
+    await btn.click()
+    await expect.poll(() => checks.some((u) => u.includes('refresh=1'))).toBe(true)
+  })
 })

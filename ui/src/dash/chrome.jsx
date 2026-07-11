@@ -169,6 +169,7 @@ function NotificationBell() {
   const {
     approvals, errorSlots, activePulls, failedPulls,
     hasUpdate, hal0Ch, driftCount,
+    updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
     count,
   } = useNotifications();
@@ -270,10 +271,24 @@ function NotificationBell() {
     );
   }
 
-  if (hasUpdate || driftCount > 0) {
+  if (hasUpdate || driftCount > 0 || updatableModels.length > 0) {
     sections.push(
       <div className="notif-sec" data-testid="notif-sec-updates" key="updates">
         <div className="notif-sec-h mono">updates</div>
+        {updatableModels.length > 0 && (
+          <div className="notif-row" data-testid="notif-model-updates">
+            <span className="notif-dot" style={{ background: "var(--accent)" }} />
+            <span className="notif-msg">
+              {updatableModels.length} model update{updatableModels.length !== 1 ? "s" : ""} available on HuggingFace
+            </span>
+            <button
+              className="notif-act"
+              disabled={updateAllModels.isPending}
+              onClick={() => updateAllModels.mutate(updatableModels.map((m) => m.id))}
+            >{updateAllModels.isPending ? "Starting…" : "Update all"}</button>
+            <button className="notif-act" onClick={() => go("#models")}>View</button>
+          </div>
+        )}
         {hasUpdate && (
           <div className="notif-row">
             <span className="notif-dot" style={{ background: "var(--accent)" }} />
