@@ -390,7 +390,7 @@ export const COMFYUI_V2_MOCK = {
 }
 
 // ── Card header ───────────────────────────────────────────────────────────────
-function CardHead({ engine, run, pct }) {
+function CardHead({ run, pct, onStop, onRestart, onLogs }) {
   const hasRun = run != null
   return (
     <div className="engine-h wcard-h">
@@ -406,23 +406,25 @@ function CardHead({ engine, run, pct }) {
         <span className="dot" />
         {hasRun ? `generating · ${Math.round(pct)}%` : 'idle'}
       </span>
-      <span className="cf-pill">
-        <span className="d" />
-        iGPU · exclusive
-      </span>
       <span className="grow" />
       <span className="eh-right">
-        <span className="gpu-note">
-          <Ci name="bolt" size={11} /> inference slots <span className="b">paused</span> while rendering
+        <span className="cf-pill">
+          <span className="d" />
+          iGPU · exclusive
         </span>
-        <span className="meta">docker · <b>{engine.endpoint}</b></span>
+        {/* Container controls — moved up from the footer to the header far right. */}
+        <span className="foot-ctrls">
+          <button className="sctrl stop" title="Stop container" onClick={onStop}><Ci name="stop" size={12} /></button>
+          <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
+          <button className="sctrl" title="Logs" onClick={onLogs}><Ci name="logs" size={12} /></button>
+        </span>
       </span>
     </div>
   )
 }
 
 // ── Card footer ───────────────────────────────────────────────────────────────
-function CardFoot({ engine, onRestart, onLogs }) {
+function CardFoot({ engine }) {
   return (
     <div className="wfoot">
       <div className="foot-id">
@@ -438,12 +440,6 @@ function CardFoot({ engine, onRestart, onLogs }) {
         <span className="k">endpoint</span>
         <span className="v acc">{engine.endpoint}</span>
       </div>
-      <span className="grow" />
-      <span className="foot-ctrls">
-        <button className="sctrl stop" title="Stop container"><Ci name="stop" size={12} /></button>
-        <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
-        <button className="sctrl" title="Logs" onClick={onLogs}><Ci name="logs" size={12} /></button>
-      </span>
     </div>
   )
 }
@@ -513,8 +509,17 @@ export function ImageGenCard({
 
   return (
     <div className="engine wcard active">
-      <CardHead engine={engine} run={run} pct={pct} />
+      <CardHead run={run} pct={pct} onRestart={onRestart} onLogs={onLogs} />
       <div className="wcard-b">
+
+        {/* Render-active notice — moved out of the card header so it sits
+            directly above the active render. Only shown while a render is
+            running, since it describes what's paused *while rendering*. */}
+        {hasRun && (
+          <div className="gpu-note render-warn">
+            <Ci name="bolt" size={11} /> inference slots <span className="b">paused</span> while rendering
+          </div>
+        )}
 
         {/* ── Top row: active render activity (60%) + metrics (40%) ── */}
         <div className="activity-metrics-row">
@@ -705,7 +710,7 @@ export function ImageGenCard({
         )}
       </div>
 
-      <CardFoot engine={engine} onRestart={onRestart} onLogs={onLogs} />
+      <CardFoot engine={engine} />
     </div>
   )
 }
