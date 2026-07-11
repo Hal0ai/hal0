@@ -21,8 +21,17 @@ runner = CliRunner()
 def stub_api(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bc, "_api_unreachable", lambda _url: False)
 
-    calls: dict[str, list[Any]] = {"get": [], "put": [], "patch": [], "post": [], "delete": []}
-    responses: dict[str, Any] = {}
+    calls: dict[str, list[Any]] = {"get": [], "patch": [], "post": [], "delete": []}
+    # Mutable so profile-set tests can assert the config PATCH actually
+    # changed what a subsequent GET /config reports (partial-merge).
+    config: dict[str, Any] = {
+        "disposition_skepticism": 3,
+        "disposition_literalism": 3,
+        "disposition_empathy": 3,
+        "retain_mission": None,
+        "observations_mission": None,
+        "reflect_mission": None,
+    }
 
     def fake_get(path: str, **kw: Any) -> Any:
         calls["get"].append((path, kw))
@@ -49,24 +58,18 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
                 "last_consolidated_at": None,
             }
         if path.endswith("/profile"):
-            return responses.get(
-                "profile",
-                {
-                    "bank_id": "shared",
-                    "name": "shared",
-                    "mission": "",
-                    "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
-                },
-            )
+            # Deprecated upstream (0.8.4): name only matters here, disposition
+            # and mission are stale on this endpoint — see module docstring.
+            return {"bank_id": "shared", "name": "shared", "mission": "", "disposition": {}}
+        if path.endswith("/config"):
+            return {"bank_id": "shared", "config": dict(config), "overrides": {}}
         return {}
-
-    def fake_put(path: str, **kw: Any) -> Any:
-        calls["put"].append((path, kw.get("json")))
-        return {"bank_id": "shared", **(kw.get("json") or {})}
 
     def fake_patch(path: str, **kw: Any) -> Any:
         calls["patch"].append((path, kw.get("json")))
-        return {"bank_id": "shared", "overrides": (kw.get("json") or {}).get("updates", {})}
+        updates = (kw.get("json") or {}).get("updates", {})
+        config.update(updates)  # partial merge, like the real /config PATCH
+        return {"bank_id": "shared", "overrides": updates}
 
     def fake_post(path: str, **kw: Any) -> Any:
         calls["post"].append((path, kw.get("json"), kw.get("params")))
@@ -79,11 +82,10 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
         return {"deleted": True}
 
     monkeypatch.setattr(bc, "api_get", fake_get)
-    monkeypatch.setattr(bc, "api_put", fake_put)
     monkeypatch.setattr(bc, "api_patch", fake_patch)
     monkeypatch.setattr(bc, "api_post", fake_post)
     monkeypatch.setattr(bc, "api_delete", fake_delete)
-    calls["_responses"] = responses  # type: ignore[assignment]
+    calls["_config"] = config  # type: ignore[assignment]
     return calls
 
 
@@ -111,27 +113,32 @@ def test_bank_stats(stub_api) -> None:
 
 def test_profile_get(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "get", "shared", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["disposition"]["skepticism"] == 3
+    # name from /profile, disposition + missions from /config — see
+    # _fetch_merged_profile.
+    assert payload["name"] == "shared"
+    assert payload["disposition"] == {"skepticism": 3, "literalism": 3, "empathy": 3}
+    assert payload["retain_mission"] is None
+    get_paths = [p for p, _kw in stub_api["get"]]
+    assert "/api/memory/banks/shared/profile" in get_paths
+    assert "/api/memory/banks/shared/config" in get_paths
 
 
 def test_profile_set_requires_at_least_one_field(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "set", "shared"])
     assert result.exit_code != 0
-    assert not stub_api["put"]
     assert not stub_api["patch"]
 
 
-def test_profile_set_disposition_merges_and_puts_full_object(stub_api) -> None:
+def test_profile_set_disposition_is_a_single_config_patch(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "set", "shared", "--skepticism", "5"])
     assert result.exit_code == 0, result.output
-    path, payload = stub_api["put"][-1]
-    assert path == "/api/memory/banks/shared/profile"
-    # All three disposition fields must be present (upstream requires it),
-    # only skepticism should differ from the fetched default.
-    assert payload == {"disposition": {"skepticism": 5, "literalism": 3, "empathy": 3}}
-    assert not stub_api["patch"]
+    path, payload = stub_api["patch"][-1]
+    assert path == "/api/memory/banks/shared/config"
+    # Only the field passed is sent — config PATCH is a partial merge,
+    # no read-modify-write needed for the other two disposition traits.
+    assert payload == {"updates": {"disposition_skepticism": 5}}
 
 
 def test_profile_set_mission_fields_go_through_config_patch(stub_api) -> None:
@@ -153,17 +160,27 @@ def test_profile_set_mission_fields_go_through_config_patch(stub_api) -> None:
     assert payload == {
         "updates": {"retain_mission": "extract carefully", "reflect_mission": "be terse"}
     }
-    assert not stub_api["put"]
 
 
-def test_profile_set_can_touch_both_resources_in_one_call(stub_api) -> None:
+def test_profile_set_mission_and_disposition_in_one_patch_call(stub_api) -> None:
     result = runner.invoke(
         bc.app,
         ["profile", "set", "shared", "--empathy", "5", "--observations-mission", "notice patterns"],
     )
     assert result.exit_code == 0, result.output
-    assert stub_api["put"], "disposition PUT expected"
-    assert stub_api["patch"], "config PATCH expected"
+    assert len(stub_api["patch"]) == 1, "expected exactly one PATCH /config call"
+    path, payload = stub_api["patch"][-1]
+    assert path == "/api/memory/banks/shared/config"
+    assert payload == {
+        "updates": {"disposition_empathy": 5, "observations_mission": "notice patterns"}
+    }
+
+
+def test_profile_set_reflects_in_subsequent_get(stub_api) -> None:
+    result = runner.invoke(bc.app, ["profile", "set", "shared", "--retain-mission", "be precise"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(runner.invoke(bc.app, ["profile", "get", "shared", "--json"]).output)
+    assert payload["retain_mission"] == "be precise"
 
 
 def test_export_writes_file(stub_api, tmp_path) -> None:

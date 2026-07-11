@@ -255,8 +255,8 @@ and per-slot TOMLs are **not** migrated (v0.1.x → v0.2 is a clean break).
 | `memory honcho render-env` | Render `/etc/hal0/honcho.env` from `hal0.toml [honcho]` and restart the stack if it changed. | `--restart`/`--no-restart`, `--json` |
 | `memory bank list` | List Hindsight banks with fact counts and last-activity timestamps. | `--json` |
 | `memory bank stats <bank>` | Show detailed stats for a bank (nodes, links, documents, operations). | `--json` |
-| `memory bank profile get <bank>` | Show a bank's profile (name, mission, disposition traits). | `--json` |
-| `memory bank profile set <bank>` | Read-modify-write a bank's profile. | `--retain-mission`, `--observations-mission`, `--reflect-mission`, `--skepticism`, `--literalism`, `--empathy`, `--json` |
+| `memory bank profile get <bank>` | Show a bank's profile (name, disposition traits, missions — via `/config`). | `--json` |
+| `memory bank profile set <bank>` | Set a bank's profile (single `PATCH /config` call). | `--retain-mission`, `--observations-mission`, `--reflect-mission`, `--skepticism`, `--literalism`, `--empathy`, `--json` |
 | `memory bank export <bank>` | Export a bank as a portable template manifest. | `--out <path>` (default: stdout) |
 | `memory bank import <bank>` | Import a bank template manifest. | `--file <path>` (required), `--dry-run`, `--json` |
 | `memory bank delete <bank>` | Irreversibly delete a bank (drops every memory/document/entity in it). | `--confirm <bank>` (required, must match exactly), `--json` |
@@ -279,26 +279,27 @@ it runs the Hindsight&lt;-&gt;Honcho backfill/graph-sync engine in-process
 against the local hal0-api + Honcho REST surfaces, defaulting to a live run
 (`--dry-run` opts into a scan-only report).
 
-`memory bank profile set` splits its flags across two upstream Hindsight
-calls: `--skepticism`/`--literalism`/`--empathy` go through the bank's
-`profile` endpoint (disposition traits), while `--retain-mission`/
-`--observations-mission`/`--reflect-mission` go through its `config`
-endpoint (bank config overrides) — they read like one "profile" but are
-different upstream resources. `memory bank delete` requires `--confirm
-<bank>` to exactly match the target bank id before it even calls the API;
-the server enforces the same rule server-side. `memory migrate unify
---apply` requires hindsight-api's document-transfer API
-(`features.document_export_api`/`document_import_api` on `/version`) — as
-of writing the live engine is 0.7.2, which lacks it, so `--apply` refuses
-with a clear error rather than faking a migration via export/import
-(which round-trips a whole bank template and would drop the provenance
-tags). `--dry-run` (the default) works on any version since it only reads
-bank stats. There is no per-document tag-rewrite option on the transfer
+`memory bank profile get`/`set` both go through `GET`/`PATCH
+.../config` alone now — `GET`/`PUT .../profile` is deprecated upstream
+(disposition-only, and confirmed live to not actually apply): a bank's
+fully-resolved config carries `disposition_skepticism`/
+`disposition_literalism`/`disposition_empathy` alongside
+`retain_mission`/`observations_mission`/`reflect_mission`, so `set` is one
+`PATCH` with whichever of the six fields you passed (a partial merge
+server-side — no read-modify-write needed), and `get` merges that with
+`GET .../profile` just for the bank's `name`. `memory bank delete`
+requires `--confirm <bank>` to exactly match the target bank id before it
+even calls the API; the server enforces the same rule server-side.
+`memory migrate unify --apply` requires hindsight-api's document-transfer
+API (`features.document_export_api`/`document_import_api` on `/version`)
+— live as of hindsight-api 0.8.4. `--dry-run` (the default) works on any
+version since it only reads bank stats. There is no per-document tag-rewrite option on the transfer
 itself, so `--add-tag`/derived tags are applied as a separate post-import
 pass — a document-id diff of the target bank before/after each source's
-import, then a read-merge-write `PATCH` of each new document's tags
-(`hal0 memory bank profile`-style: full-replace body, so existing tags are
-preserved). Retagging N documents queues N Hindsight re-consolidation
+import, then a read-merge-write `PATCH` of each new document's tags (the
+document tags field is a full-replace, unlike bank config's partial-merge
+`updates`, so the CLI reads current tags first and unions them in rather
+than overwriting). Retagging N documents queues N Hindsight re-consolidation
 passes — the CLI warns before starting; consider running large unifies
 off-hours.
 
