@@ -35,6 +35,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache
 from hal0.api.deps import DispatcherDep
+from hal0.upstreams.filters import apply_filters
 
 log = structlog.get_logger("hal0-v1")
 
@@ -719,6 +720,8 @@ async def list_models(
             chat_model_ids = set()
 
     for u in upstreams.list():
+        if not getattr(u, "enabled", True):
+            continue
         if not getattr(u, "advertise_models", True):
             continue
         # The composite ``hal0`` upstream's URL is hal0-api itself —
@@ -733,6 +736,9 @@ async def list_models(
                 advertised = await upstreams.fetch_models(u.name)
             except Exception:
                 advertised = []
+        # Per-upstream curation of the discovery catalog only — the dispatch
+        # cache keeps the full list, so filtered-out ids stay addressable.
+        advertised = apply_filters(advertised, getattr(u, "model_filters", None))
         for mid in advertised:
             if mid in seen:
                 continue
