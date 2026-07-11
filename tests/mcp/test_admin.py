@@ -469,15 +469,15 @@ def test_catalog_validation_catches_path_arg_drift(monkeypatch: pytest.MonkeyPat
         admin._validate_catalog()
 
 
-@pytest.mark.asyncio
-async def test_build_server_rejects_registration_drift(
-    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+def test_catalog_validation_catches_description_drift(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool classified but never _register()ed (or vice versa) fails
-    loudly at build time instead of 404ing in an agent's chat."""
+    """A tool classified but missing from TOOL_DESCRIPTIONS (or vice
+    versa) fails import validation — registration iterates that dict, so
+    a gap would otherwise silently drop the tool from tools/list."""
     monkeypatch.setattr(admin, "GATED_TOOLS", admin.GATED_TOOLS | {"ghost_tool"})
     with pytest.raises(RuntimeError, match="ghost_tool"):
-        admin.build_server(approval_queue=queue, base_url="http://t")
+        admin._validate_catalog()
 
 
 def test_model_edit_and_model_update_route_to_distinct_endpoints() -> None:

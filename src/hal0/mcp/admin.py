@@ -1037,6 +1037,119 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
 }
 
 
+# ── Tool catalog descriptions ────────────────────────────────────────────────
+#
+# Single source of truth for the tool surface's names + descriptions.
+# build_server registers exactly this dict; the dashboard's agent chat
+# (hal0.api.routes.board_chat) surfaces the same catalog as OpenAI tool
+# schemas and routes calls through the same ``dispatch`` core — keep
+# descriptions agent-facing (state required args + side effects).
+
+TOOL_DESCRIPTIONS: dict[str, str] = {
+    # ── Autonomous read ─────────────────────────────────────────────────
+    "slot_list": "List every slot known to hal0 (local + remote).",
+    "slot_status": "Get one slot's lifecycle state + metadata.",
+    "slot_metrics": "Get per-slot performance metrics (tok/s, latency, queue depth).",
+    "slot_capacity": "Get GPU/NPU memory capacity and per-slot allocation.",
+    "model_list": "Aggregate models from local registry + upstreams.",
+    "model_show": "Show a single model's full metadata (registry + upstream).",
+    "model_scan_preview": "Preview what a model scan would register (dry run).",
+    "model_catalogue": "List the curated catalogue of blessed models.",
+    "model_update_check": "Check which HF-backed models have updates available.",
+    "model_pulls_list": "List all pull jobs (in-flight + terminal).",
+    "model_pull_status": "Get one model's pull-job progress (state, %, speed, ETA).",
+    "model_inspect": (
+        "Inspect a HuggingFace repo — returns detected .gguf/.mmproj files, quants and "
+        "capabilities WITHOUT registering anything. Use before model_register/model_pull."
+    ),
+    "model_store": (
+        "Show the operator's configured model-store directory ([models].store) and "
+        "candidate paths. Pulls always download into this store."
+    ),
+    "hardware_probe": "Live hardware probe — backends, memory, accelerators.",
+    "capability_list": "Capability overlay state — backends + selections.",
+    "provider_list": "List configured providers.",
+    "version_info": "hal0 version + runtime status.",
+    "upstream_list": "List all configured upstream LLM providers.",
+    "stack_list": "List every stack, with the active stack + drift status.",
+    "stack_status": "Get one stack's detail, active flag, and drift status.",
+    "profile_list": "List every profile in the catalog (seed + custom).",
+    "profile_status": "Get one profile's resolved detail (image, flags, backend, used-by).",
+    "profile_export": (
+        "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
+    ),
+    "settings_get": "Get the current hal0 settings (pydantic schema validated).",
+    "settings_schema": "Get the JSON schema for hal0 settings validation.",
+    "settings_apply_plan": "Preview what settings changes would take effect.",
+    "bench_runs": "List benchmark runs (history + in-flight).",
+    "bench_run_status": "Get one benchmark run's detail + results.",
+    "bench_queue": "Show the benchmark queue (pending cells).",
+    "gpu_target_version": "Decode KFD's gfx_target_version to a gfxNNNN string (e.g. gfx1151).",
+    "npu_status": "Report XDNA NPU presence + driver binding (LXC-correct, no modinfo).",
+    "env_report": "Composite host snapshot — container, CPU, RAM, GPU, NPU, network, tooling.",
+    "model_store_probe": (
+        "Probe a model-store path: fstype, free/total bytes, writable, UMA-aware."
+    ),
+    # ── Autonomous write ────────────────────────────────────────────────
+    "model_swap": "Hot-swap the primary slot to a new model.",
+    "model_assign": "Assign a model to a slot's default (does not load the slot).",
+    "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
+    "model_scan": "Walk the configured model roots + store and register newly-found files.",
+    "model_pull_cancel": "Cancel an in-flight model pull job.",
+    "slot_load": "Load a slot (optionally assign a model first).",
+    "slot_unload": "Unload a running slot gracefully.",
+    "slot_edit": (
+        "Update one or more slot config fields (model, port, ctx-size, provider, hardware)."
+    ),
+    "settings_reload": "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
+    "memory_add": "Add an item to long-term memory.",
+    "memory_search": "Search long-term memory.",
+    "memory_list": "Page through long-term memory items.",
+    "memory_delete": (
+        "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise)."
+    ),
+    # ── Gated write ─────────────────────────────────────────────────────
+    "model_pull": (
+        "Download a model from HuggingFace into the operator's configured model store "
+        "([models].store — check model_store first). Accepts "
+        "hf_repo/hf_filename/mmproj_filename body overrides for new models (gated)."
+    ),
+    "model_delete": "Delete a model from the local registry (gated).",
+    "model_register": "Register a model that's already on disk into the local registry (gated).",
+    "model_add": "Register an already-downloaded model file — capabilities auto-detected (gated).",
+    "model_store_set": (
+        "Set or change the model-store directory — future pulls download there; existing "
+        "files stay until model_store_migrate (gated)."
+    ),
+    "model_store_migrate": "Migrate model files from the current store to a new path (gated).",
+    "model_update": "Re-pull a model's HF file over its installed bytes (in place) (gated).",
+    "slot_create": "Create a new slot (gated).",
+    "slot_delete": "Delete a slot (gated).",
+    "slot_restart": "Restart a slot's systemd unit (gated).",
+    "capability_set": "Assign a capability child to a slot (gated).",
+    "config_write": "Update hal0.toml top-level settings (gated).",
+    "provider_credential_write": "Write provider credentials (gated; secrets never echoed back).",
+    "stack_create": "Create a stack from a slug + full stack body (gated).",
+    "stack_update": "Replace a custom stack's body wholesale (gated).",
+    "stack_apply": "Apply a stack — commit its slot config and converge runtime to match (gated).",
+    "stack_import": "Import a stack from a .hal0stack.json envelope (gated).",
+    "stack_export": "Serialize a stack into its portable .hal0stack.json envelope (gated).",
+    "stack_snapshot": "Build a stack from the current live slot + capability config (gated).",
+    "stack_delete": "Delete a custom stack from the catalog (gated).",
+    "profile_create": (
+        "Create a custom runtime profile (image, flags, device class) — e.g. authored "
+        "from a model card's requirements (gated)."
+    ),
+    "profile_update": "Update an existing custom profile (shallow merge) (gated).",
+    "profile_import": "Import a profile from a .hal0profile.json envelope (gated).",
+    "profile_delete": "Delete a custom profile from the catalog (gated).",
+    "bench_enqueue": "Enqueue benchmark cells (model x slot x settings) for the runner (gated).",
+    "bench_control": "Start/stop/pause the benchmark runner (gated).",
+    "logs_tail": "Tail journald for one systemd unit (gated).",
+    "slot_logs": "Tail one slot's journal output (gated).",
+}
+
+
 # ── Catalog consistency guard ────────────────────────────────────────────────
 #
 # The tool surface is spread over four tables (classification frozensets,
@@ -1067,6 +1180,12 @@ def _validate_catalog() -> None:
         problems.append(f"in _REST_MAP but never classified: {sorted(unclassified)}")
     if unannotated := catalog - set(_ANNOTATIONS):
         problems.append(f"classified but missing ToolAnnotations: {sorted(unannotated)}")
+    if set(TOOL_DESCRIPTIONS) != catalog:
+        problems.append(
+            "TOOL_DESCRIPTIONS out of sync with classification — "
+            f"missing: {sorted(catalog - set(TOOL_DESCRIPTIONS))}, "
+            f"extra: {sorted(set(TOOL_DESCRIPTIONS) - catalog)}"
+        )
 
     for tool, (_method, template) in _REST_MAP.items():
         placeholders = set(re.findall(r"{(\w+)}", template))
@@ -1117,16 +1236,10 @@ def build_server(
         return bearer_resolver()
 
     # Single tool factory — every tool in the catalog dispatches into
-    # the same ``dispatch`` core. We register each tool name explicitly
-    # so FastMCP's tool listing reports them as distinct entries (vs.
-    # a single catch-all tool that opaquely dispatches).
-    registered: set[str] = set()
-
+    # the same ``dispatch`` core. Registration iterates TOOL_DESCRIPTIONS
+    # verbatim, so FastMCP's tools/list is exactly the validated catalog
+    # (dict keys are unique; _validate_catalog pins keys == catalog).
     def _register(tool_name: str, description: str) -> None:
-        if tool_name in registered:
-            raise RuntimeError(f"hal0.mcp.admin: duplicate tool registration {tool_name!r}")
-        registered.add(tool_name)
-
         async def _tool(args: dict[str, Any] | None = None) -> dict[str, Any]:
             bearer, client_id = _resolve()
             return await dispatch(
@@ -1144,222 +1257,8 @@ def build_server(
         annotations = _ANNOTATIONS.get(tool_name)
         server.tool(name=tool_name, description=description, annotations=annotations)(_tool)
 
-    # ── Autonomous read ────────────────────────────────────────────────
-    # Slots
-    _register("slot_list", "List every slot known to hal0 (local + remote).")
-    _register("slot_status", "Get one slot's lifecycle state + metadata.")
-    _register("slot_metrics", "Get per-slot performance metrics (tok/s, latency, queue depth).")
-    _register("slot_capacity", "Get GPU/NPU memory capacity and per-slot allocation.")
-    # Models
-    _register("model_list", "Aggregate models from local registry + upstreams.")
-    _register("model_show", "Show a single model's full metadata (registry + upstream).")
-    _register("model_scan_preview", "Preview what a model scan would register (dry run).")
-    _register("model_catalogue", "List the curated catalogue of blessed models.")
-    _register("model_update_check", "Check which HF-backed models have updates available.")
-    _register("model_pulls_list", "List all pull jobs (in-flight + terminal).")
-    _register("model_pull_status", "Get one model's pull-job progress (state, %, speed, ETA).")
-    _register(
-        "model_inspect",
-        "Inspect a HuggingFace repo — returns detected .gguf/.mmproj files, quants and "
-        "capabilities WITHOUT registering anything. Use before model_register/model_pull.",
-    )
-    _register(
-        "model_store",
-        "Show the operator's configured model-store directory ([models].store) and "
-        "candidate paths. Pulls always download into this store.",
-    )
-    # System
-    _register("hardware_probe", "Live hardware probe — backends, memory, accelerators.")
-    _register("capability_list", "Capability overlay state — backends + selections.")
-    _register("provider_list", "List configured providers.")
-    _register("version_info", "hal0 version + runtime status.")
-    _register("upstream_list", "List all configured upstream LLM providers.")
-    # Stacks
-    _register("stack_list", "List every stack, with the active stack + drift status.")
-    _register("stack_status", "Get one stack's detail, active flag, and drift status.")
-    # Profiles
-    _register("profile_list", "List every profile in the catalog (seed + custom).")
-    _register(
-        "profile_status",
-        "Get one profile's resolved detail (image, flags, backend, used-by).",
-    )
-    # profile_export is a read-shaped POST — builds the envelope, no state change.
-    _register(
-        "profile_export",
-        "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths).",
-    )
-    # Settings
-    _register("settings_get", "Get the current hal0 settings (pydantic schema validated).")
-    _register("settings_schema", "Get the JSON schema for hal0 settings validation.")
-    _register("settings_apply_plan", "Preview what settings changes would take effect.")
-    # Benchmarks
-    _register("bench_runs", "List benchmark runs (history + in-flight).")
-    _register("bench_run_status", "Get one benchmark run's detail + results.")
-    _register("bench_queue", "Show the benchmark queue (pending cells).")
-    # Host-introspection probes (issue #237)
-    _register(
-        "gpu_target_version",
-        "Decode KFD's gfx_target_version to a gfxNNNN string (e.g. gfx1151).",
-    )
-    _register(
-        "npu_status",
-        "Report XDNA NPU presence + driver binding (LXC-correct, no modinfo).",
-    )
-    _register(
-        "env_report",
-        "Composite host snapshot — container, CPU, RAM, GPU, NPU, network, tooling.",
-    )
-    _register(
-        "model_store_probe",
-        "Probe a model-store path: fstype, free/total bytes, writable, UMA-aware.",
-    )
-    # ── Autonomous write ───────────────────────────────────────────────
-    # Model
-    _register("model_swap", "Hot-swap the primary slot to a new model.")
-    _register(
-        "model_assign",
-        "Assign a model to a slot's default (does not load the slot).",
-    )
-    _register(
-        "model_edit",
-        "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
-    )
-    _register(
-        "model_scan",
-        "Walk the configured model roots + store and register newly-found files.",
-    )
-    _register(
-        "model_pull_cancel",
-        "Cancel an in-flight model pull job.",
-    )
-    # Slot lifecycle
-    _register(
-        "slot_load",
-        "Load a slot (optionally assign a model first).",
-    )
-    _register(
-        "slot_unload",
-        "Unload a running slot gracefully.",
-    )
-    _register(
-        "slot_edit",
-        "Update one or more slot config fields (model, port, ctx-size, provider, hardware).",
-    )
-    # Settings
-    _register(
-        "settings_reload",
-        "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
-    )
-    # Memory
-    _register("memory_add", "Add an item to long-term memory.")
-    _register("memory_search", "Search long-term memory.")
-    _register("memory_list", "Page through long-term memory items.")
-    _register(
-        "memory_delete",
-        "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise).",
-    )
-    # ── Gated write ────────────────────────────────────────────────────
-    # Model
-    _register(
-        "model_pull",
-        "Download a model from HuggingFace into the operator's configured "
-        "model store ([models].store — check model_store first). Accepts "
-        "hf_repo/hf_filename/mmproj_filename body overrides for new models "
-        "(gated).",
-    )
-    _register("model_delete", "Delete a model from the local registry (gated).")
-    _register(
-        "model_register",
-        "Register a model that's already on disk into the local registry (gated).",
-    )
-    _register(
-        "model_add",
-        "Register an already-downloaded model file — capabilities auto-detected (gated).",
-    )
-    _register(
-        "model_store_set",
-        "Set or change the model-store directory — future pulls download "
-        "there; existing files stay until model_store_migrate (gated).",
-    )
-    _register(
-        "model_store_migrate",
-        "Migrate model files from the current store to a new path (gated).",
-    )
-    _register(
-        "model_update",
-        "Re-pull a model's HF file over its installed bytes (in place) (gated).",
-    )
-    # Slot
-    _register("slot_create", "Create a new slot (gated).")
-    _register("slot_delete", "Delete a slot (gated).")
-    _register("slot_restart", "Restart a slot's systemd unit (gated).")
-    # Capability / config
-    _register("capability_set", "Assign a capability child to a slot (gated).")
-    _register("config_write", "Update hal0.toml top-level settings (gated).")
-    _register(
-        "provider_credential_write",
-        "Write provider credentials (gated; secrets never echoed back).",
-    )
-    # Stacks
-    _register(
-        "stack_create",
-        "Create a stack from a slug + full stack body (gated).",
-    )
-    _register(
-        "stack_update",
-        "Replace a custom stack's body wholesale (gated).",
-    )
-    _register(
-        "stack_apply",
-        "Apply a stack — commit its slot config and converge runtime to match (gated).",
-    )
-    _register("stack_import", "Import a stack from a .hal0stack.json envelope (gated).")
-    _register(
-        "stack_export",
-        "Serialize a stack into its portable .hal0stack.json envelope (gated).",
-    )
-    _register(
-        "stack_snapshot",
-        "Build a stack from the current live slot + capability config (gated).",
-    )
-    _register("stack_delete", "Delete a custom stack from the catalog (gated).")
-    # Profiles
-    _register(
-        "profile_create",
-        "Create a custom runtime profile (image, flags, device class) — e.g. "
-        "authored from a model card's requirements (gated).",
-    )
-    _register(
-        "profile_update",
-        "Update an existing custom profile (shallow merge) (gated).",
-    )
-    _register(
-        "profile_import",
-        "Import a profile from a .hal0profile.json envelope (gated).",
-    )
-    _register("profile_delete", "Delete a custom profile from the catalog (gated).")
-    # Benchmarks — runs load models onto slots (disruptive)
-    _register(
-        "bench_enqueue",
-        "Enqueue benchmark cells (model x slot x settings) for the runner (gated).",
-    )
-    _register(
-        "bench_control",
-        "Start/stop/pause the benchmark runner (gated).",
-    )
-    # Journald surfaces gated for security (MED-1)
-    _register("logs_tail", "Tail journald for one systemd unit (gated).")
-    _register("slot_logs", "Tail one slot's journal output (gated).")
-
-    # Every classified tool must be discoverable via tools/list and vice
-    # versa — a registration gap otherwise 404s at call time only.
-    catalog = AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS
-    if registered != catalog:
-        raise RuntimeError(
-            "hal0.mcp.admin: registration drift — "
-            f"unregistered: {sorted(catalog - registered)}, "
-            f"unclassified: {sorted(registered - catalog)}"
-        )
+    for _name, _description in TOOL_DESCRIPTIONS.items():
+        _register(_name, _description)
 
     return server
 
@@ -1368,6 +1267,7 @@ __all__ = [
     "AUTONOMOUS_READ_TOOLS",
     "AUTONOMOUS_WRITE_TOOLS",
     "GATED_TOOLS",
+    "TOOL_DESCRIPTIONS",
     "_ANNOTATIONS",
     "build_server",
     "dispatch",
