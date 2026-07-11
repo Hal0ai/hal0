@@ -469,6 +469,26 @@ def test_disable_offline_slot_does_not_unload(
     )
 
 
+def test_delete_forwards_force_query_param(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """DELETE ?force=true binds + forwards to the manager and echoes ``forced``.
+
+    'chat' is a non-seeded slot, so it deletes with or without force — this
+    covers the query-param wiring; the seeded-guard bypass itself is unit-tested
+    on SlotManager.delete.
+    """
+    r = isolated_client.delete("/api/slots/chat?force=true")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["forced"] is True
+    # The config is gone; a follow-up GET 404s.
+    assert isolated_client.get("/api/slots/chat/config").status_code == 404
+
+
 def test_invalid_enable_surfaces_conflict(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],

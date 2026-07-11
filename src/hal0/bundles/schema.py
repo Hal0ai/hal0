@@ -47,7 +47,7 @@ class ModelEntry:
 
     ``slot`` is the hal0 slot id (``chat.primary``, ``chat.coder``,
     ``embed``, ``rerank``, ``stt``, ``tts``, ``img``, plus the FLM trio
-    slots ``agent`` / ``stt-npu`` / ``embed-npu`` when present).
+    slots ``flm-stt`` / ``flm-embed`` when present).
     ``model_name`` is the catalog model id (registry.toml key).
     ``size_gb`` is the on-disk pull size; informational only — the actual
     download honours whatever the pull engine resolves at pull time.

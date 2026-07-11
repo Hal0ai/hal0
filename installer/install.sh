@@ -1036,15 +1036,32 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         chown -R hal0:hal0 "${BENCH_STATE_DIR}" 2>/dev/null || true
         # Units: weekly scheduled session (timer→oneshot) + the run-queue worker
         # (long-running, inert until Started from the dashboard). The shipped
-        # ExecStart hardcodes the default FHS venv; rewrite it when this install
-        # uses a different prefix (HAL0_PREFIX override or --dev) so the units
-        # stay truthful about the binary they'd run.
+        # units hardcode the default FHS venv and the engine defaults its
+        # state root to /var/lib/hal0-bench; on a non-default prefix
+        # (HAL0_PREFIX override or --dev), rewrite ExecStart and inject
+        # Environment=HAL0_BENCH_STATE so the units actually run the prefix's
+        # binary against the prefix's state dir. Rewritten in python (not
+        # sed) so a prefix containing sed metacharacters can't corrupt the
+        # substitution.
         for _bench_unit in hal0-bench.service hal0-bench.timer hal0-bench-worker.service; do
             install -m 0644 "${REPO_ROOT}/installer/systemd/${_bench_unit}" "${UNIT_DIR}/${_bench_unit}"
-            if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" ]]; then
-                sed -i "s|/usr/lib/hal0/venv|${VENV_DIR}|g" "${UNIT_DIR}/${_bench_unit}"
-            fi
         done
+        if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" || "${BENCH_STATE_DIR}" != "/var/lib/hal0-bench" ]]; then
+            "${PY}" - "${UNIT_DIR}" "${VENV_DIR}" "${BENCH_STATE_DIR}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+unit_dir, venv, state = sys.argv[1], sys.argv[2], sys.argv[3]
+for name in ("hal0-bench.service", "hal0-bench.timer", "hal0-bench-worker.service"):
+    p = Path(unit_dir) / name
+    text = p.read_text(encoding="utf-8").replace("/usr/lib/hal0/venv", venv)
+    if name.endswith(".service") and state != "/var/lib/hal0-bench":
+        text = text.replace(
+            "[Service]", f"[Service]\nEnvironment=HAL0_BENCH_STATE={state}", 1
+        )
+    p.write_text(text, encoding="utf-8")
+PYEOF
+        fi
         if [[ "${DEV_MODE}" -eq 0 ]]; then
             systemctl daemon-reload 2>/dev/null || true
             systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true

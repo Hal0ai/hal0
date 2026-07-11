@@ -280,9 +280,15 @@ class ProfileCatalog:
 
     def _guard_custom(self, name: str) -> None:
         if name in SEED_PROFILES:
+            # Seed profiles are VIRTUAL — overlaid from SEED_PROFILES in code on
+            # every load (see loader.load_profiles_config), so there is nowhere on
+            # disk to record a deletion: a force-delete would reappear on the next
+            # load. There is deliberately no --force here; clone to customise, or
+            # disable the slot that uses it via capabilities.toml.
             raise Conflict(
-                f"profile {name!r} is a seed profile — seed profiles are immutable; "
-                "clone under a new name",
+                f"profile {name!r} is a seed profile — seeds are virtual (re-applied "
+                "from code on every load) and cannot be deleted or edited; clone it "
+                "under a new name to customise, or disable the slot in capabilities.toml.",
                 code="profiles.seed_immutable",
                 details={"profile": name},
             )
