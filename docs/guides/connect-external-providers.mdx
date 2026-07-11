@@ -1,6 +1,6 @@
 ---
 title: Connect external providers
-description: Wire up OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible provider by editing upstreams.toml, writing credentials, and testing reachability.
+description: Wire up OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible provider from the dashboard, the hal0 upstream CLI, the REST API, or upstreams.toml.
 sidebar:
   order: 40
 ---
@@ -9,26 +9,33 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 can route requests to **external upstreams** — third-party
 OpenAI-compatible APIs like OpenAI, Anthropic, OpenRouter, Google AI
-Studio, Ollama, or any custom endpoint. You wire them up by editing
-`/etc/hal0/upstreams.toml` (the source of truth) and then writing the
-credential and testing reachability through the API.
+Studio, Ollama, or any custom endpoint. There are four equivalent ways to
+manage them, all backed by the same source of truth
+(`/etc/hal0/upstreams.toml`):
+
+- **Dashboard** — Slots → Endpoints → *Upstream providers* (also on the
+  Connections view): add from the catalog, paste the key, test, curate
+  models, toggle, delete.
+- **CLI** — `hal0 upstream {list,show,create,update,delete,test,set-credentials}`
+  (see the [CLI reference](/docs/reference/cli#hal0-upstream--external-llm-providers)).
+- **REST API** — `GET/POST /api/upstreams`, `PATCH/DELETE /api/upstreams/{name}`,
+  `POST /api/upstreams/{name}/test` (what the dashboard, CLI, and the
+  bundled MCP admin tools all call).
+- **The TOML file itself** — hand-edit and restart; every reactive write
+  rewrites the same file atomically, so hand-edits and API edits coexist.
 
 <Aside type="note">
-Upstreams are authored by editing the TOML file — there is no dashboard
-UI yet for browsing the catalog, adding an upstream, or testing a
-connection; those all live behind the REST API described below (also
-what the bundled MCP admin tools use). The one piece that *is*
-dashboard-reachable today is the credential value itself, via Settings →
-Secrets — see "Write the credential" below. Creating and deleting
-upstreams reactively is intentionally deferred — the TOML is canonical.
+`upstreams.toml` stays canonical: API/CLI/dashboard writes go through a
+single lock-guarded write path that rewrites the file atomically *before*
+updating the running registry, so a crash can never leave the two out of
+sync, and a `git diff` of `/etc/hal0` always tells the whole story.
 </Aside>
 
 ## See what's available
 
-The integration catalog is a static reference of known provider
-templates — base URL, auth style, capabilities — intended for a future
-dashboard "add upstream" form. Today it's most useful as a copy/paste
-source for the TOML block below:
+The integration catalog is a static reference of known provider templates
+— base URL, auth style, capabilities. It feeds the dashboard's **Add
+upstream** dropdown and the CLI's `--catalog` flag:
 
 ```sh
 curl http://localhost:8080/api/providers/catalog
@@ -38,9 +45,40 @@ It includes OpenAI, Anthropic, OpenRouter, Google AI Studio, Ollama, and a
 generic **custom** OpenAI-compatible entry, each with its default base URL
 and auth style.
 
-## Define the upstream
+## Add an upstream
 
-Add a `[[upstream]]` block to `/etc/hal0/upstreams.toml`:
+<Tabs>
+<TabItem label="CLI">
+
+```sh
+# From the catalog, key included — one command, ready to route:
+hal0 upstream create openrouter --catalog openrouter --api-key
+# (prompts for the key with hidden input; or pass -k <key>)
+
+# Fully custom endpoint:
+hal0 upstream create corp \
+  --url https://llm.corp.internal/v1 \
+  --auth-style header --auth-header X-Api-Key --auth-env CORP_LLM_KEY
+```
+
+</TabItem>
+<TabItem label="REST">
+
+```sh
+curl -X POST http://localhost:8080/api/upstreams \
+  -H 'content-type: application/json' \
+  -d '{"name": "openrouter", "catalog_id": "openrouter"}'
+```
+
+`catalog_id` prefills `url`, `auth_style`, and a default
+`auth_value_env` of `<CATALOG_ID>_API_KEY`; explicit body fields win over
+the prefill. Without `catalog_id`, `url` is required. The upstream is
+always `kind = "remote"`; names must match `^[a-z0-9][a-z0-9_-]{0,63}$`
+(`hal0` is reserved). Returns `201` with the created entry — plus a
+`hint` pointing at the credentials route when the key still needs writing.
+
+</TabItem>
+<TabItem label="upstreams.toml">
 
 ```toml
 [[upstream]]
@@ -51,7 +89,18 @@ auth_style = "bearer"
 auth_value_env = "OPENROUTER_API_KEY"
 timeout_seconds = 300.0
 advertise_models = true
+enabled = true
+
+[upstream.model_filters]
+include = ["anthropic/*", "google/*"]
+exclude = ["*:free"]
 ```
+
+Run `hal0 config validate` after any hand-edit, then restart `hal0-api`
+(hand-edits are read at startup; only API/CLI/dashboard writes apply live).
+
+</TabItem>
+</Tabs>
 
 The fields:
 
@@ -64,57 +113,90 @@ The fields:
 
 3. **`url`** — the base URL (required, non-empty).
 
-4. **`auth_style`** — how the key is sent. `upstreams.toml`'s schema
-   validates exactly three values: `bearer` (`Authorization: Bearer <key>`
-   — the default, and what OpenRouter, Ollama, and most OpenAI-compatible
-   endpoints expect, including Google AI Studio's `/v1beta/openai` layer),
-   `header` (a custom header — reserved for a future header-name field;
-   nothing in the current schema lets you name the header, so it has no
-   effect yet), or `none` (no auth header, e.g. an unauthenticated local
-   Ollama).
+4. **`auth_style`** — how the key is sent: `bearer`
+   (`Authorization: Bearer <key>` — the default, and what OpenRouter,
+   Ollama, and most OpenAI-compatible endpoints expect, including Google
+   AI Studio's `/v1beta/openai` layer), `anthropic` (`x-api-key` +
+   `anthropic-version`), `google_query` (`?key=` on the URL), `header`
+   (a custom header — name it with `auth_header`), or `none` (no auth,
+   e.g. an unauthenticated local Ollama).
 
-5. **`auth_value_env`** — the **name** of the environment variable that
+5. **`auth_header`** — the header **name** when `auth_style = "header"`
+   (e.g. `X-Api-Key`); required for that style, ignored otherwise.
+
+6. **`auth_value_env`** — the **name** of the environment variable that
    holds the secret. The key itself is never written to TOML — only the
    env-var name lives here.
 
-6. **`timeout_seconds`** — request timeout (default `300`).
+7. **`timeout_seconds`** — request timeout (default `300`).
 
-7. **`advertise_models`** — whether this upstream's models appear in the
-   aggregated model list (default `true`).
+8. **`enabled`** — the routing kill-switch (default `true`). When `false`
+   the dispatcher skips the upstream entirely and it vanishes from
+   `/v1/models`; config and credentials are retained, so it's a pause,
+   not a deletion.
+
+9. **`advertise_models`** — whether this upstream's models appear in the
+   aggregated model list (default `true`). Routing is unaffected.
+
+10. **`model_filters`** — optional per-upstream curation of what appears
+    in `/v1/models`; see below.
 
 </Steps>
 
-<Aside type="caution">
-The provider catalog's own metadata (above) lists `anthropic` and
-`google_query` as auth styles for Anthropic and Google AI Studio, and the
-dispatcher's header-building code still knows how to construct both —
-but `upstreams.toml`'s validator doesn't accept them (see the field list
-above). Writing `auth_style = "anthropic"` by hand fails config
-validation, and because the whole file is validated as one unit, a
-single bad entry silently drops **every** upstream in `upstreams.toml` at
-the next `hal0-api` restart (logged as `upstreams.config_parse_failed`,
-not a crash — the API still starts, just with an empty upstream list).
-Run `hal0 config validate` after any hand-edit, before restarting. For
-Anthropic specifically, the catalog's own notes point out its native API
+<Aside type="note">
+For Anthropic specifically, the catalog's notes point out its native API
 speaks `/v1/messages`, not OpenAI's `/v1/chat/completions` — route
 through a compatible proxy rather than pointing an upstream straight at
-`api.anthropic.com`.
+`api.anthropic.com` for chat-completions traffic.
 </Aside>
+
+## Curate the advertised models
+
+An upstream like OpenRouter advertises hundreds of models; without a
+filter they all land in `/v1/models` and flood every model picker.
+`model_filters` curates the **discovery catalog only** — filtered-out
+models remain fully dispatchable by explicit name, so agent configs
+pinned to `openrouter/some-model` keep working.
+
+- **`models`** — exact ids to allowlist.
+- **`include`** — glob patterns (`fnmatch`: `*` and `?`, case-sensitive).
+- **`exclude`** — glob patterns that always win over `models` + `include`.
+- Empty `models` + `include` means "everything included unless excluded".
+
+```sh
+# "Anthropic and Google models, plus one DeepSeek — but nothing :free"
+hal0 upstream update openrouter \
+  --include 'anthropic/*' --include 'google/*' \
+  --model deepseek/deepseek-r1 \
+  --exclude '*:free'
+
+# Back to advertising everything:
+hal0 upstream update openrouter --clear-filters
+```
+
+Or over REST (an all-empty object clears the filters):
+
+```sh
+curl -X PATCH http://localhost:8080/api/upstreams/openrouter \
+  -H 'content-type: application/json' \
+  -d '{"model_filters": {"include": ["anthropic/*"], "exclude": ["*:free"]}}'
+```
+
+The dashboard's filter editor shows a live `advertised/total` preview
+against the upstream's cached model list as you type.
 
 ## Write the credential
 
 The secret lives in `/etc/hal0/api.env` (a systemd `EnvironmentFile`),
-not in the TOML. There are two ways to write it today:
+not in the TOML. Three ways to write it:
 
-- **The dashboard** — Settings → Secrets has presets for `OPENAI_API_KEY`,
-  `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY` (labelled "fallback
-  provider" keys) plus a paired AWS Bedrock entry and a free-form custom
-  name. It writes the same `api.env` file through `POST /api/secrets/{name}`,
-  but it does **not** check the name against any upstream's
-  `auth_value_env` — type the exact env-var name your upstream declares.
-- **The API**, which binds the credential to the upstream's declared
-  `auth_value_env` so you can't accidentally write a key the upstream
-  won't read (this is also what the bundled MCP admin tool's
+- **Dashboard** — the key field on the upstream's row (or Settings →
+  Secrets for free-form names).
+- **CLI** — `hal0 upstream set-credentials openrouter` (hidden prompt),
+  or fold it into creation with `create --api-key`.
+- **REST** — the credentials route, which binds the write to the
+  upstream's declared `auth_value_env` so you can't accidentally store a
+  key the upstream won't read (also what the MCP admin tool
   `provider_credential_write` uses):
 
 ```sh
@@ -124,11 +206,11 @@ curl -X POST http://localhost:8080/api/providers/openrouter/credentials \
 ```
 
 The `key` must match the upstream's `auth_value_env` exactly and be a
-valid `ALL_CAPS` env-var name — the upstream named in the URL must
-already exist (a 404 if it doesn't). The endpoint writes the value
-atomically to `api.env` with `0600` permissions, updates the running
-process environment so the change takes effect immediately, and **never
-echoes the secret back** — the response carries `"value": "***REDACTED***"`.
+valid `ALL_CAPS` env-var name. The endpoint writes the value atomically to
+`api.env` with `0600` permissions, updates the running process environment
+so the change takes effect immediately, and **never echoes the secret
+back**. Deleting an upstream deliberately leaves its credential in
+`api.env` — remove it via `/api/secrets` if truly unwanted.
 
 <Aside type="caution">
 There is no built-in authentication on the hal0 API (ADR-0012) — it binds
@@ -139,58 +221,59 @@ any secret-bearing service and reverse-proxy it if it needs to be exposed.
 ## List configured providers
 
 ```sh
-# remote providers only
-curl http://localhost:8080/api/providers
+hal0 upstream list          # table: enabled/advertise/auth/filter summary
+hal0 upstream show openrouter
 
-# all upstreams (remote + local slots)
-curl http://localhost:8080/api/upstreams
-
-# one upstream
-curl http://localhost:8080/api/upstreams/openrouter
+# or over REST:
+curl http://localhost:8080/api/providers    # remote providers only
+curl http://localhost:8080/api/upstreams    # all upstreams (remote + local slots)
 ```
 
-Each entry reports `auth_configured` — whether the upstream *declares* an
-`auth_value_env` at all, not whether the credential has actually been
-written yet. It's `true` the moment your TOML entry names an env var,
-even before you've written anything to `api.env` — check with `test`
-(below) to confirm the credential itself is actually set.
+Each entry reports two auth booleans: `auth_configured` (an
+`auth_value_env` is *declared*) and `auth_key_present` (the env var
+actually *holds a value* — this is what the dashboard's auth badge shows).
 
 ## Test the connection
 
 ```sh
-curl -X POST http://localhost:8080/api/upstreams/openrouter/test
+hal0 upstream test openrouter
+# or: curl -X POST http://localhost:8080/api/upstreams/openrouter/test
 ```
 
 This probes the upstream's `/models` endpoint (appended to the configured
 base URL) and returns a reachability report:
 `{ok, status, latency_ms, models_count, error?}`. If `auth_value_env` is
-declared but the env var itself is empty, the probe fails fast with
-`{"ok": false, "error": "env var $X is not set", "latency_ms": 0.0}`
-without making an HTTP call. An unhealthy result also fires a dashboard
-footer event so the outage is visible.
+declared but the env var itself is empty, the probe fails fast without
+making an HTTP call. An unhealthy result also fires a dashboard footer
+event so the outage is visible.
+
+## Disable vs. hide vs. delete
+
+Three different levers, in decreasing severity:
+
+| Lever | Routing | /v1/models | Config + key kept? |
+|---|---|---|---|
+| `enabled = false` | ✗ skipped entirely | ✗ hidden | ✓ |
+| `advertise_models = false` | ✓ still routable | ✗ hidden | ✓ |
+| `model_filters` | ✓ still routable | partially hidden | ✓ |
+| `delete` | ✗ | ✗ | key kept, config gone |
 
 ## Picking up changes
 
-Credential writes through either the API or the dashboard's Settings →
-Secrets panel apply to the running process immediately — no restart
-needed. Structural edits to `upstreams.toml` (adding, removing, or
-retiming an upstream) are a different story: they're only read once, at
-`hal0-api` startup. `hal0 config reload` / `POST /api/settings/reload`
-re-reads `hal0.toml`, **not** `upstreams.toml` — there is no lighter-weight
-reload for upstream edits today. Run `hal0 config validate` to check the
-file, then `systemctl restart hal0-api` to pick up the change.
+Every write through the dashboard, CLI, or REST API applies **live** — the
+in-memory registry updates in the same request that rewrites
+`upstreams.toml`, so no restart is needed for create, update, delete,
+credential writes, toggles, or filters.
 
-The `advertise_models` field is an exception: it has a dedicated runtime
-toggle that doesn't require a restart. To toggle whether an upstream appears
-in the aggregated model list:
+Hand-edits to `upstreams.toml` are the one path that still needs a
+restart: the file is read once at `hal0-api` startup. Run
+`hal0 config validate` first — the whole file is validated as one unit,
+and a single bad entry drops **every** upstream at the next start (logged
+as `upstreams.config_parse_failed`; the API still boots, just with an
+empty upstream list).
 
-```sh
-curl -X PATCH http://localhost:8080/api/upstreams/openrouter \
-  -H 'content-type: application/json' \
-  -d '{"advertise_models": false}'
-```
-
-The change takes effect immediately, persists to `upstreams.toml` on disk,
-and is audit-logged — no `hal0-api` restart needed. All other structural
-fields (name, kind, url, auth_*, slot_name, warmup_strategy) require the
-TOML-edit + validate + restart workflow described above.
+<Aside type="note">
+Older TOMLs written with `warmup_strategy = "lazy"` or `"eager"` still
+load — they normalize to the canonical `ondemand`/`always` vocabulary on
+read and are rewritten in normalized form on the next reactive write.
+</Aside>
