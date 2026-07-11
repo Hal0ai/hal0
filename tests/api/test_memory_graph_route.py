@@ -250,3 +250,84 @@ def test_status_unavailable_when_no_wrapper(
         r = c.get("/api/memory/graph/status")
         assert r.status_code == 503
         assert r.json()["error"]["code"] == "memory.unavailable"
+
+
+# ── POST /api/memory/graph/retry ─────────────────────────────────────────────
+
+
+class _RetryWrapper(StubWrapper):
+    """Wrapper exposing a hindsight_client that serves a (single-page) operations
+    ledger and records retry POSTs, so we can drive ``POST /graph/retry``."""
+
+    def __init__(self, ops_by_bank: dict[str, list[dict[str, Any]]]) -> None:
+        super().__init__()
+        self._ops = ops_by_bank
+        self.retried: list[str] = []
+        parent = self
+
+        class _Client:
+            async def request_json(self, method: str, path: str) -> Any:
+                if method == "GET" and path == "/v1/default/banks":
+                    return {"banks": [{"bank_id": b} for b in parent._ops]}
+                for bank, ops in parent._ops.items():
+                    if method == "GET" and path.startswith(
+                        f"/v1/default/banks/{bank}/operations?"
+                    ):
+                        # A page shorter than the limit ends the walk, so return
+                        # the whole ledger on offset 0 and nothing after.
+                        return {"operations": ops if "offset=0" in path else []}
+                    prefix = f"/v1/default/banks/{bank}/operations/"
+                    if method == "POST" and path.startswith(prefix) and path.endswith("/retry"):
+                        op_id = path[len(prefix) : -len("/retry")]
+                        parent.retried.append(op_id)
+                        return {"success": True, "operation_id": op_id}
+                raise AssertionError(f"unexpected {method} {path}")
+
+        self.hindsight_client = _Client()
+
+
+def test_retry_failed_requeues_only_failed_ops(hal0_home: Path) -> None:
+    # Only ``failed`` ops are requeued; completed/processing are left alone.
+    wrapper = _RetryWrapper(
+        {
+            "shared": [
+                {"id": "a", "status": "failed"},
+                {"id": "b", "status": "completed"},
+                {"id": "c", "status": "failed"},
+            ],
+            "private__hermes": [
+                {"id": "d", "status": "failed"},
+                {"id": "e", "status": "processing"},
+            ],
+        }
+    )
+    app = _build_app(wrapper, "utility")
+    with TestClient(app) as c:
+        r = c.post("/api/memory/graph/retry")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["queued"] == 3  # a, c, d
+    assert body["skipped"] == 0
+    assert set(wrapper.retried) == {"a", "c", "d"}
+    assert body["banks"]["shared"]["queued"] == 2
+    assert body["banks"]["private__hermes"]["queued"] == 1
+    assert body["banks"]["private__hermes"]["failed"] == 1
+
+
+def test_retry_failed_noop_when_ledger_clean(hal0_home: Path) -> None:
+    wrapper = _RetryWrapper({"shared": [{"id": "x", "status": "completed"}]})
+    app = _build_app(wrapper, "utility")
+    with TestClient(app) as c:
+        r = c.post("/api/memory/graph/retry")
+    assert r.status_code == 200
+    assert r.json()["queued"] == 0
+    assert wrapper.retried == []
+
+
+def test_retry_failed_unavailable_without_hindsight_client(hal0_home: Path) -> None:
+    # Provider present but no hindsight_client → 503 (can't reach the ledger).
+    app = _build_app(StubWrapper(), "utility")
+    with TestClient(app) as c:
+        r = c.post("/api/memory/graph/retry")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "memory.unavailable"

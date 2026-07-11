@@ -9,7 +9,7 @@
 //   useAgentMemoryStats — GET /api/agents/{id}/memory/stats (per-agent counts)
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPut } from '../client'
+import { apiGet, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── Memory list ────────────────────────────────────────────────────────────
@@ -123,6 +123,13 @@ export interface MemoryGraphUpdateResponse extends MemoryGraphStatus {
   propagation?: MemoryGraphPropagation
 }
 
+// Per-bank tally returned by POST /api/memory/graph/retry.
+export interface MemoryGraphRetryResponse {
+  queued: number
+  skipped: number
+  banks: Record<string, { queued: number; skipped: number; failed: number }>
+}
+
 const POLL_MS = 15_000
 
 export function useMemoryGraphStatus() {
@@ -148,6 +155,22 @@ export function useUpdateMemoryGraph() {
       // in the PUT response so we COULD seed the cache, but a
       // re-fetch keeps the polling timestamp honest.
       qc.invalidateQueries({ queryKey: ['memory', 'graph', 'status'] })
+    },
+  })
+}
+
+// Bulk "retry all failed extractions" — requeues every failed op across banks.
+// Invalidates both the graph-status counters and the per-bank operation lists
+// so the health panel + operations queue reflect the requeue immediately.
+export function useRetryFailedExtractions() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<MemoryGraphRetryResponse>(ENDPOINTS.memoryGraphRetry),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['memory', 'graph', 'status'] })
+      // useHindsight keys its operation lists under ['memory', ...]; a broad
+      // invalidate refreshes the bank stats + operations queue too.
+      qc.invalidateQueries({ queryKey: ['memory'] })
     },
   })
 }
