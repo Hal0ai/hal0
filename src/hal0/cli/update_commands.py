@@ -16,6 +16,8 @@ Surface:
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import time
 import tomllib
@@ -40,6 +42,15 @@ from hal0.cli._shared import (
 )
 
 console = Console()
+
+#: The `hal0 update` surface. The group callback runs the hal0 self-update
+#: (the historical behaviour of the bare `hal0 update`); `owui` is a sibling
+#: verb that updates the OpenWebUI companion image. Registered in main.py via
+#: ``app.add_typer(update_app, name="update")``.
+update_app = typer.Typer(
+    help="Update hal0, or its OpenWebUI companion (`hal0 update owui`).",
+    no_args_is_help=False,
+)
 
 
 class UpdateChannel(StrEnum):
@@ -305,7 +316,9 @@ def _update_via_git(check_only: bool = False) -> None:
     _print_drift_banner(_fetch_slot_drift())
 
 
+@update_app.callback(invoke_without_command=True)
 def update(
+    ctx: typer.Context,
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
@@ -351,6 +364,12 @@ def update(
     This is a thin client over /api/updates/*; the actual swap happens in
     the daemon. Real progress comes from polling /api/updates/status/<id>.
     """
+    # `hal0 update owui` (and any future sibling verb) still runs this
+    # callback first — bail so the bare `hal0 update` self-update only fires
+    # when no sub-command was given, mirroring the `hal0 doctor` pattern.
+    if ctx.invoked_subcommand is not None:
+        return
+
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -466,3 +485,203 @@ def update(
     else:
         err = final.get("error") or "unknown error"
         die(f"update {state}: {err}")
+
+
+# ── hal0 update owui — repin the OpenWebUI companion image ─────────────────────
+#
+# OpenWebUI is a podman container pinned by sha256 manifest-list digest in the
+# installed unit (packaging/systemd/hal0-openwebui.service, copied to
+# /etc/systemd/system by install.sh). It is NOT in manifest.json, and the hal0
+# self-updater does not touch companion units — so a runtime repin of the
+# installed unit is durable across `hal0 update` (only a fresh install.sh run
+# rewrites it). This command resolves a digest (upstream tag or explicit
+# --target), repins the unit, pulls, and restarts. The pure text seam lives in
+# hal0.openwebui.image_pin; the release-source pin sites (install.sh + the
+# packaging unit) are a separate maintainer concern — see
+# scripts/update-owui-digest.sh + the pin-consistency test.
+
+
+def _dev_mode() -> bool:
+    """True under an ``install.sh --dev`` layout (HAL0_HOME set).
+
+    In dev we rewrite the unit file but skip the privileged podman/systemctl
+    side effects — there is no real service to bounce.
+    """
+    return bool(os.environ.get("HAL0_HOME", "").strip())
+
+
+def _run_cmd(argv: list[str], *, timeout: float) -> tuple[int | None, str, str]:
+    """Run ``argv``; return ``(rc, stdout, stderr)``. rc=None on spawn/timeout."""
+    try:
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return None, "", f"{argv[0]} timed out after {timeout:.0f}s"
+    except (FileNotFoundError, OSError) as exc:
+        return None, "", f"{argv[0]} not runnable: {exc}"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _resolve_owui_upstream_digest(tag: str) -> str:
+    """Resolve the published ghcr.io manifest-list digest for OWUI ``tag``.
+
+    Reuses the anonymous OCI probe the toolbox surface already ships. Raises
+    ``httpx.HTTPError`` / ``RuntimeError`` / ``ValueError`` on failure for the
+    caller to turn into a clean ``die``.
+    """
+    import httpx
+
+    from hal0.cli.doctor_commands import _ghcr_anon_token, _ghcr_manifest_digest
+    from hal0.openwebui.image_pin import OPENWEBUI_GHCR_REPO
+
+    with httpx.Client(follow_redirects=True) as client:
+        token = _ghcr_anon_token(OPENWEBUI_GHCR_REPO, client=client)
+        return _ghcr_manifest_digest(OPENWEBUI_GHCR_REPO, tag, token=token, client=client)
+
+
+def _write_unit_atomic(unit: Path, text: str) -> None:
+    """Rewrite ``unit`` in place, preserving mode, via a same-dir temp + replace."""
+    try:
+        mode = unit.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    tmp = unit.with_name(f".{unit.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, mode)
+    os.replace(tmp, unit)
+
+
+@update_app.command("owui")
+def update_owui(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Only report the pinned vs upstream digest; don't repin or restart.",
+    ),
+    tag: str | None = typer.Option(
+        None,
+        "--tag",
+        help="Upstream tag to resolve (default: OpenWebUI's :main). Ignored with --target.",
+    ),
+    target: str | None = typer.Option(
+        None,
+        "--target",
+        help="Pin an explicit digest (sha256:… or bare 64-hex) instead of resolving a tag.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt before repinning."
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Repin + pull + restart even when the digest already matches.",
+    ),
+) -> None:
+    """Update the OpenWebUI companion container to a newer pinned image.
+
+    OpenWebUI runs as a podman container pinned by sha256 digest in its systemd
+    unit. This resolves a target digest (upstream ``--tag`` or explicit
+    ``--target``), repins the installed unit, pulls the image, and restarts
+    ``hal0-openwebui``. The repin is durable — ``hal0 update`` (the hal0
+    self-update) never rewrites companion units.
+    """
+    from hal0.openwebui import image_pin
+
+    unit = image_pin.installed_unit_path()
+    if not unit.is_file():
+        die(f"OpenWebUI unit not found at {unit} — is the OpenWebUI companion installed?")
+        return
+    text = unit.read_text(encoding="utf-8")
+    current = image_pin.parse_pinned_digest(text)
+    if current is None:
+        die(
+            f"could not read a consistent pinned digest from {unit} "
+            "(no pin, or the two pins disagree — inspect the unit)."
+        )
+        return
+
+    # ── Resolve the target digest ────────────────────────────────────────────
+    resolve_tag = tag or image_pin.OPENWEBUI_DEFAULT_TAG
+    if target is not None:
+        target_digest = image_pin.normalize_digest(target)
+        if target_digest is None:
+            die(f"--target {target!r} is not a sha256 digest (expected sha256:<64-hex> or 64-hex).")
+            return
+        source = "target"
+    else:
+        try:
+            target_digest = _resolve_owui_upstream_digest(resolve_tag)
+        except Exception as exc:  # noqa: BLE001 — httpx/OCI errors → clean die
+            die(f"could not resolve ghcr.io {image_pin.OPENWEBUI_IMAGE_REPO}:{resolve_tag}: {exc}")
+            return
+        if not image_pin.is_sha256_digest(target_digest):
+            die(f"ghcr.io returned an unexpected digest for :{resolve_tag}: {target_digest!r}")
+            return
+        source = f"ghcr :{resolve_tag}"
+
+    drifted = target_digest != current
+    table = Table(title="OpenWebUI image pin", show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("pinned (now)", current)
+    table.add_row(f"target ({source})", target_digest)
+    table.add_row("status", "[green]newer available[/green]" if drifted else "[dim]up to date[/dim]")
+    console.print(table)
+
+    if check:
+        return
+
+    if not drifted and not force:
+        console.print("[dim]already pinned to that digest — nothing to do (use --force to re-pull).[/dim]")
+        return
+
+    dev = _dev_mode()
+    if not dev and hasattr(os, "geteuid") and os.geteuid() != 0:
+        die("repinning the unit and restarting hal0-openwebui need root — re-run with sudo.")
+        return
+
+    short = target_digest[:19] + "…"
+    if not yes and _interactive() and not typer.confirm(f"Repin OpenWebUI → {short}?", default=True):
+        console.print("[dim]aborted — unit unchanged.[/dim]")
+        return
+
+    ref = image_pin.pinned_ref(target_digest)
+
+    # Pull FIRST (unless dev): if the new image isn't pullable, abort before
+    # touching the unit so we never leave it pointing at an unusable digest.
+    if not dev:
+        console.print(f"[cyan]pulling[/cyan] {ref}")
+        rc, _out, err = _run_cmd(["podman", "pull", ref], timeout=600.0)
+        if rc != 0:
+            die(f"podman pull failed — unit unchanged: {err.strip() or f'exit {rc}'}")
+            return
+
+    new_text, count = image_pin.repin_unit_text(text, target_digest)
+    if count == 0:  # pragma: no cover — parse_pinned_digest already proved a match
+        die("internal error: no digest occurrences rewritten in the unit.")
+        return
+    try:
+        _write_unit_atomic(unit, new_text)
+    except OSError as exc:
+        die(f"could not write {unit}: {exc}")
+        return
+    console.print(f"[green]repinned[/green] {unit} ({count} occurrence(s))")
+
+    if dev:
+        console.print("[dim]dev mode (HAL0_HOME set): skipping daemon-reload / restart.[/dim]")
+        return
+
+    rc, _out, err = _run_cmd(["systemctl", "daemon-reload"], timeout=30.0)
+    if rc != 0:
+        console.print(f"[yellow]systemctl daemon-reload failed:[/yellow] {err.strip() or f'exit {rc}'}")
+
+    console.print(f"[cyan]restarting[/cyan] {image_pin.OPENWEBUI_UNIT_NAME}")
+    rc, _out, err = _run_cmd(["systemctl", "restart", image_pin.OPENWEBUI_UNIT_NAME], timeout=120.0)
+    if rc != 0:
+        die(
+            f"restart failed: {err.strip() or f'exit {rc}'}. "
+            f"The unit is repinned; check `journalctl -u {image_pin.OPENWEBUI_UNIT_NAME} -n 40`."
+        )
+        return
+    console.print(Panel("[green]OpenWebUI updated.[/green]", border_style="green"))
