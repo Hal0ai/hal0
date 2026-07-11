@@ -1739,20 +1739,22 @@ else
         HONCHO_SYNC_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.service"
         HONCHO_SYNC_TIMER_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.timer"
 
-        info "setting up Honcho memory engine (docker compose stack) — this can take a few minutes…"
+        info "setting up Honcho memory engine (podman compose stack) — this can take a few minutes…"
 
+        # podman-native (see hal0-honcho.service): `podman compose`
+        # delegates to the docker-compose v2 binary over podman.socket —
+        # no docker engine (whose default AppArmor profile can't even load
+        # inside an unprivileged LXC).
         hc_compose_ok=0
-        if docker compose version >/dev/null 2>&1; then
+        if podman compose version >/dev/null 2>&1; then
             hc_compose_ok=1
         else
-            warn "docker compose plugin missing — attempting install"
-            apt-get install -y docker-compose-plugin >/dev/null 2>&1 \
-                || apt-get install -y docker-compose-v2 >/dev/null 2>&1 \
-                || true
-            if docker compose version >/dev/null 2>&1; then
+            warn "podman compose provider missing — attempting docker-compose-v2 install"
+            apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
+            if podman compose version >/dev/null 2>&1; then
                 hc_compose_ok=1
             else
-                warn "docker compose still unavailable — Honcho will be skipped (install docker-compose-plugin and re-run)"
+                warn "podman compose still unavailable — Honcho will be skipped (install docker-compose-v2 and re-run)"
             fi
         fi
 
@@ -1792,8 +1794,9 @@ else
                     warn "hal0 CLI not available yet — skipping honcho.env render (rerun 'hal0 memory honcho render-env' later)"
                 fi
 
-                info "building Honcho image (docker compose build — this is slow on first run)…"
-                if ! (cd "${HC_DIR}" && docker compose --project-name hal0-honcho -f docker-compose.yml build); then
+                info "building Honcho image (podman build — this is slow on first run)…"
+                if ! podman image exists "hal0-honcho:${HONCHO_REF}" \
+                    && ! (cd "${HC_DIR}/src" && podman build -t "hal0-honcho:${HONCHO_REF}" .); then
                     warn "Honcho image build failed; check the build log above"
                 fi
 

@@ -53,7 +53,7 @@ class TestRenderEnvDefaults:
         monkeypatch.setattr(he, "SECRETS_PATH", _NO_SECRETS)
         out = he.render_env(_honcho_cfg())
 
-        for level in ("minimal", "low", "medium", "high", "max", "all"):
+        for level in ("minimal", "low", "medium", "high", "max"):
             prefix = f"DIALECTIC_LEVELS__{level}__MODEL_CONFIG"
             assert f"{prefix}__MODEL=hal0/agent" in out
             assert f"{prefix}__OVERRIDES__BASE_URL={LOCAL_BASE_URL}" in out
@@ -85,7 +85,7 @@ class TestRenderEnvCloudOverride:
             "https://openrouter.ai/api/v1" in out
         )
         assert (
-            "DIALECTIC_LEVELS__all__MODEL_CONFIG__OVERRIDES__API_KEY_ENV=OPENROUTER_API_KEY"
+            "DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__API_KEY_ENV=OPENROUTER_API_KEY"
             in out
         )
         # Other features unaffected — still local.

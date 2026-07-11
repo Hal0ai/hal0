@@ -24,6 +24,10 @@ name: hal0-honcho
 
 services:
   api:
+    # Image is pre-built by the installer via `podman build` (BuildKit RUN
+    # steps hit the LXC AppArmor wall under docker); `build:` is kept as a
+    # fallback reference. hal0-honcho.service runs `up --no-build`.
+    image: localhost/hal0-honcho:v3.0.9
     build:
       context: /var/lib/hal0/honcho/src
       dockerfile: Dockerfile
@@ -57,8 +61,18 @@ services:
       - path: /etc/hal0/honcho.env
         required: false
     restart: unless-stopped
+    # Docker-in-LXC: the docker-default AppArmor profile cannot be loaded
+    # inside an unprivileged LXC (apparmor_parser needs policy-admin), so
+    # every service runs unconfined — same workaround as the box's other
+    # docker/podman services (e.g. karakeep, openwebui).
+    security_opt:
+      - apparmor:unconfined
 
   deriver:
+    # Image is pre-built by the installer via `podman build` (BuildKit RUN
+    # steps hit the LXC AppArmor wall under docker); `build:` is kept as a
+    # fallback reference. hal0-honcho.service runs `up --no-build`.
+    image: localhost/hal0-honcho:v3.0.9
     build:
       context: /var/lib/hal0/honcho/src
       dockerfile: Dockerfile
@@ -80,10 +94,22 @@ services:
       - path: /etc/hal0/honcho.env
         required: false
     restart: unless-stopped
+    # Docker-in-LXC: the docker-default AppArmor profile cannot be loaded
+    # inside an unprivileged LXC (apparmor_parser needs policy-admin), so
+    # every service runs unconfined — same workaround as the box's other
+    # docker/podman services (e.g. karakeep, openwebui).
+    security_opt:
+      - apparmor:unconfined
 
   database:
     image: pgvector/pgvector:pg15
     restart: unless-stopped
+    # Docker-in-LXC: the docker-default AppArmor profile cannot be loaded
+    # inside an unprivileged LXC (apparmor_parser needs policy-admin), so
+    # every service runs unconfined — same workaround as the box's other
+    # docker/podman services (e.g. karakeep, openwebui).
+    security_opt:
+      - apparmor:unconfined
     command: ["postgres", "-c", "max_connections=200"]
     environment:
       - POSTGRES_DB=postgres
@@ -107,6 +133,12 @@ services:
   redis:
     image: redis:8.2
     restart: unless-stopped
+    # Docker-in-LXC: the docker-default AppArmor profile cannot be loaded
+    # inside an unprivileged LXC (apparmor_parser needs policy-admin), so
+    # every service runs unconfined — same workaround as the box's other
+    # docker/podman services (e.g. karakeep, openwebui).
+    security_opt:
+      - apparmor:unconfined
     volumes:
       - /var/lib/hal0/honcho/redis-data:/data
     healthcheck:

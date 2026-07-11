@@ -27,7 +27,7 @@ Pinned ref: `v3.0.9` (`HONCHO_REF` in `installer/install.sh`).
    ```
 3. Diff the new `docker-compose.yml.example` against the previous upstream
    tag; port any new services/env vars into `installer/honcho/docker-compose.yml`.
-4. `docker compose --project-name hal0-honcho -f /var/lib/hal0/honcho/docker-compose.yml build`
+4. `podman compose --project-name hal0-honcho -f /var/lib/hal0/honcho/docker-compose.yml build`
 5. `systemctl restart hal0-honcho`
 
 ## License note
