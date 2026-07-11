@@ -93,9 +93,12 @@ def test_round_trip_from_build_auto_selections(tmp_path):
     # build_auto_selections also scaffolds embed/rerank/stt/tts/vision slots;
     # the answer-file slots schema only supports chat/coder today (spec §3/§5)
     # so dump_answers must warn-and-skip those rather than emit an invalid file.
+    # Both chat-capability slots survive — `agent` (the ADR-0023 anchor) and
+    # the steward's `brain` scaffold — so an --answers replay reproduces them.
     with pytest.warns(UserWarning, match="does not yet support"):
         doc = dump_answers(sel)
     assert {s["capability"] for s in doc["slots"]} == {"chat", "coder"}
+    assert {s["name"] for s in doc["slots"]} == {"agent", "brain", "coder"}
 
     path = tmp_path / "hal0-setup.yaml"
     write_answers(sel, str(path))
@@ -106,10 +109,11 @@ def test_round_trip_from_build_auto_selections(tmp_path):
     assert loaded.extensions == sel.extensions
     assert loaded.comfyui_defaults == sel.comfyui_defaults
     assert {s.capability for s in loaded.slots} == {"chat", "coder"}
-    orig_by_cap = {s.capability: s for s in sel.slots if s.capability in ("chat", "coder")}
+    orig_by_name = {s.slot_name: s for s in sel.slots if s.capability in ("chat", "coder")}
+    assert {s.slot_name for s in loaded.slots} == set(orig_by_name)
     for s in loaded.slots:
-        assert s.model_id == orig_by_cap[s.capability].model_id
-        assert s.port == orig_by_cap[s.capability].port
+        assert s.model_id == orig_by_name[s.slot_name].model_id
+        assert s.port == orig_by_name[s.slot_name].port
 
 
 def test_write_answers_creates_parent_dirs_and_header(tmp_path):

@@ -28,7 +28,9 @@ def test_seed_utility_toml_validates() -> None:
     assert slot.runtime == "container"
     assert slot.profile == "vulkan"
     assert slot.device == "gpu-vulkan"
-    assert slot.port == 8081
+    # 8090: 8081 was reclaimed as the `agent` seed's canonical primary port
+    # (ADR-0023 LLM anchor); utility moved off it on new installs.
+    assert slot.port == 8090
     # Clean seed (WS-E, #1107): the ghost id `gemma-4-12b-it` pin is gone — the
     # slot boots grey (no crash-loop, no surprise download). context_size is a
     # tuning default that applies once the operator assigns a model.

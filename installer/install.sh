@@ -1355,7 +1355,8 @@ else
 fi
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img}.toml if absent
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain}.toml
+# if absent
 # (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
@@ -1369,7 +1370,7 @@ fi
 # `cp -a installer "${STAGE}/"`), git checkouts carry it, and the prod
 # rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
 # that touches installer/.
-for seed_slot in flm tts rerank utility img; do
+for seed_slot in flm tts rerank utility img agent brain; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if [[ -f "${SLOT_TOML}" ]]; then

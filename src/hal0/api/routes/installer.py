@@ -284,7 +284,9 @@ async def curated_models() -> dict[str, Any]:
 #: capability drives both the on-disk store group (design D2) and the
 #: device/profile derivation (design D4).
 _SLOT_META: dict[str, tuple[str, str, int]] = {
-    "chat.primary": ("chat", "chat", 8081),
+    # The chat capability's slot is NAMED `agent` (ADR-0023 LLM anchor) —
+    # mirrors setup_command._SETUP_SLOTS so both first-run paths agree.
+    "chat.primary": ("chat", "agent", 8081),
     "chat.coder": ("coder", "coder", 8082),
     "embed": ("embed", "embed", 8083),
     "stt": ("stt", "stt", 8084),
