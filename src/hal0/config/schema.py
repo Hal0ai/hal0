@@ -1592,8 +1592,36 @@ def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
 
 
 _VALID_UPSTREAM_KINDS = frozenset({"slot", "remote"})
-_VALID_AUTH_STYLES = frozenset({"bearer", "header", "none"})
-_VALID_WARMUP = frozenset({"none", "lazy", "eager"})
+# The full set implemented by UpstreamRegistry.auth_headers().
+_VALID_AUTH_STYLES = frozenset({"bearer", "anthropic", "google_query", "header", "none"})
+# Canonical vocabulary matches the Upstream dataclass; "lazy"/"eager" were the
+# original schema-only spellings and are still accepted as aliases on read.
+_VALID_WARMUP = frozenset({"none", "ondemand", "always"})
+_WARMUP_ALIASES = {"lazy": "ondemand", "eager": "always"}
+
+
+class UpstreamModelFilters(BaseModel):
+    """Optional [upstream.model_filters] table — curates /v1/models advertising.
+
+    A model id is advertised when it is in ``models`` OR matches any ``include``
+    glob (both empty ⇒ everything included), AND it does not match any
+    ``exclude`` glob. Exclude always wins. Dispatch is unfiltered — excluded
+    models stay reachable by explicit name.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    models: list[str] = Field(default_factory=list, description="Exact model ids to allowlist.")
+    include: list[str] = Field(default_factory=list, description="fnmatch globs to include.")
+    exclude: list[str] = Field(default_factory=list, description="fnmatch globs to exclude.")
+
+    @field_validator("models", "include", "exclude")
+    @classmethod
+    def drop_empty_entries(cls, v: list[str]) -> list[str]:
+        return [s.strip() for s in v if s and s.strip()]
+
+    def is_empty(self) -> bool:
+        return not (self.models or self.include or self.exclude)
 
 
 class UpstreamEntry(BaseModel):
@@ -1605,11 +1633,17 @@ class UpstreamEntry(BaseModel):
     kind: str = Field(default="remote", description="'slot' | 'remote'.")
     url: str = Field(..., description="Base URL.")
     auth_style: str = Field(default="bearer")
+    auth_header: str = Field(default="", description="Header name when auth_style='header'.")
     auth_value_env: str = Field(default="")
     timeout_seconds: float = Field(default=300.0, gt=0.0)
     slot_name: str | None = Field(default=None)
     warmup_strategy: str = Field(default="none")
     advertise_models: bool = Field(default=True)
+    enabled: bool = Field(
+        default=True,
+        description="When false the upstream is skipped by routing and /v1/models.",
+    )
+    model_filters: UpstreamModelFilters | None = Field(default=None)
 
     @field_validator("name")
     @classmethod
@@ -1646,6 +1680,7 @@ class UpstreamEntry(BaseModel):
     @field_validator("warmup_strategy")
     @classmethod
     def warmup_valid(cls, v: str) -> str:
+        v = _WARMUP_ALIASES.get(v, v)
         if v not in _VALID_WARMUP:
             raise ValueError(
                 f"warmup_strategy {v!r} is not valid; choose from {sorted(_VALID_WARMUP)}"
@@ -1659,6 +1694,14 @@ class UpstreamEntry(BaseModel):
         # Catch this at load rather than at dispatch time.
         if self.kind == "slot" and not (self.slot_name and self.slot_name.strip()):
             raise ValueError(f"upstream {self.name!r}: kind='slot' requires slot_name to be set")
+        return self
+
+    @model_validator(mode="after")
+    def header_style_has_header_name(self) -> UpstreamEntry:
+        if self.auth_style == "header" and not self.auth_header.strip():
+            raise ValueError(
+                f"upstream {self.name!r}: auth_style='header' requires auth_header to be set"
+            )
         return self
 
 

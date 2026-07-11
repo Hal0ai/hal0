@@ -18,13 +18,18 @@ See PLAN.md §3 and §5 Tier 1.
 Key exports:
     Upstream         — frozen dataclass representing one routing target.
     UpstreamRegistry — runtime registry of all upstreams.
+    ModelFilters     — per-upstream /v1/models advertising filters.
 """
 
 from __future__ import annotations
 
+from hal0.upstreams.filters import ModelFilters, apply_filters, is_advertised
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 __all__ = [
+    "ModelFilters",
     "Upstream",
     "UpstreamRegistry",
+    "apply_filters",
+    "is_advertised",
 ]
