@@ -100,3 +100,66 @@ def test_home_init_hands_hermes_home_to_hal0(tmp_path, monkeypatch) -> None:
     out = hp._phase_home_init(hp.context_for("home_init", state))
     assert out.status == hp.PhaseStatus.OK
     assert hermes_home in chowned
+
+
+# ── ownership_reconcile phase (fixes bug F: config.yaml root:root ordering) ───
+#
+# home_init (phase 4) chowns HERMES_HOME, but config_write (phase 7) writes
+# config.yaml as root AFTER that, so on the happy path config.yaml lands
+# root:root and the User=hal0 unit can't read it. The late always-run
+# ownership_reconcile phase re-chowns the whole home + repairs 0711 on the
+# agents dir. Spy on the chown helper so the assertion holds without being root.
+
+
+def test_ownership_reconcile_rechows_hermes_home(tmp_path, monkeypatch) -> None:
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text("x: 1\n")  # the file bug F strands
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+
+    chowned: list[Path] = []
+    monkeypatch.setattr(hp, "_chown_tree_to_hal0", lambda p, **_k: chowned.append(Path(p)) or 1)
+    # Redirect the agents dir under tmp so the phase never touches the real one.
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(mode=0o755)
+    monkeypatch.setattr(hp, "AGENTS_DIR", agents_dir)
+
+    out = hp._phase_ownership_reconcile(hp.context_for("ownership_reconcile", state))
+    assert out.status == hp.PhaseStatus.OK
+    assert hermes_home in chowned  # the config-bearing home got re-chowned
+
+
+def test_ownership_reconcile_repairs_agents_dir_mode_to_0711(tmp_path, monkeypatch) -> None:
+    import os as _os
+    import stat as _stat
+
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    monkeypatch.setattr(hp, "_chown_tree_to_hal0", lambda p, **_k: 0)
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(mode=0o755)
+    _os.chmod(agents_dir, 0o755)  # wrong mode → the unit could enumerate siblings
+    monkeypatch.setattr(hp, "AGENTS_DIR", agents_dir)
+
+    out = hp._phase_ownership_reconcile(hp.context_for("ownership_reconcile", state))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["agents_dir_mode_fixed"] is True
+    assert _stat.S_IMODE(agents_dir.stat().st_mode) == 0o711
+
+
+def test_ownership_reconcile_agents_dir_mode_idempotent(tmp_path, monkeypatch) -> None:
+    import stat as _stat
+
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(hp, "_chown_tree_to_hal0", lambda p, **_k: 0)
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(mode=0o711)
+    agents_dir.chmod(0o711)  # already correct
+    monkeypatch.setattr(hp, "AGENTS_DIR", agents_dir)
+
+    out = hp._phase_ownership_reconcile(hp.context_for("ownership_reconcile", state))
+    # Already 0711 → no churn, but still reported.
+    assert out.details["agents_dir_mode_fixed"] is False
+    assert _stat.S_IMODE(agents_dir.stat().st_mode) == 0o711

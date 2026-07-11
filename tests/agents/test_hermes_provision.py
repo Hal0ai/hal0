@@ -59,6 +59,15 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
     _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf")
+    # Foreign-gateway preflight scans user systemd dirs; point them at an empty
+    # tmp dir so a run on a real host (which may have a live hermes-gateway) stays
+    # hermetic. The pipeline_io `run` seam also stubs systemctl is-active/pgrep.
+    monkeypatch.setattr(
+        hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),)
+    )
+    # ownership_reconcile chmods /var/lib/hal0/agents to 0711; redirect it under
+    # tmp so a root test runner never touches the live agents dir.
+    monkeypatch.setattr(hp, "AGENTS_DIR", tmp_path / "var" / "lib" / "hal0" / "agents")
     return hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
 
@@ -84,9 +93,26 @@ def pipeline_io() -> hp.PhaseIO:
         stdout = ""
         stderr = ""
 
+    class _InactiveCompleted:
+        returncode = 3
+        stdout = "inactive\n"
+        stderr = ""
+
+    class _NoMatchCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
     def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
-        if isinstance(argv, (list, tuple)) and list(argv[:2]) == ["systemctl", "daemon-reload"]:
+        head = list(argv[:2]) if isinstance(argv, (list, tuple)) else []
+        if head == ["systemctl", "daemon-reload"]:
             return _NoopCompleted()
+        # Foreign-gateway preflight probes — stub them so a run on a real host
+        # (which may have a live system hermes-gateway) doesn't false-positive.
+        if head == ["systemctl", "is-active"]:
+            return _InactiveCompleted()
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "pgrep":
+            return _NoMatchCompleted()
         return real_run(argv, *a, **kw)
 
     def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
@@ -132,6 +158,10 @@ def test_phase_names_in_planned_order() -> None:
         "namespace_register",
         "model_automap",
         "voice_wire",
+        # Late always-run ownership reconcile: re-chown HERMES_HOME + repair
+        # 0711 on /var/lib/hal0/agents after the phases that write root-owned
+        # files into the home (fixes the config.yaml root:root ordering bug).
+        "ownership_reconcile",
         # #437 (SYSTEM scope): the gateway secrets drop-in lands after
         # voice_wire (which may write the vault it references) and before
         # smoke_tests.
@@ -182,8 +212,11 @@ def test_rerun_is_noop_when_all_phases_ok(
 ) -> None:
     hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
     second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    # All phases skipped because their checkpoint is already ok.
-    assert set(second.skipped) == set(hp.PHASE_NAMES)
+    # All phases skipped because their checkpoint is already ok — EXCEPT the
+    # always-run ownership_reconcile, which re-runs every invocation.
+    assert set(second.skipped) == set(hp.PHASE_NAMES) - {"ownership_reconcile"}
+    assert "ownership_reconcile" not in second.skipped
+    assert second.phases["ownership_reconcile"]["status"] == hp.PhaseStatus.OK.value
     assert second.failed == []
 
 
@@ -1921,3 +1954,103 @@ def test_resolve_installer_root_falls_back_to_fhs_current(tmp_path):
 
     got = hp._resolve_installer_root(module_file=mod, prefix=str(venv))
     assert got == fhs / "current"
+
+
+# ── capture / --adopt / fatal-abort (pipeline level) ─────────────────────────
+#
+# The claim guard used to be cosmetic: run-all meant a claim FAIL was recorded
+# but config_write/context_link still clobbered the foreign config. These pin
+# the fatal-abort behaviour + the --adopt capture path end-to-end.
+
+
+def _seed_foreign_home(hermes_home: Path) -> tuple[bytes, bytes]:
+    """Populate hermes_home as a foreign (unmarked) install; return original bytes."""
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    cfg = hermes_home / "config.yaml"
+    soul = hermes_home / "SOUL.md"
+    cfg.write_bytes(b"operator: hand-written\nmodel:\n  default: their-model\n")
+    soul.write_bytes(b"# Operator SOUL\nDo not clobber me.\n")
+    (hermes_home / ".env").write_text(
+        "TELEGRAM_BOT_TOKEN=live-tg\nDISCORD_TOKEN=live-dc\nRANDOM_UNRELATED=keep\n"
+    )
+    return cfg.read_bytes(), soul.read_bytes()
+
+
+def test_foreign_home_without_adopt_aborts_and_preserves_files(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
+) -> None:
+    hermes_home = Path(state_with_tmp_paths.hermes_home)
+    cfg_before, soul_before = _seed_foreign_home(hermes_home)
+
+    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
+
+    # Fatal abort at install's claim guard: run stopped, exit non-zero.
+    assert result.aborted is True
+    assert "install" in result.failed
+    assert result.state.phases["install"].get("fatal") is True
+    # Every phase after the fatal one is recorded skipped with the abort reason.
+    assert result.state.phases["config_write"]["status"] == hp.PhaseStatus.SKIP.value
+    assert "aborted" in result.state.phases["config_write"]["reason"]
+    # The foreign config.yaml + SOUL.md are byte-identical — never clobbered.
+    assert (hermes_home / "config.yaml").read_bytes() == cfg_before
+    assert (hermes_home / "SOUL.md").read_bytes() == soul_before
+    # No hal0 marker was stamped (the home stays unclaimed).
+    assert not (hermes_home / hp._HAL0_MANAGED_MARKER).exists()
+
+
+def test_foreign_home_without_adopt_cli_exit_nonzero(
+    tmp_path: Path,
+    state_with_tmp_paths: hp.BootstrapState,
+    pipeline_io: hp.PhaseIO,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_foreign_home(Path(state_with_tmp_paths.hermes_home))
+    real_run = hp.run
+
+    def _wrapped(**kwargs: Any) -> hp.RunResult:
+        kwargs.setdefault("initial_state", state_with_tmp_paths)
+        kwargs.setdefault("io", pipeline_io)
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(hp, "run", _wrapped)
+    rc = hp.bootstrap_cli(
+        repair=False, adopt=False, dry_run=False, skip_phases=(), verbose=False, state_root=tmp_path
+    )
+    assert rc == 1
+
+
+def test_foreign_home_with_adopt_backs_up_imports_and_proceeds(
+    tmp_path: Path,
+    state_with_tmp_paths: hp.BootstrapState,
+    pipeline_io: hp.PhaseIO,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hermes_home = Path(state_with_tmp_paths.hermes_home)
+    cfg_before, soul_before = _seed_foreign_home(hermes_home)
+    vault = tmp_path / "vault" / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+
+    result = hp.run(
+        state_root=tmp_path, initial_state=state_with_tmp_paths, adopt=True, io=pipeline_io
+    )
+
+    # No abort — the run proceeds through every phase.
+    assert result.aborted is False
+    assert "install" not in result.failed
+    # Marker stamped so the home is now hal0-managed.
+    assert (hermes_home / hp._HAL0_MANAGED_MARKER).is_file()
+    # Full-tree backup sibling created.
+    backups = list(hermes_home.parent.glob(f"{hermes_home.name}.pre-hal0-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "config.yaml").read_bytes() == cfg_before
+    # Sidecar snapshots preserve the operator's originals in place.
+    assert (hermes_home / "config.yaml.pre-hal0").read_bytes() == cfg_before
+    assert (hermes_home / "SOUL.md.pre-hal0").read_bytes() == soul_before
+    # Recognized tokens imported into the vault; unrelated key skipped.
+    vault_body = vault.read_text()
+    assert "TELEGRAM_BOT_TOKEN=live-tg" in vault_body
+    assert "DISCORD_TOKEN=live-dc" in vault_body
+    assert "RANDOM_UNRELATED" not in vault_body
+    # The adopt details are surfaced in the install checkpoint.
+    adopted = result.state.phases["install"]["details"]["adopted"]
+    assert adopted["tokens_imported"] == ["DISCORD_TOKEN", "TELEGRAM_BOT_TOKEN"]
