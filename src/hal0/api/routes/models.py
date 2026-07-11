@@ -42,6 +42,7 @@ from hal0.registry.pull import (
 from hal0.registry.pull import persist_pull_job as _persist_pull_job
 from hal0.registry.pull import pull_job_file as _pull_job_file
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
+from hal0.upstreams.filters import apply_filters
 
 # See slots.py for the writer-gate rationale.
 
@@ -302,11 +303,26 @@ async def list_models(request: Request) -> dict[str, Any]:
         # Probe unavailable (no flm binary / dev host) — nothing to skip.
         pass
     for u in upstreams.list():
+        # Slot-backed entries serve LOCAL models: the composite ``hal0``
+        # aggregate (kind="slot") and container slots (kind="remote" with
+        # slot_name) advertise ids that live on this host's disk — labeling
+        # them origin="upstream" put local slot models in the Models page
+        # Upstream tab whenever the advertised id differed from the registry
+        # id (raw GGUF casing vs normalized alias). Only genuine remotes
+        # contribute upstream rows here.
+        if u.kind != "remote" or u.slot_name:
+            continue
+        if not getattr(u, "enabled", True) or not getattr(u, "advertise_models", True):
+            continue
         try:
             ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
             cache[u.name] = ids
         except Exception:
             ids = []
+        # Same operator curation as /v1/models — the Models page is a
+        # discovery surface, so per-upstream filters apply here too
+        # (dispatch stays unfiltered; hidden models remain addressable).
+        ids = apply_filters(ids, getattr(u, "model_filters", None))
         for mid in ids:
             if mid in seen:
                 continue

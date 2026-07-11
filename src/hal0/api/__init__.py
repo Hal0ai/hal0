@@ -129,7 +129,7 @@ from hal0.hardware.probe import HardwareProbe
 from hal0.registry.discover import scan_and_register
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
-from hal0.upstreams.registry import Upstream, UpstreamRegistry
+from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
 
 log = structlog.get_logger(__name__)
 
@@ -660,19 +660,7 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
         return
     for entry in cfg.upstream:
         try:
-            registry.upsert(
-                Upstream(
-                    name=entry.name,
-                    kind=entry.kind,
-                    url=entry.url,
-                    auth_style=entry.auth_style,
-                    auth_value_env=entry.auth_value_env,
-                    timeout_seconds=entry.timeout_seconds,
-                    slot_name=entry.slot_name,
-                    warmup_strategy=entry.warmup_strategy,
-                    advertise_models=entry.advertise_models,
-                )
-            )
+            registry.upsert(upstream_from_entry(entry))
         except Exception as exc:
             log.warning(
                 "upstreams.entry_skipped",
