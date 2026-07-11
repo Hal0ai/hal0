@@ -177,8 +177,10 @@ test.describe('ImageGen V2 render-hero pane', () => {
     await expect(pane.locator('.inv-pill').first()).toContainText('6')
   })
 
-  // ── 6. Container footer ─────────────────────────────────────────────────
-  test('footer: container identity + controls render', async ({ page }) => {
+  // ── 6. Container footer + header controls ────────────────────────────────
+  // #1209 moved the stop/restart/logs controls from the footer up into the
+  // card header's far right; the container identity row stays in the footer.
+  test('footer identity + header controls render', async ({ page }) => {
     await gotoImageTab(page)
     const pane = page.locator('.comfy-v2-pane')
 
@@ -186,9 +188,10 @@ test.describe('ImageGen V2 render-hero pane', () => {
     await expect(foot).toBeVisible()
     await expect(foot).toContainText('comfyui')
     await expect(foot).toContainText(':8188')
-    // stop, restart, logs controls
-    await expect(foot.locator('.sctrl.stop')).toBeVisible()
-    await expect(foot.locator('.sctrl.restart')).toBeVisible()
+    // stop, restart controls — now in the header far right
+    const head = pane.locator('.wcard-h')
+    await expect(head.locator('.sctrl.stop')).toBeVisible()
+    await expect(head.locator('.sctrl.restart')).toBeVisible()
   })
 
   // ── 7. Empty-queue state: NO click-blocking overlay ─────────────────────
