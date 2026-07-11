@@ -60,6 +60,13 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
     _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf")
+    # Foreign-gateway preflight: point the user-scope scan at an empty tmp dir
+    # so a run on a real host (which may have a live system hermes-gateway)
+    # stays hermetic; the hermetic_io `run` seam stubs systemctl is-active/pgrep.
+    monkeypatch.setattr(hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),))
+    # ownership_reconcile chmods /var/lib/hal0/agents to 0711 — redirect under
+    # tmp so a root test runner never touches the live agents dir.
+    monkeypatch.setattr(hp, "AGENTS_DIR", var_lib / "agents-dir")
     # Personas land under $HERMES_HOME/personas via _personas_root_for —
     # the fixture's hermes_home is already in tmp_path so no further
     # monkey-patching is needed for the persona phase.
@@ -168,9 +175,26 @@ def hermetic_io() -> hp.PhaseIO:
         stdout = ""
         stderr = ""
 
+    class _InactiveCompleted:
+        returncode = 3
+        stdout = "inactive\n"
+        stderr = ""
+
+    class _NoMatchCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
     def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
-        if isinstance(argv, (list, tuple)) and list(argv[:2]) == ["systemctl", "daemon-reload"]:
+        head = list(argv[:2]) if isinstance(argv, (list, tuple)) else []
+        if head == ["systemctl", "daemon-reload"]:
             return _NoopCompleted()
+        # Foreign-gateway preflight probes — stub so a live system hermes-gateway
+        # on the host doesn't false-positive an abort.
+        if head == ["systemctl", "is-active"]:
+            return _InactiveCompleted()
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "pgrep":
+            return _NoMatchCompleted()
         # Apply `hermes config set/migrate` to the real config.yaml (the stub
         # venv hermes is a no-op `exit 0`), so the E2E config-content asserts
         # see what the live CLI would have written.

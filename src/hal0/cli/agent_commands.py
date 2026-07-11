@@ -76,6 +76,15 @@ def agent_install(
             "without the messaging bridge."
         ),
     ),
+    adopt: bool = typer.Option(
+        False,
+        "--adopt",
+        help=(
+            "Hermes only: capture an existing (foreign) install — back up "
+            "$HERMES_HOME, import its .env tokens, then claim it. Without this, "
+            "a foreign home or a live foreign gateway aborts provisioning."
+        ),
+    ),
 ) -> None:
     """Install a bundled agent.
 
@@ -92,7 +101,7 @@ def agent_install(
     #1102 / decision Q9.
     """
     if name == "hermes":
-        _install_hermes(switch=switch, gateway=gateway)
+        _install_hermes(switch=switch, gateway=gateway, adopt=adopt)
         return
 
     url = _api_base()
@@ -113,7 +122,7 @@ def agent_install(
     )
 
 
-def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
+def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
     Four steps, all local + foreground:
@@ -158,7 +167,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
         )
 
     console.print("[bold]Provisioning Hermes[/bold] → /var/lib/hal0/venvs/hermes …")
-    rc = bootstrap_cli(repair=False, dry_run=False, skip_phases=(), verbose=False)
+    rc = bootstrap_cli(repair=False, adopt=adopt, dry_run=False, skip_phases=(), verbose=False)
     if rc != 0:
         die(
             "Hermes provisioning failed — inspect `hal0 agent status hermes` / `hal0 agent log hermes`."
@@ -367,6 +376,26 @@ def _install_hermes_gateway() -> None:
         return
 
     if _shutil.which("systemctl") is None:
+        return
+
+    # Don't start a SECOND poller. If a foreign hermes-gateway is live (a
+    # hand-installed system unit, or a `systemctl --user` unit under another
+    # user), enabling hal0's unit too puts two long-polls on one Telegram
+    # token → HTTP 409 flapping. Skip the enable + tell the operator how to
+    # stop the other one. Best-effort: detection errors fall through to enable.
+    try:
+        from hal0.agents.hermes_provision import _detect_foreign_gateways
+
+        foreign = _detect_foreign_gateways()
+    except Exception:  # detection is strictly best-effort
+        foreign = []
+    if foreign:
+        console.print(
+            "[yellow]foreign hermes-gateway detected — NOT enabling hal0's unit "
+            "(two pollers on one token → HTTP 409). Stop the other one first:[/yellow]"
+        )
+        for f in foreign:
+            console.print(f"[dim]  {f['detail']}\n  stop: {f['stop_cmd']}[/dim]")
         return
 
     _subprocess.run(["systemctl", "daemon-reload"], check=False)  # nosec B603 B607
@@ -848,12 +877,31 @@ def agent_peers() -> None:
     console.print(table)
 
 
-@bootstrap_app.command("hermes")
+@bootstrap_app.command(
+    "hermes",
+    epilog=(
+        "CAPTURE: a populated $HERMES_HOME that hal0 didn't create, or a live "
+        "foreign hermes-gateway (e.g. a `systemctl --user` unit), aborts the run. "
+        "Pass --adopt to capture it safely: hal0 backs up the tree to "
+        "<home>.pre-hal0-<UTC>, imports its .env tokens into the vault, then "
+        "claims it. Operator config overrides deep-merge from "
+        "/etc/hal0/agents/hermes/overrides.yaml (applied last)."
+    ),
+)
 def bootstrap_hermes(
     repair: bool = typer.Option(
         False,
         "--repair",
         help="Re-run every phase regardless of checkpoint state (forces full rerun).",
+    ),
+    adopt: bool = typer.Option(
+        False,
+        "--adopt",
+        help=(
+            "Capture an existing (foreign) hermes install: back up $HERMES_HOME, "
+            "import its .env tokens into the vault, then claim it. Without this, a "
+            "foreign home or a live foreign gateway aborts the run."
+        ),
     ),
     dry_run: bool = typer.Option(
         False,
@@ -883,6 +931,7 @@ def bootstrap_hermes(
         _os.environ["HAL0_HERMES_OFFLINE"] = "1"
     rc = bootstrap_cli(
         repair=repair,
+        adopt=adopt,
         dry_run=dry_run,
         skip_phases=tuple(skip_phase),
         verbose=verbose,
@@ -988,7 +1037,14 @@ def agent_upgrade(
 # ── Reprovision (PR-3, v0.3) ────────────────────────────────────────────────
 
 
-@app.command("reprovision")
+@app.command(
+    "reprovision",
+    epilog=(
+        "Operator config overrides deep-merge from "
+        "/etc/hal0/agents/hermes/overrides.yaml (applied last, so a hand override "
+        "wins). config.yaml is snapshotted to config.yaml.bak before each render."
+    ),
+)
 def agent_reprovision(
     name: str = typer.Argument("hermes", help="Bundled agent name."),
     repair: bool = typer.Option(

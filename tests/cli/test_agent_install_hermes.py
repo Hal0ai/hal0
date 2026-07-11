@@ -75,6 +75,28 @@ def test_install_hermes_runs_prereqs_then_bootstrap_then_register(
     assert payload == {"name": "hermes", "switch": True}
 
 
+def test_install_hermes_forwards_adopt_to_bootstrap(monkeypatch) -> None:
+    """`hal0 agent install hermes --adopt` threads --adopt into the bootstrap
+    pipeline so the capture (backup + token import + claim) actually happens."""
+    seen: dict[str, object] = {}
+
+    def _fake_bootstrap_cli(**kwargs):  # type: ignore[no-untyped-def]
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 0})())
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision.bootstrap_cli", _fake_bootstrap_cli, raising=True
+    )
+    monkeypatch.setattr(ac, "api_post", lambda *_a, **_k: {})
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+
+    ac._install_hermes(switch=False, gateway=False, adopt=True)
+    assert seen.get("adopt") is True
+
+
 def test_install_hermes_aborts_when_provisioning_fails(monkeypatch) -> None:
     """A non-zero bootstrap rc must stop the flow before the API register —
     we don't want to mark a half-provisioned agent installed."""
@@ -280,12 +302,54 @@ def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path)
     monkeypatch.setattr(subprocess, "run", _fake_run)
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
     monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
+    # No foreign gateway on this box → the enable gate is a no-op. Stub it so
+    # the test is hermetic regardless of the host's real systemd/drop-in state.
+    monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
 
     ac._install_hermes_gateway()
 
     assert [ac._HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"] in calls
     assert ["systemctl", "daemon-reload"] in calls
     assert ["systemctl", "enable", "--now", "hermes-gateway.service"] in calls
+
+
+def test_install_hermes_gateway_skips_enable_on_foreign_gateway(monkeypatch, tmp_path) -> None:
+    """A live foreign hermes-gateway means enabling hal0's unit too would put a
+    SECOND poller on the same Telegram token (HTTP 409). The gate must skip the
+    `systemctl enable --now` and leave the operator a stop command."""
+    gateway_unit = tmp_path / "hermes-gateway.service"
+    calls: list[list[str]] = []
+
+    def _fake_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        calls.append(list(argv))
+        if argv[0] == ac._HERMES_BIN:
+            gateway_unit.write_text("[Unit]\n")
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
+    monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision._detect_foreign_gateways",
+        lambda **_k: [
+            {
+                "scope": "user",
+                "detail": "user-scope hermes-gateway.service at /root/.config/...",
+                "stop_cmd": "systemctl --user disable --now hermes-gateway.service",
+            }
+        ],
+    )
+
+    ac._install_hermes_gateway()  # must not raise
+
+    # The unit install still ran, but hal0 did NOT enable/start a second poller.
+    assert [ac._HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"] in calls
+    assert ["systemctl", "enable", "--now", "hermes-gateway.service"] not in calls
 
 
 def test_install_hermes_gateway_warns_without_raising_when_unit_missing(monkeypatch) -> None:
