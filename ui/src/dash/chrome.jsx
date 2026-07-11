@@ -107,6 +107,8 @@ const Icons = {
   memory:    <Icon><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v5c0 1.1 2.2 2 5 2s5-.9 5-2V4"/><path d="M3 6.5c0 1.1 2.2 2 5 2s5-.9 5-2"/><circle cx="13" cy="12.5" r="1.5"/></Icon>,
   settings:  <Icon><circle cx="8" cy="8" r="2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></Icon>,
   bell:      <Icon d="M4 11h8c-1 0-1.5-0.5-1.5-2V6.5a2.5 2.5 0 0 0-5 0V9c0 1.5-0.5 2-1.5 2zM6.5 13a1.5 1.5 0 0 0 3 0"/>,
+  // Open book — Documentation launcher.
+  docs:      <Icon><path d="M8 4C6.6 2.9 4.6 2.6 2.5 3v9c2.1-.4 4.1-.1 5.5 1 1.4-1.1 3.4-1.4 5.5-1V3c-2.1-.4-4.1-.1-5.5 1z"/><path d="M8 4v9"/></Icon>,
   search:    <Icon><circle cx="7" cy="7" r="4"/><path d="M10 10l3 3"/></Icon>,
   send:      <Icon d="M2 8l12-6-3 14-3-6-6-2z"/>,
   attach:    <Icon d="M9 3l-5 5a3 3 0 0 0 4 4l5-5a2 2 0 0 0-3-3l-5 5"/>,
@@ -500,6 +502,18 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
           {Icons.agent}<span>Agent Chat</span>
         </button>
       </div>
+      {/* Documentation — opens the hosted docs in a new tab. */}
+      <a
+        className="tb-docs"
+        data-testid="tb-docs"
+        href="https://hal0.dev/docs/"
+        target="_blank"
+        rel="noreferrer"
+        title="Open the hal0 documentation"
+        aria-label="Documentation"
+      >
+        {Icons.docs}
+      </a>
       <NotificationBell />
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button
