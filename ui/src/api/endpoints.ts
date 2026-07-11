@@ -276,6 +276,18 @@ export const ENDPOINTS = {
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,
+
+  // ── Upstream providers (external LLM endpoints) ──────────────────
+  // GET list / POST create; PATCH settings / DELETE per name; POST test
+  // probes reachability. providersCatalog feeds the "Add upstream" form;
+  // providerCredentials writes ONE api-key to api.env ({key, value} —
+  // the secret never transits the upstream CRUD surface).
+  upstreams: '/api/upstreams',
+  upstream: (name: string) => `/api/upstreams/${encodeURIComponent(name)}`,
+  upstreamTest: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/test`,
+  providersCatalog: '/api/providers/catalog',
+  providerCredentials: (name: string) =>
+    `/api/providers/${encodeURIComponent(name)}/credentials`,
   // Service URL discovery — the dashboard reads this to resolve the
   // reachable hostnames for sibling services (OpenWebUI, Hermes) from the
   // request host, so links work on any install (localhost / LAN IP /

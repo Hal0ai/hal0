@@ -43,6 +43,7 @@ from hal0.cli.registry_commands import app as registry_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update_app
+from hal0.cli.upstream_commands import app as upstream_app
 
 console = Console()
 
@@ -66,6 +67,7 @@ app.add_typer(model_app, name="model")
 app.add_typer(memory_app, name="memory")
 app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
+app.add_typer(upstream_app, name="upstream")
 app.add_typer(capabilities_app, name="capabilities")
 app.add_typer(agent_app, name="agent")
 # Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps

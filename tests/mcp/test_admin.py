@@ -155,6 +155,7 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         "memory_delete",
         "stack_delete",
         "profile_delete",
+        "upstream_delete",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint

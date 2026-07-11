@@ -46,7 +46,7 @@ Autonomous read::
     model_pull_status, model_inspect, model_store,
     hardware_probe, capability_list, provider_list, version_info,
     stack_list, stack_status, profile_list, profile_status,
-    profile_export, upstream_list,
+    profile_export, upstream_list, upstream_get, upstream_test,
     settings_get, settings_schema, settings_apply_plan,
     bench_runs, bench_run_status, bench_queue,
     # Host-introspection probes (issue #237)
@@ -73,6 +73,8 @@ Gated (destructive — enqueued for owner approval)::
     # Stack CRUD (create/update/apply/import/export/snapshot/delete)
     stack_create, stack_update, stack_apply, stack_import,
     stack_export, stack_snapshot, stack_delete,
+    # Upstream provider CRUD (create/update/delete; test is a read)
+    upstream_create, upstream_update, upstream_delete,
     # Benchmarks — enqueue/control load models onto slots (disruptive)
     bench_enqueue, bench_control,
     # Journald surfaces gated for security (MED-1)
@@ -304,6 +306,10 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "npu_status",
         "env_report",
         "model_store_probe",
+        # Upstream provider reads (upstream_list is with the other list
+        # reads above); test probes the provider but changes no state.
+        "upstream_get",
+        "upstream_test",
     }
 )
 
@@ -380,6 +386,12 @@ GATED_TOOLS: frozenset[str] = frozenset(
         # docs/internal/phase-8-pending/mcp-backend.md §2.
         "logs_tail",
         "slot_logs",
+        # Upstream provider CRUD — config-surface writes (delete is
+        # destructive; the credential itself goes through the separately
+        # gated provider_credential_write).
+        "upstream_create",
+        "upstream_update",
+        "upstream_delete",
         # memory_delete with len(ids) > 1 routes here at call time.
     }
 )
@@ -406,7 +418,7 @@ GATED_TOOLS: frozenset[str] = frozenset(
 #   model_swap → /api/slots/{n}/model   /api/slots/{n}/swap           name diff
 #   model_pull → /api/models/pull       /api/models/{id}/pull         id-in-path
 #   capability_set → /api/capabilities  /api/capabilities/{slot}/{c}  composite key
-#   provider_credential_write → /api/providers/{n}/credentials  NO LIVE ROUTE
+#   provider_credential_write → /api/providers/{n}/credentials  live (providers.py)
 #   version_info → /api/version         /api/status                   name diff
 
 _REST_MAP: dict[str, tuple[str, str]] = {
@@ -491,6 +503,12 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "profile_import": ("POST", "/api/profiles/import"),
     "profile_delete": ("DELETE", "/api/profiles/{name}"),
     "provider_credential_write": ("POST", "/api/providers/{name}/credentials"),
+    # Upstream CRUD (upstream_list is in the System section above)
+    "upstream_get": ("GET", "/api/upstreams/{name}"),
+    "upstream_create": ("POST", "/api/upstreams"),
+    "upstream_update": ("PATCH", "/api/upstreams/{name}"),
+    "upstream_delete": ("DELETE", "/api/upstreams/{name}"),
+    "upstream_test": ("POST", "/api/upstreams/{name}/test"),
 }
 
 
@@ -528,6 +546,11 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "stack_export": ("slug",),
     "stack_update": ("slug",),
     "stack_delete": ("slug",),
+    # Upstream providers
+    "upstream_get": ("name",),
+    "upstream_update": ("name",),
+    "upstream_delete": ("name",),
+    "upstream_test": ("name",),
     # Misc
     "capability_set": ("slot", "child"),
     "provider_credential_write": ("name",),
@@ -1122,6 +1145,22 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "profile_update": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    # Upstream CRUD (upstream_list is annotated with the list reads above)
+    "upstream_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_test": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "upstream_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
     # Mutating, reversible, non-idempotent (each call has additional effect).
     "memory_add": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
@@ -1219,6 +1258,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "provider_list": "List configured providers.",
     "version_info": "hal0 version + runtime status.",
     "upstream_list": "List all configured upstream LLM providers.",
+    "upstream_get": "Get one upstream provider's full detail.",
+    "upstream_test": "Probe an upstream's reachability and auth status.",
+    "upstream_create": "Register a new remote upstream LLM provider (gated).",
+    "upstream_update": (
+        "Update an upstream provider's settings (url/auth/visibility/filters/enabled) (gated)."
+    ),
+    "upstream_delete": "Remove an upstream provider; its api.env credential is kept (gated).",
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",

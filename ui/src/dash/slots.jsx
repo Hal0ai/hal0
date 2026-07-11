@@ -961,6 +961,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       {tab === "endpoints" ? (
         <div className="conn">
           {window.LocalEndpointsPanel ? <window.LocalEndpointsPanel /> : null}
+          {window.UpstreamProvidersPanel ? <window.UpstreamProvidersPanel /> : null}
         </div>
       ) : tab === "profiles" ? (
         window.ProfilesView ? <window.ProfilesView /> : null

@@ -2,15 +2,20 @@
 
 Endpoints:
   GET    /api/upstreams                  — list registered routing targets
+  POST   /api/upstreams                  — create a remote upstream (reactive)
   GET    /api/upstreams/{name}           — single upstream
+  PATCH  /api/upstreams/{name}           — mutate settings (visibility + structural)
+  DELETE /api/upstreams/{name}           — remove a remote upstream
   POST   /api/upstreams/{name}/test      — probe reachability + auth
   GET    /api/providers/catalog          — static integration catalog
   GET    /api/providers                  — configured providers (alias of upstreams)
+  POST   /api/providers/{name}/credentials — write one API key to api.env
 
-Write paths (create/update/delete) are intentionally deferred — providers are
-authored by editing /etc/hal0/upstreams.toml and reloading, which the
-``hal0 config reload`` CLI surfaces. The Phase 1 design (PLAN §6) treats the
-TOML files as the source of truth; a fully reactive editor lands later.
+``/etc/hal0/upstreams.toml`` remains the source of truth (PLAN §6): every
+write path funnels through :class:`~hal0.upstreams.registry.UpstreamRegistry`'s
+persistent mutators, which rewrite the TOML atomically before touching the
+in-memory registry — hand-editing the file plus ``hal0 config reload`` keeps
+working alongside the reactive editor.
 """
 
 from __future__ import annotations
@@ -22,14 +27,20 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from hal0.api._env_store import upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
+from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
 from hal0.upstreams.integrations import get_catalog
-from hal0.upstreams.registry import UpstreamNotFound
+from hal0.upstreams.registry import (
+    COMPOSITE_UPSTREAM_NAME,
+    UpstreamAlreadyExists,
+    UpstreamNotFound,
+    UpstreamProtected,
+)
 
 _audit_log = structlog.get_logger("hal0.audit")
 _log = structlog.get_logger(__name__)
@@ -50,9 +61,43 @@ class UpstreamNotFoundHTTP(Hal0Error):
     status = 404
 
 
+class UpstreamProtectedHTTP(Hal0Error):
+    code = "upstream.protected"
+    status = 400
+
+
+class UpstreamConflictHTTP(Hal0Error):
+    code = "upstream.already_exists"
+    status = 409
+
+
+class UpstreamInvalidHTTP(Hal0Error):
+    code = "upstream.invalid"
+    status = 400
+
+
 class ProviderCredentialError(Hal0Error):
     code = "provider.credential_write_failed"
     status = 400
+
+
+# Upstream names double as TOML keys, URL path segments, and env-var stems —
+# keep them boring: lowercase alnum plus - and _, max 64 chars.
+_UPSTREAM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _validation_summaries(exc: ValidationError) -> list[str]:
+    """Flatten pydantic errors to JSON-safe strings (ctx can hold raw exceptions)."""
+    return [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+
+
+# Fields editable on any upstream (catalog visibility / routing kill-switch).
+_VISIBILITY_FIELDS = frozenset({"advertise_models", "enabled", "model_filters"})
+# Fields only editable on TOML-authored remote upstreams — the composite and
+# slot-backed entries get their structure from the slot lifecycle.
+_STRUCTURAL_FIELDS = frozenset(
+    {"url", "auth_style", "auth_header", "auth_value_env", "timeout_seconds", "warmup_strategy"}
+)
 
 
 class ProviderCredentialBody(BaseModel):
@@ -79,17 +124,32 @@ def _serialize_upstream(u: Any, *, last_models: list[str] | None = None) -> dict
     today — but if a future field lands here whose name matches a
     sensitive pattern, the walk catches it without a round of edits.
     """
+    filters = getattr(u, "model_filters", None)
     out = {
         "name": u.name,
         "kind": u.kind,
         "url": u.url,
         "auth_style": u.auth_style,
+        "auth_header": getattr(u, "auth_header", ""),
         "auth_value_env": u.auth_value_env,  # env-var *name*, not value
         "auth_configured": bool(u.auth_value_env),
+        # Unlike auth_configured (env-var *declared*), this reports whether
+        # the key has actually been written — drives the UI's auth badge.
+        "auth_key_present": bool(u.auth_value_env and os.environ.get(u.auth_value_env)),
         "timeout_seconds": u.timeout_seconds,
         "slot_name": u.slot_name,
         "warmup_strategy": u.warmup_strategy,
         "advertise_models": u.advertise_models,
+        "enabled": getattr(u, "enabled", True),
+        "model_filters": (
+            None
+            if filters is None
+            else {
+                "models": list(filters.models),
+                "include": list(filters.include),
+                "exclude": list(filters.exclude),
+            }
+        ),
         "models": last_models or [],
     }
     return redact_config(out)
@@ -119,42 +179,177 @@ async def get_upstream(name: str, request: Request) -> dict[str, Any]:
     return _serialize_upstream(u, last_models=model_cache.get(name))
 
 
+class UpstreamCreateBody(BaseModel):
+    """Body for ``POST /api/upstreams`` — always creates a ``kind="remote"``.
+
+    ``catalog_id`` prefills ``url``/``auth_style``/``auth_header`` from the
+    integrations catalog (explicit body fields win over the prefill); without
+    it ``url`` is required. Credentials are NOT accepted here — write the key
+    afterwards via ``POST /api/providers/{name}/credentials`` so secrets never
+    transit the CRUD surface.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str = Field(..., min_length=1, max_length=64)
+    catalog_id: str | None = Field(default=None)
+    url: str | None = Field(default=None)
+    auth_style: str | None = Field(default=None)
+    auth_header: str | None = Field(default=None)
+    auth_value_env: str | None = Field(default=None)
+    timeout_seconds: float | None = Field(default=None, gt=0.0)
+    warmup_strategy: str | None = Field(default=None)
+    advertise_models: bool = Field(default=True)
+    enabled: bool = Field(default=True)
+    model_filters: UpstreamModelFilters | None = Field(default=None)
+
+
+@router.post("/upstreams", status_code=201)
+async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[str, Any]:
+    """Create a remote upstream reactively.
+
+    Appends a row to ``upstreams.toml`` (atomic write, TOML stays canonical)
+    and registers the upstream live — no API restart needed. Guards: the
+    composite name is reserved, names must be unique, and slot upstreams
+    can't be created here (they're owned by the slot lifecycle).
+    """
+    name = body.name.strip()
+    if not _UPSTREAM_NAME_RE.match(name):
+        raise UpstreamInvalidHTTP(
+            "upstream name must be lowercase alphanumeric plus '-'/'_' (max 64 chars)",
+            details={"name": body.name},
+        )
+
+    prefill: dict[str, Any] = {}
+    if body.catalog_id is not None:
+        entry = get_catalog().get(body.catalog_id)
+        if entry is None:
+            raise UpstreamInvalidHTTP(
+                f"unknown catalog_id {body.catalog_id!r}",
+                details={"catalog_id": body.catalog_id, "known": sorted(get_catalog())},
+            )
+        prefill = {
+            "url": entry.get("base_url") or None,
+            "auth_style": entry.get("auth") or None,
+            "auth_header": (
+                entry.get("auth_header_name") if entry.get("auth") == "header" else None
+            ),
+            "auth_value_env": f"{body.catalog_id.upper()}_API_KEY",
+        }
+
+    def pick(field: str, default: Any = None) -> Any:
+        explicit = getattr(body, field)
+        if explicit is not None:
+            return explicit
+        prefilled = prefill.get(field)
+        return prefilled if prefilled is not None else default
+
+    url = pick("url")
+    if not url:
+        raise UpstreamInvalidHTTP(
+            "url is required (or supply a catalog_id with a known base_url)",
+            details={"name": name},
+        )
+
+    try:
+        entry_model = UpstreamEntry(
+            name=name,
+            kind="remote",
+            url=url,
+            auth_style=pick("auth_style", "bearer"),
+            auth_header=pick("auth_header", ""),
+            auth_value_env=pick("auth_value_env", ""),
+            timeout_seconds=body.timeout_seconds if body.timeout_seconds is not None else 300.0,
+            warmup_strategy=body.warmup_strategy or "none",
+            advertise_models=body.advertise_models,
+            enabled=body.enabled,
+            model_filters=(
+                None
+                if body.model_filters is None or body.model_filters.is_empty()
+                else body.model_filters
+            ),
+        )
+    except ValidationError as exc:
+        raise UpstreamInvalidHTTP(
+            "invalid upstream configuration",
+            details={"name": name, "errors": _validation_summaries(exc)},
+        ) from exc
+
+    upstreams = request.app.state.upstreams
+    try:
+        created = upstreams.create_persistent(entry_model)
+    except UpstreamProtected as exc:
+        raise UpstreamProtectedHTTP(str(exc), {"name": name}) from exc
+    except UpstreamAlreadyExists as exc:
+        raise UpstreamConflictHTTP(str(exc), {"name": name}) from exc
+
+    _audit_log.info(
+        "upstream.created",
+        name=name,
+        url=url,
+        catalog_id=body.catalog_id,
+        source=request.client.host if request.client else None,
+    )
+    out = _serialize_upstream(created)
+    if created.auth_value_env and not os.environ.get(created.auth_value_env):
+        out["hint"] = (
+            f"write the API key next: POST /api/providers/{name}/credentials "
+            f'{{"key": "{created.auth_value_env}", "value": "<secret>"}}'
+        )
+    return out
+
+
 class UpstreamPatchBody(BaseModel):
     """Body for ``PATCH /api/upstreams/{name}``.
 
-    Only mutable, runtime-tunable fields are accepted. Structural fields
-    (``name``, ``kind``, ``url``, ``auth_*``, ``slot_name``,
-    ``warmup_strategy``) are intentionally absent — those stay
-    ``upstreams.toml``-authored per the deferred-write design called out
-    in this module's module docstring. ``advertise_models`` is the first
-    exception because catalog visibility is a runtime concern, not a
-    config-time one.
+    Visibility fields (``advertise_models``, ``enabled``, ``model_filters``)
+    are editable on every upstream kind. Structural fields (``url``,
+    ``auth_*``, ``timeout_seconds``, ``warmup_strategy``) only on
+    TOML-authored remote upstreams — the composite and slot-backed entries
+    get their structure from the slot lifecycle. ``name``/``kind``/
+    ``slot_name`` stay immutable (delete + recreate to rename).
+
+    ``model_filters`` set to ``null`` or an all-empty object clears the
+    filters; omitting the field leaves them unchanged.
     """
+
+    model_config = {"extra": "forbid"}
 
     advertise_models: bool | None = Field(
         default=None,
         description="Whether this upstream's /v1/models appears in the aggregate catalog.",
     )
+    enabled: bool | None = Field(
+        default=None,
+        description="Routing kill-switch — false removes the upstream from dispatch entirely.",
+    )
+    model_filters: UpstreamModelFilters | None = Field(default=None)
+    url: str | None = Field(default=None)
+    auth_style: str | None = Field(default=None)
+    auth_header: str | None = Field(default=None)
+    auth_value_env: str | None = Field(default=None)
+    timeout_seconds: float | None = Field(default=None, gt=0.0)
+    warmup_strategy: str | None = Field(default=None)
 
 
 @router.patch("/upstreams/{name}")
 async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -> dict[str, Any]:
-    """Mutate runtime-tunable fields on a registered upstream.
+    """Mutate settings on a registered upstream.
 
-    The first reactive write against ``upstreams.toml`` (the module's
-    docstring notes write paths were deferred; this slice is the scoped
-    exception for ``advertise_models``). On success:
+    On success:
 
     - the in-memory :class:`Upstream` is updated,
-    - ``upstreams.toml`` is rewritten atomically via
-      :func:`hal0.config.loader.save_upstreams_config`,
+    - the matching ``upstreams.toml`` row is rewritten atomically via
+      :func:`hal0.config.loader.save_upstreams_config` (auto-registered
+      upstreams with no TOML row get an in-memory-only update that resets
+      on restart — same contract ``set_advertise`` always had),
     - the per-upstream model cache (``app.state.upstream_models[name]``)
-      is punched so the next ``/api/upstreams`` and ``/v1/models``
-      request sees the change without an API restart,
+      is punched on visibility flips so the next ``/api/upstreams`` and
+      ``/v1/models`` request sees the change without an API restart,
     - the change is audit-logged.
 
-    Dispatch/routing to the upstream is unaffected — ``advertise_models``
-    is purely a catalog-visibility flag, not a routing flag.
+    ``advertise_models``/``model_filters`` are catalog-visibility knobs;
+    ``enabled`` is the routing kill-switch; the rest are structural.
     """
     upstreams = request.app.state.upstreams
     try:
@@ -164,22 +359,51 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
     if u is None:
         raise UpstreamNotFoundHTTP(f"upstream {name!r} not found", {"name": name})
 
-    if body.advertise_models is None:
+    # Only fields the caller actually sent — model_filters=null means
+    # "clear", so presence must be distinguished from an omitted field.
+    fields: dict[str, Any] = {
+        k: getattr(body, k) for k in body.model_fields_set if k in body.model_fields
+    }
+
+    # Composite, slot-kind, and container-backed remotes (slot_name set)
+    # get their structure from the slot lifecycle.
+    protected = name == COMPOSITE_UPSTREAM_NAME or u.kind == "slot" or bool(u.slot_name)
+    structural_requested = sorted(set(fields) & _STRUCTURAL_FIELDS)
+    if protected and structural_requested:
+        raise UpstreamProtectedHTTP(
+            f"upstream {name!r} is {'the composite' if name == COMPOSITE_UPSTREAM_NAME else 'slot-backed'}; "
+            f"structural fields are managed by the slot lifecycle",
+            details={"name": name, "fields": structural_requested},
+        )
+
+    if not fields:
         # Nothing to do — but echo the current state so a no-op PATCH
         # remains idempotent and useful as a probe.
         model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {})
         return _serialize_upstream(u, last_models=model_cache.get(name))
 
-    new_value = body.advertise_models
-    updated = upstreams.set_advertise(name, new_value)
+    if "model_filters" in fields and fields["model_filters"] is not None:
+        mf = fields["model_filters"]
+        if mf.is_empty():
+            fields["model_filters"] = None
+
+    try:
+        updated = upstreams.apply_persistent_patch(name, fields)
+    except ValidationError as exc:
+        raise UpstreamInvalidHTTP(
+            "invalid upstream configuration",
+            details={"name": name, "errors": _validation_summaries(exc)},
+        ) from exc
 
     # Punch the per-upstream model cache so the next /api/upstreams and
-    # /v1/models request reflects the toggle without an API restart.
+    # /v1/models request reflects visibility flips without an API restart.
     # The composite ``hal0`` upstream's module-level cache lives in
     # hal0.api and is unaffected by per-upstream flips.
     model_cache = getattr(request.app.state, "upstream_models", None)
-    if model_cache is not None and name in model_cache:
-        if new_value:
+    visibility_flip = {"advertise_models", "enabled"} & set(fields)
+    if model_cache is not None and name in model_cache and visibility_flip:
+        now_visible = updated.advertise_models and getattr(updated, "enabled", True)
+        if now_visible:
             # Re-enabling: drop the stale snapshot so the next call refetches.
             model_cache.pop(name, None)
         else:
@@ -190,10 +414,44 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
     _audit_log.info(
         "upstream.patch",
         name=name,
-        advertise_models=new_value,
+        fields=sorted(fields),
         source=request.client.host if request.client else None,
     )
     return _serialize_upstream(updated, last_models=(model_cache or {}).get(name))
+
+
+@router.delete("/upstreams/{name}")
+async def delete_upstream(name: str, request: Request) -> dict[str, Any]:
+    """Delete a remote upstream from the registry and ``upstreams.toml``.
+
+    The composite and slot-backed upstreams are protected. Credentials in
+    ``api.env`` are deliberately retained — deleting an upstream must never
+    destroy a secret (remove it via ``/api/secrets`` if truly unwanted).
+    """
+    upstreams = request.app.state.upstreams
+    try:
+        removed_from_toml = upstreams.remove_persistent(name)
+    except UpstreamNotFound as exc:
+        raise UpstreamNotFoundHTTP(str(exc), {"name": name}) from exc
+    except UpstreamProtected as exc:
+        raise UpstreamProtectedHTTP(str(exc), {"name": name}) from exc
+
+    model_cache = getattr(request.app.state, "upstream_models", None)
+    if model_cache is not None:
+        model_cache.pop(name, None)
+
+    _audit_log.info(
+        "upstream.deleted",
+        name=name,
+        removed_from_toml=removed_from_toml,
+        source=request.client.host if request.client else None,
+    )
+    return {
+        "ok": True,
+        "name": name,
+        "removed_from_toml": removed_from_toml,
+        "hint": "credentials in api.env are retained; remove via /api/secrets if unwanted",
+    }
 
 
 @router.post("/upstreams/{name}/test")

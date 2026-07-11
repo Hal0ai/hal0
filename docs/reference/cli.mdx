@@ -178,6 +178,29 @@ shows (and can move) the store path. `hal0 doctor models` audits the whole
 pipeline — dangling registry paths, unregistered files in the store, and the
 NPU/FLM store directory — and names the exact fix command for each finding.
 
+## `hal0 upstream` — external LLM providers
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `upstream list` | List configured upstreams (enabled/advertise/auth/filter summary). | `--json` |
+| `upstream show <name>` | Full detail for one upstream. | `--json` |
+| `upstream create <name>` | Register a remote provider (persists to `upstreams.toml`). | `--catalog`/`-c`, `--url`, `--auth-style`, `--auth-header`, `--auth-env`, `--timeout`, `--api-key`/`-k`, `--advertise-models/--hide-models`, `--enabled/--disabled` |
+| `upstream update <name>` | Partial update: settings, toggles, model filters. | `--url`, `--auth-style`, `--auth-header`, `--auth-env`, `--timeout`, `--advertise-models/--hide-models`, `--enabled/--disabled`, `--model`, `--include`, `--exclude`, `--clear-filters` |
+| `upstream delete <name>` | Remove a remote upstream (credential in `api.env` is retained). | `--force`/`-f` |
+| `upstream test <name>` | Probe reachability + auth; prints latency and model count. | — |
+| `upstream set-credentials <name>` | Write the provider's API key to `api.env` (hidden prompt). | `--key`, `--env-var` |
+
+`upstream create` with `--catalog openrouter` (or `anthropic`, `openai`,
+`google_ai_studio`, `ollama`) prefills the URL and auth style from the
+built-in provider catalog; `--api-key` chains the credential write in the
+same command. Model filters curate what the upstream advertises in
+`/v1/models`: `--include 'anthropic/*' --exclude '*:free'` (exclude wins;
+filtered-out models stay dispatchable by explicit name). `--enabled/--disabled`
+is the routing kill-switch — a disabled upstream is skipped by dispatch
+entirely. Slot-backed upstreams and the composite `hal0` entry are managed by
+the slot lifecycle and reject structural edits/deletion. See
+[Connect external providers](/docs/guides/connect-external-providers).
+
 ## Profiles and stacks — no CLI command
 
 <Aside type="caution">

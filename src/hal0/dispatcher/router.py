@@ -570,6 +570,16 @@ class Dispatcher:
                 # isn't being served anywhere right now.
                 upstream = None
                 registry_entry = None
+            if upstream is not None and not getattr(upstream, "enabled", True):
+                # Operator kill-switch: a disabled upstream behaves like an
+                # offline one — fall through rather than erroring.
+                log.info(
+                    "registry binding disabled; falling through",
+                    upstream=upstream.name,
+                    model=model_id,
+                )
+                upstream = None
+                registry_entry = None
             if registry_entry is not None and upstream is None:
                 # Explicit binding to a missing upstream — config error, not a
                 # silent fallthrough.  Mirrors haloai's UnknownUpstream raise.
@@ -1254,7 +1264,9 @@ class Dispatcher:
 
     def _upstreams_in_priority_order(self) -> list[Upstream]:
         try:
-            return list(self._upstreams.list())
+            # Disabled upstreams are invisible to routing (operator
+            # kill-switch). getattr-guard keeps cross-subtree stubs working.
+            return [u for u in self._upstreams.list() if getattr(u, "enabled", True)]
         except NotImplementedError:
             # Cross-subtree stub fallback.
             return []

@@ -24,16 +24,21 @@ import asyncio
 import json
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
 
 from hal0.config import paths as _paths
 from hal0.errors import Hal0Error
+from hal0.upstreams.filters import ModelFilters
+
+if TYPE_CHECKING:
+    from hal0.config.schema import UpstreamEntry
 
 log = structlog.get_logger(__name__)
 
@@ -69,6 +74,18 @@ class UpstreamNotFound(UpstreamError, KeyError):
 class UpstreamAlreadyExists(UpstreamError):
     code = "system.upstream_already_exists"
     status = 409
+
+
+class UpstreamProtected(UpstreamError):
+    """Raised when mutating the synthetic composite or a slot-backed upstream."""
+
+    code = "system.upstream_protected"
+    status = 400
+
+
+# Name of the synthetic composite upstream auto-registered at startup for
+# /v1/models aggregation. Never authored in TOML, never CRUD-mutable.
+COMPOSITE_UPSTREAM_NAME = "hal0"
 
 
 # ── Upstream dataclass ────────────────────────────────────────────────────────
@@ -121,6 +138,76 @@ class Upstream:
     backoff_steps: tuple[float, ...] = field(default_factory=lambda: TIER1_BACKOFF_STEPS)
     """TIER1: per-slot probe interval steps.  Override via hardware.json."""
 
+    enabled: bool = True
+    """When False the dispatcher and /v1/models skip this upstream entirely;
+    config and credentials are retained (kill-switch, not deletion)."""
+
+    model_filters: ModelFilters | None = None
+    """Optional /v1/models advertising filters.  Dispatch is unfiltered."""
+
+
+# ── Config-layer ↔ runtime conversion ─────────────────────────────────────────
+
+
+def _filters_to_runtime(value: Any) -> ModelFilters | None:
+    """Normalise any model_filters representation to a runtime ModelFilters.
+
+    Accepts UpstreamModelFilters (pydantic), plain dicts, ModelFilters, or
+    None. Empty filters collapse to None (no-filter fast path).
+    """
+    if value is None:
+        return None
+    if isinstance(value, ModelFilters):
+        return None if value.is_empty() else value
+    if not isinstance(value, dict):
+        value = value.model_dump()
+    mf = ModelFilters.from_lists(
+        models=value.get("models"),
+        include=value.get("include"),
+        exclude=value.get("exclude"),
+    )
+    return None if mf.is_empty() else mf
+
+
+def _filters_to_config(value: Any) -> dict[str, list[str]] | None:
+    """Normalise any model_filters representation to entry-dump shape."""
+    mf = _filters_to_runtime(value)
+    if mf is None:
+        return None
+    return {"models": list(mf.models), "include": list(mf.include), "exclude": list(mf.exclude)}
+
+
+def _fields_for_entry(fields: dict[str, Any]) -> dict[str, Any]:
+    out = dict(fields)
+    if "model_filters" in out:
+        out["model_filters"] = _filters_to_config(out["model_filters"])
+    return out
+
+
+def _fields_for_dataclass(fields: dict[str, Any]) -> dict[str, Any]:
+    out = dict(fields)
+    if "model_filters" in out:
+        out["model_filters"] = _filters_to_runtime(out["model_filters"])
+    return out
+
+
+def upstream_from_entry(entry: UpstreamEntry) -> Upstream:
+    """Build the runtime Upstream for a validated UpstreamEntry."""
+    return Upstream(
+        name=entry.name,
+        kind=entry.kind,
+        url=entry.url,
+        auth_style=entry.auth_style,
+        auth_header=entry.auth_header,
+        auth_value_env=entry.auth_value_env,
+        timeout_seconds=entry.timeout_seconds,
+        slot_name=entry.slot_name,
+        warmup_strategy=entry.warmup_strategy,
+        advertise_models=entry.advertise_models,
+        enabled=entry.enabled,
+        model_filters=_filters_to_runtime(entry.model_filters),
+    )
+
 
 # ── Warmup state ──────────────────────────────────────────────────────────────
 
@@ -162,6 +249,10 @@ class UpstreamRegistry:
         # TIER1: per-slot backoff overrides loaded from hardware.json
         self._slot_overrides: dict[str, dict[str, Any]] = {}
         self._client: httpx.AsyncClient | None = None
+        # Serialises every load→mutate→save of upstreams.toml so concurrent
+        # reactive writes can't lose updates (the atomic rename in
+        # write_toml_atomic prevents torn files, not lost updates).
+        self._persist_lock = threading.Lock()
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -212,22 +303,36 @@ class UpstreamRegistry:
     def set_advertise(self, name: str, value: bool, *, persist: bool = True) -> Upstream:
         """Flip an upstream's ``advertise_models`` flag and persist atomically.
 
-        Reads ``upstreams.toml``, updates the matching entry's
-        ``advertise_models`` field, and writes the file back via
-        :func:`hal0.config.loader.save_upstreams_config` (which uses
-        ``write_toml_atomic`` for a crash-safe rename). The in-memory
-        ``Upstream`` is also updated so the next ``/v1/models`` request
-        reflects the change without an API restart.
+        Thin wrapper over :meth:`apply_persistent_patch` — see there for the
+        persistence contract.
+        """
+        return self.apply_persistent_patch(name, {"advertise_models": value}, persist=persist)
 
-        Auto-registered upstreams (e.g. slot-backed entries that aren't
-        authored in ``upstreams.toml``) have no on-disk row to patch — for
-        those the in-memory value is updated and the on-disk config is left
-        untouched. The flag stays at its in-memory value for the lifetime
-        of the process; on restart the default (``True``) is re-applied.
+    def apply_persistent_patch(
+        self, name: str, fields: dict[str, Any], *, persist: bool = True
+    ) -> Upstream:
+        """Merge ``fields`` into the named upstream and persist atomically.
+
+        Reads ``upstreams.toml``, applies ``fields`` to the matching entry
+        (re-validated through :class:`~hal0.config.schema.UpstreamEntry`),
+        and writes the file back via
+        :func:`hal0.config.loader.save_upstreams_config` (``write_toml_atomic``
+        gives a crash-safe rename). Only after the save succeeds is the
+        in-memory :class:`Upstream` updated — a failed write leaves memory
+        consistent with disk (TOML stays canonical).
+
+        ``fields`` uses config-layer values; ``model_filters`` may be an
+        :class:`~hal0.config.schema.UpstreamModelFilters`, a plain dict, or
+        ``None`` (clears filters). An empty filters object also clears.
+
+        Auto-registered upstreams (slot-backed entries and the synthetic
+        composite, which aren't authored in ``upstreams.toml``) have no
+        on-disk row to patch — for those the in-memory value is updated and
+        the on-disk config is left untouched; the value resets on restart.
 
         Args:
             name: Upstream name.
-            value: New ``advertise_models`` value.
+            fields: Field-name → new-value mapping.
             persist: When ``True`` (default), atomically write
                 ``upstreams.toml``. Set to ``False`` for tests that don't
                 want filesystem side-effects.
@@ -236,6 +341,7 @@ class UpstreamRegistry:
 
         Raises:
             UpstreamNotFound: If ``name`` is not registered.
+            ValidationError: If the patched entry fails schema validation.
         """
         cur = self._upstreams.get(name)
         if cur is None:
@@ -249,24 +355,113 @@ class UpstreamRegistry:
                 load_upstreams_config,
                 save_upstreams_config,
             )
+            from hal0.config.schema import UpstreamEntry
 
-            cfg = load_upstreams_config()
-            for entry in cfg.upstream:
-                if entry.name == name:
-                    entry.advertise_models = value
-                    save_upstreams_config(cfg)
-                    break
-            # else: auto-registered upstream, not on disk — in-memory only.
+            with self._persist_lock:
+                cfg = load_upstreams_config()
+                for i, entry in enumerate(cfg.upstream):
+                    if entry.name == name:
+                        data = entry.model_dump()
+                        data.update(_fields_for_entry(fields))
+                        cfg.upstream[i] = UpstreamEntry.model_validate(data)
+                        save_upstreams_config(cfg)
+                        break
+                # else: auto-registered upstream, not on disk — in-memory only.
 
-        merged = replace(cur, advertise_models=value)
+        merged = replace(cur, **_fields_for_dataclass(fields))
         self._upstreams[name] = merged
         log.info(
-            "upstream.set_advertise",
+            "upstream.patch",
             name=name,
-            advertise_models=value,
+            fields=sorted(fields),
             persisted=persist,
         )
         return merged
+
+    def create_persistent(self, entry: UpstreamEntry, *, persist: bool = True) -> Upstream:
+        """Append a new upstream to ``upstreams.toml`` and register it.
+
+        Guards: the composite name and ``kind="slot"`` entries are rejected —
+        slot upstreams are owned by SlotManager, not this surface.
+
+        Raises:
+            UpstreamProtected: Reserved name or slot kind.
+            UpstreamAlreadyExists: Name collision in registry or TOML.
+        """
+        if entry.name == COMPOSITE_UPSTREAM_NAME:
+            raise UpstreamProtected(
+                f"upstream name {entry.name!r} is reserved", {"name": entry.name}
+            )
+        if entry.kind == "slot":
+            raise UpstreamProtected(
+                "slot upstreams are managed by the slot lifecycle, not created here",
+                {"name": entry.name},
+            )
+        if entry.name in self._upstreams:
+            raise UpstreamAlreadyExists(
+                f"upstream {entry.name!r} already exists", {"name": entry.name}
+            )
+
+        if persist:
+            from hal0.config.loader import (
+                load_upstreams_config,
+                save_upstreams_config,
+            )
+
+            with self._persist_lock:
+                cfg = load_upstreams_config()
+                if any(e.name == entry.name for e in cfg.upstream):
+                    raise UpstreamAlreadyExists(
+                        f"upstream {entry.name!r} already exists in upstreams.toml",
+                        {"name": entry.name},
+                    )
+                cfg.upstream.append(entry)
+                save_upstreams_config(cfg)
+
+        upstream = upstream_from_entry(entry)
+        self.add(upstream)
+        return upstream
+
+    def remove_persistent(self, name: str, *, persist: bool = True) -> bool:
+        """Delete an upstream from ``upstreams.toml`` and the registry.
+
+        Credentials referenced via ``auth_value_env`` are deliberately left
+        in ``api.env`` — deleting an upstream must never destroy a secret.
+
+        Returns True when a TOML row was removed (False for auto-registered
+        upstreams that only existed in memory).
+
+        Raises:
+            UpstreamNotFound: If ``name`` is not registered.
+            UpstreamProtected: Composite or slot-backed upstream.
+        """
+        cur = self._upstreams.get(name)
+        if cur is None:
+            raise UpstreamNotFound(f"upstream {name!r} not found", {"name": name})
+        # Composite, slot-kind, AND container-backed remotes (kind="remote"
+        # with slot_name set) are all owned by the slot lifecycle.
+        if name == COMPOSITE_UPSTREAM_NAME or cur.kind == "slot" or cur.slot_name:
+            raise UpstreamProtected(
+                f"upstream {name!r} is protected and cannot be deleted", {"name": name}
+            )
+
+        removed_from_toml = False
+        if persist:
+            from hal0.config.loader import (
+                load_upstreams_config,
+                save_upstreams_config,
+            )
+
+            with self._persist_lock:
+                cfg = load_upstreams_config()
+                kept = [e for e in cfg.upstream if e.name != name]
+                if len(kept) != len(cfg.upstream):
+                    cfg.upstream = kept
+                    save_upstreams_config(cfg)
+                    removed_from_toml = True
+
+        self.remove(name)
+        return removed_from_toml
 
     def in_priority_order(self) -> list[Upstream]:
         """Sort order for dispatcher fallback: slots first, then remotes."""
