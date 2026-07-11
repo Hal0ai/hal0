@@ -406,7 +406,7 @@ GATED_TOOLS: frozenset[str] = frozenset(
 #   model_swap → /api/slots/{n}/model   /api/slots/{n}/swap           name diff
 #   model_pull → /api/models/pull       /api/models/{id}/pull         id-in-path
 #   capability_set → /api/capabilities  /api/capabilities/{slot}/{c}  composite key
-#   provider_credential_write → /api/providers/{n}/credentials  NO LIVE ROUTE
+#   provider_credential_write → /api/providers/{n}/credentials  live (providers.py)
 #   version_info → /api/version         /api/status                   name diff
 
 _REST_MAP: dict[str, tuple[str, str]] = {
