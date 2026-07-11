@@ -38,9 +38,9 @@
   --ok:           #6fcf97;
   --ok-soft:      rgba(111, 207, 151, 0.10);
   --ok-line:      rgba(111, 207, 151, 0.30);
-  --warn:         #e8b94e;
-  --warn-soft:    rgba(232, 185, 78, 0.10);
-  --warn-line:    rgba(232, 185, 78, 0.30);
+  --warn:         #f2792b;
+  --warn-soft:    rgba(242, 121, 43, 0.10);
+  --warn-line:    rgba(242, 121, 43, 0.30);
   --err:          #ef6b6b;
   --err-soft:     rgba(239, 107, 107, 0.10);
   --err-line:     rgba(239, 107, 107, 0.30);
@@ -1774,7 +1774,7 @@ a { color: inherit; text-decoration: none; }
   opacity: 0.9;
 }
 .slot.slot--warming::before {
-  background: var(--warming, #f2792b);
+  background: var(--warn);
   opacity: 0.9;
 }
 .slot.slot--error::before {

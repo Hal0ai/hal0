@@ -26,10 +26,7 @@
   --comfy-line: rgba(229, 184, 79, 0.34);
   --comfy-bg: #1b1605;
   --comfy-glow: rgba(229, 184, 79, 0.2);
-  /* warming / pressure → a clear orange, far enough from the yellow accent */
-  --warn: #f2792b;
-  --warn-soft: rgba(242, 121, 43, 0.12);
-  --warn-line: rgba(242, 121, 43, 0.38);
+  /* --warn/--warn-soft/--warn-line inherit from dashboard.css (canonical #f2792b) */
   font-family: var(--geist);
   color: var(--fg);
 }
