@@ -799,6 +799,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # until the operator clicks each slot.
     await slot_manager.reconcile_unconfigured_slots()
 
+    # Reconcile the FLM-trio shadow slots (flm-stt / flm-embed) to canon:
+    # rename legacy stt-npu/embed-npu records, normalize device/profile/port/
+    # served_by/type, and seed any missing shadow so the slots page + trio
+    # dispatch are coherent on fresh installs and after upgrades. No-op when
+    # there is no container NPU anchor; best-effort so it never blocks startup.
+    try:
+        await slot_manager.reconcile_npu_trio_slots()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.reconcile_trio_failed", error=str(exc))
+
     # Idle monitor — demotes READY → IDLE after the configured timeout
     # (so the dashboard distinguishes "warm but quiet" from "warm and
     # actively serving") AND hard-evicts slots idle past their TTL to free
@@ -1045,7 +1055,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # one static port; chat routes through the slot upstream like any
     # other slot, while v1.py's STT/embed routes post the two shadow
     # roles straight to the container when they detect an enabled
-    # ``stt-npu`` / ``embed-npu`` slot record. Degrades cleanly when the
+    # ``flm-stt`` / ``flm-embed`` slot record. Degrades cleanly when the
     # container isn't dispatchable (NpuTrioNotAvailable raised at
     # dispatch time so the user sees a clear envelope).
     try:

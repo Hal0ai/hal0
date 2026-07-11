@@ -45,7 +45,7 @@ _DEFAULT_TIMEOUT_S = 120.0
 
 class NpuTrioNotAvailable(Hal0Error):
     """The NPU container isn't dispatchable, so the trio's shadow roles
-    (``stt-npu`` / ``embed-npu``) have no backend to forward to.
+    (``flm-stt`` / ``flm-embed``) have no backend to forward to.
 
     Surfaced when the ``npu`` slot config is missing/not a container NPU
     slot, has no port, or isn't in the dispatchable ready-set (#696:

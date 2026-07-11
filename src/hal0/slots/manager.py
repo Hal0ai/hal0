@@ -108,11 +108,18 @@ SEEDED_SLOTS: tuple[str, ...] = (
 
 #: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
 #: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
-#: ride the same coresident FLM process as the NPU chat anchor — which is
-#: the separate ``npu`` slot, NOT listed here. ``agent`` was previously
+#: ride the same coresident FLM process as the NPU chat anchor — the
+#: separate ``flm`` slot, NOT listed here. ``agent`` was previously
 #: (wrongly) in this set; it is a GPU chat-role slot and moved to
 #: SEEDED_SLOTS in #679. Opt-in at Pro+ bundle tier (ADR-0008 §5).
-NPU_SEEDED_SLOTS: tuple[str, ...] = ("stt-npu", "embed-npu")
+#:
+#: Named ``{anchor}-stt`` / ``{anchor}-embed`` (anchor is ``flm``) to match
+#: the occupancy-pane virtual sub-cards (:mod:`hal0.api.routes.npu` synthesises
+#: ``s.name + "-stt"``) and the ``_touch_npu_shadow_count`` activity counters
+#: (:mod:`hal0.api.routes.v1`), which both key off that convention. The legacy
+#: ``stt-npu`` / ``embed-npu`` names never matched either surface and are
+#: migrated forward by :meth:`SlotManager.reconcile_npu_trio_slots`.
+NPU_SEEDED_SLOTS: tuple[str, ...] = ("flm-stt", "flm-embed")
 
 #: Back-compat alias map: old slot names → canonical new names.
 #: Aliases resolve transparently for dispatch and config lookup but are
@@ -1500,7 +1507,7 @@ class SlotManager:
         """Return the seeded slot list, optionally including the NPU trio.
 
         :data:`SEEDED_SLOTS` lands on every hal0 install. The NPU trio
-        (``agent`` / ``stt-npu`` / ``embed-npu``) only seeds when the
+        shadows (``flm-stt`` / ``flm-embed``) only seed when the
         FastFlowLM ``.deb`` is installed (``shutil.which('flm')``
         truthy). Per plan §10.2 + §4.2 + ADR-0008 §5.
 
@@ -2154,6 +2161,154 @@ class SlotManager:
                     "slot.reconcile_unconfigured_failed",
                     extra={"slot": slot_name, "error": str(exc)},
                 )
+
+    #: FLM-trio shadow spec: (name suffix, slot type, anchor ``[npu]`` toggle
+    #: key, default model id). Drives :meth:`reconcile_npu_trio_slots`.
+    _TRIO_SHADOW_SPEC: tuple[tuple[str, str, str, str], ...] = (
+        ("stt", "transcription", "asr", "whisper-v3:turbo"),
+        ("embed", "embedding", "embed", "embed-gemma:300m"),
+    )
+
+    async def reconcile_npu_trio_slots(self) -> int:
+        """Startup pass: reconcile the FLM-trio shadow slots to canon.
+
+        The NPU runs one ``flm serve`` container (the ``device=npu type=llm``
+        anchor, canonically ``flm``) that also serves transcription +
+        embedding. Those two modalities surface as *shadow* slot records
+        (``{anchor}-stt`` / ``{anchor}-embed``) so they show on the slots
+        page and gate trio dispatch (:func:`hal0.api.routes.v1._is_npu_trio_request`).
+        This pass keeps them coherent on every API start — for fresh installs
+        (anchor present, shadows never seeded), existing installs (legacy
+        names / drifted fields), and post-upgrade:
+
+          1. **Legacy rename.** ``stt-npu`` / ``embed-npu`` TOMLs — the old
+             naming that matched neither the occupancy pane's ``s.name+"-stt"``
+             synthesis nor the ``_touch_npu_shadow_count`` counters, and that
+             (ending ``-npu``, not ``-stt``/``-embed``) even leaked in as a
+             standalone occupancy tile — are moved to ``{anchor}-stt`` /
+             ``{anchor}-embed``. Skipped (and logged) when the canon target
+             already exists, so operator state is never clobbered.
+          2. **Ensure + normalize.** Each shadow is created if missing and its
+             structural fields are forced to the coresident shape: ``device=npu``,
+             ``profile=flm`` (so ``slot_view`` lifts ``device_class=npu`` — a
+             shadow without a resolvable npu profile makes the edit drawer take
+             the wrong branch, per the flm-satellite-slots-fix incident),
+             ``served_by=<anchor>``, ``port=<anchor port>``, and the trio
+             ``type``. A newly-created shadow's ``enabled`` mirrors the anchor's
+             ``[npu]`` toggle (``asr`` / ``embed``) so trio dispatch works out
+             of the box; an existing shadow's ``enabled`` and ``model.default``
+             are the operator's and left untouched.
+
+        No-op when there is no container NPU anchor. Best-effort: per-shadow
+        failures are logged and never block startup.
+
+        Returns the number of shadow records created or rewritten.
+        """
+        import tomllib
+
+        from hal0.dispatcher._npu_common import is_container_npu_cfg
+
+        # Locate the container NPU anchor (type=llm, device=npu). Mirrors
+        # CapabilityOrchestrator._set_flm_modality's scan.
+        try:
+            configs = await self.iter_configs()
+        except Exception as exc:
+            log.warning("slot.reconcile_trio_iter_failed", extra={"error": str(exc)})
+            return 0
+        anchor_cfg: dict[str, Any] | None = None
+        for cfg in configs:
+            if cfg.get("type") == "llm" and cfg.get("device") == "npu":
+                anchor_cfg = cfg
+                break
+        if anchor_cfg is None or not is_container_npu_cfg(anchor_cfg):
+            return 0
+        anchor_name = str(anchor_cfg.get("name", "")).strip()
+        anchor_port = anchor_cfg.get("port")
+        if not anchor_name or not anchor_port:
+            return 0
+        npu_tbl = anchor_cfg.get("npu")
+        if not isinstance(npu_tbl, dict):
+            npu_tbl = {}
+
+        changed = 0
+        slots_dir = paths.slots_config_dir()
+        for suffix, slot_type, npu_field, default_model in self._TRIO_SHADOW_SPEC:
+            canon = f"{anchor_name}-{suffix}"
+            legacy = f"{suffix}-npu"  # stt-npu / embed-npu
+            canon_path = slots_dir / f"{canon}.toml"
+            legacy_path = slots_dir / f"{legacy}.toml"
+            try:
+                # 1. Legacy rename — only when the canon target is free.
+                if legacy_path.exists():
+                    if canon_path.exists():
+                        log.warning(
+                            "slot.trio_shadow_rename_skipped",
+                            extra={
+                                "legacy": legacy,
+                                "canon": canon,
+                                "reason": "canon target already exists",
+                            },
+                        )
+                    else:
+                        legacy_raw = tomllib.loads(legacy_path.read_text(encoding="utf-8"))
+                        legacy_raw["name"] = canon
+                        write_slot_toml(canon_path, legacy_raw)
+                        with contextlib.suppress(FileNotFoundError):
+                            legacy_path.unlink()
+                        self._invalidate_cfg_cache(legacy)
+                        self._invalidate_cfg_cache(canon)
+                        log.info(
+                            "slot.trio_shadow_renamed",
+                            extra={"from": legacy, "to": canon},
+                        )
+
+                # 2. Ensure + normalize the canon shadow record. After a rename
+                #    canon_path now exists, so the same iteration normalizes it.
+                if canon_path.exists():
+                    raw = tomllib.loads(canon_path.read_text(encoding="utf-8"))
+                    desired = {
+                        "device": "npu",
+                        "profile": "flm",
+                        "served_by": anchor_name,
+                        "port": int(anchor_port),
+                        "type": slot_type,
+                    }
+                    if any(raw.get(k) != v for k, v in desired.items()):
+                        raw.update(desired)
+                        raw.setdefault("name", canon)
+                        write_slot_toml(canon_path, raw)
+                        self._invalidate_cfg_cache(canon)
+                        changed += 1
+                        log.info("slot.trio_shadow_normalized", extra={"slot": canon})
+                    continue
+
+                # 3. Missing → create it. ``enabled`` mirrors the anchor toggle
+                #    so trio dispatch is live when the modality is on.
+                enabled = bool(npu_tbl.get(npu_field))
+                cfg_dict = {
+                    "name": canon,
+                    "port": int(anchor_port),
+                    "device": "npu",
+                    "backend": "flm",
+                    "provider": "flm",
+                    "profile": "flm",
+                    "served_by": anchor_name,
+                    "type": slot_type,
+                    "enabled": enabled,
+                    "model": {"default": default_model},
+                }
+                await self.create(canon, cfg_dict)
+                changed += 1
+                log.info(
+                    "slot.trio_shadow_created",
+                    extra={"slot": canon, "enabled": enabled},
+                )
+            except Exception as exc:
+                log.warning(
+                    "slot.reconcile_trio_shadow_failed",
+                    extra={"slot": canon, "error": str(exc)},
+                )
+        return changed
 
     async def _persist_model_default(self, slot_name: str, model_id: str) -> None:
         """Write ``[model] default = <model_id>`` into the slot's TOML.
