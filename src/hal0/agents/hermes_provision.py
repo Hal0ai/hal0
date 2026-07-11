@@ -214,6 +214,15 @@ def _stub(name: str) -> Callable[[PhaseContext], PhaseResult]:
 # requirements.txt and the wrapper script. The constants are exposed
 # at module scope so tests can monkey-patch them onto a tmp path.
 PYTHON_MIN = (3, 11)
+# Exclusive cap for the hermes venv interpreter, mirroring hermes-agent's
+# wheel metadata: every release since 0.16.0 pins `requires-python
+# >=3.11,<3.14`. On a >=3.14 interpreter pip filters those wheels out and
+# falls back to 0.15.2 — whose wheel is broken (imports
+# hermes_cli.dashboard_auth, ships without the subpackage) — so 3.14 must be
+# rejected, not merely deprioritized (#1248). Single source of truth for the
+# resolver, the preflight message, and the stale-venv rebuild; relax it here
+# when upstream ships 3.14 support (#1249).
+PYTHON_MAX_EXCLUSIVE = (3, 14)
 MIN_FREE_GIB = 4
 DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/status"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
@@ -474,9 +483,10 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 
     Documented blockers (plan §4):
 
-    * Python ≥ 3.11 available — bootstrap shells out to a venv with
-      explicit Python; we verify the running interpreter qualifies so
-      we can re-use ``sys.executable`` instead of hunting PATH.
+    * A hermes-compatible Python (3.11-3.13) resolvable — the venv is
+      built with an explicit interpreter, and hermes-agent wheels cap
+      ``requires-python <3.14``, so \"≥ 3.11\" alone is not enough
+      (Ubuntu 26.04 ships 3.14 only, #1248).
     * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
       reach hal0 are useless. Catch it now instead of during config_write.
     * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
@@ -491,11 +501,13 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 
     py_version = sys.version_info[:3]
     details["python_version"] = ".".join(str(p) for p in py_version)
-    if py_version < PYTHON_MIN:
-        failures.append(
-            f"python {'.'.join(str(p) for p in PYTHON_MIN)}+ required, "
-            f"have {details['python_version']} — run `apt install python3.11`",
-        )
+    # What matters is the VENV interpreter, not the running one — resolve it
+    # the same way the install phase will, so a 3.14-only host fails here
+    # with a real explanation instead of three phases later inside pip.
+    venv_python = _resolve_supported_python()
+    details["venv_python"] = venv_python
+    if venv_python is None:
+        failures.append(_python_range_error())
 
     rc = ctx.io.http_get(DAEMON_HEALTH_URL)
     details["daemon_http_status"] = rc
@@ -580,18 +592,41 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 # ── Phase B: install ────────────────────────────────────────────────────────
 
 
-def _resolve_python311(prober: Callable[[str], str | None] = shutil.which) -> str | None:
-    """Find a python3.11 interpreter; fall back to the running one when it qualifies.
+def _python_range_error() -> str:
+    """Actionable failure text for hosts with no hermes-compatible Python."""
+    lo = ".".join(str(p) for p in PYTHON_MIN)
+    hi = f"{PYTHON_MAX_EXCLUSIVE[0]}.{PYTHON_MAX_EXCLUSIVE[1] - 1}"
+    cap = ".".join(str(p) for p in PYTHON_MAX_EXCLUSIVE)
+    return (
+        f"no Python {lo}-{hi} interpreter found — hermes-agent wheels pin "
+        f"`requires-python <{cap}`, so the hermes venv needs {lo}-{hi}. "
+        f"Install one and re-run, e.g. `apt install python{hi} python{hi}-venv`; "
+        f"on distros that ship only {cap}+ (Ubuntu 26.04) use the deadsnakes "
+        f"PPA or `uv python install {hi}`"
+    )
 
-    Prefers an explicit ``python3.11`` on PATH so the venv pins minor
-    version regardless of what ``sys.executable`` is. Falls back to
-    ``sys.executable`` only when the running interpreter is itself
-    3.11+ — keeps tests usable on Python 3.12+ CI shards.
+
+def _resolve_supported_python(
+    prober: Callable[[str], str | None] = shutil.which,
+    *,
+    running: tuple[int, int] | None = None,
+) -> str | None:
+    """Find an interpreter in hermes-agent's supported range, newest first.
+
+    Probes explicit ``python3.13`` → ``python3.11`` binaries on PATH so the
+    venv pins its minor version regardless of what ``sys.executable`` is.
+    Falls back to the running interpreter only when it is itself inside the
+    range — NOT merely ``>= 3.11``: on a Python-3.14-only host (Ubuntu 26.04)
+    the old fallback built the venv on 3.14, where pip filters out every
+    hermes-agent 0.16+ wheel (``requires-python <3.14``) and resolution
+    lands on the broken 0.15.2 build (#1248).
     """
-    explicit = prober("python3.11")
-    if explicit:
-        return explicit
-    if sys.version_info[:2] >= PYTHON_MIN:
+    for minor in range(PYTHON_MAX_EXCLUSIVE[1] - 1, PYTHON_MIN[1] - 1, -1):
+        explicit = prober(f"python3.{minor}")
+        if explicit:
+            return explicit
+    current = running if running is not None else sys.version_info[:2]
+    if PYTHON_MIN <= current < PYTHON_MAX_EXCLUSIVE:
         return sys.executable
     return None
 
@@ -600,23 +635,47 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
+def _venv_python_minor(venv: Path) -> tuple[int, int] | None:
+    """Minor version of an existing venv, read from its ``lib/pythonX.Y`` dir.
+
+    Filesystem-only on purpose — the venv may be too broken to execute
+    (that's exactly the case we're probing for). ``None`` when the layout
+    is unrecognizable; callers should treat that as \"leave it alone\".
+    """
+    for entry in sorted(venv.glob("lib/python3.*")):
+        try:
+            major, minor = entry.name.removeprefix("python").split(".", 1)
+            return (int(major), int(minor))
+        except ValueError:
+            continue
+    return None
+
+
 def _install_venv(
     venv: Path,
     requirements: Path,
     *,
     runner: Any = subprocess,
-    python_resolver: Callable[[], str | None] = _resolve_python311,
+    python_resolver: Callable[[], str | None] = _resolve_supported_python,
 ) -> None:
     """Create the venv at ``venv`` and install ``requirements`` into it.
 
-    Two-step: ``python3.11 -m venv`` then ``pip install -r``. We don't
+    Two-step: ``python3.x -m venv`` then ``pip install -r``. We don't
     use ``uv`` here to keep the dependency footprint zero — the
     runtime venv is small and pip is universally available.
     """
     py = python_resolver()
     if py is None:
-        raise RuntimeError("no python 3.11 interpreter found on PATH")
+        raise RuntimeError(_python_range_error())
     venv.parent.mkdir(parents=True, exist_ok=True)
+    existing_minor = _venv_python_minor(venv) if venv.exists() else None
+    if existing_minor is not None and not (PYTHON_MIN <= existing_minor < PYTHON_MAX_EXCLUSIVE):
+        # A previous run built this venv on an unsupported interpreter (the
+        # pre-guard fallback happily used 3.14). pip-installing into it can
+        # never converge — every supported hermes-agent wheel is filtered out
+        # by requires-python — so rebuild on the resolved interpreter. Venv
+        # holds packages only; $HERMES_HOME state is untouched.
+        shutil.rmtree(venv)
     if not venv.exists():
         runner.run([py, "-m", "venv", str(venv)], check=True)  # nosec B603
     pip = _venv_python(venv)
