@@ -525,7 +525,10 @@ class TestApplyPersistentPatch:
 
         merged = r.apply_persistent_patch(
             "openrouter",
-            {"enabled": False, "model_filters": {"include": ["anthropic/*"], "exclude": ["*:free"]}},
+            {
+                "enabled": False,
+                "model_filters": {"include": ["anthropic/*"], "exclude": ["*:free"]},
+            },
         )
         assert merged.enabled is False
         assert merged.model_filters is not None
@@ -563,9 +566,11 @@ class TestApplyPersistentPatch:
             r.apply_persistent_patch("ghost", {"enabled": False})
 
     def test_invalid_patch_rejected_and_memory_untouched(self, tmp_hal0_home: str) -> None:
+        from pydantic import ValidationError
+
         _write_upstreams_toml(_OPENROUTER_TOML)
         r = _registry_with_openrouter()
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             r.apply_persistent_patch("openrouter", {"auth_style": "basic"})
         assert r.get("openrouter").auth_style == "bearer"  # type: ignore[union-attr]
 

@@ -40,19 +40,39 @@ Tool catalog (ADR-0004 §4)
 
 Autonomous read::
 
-    slot_list, slot_status, model_list, hardware_probe, logs_tail,
-    capability_list, provider_list, version_info
+    slot_list, slot_status, slot_metrics, slot_capacity,
+    model_list, model_show, model_scan, model_scan_preview,
+    model_catalogue, model_update_check, model_pulls_list,
+    model_store, hardware_probe, logs_tail,
+    capability_list, provider_list, version_info,
+    stack_list, stack_status, profile_list, profile_status,
+    profile_export, upstream_list,
+    settings_get, settings_schema, settings_apply_plan,
+    # Host-introspection probes (issue #237)
+    gpu_target_version, npu_status, env_report, model_store_probe
 
 Autonomous write::
 
-    model_swap, memory_add, memory_search, memory_list,
+    model_swap, model_assign, model_edit,
+    slot_load, slot_unload, slot_edit,
+    settings_reload,
+    memory_add, memory_search, memory_list,
     memory_delete (when len(ids) == 1)
 
 Gated (destructive — enqueued for owner approval)::
 
-    model_pull, model_delete, slot_create, slot_delete, slot_restart,
+    model_pull, model_delete, model_register, model_add,
+    model_store_set, model_store_migrate, model_update,
+    slot_create, slot_delete, slot_restart,
     capability_set, config_write, provider_credential_write,
-    memory_delete (when len(ids) > 1)
+    memory_delete (when len(ids) > 1),
+    # Profile CRUD (create/update/import/delete)
+    profile_create, profile_update, profile_import, profile_delete,
+    # Stack CRUD (create/update/apply/import/export/snapshot/delete)
+    stack_create, stack_update, stack_apply, stack_import,
+    stack_export, stack_snapshot, stack_delete,
+    # Logs gated for security (MED-1)
+    logs_tail
 
 The memory_* tools are delegates that forward into
 :mod:`hal0.mcp.memory` so we have a single tool surface per server
@@ -313,7 +333,7 @@ GATED_TOOLS: frozenset[str] = frozenset(
 #   model_swap → /api/slots/{n}/model   /api/slots/{n}/swap           name diff
 #   model_pull → /api/models/pull       /api/models/{id}/pull         id-in-path
 #   capability_set → /api/capabilities  /api/capabilities/{slot}/{c}  composite key
-#   provider_credential_write → /api/providers/{n}/credentials  NO LIVE ROUTE
+#   provider_credential_write → /api/providers/{n}/credentials  live (providers.py)
 #   version_info → /api/version         /api/status                   name diff
 
 _REST_MAP: dict[str, tuple[str, str]] = {

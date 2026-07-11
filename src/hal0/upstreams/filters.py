@@ -22,11 +22,11 @@ This module must stay import-light (stdlib only) — it is shared by the
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
-from typing import Iterable, Sequence
 
-__all__ = ["ModelFilters", "is_advertised", "apply_filters"]
+__all__ = ["ModelFilters", "apply_filters", "is_advertised"]
 
 
 @dataclass(frozen=True)

@@ -438,7 +438,9 @@ class UpstreamRegistry:
         cur = self._upstreams.get(name)
         if cur is None:
             raise UpstreamNotFound(f"upstream {name!r} not found", {"name": name})
-        if name == COMPOSITE_UPSTREAM_NAME or cur.kind == "slot":
+        # Composite, slot-kind, AND container-backed remotes (kind="remote"
+        # with slot_name set) are all owned by the slot lifecycle.
+        if name == COMPOSITE_UPSTREAM_NAME or cur.kind == "slot" or cur.slot_name:
             raise UpstreamProtected(
                 f"upstream {name!r} is protected and cannot be deleted", {"name": name}
             )
