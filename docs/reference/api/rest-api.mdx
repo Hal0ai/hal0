@@ -79,6 +79,12 @@ See [Services](/docs/operate/services) for the operator-facing guide (registry, 
 |---|---|
 | `GET /api/meta/enums` | The canonical device/backend/capability taxonomy in one document — devices, legacy/selectable backends, device classes, slot types, runtime families, model capabilities + aliases, model backends, curated model tags, and the backend↔device translation maps. Weak version-keyed `ETag` + `If-None-Match` → `304`; `Cache-Control: public, max-age=3600`. |
 
+### `/api/models` — FLM (NPU) repo detection
+
+| Method & path | Purpose |
+|---|---|
+| `POST /api/models/inspect` | Inspect a HuggingFace repo for pullable variants. Now also detects the FastFlowLM (NPU) repo shape — a `config.json` + tokenizer + an `…nx`-suffixed NPU-quant weight directory (e.g. `model.q4nx`) — and surfaces one whole-repo variant flagged `flm`, routed through the `flm pull` path instead of the GGUF/safetensors path. Detection is shape-based (requires the `nx` weight blob), so a plain safetensors/GGUF repo is never misread as FLM. |
+
 ### `/api/profiles` — portable export/import
 
 | Method & path | Purpose |

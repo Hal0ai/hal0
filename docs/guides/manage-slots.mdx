@@ -260,6 +260,17 @@ never writing `mtp = null`).
 - **Model recipe editor** — `capabilities`, `backends`, the `mmproj` path,
   and the `hf_repo`/`hf_filename` re-pull coordinates are all editable from
   the Models view, not just the registry API.
+- **Container image** — optional per-slot container-image override via the
+  dashboard EditSlotDrawer's **Image** field (validates registry-ref shape,
+  has a Reset button to clear to default). There is no CLI flag for this; set
+  it via the drawer, or hand-edit `/etc/hal0/slots/<name>.toml` with a
+  top-level `image = "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"` line,
+  then `hal0 slot restart <name>` to apply (launch-time-baked, same as other
+  container flags). Resolution order: `slot.image → profile.image →
+  ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`. Note: `profile.image` is
+  deprecated as of v0.9.5 and is planned for removal from `SEED_PROFILES` in
+  v0.9.6 — operators with custom profiles should migrate to the per-slot
+  override instead.
 
 <Aside type="note">
 `rope_freq_base` is not editable from either drawer — it's deprecated and

@@ -17,14 +17,18 @@ hal0 setup
 ```
 
 <Aside type="note">
-The installer runs `hal0 setup --auto --no-pull --no-slots --no-extensions`
-to write the first-run sentinel (`/var/lib/hal0/.first_run_done`) and wiring
-only — it seeds **no model slots** and downloads nothing. A fresh box boots
-with no model configured; you pick your first one afterwards. Re-running
-`hal0 setup` interactively (**non-destructively** — it never overwrites an
-existing slot config) is where you choose models and enable extensions. The
-web dashboard no longer hosts a first-run picker; it shows a banner pointing
-you at the terminal.
+The installer runs `hal0 setup --auto --no-pull --no-extensions` to write
+the first-run sentinel (`/var/lib/hal0/.first_run_done`) and scaffold
+empty capability slots (`chat`, `embed`, `rerank`, `stt`, `tts`, `vision`,
+plus `coder` when an agent extension is on) — each wired with a device,
+profile, and port but no model assigned. `--no-pull` keeps it
+download-free and `--no-extensions` skips extension wiring here (OpenWebUI
+and Hermes are installed by their own dedicated installer stages instead).
+A fresh box boots with slots but no model configured; you pick your first
+one afterwards. Re-running `hal0 setup` interactively
+(**non-destructively** — it never overwrites an existing slot config) is
+where you choose models and enable extensions. The web dashboard no longer
+hosts a first-run picker; it shows a banner pointing you at the terminal.
 </Aside>
 
 ## The flow

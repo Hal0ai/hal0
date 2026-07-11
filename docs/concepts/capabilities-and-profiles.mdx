@@ -58,10 +58,12 @@ hal0 ships seed profiles so a fresh install is immediately usable:
 
 | Profile | Targets | Purpose |
 |---|---|---|
-| `rocm` | GPU (ROCm) | MoE / agent models, FP4, no MTP (larger q8 KV) — the `gpu-rocm` default |
-| `rocm-dnse` | GPU (ROCm) | Dense models with MTP speculative decoding (q8 KV) |
-| `rocm-moe` | GPU (ROCm) | MoE models with MTP speculative decoding (q8 KV) |
-| `vulkan` | GPU (Vulkan) | Standard Vulkan path and fallback, now with symmetric q8 KV |
+| `rocm` | GPU (ROCm) | Basic general-purpose ROCm profile, no MTP — the `gpu-rocm` default |
+| `rocm-dense` | GPU (ROCm) | ROCmFPX DENSE weights with MTP — sustained-decode win on Strix Halo |
+| `rocm-moe` | GPU (ROCm) | ROCmFPX MoE weights with MTP — prefill-bound `-dev ROCm0` opt-in |
+| `vulkan-dense` | GPU (Vulkan) | ROCmFPX DENSE weights with MTP via Vulkan0 — prefill win (~+24% PP) |
+| `vulkan-moe` | GPU (Vulkan) | ROCmFPX MoE weights with MTP via Vulkan0 — best sustained-decode throughput (the validated Tool-Eval card) |
+| `vulkan` | GPU (Vulkan) | Basic general-purpose Vulkan (RADV) profile, no MTP, no KV quant (defaults to f16) — the broad-compatibility fallback |
 | `cuda` | GPU (CUDA) | NVIDIA GPUs via upstream llama.cpp CUDA — **experimental**, the `gpu-cuda` default |
 | `embed` | GPU (ROCm) | Dedicated embeddings lane (`--embedding`, wide ubatch for long inputs) |
 | `rerank` | GPU (ROCm) | Dedicated reranking lane (`--reranking`) — always a separate instance from `embed` |
@@ -74,6 +76,13 @@ hal0 ships seed profiles so a fresh install is immediately usable:
 `embed` and `rerank` are deliberately separate profiles/slots rather than one
 server handling both — combining `--embedding` and `--reranking` on a single
 llama-server instance produces all-zero scores.
+
+The four ROCmFPX runner profiles (`rocm-dense`, `rocm-moe`, `vulkan-dense`,
+`vulkan-moe`) all reference the same canonical runner image,
+`ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`; a slot can override the image
+per-slot via a top-level `image` field in its TOML, which wins over the
+profile's image (resolution order: `slot.image` → `profile.image` → the
+default).
 
 ### Seed profiles are virtual
 
@@ -167,11 +176,12 @@ gemma → -ctk f16 -ctv f16 --cache-reuse 0
 ```
 
 Gemma's interleaved sliding-window attention regresses under quantized KV
-cache, so **any** Gemma model on **any** q8-KV profile is pinned back to f16
-KV with cache-reuse disabled automatically — no per-slot opt-in needed. This
-is what makes it safe for the `vulkan` seed profile to default to symmetric
-q8 KV: without the Gemma guard, a Gemma model on `vulkan` would silently
-regress in prompt-processing speed.
+cache, so **any** Gemma model on **any** q8-KV profile — including a custom
+profile you clone with q8 KV flags — is pinned back to f16 KV with
+cache-reuse disabled automatically, no per-slot opt-in needed. None of the
+seed profiles ship q8 KV by default today (`rocm` and `vulkan` both leave KV
+quant unset, defaulting to f16), so the guard's day-to-day job is protecting
+any q8-KV profile you tune yourself.
 
 ## MTP: a model × profile × slot decision
 
@@ -182,8 +192,9 @@ independent signals, not a single flag:
    is set, or an `MTP` marker appears in its id/filename as a delimited token
    (e.g. `...-mtp-...`), not buried inside an unrelated word.
 2. **Profile opt-in** — `profile.mtp: true` means "enable MTP *for eligible
-   models*" (only `rocm-dnse` and `rocm-moe` opt in among the seeds) — it does
-   **not** mean "always append the spec-draft bundle" regardless of the model.
+   models*" (the `rocm-dense`, `rocm-moe`, `vulkan-dense`, and `vulkan-moe`
+   seed profiles opt in) — it does **not** mean "always append the spec-draft
+   bundle" regardless of the model.
 3. **Slot override** — a slot's `mtp` field is a tri-state: `true` forces MTP
    on, `false` forces it off, and unset (Auto) lets the first two decide.
 
@@ -269,6 +280,13 @@ upstream like any other slot. The other two modalities ride as **shadow slots**
 container's port when their slot records are enabled. There's no second process
 and no separate model server: the three endpoints are the same FLM process
 answering on one static port.
+
+The NPU slot is chat-first by default: `NpuConfig.chat` defaults to `true`, so
+a bare `[npu]` section in a slot TOML is already chat-ready with no extra
+config — the seeded `installer/etc-hal0/slots/npu.toml` ships exactly that,
+with no model pinned yet. Operators opt into the other two modalities by
+adding `asr = true` and/or `embed = true` under `[npu]`, or opt out of chat
+with `chat = false` for an asr/embed-only NPU slot.
 
 Because the XDNA hardware context admits only one NPU LLM at a time, hal0
 enforces NPU exclusivity: you can't enable a second `device=npu` chat slot. When
