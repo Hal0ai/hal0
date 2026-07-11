@@ -1,0 +1,24 @@
+[Unit]
+Description=hal0 Honcho memory engine (docker compose stack: api+deriver+db+redis)
+Documentation=https://github.com/plastic-labs/honcho
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/hal0/honcho
+
+# `up` (not `up -d`) so Type=simple has a foreground process systemd can
+# track/restart; `--no-build` because install.sh builds the image ahead of
+# time (a build-on-start would stall unit activation for minutes).
+ExecStart=/usr/bin/docker compose --project-name hal0-honcho -f /var/lib/hal0/honcho/docker-compose.yml up --no-build
+ExecStop=/usr/bin/docker compose --project-name hal0-honcho -f /var/lib/hal0/honcho/docker-compose.yml down
+
+Restart=on-failure
+RestartSec=5
+# First boot can be slow: pgvector init + api/deriver healthcheck chain.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=hal0 Honcho -> Hindsight graph sync hourly timer
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
