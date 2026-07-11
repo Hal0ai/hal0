@@ -85,20 +85,32 @@ def _write_release_manifest(
     *,
     manifest_path: Path,
     tarball: Path,
-    sig: Path,
     version: str,
+    sig: Path | None = None,
     cert: Path | None = None,
+    bundle: Path | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write a full hal0.releases.v1 manifest pointing at file:// URLs."""
-    cert_url = f"file://{cert}" if cert is not None else f"file://{sig.with_suffix('.crt')}"
+    """Write a full hal0.releases.v1 manifest pointing at file:// URLs.
+
+    Since #1159 the manifest carries a single ``bundle_url`` (a Sigstore
+    bundle that embeds the cert + signature + Rekor SET) instead of the old
+    detached ``sig_url`` + ``cert_url``. The bundle file is created next to
+    the tarball so the file:// download in apply()/prepare() finds it (its
+    contents are irrelevant whenever cosign is skipped or faked). The legacy
+    ``sig``/``cert`` kwargs are accepted and ignored so existing callers need
+    not change.
+    """
+    del sig, cert  # legacy kwargs — no longer written to the manifest
+    bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
+    if not bundle.exists():
+        bundle.write_bytes(b"sigstore-bundle-placeholder\n")
     payload: dict[str, Any] = {
         "_schema": "hal0.releases.v1",
         "version": version,
         "channel": "stable",
         "url": f"file://{tarball}",
-        "sig_url": f"file://{sig}",
-        "cert_url": cert_url,
+        "bundle_url": f"file://{bundle}",
         "digest_sha256": _sha256_of(tarball),
         "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         "signer_issuer": "https://token.actions.githubusercontent.com",
@@ -212,7 +224,7 @@ def test_manifest_schema_accepts_full_payload(tmp_path: Path) -> None:
 
 
 def test_manifest_schema_rejects_missing_required_fields() -> None:
-    """The pydantic schema rejects manifests without sig_url / digest_sha256."""
+    """The pydantic schema rejects manifests without bundle_url / digest_sha256."""
     with pytest.raises(UpdateManifestInvalid):
         _parse_manifest({"version": "9.9.9", "url": "https://x/y.tar.gz"})
 
@@ -223,8 +235,7 @@ def test_manifest_schema_rejects_malformed_digest() -> None:
         "_schema": "hal0.releases.v1",
         "version": "0.0.1",
         "url": "file:///x",
-        "sig_url": "file:///x.sig",
-        "cert_url": "file:///x.crt",
+        "bundle_url": "file:///x.bundle",
         "digest_sha256": "not-a-real-digest",
         "signer_identity": "^https://github.com/x/.*",
     }
@@ -722,8 +733,7 @@ def test_apply_download_failure_surfaces_typed_error(
         "_schema": "hal0.releases.v1",
         "version": "9.9.9",
         "url": f"file://{tmp_path / 'nope.tar.gz'}",
-        "sig_url": f"file://{tmp_path / 'nope.sig'}",
-        "cert_url": f"file://{tmp_path / 'nope.crt'}",
+        "bundle_url": f"file://{tmp_path / 'nope.tar.gz.bundle'}",
         "digest_sha256": "a" * 64,
         "signer_identity": "^https://github.com/.*",
     }

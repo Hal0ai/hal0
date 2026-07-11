@@ -160,13 +160,15 @@ class ReleaseManifest(BaseModel):
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
     channel: str = Field(default="stable", description="stable | nightly")
     url: str = Field(..., description="Tarball download URL (https or file).")
-    sig_url: str = Field(..., description="Detached cosign signature URL.")
-    cert_url: str = Field(
+    bundle_url: str = Field(
         ...,
         description=(
-            "Fulcio-issued certificate URL (cosign keyless OIDC). "
-            "Required by ``cosign verify-blob --certificate`` in cosign 3.x; "
-            "produced alongside the .sig by ``cosign sign-blob --output-certificate``."
+            "Sigstore bundle URL (cosign keyless OIDC). The bundle embeds the "
+            "Fulcio certificate, the signature, and the Rekor transparency-log "
+            "inclusion proof + Signed Entry Timestamp (SET). The SET is the "
+            "trusted timestamp that lets ``cosign verify-blob --bundle`` succeed "
+            "after the short-lived Fulcio cert has expired (see #1159); a "
+            "detached .sig + .crt carried no SET and failed on every client."
         ),
     )
     digest_sha256: str = Field(..., description="Hex sha256 of the tarball bytes.")
@@ -513,8 +515,7 @@ def _cosign_skip() -> bool:
 
 def _verify_cosign(
     tarball: Path,
-    signature: Path,
-    certificate: Path,
+    bundle: Path,
     *,
     identity_regexp: str,
     issuer: str,
@@ -526,10 +527,15 @@ def _verify_cosign(
         UpdateCosignMissing: ``cosign`` not on PATH.
         UpdateCosignFailed: signature invalid or identity mismatch.
 
-    cosign 3.x requires the Fulcio-issued certificate (``--certificate``)
-    alongside the signature for keyless verification; ``--certificate-
-    identity-regexp`` is checked against the cert's SAN. The cert is
-    fetched from ``manifest.cert_url`` and stored next to the .sig.
+    Keyless signing uses a short-lived (~10 min) Fulcio certificate. To
+    verify a signature after that cert expires — i.e. every real install,
+    which happens hours/days after the release was signed — cosign needs a
+    trusted timestamp proving the signature was made while the cert was
+    valid. That timestamp is the Rekor Signed Entry Timestamp (SET), which
+    travels inside the Sigstore ``bundle`` (fetched from ``manifest.bundle_url``).
+    ``--certificate-identity-regexp`` is checked against the cert SAN carried
+    in the bundle. A detached ``.sig`` + ``.crt`` carried no SET, so client
+    verification failed 100% once the cert expired (#1159).
 
     The skip env-var (``HAL0_UPDATE_SKIP_COSIGN=1``) bypasses the entire
     check with a WARN log line — documented gap, must close before v1.
@@ -564,10 +570,8 @@ def _verify_cosign(
     cmd = [
         cosign,
         "verify-blob",
-        "--signature",
-        str(signature),
-        "--certificate",
-        str(certificate),
+        "--bundle",
+        str(bundle),
         "--certificate-identity-regexp",
         identity_regexp,
         "--certificate-oidc-issuer",
@@ -1473,8 +1477,7 @@ class Updater:
         cache = _cache_dir(target_version)
         cache.mkdir(parents=True, exist_ok=True)
         tarball_path = cache / f"hal0-{target_version}.tar.gz"
-        sig_path = cache / f"hal0-{target_version}.tar.gz.sig"
-        cert_path = cache / f"hal0-{target_version}.tar.gz.crt"
+        bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
         log.info(
             "updater.download_start",
             job_id=self.job_id,
@@ -1482,14 +1485,12 @@ class Updater:
             url=manifest.url,
         )
         await _download(manifest.url, tarball_path)
-        await _download(manifest.sig_url, sig_path)
-        await _download(manifest.cert_url, cert_path)
+        await _download(manifest.bundle_url, bundle_path)
         log.info(
             "updater.download_ok",
             job_id=self.job_id,
             tarball=str(tarball_path),
-            sig=str(sig_path),
-            cert=str(cert_path),
+            bundle=str(bundle_path),
         )
 
         # Step 4: sha256 verify.
@@ -1509,8 +1510,7 @@ class Updater:
         await asyncio.to_thread(
             _verify_cosign,
             tarball_path,
-            sig_path,
-            cert_path,
+            bundle_path,
             identity_regexp=manifest.signer_identity,
             issuer=manifest.signer_issuer,
             job_id=self.job_id,
