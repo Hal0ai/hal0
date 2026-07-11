@@ -17,7 +17,7 @@ PR-11 (plan §11 + ADR-0008 §5): list responses are enriched with
 config-derived fields (drawer seeds, declared backend) plus live
 container state (``container_status`` / ``container_health``), and a
 ``coresident_group`` ID grouping slots that back the same FLM process
-(the NPU trio: ``agent`` + ``stt-npu`` + ``embed-npu``). This is
+(the NPU trio: ``flm`` + ``flm-stt`` + ``flm-embed``). This is
 backward-compatible — every legacy field is preserved; new keys are
 purely additive.
 """

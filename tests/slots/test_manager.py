@@ -62,7 +62,10 @@ def test_seeded_slots_matches_plan_section_10_2() -> None:
 
 def test_npu_seeded_slots_matches_plan_section_10_2() -> None:
     # #679: agent dropped — it's a GPU chat-role slot, not the NPU FLM anchor.
-    assert NPU_SEEDED_SLOTS == ("stt-npu", "embed-npu")
+    # Named {anchor}-stt/{anchor}-embed (anchor = ``flm``) to match the
+    # occupancy pane's virtual sub-cards + the trio activity counters; the
+    # legacy stt-npu/embed-npu names are migrated by reconcile_npu_trio_slots.
+    assert NPU_SEEDED_SLOTS == ("flm-stt", "flm-embed")
 
 
 def test_builtin_slots_aliases_seeded_slots() -> None:
