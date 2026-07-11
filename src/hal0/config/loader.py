@@ -698,6 +698,14 @@ def _find_manifest_path() -> Path | None:
          ``HAL0_HOME`` is NOT set, so unit tests with isolated
          tmp_hal0_home don't accidentally pick up the repo-root copy.
 
+    Note the (2)-before-(3) consequence: on a box that carries BOTH a
+    production install and a bare git checkout (no ``HAL0_HOME``), code
+    imported from the checkout reads the *installed release's* pins from
+    ``current/``, not the checkout's repo-root manifest — deliberate, so
+    ad-hoc scripts on a prod box see the same images the running services
+    use. Set ``HAL0_HOME`` (or pass an explicit path) to pin a checkout to
+    its own manifest.
+
     Returns the first existing path, or None if none is found.  The
     loader's callers fall back to ":v1" tag pulls in that case.
     """

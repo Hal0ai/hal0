@@ -121,8 +121,10 @@ installed, a single FLM process inside the `hal0-toolbox-flm` container
 hosts chat + transcription + embedding concurrently on the one AMDXDNA
 hardware context — ~2 GB NPU memory, gemma3:1b at 40 tok/s +
 Whisper-V3-Turbo + Embedding-Gemma all coresident. hal0 exposes this
-as three slots (`npu`, `stt-npu`, `embed-npu`); the `npu.toml`
-`[npu]` table toggles ASR and embed. The host-side FLM `.deb` is
+as one seeded `flm` slot (chat-first) whose `[npu]` table — or the
+dashboard's NPU drawer — toggles ASR and embed on the running
+`flm serve`; the occupancy card shows the coresident STT/embed
+sub-cards. The host-side FLM `.deb` is
 installed for device-sanity probes only — inference runs in the
 container. See ADR-0009 (FLM trio NPU packing) for why.
 
@@ -151,12 +153,13 @@ be evicted out from under a streaming request.
 - **Slots** — each named target carries a `type`
   (`llm | embedding | reranking | transcription | tts | image`),
   a `device` (`gpu-rocm | gpu-vulkan | cpu | npu | img`), a `model`,
-  plus `enabled` and optional `default`. Five seeded slots (`npu`,
+  plus `enabled` and optional `default`. Five seeded slots (`flm`,
   `tts`, `rerank`, `utility`, `img`) are written to
-  `/etc/hal0/slots/<name>.toml` during install; `hal0 setup` scaffolds
+  `/etc/hal0/slots/<name>.toml` during install (each gates on its own
+  runtime validation at load time — the `flm` NPU slot simply stays
+  grey without FastFlowLM hardware); `hal0 setup` scaffolds
   additional capability slots (chat, coder, embed, stt, vision) with
-  empty model picks for the operator to fill. NPU slots (`npu`,
-  `embed-npu`, `stt-npu`) are seeded when FastFlowLM is installed.
+  empty model picks for the operator to fill.
   User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
   Slots refer to a **profile** in `/etc/hal0/profiles.toml` that pins
   the container image + flag bundle for that backend.
@@ -306,7 +309,7 @@ hal0/
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
 ├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3)
 ├── installer/        # install.sh (writes /etc/hal0/, systemd units, hal0-api.service)
-│   ├── etc-hal0/     # seed slot TOMLs (npu, tts, rerank, utility, img) + profiles.toml
+│   ├── etc-hal0/     # seed slot TOMLs (flm, tts, rerank, utility, img) + profiles.toml
 │   └── systemd/      # hal0-agent@ template units
 ├── tests/            # pytest suite (α unit, β integration, γ release-gate)
 ├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/
@@ -424,7 +427,8 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
 - **OmniRouter client-side tool-calling** — 8 tools, dynamic
   per-request filtering, `route_to_chat` cross-slot delegation
 - **`hal0 setup` TUI** — replaces the web FirstRun picker; the installer
-  seeds no model picks (`--auto --no-pull --no-slots`); the interactive
+  scaffolds model-less slot structure with no picks and no downloads
+  (`--auto --no-pull --no-extensions`); the interactive
   post-install flow covers storage, Extensions, models, and NPU opt-in
 - **`hal0 registry import`** — one-shot v0.1.x → v0.3 registry
   recovery from a backup tarball
