@@ -35,7 +35,7 @@ DEFAULT_STATE_PATH = Path("/var/lib/hal0/honcho/migrate-state.json")
 #: this is a conservative char budget, not a tokenizer.
 _MAX_CONTENT_CHARS = 60_000
 
-_CONCLUSION_BATCH = 100
+_CONCLUSION_BATCH = 25
 
 #: Session-name prefix stamped on every hindsight->honcho migration session,
 #: so the reverse (honcho->hindsight) direction can recognise + skip its own
@@ -130,7 +130,7 @@ class MigrateState:
 def _honcho_client(honcho_base: str, http_client: httpx.Client | None) -> tuple[httpx.Client, bool]:
     if http_client is not None:
         return http_client, False
-    return httpx.Client(base_url=honcho_base.rstrip("/"), timeout=10.0), True
+    return httpx.Client(base_url=honcho_base.rstrip("/"), timeout=httpx.Timeout(600.0, connect=5.0)), True
 
 
 def _ensure_workspace(client: httpx.Client, workspace: str) -> None:
@@ -166,7 +166,7 @@ def _session_name(dataset: str) -> str:
 def _hal0_client(hal0_base: str, http_client: httpx.Client | None) -> tuple[httpx.Client, bool]:
     if http_client is not None:
         return http_client, False
-    return httpx.Client(base_url=hal0_base.rstrip("/"), timeout=10.0), True
+    return httpx.Client(base_url=hal0_base.rstrip("/"), timeout=httpx.Timeout(120.0, connect=5.0)), True
 
 
 def _hal0_list_page(
