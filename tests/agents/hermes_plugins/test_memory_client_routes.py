@@ -8,7 +8,6 @@ which 404. This test asserts the client now hits routes the router serves.
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from hal0.agents.hermes.plugins.memory_hindsight._client import Hal0MemoryClient
 from hal0.api.routes.memory import router
@@ -22,21 +21,20 @@ def _router_paths() -> set[tuple[str, str]]:
     return out
 
 
-@pytest.mark.asyncio
-async def test_list_and_delete_hit_real_routes():
+def test_list_and_delete_hit_real_routes():
     seen: list[tuple[str, str]] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path))
         if request.method == "GET":
             return httpx.Response(200, json={"items": [], "next_cursor": None})
         return httpx.Response(200, json={"deleted": 1})
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport, base_url="http://x") as http:
+    with httpx.Client(transport=transport, base_url="http://x") as http:
         client = Hal0MemoryClient(http_client=http)
-        await client.list_items(limit=10)
-        await client.delete("some-id")
+        client.list_items(limit=10)
+        client.delete("some-id")
 
     # The router is mounted under /api/memory — its own route.path values
     # are relative (e.g. "/list", "/delete"). Reconstruct full paths.

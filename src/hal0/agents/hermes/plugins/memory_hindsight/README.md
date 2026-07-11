@@ -4,8 +4,11 @@
 hal0-memory REST surface (`/api/memory/*` on hal0-api) so that Hermes's
 durable memory is backed by hal0's Hindsight store.
 
-This plugin lives under hal0's repo (`src/hal0/agents/hermes/plugins/memory_hindsight/`)
-and is vendored into the Hermes plugin tree at provision time by
+This plugin lives under hal0's repo (`src/hal0/agents/hermes/plugins/memory_hindsight/`);
+the installer seed at `installer/agents/hermes/plugins/hal0-memory/` is a
+byte-identical copy (enforced by
+`tests/agents/hermes_plugins/test_seed_parity.py`) and is vendored into the
+Hermes plugin tree at provision time by
 `hal0.agents.hermes_provision._phase_install`. It is NOT imported by
 hal0 itself — the upstream `agent.memory_provider` ABC resolves inside
 the hermes-agent venv at runtime.
@@ -16,71 +19,62 @@ the hermes-agent venv at runtime.
 |---|---|
 | Plugin name | `hal0-memory` |
 | Kind | `exclusive` (per `MemoryManager` single-provider invariant) |
-| Base URL | `HAL0_MEMORY_BASE` env, defaults `http://127.0.0.1:8080` |
-| Identity | `X-hal0-Agent: $HAL0_AGENT_ID` header (defaults `hermes-agent`) |
-| Dataset field | **NEVER SENT** — server resolves from header (issue #317) |
-| Timeouts | 3s connect / 10s read |
-| Tool schemas | None — memory surfaces via system prompt + prefetch context |
+| Base URL | arg → `HAL0_MEMORY_BASE` env → `memory.hal0.base_url` (config.yaml) → `http://127.0.0.1:8080` |
+| Identity | `X-hal0-Agent` header: arg → `HAL0_AGENT_ID` env → `memory.hal0.agent_id` → `hermes` |
+| Banks | `private:<agent-id>` (default writes) + `shared` (`X-hal0-Private: 0`); reads are a union |
+| Dataset field | **NEVER SENT** — server resolves from headers (issue #317 / PR #366) |
+| Transport | **synchronous** `httpx.Client` (memory hooks are sync; async wrapping broke on reuse) |
+| Timeouts | 3s connect / 30s read / 1s probe |
+| Tool schemas | `hal0_memory_search`, `hal0_memory_recall`, `hal0_memory_add(shared=…)` |
+| Observability | first (and every 25th) transport failure per op logs WARNING; `failure_counts` property; degraded notice in system prompt |
 | Operator CRUD | Via the `hal0-memory` MCP server (loaded separately) |
 
 ## Why no `dataset` field
 
 The hal0-memory REST routes call `resolve_write_dataset(requested,
-private, client_id)` (`src/hal0/api/routes/memory.py:291`). When the
-client omits an explicit dataset, the server reads `X-hal0-Agent` and
-routes the write to `private:<agent_id>`. Sending an explicit
-`private:hermes-agent` re-trips the `_AGENT_ID_PATTERN` reject in
-`src/hal0/mcp/memory.py:200` — the same bug the retired
-`hal0-memory` plugin stub caused at
-`installer/agents/hermes/plugins/hal0-memory/__init__.py:117`.
+private, client_id)` (`src/hal0/api/routes/memory.py`). When the
+client omits an explicit dataset, the server reads `X-hal0-Agent` (and
+`X-hal0-Private`) and routes the write to `private:<agent_id>` or
+`shared`. Sending an explicit `private:<id>` re-trips the
+`_AGENT_ID_PATTERN` reject in `src/hal0/mcp/memory.py`.
 
 The regression test in
 `tests/agents/hermes_plugins/test_memory_hindsight_provider.py` asserts
-that no outbound REST payload carries a `dataset` key, locking the
-fix.
+that no outbound REST payload carries a `dataset` key, locking the fix.
 
 ## ABC surface implemented
 
-From `agent/memory_provider.py:42`:
+From `agent/memory_provider.py`:
 
 * `name` (property) — returns `"hal0-memory"`.
-* `is_available()` — `True` unconditionally (config-only check; no
-  network call per ABC docstring).
-* `initialize(session_id, **kwargs)` — opens the async client, honours
-  `agent_context` so cron/flush/subagent loops skip writes (the same
-  guard honcho and supermemory ship).
-* `system_prompt_block()` — short memory-availability preamble.
+* `is_available()` — `True` unconditionally (config-only check; no network
+  call per ABC docstring). Reachability is probed at `initialize()` and
+  surfaced as a degraded notice in the system prompt instead.
+* `initialize(session_id, **kwargs)` — builds the sync client, probes
+  reachability (1s), honours `agent_context` so cron/flush/subagent loops
+  skip writes.
+* `system_prompt_block()` — two-bank preamble; three-tier variant for
+  profile agent-ids (`hermes__<profile>`): profile-private bank, global
+  roll-up bank, shared.
 * `prefetch(query, *, session_id)` — best-effort `/api/memory/recall`
   with a 2048-token budget; transport failures fall back to empty string.
 * `sync_turn(user, assistant, *, session_id)` — fire-and-forget
   `/api/memory/add`; honours `_SKIP_WRITE_CONTEXTS`.
-* `get_tool_schemas()` — returns `[]`. Memory tools live on the
-  MCP path so they don't double-register against the agent loop.
+* `get_tool_schemas()` / `handle_tool_call()` — explicit
+  `hal0_memory_{search,recall,add}` tools (robust even when the MCP
+  server's tools aren't surfaced to a session).
 * `on_memory_write(action, target, content, metadata=None)` — mirrors
   the built-in memory tool's writes into hal0-memory.
-* `shutdown()` — closes the owned `httpx.AsyncClient`.
+* `shutdown()` — closes the owned `httpx.Client` (idempotent).
 
-## Integration wiring (PR-3)
+## Settings
 
-PR-3 (hermes_provision overhaul) will:
-
-1. Copy this directory into `$HERMES_HOME/plugins/memory/hal0-memory/`
-   at `_phase_install` time.
-2. Set `memory.provider = "hal0-memory"` in `$HERMES_HOME/config.yaml`.
-3. Drop the retired `installer/agents/hermes/plugins/hal0-memory/`
-   stub.
-
-End-to-end LXC smoke (provider loads, prefetch returns, sync_turn
-writes hit hal0-memory) is deferred to that PR. This PR ships the
-plugin sources + unit tests only.
-
-## Environment variables
-
-| Var | Default | Purpose |
+| Setting | Resolution order | Default |
 |---|---|---|
-| `HAL0_MEMORY_BASE` | `http://127.0.0.1:8080` | hal0-api base URL |
-| `HAL0_AGENT_ID` | `hermes-agent` | Identity for `X-hal0-Agent` |
+| base URL | ctor arg → `HAL0_MEMORY_BASE` → `memory.hal0.base_url` in `$HERMES_HOME/config.yaml` | `http://127.0.0.1:8080` |
+| agent id | ctor arg → `HAL0_AGENT_ID` → `memory.hal0.agent_id` | `hermes` |
 
-Both are read from the environment at `initialize()` time so per-agent
-unit overrides (PR-5 `hal0-agent@hermes.service`) take effect on
-provider construction without restart.
+Env vars are read at `initialize()` time so per-agent unit overrides
+(`hal0-agent@hermes.service` / gateway drop-ins) take effect on provider
+construction without code change. The config.yaml fallback lets operators
+retarget without touching unit files.

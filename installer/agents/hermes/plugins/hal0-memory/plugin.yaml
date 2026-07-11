@@ -3,7 +3,8 @@
 # Wires Hermes's durable memory to hal0's shared brain (Hindsight) via the
 # hal0-api REST front door (/api/memory/*). Two banks: private:<agent-id>
 # (private) and shared. Activated by `memory.provider: hal0-memory`.
+
 name: hal0-memory
 kind: exclusive
-version: 1.0.0
+version: 1.1.0
 description: hal0-memory provider — durable Hindsight memory via hal0-api REST (private + shared banks).
