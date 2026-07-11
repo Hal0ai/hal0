@@ -2477,14 +2477,17 @@ class MemoryEmbeddingConfig(BaseModel):
         return v
 
 
+_VALID_AGENT_MEMORY_PROVIDERS = frozenset({"hindsight", "honcho"})
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
     Container for the per-subsystem memory tunables. Today carries
-    ``[memory.graph]`` (ADR-0014) and ``[memory.embedding]`` (issue
-    #116). Future memory features (retention, prune-policy, archival)
-    land under a single namespace rather than scattering top-level
-    tables.
+    ``[memory.graph]`` (ADR-0014), ``[memory.embedding]`` (issue #116), and
+    the per-agent provider routing (``agent_providers``/``agent_private``).
+    Future memory features (retention, prune-policy, archival) land under a
+    single namespace rather than scattering top-level tables.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}
@@ -2499,6 +2502,26 @@ class MemoryConfig(BaseModel):
             "revert to the untouched Cognee store for one release."
         ),
     )
+    agent_providers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Agent id -> memory provider ('hindsight' | 'honcho'). Selects "
+            "which provider the agent provisioner wires into that agent's "
+            "Hermes memory.provider + honcho.json. hal0's own [memory].engine "
+            "(above) is unaffected — it always stays 'hindsight' regardless "
+            "of what agents are routed to Honcho."
+        ),
+    )
+    agent_private: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Agent id -> private-workspace flag. When True the agent writes "
+            "to an isolated Honcho workspace "
+            "'<honcho.workspace>__private__<agent>' instead of the unified "
+            "workspace. Only meaningful for agents routed to 'honcho' in "
+            "agent_providers."
+        ),
+    )
 
     @field_validator("engine")
     @classmethod
@@ -2508,6 +2531,128 @@ class MemoryConfig(BaseModel):
         if s not in known:
             raise ValueError(f"memory.engine {v!r} must be one of {sorted(known)}")
         return s
+
+    @field_validator("agent_providers")
+    @classmethod
+    def _agent_providers_known(cls, v: dict[str, str]) -> dict[str, str]:
+        for agent_id, provider in v.items():
+            if provider not in _VALID_AGENT_MEMORY_PROVIDERS:
+                raise ValueError(
+                    f"memory.agent_providers[{agent_id!r}] = {provider!r} must be "
+                    f"one of {sorted(_VALID_AGENT_MEMORY_PROVIDERS)}"
+                )
+        return v
+
+
+# ── HonchoConfig ────────────────────────────────────────────────────────────
+
+_VALID_HONCHO_TRANSPORTS = frozenset({"openai", "anthropic", "gemini"})
+_HONCHO_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+class HonchoLLMFeatureConfig(BaseModel):
+    """One Honcho LLM feature route (``deriver``/``dialectic``/``summary``/
+    ``dream``/``embedding``) inside ``[honcho.llm]``.
+
+    Empty ``model``/``base_url`` mean "use the local-default for this
+    feature" — resolved by :mod:`hal0.memory.honcho_env` at render time, not
+    here, since the defaults depend on the running hal0-api's slot names.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    transport: str = Field(
+        default="openai",
+        description="Honcho LLM transport for this feature. One of 'openai' | 'anthropic' | 'gemini'.",
+    )
+    model: str = Field(
+        default="",
+        description="Model id for this feature. Empty = per-feature local default.",
+    )
+    base_url: str = Field(
+        default="",
+        description="Upstream base URL for this feature. Empty = local hal0-api gateway.",
+    )
+    api_key_env: str = Field(
+        default="",
+        description=(
+            "Name of the env var carrying the API key for a cloud upstream. "
+            "Empty for the local (keyless) gateway."
+        ),
+    )
+
+    @field_validator("transport")
+    @classmethod
+    def _transport_known(cls, v: str) -> str:
+        s = str(v or "openai").strip().lower()
+        if s not in _VALID_HONCHO_TRANSPORTS:
+            raise ValueError(
+                f"honcho llm transport {v!r} must be one of {sorted(_VALID_HONCHO_TRANSPORTS)}"
+            )
+        return s
+
+
+class HonchoLLMConfig(BaseModel):
+    """``[honcho.llm]`` block — per-feature model routing for the Honcho stack."""
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    deriver: HonchoLLMFeatureConfig = Field(default_factory=HonchoLLMFeatureConfig)
+    dialectic: HonchoLLMFeatureConfig = Field(default_factory=HonchoLLMFeatureConfig)
+    summary: HonchoLLMFeatureConfig = Field(default_factory=HonchoLLMFeatureConfig)
+    dream: HonchoLLMFeatureConfig = Field(default_factory=HonchoLLMFeatureConfig)
+    embedding: HonchoLLMFeatureConfig = Field(default_factory=HonchoLLMFeatureConfig)
+    embedding_dimensions: int = Field(
+        default=1024,
+        ge=32,
+        le=4096,
+        description="Embedding vector dimensionality Honcho stores (EMBEDDING_VECTOR_DIMENSIONS).",
+    )
+
+
+class HonchoConfig(BaseModel):
+    """[honcho] section of hal0.toml — self-hosted Honcho v3 memory stack.
+
+    Honcho is an opt-in alternative memory provider (see
+    ``memory.agent_providers``) rendered to ``/etc/hal0/honcho.env`` for its
+    docker compose stack by :mod:`hal0.memory.honcho_env`. Disabled by
+    default; hal0's own ``[memory].engine`` stays 'hindsight' regardless.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    enabled: bool = Field(
+        default=False, description="Provision + render config for the Honcho stack."
+    )
+    port: int = Field(
+        default=8000, ge=1, le=65535, description="Host port Honcho's API listens on."
+    )
+    workspace: str = Field(
+        default="hal0",
+        description="Unified Honcho workspace name shared by non-private agents.",
+    )
+    user_peer: str = Field(
+        default="operator",
+        description="Single human peer id shared by all clients in the unified workspace.",
+    )
+    auth_enabled: bool = Field(
+        default=False,
+        description=(
+            "Require Bearer auth on the Honcho API. Default False (loopback-only "
+            "posture, ADR-0012: no Bearer needed on LAN)."
+        ),
+    )
+    llm: HonchoLLMConfig = Field(default_factory=HonchoLLMConfig)
+
+    @field_validator("workspace", "user_peer")
+    @classmethod
+    def _name_grammar(cls, v: str, info: Any) -> str:
+        if not v or not _HONCHO_NAME_RE.match(v):
+            raise ValueError(
+                f"honcho.{info.field_name} {v!r} must match Honcho's peer/workspace "
+                r"name pattern ^[a-zA-Z0-9_-]+$"
+            )
+        return v
 
 
 class ModelsConfig(BaseModel):
@@ -2717,6 +2862,7 @@ class Hal0Config(BaseModel):
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    honcho: HonchoConfig = Field(default_factory=HonchoConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
 
@@ -2746,6 +2892,9 @@ __all__ = [
     "GPUInfo",
     "Hal0Config",
     "HardwareInfo",
+    "HonchoConfig",
+    "HonchoLLMConfig",
+    "HonchoLLMFeatureConfig",
     "ImageGenConfig",
     "MCPServerConfig",
     "MemoryConfig",
