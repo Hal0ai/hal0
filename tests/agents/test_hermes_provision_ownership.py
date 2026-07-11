@@ -186,33 +186,37 @@ def test_chown_tree_default_uses_lchown_not_chown() -> None:
 
 
 def test_chown_tree_does_not_follow_symlink_to_outside(tmp_path: Path) -> None:
-    """Regression: a symlink inside the tree pointing outside must NOT change
-    the outside target's ownership. Needs real chown syscalls → root-gated
-    (CI runs non-root, where _chown_tree_to_hal0 no-ops anyway)."""
-    import os as _os
+    """Regression: the recursion must chown the SYMLINK's OWN path, never the
+    resolved out-of-tree target it points at.
 
-    import pytest
-
-    if _os.geteuid() != 0:
-        pytest.skip("real chown behaviour needs root; the helper no-ops off-root")
-
+    Uses an injected recording chown (no real privileged syscall), matching the
+    file's convention, so it's CI-safe on any runner regardless of CAP_CHOWN.
+    The lchown-vs-chown seam selection that actually enforces non-follow at the
+    syscall level is proven separately by
+    :func:`test_chown_tree_default_uses_lchown_not_chown`."""
     outside = tmp_path / "outside_secret"
     outside.write_text("do not touch")
-    orig_uid = outside.stat().st_uid  # root-owned (0)
 
     tree = tmp_path / "home"
     tree.mkdir()
-    (tree / "evil").symlink_to(outside)
+    (tree / "evil").symlink_to(outside)  # planted inside->outside symlink
     (tree / "regular.txt").write_text("ok")
 
-    # Real chown (default os.lchown) to an arbitrary uid — root may set any.
-    n = hp._chown_tree_to_hal0(tree, resolve_ids=lambda _u: (12345, 12345))
+    calls, chown = _recorder()
+    n = hp._chown_tree_to_hal0(
+        tree,
+        geteuid=lambda: 0,
+        resolve_ids=lambda _u: (12345, 12345),
+        chown=chown,
+    )
 
-    # The out-of-tree target's ownership is UNCHANGED (the link, not its
-    # target, was chowned).
-    assert outside.stat().st_uid == orig_uid
-    # The symlink itself was chowned (lstat sees the link, not the target).
-    assert _os.lstat(tree / "evil").st_uid == 12345
-    # The regular file inside the tree was chowned as before.
-    assert (tree / "regular.txt").stat().st_uid == 12345
-    assert n >= 3
+    chowned = {Path(p) for p, _, _ in calls}
+    # The symlink is chowned by its OWN path — never the resolved outside target.
+    assert tree / "evil" in chowned
+    assert outside not in chowned
+    assert outside.resolve() not in chowned
+    # Tree root + the regular file are still chowned; every entry gets the ids.
+    assert tree in chowned
+    assert tree / "regular.txt" in chowned
+    assert all((uid, gid) == (12345, 12345) for _, uid, gid in calls)
+    assert n == len(calls) == 3
