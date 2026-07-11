@@ -21,6 +21,35 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.7.1] — 2026-07-11
+
+Hotfix for a fresh-install blocker — Hermes never auto-provisioned on a clean
+`curl | bash` install — bundled with the dashboard, provider, and memory
+improvements merged since 0.9.7.
+
+### Highlights
+- **Hermes now auto-provisions on a fresh install** — no more manual `--adopt`/`--repair`; all bootstrap phases complete and the gateway comes up managed, idle until a bot token is added (#1239).
+- **MiniMax and DeepSeek** are now one-click options in the upstream provider catalog (#1236).
+- **Keyboard-driven `hal0 setup`** — the guided setup TUI gets real arrow-key navigation and a clearer model picker (#1237).
+- **Memory subsystem toggle** — `hal0 memory enable` / `disable` / `status` replace the old install-time env flag (#1240).
+
+### Added
+- **MiniMax + DeepSeek** upstream catalog entries (OpenAI-compatible, bearer auth) — selectable in Slots ▸ Endpoints ▸ Add upstream with prefilled URL and auth (#1236).
+- **Arrow-key navigation in the guided-setup TUI**: ↑↓/jk move, space toggles apps/agents, enter selects; scaffold/skip are clean navigable rows; numbered entry still works over a pipe or in CI (#1237).
+- **`hal0 memory enable` / `disable` / `status`** commands, plus the `[memory].enabled` config flag (#1240).
+- **Retry failed graph extractions** — a Memory-tab button that re-runs Hindsight's failed extraction operations, plus mental-model delete (#1235).
+
+### Fixed
+- **Hermes fresh-install provisioning** (#1239, closes #1238). Two chained bugs aborted provisioning on every clean install: the api-lifespan seed populated `HERMES_HOME` before the bootstrap could claim it ("unclaimed HERMES_HOME"), and the gateway installer started a unit that hal0 then flagged as its own "foreign" gateway. The lifespan now stamps `.hal0-managed` before seeding and pre-writes the gateway secrets drop-in before the unit starts.
+- **Model-filters spacing** in the Endpoints upstream pane — the filter inputs no longer sit flush against the panel border (#1236).
+- **Graph-extraction consolidation reliability** in the Memory tab (#1235).
+
+### Changed
+- The memory subsystem is now gated by **`[memory].enabled` in `hal0.toml`** (default on) instead of the installer-written `HAL0_MEMORY_ENABLED` env var; toggle it with `hal0 memory enable` / `disable` (#1240).
+
+### Migrations
+- If you had disabled memory with `HAL0_MEMORY_ENABLED=0`, that env var is now ignored (memory defaults on) — run `hal0 memory disable` to keep it off (#1240).
+
 ## [0.9.7] — 2026-07-11
 
 The steward release. The dashboard's agent chat graduates from a
