@@ -280,6 +280,40 @@ async def test_flm_inference_gate_runs_once_and_promotes_to_ready(
 
 
 @pytest.mark.anyio
+async def test_flm_inference_gate_passes_assigned_model(
+    slot_root: Path,
+    tmp_hal0_home: str,
+) -> None:
+    """Regression (#1171): the warm→ready gate must tell verify_inference which
+    model the slot serves, so the sentinel probes that model rather than FLM's
+    ``models[0]`` (an arbitrary other model whose reload deadlocks the NPU)."""
+    from hal0.providers.flm import FLMProvider
+    from hal0.slots.manager import SlotState
+
+    _write_npu_container_slot(slot_root, "npu")
+    fake_provider = _make_container_provider_mock()
+    gate = AsyncMock(return_value={"ok": True, "status": "ready", "model": "gemma3:4b"})
+
+    with (
+        patch("hal0.providers.container.container_provider", return_value=fake_provider),
+        patch.object(FLMProvider, "verify_inference", gate),
+        patch(
+            "hal0.providers.flm.flm_served_models",
+            return_value=[{"tag": "gemma3:4b", "installed": True}],
+        ),
+        patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
+    ):
+        mgr = SlotManager()
+        await mgr.load("npu", "gemma3:4b")
+
+        assert mgr.state("npu") == SlotState.READY
+        assert gate.call_args.kwargs.get("expected_model") == "gemma3:4b", (
+            "the gate must pass the slot's assigned model as expected_model so "
+            f"the sentinel probes it, not models[0]; got {gate.call_args!r}"
+        )
+
+
+@pytest.mark.anyio
 async def test_flm_inference_gate_wedged_npu_stays_warming(
     slot_root: Path,
     tmp_hal0_home: str,

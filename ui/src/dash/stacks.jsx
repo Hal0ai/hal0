@@ -764,10 +764,14 @@ function StacksView() {
   function Header() {
     return (
       <div className="vh">
-        <span className="vh-eye mono">RUNTIME</span>
-        <h1>Stacks</h1>
+        <span className="sec-label">
+          <b>Stacks</b>
+          <span className="dim">·</span>
+          <span className="meta">runtime</span>
+          <span className="dim">·</span>
+          <span className="meta">slot + profile + model bundles</span>
+        </span>
         <div className="vh-spacer" />
-        <span className="hint mono">preconfigured slot + profile + model bundles</span>
         <button className="btn ghost sm" onClick={() => setImporting(true)} data-testid="st-btn-import">{Icons.attach} Import</button>
         <button className="btn ghost sm" onClick={onSnapshot} data-testid="st-btn-snapshot">{Icons.copy} Snapshot</button>
         <button className="btn sm" onClick={() => setDrawer({ mode: 'create' })} data-testid="st-btn-new">{Icons.plus} New stack</button>

@@ -390,8 +390,16 @@ export function NpuOccupancyCard({ slots }) {
   // One owner object per slot, shared by reference across every column it
   // owns — the grid's partition-merge keys off identity, so distinct objects
   // would fragment a single slot into one bracket per column.
+  // The single-tenant NPU is held by ONE FLM process — the anchor (type=llm).
+  // The stt/embed shadows are coresident modalities of that same process and
+  // report the SAME columns in the occupancy probe; letting them paint would
+  // overwrite the anchor's colour (grid turns green + labels "flm-stt"). Only
+  // non-shadow slots own grid columns, so the grid always reads as the primary
+  // FLM slot. Shadow cards keep their own accent via ComboSlot's `hue` prop.
+  const isNpuShadow = (s) => s.type === 'transcription' || s.type === 'embedding'
   const owners = Array(NPU_COLS).fill(null)
   npuSlots.forEach((s, idx) => {
+    if (isNpuShadow(s)) return
     const o = occByName[s.name]
     const cols = o?.cols || []
     const ind = slotIndicatorFromPhase(s)
@@ -446,23 +454,23 @@ export function NpuOccupancyCard({ slots }) {
             XDNA 2 · npu
           </span>
           <span className="grow" />
-          <button className="btn ghost sm" title="Start"
+          <button className="btn ghost sm ctl-start" title="Start"
             onClick={() => handlers.onStart(flmSlot)} disabled={!flmSlot}>
             ▶
           </button>
-          <button className="btn ghost sm" title="Stop"
+          <button className="btn ghost sm ctl-stop" title="Stop"
             onClick={() => handlers.onStop(flmSlot)} disabled={!flmSlot}>
             ■
           </button>
-          <button className="btn ghost sm" title="Restart"
+          <button className="btn ghost sm ctl-restart" title="Restart"
             onClick={() => handlers.onRestart(flmSlot)} disabled={!flmSlot}>
             ↻
           </button>
-          <button className="btn ghost sm" title="Logs"
+          <button className="btn ghost sm ctl-logs" title="Logs"
             onClick={() => handlers.onLogs(flmSlot)} disabled={!flmSlot}>
             📋
           </button>
-          <button className="btn ghost sm" title="Edit FLM slot" onClick={() => window.location.hash = '#slots/flm'} style={{fontSize: 13}}>✎ Edit</button>
+          <button className="btn ghost sm" title="Configure FLM slot" onClick={() => window.location.hash = '#slots/flm'} style={{fontSize: 13}}>✎ Configure</button>
         </div>
         <div className="wcard-b">
           <div className="combo">

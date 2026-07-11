@@ -36,7 +36,7 @@ fields:
 |---|---|
 | `slot` | The slot name (existing, or new — created on apply). |
 | `model` / `profile` | References resolved against the stack's own embedded `models`/`profiles` maps. |
-| `device`, `provider`, `role` | Device class, provider label, and LLM role. |
+| `device`, `provider` | Device class and provider label overrides for the slot. |
 | `vision` | Whether the mmproj sidecar loads for this row (defaults **off** — a stack row opts in explicitly, unlike a raw slot, which defaults it on). |
 | `mtp` | The tri-state Auto/On/Off override — `null` inherits the profile's default. |
 | `enable_thinking`, `server_extra_args` | Same knobs as the slot drawer. |

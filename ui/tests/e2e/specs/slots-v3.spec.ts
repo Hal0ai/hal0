@@ -39,7 +39,8 @@ test.describe('Slots v3 (/slots)', () => {
     await expect(card).toBeVisible()
     // 4×8 AIE-ML occupancy grid (single-tenant: one FLM claims the whole array)
     await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
-    // at least one resident FLM slot card with its column strip
-    await expect(card.locator('.cslot .cslot-strip').first()).toBeVisible()
+    // at least one resident FLM slot card (name + metrics row — the card's
+    // inline TileStrip was removed in 86c73366, so assert the current shape)
+    await expect(card.locator('.cslot .cslot-top .nm').first()).toBeVisible()
   })
 })

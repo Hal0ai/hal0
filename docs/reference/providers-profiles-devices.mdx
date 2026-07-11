@@ -82,20 +82,22 @@ populated on a fresh install. A profile supplies the container image, the
 bench-tuned flag bundle, and an optional MTP toggle; the slot supplies the
 model, context size, and port.
 
-| Profile     | `device_class` | Image                                                                | MTP   | Intent                |
-|-------------|----------------|----------------------------------------------------------------------|-------|-----------------------|
-| `rocm`      | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | MoE agents · q8 KV    |
-| `rocm-dnse` | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense + MTP · q8 KV   |
-| `rocm-moe`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | MoE + MTP · q8 KV     |
-| `vulkan`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`         | off   | Vulkan std · fallback |
-| `cuda`      | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                             | off   | CUDA · NVIDIA (upstream llama.cpp, experimental) |
-| `embed`     | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | Embeddings · GPU      |
-| `rerank`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | Reranking · GPU       |
-| `tts-qwen3` | gpu            | `ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1`                            | off   | TTS · Qwen3 (multilingual GPU) |
-| `flm`       | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                             | off   | FLM NPU inference     |
-| `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS · Kokoro          |
-| `cpu-llm`   | cpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server` (no GPU passthrough) | off   | CPU-only LLM · llama-server |
-| `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`   | off   | Image generation      |
+| Profile        | `device_class` | Image                                                                | MTP   | Intent                |
+|----------------|----------------|------------------------------------------------------------------------|-------|-----------------------|
+| `rocm`         | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`    | off   | MoE agents · q8 KV    |
+| `rocm-dense`   | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · DENSE · MTP (sustained-decode) |
+| `rocm-moe`     | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · MOE · MTP (prefill-bound / -dev ROCm0) |
+| `vulkan-dense` | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · DENSE · MTP (prefill-bound) |
+| `vulkan-moe`   | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · MOE · MTP (best decode t/s) |
+| `vulkan`       | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`           | off   | Vulkan std · fallback |
+| `cuda`         | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                               | off   | CUDA · NVIDIA (upstream llama.cpp, experimental) |
+| `embed`        | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`    | off   | Embeddings · GPU      |
+| `rerank`       | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`    | off   | Reranking · GPU       |
+| `tts-qwen3`    | gpu            | `ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1`                              | off   | TTS · Qwen3 (multilingual GPU) |
+| `flm`          | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                               | off   | FLM NPU inference     |
+| `tts`          | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                                | off   | TTS · Kokoro          |
+| `cpu-llm`      | cpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server` (no GPU passthrough) | off   | CPU-only LLM · llama-server |
+| `comfyui`      | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`     | off   | Image generation      |
 
 ![The Profiles tab in the hal0 dashboard showing seed profile cards with device class, intent, and bench metrics](/screenshots/profiles-tab.png)
 *Profiles tab in the hal0 dashboard — seed profile cards display device class, quantisation, and bench throughput (tokens/sec or RTF).*
@@ -135,19 +137,23 @@ you clone it under a new name.
 </Aside>
 
 <Aside type="caution" title="The old `rocm-mtp` slug">
-An earlier single `rocm-mtp` profile was split into `rocm-dnse` and `rocm-moe`
-(MTP is now the per-slot/per-profile `mtp` field). `rocm` itself is **not**
-retired — it's a live seed profile and the default for `gpu-rocm`. There is no
-loader remap, so a slot TOML pointing at a slug that no longer exists should be
-repointed to one of the current profiles.
+An earlier single `rocm-mtp` profile was split into `rocm-dnse` and `rocm-moe`,
+then in v0.9.5 the ROCmFPX slugs were consolidated again into today's 2×2 grid
+(`rocm-dense`/`rocm-moe`/`vulkan-dense`/`vulkan-moe`, all on the canonical
+`vulkan-minicpm5` runner). `rocm` itself is **not** retired — it's a live seed
+profile and the default for `gpu-rocm`. There is no loader remap, so a slot
+TOML pointing at a slug that no longer exists (`rocm-mtp`, `rocm-dnse`,
+`rocmfpx-rocm`, `vkfpx-dense`, `vkfpx-moe`) should be repointed to one of the
+current profiles.
 </Aside>
 
 ### MTP flag bundle
 
 A slot's `mtp` field is a tri-state: `true` forces MTP on, `false` forces it
 off, and unset (**Auto**) defers to the profile. Under Auto, MTP is effective
-only when **both** the profile opts in (`mtp = true` — only `rocm-dnse` and
-`rocm-moe` do among the seeds) **and** the model is MTP-eligible (a registry
+only when **both** the profile opts in (`mtp = true` — only
+`rocm-dense`, `rocm-moe`, `vulkan-dense`, and `vulkan-moe` do among the seeds)
+**and** the model is MTP-eligible (a registry
 `mtp` tag, or an `mtp` marker in the model's id/filename). A profile opting in
 no longer means "always append the spec-draft bundle" — a non-MTP model
 sitting on `rocm-moe` under Auto launches clean, without dead

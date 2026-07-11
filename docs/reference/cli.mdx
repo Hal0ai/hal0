@@ -34,13 +34,22 @@ directly so they work without a running daemon.
 | `hal0 probe` | Re-run hardware detection (`POST /api/hardware/probe`) and update `hardware.json`. | — |
 | `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
-| `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER` |
+| `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots`, `--source {release\|git}` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
 
 `hal0 update` with no flags checks the configured channel and applies the
 update if one is newer; it polls the apply job to completion. `--channel`
 persists the channel before checking. `--rollback` restores the previous
 tree recorded at `/var/lib/hal0/hal0.previous`.
+
+`--yes`/`-y` skips the confirmation prompt shown after reviewing release notes.
+`--restart-slots` is a standalone action (independent of the check/apply flow)
+that restarts only the slots still running the pre-update launch command —
+i.e. it clears post-update drift on demand, without bouncing a slot that
+hasn't actually drifted. `--source git` switches from the default
+cosign-verified release-tarball flow to a git clone/fetch-based update
+(clone or fetch from GitHub, `pip install`, then a symlink swap) — combine
+with `--check` to only check the git remote without applying.
 
 `hal0 uninstall` defaults to keeping `/etc/hal0` and `/var/lib/hal0`.
 `--purge` additionally deletes config, data, the hal0 system user, and all

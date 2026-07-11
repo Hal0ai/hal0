@@ -25,8 +25,10 @@ restart never trips over a stale container name, and publishes its port on
 The **`SlotManager`** owns this. It renders the unit, starts and stops it,
 tracks state, and registers the running container as an internal upstream so the
 dispatcher can forward to it. A slot is configured by a small TOML file that
-supplies the model, context size, and port; the container image and tuned flags
-come from the slot's [profile](/docs/concepts/capabilities-and-profiles).
+supplies the model, context size, and port; the tuned flags come from the
+slot's [profile](/docs/concepts/capabilities-and-profiles), and so does the
+container image — unless the slot TOML sets its own top-level `image` field,
+which wins over the profile's image.
 
 <Aside type="note">
 The container runtime is podman. A docker fallback exists, but podman is the
@@ -190,7 +192,7 @@ heads) is resolved from three independent signals, in this order:
 1. **Model eligibility** — does the model actually ship MTP heads? hal0 checks
    the registry's `mtp` tag or an `mtp` marker in the model's id/filename.
 2. **Profile opt-in** — does the slot's profile enable MTP at all? Only the
-   `rocm-dnse` and `rocm-moe` seed profiles do.
+   `rocm-dense`, `rocm-moe`, `vulkan-dense`, and `vulkan-moe` seed profiles do.
 3. **Slot override** — the slot's own `mtp` setting, a tri-state: forced
    **On**, forced **Off**, or **Auto** (the default, shown as the middle
    position of the dashboard's Auto/On/Off control in the slot drawer).

@@ -1,6 +1,6 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), installs podman, seeds default slot config, and starts the API.
+description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), installs podman, scaffolds empty capability slots, and starts the API.
 sidebar:
   order: 10
 ---
@@ -92,8 +92,10 @@ For a full production deployment, use the bootstrap script above.
 4. **Unpack and hand off** to `installer/install.sh`, which runs
    pre-flight checks, installs podman + the Python venv, builds the
    dashboard, writes config and systemd units, runs first-run setup
-   (`hal0 setup --auto --no-pull --no-extensions`) to seed a
-   hardware-recommended slot configuration, and starts the API.
+   (`hal0 setup --auto --no-pull --no-extensions`) to scaffold empty
+   capability slots (`chat`, `embed`, `rerank`, `stt`, `tts`, `vision`,
+   plus `coder` when an agent extension is on) — each wired with a
+   device, profile, and port but no model assigned — and starts the API.
 
 </Steps>
 
@@ -108,7 +110,7 @@ flags:
 | `HAL0_PORT` | `8080` | API bind port |
 | `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
 | `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
-| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (hardware-recommended slot seed) |
+| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (empty capability-slot scaffolding) |
 | `HAL0_INSTALL_REQUIRE_COSIGN` | _(unset)_ | Set to `1` to make the bootstrap refuse the install outright when `cosign` isn't present, instead of warning and proceeding on the SHA-256 check alone |
 
 | Flag | Effect |
@@ -180,8 +182,8 @@ may depend on them.
 
 ## Next steps
 
-First-run setup already seeded a hardware-recommended slot and profile
-during install. From here:
+First-run setup already scaffolded empty capability slots during install —
+no model is assigned to any of them yet. From here:
 
 - Run the interactive **`hal0 setup`** TUI to pick real models and
   extensions — see [First-run setup](/docs/getting-started/setup/).

@@ -44,12 +44,20 @@ fall back to the digit-tuple comparator for their timestamp ordering.
 hal0 update
 ```
 
-This checks, then applies if a newer version exists. The CLI prints the
-apply job id and polls `/api/updates/status/<id>` until it reaches
-`applied` or `failed`. After a successful apply the **daemon
-try-restarts hal0-api itself** — the CLI never touches systemd. If the
-restart didn't complete, the result says so (the new tree stays in place
-regardless).
+This checks, then applies if a newer version exists. The actual flow runs in
+two stages: **prepare** (downloads, cosign-verifies, extracts the release
+without touching the running system) and **commit** (performs the atomic
+swap). After the prepare stage completes, the CLI renders the release notes
+(highlights, breaking changes, migrations) and on an interactive terminal
+prompts `Apply hal0 <version>?` before proceeding. Declining leaves the
+staged tree in place (harmless) and tells you to re-run `hal0 update` to
+apply it later. The `--yes` / `-y` flag skips the confirmation prompt — useful
+for scripts, cron jobs, and unattended updates. Non-interactive or piped
+invocations also skip the prompt automatically so updates never block.
+
+After a successful apply the **daemon try-restarts hal0-api itself** — the CLI
+never touches systemd. If the restart didn't complete, the result says so (the
+new tree stays in place regardless).
 
 To pin a specific version instead of the latest:
 
@@ -71,6 +79,34 @@ The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
 
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
+
+## Update from git (local dev)
+
+For development or local testing, you can update hal0 directly from a git checkout:
+
+```sh
+hal0 update --source git
+```
+
+This clones or fetches the GitHub repository and pip-installs the newer version
+directly, without downloading or verifying a release tarball. On an interactive
+terminal it prompts to confirm before applying — `--yes` has no effect on this
+path (it's only wired for the release path above); to skip the prompt, run
+`hal0 update --source git` from a non-interactive or piped invocation instead.
+
+To check for an update via git without applying it:
+
+```sh
+hal0 update --source git --check
+```
+
+Unlike the release path, a git-based update does **not** automatically restart
+`hal0-api` — the CLI prints `Restart hal0-api to apply: systemctl restart
+hal0-api` and leaves that to you. The post-update slot-drift banner still
+appears, so you can restart drifted slots with `hal0 update --restart-slots`
+when convenient. This code path skips the cosign signature and digest
+verification described in the next section; it is intended for development and
+testing, not production.
 
 ## How the atomic update works
 
@@ -112,6 +148,17 @@ The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
    for rollback.
 
 </Steps>
+
+<Aside type="note">
+After an update applies, the CLI checks whether any slots are still running
+pre-update launch flags (printed as a drift banner). Since step 6 re-renders
+unit files but never bounces a running container, a slot may keep serving
+the older command until you restart it. When the CLI detects drift, it names
+the affected slots and tells you to run `hal0 update --restart-slots`. This
+flag is deliberately opt-in — a slot might be mid-inference — and it restarts
+only the drifted slots, reporting which succeeded and which failed per-slot.
+If nothing is drifted, no action is needed.
+</Aside>
 
 <Aside type="caution">
 `hal0 update` verifies every release with `cosign verify-blob` before

@@ -121,6 +121,8 @@
   background: var(--warn-soft); white-space: nowrap;
 }
 .comfy-page .gpu-note .b { color: var(--fg-2); }
+/* Banner variant — sits above the active render (out of the header). */
+.comfy-page .render-warn { display: inline-flex; margin: 0 0 14px; }
 
 /* ── Live dot ───────────────────────────────────────────────────────────────── */
 .comfy-page .ldot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-5); flex-shrink: 0; }

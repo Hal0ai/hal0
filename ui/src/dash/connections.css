@@ -60,8 +60,9 @@
 }
 .cpane.live .cpane-glyph { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
 .cpane-titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.engine-title,
-.cpane-title { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); white-space: nowrap; }
+.engine-title { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); white-space: nowrap; }
+/* Match the inference/NPU engine-pane titles (.infer-pane .sec-label → 12px). */
+.cpane-title { font-family: var(--jbm); font-size: 12px; font-weight: 500; color: var(--fg); white-space: nowrap; }
 .engine-sub,
 .cpane-sub { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cpane-h .grow { flex: 1; }
@@ -132,11 +133,15 @@
 .eprow.expanded > .eprow-main { background: var(--bg-2); }
 .eprow.dim .eprow-main { opacity: 0.5; }
 
+/* ONE status vocabulary — matches .sdot (overhaul.css / engine-panes.css) so an
+   endpoint row and its slot card always show the same colour for the same phase:
+   serving = green + pulse · stale/ready = amber (idle-but-up) · warming = orange
+   pulse · error = red · offline = grey. */
 .ep-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-5); justify-self: center; }
-.ep-dot.serving { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.4s ease-in-out infinite; }
-.ep-dot.ready { background: var(--ok); box-shadow: 0 0 7px var(--ok); }
+.ep-dot.serving { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.4s ease-in-out infinite; }
+.ep-dot.stale { background: var(--hal0-accent); }
 .ep-dot.warming { background: var(--warn); box-shadow: 0 0 7px var(--warn); animation: pulse 1.4s ease-in-out infinite; }
-.ep-dot.idle { background: var(--ok); opacity: 0.4; }
+.ep-dot.error { background: var(--err); box-shadow: 0 0 7px var(--err); }
 .ep-dot.offline { background: var(--fg-5); }
 .ep-name { color: var(--fg); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ep-name .star { color: var(--accent); font-size: 9px; }

@@ -44,7 +44,7 @@ def test_personas_list_after_seed(cli_runner: CliRunner, isolated_personas: Path
     assert result.exit_code == 0
     # Both seeded personas appear; the default is marked active.
     assert "hermes" in result.stdout
-    assert "coder" in result.stdout
+    assert "hal0-brain" in result.stdout
     # Some part of "yes" appears on the active row's column.
     assert "yes" in result.stdout
 
@@ -81,12 +81,12 @@ def test_personas_activate_writes_pointer_and_emits_status(
     # asserts the success path explicitly; the failure path lives in
     # test_personas.py's activate test.
     monkeypatch.setattr(P, "hermes_reload", lambda **_kw: (True, None))
-    result = cli_runner.invoke(agent_app, ["personas", "activate", "coder"])
+    result = cli_runner.invoke(agent_app, ["personas", "activate", "hal0-brain"])
     assert result.exit_code == 0
-    # active.txt now points at coder.
-    assert (isolated_personas / P.ACTIVE_POINTER).read_text().strip() == "coder"
+    # active.txt now points at hal0-brain.
+    assert (isolated_personas / P.ACTIVE_POINTER).read_text().strip() == "hal0-brain"
     assert "Activated" in result.stdout
-    assert "Coder" in result.stdout
+    assert "Brain" in result.stdout
 
 
 def test_personas_activate_failed_reload_warns_but_succeeds(
@@ -98,11 +98,11 @@ def test_personas_activate_failed_reload_warns_but_succeeds(
     succeeds — the file write is the durable part."""
     P.seed_default_personas(agent_id="hermes-agent", root=isolated_personas)
     monkeypatch.setattr(P, "hermes_reload", lambda **_kw: (False, "Connection refused"))
-    result = cli_runner.invoke(agent_app, ["personas", "activate", "coder"])
+    result = cli_runner.invoke(agent_app, ["personas", "activate", "hal0-brain"])
     assert result.exit_code == 0
     assert "Hot-reload nudge skipped" in result.stdout
     # Activation still went through.
-    assert (isolated_personas / P.ACTIVE_POINTER).read_text().strip() == "coder"
+    assert (isolated_personas / P.ACTIVE_POINTER).read_text().strip() == "hal0-brain"
 
 
 def test_personas_activate_missing_persona_exits_nonzero(

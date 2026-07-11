@@ -38,9 +38,9 @@
   --ok:           #6fcf97;
   --ok-soft:      rgba(111, 207, 151, 0.10);
   --ok-line:      rgba(111, 207, 151, 0.30);
-  --warn:         #e8b94e;
-  --warn-soft:    rgba(232, 185, 78, 0.10);
-  --warn-line:    rgba(232, 185, 78, 0.30);
+  --warn:         #f2792b;
+  --warn-soft:    rgba(242, 121, 43, 0.10);
+  --warn-line:    rgba(242, 121, 43, 0.30);
   --err:          #ef6b6b;
   --err-soft:     rgba(239, 107, 107, 0.10);
   --err-line:     rgba(239, 107, 107, 0.30);
@@ -305,6 +305,30 @@ a { color: inherit; text-decoration: none; }
   border-color: var(--accent-line);
   background: var(--accent-soft);
   box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
+}
+
+/* Agent Chat launcher — brain icon with a persistent pinkish-purple glow
+   (overrides the amber launcher default). Intensifies on hover / when the
+   chat slide-out is open. */
+.tb-launch-btn.tb-brain svg {
+  color: #d074ff;
+  filter: drop-shadow(0 0 5px rgba(208, 116, 255, 0.75)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+.tb-launch-btn.tb-brain:hover svg,
+.tb-launch-btn.tb-brain.on svg {
+  color: #e29bff;
+  filter: drop-shadow(0 0 8px rgba(208, 116, 255, 0.95)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+.tb-launch-btn.tb-brain:hover {
+  color: var(--fg);
+  border-color: rgba(208, 116, 255, 0.5);
+  background: rgba(208, 116, 255, 0.10);
+}
+.tb-launch-btn.tb-brain.on {
+  color: #e29bff;
+  border-color: rgba(208, 116, 255, 0.5);
+  background: rgba(208, 116, 255, 0.10);
+  box-shadow: 0 0 0 1px rgba(208, 116, 255, 0.4), 0 0 14px -4px #d074ff;
 }
 
 /* Notification bell — icon-only launcher + anchored dropdown panel. */
@@ -1774,7 +1798,7 @@ a { color: inherit; text-decoration: none; }
   opacity: 0.9;
 }
 .slot.slot--warming::before {
-  background: var(--warming, #f2792b);
+  background: var(--warn);
   opacity: 0.9;
 }
 .slot.slot--error::before {

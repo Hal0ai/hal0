@@ -911,6 +911,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.slot_manager = slot_manager
     app.state.model_cache = model_cache
 
+    # Agent personas — idempotently seed any missing defaults (hermes /
+    # coder / hal0-brain). The dashboard's agent-chat slide-out embodies the
+    # hal0-brain profile (routes/board_chat), so a box updated from a release
+    # that predates a seed must still grow its editable TOML: provisioning's
+    # persona_seed phase is checkpointed and never re-runs on `hal0 update`,
+    # which makes the post-update API restart the only hook every install
+    # path (update, editable/dev, fresh) shares. Existing files are never
+    # touched (overwrite=False); `hal0 agent install hermes --repair` stays
+    # the reset-to-canonical path. The root goes through paths.var_lib()
+    # rather than the module's PERSONAS_ROOT constant so HAL0_HOME installs
+    # (tests, dev boxes) seed under their own tree instead of the host's
+    # /var/lib/hal0 — in FHS production the two resolve identically.
+    try:
+        from hal0.agents.personas import seed_default_personas
+        from hal0.config import paths as _hal0_paths
+
+        seeded_personas = await asyncio.to_thread(
+            seed_default_personas,
+            root=_hal0_paths.var_lib() / ".hermes" / "personas",
+        )
+        if seeded_personas:
+            log.info("personas.startup_seed", ids=[p.id for p in seeded_personas])
+    except Exception as exc:  # seeding must never block startup
+        log.warning("personas.startup_seed_failed", error=str(exc))
+
     # Capability orchestrator — overlay that maps the dashboard's
     # capability-grouped children (embed/voice/img) onto regular slots.
     # The orchestrator is intentionally constructed AFTER the slot
