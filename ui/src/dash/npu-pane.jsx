@@ -280,7 +280,10 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
   // they run no unit of their own).
   const occState = String(occ?.state || '').toLowerCase()
   const RUNNING_STATES = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale']
-  const serving = ind.cls === 'serving' || occState === 'serving'
+  // occ.active = this capability hit the NPU within the server's activity
+  // window (chat / stt / embed each carry their own last-used stamp), so the
+  // card dot lights per capability, not just off the shared anchor phase.
+  const serving = ind.cls === 'serving' || occState === 'serving' || occ?.active === true
   // "running" = up & resident on the NPU. These glow purple; offline/off/error
   // stay dim. Previously every non-serving state (incl. offline) fell through
   // to a flat green dot, so all three trio cards read green regardless.
@@ -409,6 +412,28 @@ export function NpuOccupancyCard({ slots }) {
       if (c >= 0 && c < NPU_COLS) owners[c] = ownerObj
     })
   })
+
+  // Per-capability activity takeover. The NPU is single-tenant — chat, STT
+  // and embed all ride the one FLM process — so "which capability is hitting
+  // it right now" is a whole-grid question: the claimed columns recolour to
+  // the active slot's hue (most recent request wins when several are hot,
+  // per the occupancy endpoint's last_used_age_s). No activity → the grid
+  // keeps its resting claimed look.
+  const activeOwners = npuSlots
+    .map((s, idx) => ({ slot: s, occ: occByName[s.name], hue: HUES[idx % HUES.length] }))
+    .filter((x) => x.occ?.active)
+    .sort(
+      (a, b) => (a.occ.last_used_age_s ?? Infinity) - (b.occ.last_used_age_s ?? Infinity)
+    )
+  if (activeOwners.length > 0) {
+    const top = activeOwners[0]
+    const activeObj = { name: top.slot.name, serving: true, ...top.hue }
+    const claimed = owners.map((o, c) => (o ? c : -1)).filter((c) => c >= 0)
+    const cols = top.occ.cols && top.occ.cols.length ? top.occ.cols : claimed
+    cols.forEach((c) => {
+      if (c >= 0 && c < NPU_COLS) owners[c] = activeObj
+    })
+  }
 
   // fire-and-forget lifecycle (mirrors InferencePane/SlotsView)
   const run = (name, mut, args, okMsg) => {

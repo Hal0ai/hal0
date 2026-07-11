@@ -18,6 +18,7 @@ every error path (no SlotManager, accessor errors, etc.).
 
 from __future__ import annotations
 
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,27 @@ _LOADED_STATES = frozenset({"serving", "ready", "warming", "idle"})
 # Used by the degraded single-tenant fallback, which works off the already-
 # mapped slot_view["state"] rather than the raw SlotState.
 _LOADED_VIEW_STATES = frozenset({"serving", "ready", "loaded", "idle"})
+
+# A capability counts as "actively hitting the NPU" when its slot was used
+# within this window. Must exceed the dashboard's 2.5s occupancy poll so a
+# single request is catchable by at least one poll; short enough that the
+# grid's per-capability tint fades soon after traffic stops.
+_ACTIVE_WINDOW_S = 6.0
+
+
+def _last_used_age_s(app_state: Any, slot_name: str) -> float | None:
+    """Seconds since *slot_name* last served a request, or ``None``.
+
+    Reads the ``app.state.slot_last_used`` monotonic timestamps that v1.py
+    stamps on every chat response (``_record_nonstreaming_throughput`` /
+    the streaming counter) and on every trio STT/embed dispatch
+    (``_touch_npu_shadow_count``).
+    """
+    last_used = getattr(app_state, "slot_last_used", None) or {}
+    ts = last_used.get(slot_name)
+    if not isinstance(ts, (int, float)):
+        return None
+    return max(0.0, time.monotonic() - float(ts))
 
 
 def _occupancy_absent() -> dict[str, Any]:
@@ -226,6 +248,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 seen: set[int] = set()
                 cols = [c for c in cols if 0 <= c < _NPU_COLS and not (c in seen or seen.add(c))]
 
+        # Per-capability activity: chat is "active" while a request is
+        # in flight (SERVING) or was answered within the window; the
+        # trio's shadow roles below key off their own last-used stamps.
+        chat_age = _last_used_age_s(request.app.state, s.name)
         slots_out.append(
             {
                 "name": s.name,
@@ -233,6 +259,9 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 "state": mapped_state,
                 "cols": cols,
                 "gb": gb,
+                "active": mapped_state == "serving"
+                or (chat_age is not None and chat_age <= _ACTIVE_WINDOW_S),
+                "last_used_age_s": round(chat_age, 1) if chat_age is not None else None,
             }
         )
 
@@ -258,6 +287,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         # the sub-card wrongly showed "off"/dim.)
         if npu_cfg.get("asr"):
             stt_live = is_loaded
+            stt_age = _last_used_age_s(request.app.state, s.name + "-stt")
             slots_out.append(
                 {
                     "name": s.name + "-stt",
@@ -265,10 +295,13 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "state": mapped_state if stt_live else "off",
                     "cols": list(range(_NPU_COLS)) if stt_live else [],
                     "gb": None,
+                    "active": stt_live and stt_age is not None and stt_age <= _ACTIVE_WINDOW_S,
+                    "last_used_age_s": round(stt_age, 1) if stt_age is not None else None,
                 }
             )
         if npu_cfg.get("embed"):
             embed_live = is_loaded
+            embed_age = _last_used_age_s(request.app.state, s.name + "-embed")
             slots_out.append(
                 {
                     "name": s.name + "-embed",
@@ -276,6 +309,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "state": mapped_state if embed_live else "off",
                     "cols": list(range(_NPU_COLS)) if embed_live else [],
                     "gb": None,
+                    "active": embed_live
+                    and embed_age is not None
+                    and embed_age <= _ACTIVE_WINDOW_S,
+                    "last_used_age_s": round(embed_age, 1) if embed_age is not None else None,
                 }
             )
 

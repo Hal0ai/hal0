@@ -16,9 +16,13 @@ import { ENDPOINTS } from '../endpoints'
 export interface NpuOccupancySlot {
   name: string
   model: string | null
-  state: 'serving' | 'ready' | 'loaded' | 'idle' | 'offline'
+  state: 'serving' | 'ready' | 'loaded' | 'idle' | 'offline' | 'off'
   cols: number[]
   gb: number | null
+  // Capability hit the NPU within the server's activity window (~6s) or has
+  // a request in flight. Drives the grid's per-capability colour takeover.
+  active?: boolean
+  last_used_age_s?: number | null
 }
 
 export interface NpuOccupancy {
