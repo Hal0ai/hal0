@@ -1604,7 +1604,10 @@ def _resolve_memory_provider(agent_id: str, cfg: Any) -> str:
     ``SimpleNamespace`` instead of constructing a full ``Hal0Config``.
     """
     agent_providers = getattr(getattr(cfg, "memory", None), "agent_providers", None) or {}
-    choice = agent_providers.get(agent_id, "hindsight")
+    # Legacy provision.json state carries agent_id="hermes-agent" (pre-#1056);
+    # the toggle is keyed by the canonical registry name ("hermes").
+    canonical = agent_id.removesuffix("-agent") or agent_id
+    choice = agent_providers.get(agent_id) or agent_providers.get(canonical, "hindsight")
     return "honcho" if choice == "honcho" else "hal0-memory"
 
 

@@ -243,3 +243,15 @@ def test_disable_honcho_hermes_host_already_disabled_no_change(tmp_path: Path) -
     (home / "honcho.json").write_text(json.dumps(existing))
 
     assert hp._disable_honcho_hermes_host(home) is False
+
+
+def test_resolve_memory_provider_legacy_agent_id_suffix():
+    """provision.json state predating #1056 says 'hermes-agent' — must still
+    hit the canonical 'hermes' toggle key."""
+    from types import SimpleNamespace
+
+    from hal0.agents.hermes_provision import _resolve_memory_provider
+
+    cfg = SimpleNamespace(memory=SimpleNamespace(agent_providers={"hermes": "honcho"}, agent_private={}))
+    assert _resolve_memory_provider("hermes-agent", cfg) == "honcho"
+    assert _resolve_memory_provider("hermes", cfg) == "honcho"
