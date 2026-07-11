@@ -1,0 +1,25 @@
+# Agent LLM slot — vulkan llama-server container (hal0-slot@agent).
+#
+# ADR-0023: `agent` is the default LLM anchor every `hal0/<slot>` fallback
+# chain ends in (chat routing, the sidebar steward's hal0/brain fallback,
+# Hermes delegation). Seeding it at install time keeps those chains from
+# dead-ending on a fresh box; `hal0 setup` scaffolds the same slot when this
+# seed is absent (setup_command._SETUP_SLOTS — chat capability, same name +
+# port), and never overwrites an existing file.
+#
+# Clean seed (WS-E, #1107 pattern): ships WITHOUT a `[model].default` and
+# DISABLED, so a fresh, deliberately model-less box boots a GREY tile — no
+# surprise multi-GB download and no crash-loop. The operator assigns a model
+# later (dashboard / `hal0 setup`), which flips the slot enabled. device/
+# profile are the widest-compatible GPU-Vulkan tile defaults; the guided /
+# answer-file setup path derives them from the up-front preflight instead.
+name = "agent"
+type = "llm"
+device = "gpu-vulkan"
+runtime = "container"
+profile = "vulkan"
+enabled = false
+port = 8081
+
+[model]
+context_size = 65536
