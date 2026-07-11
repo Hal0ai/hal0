@@ -10,25 +10,45 @@ path, and the routing degrades to a typed error without app wiring.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hal0.agents.personas import Persona, PersonaApproval, save_persona
 from hal0.api.routes import board_chat as bc
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
 
 def _fake_request(**state: Any) -> Any:
-    """A Request stand-in exposing exactly what the admin path reads."""
+    """A Request stand-in exposing exactly what the admin path reads.
+
+    ``brain_persona_root`` defaults to a nonexistent dir so the policy
+    loader resolves to None — never the test box's live persona store.
+    """
     defaults: dict[str, Any] = {
         "approval_queue": None,
         "memory_dispatcher": None,
         "self_api_base_url": "http://testserver",
+        "brain_persona_root": Path("/nonexistent-personas-root"),
     }
     defaults.update(state)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(**defaults)), headers={})
+
+
+def _brain_persona_root(tmp_path: Path, **overrides: Any) -> Path:
+    """Write a hal0-brain persona TOML into ``tmp_path`` and return it."""
+    approval = overrides.pop("approval", PersonaApproval())
+    persona = Persona(
+        id=bc.BRAIN_PERSONA_ID,
+        display_name="hal0 Brain",
+        approval=approval,
+        **overrides,
+    )
+    save_persona(persona, root=tmp_path)
+    return tmp_path
 
 
 # ── surfaced schema shape ────────────────────────────────────────────────────
@@ -116,3 +136,76 @@ async def test_admin_dispatch_degrades_without_approval_queue() -> None:
     request = _fake_request(approval_queue=None)
     result = await bc._dispatch_admin_tool(request, "model_pull", {"model_id": "m"})
     assert "unavailable" in result["error"]
+
+
+# ── persona ToolPolicy enforcement on the sidebar surface ────────────────────
+
+
+def test_brain_policy_none_when_persona_missing(tmp_path: Path) -> None:
+    request = _fake_request(brain_persona_root=tmp_path)  # empty store
+    assert bc._brain_tool_policy(request) is None
+
+
+def test_brain_policy_loads_from_persona_toml(tmp_path: Path) -> None:
+    root = _brain_persona_root(
+        tmp_path,
+        approval=PersonaApproval(auto_approve=("model_pull",), require_approval=("slot_load",)),
+    )
+    policy = bc._brain_tool_policy(_fake_request(brain_persona_root=root))
+    assert policy is not None
+    assert policy.classify("model_pull", server_gated=True) == "run"
+    assert policy.classify("slot_load", server_gated=False) == "gated"
+
+
+def test_surfaced_schemas_filtered_by_tools_allowed(tmp_path: Path) -> None:
+    """tools_allowed narrows BOTH the local and admin schema lists."""
+    root = _brain_persona_root(tmp_path, tools_allowed=("get_board", "profile_*"))
+    request = _fake_request(brain_persona_root=root)
+    names = {s["function"]["name"] for s in bc._surfaced_tool_schemas(request)}
+    assert "get_board" in names
+    assert "profile_list" in names and "profile_create" in names
+    assert "model_pull" not in names  # admin tool hidden
+    assert "slot_load" not in names  # local tool hidden
+    # No persona → everything surfaces.
+    full = {s["function"]["name"] for s in bc._surfaced_tool_schemas(_fake_request())}
+    assert "model_pull" in full and "slot_load" in full
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_refuses_disallowed_local_tool(tmp_path: Path) -> None:
+    root = _brain_persona_root(tmp_path, tools_allowed=("get_board",))
+    request = _fake_request(brain_persona_root=root, approval_queue=ApprovalQueue())
+    result = await bc._dispatch_tool(request, client=None, name="slot_load", args={}, board=None)
+    assert "tools_allowed" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_persona_loosening_skips_approval_from_sidebar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """auto_approve=model_pull in the persona TOML → the sidebar call
+    executes immediately instead of queueing."""
+    executed: dict[str, Any] = {}
+
+    async def _fake_execute(**kwargs: Any) -> dict[str, Any]:
+        executed.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(admin, "_execute_tool", _fake_execute)
+    root = _brain_persona_root(tmp_path, approval=PersonaApproval(auto_approve=("model_pull",)))
+    queue = ApprovalQueue()
+    request = _fake_request(brain_persona_root=root, approval_queue=queue)
+    result = await bc._dispatch_admin_tool(request, "model_pull", {"model_id": "m"})
+    assert result == {"ok": True}
+    assert executed["tool"] == "model_pull"
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_persona_cannot_loosen_destructive_floor(tmp_path: Path) -> None:
+    root = _brain_persona_root(tmp_path, approval=PersonaApproval(auto_approve=("model_delete",)))
+    queue = ApprovalQueue()
+    request = _fake_request(brain_persona_root=root, approval_queue=queue)
+    result = await bc._dispatch_admin_tool(request, "model_delete", {"model_id": "m"})
+    assert result["status"] == "pending_approval"
+    assert [p["tool"] for p in queue.list_pending()] == ["model_delete"]
