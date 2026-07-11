@@ -72,6 +72,7 @@ from hal0.api.routes import (
     logs,
     models,
     npu,
+    ports as ports_routes,
     power,
     providers,
     services_health,
@@ -1165,6 +1166,9 @@ def create_app() -> FastAPI:
         tags=["installer"],
     )
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
+    # Global port-claim map (hal0.ports registry) — slots, runtime rows,
+    # reserved ports, live listeners, conflicts, next-free.
+    app.include_router(ports_routes.router, prefix="/api/ports", tags=["ports"])
     # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
     # tab (docker + systemd + ComfyUI HTTP), plus arbiter switchover controls.
     app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
