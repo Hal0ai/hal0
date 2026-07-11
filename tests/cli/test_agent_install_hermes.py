@@ -313,6 +313,45 @@ def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path)
     assert ["systemctl", "enable", "--now", "hermes-gateway.service"] in calls
 
 
+def test_install_hermes_gateway_writes_dropin_before_gateway_install(monkeypatch, tmp_path) -> None:
+    """The secrets drop-in must be laid down BEFORE `hermes gateway install`
+    starts the (start-now) vanilla unit — otherwise hal0 flags its own active,
+    drop-in-less unit as a foreign poller and never wires the bridge."""
+    import hal0.agents.hermes_provision as hp
+
+    gateway_unit = tmp_path / "hermes-gateway.service"
+    events: list[str] = []
+
+    def _fake_dropin(**_k):  # type: ignore[no-untyped-def]
+        events.append("dropin")
+        return hp.GatewayDropinResult(outcome="written", dropin_path=str(gateway_unit))
+
+    def _fake_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        if argv[0] == ac._HERMES_BIN:
+            events.append("gateway-install")
+            gateway_unit.write_text("[Unit]\n")
+        else:
+            events.append(" ".join(argv))
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
+    monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
+    monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
+    monkeypatch.setattr("hal0.agents.hermes_provision.write_gateway_secrets_dropin", _fake_dropin)
+
+    ac._install_hermes_gateway()
+
+    assert "dropin" in events and "gateway-install" in events
+    assert events.index("dropin") < events.index("gateway-install")
+
+
 def test_install_hermes_gateway_skips_enable_on_foreign_gateway(monkeypatch, tmp_path) -> None:
     """A live foreign hermes-gateway means enabling hal0's unit too would put a
     SECOND poller on the same Telegram token (HTTP 409). The gate must skip the

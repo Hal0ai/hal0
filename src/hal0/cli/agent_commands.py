@@ -347,6 +347,28 @@ def _install_hermes_gateway() -> None:
         return
 
     console.print("[bold]Installing hermes gateway[/bold] (Telegram/Discord bridge)…")
+
+    # Lay the hal0 secrets drop-in down BEFORE `hermes gateway install` starts
+    # the unit. `hermes gateway install </dev/null` defaults to start-now, so
+    # the vanilla unit goes ACTIVE immediately; hal0 flags a system gateway
+    # "foreign" iff it's active with no drop-in present (_detect_foreign_gateways
+    # below). Without pre-writing, hal0 would mistake its OWN just-started unit
+    # for a foreign poller and skip the enable, leaving the bridge unwired. The
+    # bootstrap's gateway_secrets_wire phase already writes this on the fresh
+    # path; this call makes the ordering hold on the deferred/standalone path
+    # too. Best-effort (non-root/pytest → skipped; write error → reported).
+    try:
+        from hal0.agents.hermes_provision import write_gateway_secrets_dropin
+
+        dropin = write_gateway_secrets_dropin()
+        if dropin.outcome == "failed":
+            console.print(
+                f"[yellow]gateway secrets drop-in not written ({dropin.reason}) — "
+                "continuing; the bridge may come up unwired.[/yellow]"
+            )
+    except Exception as exc:  # drop-in wiring is strictly best-effort
+        console.print(f"[yellow]gateway secrets drop-in pre-write skipped: {exc}[/yellow]")
+
     # HERMES_HOME is unset so the generator bakes the hal0 default
     # (~/.hermes) rather than a value inherited from the invoking shell.
     env = dict(_os.environ)

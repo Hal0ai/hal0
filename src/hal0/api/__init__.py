@@ -1061,12 +1061,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (tests, dev boxes) seed under their own tree instead of the host's
     # /var/lib/hal0 — in FHS production the two resolve identically.
     try:
+        from hal0.agents.hermes_provision import mark_home_managed_if_owned
         from hal0.agents.personas import seed_default_personas
         from hal0.config import paths as _hal0_paths
 
+        hermes_home = _hal0_paths.var_lib() / ".hermes"
+        # Stamp `.hal0-managed` BEFORE seeding personas. This seed populates
+        # HERMES_HOME on every fresh box before `hal0 agent install hermes`
+        # runs; without the marker the bootstrap's home-claim guard mistakes
+        # hal0's OWN seeded personas for a foreign tree and fatal-aborts every
+        # phase ("unclaimed HERMES_HOME"). A genuine foreign tree stays
+        # unstamped so capture still requires --adopt (returns False here).
+        claimed = await asyncio.to_thread(mark_home_managed_if_owned, hermes_home)
+        if not claimed:
+            log.info("personas.startup_seed_foreign_home", home=str(hermes_home))
+
         seeded_personas = await asyncio.to_thread(
             seed_default_personas,
-            root=_hal0_paths.var_lib() / ".hermes" / "personas",
+            root=hermes_home / "personas",
         )
         if seeded_personas:
             log.info("personas.startup_seed", ids=[p.id for p in seeded_personas])
