@@ -712,7 +712,7 @@ def _chown_tree_to_hal0(
     user: str = _HAL0_SERVICE_USER,
     geteuid: Callable[[], int] = os.geteuid,
     resolve_ids: Callable[[str], tuple[int, int] | None] = _resolve_user_ids,
-    chown: Callable[[str, int, int], None] = os.chown,
+    chown: Callable[[str, int, int], None] = os.lchown,
 ) -> int:
     """Recursively chown ``path`` to the hal0 service user, returning the count.
 
@@ -720,6 +720,13 @@ def _chown_tree_to_hal0(
     ``runtime.json``) to the unprivileged ``hal0`` user so the ``User=hal0``
     systemd unit can read/write them instead of hitting EACCES or silently
     falling back to the default provider — the root-clobber regression (#843).
+
+    Uses :func:`os.lchown` (NOT :func:`os.chown`) so a symlink entry chowns the
+    LINK itself, never the file it points at. As root, following a symlink would
+    hand ownership of an arbitrary out-of-tree target to the hal0 service user —
+    a real hazard now that ``--adopt`` runs this over a foreign home of uncertain
+    provenance (a planted ``evil -> /outside/secret`` symlink). For a regular
+    file ``lchown`` is identical to ``chown``, so nothing else changes.
 
     A no-op (returns 0) when not root, when ``user`` doesn't exist, or when
     ``path`` is missing, so it's safe in dev/non-root installs and idempotent
@@ -838,6 +845,18 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             reason=f"wrapper source missing at {hermes_wrapper_src}",
         )
 
+    # Claim HERMES_HOME BEFORE any mutation (venv build, wrapper swap, plugin
+    # copy). An unclaimed foreign home without --adopt is a true no-op abort —
+    # we must NOT build the venv or swap /usr/local/bin/hermes and only then
+    # bail. On --adopt this also runs the backup + token import up front, so the
+    # marker is stamped before install populates the tree with plugin dirs.
+    hermes_home = Path(state.hermes_home)
+    claimed, reason, adopt_details = _claim_hermes_home(hermes_home, adopt=ctx.adopt)
+    if not claimed:
+        return PhaseResult(status=PhaseStatus.FAIL, reason=reason, fatal=True)
+    if adopt_details is not None:
+        details["adopted"] = adopt_details
+
     hermes_bin = _venv_python(venv).parent / "hermes"
     if not hermes_bin.exists():
         try:
@@ -869,15 +888,8 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
         )
 
     # Plugin stubs into HERMES_HOME-shaped locations. Real bodies in #241/#242.
-    # Claim HERMES_HOME with the .hal0-managed marker FIRST so home_init's
-    # "is this my tree?" check passes — install populates HERMES_HOME with
-    # plugin dirs, so it has to be the phase that stamps the marker.
-    hermes_home = Path(state.hermes_home)
-    claimed, reason, adopt_details = _claim_hermes_home(hermes_home, adopt=ctx.adopt)
-    if not claimed:
-        return PhaseResult(status=PhaseStatus.FAIL, reason=reason, fatal=True)
-    if adopt_details is not None:
-        details["adopted"] = adopt_details
+    # HERMES_HOME was already claimed (marker stamped) above, before any
+    # mutation — install populates it with plugin dirs below.
     plugin_targets = {
         "hal0-memory": hermes_home / "plugins" / "hal0-memory",
     }

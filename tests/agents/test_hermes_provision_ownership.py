@@ -163,3 +163,56 @@ def test_ownership_reconcile_agents_dir_mode_idempotent(tmp_path, monkeypatch) -
     # Already 0711 → no churn, but still reported.
     assert out.details["agents_dir_mode_fixed"] is False
     assert _stat.S_IMODE(agents_dir.stat().st_mode) == 0o711
+
+
+# ── symlink-following chown hazard (blocking review finding) ─────────────────
+#
+# _chown_tree_to_hal0 recurses HERMES_HOME as root. With os.chown (follow=True)
+# a symlink entry chowns its TARGET — so a planted `evil -> /outside/secret`
+# hands ownership of an out-of-tree file to the hal0 service user (which holds
+# broad NOPASSWD sudo). Now that --adopt runs this over a foreign home of
+# uncertain provenance, that's a real escalation path. The fix: os.lchown, so
+# the LINK is chowned, never its target.
+
+
+def test_chown_tree_default_uses_lchown_not_chown() -> None:
+    """The default chown seam must be os.lchown (never follows symlinks)."""
+    import inspect
+    import os as _os
+
+    default = inspect.signature(hp._chown_tree_to_hal0).parameters["chown"].default
+    assert default is _os.lchown
+    assert default is not _os.chown
+
+
+def test_chown_tree_does_not_follow_symlink_to_outside(tmp_path: Path) -> None:
+    """Regression: a symlink inside the tree pointing outside must NOT change
+    the outside target's ownership. Needs real chown syscalls → root-gated
+    (CI runs non-root, where _chown_tree_to_hal0 no-ops anyway)."""
+    import os as _os
+
+    import pytest
+
+    if _os.geteuid() != 0:
+        pytest.skip("real chown behaviour needs root; the helper no-ops off-root")
+
+    outside = tmp_path / "outside_secret"
+    outside.write_text("do not touch")
+    orig_uid = outside.stat().st_uid  # root-owned (0)
+
+    tree = tmp_path / "home"
+    tree.mkdir()
+    (tree / "evil").symlink_to(outside)
+    (tree / "regular.txt").write_text("ok")
+
+    # Real chown (default os.lchown) to an arbitrary uid — root may set any.
+    n = hp._chown_tree_to_hal0(tree, resolve_ids=lambda _u: (12345, 12345))
+
+    # The out-of-tree target's ownership is UNCHANGED (the link, not its
+    # target, was chowned).
+    assert outside.stat().st_uid == orig_uid
+    # The symlink itself was chowned (lstat sees the link, not the target).
+    assert _os.lstat(tree / "evil").st_uid == 12345
+    # The regular file inside the tree was chowned as before.
+    assert (tree / "regular.txt").stat().st_uid == 12345
+    assert n >= 3

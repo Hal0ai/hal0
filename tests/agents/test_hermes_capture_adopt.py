@@ -347,3 +347,41 @@ def test_preflight_warns_not_fatal_on_foreign_gateway_with_adopt(tmp_path: Path,
     assert out.fatal is False
     assert "foreign_gateway_warning" in out.details
     assert "will NOT auto-stop" in out.details["foreign_gateway_warning"]
+
+
+# ── _phase_install: claim before any mutation (blocking review finding) ──────
+
+
+def test_install_aborts_before_any_mutation_on_foreign_home_without_adopt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A foreign (populated, unmarked) home without --adopt must fatal-abort
+    BEFORE building the venv or swapping /usr/local/bin/hermes — a true no-op
+    abort, not one that swaps the system entrypoint and only then bails."""
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text("operator: cfg\n")  # foreign, unmarked
+
+    venv = tmp_path / "venv"
+    wrapper_dst = tmp_path / "usr" / "bin" / "hermes"
+    wrapper_dst.parent.mkdir(parents=True)
+    foreign_wrapper = "#!/bin/sh\n# foreign upstream hermes\nexec /opt/hermes \"$@\"\n"
+    wrapper_dst.write_text(foreign_wrapper)
+    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", wrapper_dst)
+    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "bin" / "hal0-hermes")
+
+    install_calls: list[Any] = []
+    io = hp.PhaseIO(install_venv=lambda *a, **_k: install_calls.append(a))
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
+
+    out = hp._phase_install(hp.context_for("install", state, io=io))  # adopt defaults False
+
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.fatal is True
+    # Nothing was mutated: venv not built, the system `hermes` not swapped (nor
+    # even backed up), and the home stays unclaimed.
+    assert install_calls == []
+    assert not (venv / "bin").exists()
+    assert wrapper_dst.read_text() == foreign_wrapper
+    assert not wrapper_dst.with_name("hermes.pre-hal0").exists()
+    assert not (hermes_home / hp._HAL0_MANAGED_MARKER).exists()
