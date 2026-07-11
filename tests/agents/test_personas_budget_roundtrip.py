@@ -69,13 +69,13 @@ def test_seed_personas_have_empty_budget_by_default(tmp_path: Path) -> None:
     """Default seeds ship an empty budget — operator opts in."""
     personas_mod.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
     hermes = personas_mod.load_persona("hermes", root=tmp_path)
-    coder = personas_mod.load_persona("coder", root=tmp_path)
+    brain = personas_mod.load_persona("hal0-brain", root=tmp_path)
     assert hermes.budget.is_empty()
-    assert coder.budget.is_empty()
+    assert brain.budget.is_empty()
     # …but hard_cap defaults to True so a later operator edit doesn't have
     # to remember to flip it.
     assert hermes.budget.hard_cap is True
-    assert coder.budget.hard_cap is True
+    assert brain.budget.hard_cap is True
 
 
 def test_persona_with_budget_preserves_other_fields(tmp_path: Path) -> None:

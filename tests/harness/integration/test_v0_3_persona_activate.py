@@ -46,7 +46,7 @@ from hal0.api.agents import personas as personas_route
 @pytest.fixture
 def seeded_personas_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Redirect the personas store to a tmp dir + seed the default
-    hermes + coder personas + the active pointer (= hermes)."""
+    hermes + hal0-brain personas + the active pointer (= hermes)."""
     root = tmp_path / "personas"
     root.mkdir()
     monkeypatch.setattr(personas_mod, "PERSONAS_ROOT", root)
@@ -65,7 +65,7 @@ def test_persona_list_reflects_seeded_personas(
     assert body["agent_id"] == "hermes"
     assert body["active"] == "hermes"
     ids = sorted(row["id"] for row in body["personas"])
-    assert ids == ["coder", "hal0-brain", "hermes"]
+    assert ids == ["hal0-brain", "hermes"]
 
 
 def test_persona_activate_writes_active_txt(
@@ -74,21 +74,21 @@ def test_persona_activate_writes_active_txt(
     fake_hermes: FakeWsServer,
 ) -> None:
     """The activate POST persists ``active.txt`` to the persona root."""
-    # Hermes is already active per seed. Switch to coder.
+    # Hermes is already active per seed. Switch to hal0-brain.
     r = harness_client.post(
-        "/api/agents/hermes/personas/coder/activate",
+        "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": False},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["active"] == "coder"
+    assert body["active"] == "hal0-brain"
     assert body["previous"] == "hermes"
     assert body["reloaded"] is False  # because we passed reload=false
 
     # On-disk active.txt must reflect the swap.
     active_file = seeded_personas_root / "active.txt"
     assert active_file.exists()
-    assert active_file.read_text().strip() == "coder"
+    assert active_file.read_text().strip() == "hal0-brain"
 
 
 def test_persona_activate_with_reload_calls_hermes(
@@ -118,12 +118,12 @@ def test_persona_activate_with_reload_calls_hermes(
     monkeypatch.setenv("HAL0_HERMES_PORT", str(port))
 
     r = harness_client.post(
-        "/api/agents/hermes/personas/coder/activate",
+        "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": True},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["active"] == "coder"
+    assert body["active"] == "hal0-brain"
     # ``reloaded`` reflects whether the nudge succeeded. If the helper
     # uses a different protocol or wasn't wired to use the env vars,
     # the call still wrote active.txt and the endpoint returned 200 —
@@ -151,7 +151,7 @@ def test_persona_activate_unknown_agent_returns_404(
     seeded_personas_root: Path,
 ) -> None:
     r = harness_client.post(
-        "/api/agents/pi-coder/personas/coder/activate",
+        "/api/agents/pi-coder/personas/hal0-brain/activate",
         json={"reload": False},
     )
     assert r.status_code == 404
@@ -163,17 +163,17 @@ def test_persona_detail_after_activate_shows_new_active(
     harness_client: TestClient,
     seeded_personas_root: Path,
 ) -> None:
-    """Round-trip: activate coder → GET coder → ``active=true``."""
+    """Round-trip: activate hal0-brain → GET hal0-brain → ``active=true``."""
     r = harness_client.post(
-        "/api/agents/hermes/personas/coder/activate",
+        "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": False},
     )
     assert r.status_code == 200
 
-    r = harness_client.get("/api/agents/hermes/personas/coder")
+    r = harness_client.get("/api/agents/hermes/personas/hal0-brain")
     assert r.status_code == 200
     body = r.json()
-    assert body["id"] == "coder"
+    assert body["id"] == "hal0-brain"
     assert body["active"] is True
 
     # And the previously-active hermes is now inactive.

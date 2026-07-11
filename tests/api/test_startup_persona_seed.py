@@ -23,39 +23,41 @@ def _personas_root(tmp_hal0_home: str) -> Path:
 
 
 def test_lifespan_seeds_default_personas(tmp_hal0_home: str) -> None:
-    """A blank box grows all three seeds + the active pointer at startup."""
+    """A blank box grows both seeds + the active pointer at startup."""
     root = _personas_root(tmp_hal0_home)
     assert not root.exists()
 
     with TestClient(create_app()):
         pass
 
-    assert {p.stem for p in root.glob("*.toml")} == {"hermes", "coder", "hal0-brain"}
+    assert {p.stem for p in root.glob("*.toml")} == {"hermes", "hal0-brain"}
     assert (root / "active.txt").read_text(encoding="utf-8").strip() == "hermes"
 
 
-def test_lifespan_seed_adds_missing_brain_without_touching_edits(
+def test_lifespan_seed_converges_old_box_without_touching_edits(
     tmp_hal0_home: str,
 ) -> None:
-    """The pre-hal0-brain upgrade case: hermes/coder exist (one operator-
-    edited), hal0-brain is missing — startup adds only the missing seed."""
+    """The upgrade case: an old box has hermes (operator-edited) + a
+    pristine retired coder, no hal0-brain — startup adds the missing
+    seed, sweeps the retired one, and leaves the edit alone."""
+    import dataclasses
+
     from hal0.agents import personas as personas_mod
 
     root = _personas_root(tmp_hal0_home)
-    personas_mod.seed_default_personas(root=root)
-    (root / "hal0-brain.toml").unlink()
-    import dataclasses
-
+    root.mkdir(parents=True)
     edited = dataclasses.replace(
-        personas_mod.load_persona("hermes", root=root),
+        personas_mod._seed_hermes("hermes"),
         system_prompt="operator-edited prompt",
     )
     personas_mod.save_persona(edited, root=root)
+    personas_mod.save_persona(personas_mod._seed_coder("hermes"), root=root)
+    personas_mod.set_active("hermes", root=root)
 
     with TestClient(create_app()):
         pass
 
-    assert (root / "hal0-brain.toml").exists()
+    assert not (root / "coder.toml").exists()  # pristine retired seed swept
     brain = personas_mod.load_persona("hal0-brain", root=root)
     assert brain.memory_namespace == "private:hal0-brain"
     assert brain.preferred_model == "hal0/brain"
