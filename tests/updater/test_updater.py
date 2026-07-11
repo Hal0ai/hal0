@@ -86,6 +86,7 @@ def _write_release_manifest(
     manifest_path: Path,
     tarball: Path,
     version: str,
+    scheme: str = "bundle",
     sig: Path | None = None,
     cert: Path | None = None,
     bundle: Path | None = None,
@@ -93,24 +94,23 @@ def _write_release_manifest(
 ) -> dict[str, Any]:
     """Write a full hal0.releases.v1 manifest pointing at file:// URLs.
 
-    Since #1159 the manifest carries a single ``bundle_url`` (a Sigstore
-    bundle that embeds the cert + signature + Rekor SET) instead of the old
-    detached ``sig_url`` + ``cert_url``. The bundle file is created next to
-    the tarball so the file:// download in apply()/prepare() finds it (its
-    contents are irrelevant whenever cosign is skipped or faked). The legacy
-    ``sig``/``cert`` kwargs are accepted and ignored so existing callers need
-    not change.
+    Since #1159 the manifest prefers a ``bundle_url`` (a Sigstore bundle
+    that embeds the cert + signature + Rekor SET) over the old detached
+    ``sig_url`` + ``cert_url``. #1189's dual-emit transition window keeps
+    both schemes available on the wire so manifests still parse on clients
+    built before the bundle fix shipped (see ``ReleaseManifest.sig_url``).
+
+    ``scheme`` selects what this manifest carries: ``"bundle"`` (default —
+    what new releases publish and what fresh clients prefer), ``"legacy"``
+    (sig_url/cert_url only — simulates a pre-#1159 manifest, or exercises
+    the fallback path a #1189 client takes when bundle_url is absent), or
+    ``"both"`` (mirrors an actual dual-emit release).
     """
-    del sig, cert  # legacy kwargs — no longer written to the manifest
-    bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
-    if not bundle.exists():
-        bundle.write_bytes(b"sigstore-bundle-placeholder\n")
     payload: dict[str, Any] = {
         "_schema": "hal0.releases.v1",
         "version": version,
         "channel": "stable",
         "url": f"file://{tarball}",
-        "bundle_url": f"file://{bundle}",
         "digest_sha256": _sha256_of(tarball),
         "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         "signer_issuer": "https://token.actions.githubusercontent.com",
@@ -119,6 +119,22 @@ def _write_release_manifest(
         "notes_url": "https://example.test/notes",
         "toolbox_images": {},
     }
+    if scheme in ("bundle", "both"):
+        bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
+        if not bundle.exists():
+            bundle.write_bytes(b"sigstore-bundle-placeholder\n")
+        payload["bundle_url"] = f"file://{bundle}"
+    if scheme in ("legacy", "both"):
+        sig = sig if sig is not None else Path(f"{tarball}.sig")
+        cert = cert if cert is not None else Path(f"{tarball}.crt")
+        if not sig.exists():
+            sig.write_bytes(b"signature-placeholder\n")
+        if not cert.exists():
+            cert.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n"
+            )
+        payload["sig_url"] = f"file://{sig}"
+        payload["cert_url"] = f"file://{cert}"
     if overrides:
         payload.update(overrides)
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -257,6 +273,39 @@ def test_manifest_schema_defaults_revoked_false(tmp_path: Path) -> None:
     m = _parse_manifest(payload)
     assert m.revoked is False
     assert m.revoked_reason == ""
+
+
+def test_manifest_schema_accepts_legacy_only_payload(tmp_path: Path) -> None:
+    """#1189 dual-emit: a manifest with sig_url/cert_url but no bundle_url still parses.
+
+    This is the shape a client built before #1159 shipped would have
+    received (and the shape a #1189+ client falls back to when a manifest
+    predates the bundle fix).
+    """
+    tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
+    payload = _write_release_manifest(
+        manifest_path=tmp_path / "latest.json",
+        tarball=tarball,
+        version="0.0.1",
+        scheme="legacy",
+    )
+    m = _parse_manifest(payload)
+    assert m.bundle_url is None
+    assert m.sig_url is not None
+    assert m.cert_url is not None
+
+
+def test_manifest_schema_rejects_no_signing_scheme() -> None:
+    """A manifest with neither bundle_url nor a complete sig_url/cert_url pair is invalid."""
+    payload = {
+        "_schema": "hal0.releases.v1",
+        "version": "0.0.1",
+        "url": "file:///x",
+        "digest_sha256": "0" * 64,
+        "signer_identity": "^https://github.com/x/.*",
+    }
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(payload)
 
 
 def test_manifest_schema_accepts_revoked(tmp_path: Path) -> None:
@@ -640,6 +689,35 @@ def test_prepare_reads_release_notes(
     assert notes["highlights"] == ["h"]
     assert notes["breaking"] == ["b"]
     assert notes["migrations"] == ["m"]
+
+
+def test_prepare_falls_back_to_legacy_signing_urls(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
+) -> None:
+    """prepare() downloads via sig_url/cert_url when a manifest has no bundle_url.
+
+    Covers the #1189 dual-emit fallback: an already-deployed client (or one
+    fetching a pre-#1159 manifest) still completes prepare() end-to-end.
+    """
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    version = "0.0.1"
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        scheme="legacy",
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+    res = asyncio.run(Updater().prepare())
+    assert res["version"] == version
 
 
 def test_read_release_notes_missing_is_empty(tmp_path: Path) -> None:

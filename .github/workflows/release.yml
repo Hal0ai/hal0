@@ -246,6 +246,28 @@ jobs:
               "${TARBALL}"
           echo "bundle=${BUNDLE}" >> "$GITHUB_OUTPUT"
 
+          # Transition-window legacy artifacts (detached .sig + .crt).
+          # Every hal0 install up through v0.9.6.1 runs updater code that
+          # requires manifest.sig_url — a manifest with bundle_url only would
+          # fail *schema validation* on those clients, breaking `hal0 update`
+          # outright (not just cosign verify, which already failed the same
+          # way today). Keep signing + publishing both artifact sets so
+          # already-deployed clients are no worse off than before, while
+          # clients built from this fix (>= the version that ships this
+          # workflow change) prefer the bundle and actually succeed. Drop
+          # this second signing pass once telemetry/adoption confirms the
+          # fleet has moved past sig_url-only clients — see
+          # docs/internal/release-manifest.md.
+          SIG="${TARBALL}.sig"
+          CRT="${TARBALL}.crt"
+          cosign sign-blob --yes \
+              --new-bundle-format=false \
+              --output-signature "${SIG}" \
+              --output-certificate "${CRT}" \
+              "${TARBALL}"
+          echo "sig=${SIG}" >> "$GITHUB_OUTPUT"
+          echo "cert=${CRT}" >> "$GITHUB_OUTPUT"
+
       # ── 4. Self-verify before publishing — never ship a release we can't
       #       verify with our own production code path. ────────────────────────
       - name: Self-verify (cosign verify-blob with workflow OIDC identity)
@@ -271,6 +293,21 @@ jobs:
           # meaningful mirror of the real install path.
           cosign verify-blob \
               --bundle "${BUNDLE}" \
+              --certificate-identity-regexp "${IDENT}" \
+              --certificate-oidc-issuer    "${ISSUER}" \
+              "${TARBALL}"
+
+          # Sanity-check the transition-window legacy artifacts too — this
+          # only proves cosign signed them correctly, NOT that they'll still
+          # verify after cert expiry (they won't; that's the known, accepted
+          # gap the bundle fixes). It exists so a signing-step regression in
+          # the legacy path fails CI instead of silently shipping a broken
+          # sig_url/cert_url to clients still relying on it.
+          SIG="${{ steps.sign.outputs.sig }}"
+          CRT="${{ steps.sign.outputs.cert }}"
+          cosign verify-blob \
+              --signature "${SIG}" \
+              --certificate "${CRT}" \
               --certificate-identity-regexp "${IDENT}" \
               --certificate-oidc-issuer    "${ISSUER}" \
               "${TARBALL}"
@@ -308,6 +345,10 @@ jobs:
               "channel":         channel,
               "url":             f"{base}/hal0-{version}.tar.gz",
               "bundle_url":      f"{base}/hal0-{version}.tar.gz.bundle",
+              # Transition-window fields (see the sign step above) — dropped
+              # once the fleet has moved past sig_url-only clients (#1159).
+              "sig_url":         f"{base}/hal0-{version}.tar.gz.sig",
+              "cert_url":        f"{base}/hal0-{version}.tar.gz.crt",
               "digest_sha256":   digest,
               "signer_identity": ident,
               "signer_issuer":   "https://token.actions.githubusercontent.com",
@@ -423,6 +464,8 @@ jobs:
           TAG="${{ steps.ver.outputs.tag }}"
           TARBALL="${{ steps.tarball.outputs.path }}"
           BUNDLE="${{ steps.sign.outputs.bundle }}"
+          SIG="${{ steps.sign.outputs.sig }}"
+          CRT="${{ steps.sign.outputs.cert }}"
           MANIFEST="${{ steps.manifest.outputs.path }}"
           NOTES_FILE="${{ steps.notes.outputs.path }}"
 
@@ -454,7 +497,7 @@ jobs:
             fi
           fi
 
-          gh release upload "${TAG}" "${TARBALL}" "${BUNDLE}" "${MANIFEST}" --clobber
+          gh release upload "${TAG}" "${TARBALL}" "${BUNDLE}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
 
       - name: Summary
         run: |

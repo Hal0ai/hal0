@@ -51,7 +51,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import structlog
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 import hal0
 from hal0.config import paths
@@ -160,16 +160,31 @@ class ReleaseManifest(BaseModel):
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
     channel: str = Field(default="stable", description="stable | nightly")
     url: str = Field(..., description="Tarball download URL (https or file).")
-    bundle_url: str = Field(
-        ...,
+    bundle_url: str | None = Field(
+        default=None,
         description=(
             "Sigstore bundle URL (cosign keyless OIDC). The bundle embeds the "
             "Fulcio certificate, the signature, and the Rekor transparency-log "
             "inclusion proof + Signed Entry Timestamp (SET). The SET is the "
             "trusted timestamp that lets ``cosign verify-blob --bundle`` succeed "
             "after the short-lived Fulcio cert has expired (see #1159); a "
-            "detached .sig + .crt carried no SET and failed on every client."
+            "detached .sig + .crt carried no SET and failed on every client. "
+            "Preferred over sig_url/cert_url when both are present."
         ),
+    )
+    sig_url: str | None = Field(
+        default=None,
+        description=(
+            "Transition-window detached cosign signature URL. Kept alongside "
+            "bundle_url so manifests still parse on clients built before "
+            "#1159 shipped (which require sig_url/cert_url); those clients "
+            "still fail cosign verify post cert-expiry, same as before this "
+            "fix. Drop once the fleet has moved past sig_url-only clients."
+        ),
+    )
+    cert_url: str | None = Field(
+        default=None,
+        description="Fulcio-issued certificate URL paired with sig_url (see sig_url).",
     )
     digest_sha256: str = Field(..., description="Hex sha256 of the tarball bytes.")
     signer_identity: str = Field(
@@ -218,6 +233,14 @@ class ReleaseManifest(BaseModel):
         if not re.fullmatch(r"[0-9a-f]{64}", s):
             raise ValueError(f"digest_sha256 must be a 64-char hex string, got {v!r}")
         return s
+
+    @model_validator(mode="after")
+    def _has_a_signing_scheme(self) -> ReleaseManifest:
+        has_bundle = bool(self.bundle_url)
+        has_legacy = bool(self.sig_url) and bool(self.cert_url)
+        if not has_bundle and not has_legacy:
+            raise ValueError("manifest must provide bundle_url, or both sig_url and cert_url")
+        return self
 
 
 @dataclasses.dataclass(frozen=True)
@@ -515,8 +538,10 @@ def _cosign_skip() -> bool:
 
 def _verify_cosign(
     tarball: Path,
-    bundle: Path,
+    bundle: Path | None,
     *,
+    signature: Path | None = None,
+    certificate: Path | None = None,
     identity_regexp: str,
     issuer: str,
     job_id: str | None = None,
@@ -526,6 +551,7 @@ def _verify_cosign(
     Raises:
         UpdateCosignMissing: ``cosign`` not on PATH.
         UpdateCosignFailed: signature invalid or identity mismatch.
+        ValueError: neither a bundle nor a signature+certificate pair was given.
 
     Keyless signing uses a short-lived (~10 min) Fulcio certificate. To
     verify a signature after that cert expires — i.e. every real install,
@@ -535,7 +561,11 @@ def _verify_cosign(
     travels inside the Sigstore ``bundle`` (fetched from ``manifest.bundle_url``).
     ``--certificate-identity-regexp`` is checked against the cert SAN carried
     in the bundle. A detached ``.sig`` + ``.crt`` carried no SET, so client
-    verification failed 100% once the cert expired (#1159).
+    verification against them fails once the cert expires — which is why
+    ``bundle`` is preferred whenever present; ``signature``/``certificate``
+    are the transition-window fallback for manifests fetched by clients
+    predating #1159 (see ``ReleaseManifest.sig_url``), and inherit that same
+    known post-expiry failure mode rather than fixing it.
 
     The skip env-var (``HAL0_UPDATE_SKIP_COSIGN=1``) bypasses the entire
     check with a WARN log line — documented gap, must close before v1.
@@ -567,11 +597,17 @@ def _verify_cosign(
             },
         )
 
+    if bundle is not None:
+        verify_args = ["--bundle", str(bundle)]
+    elif signature is not None and certificate is not None:
+        verify_args = ["--signature", str(signature), "--certificate", str(certificate)]
+    else:
+        raise ValueError("_verify_cosign requires either bundle, or signature and certificate")
+
     cmd = [
         cosign,
         "verify-blob",
-        "--bundle",
-        str(bundle),
+        *verify_args,
         "--certificate-identity-regexp",
         identity_regexp,
         "--certificate-oidc-issuer",
@@ -1473,11 +1509,16 @@ class Updater:
                 manifest=manifest.version,
             )
 
-        # Step 3: download tarball + signature + cert.
+        # Step 3: download tarball + signing artifacts. Prefer the Sigstore
+        # bundle (survives cert expiry, #1159); fall back to the transition-
+        # window sig_url/cert_url pair for manifests that don't carry a
+        # bundle_url (see ReleaseManifest._has_a_signing_scheme).
         cache = _cache_dir(target_version)
         cache.mkdir(parents=True, exist_ok=True)
         tarball_path = cache / f"hal0-{target_version}.tar.gz"
-        bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
+        bundle_path: Path | None = None
+        sig_path: Path | None = None
+        cert_path: Path | None = None
         log.info(
             "updater.download_start",
             job_id=self.job_id,
@@ -1485,12 +1526,24 @@ class Updater:
             url=manifest.url,
         )
         await _download(manifest.url, tarball_path)
-        await _download(manifest.bundle_url, bundle_path)
+        if manifest.bundle_url:
+            bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
+            await _download(manifest.bundle_url, bundle_path)
+        else:
+            # ReleaseManifest._has_a_signing_scheme guarantees sig_url and
+            # cert_url are both set whenever bundle_url is absent.
+            assert manifest.sig_url and manifest.cert_url
+            sig_path = cache / f"hal0-{target_version}.tar.gz.sig"
+            cert_path = cache / f"hal0-{target_version}.tar.gz.crt"
+            await _download(manifest.sig_url, sig_path)
+            await _download(manifest.cert_url, cert_path)
         log.info(
             "updater.download_ok",
             job_id=self.job_id,
             tarball=str(tarball_path),
-            bundle=str(bundle_path),
+            bundle=str(bundle_path) if bundle_path else None,
+            sig=str(sig_path) if sig_path else None,
+            cert=str(cert_path) if cert_path else None,
         )
 
         # Step 4: sha256 verify.
@@ -1511,6 +1564,8 @@ class Updater:
             _verify_cosign,
             tarball_path,
             bundle_path,
+            signature=sig_path,
+            certificate=cert_path,
             identity_regexp=manifest.signer_identity,
             issuer=manifest.signer_issuer,
             job_id=self.job_id,
