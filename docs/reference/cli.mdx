@@ -287,11 +287,20 @@ endpoint (bank config overrides) — they read like one "profile" but are
 different upstream resources. `memory bank delete` requires `--confirm
 <bank>` to exactly match the target bank id before it even calls the API;
 the server enforces the same rule server-side. `memory migrate unify
---apply` requires `hindsight-api>=0.8.0` — as of writing the live engine is
-0.7.2, which has no cross-bank document-transfer endpoint, so `--apply`
-refuses with a clear error rather than faking a migration via
-export/import (which would drop the provenance tags). `--dry-run` (the
-default) works on any version since it only reads bank stats.
+--apply` requires hindsight-api's document-transfer API
+(`features.document_export_api`/`document_import_api` on `/version`) — as
+of writing the live engine is 0.7.2, which lacks it, so `--apply` refuses
+with a clear error rather than faking a migration via export/import
+(which round-trips a whole bank template and would drop the provenance
+tags). `--dry-run` (the default) works on any version since it only reads
+bank stats. There is no per-document tag-rewrite option on the transfer
+itself, so `--add-tag`/derived tags are applied as a separate post-import
+pass — a document-id diff of the target bank before/after each source's
+import, then a read-merge-write `PATCH` of each new document's tags
+(`hal0 memory bank profile`-style: full-replace body, so existing tags are
+preserved). Retagging N documents queues N Hindsight re-consolidation
+passes — the CLI warns before starting; consider running large unifies
+off-hours.
 
 <Aside type="caution">
 The memory subsystem is opt-in. Graph extraction defaults **off** (ADR-0023):
