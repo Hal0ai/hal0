@@ -311,6 +311,77 @@ async def test_verify_inference_requires_round_trip(provider: FLMProvider) -> No
 
 
 @pytest.mark.asyncio
+async def test_verify_inference_probes_expected_model_not_models0(
+    provider: FLMProvider,
+) -> None:
+    """Regression (#1171): the sentinel must probe the slot's ASSIGNED model.
+
+    FLM's /v1/models returns its whole installed catalogue (sorted), so
+    ``models[0]`` is an arbitrary OTHER model. Probing it makes FLM reload
+    the wrong weights onto its single NPU context mid-gate and deadlocks the
+    load, wedging the slot in WARMING forever. Given ``expected_model``, the
+    sentinel must target that tag, not the catalogue head.
+    """
+    # Sorted catalogue — models[0] is deepseek, NOT the slot's qwen3:0.6b.
+    models_payload = {
+        "data": [
+            {"id": "deepseek-r1:8b"},
+            {"id": "gemma3:1b"},
+            {"id": "qwen3:0.6b"},
+        ]
+    }
+    chat_payload = {"choices": [{"message": {"content": "x"}}]}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        assert json["model"] == "qwen3:0.6b", (
+            "sentinel probed the wrong model — would reload wrong weights and "
+            f"deadlock the NPU; got {json['model']!r}"
+        )
+        return _mock_response(status_code=200, json_payload=chat_payload)
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086, expected_model="qwen3:0.6b")
+
+    assert result["ok"] is True
+    assert result["model"] == "qwen3:0.6b"
+
+
+@pytest.mark.asyncio
+async def test_verify_inference_falls_back_to_models0_when_expected_absent(
+    provider: FLMProvider,
+) -> None:
+    """When the expected tag isn't advertised, fall back to models[0].
+
+    Keeps a slot whose expected model somehow isn't in /v1/models from being
+    made worse than the pre-fix behaviour.
+    """
+    models_payload = {"data": [{"id": "deepseek-r1:8b"}, {"id": "gemma3:1b"}]}
+    chat_payload = {"choices": [{"message": {"content": "x"}}]}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        assert json["model"] == "deepseek-r1:8b"
+        return _mock_response(status_code=200, json_payload=chat_payload)
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086, expected_model="qwen3:0.6b")
+
+    assert result["ok"] is True
+    assert result["model"] == "deepseek-r1:8b"
+
+
+@pytest.mark.asyncio
 async def test_verify_embed_exercises_embeddings(provider: FLMProvider) -> None:
     """The embed gate (chat-off slots) MUST POST /v1/embeddings, not chat.
 

@@ -498,7 +498,9 @@ class FLMProvider(Provider):
             # Do not silently swallow — surface the failure to the fail-watcher.
             return {"ok": False, "status": "exception", "detail": str(exc)}
 
-    async def verify_inference(self, port: int) -> dict[str, Any]:
+    async def verify_inference(
+        self, port: int, expected_model: str | None = None
+    ) -> dict[str, Any]:
         """One-shot real-inference gate — a single ``/v1/chat/completions``.
 
         Run EXACTLY ONCE at the warm→ready promotion (see
@@ -506,6 +508,15 @@ class FLMProvider(Provider):
         path. This is the Tier-1 check that ``/v1/models`` listing a model is
         not proof the NPU can actually produce a token (haloai
         lib/slots.py:899-920).
+
+        ``expected_model`` is the slot's assigned tag (the one it serves). The
+        sentinel MUST probe that model, not ``models[0]``: FLM's ``/v1/models``
+        returns its whole installed catalogue (sorted), so ``models[0]`` is an
+        arbitrary OTHER model. Probing it makes FLM switch/reload the wrong
+        weights onto its single NPU context mid-gate, which deadlocks the
+        in-flight load — the slot then sits in ``warming`` forever (#1171). We
+        fall back to ``models[0]`` only when the expected tag isn't advertised,
+        so this can never make an otherwise-working slot worse.
 
         The sentinel POST is wrapped in :func:`asyncio.shield`: if the load
         coroutine is cancelled mid-flight we must NOT abort an in-progress NPU
@@ -532,7 +543,8 @@ class FLMProvider(Provider):
                         "status": "models_endpoint_empty",
                         "detail": "/v1/models returned no entries",
                     }
-                model_id = models[0].get("id")
+                ids = [m.get("id") for m in models]
+                model_id = expected_model if expected_model in ids else models[0].get("id")
 
             async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {
