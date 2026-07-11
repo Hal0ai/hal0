@@ -12,10 +12,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.install.static_seeds import STATIC_SEED_SLOTS
+
+
+@pytest.fixture(autouse=True)
+def _no_static_slot_seed() -> None:
+    """Override tests/conftest.py's global no-op — this module tests the
+    REAL seeding behavior, so let it run."""
+    return None
 
 
 def _slots_dir(tmp_hal0_home: str) -> Path:
