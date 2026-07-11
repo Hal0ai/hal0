@@ -176,6 +176,14 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "activity.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "activity.retention_days": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "activity.max_rows": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # [brain_chat] — every key is read live per chat turn via
+    # board_chat._brain_chat_config() off app.state.hal0_config, which the
+    # settings PUT refreshes in place, so all of them apply immediately.
+    "brain_chat.enabled": {"apply_class": "immediate", "services": []},
+    "brain_chat.read_only": {"apply_class": "immediate", "services": []},
+    "brain_chat.model": {"apply_class": "immediate", "services": []},
+    "brain_chat.max_rounds": {"apply_class": "immediate", "services": []},
+    "brain_chat.completion_timeout_s": {"apply_class": "immediate", "services": []},
     # [meta]
     "meta.schema_version": {"apply_class": "manual-restart", "services": []},
 }

@@ -2637,13 +2637,20 @@ class BrainChatConfig(BaseModel):
     and reading state but refuses every mutating or admin-write tool
     server-side — a guardrail that holds INDEPENDENTLY of the ``hal0-brain``
     persona's ``tools_allowed`` / approval policy (a persona edit can loosen
-    the persona, never this). ``max_rounds`` bounds the per-turn tool loop
-    (runaway backstop); ``completion_timeout_s`` is the transport timeout for
-    each LLM round against the brain/agent slot.
+    the persona, never this). ``model`` overrides which model/slot the chat
+    drives (e.g. ``hal0/npu`` to run the steward on the NPU chat slot); empty
+    keeps the persona's ``preferred_model`` (``hal0/brain``, which itself
+    falls back to the ``agent`` slot). ``max_rounds`` bounds the per-turn tool
+    loop (runaway backstop); ``completion_timeout_s`` is the transport timeout
+    for each LLM round against the target slot.
     """
 
     enabled: bool = True
     read_only: bool = False
+    # Empty → persona preferred_model (hal0/brain). Set to a virtual slot model
+    # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
+    # explicit per-request ``model`` in the chat body still wins over this.
+    model: str = ""
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
 

@@ -1099,8 +1099,12 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     if not messages or not (isinstance(messages[0], dict) and messages[0].get("role") == "system"):
         messages.insert(0, {"role": "system", "content": system_prompt})
 
+    # Model precedence: an explicit per-request model wins, then the
+    # [brain_chat] model override (e.g. hal0/npu to run on the NPU chat slot),
+    # then the persona's preferred_model / built-in default.
+    model = payload.get("model") or (cfg.model or None) or default_model
     body: dict[str, Any] = {
-        "model": payload.get("model") or default_model,
+        "model": model,
         "messages": messages,
         "tools": _surfaced_tool_schemas(request),
         "stream": False,
