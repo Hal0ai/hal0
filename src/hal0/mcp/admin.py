@@ -274,6 +274,7 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # GATED_TOOLS until the logs.py redactor covers every key shape
         # (security review MED-1).
         "hardware_probe",
+        "port_list",
         "capability_list",
         "provider_list",
         "version_info",
@@ -414,6 +415,7 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "slot_status": ("GET", "/api/slots/{name}"),
     "slot_metrics": ("GET", "/api/slots/metrics"),
     "slot_capacity": ("GET", "/api/slots/capacity"),
+    "port_list": ("GET", "/api/ports"),
     "slot_load": ("POST", "/api/slots/{name}/load"),
     "slot_unload": ("POST", "/api/slots/{name}/unload"),
     "slot_edit": ("PUT", "/api/slots/{name}/config"),
@@ -545,7 +547,16 @@ def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[s
     for key in path_keys:
         if key not in remainder:
             raise KeyError(f"tool {tool!r} requires arg {key!r}")
-        path_args[key] = str(remainder.pop(key))
+        value = str(remainder.pop(key))
+        if "/" in value:
+            # A slash would splice extra path segments into the REST URL and
+            # mis-route (observed: model_pull with model_id='org/repo' → 405).
+            raise KeyError(
+                f"tool {tool!r} arg {key!r} must not contain '/' (got {value!r}). "
+                "For model_pull, use a short local model_id and pass the HF repo "
+                "as hf_repo='org/name' + hf_filename in the body."
+            )
+        path_args[key] = value
     return path_args, remainder
 
 
@@ -808,7 +819,17 @@ async def dispatch(
             executor=_executor,
         )
         _audit(client_id=client_id, tool=tool, args=args, gated=True, outcome="enqueued")
-        return {"status": "pending_approval", "approval_id": approval_id}
+        return {
+            "status": "pending_approval",
+            "approval_id": approval_id,
+            "detail": (
+                "queued for operator approval — the call runs only after the "
+                "operator approves it (inline chat card or top-bar bell). The "
+                "chat turn pauses while the operator decides; if you are "
+                "reading this, the wait timed out — tell the operator it is "
+                "still pending."
+            ),
+        }
 
     # Autonomous — run immediately.
     result = await _execute_tool(
@@ -911,6 +932,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     # ── Autonomous read — pure reads against the local REST surface. ─────
     # Slots
     "slot_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "port_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "slot_status": ToolAnnotations(
@@ -1169,6 +1193,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_status": "Get one slot's lifecycle state + metadata.",
     "slot_metrics": "Get per-slot performance metrics (tok/s, latency, queue depth).",
     "slot_capacity": "Get GPU/NPU memory capacity and per-slot allocation.",
+    "port_list": (
+        "The global port-claim map: every port owned by a slot config (incl. "
+        "disabled), a runtime slot row, a reserved service, or a live listener — "
+        "plus conflicts and the next free port. Check before choosing a port."
+    ),
     "model_list": "Aggregate models from local registry + upstreams.",
     "model_show": "Show a single model's full metadata (registry + upstream).",
     "model_scan_preview": "Preview what a model scan would register (dry run).",
@@ -1178,7 +1207,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "model_pull_status": "Get one model's pull-job progress (state, %, speed, ETA).",
     "model_inspect": (
         "Inspect a HuggingFace repo — returns detected .gguf/.mmproj files, quants and "
-        "capabilities WITHOUT registering anything. Use before model_register/model_pull."
+        "capabilities WITHOUT registering anything. Use before model_register/model_pull. "
+        "Args: hf_repo='org/name' (or hf_url='https://huggingface.co/org/name')."
     ),
     "model_store": (
         "Show the operator's configured model-store directory ([models].store) and "
@@ -1209,12 +1239,21 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Probe a model-store path: fstype, free/total bytes, writable, UMA-aware."
     ),
     # ── Autonomous write ────────────────────────────────────────────────
-    "model_swap": "Hot-swap the primary slot to a new model.",
-    "model_assign": "Assign a model to a slot's default (does not load the slot).",
+    "model_swap": (
+        "Hot-swap a slot to a new model (container restart). "
+        "Args: name=SLOT name (not the model!), model_id=registered model id."
+    ),
+    "model_assign": (
+        "Assign a model as a slot's default (does not load the slot). "
+        "Args: name=SLOT name (not the model!), model=registered model id."
+    ),
     "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
     "model_scan": "Walk the configured model roots + store and register newly-found files.",
     "model_pull_cancel": "Cancel an in-flight model pull job.",
-    "slot_load": "Load a slot (optionally assign a model first).",
+    "slot_load": (
+        "Load a slot (optionally assign a model first). "
+        "Args: name=SLOT name, optional model_id=registered model to load."
+    ),
     "slot_unload": "Unload a running slot gracefully.",
     "slot_edit": (
         "Update one or more slot config fields (model, port, ctx-size, provider, hardware)."
@@ -1228,9 +1267,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     # ── Gated write ─────────────────────────────────────────────────────
     "model_pull": (
-        "Download a model from HuggingFace into the operator's configured model store "
-        "([models].store — check model_store first). Accepts "
-        "hf_repo/hf_filename/mmproj_filename body overrides for new models (gated)."
+        "Download a model from HuggingFace into the operator's configured model store. "
+        "model_id is the LOCAL id — a short name with NO slashes (for a new model, "
+        "invent one, e.g. 'Qwythos-9B-bf16-mtp'). The HF source goes in the body: "
+        "hf_repo='org/name' + hf_filename='file.gguf' (find the exact filename via "
+        "model_inspect first; optional mmproj_filename for vision). "
+        "Async: returns a job id immediately. Check model_pull_status once and report "
+        "progress — do NOT poll in a loop; downloads run for minutes in the background."
     ),
     "model_delete": "Delete a model from the local registry (gated).",
     "model_register": "Register a model that's already on disk into the local registry (gated).",
@@ -1241,9 +1284,20 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "model_store_migrate": "Migrate model files from the current store to a new path (gated).",
     "model_update": "Re-pull a model's HF file over its installed bytes (in place) (gated).",
-    "slot_create": "Create a new slot (gated).",
+    "slot_create": (
+        "Create a new slot config (gated). Args pass through to POST /api/slots "
+        "(full SlotConfig schema): name + model required; omit port to auto-assign "
+        "the next free one; optional type/device, model.context_size, and a string "
+        "image override (FPX/FP4-quant GGUFs need the hal0-rocmfpx toolbox image, "
+        "with runtime='container'). Writes config only — follow with slot_load to "
+        "start it."
+    ),
     "slot_delete": "Delete a slot (gated).",
-    "slot_restart": "Restart a slot's systemd unit (gated).",
+    "slot_restart": (
+        "Restart a slot's systemd unit (gated). Prefer slot_load for a slot in "
+        "error state or after a config change — load regenerates the unit; "
+        "restart can time out on errored slots."
+    ),
     "capability_set": "Assign a capability child to a slot (gated).",
     "config_write": "Update hal0.toml top-level settings (gated).",
     "provider_credential_write": "Write provider credentials (gated; secrets never echoed back).",

@@ -352,6 +352,20 @@
 .b-drawer .tool-card .tool-args { color: var(--fg-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .b-drawer .tool-card .tool-status { color: var(--fg-5); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
 .b-drawer .tool-card.error .tool-status { color: var(--err); }
+/* session auto-approve toggle — amber when armed (it covers destructive tools) */
+.b-drawer .chat-auto-approve { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-4); margin-right: 8px; cursor: pointer; user-select: none; }
+.b-drawer .chat-auto-approve input { margin: 0; accent-color: var(--warn, #E8B94E); }
+.b-drawer .chat-auto-approve.on { color: var(--warn, #E8B94E); }
+/* new-session control — quiet text button in the drawer header */
+.b-drawer .chat-new-session { background: none; border: 1px solid var(--line); border-radius: var(--rad-sm); color: var(--fg-4); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 8px; cursor: pointer; margin-right: 8px; }
+.b-drawer .chat-new-session:hover { color: var(--fg-2); border-color: var(--fg-4); }
+/* gated call parked on operator approval — amber until resolved inline */
+.b-drawer .tool-card.pending { border-color: var(--warn, #E8B94E); }
+.b-drawer .tool-card.pending .tool-status { color: var(--warn, #E8B94E); }
+.b-drawer .tool-card.denied .tool-status { color: var(--err); }
+.b-drawer .tool-approval { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
+.b-drawer .tool-approval .btn { font-size: 10px; padding: 3px 10px; }
+.b-drawer .tool-approval-note { font-size: 10px; color: var(--fg-4); flex: 1; min-width: 0; margin-top: 2px; }
 .b-drawer .tool-result { margin-top: 6px; }
 .b-drawer .tool-result summary { cursor: pointer; font-size: 10px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.06em; }
 .b-drawer .tool-result pre { margin: 6px 0 0; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--rad-sm); font-size: 10.5px; line-height: 1.5; overflow-x: auto; max-height: 220px; color: var(--fg-3); white-space: pre-wrap; word-break: break-word; }

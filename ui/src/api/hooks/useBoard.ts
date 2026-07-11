@@ -1066,8 +1066,10 @@ export interface ChatMessage {
   thinking?: string
   /** Tool messages: the matched tool_result payload once it lands. */
   result?: unknown
-  /** Tool messages: running → done | error as the result frame arrives. */
-  status?: 'running' | 'done' | 'error'
+  /** Tool messages: running → done | error | pending (parked on operator approval) → approved | denied. */
+  status?: 'running' | 'done' | 'error' | 'pending' | 'approved' | 'denied'
+  /** Tool messages: the ApprovalQueue id when the call is gated (status=pending). */
+  approval_id?: string
   /** Internal streaming marker: which assistant segment of which turn this bubble is. */
   seg?: string
 }
@@ -1076,6 +1078,20 @@ export interface UseBoardChatResult {
   messages: ChatMessage[]
   send: (text: string) => void
   streaming: boolean
+  /** Approve/deny a gated tool call inline (same endpoints as the top-bar bell). */
+  resolveApproval: (approvalId: string, verdict: 'approve' | 'deny') => void
+  /** Start a fresh session: abort any in-flight stream and clear the thread.
+   * The history is rebuilt from `messages` on every send, so clearing them is
+   * the only way to unstick a thread whose context has gone bad. */
+  reset: () => void
+  /** Abort the in-flight turn, keeping the thread. */
+  stop: () => void
+  /** Session-scoped auto-approve for gated tool calls (default off). When on,
+   * approval_required frames are approved immediately — the paused turn then
+   * continues with the executed result. Applies to EVERY gated tool,
+   * including deletes; deliberately not persisted. */
+  autoApprove: boolean
+  setAutoApprove: (on: boolean) => void
 }
 
 // The agent chat embodies the hal0-brain profile, which targets the dedicated
@@ -1118,7 +1134,11 @@ function splitThink(text: string): { thinking: string; visible: string } {
 export function useBoardChat(board?: string): UseBoardChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [autoApprove, setAutoApprove] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  // Read at frame-handling time (the SSE reader closure outlives renders).
+  const autoApproveRef = useRef(autoApprove)
+  autoApproveRef.current = autoApprove
   // Mirror `messages` in a ref so `send` can build the request history without
   // a stale closure (and without re-creating the callback every render).
   const messagesRef = useRef<ChatMessage[]>([])
@@ -1133,14 +1153,50 @@ export function useBoardChat(board?: string): UseBoardChatResult {
     abortRef.current = new AbortController()
     const signal = abortRef.current.signal
 
-    // Build the OpenAI-style conversation the backend expects: prior
-    // user/assistant turns + this new user message. Tool frames are UI-only
-    // and intentionally omitted (sending bare tool messages without their
-    // originating assistant tool_calls is malformed for the LLM).
-    const history = messagesRef.current
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .filter((m) => (m.body ?? '').trim().length > 0)
-      .map((m) => ({ role: m.role, content: m.body }))
+    // Build the OpenAI-style conversation the backend expects: prior turns
+    // INCLUDING tool activity. Tool cards are rebuilt as a valid pair —
+    // assistant tool_calls message + matching tool result — because a
+    // history where the assistant says "let me check" and then answers
+    // with no tool call in between teaches the model to hallucinate
+    // results instead of calling tools (observed: long threads stopped
+    // emitting tool calls entirely and invented slot lists).
+    const history: Record<string, unknown>[] = []
+    for (const m of messagesRef.current) {
+      if ((m.role === 'user' || m.role === 'assistant') && (m.body ?? '').trim().length > 0) {
+        history.push({ role: m.role, content: m.body })
+      } else if (m.role === 'tool' && m.tool_call?.name) {
+        const callId = m.tool_call.id || `call_${history.length}`
+        history.push({
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: callId,
+              type: 'function',
+              function: {
+                name: m.tool_call.name,
+                arguments: JSON.stringify(m.tool_call.arguments ?? {}),
+              },
+            },
+          ],
+        })
+        let content: string
+        try {
+          content = JSON.stringify(m.result ?? { status: m.status ?? 'unknown' })
+        } catch {
+          content = String(m.result)
+        }
+        // Big reads (list_slots dumps ~10 KB per slot) would swamp the
+        // context replayed on every send — the head is enough signal.
+        if (content.length > 4000) content = content.slice(0, 4000) + '…(truncated)'
+        history.push({
+          role: 'tool',
+          tool_call_id: callId,
+          name: m.tool_call.name,
+          content,
+        })
+      }
+    }
     const outbound = [...history, { role: 'user', content: text }]
 
     // Append user message immediately
@@ -1254,6 +1310,7 @@ export function useBoardChat(board?: string): UseBoardChatResult {
               result?: unknown
               id?: string
               message?: string
+              approval_id?: string
             }
             try {
               frame = JSON.parse(payload)
@@ -1295,18 +1352,31 @@ export function useBoardChat(board?: string): UseBoardChatResult {
                   const next = [...prev]
                   for (let i = next.length - 1; i >= 0; i--) {
                     const m = next[i]
-                    if (m.role !== 'tool' || m.status !== 'running') continue
+                    if (m.role !== 'tool') continue
+                    // running = first result; pending/approved = the follow-up
+                    // result the backend streams once a paused gated call is
+                    // decided (executed / denied / failed).
+                    if (!(m.status === 'running' || m.status === 'pending' || m.status === 'approved')) continue
                     const idMatch = rFrame.id && m.tool_call?.id === rFrame.id
                     const nameMatch = !rFrame.id && m.tool_call?.name === rFrame.name
                     if (idMatch || nameMatch) {
-                      const isErr =
-                        !!rFrame.result &&
-                        typeof rFrame.result === 'object' &&
-                        'error' in (rFrame.result as Record<string, unknown>)
+                      const res = rFrame.result as Record<string, unknown> | null
+                      const isObj = !!res && typeof res === 'object'
+                      // Truthy check, not key presence: job-shaped results
+                      // (pull status, approvals) carry `error: null` when fine.
+                      const isErr = isObj && !!res.error
+                      // Gated tools park on the ApprovalQueue: surface the
+                      // gate in the thread (also announced by a follow-up
+                      // approval_required frame) instead of reading "done".
+                      const isPending = isObj && res.status === 'pending_approval'
+                      const isDenied = isObj && res.status === 'denied'
                       next[i] = {
                         ...m,
                         result: rFrame.result,
-                        status: isErr ? 'error' : 'done',
+                        status: isErr ? 'error' : isPending ? 'pending' : isDenied ? 'denied' : 'done',
+                        approval_id: isPending
+                          ? String(res.approval_id ?? '') || undefined
+                          : m.approval_id,
                       }
                       break
                     }
@@ -1314,6 +1384,27 @@ export function useBoardChat(board?: string): UseBoardChatResult {
                   return next
                 })
                 qc.invalidateQueries({ queryKey: boardKey(board) })
+                break
+              }
+              case 'approval_required': {
+                // Explicit gate announcement (backend emits it right after the
+                // pending_approval tool_result) — idempotent with the shape
+                // detection above; also covers a future backend that skips the
+                // tool_result frame for gated calls.
+                const aFrame = frame
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.role === 'tool' &&
+                    (aFrame.id ? m.tool_call?.id === aFrame.id : m.tool_call?.name === aFrame.name) &&
+                    (m.status === 'running' || m.status === 'pending')
+                      ? { ...m, status: 'pending', approval_id: aFrame.approval_id ?? m.approval_id }
+                      : m,
+                  ),
+                )
+                // Session auto-approve: unblock the paused turn immediately.
+                if (autoApproveRef.current && aFrame.approval_id) {
+                  resolveApproval(aFrame.approval_id, 'approve')
+                }
                 break
               }
               case 'error':
@@ -1348,5 +1439,56 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       })
   }
 
-  return { messages, send, streaming }
+  const resolveApproval = (approvalId: string, verdict: 'approve' | 'deny') => {
+    const url =
+      verdict === 'approve'
+        ? ENDPOINTS.agentApprovalApprove(approvalId)
+        : ENDPOINTS.agentApprovalDeny(approvalId)
+    fetch(url, { method: 'POST' })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.approval_id === approvalId
+              ? { ...m, status: verdict === 'approve' ? 'approved' : 'denied' }
+              : m,
+          ),
+        )
+        // The executor ran (or was dropped) server-side — refresh board state
+        // and the bell's pending list.
+        qc.invalidateQueries({ queryKey: boardKey(board) })
+        qc.invalidateQueries({ queryKey: ['agents', 'approvals'] })
+      })
+      .catch(() => {
+        /* leave the card pending — the bell remains the fallback path */
+      })
+  }
+
+  const stop = () => {
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+    }
+    setStreaming(false)
+    // Freeze the thread as-is: half-streamed bubbles stop pulsing and
+    // unresolved tool cards read as stopped rather than spinning forever.
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.streaming) return { ...m, streaming: false }
+        if (m.role === 'tool' && m.status === 'running') return { ...m, status: 'error' }
+        return m
+      }),
+    )
+  }
+
+  const reset = () => {
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+    }
+    setMessages([])
+    setStreaming(false)
+  }
+
+  return { messages, send, streaming, resolveApproval, reset, stop, autoApprove, setAutoApprove }
 }
