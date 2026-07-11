@@ -534,14 +534,6 @@ export function InferencePane() {
     },
   }
 
-  const epillCls = servingN > 0 ? 'serving' : loadedN > 0 ? 'ready' : 'stopped'
-  const epillLabel =
-    servingN > 0
-      ? `${servingN} serving · ${loadedN} loaded`
-      : loadedN > 0
-        ? `${loadedN} loaded`
-        : 'idle'
-
   const newSlot = () => window.dispatchEvent(new CustomEvent('hal0:create-slot'))
   const openLogs = () => {
     window.location.hash = '#logs'
@@ -550,37 +542,29 @@ export function InferencePane() {
   return (
     <div className="infer-pane">
       <div className="proto">
-        <div className="sec-label">
-          <b>Inference Engine</b>
-          <span className="dim">·</span>
-          <span className="meta">slots</span>
-          <span className="mono" style={{ color: 'var(--comfy)' }}>
-            {gpuN} iGPU
-          </span>
-          {npuN > 0 && (
-            <>
-              <span className="dim">·</span>
-              <span className="mono" style={{ color: 'var(--dev-npu)' }}>
-                {npuN} FLM
-              </span>
-            </>
-          )}
-          <span className="grow" style={{ flex: 1 }} />
-          <span className="meta">podman · :8080</span>
-        </div>
-
+        {/* Single NPU-card-style header row — the old two-row stack (sec-label
+            above + "Inference / inference engine · podman" title block + green
+            loaded epill) collapsed into one heading. */}
         <div className={'engine' + (loadedN > 0 ? ' active' : '')}>
           <div className="engine-h">
             <span className="engine-glyph">
               <Ic name="slots" size={16} />
             </span>
-            <span className="col">
-              <span className="engine-title">Inference</span>
-              <span className="engine-sub">inference engine · podman</span>
-            </span>
-            <span className={'epill ' + epillCls} data-testid="infer-epill">
-              <span className="dot" />
-              {epillLabel}
+            <span className="sec-label">
+              <b>Inference Engine</b>
+              <span className="dim">·</span>
+              <span className="meta">slots</span>
+              <span className="mono" style={{ color: 'var(--comfy)' }}>
+                {gpuN} iGPU
+              </span>
+              {npuN > 0 && (
+                <>
+                  <span className="dim">·</span>
+                  <span className="mono" style={{ color: 'var(--dev-npu)' }}>
+                    {npuN} FLM
+                  </span>
+                </>
+              )}
             </span>
             <span className="grow" style={{ flex: 1 }} />
             <span className="eh-right">

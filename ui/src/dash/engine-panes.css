@@ -56,6 +56,63 @@
 }
 
 /* ─── Section label ─────────────────────────────────────────────────── */
+/* Generic in-header variant — any pane header (.engine-h / .cpane-h /
+   .wcard-h) or view header (.vh) can host the same single-row heading
+   family the Inference pane uses: bold uppercase name · dim dots ·
+   uppercase meta segments. The pane-scoped rules below come later in the
+   file so their per-pane accent (--comfy) wins inside .infer-pane/.npu-pane. */
+.engine-h .sec-label,
+.cpane-h .sec-label,
+.wcard-h .sec-label,
+.vh .sec-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: var(--jbm);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+  margin: 0;
+  min-width: 0;
+}
+.engine-h .sec-label b,
+.cpane-h .sec-label b,
+.wcard-h .sec-label b,
+.vh .sec-label b {
+  color: var(--accent);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.engine-h .sec-label .dim,
+.cpane-h .sec-label .dim,
+.wcard-h .sec-label .dim,
+.vh .sec-label .dim {
+  color: var(--fg-5);
+}
+.engine-h .sec-label .meta,
+.cpane-h .sec-label .meta,
+.wcard-h .sec-label .meta,
+.vh .sec-label .meta {
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+.engine-h .sec-label .grow,
+.cpane-h .sec-label .grow,
+.wcard-h .sec-label .grow,
+.vh .sec-label .grow {
+  flex: 1;
+}
+.engine-h .sec-label .mono,
+.cpane-h .sec-label .mono,
+.wcard-h .sec-label .mono,
+.vh .sec-label .mono {
+  font-family: var(--jbm);
+}
+
 .infer-pane .sec-label,
 .npu-pane .sec-label {
   display: flex;
@@ -84,6 +141,12 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 11px;
+}
+/* sec-label hoisted into the engine header row (single NPU-style heading) —
+   drop the block margin it carries as a standalone section label */
+.infer-pane .engine-h .sec-label,
+.npu-pane .engine-h .sec-label {
+  margin: 0;
 }
 .infer-pane .sec-label .grow,
 .npu-pane .sec-label .grow,
@@ -951,13 +1014,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* ── ONE status vocabulary (round dot), yellow-family · scoped to .infer-pane ──
-   ready   = solid yellow (loaded, healthy, idle-but-up) — no glow
-   serving = yellow + glow + pulse (active / working)
-   warming = orange + glow + pulse
+/* ── ONE status vocabulary (round dot) · shared across every slot indicator ──
+   The colours here MUST match the generic .sdot (overhaul.css) and the
+   endpoint .ep-dot (connections.css) so a slot's card, its endpoint row, and
+   its list entry can never show different colours for the same phase:
+   serving = GREEN + glow + pulse (actively processing a request now)
+   ready   = solid YELLOW/amber (loaded, healthy, idle-but-up) — no glow
+   warming = orange + glow + pulse (starting / pulling)
    error   = red + glow
-   offline = grey, no glow
-   Green (--ok) no longer appears for any slot status in this pane. */
+   offline = grey, no glow */
 .infer-pane .sdot {
   width: 8px;
   height: 8px;
@@ -966,11 +1031,11 @@
   flex-shrink: 0;
 }
 .infer-pane .sdot.ready {
-  background: var(--comfy);
+  background: var(--hal0-accent);
 }
 .infer-pane .sdot.serving {
-  background: var(--comfy);
-  box-shadow: 0 0 8px var(--comfy);
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok-glow, rgba(111, 207, 151, 0.35));
   animation: pulse 1.4s ease-in-out infinite;
 }
 .infer-pane .sdot.warming {

@@ -101,6 +101,33 @@
   padding: 16px;
 }
 
+/* header lifecycle controls — each action carries its own hue:
+   start purple (NPU accent) · stop red · restart yellow · logs grey */
+.npu-card .wcard-h .btn.ctl-start {
+  color: var(--npu);
+  border-color: var(--npu-line);
+}
+.npu-card .wcard-h .btn.ctl-start:hover {
+  background: var(--npu-soft);
+}
+.npu-card .wcard-h .btn.ctl-stop {
+  color: var(--err);
+  border-color: var(--err-line);
+}
+.npu-card .wcard-h .btn.ctl-stop:hover {
+  background: var(--err-soft);
+}
+.npu-card .wcard-h .btn.ctl-restart {
+  color: var(--warn);
+  border-color: var(--warn-line);
+}
+.npu-card .wcard-h .btn.ctl-restart:hover {
+  background: var(--warn-soft);
+}
+.npu-card .wcard-h .btn.ctl-logs {
+  color: var(--fg-3);
+}
+
 /* device pill — [ XDNA 2 · npu ] */
 .npu-card .npu-pill {
   display: inline-flex;

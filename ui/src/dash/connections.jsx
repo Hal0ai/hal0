@@ -20,6 +20,7 @@
 // from GET /api/mcp/servers (`tool_details`).
 
 import { useSlots } from '@/api/hooks/useSlots'
+import { slotIndicatorFromPhase } from './slot-status.js'
 import { useMcpServers } from '@/api/hooks/useMcp'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 
@@ -124,14 +125,13 @@ function modelId(s) {
   return s.model_id || s.model || s.name
 }
 
-// Lifecycle → the five dot states the pane styles. Unknown / transitional
-// backend states fold into the nearest visual bucket.
+// Lifecycle → dot state. Derived from the SAME container-aware classifier the
+// slot cards use (slot-status.js) so an endpoint row and its slot card can
+// never disagree — the old raw-`state` heuristic here flagged a healthy-but-
+// quiet slot as "warming" while the card showed it "ready". cls is one of
+// serving | stale | warming | error | offline (see .ep-dot in connections.css).
 function epState(s) {
-  const st = s.state
-  if (['serving', 'ready', 'warming', 'idle', 'offline'].includes(st)) return st
-  if (st === 'loading' || st === 'starting' || st === 'pending') return 'warming'
-  if (st === 'error' || st === 'failed' || st === 'stopped' || st === 'unloaded') return 'offline'
-  return 'idle'
+  return slotIndicatorFromPhase(s).cls
 }
 
 // Slot → the OpenAI route family. Maps the slot `type` (a true modality) onto
@@ -436,19 +436,23 @@ function CopyBtn({ text, label, icon, cls }) {
 }
 
 // ─── reusable engine-block pane ──────────────────────────────────────
-function EnginePane({ live, glyph, eyebrow, title, sub, pill, headRight, strip, foot, defaultOpen, children }) {
+function EnginePane({ live, glyph, title, sub, pill, headRight, strip, foot, defaultOpen, children }) {
   const [open, setOpen] = useCS(defaultOpen !== false)
   return (
     <section>
-      <div className="conn-eyebrow">{eyebrow}</div>
       <div className={'engine cpane' + (live ? ' live active' : '') + (open ? ' open' : '')}>
         <div className="engine-h cpane-h" onClick={() => setOpen((o) => !o)}>
           <span className="engine-glyph cpane-glyph">
             <CIcon name={glyph} size={16} />
           </span>
-          <span className="cpane-titles">
-            <span className="engine-title cpane-title">{title}</span>
-            <span className="engine-sub cpane-sub">{sub}</span>
+          <span className="sec-label">
+            <b className="cpane-title">{title}</b>
+            {sub && (
+              <>
+                <span className="dim">·</span>
+                <span className="meta cpane-sub">{sub}</span>
+              </>
+            )}
           </span>
           <span className={'cpill ' + (pill.tone || '')}>
             <span className="dot" />
@@ -848,25 +852,12 @@ function LocalEndpointsPanel() {
   const tls = typeof window !== 'undefined' && window.location.protocol === 'https:'
 
   const serving = slots.filter((s) => epState(s) === 'serving').length
-  const reachable = slots.filter((s) => epState(s) !== 'offline').length
+  const reachable = slots.filter((s) => !['offline', 'error'].includes(epState(s))).length
 
   return (
     <EnginePane
       live
       glyph="connections"
-      eyebrow={
-        <>
-          <b>local endpoints</b>
-          <span className="dim">·</span>
-          <span className="meta">openai-compatible</span>
-          <span className="dim">·</span>
-          <span className="mono" style={{ color: 'var(--fg-3)' }}>
-            {slots.length} ports
-          </span>
-          <span className="grow" />
-          <span className="meta">gateway · :{port}</span>
-        </>
-      }
       title="Local endpoints"
       sub="openai-compatible · /v1/*"
       pill={{ tone: 'live', text: serving + ' serving · ' + reachable + ' reachable' }}
@@ -942,21 +933,6 @@ function McpServersPanel() {
   return (
     <EnginePane
       glyph="agent"
-      eyebrow={
-        <>
-          <b>mcp</b>
-          <span className="dim">·</span>
-          <span className="meta">model context protocol</span>
-          <span className="dim">·</span>
-          <span className="mono" style={{ color: 'var(--fg-3)' }}>
-            {servers.length} servers
-          </span>
-          <span className="grow" />
-          <span className="meta">
-            {host}:{port}/mcp/*
-          </span>
-        </>
-      }
       title="MCP servers"
       sub="model context protocol · bundled"
       pill={{ tone: 'ok', text: mcpUp + ' up · ' + toolTotal + ' tools' }}

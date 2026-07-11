@@ -1444,6 +1444,7 @@
   background: var(--bg-1);
   overflow: hidden;
   container-type: inline-size;
+  margin-bottom: 16px; /* breathing room above the slots-page tab bar */
 }
 /* Base = auto-fit (also the fallback for pre-container-query browsers);
    the ruler is a strip item spanning the full row. Container queries
