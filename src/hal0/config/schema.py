@@ -2489,6 +2489,16 @@ class MemoryConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the memory subsystem (Hindsight engine, /mcp/memory, "
+            "/api/memory/*, the dashboard's Agent -> Memory tab) is built at "
+            "startup. Replaces the old HAL0_MEMORY_ENABLED env var — toggle via "
+            "'hal0 memory enable' / 'hal0 memory disable'. Consumed once at "
+            "create_app(), so a change needs a hal0-api restart."
+        ),
+    )
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     engine: str = Field(

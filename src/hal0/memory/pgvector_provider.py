@@ -54,8 +54,7 @@ class PgVectorProvider(MemoryProvider):
             detail=(
                 "Memory is running on the in-memory PgVectorProvider fallback. "
                 "All writes are VOLATILE and will be LOST on restart. "
-                "Ensure Hindsight is reachable and HAL0_MEMORY_ENABLED=1 "
-                "to enable durable storage."
+                "Ensure Hindsight is reachable to enable durable storage."
             ),
         )
 

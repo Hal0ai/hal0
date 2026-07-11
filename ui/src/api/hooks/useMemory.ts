@@ -153,8 +153,8 @@ export function useUpdateMemoryGraph() {
 }
 
 // 0.4 release gate. /api/status carries `memory_enabled`, gated by
-// HAL0_MEMORY_ENABLED at create_app. The dashboard reads it to show/hide
-// the Agent → Memory nav so the UI and backend can never disagree.
+// [memory].enabled in hal0.toml at create_app. The dashboard reads it to
+// show/hide the Agent → Memory nav so the UI and backend can never disagree.
 //
 // Treat the loading/unknown state as OFF (`=== true`): 0.4 ships memory
 // disabled, so the common case stays hidden with no flicker; a dev build

@@ -33,8 +33,8 @@ function buildStatus() {
   const d = data()
   // 0.4 gate: forced-mock dev/preview build keeps the memory surface ON so
   // the Agent → Memory tab stays reachable for layout/screenshot work. The
-  // shipped backend defaults this OFF (HAL0_MEMORY_ENABLED). Because
-  // forced-mock short-circuits `page.route`, a spec can't override
+  // shipped backend defaults this ON too ([memory].enabled in hal0.toml).
+  // Because forced-mock short-circuits `page.route`, a spec can't override
   // /api/status the usual way — it sets `window.__hal0MockMemoryEnabled =
   // false` via addInitScript to exercise the disabled path. Default ON.
   const memoryOff =

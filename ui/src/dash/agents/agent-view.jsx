@@ -8,7 +8,7 @@
 //                This is the default landing — always present, ungated.
 //   - Memory — the full Hindsight memory page (window.MemoryView), moved in
 //              from the standalone #memory route. Gated on the memory
-//              subsystem (HAL0_MEMORY_ENABLED) via the window bridge.
+//              subsystem ([memory].enabled) via the window bridge.
 //   - MCP    — the bundled FastMCP servers (window.McpServersPanel), moved in
 //              from the dissolved Connections page.
 //

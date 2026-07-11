@@ -1605,24 +1605,30 @@ def create_app() -> FastAPI:
     app.state.approval_queue = ApprovalQueue()
 
     memory_provider = None
-    # 0.4 release gate — memory subsystem deferred. The memory engine
-    # (Cognee), its MCP server (/mcp/memory), the REST surface
-    # (/api/memory/*), and the dashboard's Agent → Memory tab ship
-    # DISABLED by default and return in a later release once the two-tier
-    # brain redesign (Hindsight + hal0-wiki) lands. Set HAL0_MEMORY_ENABLED=1
-    # to reintroduce it with NO code change — every downstream caller
+    # Gated by [memory].enabled in hal0.toml (default True) — see
+    # 'hal0 memory enable'/'hal0 memory disable'. Every downstream caller
     # (admin MCP routing, /api/memory/* routes, the Hermes memory provider,
     # per-agent memory stats) already degrades to a no-op / 503 when
     # app.state.memory_provider is None, so flipping the flag is the whole
-    # toggle. Default off so behaviour is identical on fresh AND upgraded
-    # installs (api.env is not rewritten on upgrade).
-    if os.environ.get("HAL0_MEMORY_ENABLED", "0") != "1":
-        log.info("hal0.memory.disabled", reason="HAL0_MEMORY_ENABLED!=1")
+    # toggle. Consumed once here at create_app() — a change needs a
+    # hal0-api restart to take effect (memory.enabled is registered
+    # service-restart[hal0-api] in _settings_apply.py). create_app() runs
+    # before lifespan(), so this is a fresh load rather than the cached
+    # app.state.hal0_config lifespan() sets up later.
+    try:
+        create_app_cfg = load_hal0_config()
+    except ConfigParseError as exc:
+        log.warning("hal0.config.parse_failed", error=str(exc))
+        from hal0.config.schema import Hal0Config
+
+        create_app_cfg = Hal0Config()
+    if not create_app_cfg.memory.enabled:
+        log.info("hal0.memory.disabled", reason="memory.enabled=false")
     else:
         try:
             from hal0.memory import provider_from_config
 
-            memory_provider = provider_from_config(load_hal0_config())
+            memory_provider = provider_from_config(create_app_cfg)
         except Exception as exc:  # pragma: no cover — defensive
             log.warning("hal0.memory.init_failed", error=str(exc))
     app.state.memory_provider = memory_provider

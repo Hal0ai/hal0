@@ -37,8 +37,8 @@ def test_features_comfyui_switchover_always_available(
 
 
 def test_features_memory_reflects_state(client: TestClient) -> None:
-    """``memory`` mirrors app.state.memory_provider (HAL0_MEMORY_ENABLED=1
-    in the test env → a provider is wired)."""
+    """``memory`` mirrors app.state.memory_provider ([memory].enabled
+    defaults to True → a provider is wired)."""
     expected = getattr(client.app.state, "memory_provider", None) is not None
     assert client.get("/api/features").json()["memory"] is expected
 
