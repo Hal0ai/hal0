@@ -163,7 +163,16 @@ function LogsView() {
           <select
             className="input mono"
             value={slotFilter || ""}
-            onChange={e => setSlotFilter(e.target.value || null)}
+            onChange={e => {
+              const name = e.target.value || null;
+              setSlotFilter(name);
+              // Picking a slot means "show me this slot's logs" — but the rich
+              // raw journald tail (detailed model-load lines, the same stream
+              // the slot drawer shows) is only fetched on the slot/merged
+              // channels. On the events-only channel that data stays hidden,
+              // so promote to `merged` (events + raw slot logs, interleaved).
+              if (name && channel === "events") setChannel("merged");
+            }}
             title={needsSlot ? "Pick a slot to tail" : "Filter events to one slot"}
             style={{maxWidth: 150, height: 26, fontSize: 11, marginLeft: 8, padding: "0 8px", lineHeight: "24px", ...(needsSlot && !slotFilter ? {borderColor: "var(--accent)"} : {})}}
           >
