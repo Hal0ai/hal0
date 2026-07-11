@@ -526,6 +526,50 @@ _ADMIN_TOOL_PARAM_OVERRIDES: dict[str, dict[str, Any]] = {
         },
         "required": ["name", "model"],
     },
+    "upstream_create": {
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "New upstream name — lowercase alnum plus -/_ ('hal0' reserved)",
+            },
+            "catalog_id": {
+                "type": "string",
+                "description": (
+                    "Optional provider template: openai|anthropic|openrouter|"
+                    "google_ai_studio|ollama — prefills url/auth"
+                ),
+            },
+            "url": {
+                "type": "string",
+                "description": "OpenAI-compatible base URL (required without catalog_id)",
+            },
+            "auth_value_env": {
+                "type": "string",
+                "description": "Env-var NAME for the API key (never the key itself)",
+            },
+        },
+        "required": ["name"],
+    },
+    "upstream_update": {
+        "properties": {
+            "name": {"type": "string", "description": "Upstream name to update"},
+            "enabled": {
+                "type": "boolean",
+                "description": "Routing kill-switch — false removes it from dispatch",
+            },
+            "advertise_models": {
+                "type": "boolean",
+                "description": "Whether its models list in /v1/models",
+            },
+            "model_filters": {
+                "type": "object",
+                "description": (
+                    "{models: [exact ids], include: [globs], exclude: [globs]} — "
+                    "exclude wins; all-empty clears"
+                ),
+            },
+        },
+    },
 }
 
 
