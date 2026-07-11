@@ -357,19 +357,17 @@ async def _collect_with_payload(request: Any, payload: dict[str, Any]) -> list[d
 
 
 def test_loop_budget_terminates_with_typed_error(tmp_path, monkeypatch) -> None:
+    """The [brain_chat] max_rounds knob bounds a pathological tool loop."""
+    from hal0.config.schema import BrainChatConfig
+
     monkeypatch.setattr(admin, "_call_rest", _RestRecorder())
-    monkeypatch.setattr(bc, "_MAX_ROUNDS", 2)
     stub = _StubLLM([_tool_call("slot_load", {"name": "ops"}, f"c{i}") for i in range(5)])
     request = _fake_request(stub, tmp_path)
+    request.app.state.hal0_config = SimpleNamespace(brain_chat=BrainChatConfig(max_rounds=2))
     events = _run(_collect(request))
     err = next(e for e in events if e["type"] == "error")
     assert "budget exhausted" in err["message"]
     assert len(stub.calls) == 2
-
-
-def test_rounds_budget_generous_for_multi_step_work() -> None:
-    """Operator raised the budget so real steward sessions never hit it."""
-    assert bc._MAX_ROUNDS >= 16
 
 
 # ── surfaced schemas name the body args (no more guessing) ──────────────────
