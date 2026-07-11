@@ -125,16 +125,16 @@ async def get_status(request: Request) -> dict[str, Any]:
         "hardware": None,  # populated by /api/hardware on demand
         "slots": slot_list,
         "upstreams": upstream_summary,
-        # 0.4: single source of truth for whether the memory subsystem is
-        # live (gated by HAL0_MEMORY_ENABLED at create_app). The dashboard
-        # reads this to show/hide the Agent → Memory nav so the UI and the
-        # backend can never disagree. Reflects the real wrapper, so an init
-        # failure also reads as off.
+        # Single source of truth for whether the memory subsystem is live
+        # (gated by [memory].enabled at create_app — see 'hal0 memory
+        # enable'/'disable'). The dashboard reads this to show/hide the
+        # Agent → Memory nav so the UI and the backend can never disagree.
+        # Reflects the real wrapper, so an init failure also reads as off.
         "memory_enabled": getattr(request.app.state, "memory_provider", None) is not None,
         # True  → memory is enabled but running on the volatile in-memory
         #         PgVectorProvider fallback (writes will be lost on restart).
         # False → memory is enabled and using a real durable provider.
-        # None  → memory is disabled (HAL0_MEMORY_ENABLED not set / init failed).
+        # None  → memory is disabled ([memory].enabled=false or init failed).
         "memory_degraded": _memory_degraded(request),
     }
 
@@ -264,7 +264,7 @@ async def list_features(request: Request) -> dict[str, Any]:
     Flat ``feature → bool | str`` map:
 
       - ``comfyui_switchover``: image-gen engine switchover route is present.
-      - ``memory``: a memory provider is wired (HAL0_MEMORY_ENABLED + a
+      - ``memory``: a memory provider is wired ([memory].enabled + a
         successful init).
       - ``memory_engine``: the configured engine name (``hindsight`` |
         ``cognee`` | ``mem0`` | …) — a string, not a bool.
