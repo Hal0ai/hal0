@@ -101,4 +101,5 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         reranker=reranker,
         graph_enabled=bool(graph.enabled),
         extraction_slot=str(getattr(graph, "extraction_slot", "utility")),
+        unified_bank=bool(getattr(cfg.memory, "unified_bank", True)),
     )
