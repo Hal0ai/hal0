@@ -69,11 +69,11 @@ agent process. Configured per-agent via `GET/POST
 `hermes_provision` registers `hal0-memory` and `hal0-admin` as MCP
 servers in hermes's config.toml. The plugin slot for memory is
 implemented by the hal0-bundled hermes plugin at
-`src/hal0/agents/hermes/plugins/memory_hindsight/` — a `MemoryProvider`
+`installer/agents/hermes/plugins/hal0-memory/` — a `MemoryProvider`
 subclass (memory is Hindsight-backed; see ADR-0023) that turns memory
-into part of the system prompt
-(`system_prompt_block`) rather than a tool the agent has to remember
-to call. Plugin host (PR-7) lets the dashboard mount upstream Hermes
+into part of the system prompt (`system_prompt_block` + `prefetch`)
+and also exposes explicit `hal0_memory_{search,recall,add}` tools.
+Plugin host (PR-7) lets the dashboard mount upstream Hermes
 plugin bundles (the kanban plugin today) inside an iframe with a
 shadow-DOM-isolated SDK shim.
 

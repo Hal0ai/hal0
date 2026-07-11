@@ -81,7 +81,7 @@ There is **no** `api/routes/lemonade_proxy.py`.
 - `agents/hermes_provision.py` — Hermes bootstrap state machine (15 deterministic phases, checkpointed to `/var/lib/hal0/state/agents/hermes/provision.json`). This is the provisioner.
 - `agents/hermes_refresh.py` — re-render/refresh of an already-provisioned Hermes.
 - `agents/hermes_templates/` — Jinja2 templates rendered into the Hermes home: `HERMES.md.j2`, `AGENTS.md.j2`, `SOUL.md.j2`, `STATE.md.j2`, `MCP-CLIENTS.md.j2`. (There is **no** `config.yaml.j2` — Hermes owns its own `config.yaml`; hal0 applies it via `hermes config set`.)
-- `agents/hermes/` — the bundled Hermes driver + `plugins/memory_hindsight/` (hal0-memory plugin).
+- `agents/hermes/` — the bundled Hermes driver. The hal0-memory `MemoryProvider` plugin itself lives at `installer/agents/hermes/plugins/hal0-memory/` (canonical, shipped source — copied verbatim into `$HERMES_HOME/plugins/hal0-memory/` at provision time).
 - `agents/pi_coder.py`, `agents/manager.py`, `agents/persona.py`, `agents/personas.py`, `agents/mcp_client.py` — pi-coder agent, agent manager, persona definitions, MCP client.
 
 ## Memory (`memory/`)
