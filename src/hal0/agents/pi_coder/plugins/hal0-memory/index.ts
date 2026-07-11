@@ -12,7 +12,7 @@
  * Identity: `X-hal0-Agent: pi-coder` (override with HAL0_AGENT_ID env).
  * No Bearer auth — LAN trust per ADR-0012.
  *
- * Live-API quirks (verified against hal0-api 0.8.3b1):
+ * Live-API quirks (verified against src/hal0/api/routes/memory.py on main):
  *   1. `/api/memory/add` is ASYNC. The response carries an `operation_id`,
  *      not the eventual memory item id. Hindsight extracts the text into
  *      a structured `experience`/`observation` record within ~2-5s. Tags
@@ -22,10 +22,17 @@
  *      both banks (server-side) regardless of the header.
  *   3. `/api/memory/list` is BANK-FILTERED (NOT union). This extension
  *      fetches both banks and merges so the LLM sees everything.
- *   4. `POST /api/memory/delete` is a no-op (`{"deleted":0}`) — the real
- *      item-delete path is `DELETE /api/memory/banks/{id}?confirm={id}`,
- *      which works because each memory item has its own bank id. This
- *      extension uses that path.
+ *   4. `POST /api/memory/delete` (body `{ids: [...]}`) is the real
+ *      item-delete path (`memory_delete` in memory.py → `wrapper.delete`).
+ *      An earlier version of this extension called
+ *      `DELETE /api/memory/banks/{item-id}?confirm={item-id}` instead —
+ *      that route (`memory_admin.py:279`) deletes a whole BANK by name
+ *      (e.g. `private:hermes`), not a memory item by id; a memory item's
+ *      UUID is never a valid bank name, so that call 404'd and silently
+ *      never deleted anything. Worse, if a bank ever happened to share a
+ *      name with an item's UUID, it would have destroyed that entire bank
+ *      (this repo has already had one incident of an unguarded bank
+ *      DELETE destroying ~632 records — don't repeat it).
  *
  * Vendored into the hal0 repo at src/hal0/agents/pi_coder/plugins/hal0-memory/
  * and deployed to ~/.pi/agent/extensions/hal0-memory/ by the pi-coder
@@ -165,16 +172,20 @@ async function listUnion(limit = 50): Promise<MemoryItem[]> {
 }
 
 async function deleteItem(id: string): Promise<{ status: number; ok: boolean; body: string }> {
-	// POST /api/memory/delete is a no-op; the real path is bank-delete with the
-	// item's own id (each memory item is its own bank in hal0-api's model).
-	const url = `/api/memory/banks/${encodeURIComponent(id)}?confirm=${encodeURIComponent(id)}`;
-	const res = await fetch(`${BASE_URL}${url}`, {
-		method: "DELETE",
-		headers: headers(true, false),
-		signal: AbortSignal.timeout(READ_TIMEOUT_MS),
-	});
-	const body = await res.text();
-	return { status: res.status, ok: res.ok, body };
+	// POST /api/memory/delete deletes by item id (body {ids: [id]}), not by
+	// bank name — see the module docstring for why the old bank-delete path
+	// was wrong. The server resolves the delete target from headers, same
+	// as add/search/recall; no explicit dataset needed here.
+	try {
+		const { status, data } = await request<{ deleted?: number }>("POST", "/api/memory/delete", {
+			body: { ids: [id] },
+			privateBank: true,
+		});
+		const deleted = typeof data.deleted === "number" ? data.deleted : 0;
+		return { status, ok: deleted > 0, body: JSON.stringify(data) };
+	} catch (e) {
+		return { status: e instanceof Hal0MemoryError ? (e.status ?? -1) : -1, ok: false, body: shortErr(e) };
+	}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -354,7 +365,7 @@ export default function hal0MemoryExtension(pi: ExtensionAPI) {
 			name: "hal0_memory_delete",
 			label: "hal0 memory delete",
 			description:
-				"Delete memory items by ID. Requires confirm=true to actually delete (safety guard). Implemented via DELETE /api/memory/banks/{id}?confirm={id} because POST /api/memory/delete is a no-op in hal0-api.",
+				"Delete memory items by ID. Requires confirm=true to actually delete (safety guard). Implemented via POST /api/memory/delete (body {ids: [...]}).",
 			promptSnippet: "Delete memory items by ID (requires confirm=true).",
 			promptGuidelines: [
 				"hal0_memory_delete requires confirm=true; without it the call returns a dry-run preview and does not mutate state.",
@@ -421,7 +432,7 @@ export default function hal0MemoryExtension(pi: ExtensionAPI) {
 					`shared bank:  shared`,
 					`read union:   private:${AGENT_ID} + shared (server-side, search/recall only)`,
 					`list:         fetches both banks and merges (list endpoint is bank-filtered)`,
-					`delete:       DELETE /api/memory/banks/{id}?confirm={id}`,
+					`delete:       POST /api/memory/delete (body {ids: [...]})`,
 					`endpoint:     ${ping}`,
 					`item counts:  ${counts}`,
 				].join("\n");
@@ -560,7 +571,7 @@ export default function hal0MemoryExtension(pi: ExtensionAPI) {
 					`reachable:   yes`,
 					`total items: ${items.length}`,
 					`by bank:     ${Object.entries(byBank).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}`,
-					`delete path: DELETE /api/memory/banks/{id}?confirm={id}`,
+					`delete path: POST /api/memory/delete (body {ids: [...]})`,
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 			} catch (e) {
