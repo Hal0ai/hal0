@@ -213,7 +213,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: cosign sign-blob (keyless OIDC, legacy raw .sig + .crt)
+      - name: cosign sign-blob (keyless OIDC, Sigstore bundle)
         id: sign
         env:
           # Belt + braces: the keyless flow reads ACTIONS_ID_TOKEN_REQUEST_*
@@ -221,19 +221,45 @@ jobs:
           COSIGN_EXPERIMENTAL: "true"
         run: |
           TARBALL="${{ steps.tarball.outputs.path }}"
+          BUNDLE="${TARBALL}.bundle"
+          # #1159 root cause: keyless signing issues a SHORT-LIVED (~10 min)
+          # Fulcio certificate. Verifying a signature made under an expired
+          # cert requires a TRUSTED TIMESTAMP proving the signature was created
+          # while the cert was still valid. The only place that timestamp lives
+          # is the Rekor transparency-log entry's Signed Entry Timestamp (SET).
+          #
+          # The old flow emitted a detached raw .sig + .crt (--new-bundle-format
+          # =false) which carry NO SET. In CI the Self-verify below runs seconds
+          # after signing (cert still valid) so it passed — but every real client
+          # installs hours/days later, after the cert has expired, and cosign
+          # then has no trusted timestamp to anchor the signature to. Result:
+          # verify-blob failed 100% on clients while CI stayed green.
+          #
+          # The fix: emit a Sigstore bundle (.bundle). It embeds the Fulcio
+          # cert, the signature, AND the Rekor inclusion proof + SET, so
+          # verify-blob succeeds offline and long after cert expiry. cosign 3.x
+          # writes the new bundle format by default. The client verify path
+          # (installer/bootstrap.sh, src/hal0/updater/updater.py) consumes the
+          # bundle via `cosign verify-blob --bundle`.
+          cosign sign-blob --yes \
+              --bundle "${BUNDLE}" \
+              "${TARBALL}"
+          echo "bundle=${BUNDLE}" >> "$GITHUB_OUTPUT"
+
+          # Transition-window legacy artifacts (detached .sig + .crt).
+          # Every hal0 install up through v0.9.6.1 runs updater code that
+          # requires manifest.sig_url — a manifest with bundle_url only would
+          # fail *schema validation* on those clients, breaking `hal0 update`
+          # outright (not just cosign verify, which already failed the same
+          # way today). Keep signing + publishing both artifact sets so
+          # already-deployed clients are no worse off than before, while
+          # clients built from this fix (>= the version that ships this
+          # workflow change) prefer the bundle and actually succeed. Drop
+          # this second signing pass once telemetry/adoption confirms the
+          # fleet has moved past sig_url-only clients — see
+          # docs/internal/release-manifest.md.
           SIG="${TARBALL}.sig"
           CRT="${TARBALL}.crt"
-          # cosign 3.x defaults to --new-bundle-format=true and refuses
-          # --output-signature. Today's updater (_verify_cosign in
-          # src/hal0/updater/updater.py) calls verify-blob with the legacy
-          # --signature flag, so we opt out of the bundle format here.
-          # cosign 3.x also requires the Fulcio-issued certificate to be
-          # passed via --certificate at verify time (--certificate-identity-
-          # regexp is checked against the cert's SAN), so we --output-certificate
-          # alongside the .sig and publish both as release assets. When the
-          # updater learns to consume Sigstore Bundles (RELEASE_PIPELINE_NOTES.md
-          # → Findings § cosign 3.x), drop --new-bundle-format=false and emit
-          # a .bundle in place of the separate .sig + .crt.
           cosign sign-blob --yes \
               --new-bundle-format=false \
               --output-signature "${SIG}" \
@@ -247,8 +273,7 @@ jobs:
       - name: Self-verify (cosign verify-blob with workflow OIDC identity)
         run: |
           TARBALL="${{ steps.tarball.outputs.path }}"
-          SIG="${{ steps.sign.outputs.sig }}"
-          CRT="${{ steps.sign.outputs.cert }}"
+          BUNDLE="${{ steps.sign.outputs.bundle }}"
           # The identity regex must match what we'll write into the
           # manifest below — keep these two strings in lock-step.
           # github.repository preserves case (Hal0ai/hal0); use (?i) to
@@ -262,6 +287,24 @@ jobs:
           # does NOT match the cert SAN under workflow_call.
           IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
           ISSUER="https://token.actions.githubusercontent.com"
+          # Verify exactly as the client will (bootstrap.sh + updater.py):
+          # the bundle supplies the cert + signature + Rekor SET, so this
+          # succeeds after cert expiry too — which is what makes it a
+          # meaningful mirror of the real install path.
+          cosign verify-blob \
+              --bundle "${BUNDLE}" \
+              --certificate-identity-regexp "${IDENT}" \
+              --certificate-oidc-issuer    "${ISSUER}" \
+              "${TARBALL}"
+
+          # Sanity-check the transition-window legacy artifacts too — this
+          # only proves cosign signed them correctly, NOT that they'll still
+          # verify after cert expiry (they won't; that's the known, accepted
+          # gap the bundle fixes). It exists so a signing-step regression in
+          # the legacy path fails CI instead of silently shipping a broken
+          # sig_url/cert_url to clients still relying on it.
+          SIG="${{ steps.sign.outputs.sig }}"
+          CRT="${{ steps.sign.outputs.cert }}"
           cosign verify-blob \
               --signature "${SIG}" \
               --certificate "${CRT}" \
@@ -301,6 +344,9 @@ jobs:
               "version":         version,
               "channel":         channel,
               "url":             f"{base}/hal0-{version}.tar.gz",
+              "bundle_url":      f"{base}/hal0-{version}.tar.gz.bundle",
+              # Transition-window fields (see the sign step above) — dropped
+              # once the fleet has moved past sig_url-only clients (#1159).
               "sig_url":         f"{base}/hal0-{version}.tar.gz.sig",
               "cert_url":        f"{base}/hal0-{version}.tar.gz.crt",
               "digest_sha256":   digest,
@@ -417,6 +463,7 @@ jobs:
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           TARBALL="${{ steps.tarball.outputs.path }}"
+          BUNDLE="${{ steps.sign.outputs.bundle }}"
           SIG="${{ steps.sign.outputs.sig }}"
           CRT="${{ steps.sign.outputs.cert }}"
           MANIFEST="${{ steps.manifest.outputs.path }}"
@@ -450,7 +497,7 @@ jobs:
             fi
           fi
 
-          gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
+          gh release upload "${TAG}" "${TARBALL}" "${BUNDLE}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
 
       - name: Summary
         run: |

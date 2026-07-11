@@ -99,6 +99,18 @@ except json.JSONDecodeError as e:
 "
 }
 
+# Like parse_manifest_field but prints nothing (rather than dying) when the
+# field is absent — used for the transition-window bundle_url/sig_url/
+# cert_url fields, which are mutually optional (see cosign_verify below).
+parse_manifest_field_optional() {
+    local file="$1" field="$2"
+    python3 -c "
+import json
+v = json.load(open('${file}')).get('${field}')
+print(v if v is not None else '')
+"
+}
+
 # ── tarball fetch + sha256 verify ─────────────────────────────────────────
 fetch_and_hash_check() {
     local url="$1" expected_digest="$2" out="$3"
@@ -126,7 +138,9 @@ fetch_sidecar() {
 }
 
 cosign_verify() {
-    local tarball="$1" sig="$2" cert="$3" identity="$4" issuer="$5"
+    # bundle may be empty — in that case sig and cert must both be set (the
+    # transition-window fallback for manifests without bundle_url). See main().
+    local tarball="$1" bundle="$2" sig="$3" cert="$4" identity="$5" issuer="$6"
 
     if ! command -v cosign >/dev/null 2>&1; then
         if [[ "${HAL0_INSTALL_REQUIRE_COSIGN:-0}" == "1" ]]; then
@@ -151,12 +165,28 @@ cosign_verify() {
     info "verifying signature with cosign keyless OIDC"
     info "  identity-regex: ${_C_DIM}${identity}${_C_RST}"
     info "  issuer:         ${_C_DIM}${issuer}${_C_RST}"
-    # cosign 3.x requires the Fulcio-issued cert via --certificate
-    # alongside the .sig; --certificate-identity-regexp is checked
-    # against the cert's SAN.
+
+    local -a verify_args
+    if [[ -n "${bundle}" ]]; then
+        # Keyless verification uses a Sigstore bundle. The bundle carries the
+        # Fulcio cert, the signature, AND the Rekor Signed Entry Timestamp
+        # (SET) — the trusted timestamp that lets verify-blob succeed after
+        # the short-lived (~10 min) signing cert has expired, which is
+        # always the case by the time a user runs the installer.
+        # --certificate-identity-regexp is matched against the cert SAN
+        # carried in the bundle. (A detached .sig + .crt had no SET and
+        # failed on every client — #1159.)
+        verify_args=(--bundle "${bundle}")
+    else
+        # Transition-window fallback: manifest had no bundle_url (older
+        # release, or a manifest generated before #1159 shipped). This path
+        # inherits the known post-expiry failure the bundle fixes — kept
+        # only so manifests without bundle_url still attempt verification
+        # instead of erroring outright.
+        verify_args=(--signature "${sig}" --certificate "${cert}")
+    fi
     if ! cosign verify-blob \
-            --signature "${sig}" \
-            --certificate "${cert}" \
+            "${verify_args[@]}" \
             --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "${issuer}" \
             "${tarball}" >/dev/null 2>&1; then
@@ -181,24 +211,38 @@ main() {
     local manifest="${work}/manifest.json"
     fetch_manifest "${manifest}"
 
-    local version url sig_url cert_url digest identity issuer
+    local version url bundle_url sig_url cert_url digest identity issuer
     version="$(parse_manifest_field "${manifest}" version)"
     url="$(parse_manifest_field "${manifest}" url)"
-    sig_url="$(parse_manifest_field "${manifest}" sig_url)"
-    cert_url="$(parse_manifest_field "${manifest}" cert_url)"
+    bundle_url="$(parse_manifest_field_optional "${manifest}" bundle_url)"
+    sig_url="$(parse_manifest_field_optional "${manifest}" sig_url)"
+    cert_url="$(parse_manifest_field_optional "${manifest}" cert_url)"
     digest="$(parse_manifest_field "${manifest}" digest_sha256)"
     identity="$(parse_manifest_field "${manifest}" signer_identity)"
     issuer="$(parse_manifest_field "${manifest}" signer_issuer)"
 
+    if [[ -z "${bundle_url}" && ( -z "${sig_url}" || -z "${cert_url}" ) ]]; then
+        die "manifest has no usable signing scheme (need bundle_url, or both sig_url and cert_url)"
+    fi
+
     info "release: ${_C_BLD}hal0 v${version}${_C_RST} (${HAL0_CHANNEL})"
 
     local tarball="${work}/hal0-${version}.tar.gz"
-    local sig="${tarball}.sig"
-    local cert="${tarball}.crt"
     fetch_and_hash_check "${url}" "${digest}" "${tarball}"
-    fetch_sidecar "signature" "${sig_url}" "${sig}"
-    fetch_sidecar "certificate" "${cert_url}" "${cert}"
-    cosign_verify "${tarball}" "${sig}" "${cert}" "${identity}" "${issuer}"
+
+    # Prefer the Sigstore bundle (survives cert expiry, #1159); fall back to
+    # the transition-window sig_url/cert_url pair when bundle_url is absent.
+    local bundle="" sig="" cert=""
+    if [[ -n "${bundle_url}" ]]; then
+        bundle="${tarball}.bundle"
+        fetch_sidecar "signature bundle" "${bundle_url}" "${bundle}"
+    else
+        sig="${tarball}.sig"
+        cert="${tarball}.crt"
+        fetch_sidecar "signature" "${sig_url}" "${sig}"
+        fetch_sidecar "certificate" "${cert_url}" "${cert}"
+    fi
+    cosign_verify "${tarball}" "${bundle}" "${sig}" "${cert}" "${identity}" "${issuer}"
 
     info "extracting tarball"
     tar -xzf "${tarball}" -C "${work}"
