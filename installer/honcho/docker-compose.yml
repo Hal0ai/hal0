@@ -27,7 +27,7 @@ services:
     # Image is pre-built by the installer via `podman build` (BuildKit RUN
     # steps hit the LXC AppArmor wall under docker); `build:` is kept as a
     # fallback reference. hal0-honcho.service runs `up --no-build`.
-    image: localhost/hal0-honcho:v3.0.9
+    image: localhost/hal0-honcho:main-73453f8
     build:
       context: /var/lib/hal0/honcho/src
       dockerfile: Dockerfile
@@ -72,7 +72,7 @@ services:
     # Image is pre-built by the installer via `podman build` (BuildKit RUN
     # steps hit the LXC AppArmor wall under docker); `build:` is kept as a
     # fallback reference. hal0-honcho.service runs `up --no-build`.
-    image: localhost/hal0-honcho:v3.0.9
+    image: localhost/hal0-honcho:main-73453f8
     build:
       context: /var/lib/hal0/honcho/src
       dockerfile: Dockerfile

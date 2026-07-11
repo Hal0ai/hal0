@@ -1733,7 +1733,7 @@ else
     # worth syncing.
     if [[ "${HAL0_INSTALL_HONCHO:-0}" -eq 1 ]]; then
         HC_DIR="${VAR_DIR}/honcho"
-        HONCHO_REF="${HONCHO_REF:-v3.0.9}"
+        HONCHO_REF="${HONCHO_REF:-73453f892d8a44e322447dfe06db969caeb200a4}"  # main pin: v3.0.9 lacks STRUCTURED_OUTPUT_MODE (needed for local llama backends)
         HONCHO_COMPOSE_SRC="${REPO_ROOT}/installer/honcho/docker-compose.yml"
         HONCHO_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho.service"
         HONCHO_SYNC_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.service"
@@ -1765,17 +1765,22 @@ else
             # checked out at HONCHO_REF.
             hc_cur_ref=""
             if [[ -d "${HC_DIR}/src/.git" ]]; then
-                hc_cur_ref="$(git -C "${HC_DIR}/src" describe --tags --exact-match 2>/dev/null || true)"
+                hc_cur_ref="$(git -C "${HC_DIR}/src" rev-parse HEAD 2>/dev/null || true)"
+                hc_cur_tag="$(git -C "${HC_DIR}/src" describe --tags --exact-match 2>/dev/null || true)"
             fi
-            if [[ "${hc_cur_ref}" == "${HONCHO_REF}" ]]; then
+            if [[ "${hc_cur_ref}" == "${HONCHO_REF}" || "${hc_cur_tag}" == "${HONCHO_REF}" ]]; then
                 info "Honcho source already at ${HONCHO_REF} — skipping clone"
             else
                 rm -rf "${HC_DIR}/src"
-                if git clone --branch "${HONCHO_REF}" --depth 1 \
-                    https://github.com/plastic-labs/honcho "${HC_DIR}/src" >/dev/null 2>&1; then
-                    info "cloned plastic-labs/honcho @ ${HONCHO_REF}"
+                # init+fetch instead of clone --branch: HONCHO_REF may be a
+                # commit sha (tags and branches also work with this form).
+                if git init -q "${HC_DIR}/src" \
+                    && git -C "${HC_DIR}/src" remote add origin https://github.com/plastic-labs/honcho \
+                    && git -C "${HC_DIR}/src" fetch -q --depth 1 origin "${HONCHO_REF}" \
+                    && git -C "${HC_DIR}/src" checkout -q FETCH_HEAD; then
+                    info "checked out plastic-labs/honcho @ ${HONCHO_REF}"
                 else
-                    warn "failed to clone plastic-labs/honcho @ ${HONCHO_REF} — Honcho will be unavailable"
+                    warn "failed to fetch plastic-labs/honcho @ ${HONCHO_REF} — Honcho will be unavailable"
                 fi
             fi
 
@@ -1795,8 +1800,8 @@ else
                 fi
 
                 info "building Honcho image (podman build — this is slow on first run)…"
-                if ! podman image exists "hal0-honcho:${HONCHO_REF}" \
-                    && ! (cd "${HC_DIR}/src" && podman build -t "hal0-honcho:${HONCHO_REF}" .); then
+                if ! podman image exists "hal0-honcho:main-73453f8" \
+                    && ! (cd "${HC_DIR}/src" && podman build -t "hal0-honcho:main-73453f8" .); then
                     warn "Honcho image build failed; check the build log above"
                 fi
 

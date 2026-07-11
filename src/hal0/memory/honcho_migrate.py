@@ -231,7 +231,8 @@ def migrate_hindsight_to_honcho(
     on_progress: ProgressFn | None = None,
     hal0_http_client: httpx.Client | None = None,
     honcho_http_client: httpx.Client | None = None,
-    page_size: int = 200,
+    page_size: int = 2000,
+    types: frozenset[str] = frozenset({"observation", "world"}),
 ) -> dict[str, Any]:
     """Backfill ``agent_id``'s Hindsight data into Honcho conclusions.
 
@@ -286,6 +287,12 @@ def migrate_hindsight_to_honcho(
                     scanned += 1
                     item_id = str(item.get("id"))
                     if item_id in already:
+                        skipped += 1
+                        continue
+                    # Hindsight mirrors each fact into derived rows (type
+                    # "experience" etc.); Honcho's deriver/dream builds its own
+                    # derivations, so only raw fact types cross over.
+                    if types and str(item.get("type") or "observation") not in types:
                         skipped += 1
                         continue
                     content = (item.get("text") or "")[:_MAX_CONTENT_CHARS]

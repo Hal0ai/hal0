@@ -370,3 +370,44 @@ def test_state_file_round_trip(tmp_path):
     assert reloaded.migrated_ids("shared") == {"a", "b"}
     assert reloaded.watermark() == "2026-07-11T00:00:00Z"
     assert reloaded.data["honcho_to_hindsight"]["count"] == 2
+
+
+def test_hindsight_to_honcho_skips_derived_types(tmp_path):
+    """Only raw fact types (observation/world) cross over; Hindsight's derived
+    'experience' rows are skipped — Honcho's deriver builds its own."""
+    import httpx
+
+    from hal0.memory.honcho_migrate import MigrateState, migrate_hindsight_to_honcho
+
+    items = [
+        {"id": "1", "text": "fact one", "type": "observation"},
+        {"id": "2", "text": "fact one | When: today", "type": "experience"},
+        {"id": "3", "text": "world fact", "type": "world"},
+    ]
+
+    def hal0_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": items if "shared" not in str(request.url) or True else [], "next_cursor": None})
+
+    calls = {"n": 0}
+
+    def hal0_once(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"items": items, "next_cursor": None})
+        return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+    state = MigrateState(path=tmp_path / "state.json")
+    report = migrate_hindsight_to_honcho(
+        hal0_base="http://hal0",
+        honcho_base="http://honcho",
+        workspace="hal0",
+        user_peer="alexander",
+        agent_id="hermes",
+        datasets=["private:hermes"],
+        dry_run=True,
+        state=state,
+        hal0_http_client=httpx.Client(transport=httpx.MockTransport(hal0_once), base_url="http://hal0"),
+        honcho_http_client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})), base_url="http://honcho"),
+    )
+    assert report["private:hermes"]["migrated"] == 2
+    assert report["private:hermes"]["skipped"] == 1

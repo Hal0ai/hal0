@@ -13,7 +13,7 @@ Hindsight's embedded pg0, bind mounts replace named volumes, etc). It is not
 a symlink or generated file — edit it directly and keep the deltas in sync
 if upstream's example changes shape.
 
-Pinned ref: `v3.0.9` (`HONCHO_REF` in `installer/install.sh`).
+Pinned ref: `main@73453f89 (pin: v3.0.9 lacks STRUCTURED_OUTPUT_MODE needed for local llama backends)` (`HONCHO_REF` in `installer/install.sh`).
 
 ## Upgrading
 
