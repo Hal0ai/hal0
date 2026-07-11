@@ -698,3 +698,102 @@ def test_resolve_by_capability_reexported_from_router() -> None:
     # by external callers from router — the identity must be preserved too.
     assert r.LegacyResolutionFailed is cr.LegacyResolutionFailed
     assert "LegacyResolutionFailed" in r.__all__
+
+
+# ── enabled=False gating (operator kill-switch) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_disabled_remote_skipped_on_warm_cache() -> None:
+    """A disabled remote must not win passthrough even with a warm cache."""
+    import dataclasses
+
+    remote = dataclasses.replace(
+        make_remote("openrouter", "https://openrouter.ai/api/v1"), enabled=False
+    )
+    upstreams = FakeUpstreamRegistry([remote])
+    models = FakeModelRegistry(routes={})
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: ["meta/llama-3.1-405b"] if name == "openrouter" else [],
+    )
+
+    with pytest.raises((NoRouteFound, LegacyResolutionFailed)):
+        await dispatcher.dispatch(
+            make_request(), body={"model": "meta/llama-3.1-405b", "messages": []}
+        )
+
+
+@pytest.mark.asyncio
+async def test_registry_binding_to_disabled_upstream_falls_through() -> None:
+    """An explicit ModelRegistry binding to a disabled upstream behaves like
+    an offline one — fall through, not UnknownUpstream."""
+    import dataclasses
+
+    slot = make_slot("chat")
+    remote = dataclasses.replace(
+        make_remote("openrouter", "https://openrouter.ai/api/v1"), enabled=False
+    )
+    upstreams = FakeUpstreamRegistry([slot, remote])
+    models = FakeModelRegistry(routes={"meta/llama-3.1-405b": "openrouter"})
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        # Slot cache warm so Step 2 can still route slot-served models.
+        cached_models=lambda name: ["qwen3-4b"] if name == "chat" else [],
+    )
+
+    with pytest.raises((NoRouteFound, LegacyResolutionFailed)):
+        await dispatcher.dispatch(
+            make_request(), body={"model": "meta/llama-3.1-405b", "messages": []}
+        )
+
+
+@pytest.mark.asyncio
+async def test_enabled_remote_still_routes() -> None:
+    """Control: the same setup with enabled=True routes via passthrough."""
+    remote = make_remote("openrouter", "https://openrouter.ai/api/v1")
+    upstreams = FakeUpstreamRegistry([remote])
+    models = FakeModelRegistry(routes={})
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: ["meta/llama-3.1-405b"] if name == "openrouter" else [],
+    )
+
+    call = await dispatcher.dispatch(
+        make_request(), body={"model": "meta/llama-3.1-405b", "messages": []}
+    )
+    assert call.upstream_name == "openrouter"
+    assert call.resolution_path == "passthrough:openrouter"
+
+
+@pytest.mark.asyncio
+async def test_disabled_remote_excluded_from_cold_prefetch() -> None:
+    """Step 3 must not fan /v1/models fetches out to disabled remotes."""
+    import dataclasses
+
+    fetched: list[str] = []
+    remote = dataclasses.replace(
+        make_remote("openrouter", "https://openrouter.ai/api/v1"), enabled=False
+    )
+    upstreams = FakeUpstreamRegistry([remote])
+    models = FakeModelRegistry(routes={})
+
+    async def fetch(u: Upstream) -> list[str]:
+        fetched.append(u.name)
+        return ["meta/llama-3.1-405b"]
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        fetch_models=fetch,
+        cached_models=lambda name: [],
+    )
+
+    with pytest.raises((NoRouteFound, LegacyResolutionFailed)):
+        await dispatcher.dispatch(
+            make_request(), body={"model": "meta/llama-3.1-405b", "messages": []}
+        )
+    assert fetched == []

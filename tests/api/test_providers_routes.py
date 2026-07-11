@@ -272,9 +272,10 @@ def test_patch_upstream_does_not_touch_other_rows(client: TestClient) -> None:
         raw = tomllib.load(f)
     by_name = {u["name"]: u for u in raw.get("upstream", [])}
     assert by_name["openrouter"]["advertise_models"] is False
-    # Anthropic row untouched.
+    # Anthropic row untouched (modulo warmup alias normalization: the
+    # legacy "eager" spelling is written back as canonical "always").
     assert by_name["anthropic"]["advertise_models"] is True
-    assert by_name["anthropic"]["warmup_strategy"] == "eager"
+    assert by_name["anthropic"]["warmup_strategy"] == "always"
 
 
 def test_patch_upstream_persists_atomically_no_partial_file(client: TestClient) -> None:
