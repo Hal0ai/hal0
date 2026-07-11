@@ -399,19 +399,11 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
         </div>
       )}
       <div className="tb-spacer" />
-      {/* Primary launchers — Kanban board + the agent-chat slide-out. These
-          replace the old "Quick actions" button (the ⌘K command palette is
-          still reachable via the shortcut). White icons by default, glowing
-          amber on hover/active. */}
+      {/* Primary launcher — the agent-chat slide-out. (Kanban moved to the
+          sidebar Services zone; ⌘B still opens the board. The ⌘K command
+          palette is reachable via its shortcut.) White icon by default,
+          glowing amber on hover/active. */}
       <div className="tb-launch">
-        <button
-          className={"tb-launch-btn" + (route === "board" ? " on" : "")}
-          data-testid="tb-launch-board"
-          onClick={onBoard}
-          title="Open the Kanban board (⌘B)"
-        >
-          {Icons.board}<span>Kanban</span>
-        </button>
         <button
           className={"tb-launch-btn" + (chatOn ? " on" : "")}
           data-testid="tb-launch-chat"
@@ -462,10 +454,9 @@ function useNavItems() {
       { id: "slots/stacks",    label: "Stacks" },
     ] },
     { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
-    // Operator Board (#board) — hal0-skinned kanban over the Hermes kanban
-    // backend. No live count here (it's per-board; the board's own selector
-    // shows task counts).
-    { id: "board", label: "Board", icon: Icons.board },
+    // The Operator Board (#board) is no longer a top-level nav row — it lives
+    // in the sidebar Services zone (ServiceLinks) as the "Kanban" option, and
+    // stays reachable via ⌘B.
     { id: "benchmarks", label: "Benchmarks", icon: Icons.bench },
     // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
     // with Hermes wired live) — that's the parent row's target, so no separate
@@ -560,11 +551,11 @@ function NavList({ route, param, onGo, testPrefix }) {
 
 // ─── ServiceLinks (sidebar bottom) ───
 // A separate launch zone, pinned to the sidebar bottom below the spacer, away
-// from the app/config nav above. Holds the external sibling-service shortcuts:
+// from the app/config nav above. Holds:
+//   - Kanban    → the internal Operator Board (#board), the only in-app option
+//                 here (routes via onGo, not an external link); also on ⌘B.
 //   - OpenWebUI → external chat UI, link host-derived by GET /api/config/urls.
 //   - Hermes    → external Hermes dashboard, likewise host-derived.
-// (The Kanban shortcut moved to the topbar launcher; the Operator Board is
-// also in the main nav and on ⌘B.)
 // The external links come from `useConfigUrls`, whose backend resolves the
 // hostname from the *request* (loopback, LAN IP, mDNS, or proxy domain) — so
 // they resolve correctly on every install, not just this dev box. Each is gated
@@ -572,7 +563,7 @@ function NavList({ route, param, onGo, testPrefix }) {
 // is simply omitted when the service isn't reachable on this host.
 // `testPrefix` keeps desktop ("svc-") vs drawer ("svc-drawer-") ids apart;
 // `onLaunch` lets the mobile drawer close itself after a tap.
-function ServiceLinks({ onGo, onLaunch, testPrefix }) {
+function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
   const cfg = useConfigUrls();
   const owui = cfg.data?.openwebui_enabled ? (cfg.data.openwebui || "") : "";
   const hermes = cfg.data?.hermes_enabled ? (cfg.data.hermes || "") : "";
@@ -580,6 +571,18 @@ function ServiceLinks({ onGo, onLaunch, testPrefix }) {
     <div className="sb-services">
       <div className="sb-section">Services</div>
       <div className="sb-svc-list">
+        <div
+          className={"sb-row sb-svc" + (route === "board" ? " active" : "")}
+          data-testid={testPrefix + "board"}
+          role="button"
+          tabIndex={0}
+          onClick={() => { onGo("board"); onLaunch && onLaunch(); }}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onGo("board"); onLaunch && onLaunch(); } }}
+          title="Open the Kanban board (⌘B)"
+        >
+          {Icons.board}
+          <span className="lbl">Kanban</span>
+        </div>
         {owui && (
           <a
             className="sb-row sb-svc"
@@ -620,7 +623,7 @@ function Sidebar({ route, param, onGo }) {
       <div className="sb-section">Navigate</div>
       <NavList route={route} param={param} onGo={onGo} testPrefix="nav-" />
       <div className="sb-spacer" />
-      <ServiceLinks onGo={onGo} testPrefix="svc-" />
+      <ServiceLinks route={route} onGo={onGo} testPrefix="svc-" />
     </div>
   );
 }
@@ -1145,7 +1148,7 @@ function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
         </button>
         <NavList route={route} param={param} onGo={onGo} testPrefix="nav-drawer-" />
         <div className="sb-spacer" />
-        <ServiceLinks onGo={onGo} onLaunch={onClose} testPrefix="svc-drawer-" />
+        <ServiceLinks route={route} onGo={onGo} onLaunch={onClose} testPrefix="svc-drawer-" />
         </>)}
       </aside>
     </>
