@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,
+    BrainChatConfig,
     DispatcherConfig,
     GPUInfo,
     Hal0Config,
@@ -30,6 +31,42 @@ from hal0.config.schema import (
     UpstreamEntry,
     UpstreamsConfig,
 )
+
+
+class TestBrainChatConfig:
+    def test_defaults_are_permissive_and_stable(self) -> None:
+        bc = BrainChatConfig()
+        assert bc.enabled is True
+        assert bc.read_only is False
+        assert bc.max_rounds == 8
+        assert bc.completion_timeout_s == 300.0
+
+    def test_present_on_hal0config_by_default(self) -> None:
+        assert Hal0Config().brain_chat == BrainChatConfig()
+
+    def test_guardrail_flags_round_trip_from_toml(self) -> None:
+        raw = tomllib.loads(
+            "[brain_chat]\n"
+            "enabled = false\n"
+            "read_only = true\n"
+            "max_rounds = 20\n"
+            "completion_timeout_s = 45.0\n"
+        )
+        cfg = Hal0Config(**raw)
+        assert cfg.brain_chat.enabled is False
+        assert cfg.brain_chat.read_only is True
+        assert cfg.brain_chat.max_rounds == 20
+        assert cfg.brain_chat.completion_timeout_s == 45.0
+
+    def test_max_rounds_bounds_enforced(self) -> None:
+        with pytest.raises(ValidationError):
+            BrainChatConfig(max_rounds=0)
+        with pytest.raises(ValidationError):
+            BrainChatConfig(max_rounds=101)
+
+    def test_completion_timeout_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            BrainChatConfig(completion_timeout_s=0)
 
 
 class TestServerConfigEnv:

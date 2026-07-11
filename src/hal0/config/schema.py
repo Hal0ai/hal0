@@ -2626,6 +2626,28 @@ class ActivityConfig(BaseModel):
     max_rows: int | None = Field(default=50_000, ge=100)
 
 
+class BrainChatConfig(BaseModel):
+    """``[brain_chat]`` — the dashboard's agent-chat steward (hal0-brain).
+
+    Guardrails and loop tuning for the slide-out chat that administers the
+    instance through tools (slots, models, benchmarks, the Operator Board).
+
+    ``enabled`` is a hard kill switch: when false the endpoint refuses every
+    turn, so the steward chat is off. ``read_only`` keeps the chat answering
+    and reading state but refuses every mutating or admin-write tool
+    server-side — a guardrail that holds INDEPENDENTLY of the ``hal0-brain``
+    persona's ``tools_allowed`` / approval policy (a persona edit can loosen
+    the persona, never this). ``max_rounds`` bounds the per-turn tool loop
+    (runaway backstop); ``completion_timeout_s`` is the transport timeout for
+    each LLM round against the brain/agent slot.
+    """
+
+    enabled: bool = True
+    read_only: bool = False
+    max_rounds: int = Field(default=8, ge=1, le=100)
+    completion_timeout_s: float = Field(default=300.0, gt=0)
+
+
 class Hal0Config(BaseModel):
     """Top-level hal0.toml pydantic model.
 
@@ -2646,6 +2668,7 @@ class Hal0Config(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
+    brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
 
 
 __all__ = [
@@ -2667,6 +2690,7 @@ __all__ = [
     "AgentConfig",
     "AgentMCPConfig",
     "AgentMetadataConfig",
+    "BrainChatConfig",
     "DeviceLiteral",
     "DispatcherConfig",
     "GPUInfo",

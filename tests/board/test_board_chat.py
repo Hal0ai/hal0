@@ -24,8 +24,10 @@ from hal0.api.routes import board
 from hal0.api.routes.board_chat import (
     _SYSTEM_PROMPT,
     BRAIN_SLOT_MODEL,
+    _brain_chat_config,
     _compact_board,
     _extract_tool_calls,
+    _is_read_tool,
     _resolve_platform_tool,
     _resolve_read_tool,
     _resolve_tool,
@@ -33,6 +35,7 @@ from hal0.api.routes.board_chat import (
     _tool_schemas,
 )
 from hal0.board import KANBAN_BASE_PATH, HermesKanbanClient
+from hal0.config.schema import BrainChatConfig, Hal0Config
 
 P = KANBAN_BASE_PATH
 
@@ -878,3 +881,105 @@ def test_extract_tool_calls_parses_string_args() -> None:
 
 def test_extract_tool_calls_empty_when_none() -> None:
     assert _extract_tool_calls(_final_response("hi")) == []
+
+
+# ── [brain_chat] guardrails: kill switch, read-only, config-backed knobs ─────
+
+
+class _FakeRequest:
+    def __init__(self, app) -> None:
+        self.app = app
+
+
+def _set_brain_chat_config(app, **kwargs) -> None:
+    """Attach a Hal0Config carrying a [brain_chat] override to app.state."""
+    app.state.hal0_config = Hal0Config(brain_chat=BrainChatConfig(**kwargs))
+
+
+def test_config_accessor_defaults_when_absent(tmp_path) -> None:
+    # The harness never sets app.state.hal0_config → defaults, behaviour-identical.
+    rec = _Recorder()
+    app, _client = _make_app(rec, _StubLLM([]), tmp_path)
+    cfg = _brain_chat_config(_FakeRequest(app))
+    assert (cfg.enabled, cfg.read_only, cfg.max_rounds) == (True, False, 8)
+
+
+def test_kill_switch_disables_chat_before_any_llm_call(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("should never run")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, enabled=False)
+
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    assert resp.status_code == 200
+    events = _sse_events(resp.text)
+    err = next(e for e in events if e["type"] == "error")
+    assert "disabled" in err["message"]
+    assert events[-1]["type"] == "done"
+    # The LLM was never invoked and no board request went out.
+    assert stub.calls == []
+    assert rec.requests == []
+
+
+def test_read_only_refuses_board_mutation_no_request_sent(tmp_path) -> None:
+    rec = _Recorder()
+    # The model tries to mutate; read-only must refuse before the PATCH.
+    stub = _StubLLM(
+        [
+            _tool_call_response("move_task", {"task_id": "t1", "status": "done"}, "c1"),
+            _final_response("ok"),
+        ]
+    )
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, read_only=True)
+
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "do"}]})
+    assert resp.status_code == 200
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "read-only mode" in result["result"]["error"]
+    # No PATCH ever reached the board backend, and nothing was audited.
+    assert rec.recorded("PATCH", "/tasks/t1") == []
+    assert app.state.audit.query(action="board.chat.turn") == []
+
+
+def test_read_only_still_allows_reads(tmp_path) -> None:
+    rec = _Recorder()
+    rec.respond("GET", "/board", {"columns": []})
+    stub = _StubLLM([_tool_call_response("get_board", {}, "c_gb"), _final_response("ok")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, read_only=True)
+
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert resp.status_code == 200
+    # The read passed straight through — one GET, no refusal on it.
+    assert len(rec.recorded("GET", "/board")) == 1
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "read-only mode" not in json.dumps(result["result"])
+
+
+def test_max_rounds_from_config_bounds_the_loop(tmp_path) -> None:
+    rec = _Recorder()
+    # A pathological model that ALWAYS emits a tool call and never terminates.
+    never_ends = [_tool_call_response("get_board", {}, f"c{i}") for i in range(10)]
+    rec.respond("GET", "/board", {"columns": []})
+    stub = _StubLLM(never_ends)
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, max_rounds=2)
+
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert resp.status_code == 200
+    # The loop ran exactly max_rounds times, not the stub's 10.
+    assert len(stub.calls) == 2
+
+
+def test_is_read_tool_classification() -> None:
+    # Board reads and non-mutating platform reads are safe.
+    assert _is_read_tool("get_board", {}) is True
+    assert _is_read_tool("list_slots", {}) is True
+    # Board and platform mutations are not.
+    assert _is_read_tool("move_task", {"task_id": "t1", "status": "done"}) is False
+    assert _is_read_tool("slot_load", {"name": "img"}) is False
+    # An unknown tool fails closed (treated as NOT a read).
+    assert _is_read_tool("definitely_not_a_tool", {}) is False
