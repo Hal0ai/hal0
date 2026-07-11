@@ -16,6 +16,7 @@ AsyncMock returning fake Slot snapshots.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -37,12 +38,15 @@ class _FakeSlot:
         model_id: str | None = None,
         backend: str | None = None,
         metadata: dict[str, Any] | None = None,
+        npu: dict[str, Any] | None = None,
     ):
         self.name = name
         self.state = state
         self.model_id = model_id
         self.backend = backend
         self.metadata = metadata or {}
+        if npu is not None:
+            self.npu = npu
 
 
 def _wire(client: TestClient, slots: list[_FakeSlot]) -> None:
@@ -217,4 +221,88 @@ def test_occupancy_contract_field_shape(client: TestClient, monkeypatch):
         "slots",
     }
     assert set(body.keys()) == top_keys
-    assert set(body["slots"][0].keys()) == {"name", "model", "state", "cols", "gb"}
+    assert set(body["slots"][0].keys()) == {
+        "name",
+        "model",
+        "state",
+        "cols",
+        "gb",
+        "active",
+        "last_used_age_s",
+    }
+
+
+# ── (e) per-capability activity ──────────────────────────────────────────────
+
+
+def _wire_ready_anchor(client: TestClient, monkeypatch, npu: dict[str, Any] | None = None):
+    """READY anchor slot with a successful column probe."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(
+        npu_columns,
+        "cached_aie_columns",
+        AsyncMock(
+            return_value={
+                "partitions": [{"start_col": 0, "num_cols": 8, "contexts": 1}],
+                "total": 8,
+            }
+        ),
+    )
+    _wire(
+        client,
+        [
+            _FakeSlot(
+                "npu",
+                SlotState.READY,
+                model_id="gemma3:4b",
+                metadata={"provider": "flm"},
+                npu=npu,
+            )
+        ],
+    )
+
+
+def test_occupancy_active_from_recent_last_used(client: TestClient, monkeypatch):
+    """READY (not serving) slot hit within the window → active:true."""
+    _wire_ready_anchor(client, monkeypatch)
+    client.app.state.slot_last_used = {"npu": time.monotonic() - 1.0}
+
+    slot = client.get("/api/npu/occupancy").json()["slots"][0]
+    assert slot["active"] is True
+    assert 0.5 <= slot["last_used_age_s"] <= 2.0
+
+
+def test_occupancy_inactive_when_last_used_stale(client: TestClient, monkeypatch):
+    """A stamp older than the activity window no longer reads as active."""
+    _wire_ready_anchor(client, monkeypatch)
+    client.app.state.slot_last_used = {"npu": time.monotonic() - 60.0}
+
+    slot = client.get("/api/npu/occupancy").json()["slots"][0]
+    assert slot["active"] is False
+    assert slot["last_used_age_s"] >= 59.0
+
+
+def test_occupancy_serving_is_active_without_stamp(client: TestClient, monkeypatch):
+    """SERVING (request in flight) → active even with no last-used stamp."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [_FakeSlot("npu", SlotState.SERVING, model_id="gemma3:4b", backend="flm")],
+    )
+    client.app.state.slot_last_used = {}
+
+    slot = client.get("/api/npu/occupancy").json()["slots"][0]
+    assert slot["active"] is True
+    assert slot["last_used_age_s"] is None
+
+
+def test_occupancy_subslot_activity_independent(client: TestClient, monkeypatch):
+    """flm-stt / flm-embed carry their own activity, not the anchor's."""
+    _wire_ready_anchor(client, monkeypatch, npu={"asr": True, "embed": True})
+    client.app.state.slot_last_used = {"npu-stt": time.monotonic() - 1.0}
+
+    by_name = {s["name"]: s for s in client.get("/api/npu/occupancy").json()["slots"]}
+    assert by_name["npu"]["active"] is False
+    assert by_name["npu-stt"]["active"] is True
+    assert by_name["npu-embed"]["active"] is False

@@ -142,6 +142,10 @@ def _instrument_streaming_throughput(
                 if ttft_pending and ttft_events is not None and dispatch_started is not None:
                     ttft_events.append((now, max(0.0, now - dispatch_started)))
                     ttft_pending = False
+                # Keep the last-used stamp moving through the whole stream —
+                # only non-streaming responses stamped it before, so a long
+                # streamed chat never registered as "active" on the NPU card.
+                _stamp_slot_last_used(app_state, slot_name)
             yield chunk
 
     response.body_iterator = _counting()
@@ -191,6 +195,20 @@ def _record_nonstreaming_throughput(
         _update_slot_throughput(app_state, slot_name, float(flm_tps))
     if isinstance(flm_kv, (int, float)):
         _update_slot_kv_occupancy(app_state, slot_name, float(flm_kv))
+
+
+def _stamp_slot_last_used(app_state: Any, slot_name: str | None) -> None:
+    """Record a monotonic last-use timestamp for *slot_name* (no counter).
+
+    Distinct from :func:`_touch_npu_shadow_count` so callers can mark a
+    request as in-flight at dispatch start (the NPU card's per-capability
+    activity tint) without double-incrementing the request counter.
+    """
+    if not slot_name:
+        return
+    last_used = getattr(app_state, "slot_last_used", None)
+    if last_used is not None:
+        last_used[slot_name] = time.monotonic()
 
 
 def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
@@ -923,6 +941,9 @@ async def _dispatch_via_npu_trio(
     router_obj = getattr(request.app.state, "npu_trio_router", None)
     if router_obj is None:
         return None
+    # Stamp at dispatch start too, so the capability reads as active while
+    # the request is still in flight (the counter increments on completion).
+    _stamp_slot_last_used(request.app.state, "flm-embed")
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
     _touch_npu_shadow_count(request, "flm-embed")
     return _wrap_npu_trio_response(upstream_resp)
@@ -1456,6 +1477,9 @@ async def _forward_multipart(
         if await _is_npu_trio_request(request, synthetic_body, slot_type="transcription"):
             router_obj = getattr(request.app.state, "npu_trio_router", None)
             if router_obj is not None:
+                # Stamp at dispatch start — STT on a cold NPU can run for
+                # seconds, and the card should tint while it's in flight.
+                _stamp_slot_last_used(request.app.state, "flm-stt")
                 upstream_resp = await router_obj.dispatch_stt_npu(
                     body=raw_body,
                     content_type=content_type,
