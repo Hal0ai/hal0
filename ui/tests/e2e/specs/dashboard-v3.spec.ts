@@ -28,12 +28,12 @@ test.describe('Dashboard v3 (/)', () => {
     await expect(page.locator('.sb-row.active .lbl')).toHaveText('Overview')
   })
 
-  test('topbar exposes brand + Kanban/Agent Chat launchers + notification bell without stale host chrome', async ({ page }) => {
+  test('topbar exposes brand + Agent Chat launcher + notification bell without stale host chrome', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.tb-brand')).toBeVisible()
-    // The old "Quick actions" button was replaced by two launchers.
-    await expect(page.locator('[data-testid="tb-launch-board"]')).toBeVisible()
-    await expect(page.locator('[data-testid="tb-launch-board"]')).toContainText('Kanban')
+    // Kanban moved to the sidebar Services zone; the topbar keeps only the
+    // Agent Chat launcher (⌘K palette + ⌘B board reachable via shortcuts).
+    await expect(page.locator('[data-testid="tb-launch-board"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="tb-launch-chat"]')).toBeVisible()
     await expect(page.locator('[data-testid="tb-launch-chat"]')).toContainText('Agent Chat')
     await expect(page.locator('.tb-cmdk')).toHaveCount(0)

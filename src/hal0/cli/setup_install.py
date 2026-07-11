@@ -190,14 +190,58 @@ async def _run_pulls_with_progress(pulls, *, slot_manager) -> None:
                 typer.echo(f"pull failed for {p.model_id}: {err}", err=True)
 
 
+def _conflict_message(resp: httpx.Response) -> str:
+    """Best-effort human-readable detail from a 409 error envelope.
+
+    The live service renders conflicts through the structured envelope
+    ``{"error": {"code", "message", "details"}}`` (see
+    :mod:`hal0.api.middleware.error_codes`). Pull the ``message`` out when it
+    is there; fall back to the raw body so we never crash while trying to
+    describe a crash.
+    """
+    try:
+        body = resp.json()
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+    except Exception:
+        pass
+    text = (resp.text or "").strip()
+    return text or "no detail provided by the service"
+
+
 async def _apply_via_api(sel) -> None:
-    """API-up path: POST the selections to the live service."""
+    """API-up path: POST the selections to the live service.
+
+    ``apply-selections`` is idempotent server-side: re-applying over
+    already-created slots is a per-slot no-op (ADR-0010), and the route is
+    documented to be safely re-runnable at any time. A ``409 Conflict`` from
+    this endpoint therefore does NOT mean setup failed — it means the live
+    service reports the install as already applied, or that another apply is
+    in flight (a concurrent ``hal0 setup``, or the dashboard's first-run
+    wizard). Blindly calling ``resp.raise_for_status()`` turned that
+    recoverable state into an unhandled ``HTTPStatusError`` traceback that
+    aborted setup (issue #1158).
+
+    We now treat a 409 as a recoverable no-op: surface the service's own
+    message and continue cleanly, leaving any existing slots untouched. All
+    other non-2xx statuses still raise so genuine failures aren't hidden.
+    """
     payload = dataclasses.asdict(sel)
     url = f"{_api_base()}/api/install/apply-selections"
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    if resp.status_code == 409:
+        dashboard = await _dashboard_url()
+        typer.echo(
+            "hal0 setup: the live service reports the install is already "
+            f"applied or an apply is already in progress ({_conflict_message(resp)}). "
+            "Skipping re-apply — existing slots are left unchanged. "
+            f"Dashboard: {dashboard}"
+        )
+        return
+    resp.raise_for_status()
+    data = resp.json()
     n_models = len(data.get("model_ids", []))
     n_slots = len(data.get("slots", []))
     dashboard = await _dashboard_url()

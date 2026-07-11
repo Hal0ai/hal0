@@ -39,6 +39,7 @@ import {
 } from '@/api/hooks/useDashLayout'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 import { useMemoryMapModel } from './memory-map'
+import { useNotifications } from './notifications.jsx'
 
 const { useState, useEffect, useRef, useMemo, useCallback } = React
 
@@ -148,79 +149,15 @@ function SwapButton({ cellId, current, onSwap }) {
 }
 
 // ─── attention items (shared: health strip + Needs Attention card) ──────────
-// Derived from existing sources only: pending agent approvals + slots in
-// error. (Disk-preflight warnings join once a live storage-pressure source
-// ships — no fabricated storage rows.) The health-strip count and the card
-// count read the same list so they can never disagree.
-
-function fmtWaiting(enqueuedAt) {
-  if (typeof enqueuedAt !== 'number') return null
-  const mins = Math.max(0, Math.round((Date.now() / 1000 - enqueuedAt) / 60))
-  if (mins < 60) return `${mins} min`
-  return `${Math.floor(mins / 60)} h ${mins % 60} min`
-}
+// The list now comes from the ONE shared notifications source (notifications.jsx),
+// the same hook the topbar bell reads — so the card, the health-strip count, and
+// the bell badge can never disagree. `actionableItems` is the actionable subset:
+// approvals, error slots, failed downloads, update-available, slot drift, and dev
+// messages. In-progress downloads are intentionally excluded (they carry no
+// action and live on the bell only).
 
 function useAttentionItems() {
-  const slotsQuery = useSlots()
-  const approvalQuery = useApprovalList()
-  const slots = slotsQuery.data ?? []
-  const approvals = approvalQuery?.data?.approvals ?? []
-
-  return useMemo(() => {
-    const items = []
-    for (const s of slots) {
-      if (s.state !== 'error' && s.container_status !== 'crashed') continue
-      const msg = s?.metadata?.message || s?.message || ''
-      items.push({
-        key: `slot:${s.name}`,
-        kind: 'warn',
-        eyebrow: 'slot · error',
-        body: (
-          <>
-            <span className="mono rd-attn-ident">{s.name}</span> failed
-            {msg ? <> — {msg}</> : ' — container crashed'}. Restart to recover.
-          </>
-        ),
-        actions: [
-          {
-            label: 'Restart',
-            onClick: () =>
-              window.dispatchEvent(new CustomEvent('hal0:slot-restart', { detail: { name: s.name } })),
-          },
-          { label: 'View slot', onClick: () => { window.location.hash = '#slots/' + s.name } },
-        ],
-      })
-    }
-    for (const a of approvals) {
-      const agent = a.client_id || 'hermes'
-      const waiting = fmtWaiting(a.enqueued_at)
-      let arg = ''
-      try {
-        const vals = a.args ? Object.values(a.args).filter((v) => typeof v === 'string') : []
-        arg = vals[0] || ''
-      } catch { /* unparseable args → omit */ }
-      items.push({
-        key: `approval:${a.id}`,
-        kind: 'approval',
-        eyebrow: 'agent · approval',
-        body: (
-          <>
-            {agent} wants <span className="mono rd-attn-ident">{a.tool}</span>
-            {arg && <> · <span className="mono rd-attn-ident">{arg}</span></>}.
-            {waiting && <> Waiting {waiting}.</>}
-          </>
-        ),
-        actions: [
-          {
-            label: 'Review',
-            primary: true,
-            onClick: () => window.dispatchEvent(new CustomEvent('hal0:open-approvals')),
-          },
-        ],
-      })
-    }
-    return items
-  }, [slots, approvals])
+  return useNotifications().actionableItems
 }
 
 // ─── hero strip ──────────────────────────────────────────────────────────────
@@ -311,11 +248,13 @@ function HeroStrip({ slots, heroTps, layout, swapMode, onToggleSwapMode, onToggl
 
 function HealthStrip({ slots, heroTps, attentionItems }) {
   const attentionCount = attentionItems.length
-  const warnCount = attentionItems.filter((it) => it.kind === 'warn').length
+  // Compact summary across the broadened set: approvals vs everything else
+  // (error slots, failed downloads, update, drift, messages) as "alerts".
   const approvalCount = attentionItems.filter((it) => it.kind === 'approval').length
+  const alertCount = attentionCount - approvalCount
   const attnSummary = [
-    warnCount > 0 ? `${warnCount} warn` : null,
     approvalCount > 0 ? `${approvalCount} approval${approvalCount !== 1 ? 's' : ''}` : null,
+    alertCount > 0 ? `${alertCount} alert${alertCount !== 1 ? 's' : ''}` : null,
   ].filter(Boolean).join(' · ')
   const stats = useStatsHardware()
   const st = stats.data
@@ -950,7 +889,7 @@ function RDAttentionCard({ items }) {
             <div key={it.key} className="rd-attn-item">
               <div
                 className="rd-attn-eyebrow mono"
-                style={{ color: it.kind === 'approval' ? 'var(--accent)' : 'var(--warn)' }}
+                style={{ color: it.tone === 'accent' ? 'var(--accent)' : it.tone === 'err' ? 'var(--err)' : 'var(--warn)' }}
               >
                 {it.eyebrow}
               </div>

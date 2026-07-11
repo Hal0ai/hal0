@@ -179,3 +179,18 @@ retiming an upstream) are a different story: they're only read once, at
 re-reads `hal0.toml`, **not** `upstreams.toml` — there is no lighter-weight
 reload for upstream edits today. Run `hal0 config validate` to check the
 file, then `systemctl restart hal0-api` to pick up the change.
+
+The `advertise_models` field is an exception: it has a dedicated runtime
+toggle that doesn't require a restart. To toggle whether an upstream appears
+in the aggregated model list:
+
+```sh
+curl -X PATCH http://localhost:8080/api/upstreams/openrouter \
+  -H 'content-type: application/json' \
+  -d '{"advertise_models": false}'
+```
+
+The change takes effect immediately, persists to `upstreams.toml` on disk,
+and is audit-logged — no `hal0-api` restart needed. All other structural
+fields (name, kind, url, auth_*, slot_name, warmup_strategy) require the
+TOML-edit + validate + restart workflow described above.

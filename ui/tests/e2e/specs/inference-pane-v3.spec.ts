@@ -5,7 +5,9 @@
  * Behaviour under test:
  *   - the page-level telemetry header (TelemetryHeader, above the tabs)
  *     renders the combined metrics card: throughput cell + memory rack ruler
- *   - the engine pane renders the epill + ALL slots as full cards, always
+ *   - the engine pane renders a single NPU-card-style heading (Inference
+ *     Engine · slots · N iGPU · N FLM — the old sec-label row + title/sub +
+ *     green loaded epill collapsed into it) + ALL slots as full cards, always
  *     visible (the old collapse/expand accordion + qcaret were removed)
  *   - the serving card's status pill shows live tok/s (no fabricated numbers)
  *   - the profile pill surfaces the slot's runtime profile name (slot.profile)
@@ -32,7 +34,7 @@ const body = (page: Page) => pane(page).locator('.engine-b').first()
 const hero = (page: Page) => page.getByTestId('telemetry-header')
 
 test.describe('Inference engine pane (/slots · Inference tab)', () => {
-  test('telemetry header renders throughput cell + memory ruler; engine renders epill + full slot cards', async ({ page }) => {
+  test('telemetry header renders throughput cell + memory ruler; engine renders single heading + full slot cards', async ({ page }) => {
     await page.goto('/#slots')
     // page-level telemetry header (above the tabs): throughput cell + memory
     // rack ruler. Forced-mock has no throughput-history endpoint, so the cell
@@ -40,9 +42,14 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     await expect(hero(page)).toBeVisible()
     await expect(hero(page).locator('.th-ruler-h')).toContainText('memory ·')
     await expect(hero(page).locator('.th-cell-tps')).toBeVisible()
-    // engine pane: state pill summarises serving/loaded counts (primary serving).
+    // engine pane: one NPU-card-style heading — "Inference Engine · slots ·
+    // N iGPU" with the FLM count; the old green loaded epill is gone.
     await expect(pane(page)).toBeVisible()
-    await expect(page.getByTestId('infer-epill')).toContainText('serving')
+    const head = engine(page).locator('.engine-h')
+    await expect(head).toContainText('Inference Engine')
+    await expect(head).toContainText('iGPU')
+    await expect(page.getByTestId('infer-epill')).toHaveCount(0)
+    await expect(head.locator('.epill')).toHaveCount(0)
     // headline (chat · agent) slots render as FULL cards. The status pill is
     // gone — the header now shows the slot PORT (mono, pushed right); readiness
     // is the dot, and tok/s lives in the meta row.

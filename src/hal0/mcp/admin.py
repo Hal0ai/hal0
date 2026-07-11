@@ -40,19 +40,43 @@ Tool catalog (ADR-0004 §4)
 
 Autonomous read::
 
-    slot_list, slot_status, model_list, hardware_probe, logs_tail,
-    capability_list, provider_list, version_info
+    slot_list, slot_status, slot_metrics, slot_capacity,
+    model_list, model_show, model_scan_preview,
+    model_catalogue, model_update_check, model_pulls_list,
+    model_pull_status, model_inspect, model_store,
+    hardware_probe, capability_list, provider_list, version_info,
+    stack_list, stack_status, profile_list, profile_status,
+    profile_export, upstream_list,
+    settings_get, settings_schema, settings_apply_plan,
+    bench_runs, bench_run_status, bench_queue,
+    # Host-introspection probes (issue #237)
+    gpu_target_version, npu_status, env_report, model_store_probe
 
 Autonomous write::
 
-    model_swap, memory_add, memory_search, memory_list,
+    model_swap, model_assign, model_edit, model_scan,
+    model_pull_cancel,
+    slot_load, slot_unload, slot_edit,
+    settings_reload,
+    memory_add, memory_search, memory_list,
     memory_delete (when len(ids) == 1)
 
 Gated (destructive — enqueued for owner approval)::
 
-    model_pull, model_delete, slot_create, slot_delete, slot_restart,
+    model_pull, model_delete, model_register, model_add,
+    model_store_set, model_store_migrate, model_update,
+    slot_create, slot_delete, slot_restart,
     capability_set, config_write, provider_credential_write,
-    memory_delete (when len(ids) > 1)
+    memory_delete (when len(ids) > 1),
+    # Profile CRUD (create/update/import/delete)
+    profile_create, profile_update, profile_import, profile_delete,
+    # Stack CRUD (create/update/apply/import/export/snapshot/delete)
+    stack_create, stack_update, stack_apply, stack_import,
+    stack_export, stack_snapshot, stack_delete,
+    # Benchmarks — enqueue/control load models onto slots (disruptive)
+    bench_enqueue, bench_control,
+    # Journald surfaces gated for security (MED-1)
+    logs_tail, slot_logs
 
 The memory_* tools are delegates that forward into
 :mod:`hal0.mcp.memory` so we have a single tool surface per server
@@ -153,42 +177,51 @@ def _redact_log_line(line: str) -> str:
 # We wrap the list in a top-level object here — mirroring model_list's
 # ``{<key>: [...], "count": N}`` style — keeping the per-item dicts the
 # REST layer produced untouched. Maps tool name → the list's container
-# key in the wrapped object.
+# key in the wrapped object; every other tool falls back to ``items``
+# so a newly-mapped bare-list route can never crash the result model.
 _LIST_TOOL_WRAP_KEY: dict[str, str] = {
     "slot_list": "slots",
     "provider_list": "providers",
+    "upstream_list": "upstreams",
 }
 
 
 def _wrap_list_payload(tool: str, payload: Any) -> Any:
     """Wrap a bare-list REST response in a top-level dict for ``tool``.
 
-    ``slot_list`` / ``provider_list`` hit REST routes that return a bare
-    JSON array; the MCP result model requires a top-level object. We wrap
-    the list as ``{<key>: [...], "count": len(list)}`` mirroring
-    ``model_list``'s shape. Non-list payloads (e.g. the ``_call_rest``
-    error envelope, which is already a dict) round-trip unchanged so we
-    never mask a transport error.
+    Some REST routes return a bare JSON array; the MCP result model
+    requires a top-level object. We wrap the list as
+    ``{<key>: [...], "count": len(list)}`` mirroring ``model_list``'s
+    shape, with ``items`` as the generic fallback key. Non-list payloads
+    (e.g. the ``_call_rest`` error envelope, which is already a dict)
+    round-trip unchanged so we never mask a transport error.
     """
-    key = _LIST_TOOL_WRAP_KEY.get(tool)
-    if key is None or not isinstance(payload, list):
+    if not isinstance(payload, list):
         return payload
+    key = _LIST_TOOL_WRAP_KEY.get(tool, "items")
     return {key: payload, "count": len(payload)}
 
 
 def _redact_logs_payload(payload: Any) -> Any:
-    """Walk the GET /api/logs response and redact every line in ``lines``.
+    """Redact secrets from a journald-shaped response before it ships.
 
-    Non-dict payloads (or shapes missing ``lines``) round-trip unchanged
-    so a transport error or alternative-shape envelope still reaches the
-    agent — we never swallow content, only mask known secret tokens.
+    Covers both shapes the log surfaces return: ``logs_tail``'s
+    ``{"lines": [...]}`` list and ``slot_logs``'s ``{"logs": "..."}``
+    single string. Non-dict payloads (or shapes missing both keys)
+    round-trip unchanged so a transport error or alternative-shape
+    envelope still reaches the agent — we never swallow content, only
+    mask known secret tokens.
     """
     if not isinstance(payload, dict):
         return payload
     lines = payload.get("lines")
-    if not isinstance(lines, list):
-        return payload
-    payload["lines"] = [_redact_log_line(line) if isinstance(line, str) else line for line in lines]
+    if isinstance(lines, list):
+        payload["lines"] = [
+            _redact_log_line(line) if isinstance(line, str) else line for line in lines
+        ]
+    logs = payload.get("logs")
+    if isinstance(logs, str):
+        payload["logs"] = _redact_log_line(logs)
     return payload
 
 
@@ -216,30 +249,54 @@ log = structlog.get_logger(__name__)
 # Read-only tools — execute immediately, no approval prompt.
 AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
     {
+        # Slots
         "slot_list",
         "slot_status",
+        "slot_metrics",
+        "slot_capacity",
+        # Models. model_scan is NOT here — walking the roots registers new
+        # files (a mutation); model_scan_preview is the read-shaped dry run.
+        # model_inspect is a read-shaped POST: it fetches HF repo metadata
+        # and returns detection rows without registering anything.
         "model_list",
+        "model_show",
+        "model_scan_preview",
+        "model_catalogue",
+        "model_update_check",
+        "model_pulls_list",
+        "model_pull_status",
+        "model_inspect",
+        "model_store",
+        # Hardware / system. logs_tail / slot_logs are intentionally NOT
+        # here — journald output can carry secrets, so they stay in
+        # GATED_TOOLS until the logs.py redactor covers every key shape
+        # (security review MED-1).
         "hardware_probe",
-        # logs_tail is intentionally NOT here — moved to GATED_TOOLS
-        # until the ADR-0004 §7 redaction lands in logs.py. Per
-        # security review MED-1: an agent dumping raw journald is a
-        # potential exfiltration vector for whatever secrets the log
-        # redactor doesn't yet cover. Gating now is defensive-cheap;
-        # demote back to autonomous-read once the redaction is in.
         "capability_list",
         "provider_list",
         "version_info",
+        "upstream_list",
+        # Stacks
         "stack_list",
         "stack_status",
+        # Profiles
         "profile_list",
         "profile_status",
         # profile_export is a POST but performs no state change — it
         # builds a portable envelope from existing catalog data, so it
         # classifies read-shaped (autonomous) like the other reads.
         "profile_export",
+        # Settings
+        "settings_get",
+        "settings_schema",
+        "settings_apply_plan",
+        # Benchmarks — run history + queue state (reads; enqueue/control
+        # are gated because a run loads models onto slots).
+        "bench_runs",
+        "bench_run_status",
+        "bench_queue",
         # Host-introspection probes (issue #237). Pure-read against
         # /sys/, /proc/, and lsmod — no REST round-trip, no mutation.
-        # Hermes-Agent bootstrap consumes these in its env_probe phase.
         "gpu_target_version",
         "npu_status",
         "env_report",
@@ -251,7 +308,21 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
 # (reversible, scoped, low blast radius). Per ADR-0004 §4.
 AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
     {
+        # Model. model_scan only ADDS registry entries for files already
+        # on disk (reversible via model_delete); model_pull_cancel stops
+        # an in-flight download the agent (or operator) started.
         "model_swap",
+        "model_assign",
+        "model_edit",
+        "model_scan",
+        "model_pull_cancel",
+        # Slot lifecycle
+        "slot_load",
+        "slot_unload",
+        "slot_edit",
+        # Settings
+        "settings_reload",
+        # Memory
         "memory_add",
         "memory_search",
         "memory_list",
@@ -264,29 +335,48 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
 # Tools that always require approval.
 GATED_TOOLS: frozenset[str] = frozenset(
     {
+        # Model
         "model_pull",
         "model_delete",
+        "model_register",
+        "model_add",
+        "model_store_set",
+        "model_store_migrate",
+        "model_update",
+        # Slot
         "slot_create",
         "slot_delete",
         "slot_restart",
+        # Capability / config
         "capability_set",
         "config_write",
         "provider_credential_write",
         # Stacks: applying/importing reconfigures the whole inference surface
         # (loads/swaps/unloads slots) and deleting drops a saved bundle —
         # owner-approval gated, mirroring slot_create/capability_set.
+        "stack_create",
+        "stack_update",
         "stack_apply",
         "stack_import",
+        "stack_export",
+        "stack_snapshot",
         "stack_delete",
         # Profiles: importing creates a new catalog entry and deleting
         # drops a saved profile — owner-approval gated, mirroring
         # stack_import/stack_delete.
+        "profile_create",
+        "profile_update",
         "profile_import",
         "profile_delete",
-        # logs_tail is gated until the redactor in logs.py covers
-        # Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
+        # Benchmarks: enqueue/control load models onto slots and can evict
+        # what's currently serving — disruptive, so owner-approval gated.
+        "bench_enqueue",
+        "bench_control",
+        # logs_tail / slot_logs are gated until the redactor in logs.py
+        # covers Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
         # docs/internal/phase-8-pending/mcp-backend.md §2.
         "logs_tail",
+        "slot_logs",
         # memory_delete with len(ids) > 1 routes here at call time.
     }
 )
@@ -317,39 +407,85 @@ GATED_TOOLS: frozenset[str] = frozenset(
 #   version_info → /api/version         /api/status                   name diff
 
 _REST_MAP: dict[str, tuple[str, str]] = {
-    # Read
+    # ── Slots ──────────────────────────────────────────────────────────
     "slot_list": ("GET", "/api/slots"),
     "slot_status": ("GET", "/api/slots/{name}"),
+    "slot_metrics": ("GET", "/api/slots/metrics"),
+    "slot_capacity": ("GET", "/api/slots/capacity"),
+    "slot_load": ("POST", "/api/slots/{name}/load"),
+    "slot_unload": ("POST", "/api/slots/{name}/unload"),
+    "slot_edit": ("PUT", "/api/slots/{name}/config"),
+    "slot_logs": ("GET", "/api/slots/{name}/logs"),
+    # ── Models ─────────────────────────────────────────────────────────
     "model_list": ("GET", "/api/models"),
+    "model_show": ("GET", "/api/models/{model_id}"),
+    "model_scan": ("POST", "/api/models/scan"),
+    "model_scan_preview": ("POST", "/api/models/scan/preview"),
+    "model_catalogue": ("GET", "/api/models/catalogue"),
+    "model_update_check": ("GET", "/api/models/updates/check"),
+    "model_pulls_list": ("GET", "/api/models/pulls"),
+    "model_pull_status": ("GET", "/api/models/{model_id}/pull/status"),
+    # model_inspect is a read-shaped POST — fetches HF repo metadata and
+    # returns detection rows without touching the registry.
+    "model_inspect": ("POST", "/api/models/inspect"),
+    "model_store": ("GET", "/api/settings/models/store"),
+    # ── Profiles ───────────────────────────────────────────────────────
+    "profile_list": ("GET", "/api/profiles"),
+    "profile_status": ("GET", "/api/profiles/{name}"),
+    "profile_export": ("POST", "/api/profiles/{name}/export"),
+    # ── Stacks ─────────────────────────────────────────────────────────
+    "stack_list": ("GET", "/api/stacks"),
+    "stack_status": ("GET", "/api/stacks/{slug}"),
+    # ── Settings ───────────────────────────────────────────────────────
+    "settings_get": ("GET", "/api/settings"),
+    "settings_schema": ("GET", "/api/settings/schema"),
+    "settings_apply_plan": ("GET", "/api/settings/apply-plan"),
+    "settings_reload": ("POST", "/api/settings/reload"),
+    # ── Benchmarks ─────────────────────────────────────────────────────
+    "bench_runs": ("GET", "/api/benchmarks/runs"),
+    "bench_run_status": ("GET", "/api/benchmarks/runs/{run_id}"),
+    "bench_queue": ("GET", "/api/benchmarks/queue"),
+    "bench_enqueue": ("POST", "/api/benchmarks/queue"),
+    "bench_control": ("POST", "/api/benchmarks/control"),
+    # ── System ─────────────────────────────────────────────────────────
+    "version_info": ("GET", "/api/status"),
+    "upstream_list": ("GET", "/api/upstreams"),
     "hardware_probe": ("GET", "/api/stats/hardware"),
     "logs_tail": ("GET", "/api/logs"),
     "capability_list": ("GET", "/api/capabilities"),
     "provider_list": ("GET", "/api/providers"),
-    "version_info": ("GET", "/api/status"),
-    "stack_list": ("GET", "/api/stacks"),
-    "stack_status": ("GET", "/api/stacks/{slug}"),
-    "profile_list": ("GET", "/api/profiles"),
-    "profile_status": ("GET", "/api/profiles/{name}"),
-    # profile_export is a read-shaped POST — builds the envelope, no state change.
-    "profile_export": ("POST", "/api/profiles/{name}/export"),
-    # Autonomous write
+    # ── Autonomous write ───────────────────────────────────────────────
     "model_swap": ("POST", "/api/slots/{name}/swap"),
-    # Gated write
+    "model_assign": ("PUT", "/api/slots/{name}/config"),
+    # model_edit is the metadata PUT (name/caps/tags/mmproj enrichment);
+    # model_update (gated, below) is the in-place HF re-pull POST — the
+    # two routes are easy to cross, keep them adjacent to the comment.
+    "model_edit": ("PUT", "/api/models/{model_id}"),
+    "model_pull_cancel": ("POST", "/api/models/{model_id}/pull/cancel"),
+    # ── Gated write ────────────────────────────────────────────────────
     "model_pull": ("POST", "/api/models/{model_id}/pull"),
     "model_delete": ("DELETE", "/api/models/{model_id}"),
+    "model_register": ("POST", "/api/models"),
+    "model_add": ("POST", "/api/models/add-from-path"),
+    "model_store_set": ("POST", "/api/settings/models/store"),
+    "model_store_migrate": ("POST", "/api/settings/models/store/migrate"),
+    "model_update": ("POST", "/api/models/{model_id}/update"),
     "slot_create": ("POST", "/api/slots"),
     "slot_delete": ("DELETE", "/api/slots/{name}"),
     "slot_restart": ("POST", "/api/slots/{name}/restart"),
     "capability_set": ("POST", "/api/capabilities/{slot}/{child}"),
     "config_write": ("PUT", "/api/settings"),
+    "stack_create": ("POST", "/api/stacks"),
+    "stack_update": ("PUT", "/api/stacks/{slug}"),
     "stack_apply": ("POST", "/api/stacks/{slug}/apply"),
     "stack_import": ("POST", "/api/stacks/import"),
+    "stack_export": ("POST", "/api/stacks/{slug}/export"),
+    "stack_snapshot": ("POST", "/api/stacks/snapshot"),
     "stack_delete": ("DELETE", "/api/stacks/{slug}"),
+    "profile_create": ("POST", "/api/profiles"),
+    "profile_update": ("PUT", "/api/profiles/{name}"),
     "profile_import": ("POST", "/api/profiles/import"),
     "profile_delete": ("DELETE", "/api/profiles/{name}"),
-    # No live route yet — Memory-engine / Provider team must land the
-    # endpoint. We register the tool anyway so the catalog matches the
-    # ADR; calls land in a 404 surface until the route exists.
     "provider_credential_write": ("POST", "/api/providers/{name}/credentials"),
 }
 
@@ -357,20 +493,40 @@ _REST_MAP: dict[str, tuple[str, str]] = {
 # Path-arg keys per tool — pulled out of ``args`` for URL substitution;
 # the remainder become query string (GET) or JSON body (POST/PUT/DELETE).
 _PATH_ARGS: dict[str, tuple[str, ...]] = {
+    # Slots
     "slot_status": ("name",),
-    "model_swap": ("name",),
-    "model_pull": ("model_id",),
-    "model_delete": ("model_id",),
-    "slot_delete": ("name",),
+    "slot_load": ("name",),
+    "slot_unload": ("name",),
+    "slot_edit": ("name",),
+    "slot_logs": ("name",),
     "slot_restart": ("name",),
-    "capability_set": ("slot", "child"),
-    "provider_credential_write": ("name",),
-    "stack_status": ("slug",),
-    "stack_apply": ("slug",),
-    "stack_delete": ("slug",),
+    "slot_delete": ("name",),
+    "model_swap": ("name",),
+    "model_assign": ("name",),
+    # Models
+    "model_show": ("model_id",),
+    "model_pull": ("model_id",),
+    "model_pull_status": ("model_id",),
+    "model_pull_cancel": ("model_id",),
+    "model_delete": ("model_id",),
+    "model_edit": ("model_id",),
+    "model_update": ("model_id",),
+    # Benchmarks
+    "bench_run_status": ("run_id",),
+    # Profiles
     "profile_status": ("name",),
     "profile_export": ("name",),
+    "profile_update": ("name",),
     "profile_delete": ("name",),
+    # Stacks
+    "stack_status": ("slug",),
+    "stack_apply": ("slug",),
+    "stack_export": ("slug",),
+    "stack_update": ("slug",),
+    "stack_delete": ("slug",),
+    # Misc
+    "capability_set": ("slot", "child"),
+    "provider_credential_write": ("name",),
 }
 
 
@@ -600,13 +756,14 @@ async def _execute_tool(
         url=url,
         payload=payload,
     )
-    # Redact every Bearer / HAL0_BEARER_TOKEN occurrence before the
-    # logs_tail response leaves this process. The /api/logs route
-    # itself stays unredacted — REST consumers on the same host already
-    # have credential access; the MCP transport is the spot where a
-    # narrowly-scoped agent can otherwise siphon tokens out (security
-    # review MED-1).
-    if tool == "logs_tail":
+    # Redact every Bearer / HAL0_BEARER_TOKEN occurrence before a
+    # journald-backed response leaves this process. The REST routes
+    # themselves stay unredacted — REST consumers on the same host
+    # already have credential access; the MCP transport is the spot
+    # where a narrowly-scoped agent can otherwise siphon tokens out
+    # (security review MED-1). slot_logs proxies the same journald
+    # surface per-unit, so it gets the same treatment.
+    if tool in ("logs_tail", "slot_logs"):
         result = _redact_logs_payload(result)
     # Wrap bare-list REST responses (slot_list / provider_list) into a
     # top-level dict so the FastMCP result model validates. No-op for
@@ -633,20 +790,57 @@ async def _execute_tool(
 # the right approval-prompt language without having to read ADR-0004.
 
 _ANNOTATIONS: dict[str, ToolAnnotations] = {
-    # Autonomous read — pure reads against the local REST surface.
+    # ── Autonomous read — pure reads against the local REST surface. ─────
+    # Slots
     "slot_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "slot_status": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "slot_metrics": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_capacity": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Models
     "model_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "model_show": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_scan_preview": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_catalogue": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_update_check": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_pulls_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_pull_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Read-shaped POST that fetches HF repo metadata — open-world.
+    "model_inspect": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    "model_store": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # System. logs_tail / slot_logs read-only but server-gated (MED-1).
     "hardware_probe": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "logs_tail": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_logs": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "capability_list": ToolAnnotations(
@@ -658,21 +852,44 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "version_info": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "upstream_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Stacks
     "stack_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "stack_status": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    # Profiles
     "profile_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "profile_status": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # profile_export is a POST but builds an envelope from existing data —
-    # no state change, so it carries the read-shaped annotation.
     "profile_export": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Settings
+    "settings_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "settings_schema": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "settings_apply_plan": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Benchmarks — run history + queue reads.
+    "bench_runs": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_run_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_queue": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     # Host-introspection probes — pure sysfs/procfs reads.
@@ -695,29 +912,72 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Mutating, reversible, idempotent end-state writes.
+    # ── Autonomous write — mutating, reversible, idempotent writes. ────
     "model_swap": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_assign": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_edit": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Additive registration of files already on disk; re-scan converges.
+    "model_scan": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_pull_cancel": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_load": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_unload": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_edit": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "settings_reload": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "capability_set": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Apply converges to a declared end-state (idempotent); import creates a
-    # new catalog entry (non-idempotent — re-import conflicts on slug).
+    "config_write": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "provider_credential_write": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # ── Gated write — mutating, non-idempotent or destructive. ────────
+    # Apply converges to a declared end-state (idempotent); import/create
+    # are non-idempotent (re-import/create conflicts on slug/name).
     "stack_apply": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "stack_import": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
-    # Import creates a new catalog entry (non-idempotent — re-import conflicts on name).
+    "stack_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "stack_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "stack_export": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "stack_snapshot": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
     "profile_import": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
-    "config_write": ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    "profile_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
-    "provider_credential_write": ToolAnnotations(
+    "profile_update": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     # Mutating, reversible, non-idempotent (each call has additional effect).
@@ -733,6 +993,30 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     # Reaches outside hal0 (HuggingFace / upstream registries).
     "model_pull": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    "model_register": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "model_add": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "model_store_set": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_store_migrate": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # In-place HF re-pull — hits the open network like model_pull.
+    "model_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    # Benchmarks — enqueue adds a run (non-idempotent); control start/stop
+    # converges the runner to the requested state.
+    "bench_enqueue": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "bench_control": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     # Destructive — re-delete is a no-op so idempotentHint stays true.
     "model_delete": ToolAnnotations(
@@ -751,6 +1035,172 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
 }
+
+
+# ── Tool catalog descriptions ────────────────────────────────────────────────
+#
+# Single source of truth for the tool surface's names + descriptions.
+# build_server registers exactly this dict; the dashboard's agent chat
+# (hal0.api.routes.board_chat) surfaces the same catalog as OpenAI tool
+# schemas and routes calls through the same ``dispatch`` core — keep
+# descriptions agent-facing (state required args + side effects).
+
+TOOL_DESCRIPTIONS: dict[str, str] = {
+    # ── Autonomous read ─────────────────────────────────────────────────
+    "slot_list": "List every slot known to hal0 (local + remote).",
+    "slot_status": "Get one slot's lifecycle state + metadata.",
+    "slot_metrics": "Get per-slot performance metrics (tok/s, latency, queue depth).",
+    "slot_capacity": "Get GPU/NPU memory capacity and per-slot allocation.",
+    "model_list": "Aggregate models from local registry + upstreams.",
+    "model_show": "Show a single model's full metadata (registry + upstream).",
+    "model_scan_preview": "Preview what a model scan would register (dry run).",
+    "model_catalogue": "List the curated catalogue of blessed models.",
+    "model_update_check": "Check which HF-backed models have updates available.",
+    "model_pulls_list": "List all pull jobs (in-flight + terminal).",
+    "model_pull_status": "Get one model's pull-job progress (state, %, speed, ETA).",
+    "model_inspect": (
+        "Inspect a HuggingFace repo — returns detected .gguf/.mmproj files, quants and "
+        "capabilities WITHOUT registering anything. Use before model_register/model_pull."
+    ),
+    "model_store": (
+        "Show the operator's configured model-store directory ([models].store) and "
+        "candidate paths. Pulls always download into this store."
+    ),
+    "hardware_probe": "Live hardware probe — backends, memory, accelerators.",
+    "capability_list": "Capability overlay state — backends + selections.",
+    "provider_list": "List configured providers.",
+    "version_info": "hal0 version + runtime status.",
+    "upstream_list": "List all configured upstream LLM providers.",
+    "stack_list": "List every stack, with the active stack + drift status.",
+    "stack_status": "Get one stack's detail, active flag, and drift status.",
+    "profile_list": "List every profile in the catalog (seed + custom).",
+    "profile_status": "Get one profile's resolved detail (image, flags, backend, used-by).",
+    "profile_export": (
+        "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
+    ),
+    "settings_get": "Get the current hal0 settings (pydantic schema validated).",
+    "settings_schema": "Get the JSON schema for hal0 settings validation.",
+    "settings_apply_plan": "Preview what settings changes would take effect.",
+    "bench_runs": "List benchmark runs (history + in-flight).",
+    "bench_run_status": "Get one benchmark run's detail + results.",
+    "bench_queue": "Show the benchmark queue (pending cells).",
+    "gpu_target_version": "Decode KFD's gfx_target_version to a gfxNNNN string (e.g. gfx1151).",
+    "npu_status": "Report XDNA NPU presence + driver binding (LXC-correct, no modinfo).",
+    "env_report": "Composite host snapshot — container, CPU, RAM, GPU, NPU, network, tooling.",
+    "model_store_probe": (
+        "Probe a model-store path: fstype, free/total bytes, writable, UMA-aware."
+    ),
+    # ── Autonomous write ────────────────────────────────────────────────
+    "model_swap": "Hot-swap the primary slot to a new model.",
+    "model_assign": "Assign a model to a slot's default (does not load the slot).",
+    "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
+    "model_scan": "Walk the configured model roots + store and register newly-found files.",
+    "model_pull_cancel": "Cancel an in-flight model pull job.",
+    "slot_load": "Load a slot (optionally assign a model first).",
+    "slot_unload": "Unload a running slot gracefully.",
+    "slot_edit": (
+        "Update one or more slot config fields (model, port, ctx-size, provider, hardware)."
+    ),
+    "settings_reload": "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
+    "memory_add": "Add an item to long-term memory.",
+    "memory_search": "Search long-term memory.",
+    "memory_list": "Page through long-term memory items.",
+    "memory_delete": (
+        "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise)."
+    ),
+    # ── Gated write ─────────────────────────────────────────────────────
+    "model_pull": (
+        "Download a model from HuggingFace into the operator's configured model store "
+        "([models].store — check model_store first). Accepts "
+        "hf_repo/hf_filename/mmproj_filename body overrides for new models (gated)."
+    ),
+    "model_delete": "Delete a model from the local registry (gated).",
+    "model_register": "Register a model that's already on disk into the local registry (gated).",
+    "model_add": "Register an already-downloaded model file — capabilities auto-detected (gated).",
+    "model_store_set": (
+        "Set or change the model-store directory — future pulls download there; existing "
+        "files stay until model_store_migrate (gated)."
+    ),
+    "model_store_migrate": "Migrate model files from the current store to a new path (gated).",
+    "model_update": "Re-pull a model's HF file over its installed bytes (in place) (gated).",
+    "slot_create": "Create a new slot (gated).",
+    "slot_delete": "Delete a slot (gated).",
+    "slot_restart": "Restart a slot's systemd unit (gated).",
+    "capability_set": "Assign a capability child to a slot (gated).",
+    "config_write": "Update hal0.toml top-level settings (gated).",
+    "provider_credential_write": "Write provider credentials (gated; secrets never echoed back).",
+    "stack_create": "Create a stack from a slug + full stack body (gated).",
+    "stack_update": "Replace a custom stack's body wholesale (gated).",
+    "stack_apply": "Apply a stack — commit its slot config and converge runtime to match (gated).",
+    "stack_import": "Import a stack from a .hal0stack.json envelope (gated).",
+    "stack_export": "Serialize a stack into its portable .hal0stack.json envelope (gated).",
+    "stack_snapshot": "Build a stack from the current live slot + capability config (gated).",
+    "stack_delete": "Delete a custom stack from the catalog (gated).",
+    "profile_create": (
+        "Create a custom runtime profile (image, flags, device class) — e.g. authored "
+        "from a model card's requirements (gated)."
+    ),
+    "profile_update": "Update an existing custom profile (shallow merge) (gated).",
+    "profile_import": "Import a profile from a .hal0profile.json envelope (gated).",
+    "profile_delete": "Delete a custom profile from the catalog (gated).",
+    "bench_enqueue": "Enqueue benchmark cells (model x slot x settings) for the runner (gated).",
+    "bench_control": "Start/stop/pause the benchmark runner (gated).",
+    "logs_tail": "Tail journald for one systemd unit (gated).",
+    "slot_logs": "Tail one slot's journal output (gated).",
+}
+
+
+# ── Catalog consistency guard ────────────────────────────────────────────────
+#
+# The tool surface is spread over four tables (classification frozensets,
+# _REST_MAP, _PATH_ARGS, _ANNOTATIONS) plus the _register calls in
+# build_server. A tool landing in some tables but not others fails at
+# call time with an opaque envelope — validate coherence at import so
+# drift surfaces in CI, not in an agent's chat.
+
+
+def _validate_catalog() -> None:
+    catalog = AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS
+    problems: list[str] = []
+
+    overlaps = (
+        (AUTONOMOUS_READ_TOOLS & AUTONOMOUS_WRITE_TOOLS)
+        | (AUTONOMOUS_READ_TOOLS & GATED_TOOLS)
+        | (AUTONOMOUS_WRITE_TOOLS & GATED_TOOLS)
+    )
+    if overlaps:
+        problems.append(f"tools in more than one classification: {sorted(overlaps)}")
+
+    # memory_* dispatch in-process (or report unconfigured); probes never
+    # touch REST. Everything else must route somewhere.
+    routed = {t for t in catalog if not t.startswith("memory_")} - PROBE_TOOLS
+    if unmapped := routed - set(_REST_MAP):
+        problems.append(f"classified but missing from _REST_MAP: {sorted(unmapped)}")
+    if unclassified := set(_REST_MAP) - catalog:
+        problems.append(f"in _REST_MAP but never classified: {sorted(unclassified)}")
+    if unannotated := catalog - set(_ANNOTATIONS):
+        problems.append(f"classified but missing ToolAnnotations: {sorted(unannotated)}")
+    if set(TOOL_DESCRIPTIONS) != catalog:
+        problems.append(
+            "TOOL_DESCRIPTIONS out of sync with classification — "
+            f"missing: {sorted(catalog - set(TOOL_DESCRIPTIONS))}, "
+            f"extra: {sorted(set(TOOL_DESCRIPTIONS) - catalog)}"
+        )
+
+    for tool, (_method, template) in _REST_MAP.items():
+        placeholders = set(re.findall(r"{(\w+)}", template))
+        declared = set(_PATH_ARGS.get(tool, ()))
+        if placeholders != declared:
+            problems.append(
+                f"{tool}: _PATH_ARGS {sorted(declared)} != template placeholders "
+                f"{sorted(placeholders)}"
+            )
+
+    if problems:
+        raise RuntimeError("hal0.mcp.admin catalog drift: " + " | ".join(problems))
+
+
+_validate_catalog()
 
 
 # ── FastMCP server builder ───────────────────────────────────────────────────
@@ -786,9 +1236,9 @@ def build_server(
         return bearer_resolver()
 
     # Single tool factory — every tool in the catalog dispatches into
-    # the same ``dispatch`` core. We register each tool name explicitly
-    # so FastMCP's tool listing reports them as distinct entries (vs.
-    # a single catch-all tool that opaquely dispatches).
+    # the same ``dispatch`` core. Registration iterates TOOL_DESCRIPTIONS
+    # verbatim, so FastMCP's tools/list is exactly the validated catalog
+    # (dict keys are unique; _validate_catalog pins keys == catalog).
     def _register(tool_name: str, description: str) -> None:
         async def _tool(args: dict[str, Any] | None = None) -> dict[str, Any]:
             bearer, client_id = _resolve()
@@ -807,76 +1257,8 @@ def build_server(
         annotations = _ANNOTATIONS.get(tool_name)
         server.tool(name=tool_name, description=description, annotations=annotations)(_tool)
 
-    # Autonomous read
-    _register("slot_list", "List every slot known to hal0 (local + remote).")
-    _register("slot_status", "Get one slot's lifecycle state + metadata.")
-    _register("model_list", "Aggregate models from local registry + upstreams.")
-    _register("hardware_probe", "Live hardware probe — backends, memory, accelerators.")
-    _register("logs_tail", "Tail journald for one systemd unit.")
-    _register("capability_list", "Capability overlay state — backends + selections.")
-    _register("provider_list", "List configured providers.")
-    _register("version_info", "hal0 version + runtime status.")
-    _register("stack_list", "List every stack, with the active stack + drift status.")
-    _register("stack_status", "Get one stack's detail, active flag, and drift status.")
-    _register("profile_list", "List every profile in the catalog (seed + custom).")
-    _register(
-        "profile_status",
-        "Get one profile's resolved detail (image, flags, backend, used-by).",
-    )
-    # profile_export is a read-shaped POST — builds the envelope, no state change.
-    _register(
-        "profile_export",
-        "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths).",
-    )
-    # Host-introspection probes (issue #237)
-    _register(
-        "gpu_target_version",
-        "Decode KFD's gfx_target_version to a gfxNNNN string (e.g. gfx1151).",
-    )
-    _register(
-        "npu_status",
-        "Report XDNA NPU presence + driver binding (LXC-correct, no modinfo).",
-    )
-    _register(
-        "env_report",
-        "Composite host snapshot — container, CPU, RAM, GPU, NPU, network, tooling.",
-    )
-    _register(
-        "model_store_probe",
-        "Probe a model-store path: fstype, free/total bytes, writable, UMA-aware.",
-    )
-    # Autonomous write
-    _register("model_swap", "Hot-swap the primary slot to a new model.")
-    _register("memory_add", "Add an item to long-term memory.")
-    _register("memory_search", "Search long-term memory.")
-    _register("memory_list", "Page through long-term memory items.")
-    _register(
-        "memory_delete",
-        "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise).",
-    )
-    # Gated
-    _register("model_pull", "Pull a model into the local registry (gated).")
-    _register("model_delete", "Delete a model from the local registry (gated).")
-    _register("slot_create", "Create a new slot (gated).")
-    _register("slot_delete", "Delete a slot (gated).")
-    _register("slot_restart", "Restart a slot's systemd unit (gated).")
-    _register("capability_set", "Assign a capability child to a slot (gated).")
-    _register("config_write", "Update hal0.toml top-level settings (gated).")
-    _register(
-        "stack_apply",
-        "Apply a stack — commit its slot config and converge runtime to match (gated).",
-    )
-    _register("stack_import", "Import a stack from a .hal0stack.json envelope (gated).")
-    _register("stack_delete", "Delete a custom stack from the catalog (gated).")
-    _register(
-        "profile_import",
-        "Import a profile from a .hal0profile.json envelope (gated).",
-    )
-    _register("profile_delete", "Delete a custom profile from the catalog (gated).")
-    _register(
-        "provider_credential_write",
-        "Write provider credentials (gated; secrets never echoed back).",
-    )
+    for _name, _description in TOOL_DESCRIPTIONS.items():
+        _register(_name, _description)
 
     return server
 
@@ -885,6 +1267,7 @@ __all__ = [
     "AUTONOMOUS_READ_TOOLS",
     "AUTONOMOUS_WRITE_TOOLS",
     "GATED_TOOLS",
+    "TOOL_DESCRIPTIONS",
     "_ANNOTATIONS",
     "build_server",
     "dispatch",

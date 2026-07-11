@@ -154,10 +154,28 @@ curl -X POST http://localhost:8080/api/models/inspect \
 Inspect returns each `.gguf` file as a variant with its real LFS byte
 size; use a variant's `id` (the filename) as `hf_filename` when you pull.
 
+<Aside type="note">
+If a repo contains no `.gguf` or `.mmproj` files but is shaped like a
+Hugging Face Transformers model with an NPU-quantized weight blob (e.g.,
+`model.q4nx`), inspect detects it as a FastFlowLM (NPU) model and returns
+one whole-repo variant flagged `"flm": true`. The pull endpoint (`POST
+/api/models/{id}/pull`) routes such a variant through the host's `flm pull`
+instead of the standard GGUF download path — no separate command needed. See
+[NPU / FastFlowLM models](/docs/guides/obtain-models/#npu--fastflowlm-models)
+for the full workflow.
+</Aside>
+
 ## Register a file already on disk
 
 If the bytes are already on the host — say you dropped a GGUF into the
 model store — register it without re-downloading:
+
+<Aside type="tip">
+For the quickest path when metadata doesn't need explicit tuning, use
+`hal0 model add <path>` — it auto-detects the id, capabilities, and backends
+from the file header. See
+[Obtain models](/docs/guides/obtain-models/#register-a-local-file) for the full walkthrough.
+</Aside>
 
 ```sh
 hal0 model register qwen3-4b-q4_k_m \

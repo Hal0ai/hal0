@@ -172,3 +172,11 @@ default.
 Anything not in the catalogue still works — search Hugging Face, inspect a
 repo's variants, and pull by coordinates. See
 [Pull and register models](/docs/guides/pull-and-register-models).
+
+<Aside type="note">
+NPU / FastFlowLM models are a separate case: they aren't part of this
+Hugging Face pull catalogue at all (no HF coordinates), and are obtained by
+family and size tag instead (e.g., `hal0 model pull gemma4-it:e4b`). See
+[Obtain models](/docs/guides/obtain-models/#npu--fastflowlm-models) for the
+full NPU/FLM workflow.
+</Aside>

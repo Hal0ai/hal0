@@ -74,13 +74,29 @@ def test_redact_logs_payload_walks_lines_array() -> None:
     assert redacted["lines"][2] == "[00:02] no secret here"
 
 
+def test_redact_logs_payload_masks_slot_logs_string_shape() -> None:
+    """slot_logs returns one ``logs`` string (not a ``lines`` array) —
+    the redactor must cover that shape too, since the route proxies the
+    same journald surface per slot unit."""
+    payload = {
+        "name": "agent",
+        "logs": "[00:00] boot\n[00:01] HAL0_BEARER_TOKEN=hal0_tok_leak\n[00:02] ready",
+    }
+    redacted = admin._redact_logs_payload(payload)
+    assert "hal0_tok_leak" not in str(redacted)
+    assert "***REDACTED***" in redacted["logs"]
+    assert "[00:00] boot" in redacted["logs"]
+
+
 def test_redact_logs_payload_tolerates_missing_or_malformed_shape() -> None:
     """If the upstream gives us an unexpected shape we return it
     unchanged — never swallow content, only mask known patterns."""
-    # No ``lines`` key.
+    # No ``lines`` / ``logs`` keys.
     assert admin._redact_logs_payload({"unit": "x"}) == {"unit": "x"}
     # ``lines`` is not a list.
     assert admin._redact_logs_payload({"lines": "oops"}) == {"lines": "oops"}
+    # ``logs`` is not a string.
+    assert admin._redact_logs_payload({"logs": 42}) == {"logs": 42}
     # Non-dict envelope.
     assert admin._redact_logs_payload("just a string") == "just a string"
 

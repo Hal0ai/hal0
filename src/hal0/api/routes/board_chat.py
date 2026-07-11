@@ -117,6 +117,13 @@ Tool surfaces:
 - Settings: get_orchestration / update_orchestration (board dispatcher knobs:
   orchestrator_profile, default_assignee, auto_decompose,
   auto_promote_children).
+- Full platform admin (hal0-admin catalog): model inspect/download/register/
+  organize (pulls always land in the operator's configured model store —
+  check model_store first), profile and stack CRUD, slot create/edit/delete,
+  hal0 settings, benchmarks, logs. Tools marked (gated) do NOT run
+  immediately: they return status=pending_approval with an approval_id and
+  execute only after the operator approves them in the dashboard's Approvals
+  panel — when that happens, say what you queued and why, then wait.
 
 Rules:
 - You cannot see state unless you look. Call the matching read tool first and
@@ -348,6 +355,121 @@ def _tool_schemas() -> list[dict[str, Any]]:
             [],
         ),
     ]
+
+
+# ── admin-MCP tool surface (the platform steward's hands) ───────────────────
+#
+# The slide-out chat embodies the hal0-brain persona, whose remit is the
+# whole platform — not just the board. Rather than hand-maintaining a
+# second tool table here, the chat surfaces the hal0-admin MCP catalog
+# (hal0.mcp.admin.TOOL_DESCRIPTIONS) as OpenAI tool schemas and routes
+# calls through the SAME ``dispatch`` core the /mcp/admin mount uses:
+# identical read/write/gated classification, the lifespan-scoped
+# ApprovalQueue (gated tools come back ``pending_approval`` and execute
+# only after the operator approves), and the same audit rows.
+#
+# Locals win on collision: the chat's own board tools and platform verbs
+# (slot_load/slot_unload/slot_restart, compact list_slots/list_models
+# reads) are purpose-tuned and already pinned by tests, so their admin
+# twins are excluded from the surfaced schemas. Imports stay lazy — the
+# ``mcp`` SDK is an optional dependency, and a box without it must still
+# serve the board-only chat (schemas degrade to the local list).
+
+_ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
+    {
+        # exact name collisions with the local platform verbs
+        "slot_load",
+        "slot_unload",
+        "slot_restart",
+        # semantic duplicates of the local compact reads
+        "slot_list",
+        "slot_status",
+        "model_list",
+        "hardware_probe",
+        # memory_* ride the persona's own namespace (private:hal0-brain)
+        # via Hindsight, not the agent memory engine's MCP dispatcher
+        "memory_add",
+        "memory_search",
+        "memory_list",
+        "memory_delete",
+    }
+)
+
+
+def _admin_tool_names() -> frozenset[str]:
+    """The admin catalog minus exclusions; empty when the SDK is absent."""
+    try:
+        from hal0.mcp.admin import (
+            AUTONOMOUS_READ_TOOLS,
+            AUTONOMOUS_WRITE_TOOLS,
+            GATED_TOOLS,
+        )
+    except ImportError:
+        return frozenset()
+    return (AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS) - _ADMIN_TOOL_EXCLUDES
+
+
+def _admin_tool_schemas() -> list[dict[str, Any]]:
+    """OpenAI tool schemas for the surfaced admin catalog.
+
+    Path args (from the admin server's ``_PATH_ARGS``) become required
+    string properties; ``additionalProperties`` stays open so the model
+    can pass body/query fields the descriptions call out (e.g.
+    ``model_pull``'s ``hf_repo``/``hf_filename``).
+    """
+    try:
+        from hal0.mcp.admin import _PATH_ARGS, TOOL_DESCRIPTIONS
+    except ImportError:
+        return []
+    schemas: list[dict[str, Any]] = []
+    for name, description in TOOL_DESCRIPTIONS.items():
+        if name in _ADMIN_TOOL_EXCLUDES:
+            continue
+        path_args = _PATH_ARGS.get(name, ())
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {arg: {"type": "string"} for arg in path_args},
+                        "required": list(path_args),
+                        "additionalProperties": True,
+                    },
+                },
+            }
+        )
+    return schemas
+
+
+async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]) -> Any:
+    """Route one admin-catalog call through the MCP dispatch core.
+
+    Reuses the lifespan-scoped ApprovalQueue so a gated tool queued from
+    the chat lands in the same dashboard Approvals panel as one queued
+    over /mcp/admin, and the audit trail records the persona as the
+    calling client.
+    """
+    try:
+        from hal0.mcp import admin
+    except ImportError:
+        return {"error": f"{name}: admin tools unavailable (mcp SDK not installed)"}
+    queue = getattr(request.app.state, "approval_queue", None)
+    if queue is None:
+        return {"error": f"{name}: admin tools unavailable (no approval queue)"}
+    bearer = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None
+    base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
+    return await admin.dispatch(
+        tool=name,
+        args=args,
+        client_id=BRAIN_PERSONA_ID,
+        bearer=bearer,
+        base_url=base,
+        approval_queue=queue,
+        memory_dispatcher=getattr(request.app.state, "memory_dispatcher", None),
+    )
 
 
 # ── read tools (allowlisted GETs — mirror the UNAUDITED REST read rows) ─────
@@ -584,6 +706,11 @@ async def _dispatch_tool(
 
     method, path, tool_params, body, target = _resolve_tool(name, args)
     if method is None:
+        # Not a local tool — the rest of the surface is the admin-MCP
+        # catalog, dispatched through the same gating/audit core as
+        # /mcp/admin (gated tools return ``pending_approval``).
+        if name in _admin_tool_names():
+            return await _dispatch_admin_tool(request, name, args)
         return {"error": f"unknown tool: {name}"}
 
     # Merge the board scope with any tool-specific query params (e.g.
@@ -760,7 +887,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     body: dict[str, Any] = {
         "model": payload.get("model") or default_model,
         "messages": messages,
-        "tools": _tool_schemas(),
+        "tools": _tool_schemas() + _admin_tool_schemas(),
         "stream": False,
     }
 
@@ -842,8 +969,11 @@ __all__ = [
     "BRAIN_PERSONA_ID",
     "BRAIN_SLOT_MODEL",
     "PRIMARY_SLOT_MODEL",
+    "_admin_tool_names",
+    "_admin_tool_schemas",
     "_chat_stream",
     "_compact_board",
+    "_dispatch_admin_tool",
     "_dispatch_platform_tool",
     "_dispatch_tool",
     "_resolve_platform_tool",

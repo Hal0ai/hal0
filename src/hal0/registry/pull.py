@@ -1198,7 +1198,8 @@ async def run_flm_pull(
     # base pull module's import graph (tests pull this module in
     # environments without docker).
     from hal0.providers.flm import (
-        flm_host_spawn_kwargs,
+        ensure_host_flm_store_link,
+        flm_host_async_spawn,
         flm_pull_command,
         flm_served_models,
         reset_flm_catalog_cache,
@@ -1210,10 +1211,26 @@ async def run_flm_pull(
 
     argv, host_models_dir = flm_pull_command(tag)
 
+    # flm hardcodes ~/.config/flm/models and has no dir flag, so a host pull
+    # writes to that default path — NOT the (possibly relocated) store the
+    # progress poller + serving container use. Point flm's default at the store
+    # via a symlink (host analog of the container bind-mount) before we spawn,
+    # so weights land in the store, progress tracks the real bytes, and serving
+    # finds them. Off-loaded to a thread: the one-time legacy-content migration
+    # can copy multi-GB weights and must not block the event loop.
+    await asyncio.to_thread(ensure_host_flm_store_link)
+
     # Resolve the install path + advertised total upfront so progress
     # reporting is monotonic. _flm_install_path reads the same cached
     # catalog flm_served_models uses; both fall back gracefully when
     # the probe failed (host without docker / image not present).
+    #
+    # These two probes (``flm list``) can transiently return an EMPTY catalog
+    # right at pull start — observed live: the dir grew steadily on disk while
+    # the job reported ``0/0`` the whole download because ``target_dir`` was
+    # ``None`` here and never retried. So they are NOT resolved once-and-for-
+    # all: :func:`_resolve_target_dir` / :func:`_resolve_advertised_total` below
+    # re-attempt each tick until they succeed, then progress tracks growth.
     target_dir = _flm_install_path(host_models_dir, tag)
     advertised_total = 0
     for entry in flm_served_models():
@@ -1225,6 +1242,10 @@ async def run_flm_pull(
         job.bytes_total = advertised_total
         job._signal()
 
+    # uvloop (hal0-api's event loop) rejects the user/group Popen kwargs, so
+    # the drop to the hal0 user rides the argv (setpriv/runuser) instead.
+    argv, spawn_kwargs = flm_host_async_spawn(argv)
+
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1232,14 +1253,45 @@ async def run_flm_pull(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            **flm_host_spawn_kwargs(),
+            **spawn_kwargs,
         )
         assert proc.stdout is not None
         last_emit = time.monotonic()
 
+        def _resolve_target_dir() -> None:
+            """Retry the install-path probe until it resolves (see above).
+
+            A fresh pull creates ``target_dir`` from scratch, so when we
+            resolve it late its whole on-disk size IS this pull's progress —
+            baseline 0 is correct. A re-pull of a partially-present model would
+            undercount by the pre-existing bytes, a harmless display nuance
+            versus the alternative of reporting 0 for the entire download.
+            """
+            nonlocal target_dir, baseline_size
+            if target_dir:
+                return
+            resolved = _flm_install_path(host_models_dir, tag)
+            if resolved:
+                target_dir = resolved
+                baseline_size = 0
+
+        def _resolve_advertised_total() -> None:
+            """Retry the advertised-size probe so the bar shows a real total."""
+            nonlocal advertised_total
+            if advertised_total > 0:
+                return
+            for entry in flm_served_models():
+                if entry["tag"] == tag:
+                    advertised_total = int(entry.get("size_bytes") or 0)
+                    if advertised_total > job.bytes_total:
+                        job.bytes_total = advertised_total
+                    break
+
         def _tick_progress() -> None:
             """Refresh bytes_downloaded from on-disk dir size if it grew."""
             nonlocal last_emit
+            _resolve_target_dir()
+            _resolve_advertised_total()
             if not target_dir:
                 return
             now = time.monotonic()

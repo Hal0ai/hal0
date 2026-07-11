@@ -25,7 +25,7 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from '@/lib/normalizeApiModel'
 import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
-const { useState: useStateSM, useEffect: useEffectSM } = React;
+const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM, useCallback: useCallbackSM } = React;
 
 // Map a slot lifecycle state to a chip color class.
 //   running healthy/serving → green (ok); starting/pulling → amber (warn);
@@ -1820,11 +1820,75 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 function SlotLogsDrawer({ open, slot, onClose }) {
   const { ring, disconnected, degraded } = useSlotLogsStream(
     open && slot ? slot.name : null,
-    { follow: open, max: 500 },
+    { follow: open, max: 2000 },
   );
+
+  const viewRef = useRefSM(null);
+  const [autoScroll, setAutoScroll] = useStateSM(true);
+  const [wrap, setWrap] = useStateSM(true);
+  const [atBottom, setAtBottom] = useStateSM(true);
+  const [copied, setCopied] = useStateSM(false);
+
   const lines = ring.map((r) => r.msg);
+  const text = lines.join("\n");
+  const count = lines.length;
+
+  // Reset the follow/scroll state each time the drawer opens for a slot so a
+  // freshly-opened drawer always starts pinned to the newest line.
+  useEffectSM(() => {
+    if (open) { setAutoScroll(true); setAtBottom(true); }
+  }, [open, slot && slot.name]);
+
+  // Pin to the newest line whenever the ring grows (or the wrap mode changes,
+  // which reflows and shifts scrollHeight) — but only while following.
+  useEffectSM(() => {
+    if (!autoScroll) return;
+    const el = viewRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [count, autoScroll, wrap]);
+
+  // Following is driven by scroll position: scrolling away from the bottom
+  // pauses auto-scroll; scrolling back resumes it.
+  const onScroll = useCallbackSM(() => {
+    const el = viewRef.current;
+    if (!el) return;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    setAtBottom(bottom);
+    setAutoScroll(bottom);
+  }, []);
+
+  const jumpToLatest = () => {
+    const el = viewRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    setAutoScroll(true);
+    setAtBottom(true);
+  };
+
+  const copyAll = async () => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      window.__hal0Toast && window.__hal0Toast("Clipboard unavailable", "warn");
+    }
+  };
 
   if (!slot) return null;
+
+  const toggleStyle = (on) => ({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    padding: "3px 9px",
+    fontSize: 11,
+    borderRadius: "var(--rad-sm)",
+    border: "1px solid " + (on ? "var(--accent-line)" : "var(--line)"),
+    background: on ? "var(--accent-soft)" : "transparent",
+    color: on ? "var(--accent)" : "var(--fg-3)",
+    cursor: "pointer",
+  });
 
   return (
     <Drawer
@@ -1839,50 +1903,154 @@ function SlotLogsDrawer({ open, slot, onClose }) {
         </span>
       }
     >
-      {degraded && (
+      <div style={{height: "100%", display: "flex", flexDirection: "column", minHeight: 0}}>
+        {degraded && (
+          <div
+            className="mono"
+            data-testid="slot-logs-degraded"
+            style={{
+              background: "var(--warn-soft)",
+              border: "1px solid var(--warn-line)",
+              borderRadius: "var(--rad-sm)",
+              padding: "8px 10px",
+              fontSize: 11.5,
+              color: "var(--warn)",
+              lineHeight: 1.5,
+              marginBottom: 8,
+              flex: "0 0 auto",
+            }}
+          >
+            {degraded}
+          </div>
+        )}
+
+        {/* ─── Controls toolbar ─── */}
         <div
           className="mono"
-          data-testid="slot-logs-degraded"
           style={{
-            background: "var(--warn-soft)",
-            border: "1px solid var(--warn-line)",
-            borderRadius: "var(--rad-sm)",
-            padding: "8px 10px",
-            fontSize: 11.5,
-            color: "var(--warn)",
-            lineHeight: 1.5,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
             marginBottom: 8,
+            flex: "0 0 auto",
           }}
         >
-          {degraded}
-        </div>
-      )}
-      <div
-        className="mono"
-        style={{
-          background: "var(--bg)",
-          border: "1px solid var(--line-soft)",
-          borderRadius: "var(--rad-sm)",
-          padding: 10,
-          fontSize: 11.5,
-          color: "var(--fg-2)",
-          lineHeight: 1.5,
-          height: degraded ? 414 : 460,
-          overflow: "auto",
-          whiteSpace: "pre-wrap",
-        }}
-      >
-        {lines.length === 0
-          ? (
-            <span style={{color: "var(--fg-4)", fontStyle: "italic"}}>
-              {degraded
-                ? "No log lines — see the notice above."
-                : disconnected
-                ? "Reconnecting to log stream…"
-                : "waiting for log lines…"}
+          <button
+            type="button"
+            data-testid="slot-logs-follow"
+            aria-pressed={autoScroll}
+            title="Auto-scroll to the newest line"
+            style={toggleStyle(autoScroll)}
+            onClick={() => { if (autoScroll) { setAutoScroll(false); } else { jumpToLatest(); } }}
+          >
+            {Icons.download} {autoScroll ? "Following" : "Follow"}
+          </button>
+          <button
+            type="button"
+            data-testid="slot-logs-wrap"
+            aria-pressed={wrap}
+            title="Wrap long lines"
+            style={toggleStyle(wrap)}
+            onClick={() => setWrap((w) => !w)}
+          >
+            {Icons.logs} Wrap
+          </button>
+          <button
+            type="button"
+            data-testid="slot-logs-copy"
+            title="Copy all log lines"
+            disabled={count === 0}
+            style={{...toggleStyle(false), opacity: count === 0 ? 0.5 : 1, cursor: count === 0 ? "default" : "pointer"}}
+            onClick={copyAll}
+          >
+            {copied ? Icons.check : Icons.copy} {copied ? "Copied" : "Copy"}
+          </button>
+          <span style={{marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 10, fontSize: 11}}>
+            <span style={{color: "var(--fg-4)"}}>{count} line{count === 1 ? "" : "s"}</span>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                color: degraded ? "var(--warn)" : disconnected ? "var(--warn)" : "var(--ok)",
+              }}
+            >
+              <span
+                style={{
+                  width: 6, height: 6, borderRadius: "50%",
+                  background: "currentColor",
+                  boxShadow: "0 0 0 2px color-mix(in srgb, currentColor 24%, transparent)",
+                }}
+              />
+              {degraded ? "unavailable" : disconnected ? "reconnecting" : "live"}
             </span>
-          )
-          : lines.join("\n")}
+          </span>
+        </div>
+
+        {/* ─── Log viewport (fills remaining height) ─── */}
+        <div style={{position: "relative", flex: "1 1 auto", minHeight: 0}}>
+          <div
+            ref={viewRef}
+            onScroll={onScroll}
+            className="mono"
+            data-testid="slot-logs-view"
+            style={{
+              background: "var(--bg)",
+              border: "1px solid var(--line-soft)",
+              borderRadius: "var(--rad-sm)",
+              padding: 10,
+              fontSize: 11.5,
+              color: "var(--fg-2)",
+              lineHeight: 1.5,
+              height: "100%",
+              overflow: "auto",
+              whiteSpace: wrap ? "pre-wrap" : "pre",
+              wordBreak: wrap ? "break-word" : "normal",
+            }}
+          >
+            {count === 0
+              ? (
+                <span style={{color: "var(--fg-4)", fontStyle: "italic"}}>
+                  {degraded
+                    ? "No log lines — see the notice above."
+                    : disconnected
+                    ? "Reconnecting to log stream…"
+                    : "waiting for log lines…"}
+                </span>
+              )
+              : text}
+          </div>
+
+          {/* Jump-to-latest pill — only while scrolled away from the bottom. */}
+          {!atBottom && count > 0 && (
+            <button
+              type="button"
+              data-testid="slot-logs-jump"
+              onClick={jumpToLatest}
+              className="mono"
+              style={{
+                position: "absolute",
+                bottom: 12,
+                left: "50%",
+                transform: "translateX(-50%)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "5px 12px",
+                fontSize: 11,
+                borderRadius: 999,
+                border: "1px solid var(--accent-line)",
+                background: "var(--accent)",
+                color: "var(--bg)",
+                cursor: "pointer",
+                boxShadow: "0 4px 14px -4px rgba(0,0,0,0.5)",
+              }}
+            >
+              {Icons.download} Jump to latest
+            </button>
+          )}
+        </div>
       </div>
     </Drawer>
   );

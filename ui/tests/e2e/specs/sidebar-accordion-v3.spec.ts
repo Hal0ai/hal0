@@ -67,15 +67,16 @@ test.describe('sidebar accordion', () => {
 })
 
 test.describe('sidebar Services zone', () => {
-  test('renders install-derived OpenWebUI/Hermes links (no Kanban — moved to topbar)', async ({ page }) => {
+  test('holds the internal Kanban option + install-derived OpenWebUI/Hermes links', async ({ page }) => {
     await mockConfigUrls(page)
     await page.goto('/#dashboard')
     const svc = page.locator('.sb-services')
     await expect(svc).toBeVisible({ timeout: FIVE_S })
 
-    // Kanban moved to the topbar launcher; Services now holds only the external
-    // OpenWebUI/Hermes <a>s, hrefs straight from the backend-resolved config.
-    await expect(svc.locator('[data-testid="svc-kanban"]')).toHaveCount(0)
+    // Kanban is the only in-app option here — an internal #board route, not an
+    // external <a> — followed by the external OpenWebUI/Hermes links whose
+    // hrefs come straight from the backend-resolved config.
+    await expect(svc.locator('[data-testid="svc-board"]')).toContainText('Kanban')
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute(
       'href',
       'http://hal0.example:3001',
@@ -89,9 +90,9 @@ test.describe('sidebar Services zone', () => {
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute('rel', /noopener/)
   })
 
-  test('topbar Kanban launcher routes to the Operator Board', async ({ page }) => {
+  test('sidebar Services Kanban option routes to the Operator Board', async ({ page }) => {
     await page.goto('/#dashboard')
-    await page.locator('[data-testid="tb-launch-board"]').click()
+    await page.locator('[data-testid="svc-board"]').click()
     await expect(page).toHaveURL(/#board/)
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
