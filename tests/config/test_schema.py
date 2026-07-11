@@ -280,6 +280,38 @@ class TestUpstreamEntry:
         with pytest.raises(ValidationError):
             UpstreamEntry(name="x", url="http://x", timeout_seconds=-1.0)
 
+    def test_anthropic_and_google_auth_styles_accepted(self) -> None:
+        # These were rejected pre-fix even though the runtime implements them.
+        assert UpstreamEntry(name="a", url="http://x", auth_style="anthropic").auth_style == (
+            "anthropic"
+        )
+        assert UpstreamEntry(name="g", url="http://x", auth_style="google_query").auth_style == (
+            "google_query"
+        )
+
+    def test_warmup_canonical_vocabulary_accepted(self) -> None:
+        for v in ("none", "ondemand", "always"):
+            assert UpstreamEntry(name="x", url="http://x", warmup_strategy=v).warmup_strategy == v
+
+    def test_warmup_legacy_aliases_normalize(self) -> None:
+        assert UpstreamEntry(name="x", url="http://x", warmup_strategy="lazy").warmup_strategy == (
+            "ondemand"
+        )
+        assert UpstreamEntry(name="x", url="http://x", warmup_strategy="eager").warmup_strategy == (
+            "always"
+        )
+
+    def test_header_style_requires_header_name(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            UpstreamEntry(name="x", url="http://x", auth_style="header")
+        assert "auth_header" in str(ei.value)
+        e = UpstreamEntry(name="x", url="http://x", auth_style="header", auth_header="X-Api-Key")
+        assert e.auth_header == "X-Api-Key"
+
+    def test_enabled_defaults_true(self) -> None:
+        assert UpstreamEntry(name="x", url="http://x").enabled is True
+        assert UpstreamEntry(name="x", url="http://x", enabled=False).enabled is False
+
 
 class TestUpstreamsConfig:
     def test_duplicate_upstream_names_raise(self) -> None:
