@@ -118,27 +118,52 @@ function Thinking({ text }) {
 }
 
 // ─── Tool-call card (call + matched result) ───────────────────────────
-function ToolCard({ msg }) {
+// Gated calls (status=pending) park on the ApprovalQueue: the card shows the
+// gate inline with Approve/Deny (same endpoints as the top-bar bell) so the
+// operator never has to leave the thread to unblock the steward.
+function ToolCard({ msg, onResolve }) {
   const tc = msg.tool_call || {};
   const args = tc.arguments && Object.keys(tc.arguments).length > 0
     ? JSON.stringify(tc.arguments)
     : "";
   const status = msg.status || "done";
+  const statusLabel = status === "pending" ? "awaiting approval" : status;
+  const dotColor =
+    status === "error" || status === "denied" ? "var(--err)"
+    : status === "running" ? "var(--info)"
+    : status === "pending" ? "var(--warn, #E8B94E)"
+    : "var(--ok)";
   let resultText = "";
   if (msg.result !== undefined) {
     try { resultText = JSON.stringify(msg.result, null, 2); }
     catch { resultText = String(msg.result); }
     if (resultText && resultText.length > 1200) resultText = resultText.slice(0, 1200) + " …";
   }
+  const canResolve = status === "pending" && msg.approval_id && onResolve;
   return (
     <div className={"tool-card " + status} data-testid="board-chat-tool">
       <div className="tool-card-h">
-        <span className={"kdot " + (status === "running" ? "live" : "")}
-          style={{ "--st": status === "error" ? "var(--err)" : status === "running" ? "var(--info)" : "var(--ok)" }} />
+        <span className={"kdot " + (status === "running" || status === "pending" ? "live" : "")}
+          style={{ "--st": dotColor }} />
         <span className="tool-name">{tc.name || msg.body || "tool"}</span>
         {args && <span className="tool-args" title={args}>{args}</span>}
-        <span className="tool-status">{status}</span>
+        <span className="tool-status">{statusLabel}</span>
       </div>
+      {canResolve && (
+        <div className="tool-approval" data-testid="board-chat-approval">
+          <span className="tool-approval-note">gated call — runs only with your approval</span>
+          <button className="btn" data-testid="board-chat-approve"
+            onClick={() => onResolve(msg.approval_id, "approve")}>Approve</button>
+          <button className="btn ghost" data-testid="board-chat-deny"
+            onClick={() => onResolve(msg.approval_id, "deny")}>Deny</button>
+        </div>
+      )}
+      {status === "approved" && (
+        <div className="tool-approval-note">approved — executing, the turn continues automatically</div>
+      )}
+      {status === "denied" && (
+        <div className="tool-approval-note">denied — the call was dropped</div>
+      )}
       {resultText && (
         <details className="tool-result">
           <summary>result</summary>
@@ -198,6 +223,28 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
             hal0-brain · platform steward
           </span>
           <span className="spacer" />
+          {chatHook && (
+            <label
+              className={"chat-auto-approve" + (chatHook.autoApprove ? " on" : "")}
+              title="Auto-approve gated tool calls for this session only — includes destructive tools (deletes, config writes). Resets when the page reloads."
+              data-testid="board-chat-auto-approve"
+            >
+              <input
+                type="checkbox"
+                checked={chatHook.autoApprove || false}
+                onChange={e => chatHook.setAutoApprove(e.target.checked)}
+              />
+              auto-approve
+            </label>
+          )}
+          {chatHook && displayMsgs.length > 0 && (
+            <button
+              className="chat-new-session"
+              title="Start a new session (clears this thread — the model only sees what's in it)"
+              data-testid="board-chat-new-session"
+              onClick={() => chatHook.reset()}
+            >new session</button>
+          )}
           <span className="dh-x" onClick={onClose}><Icon name="close" /></span>
         </div>
 
@@ -219,7 +266,7 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
                 <span>{m.at}</span>
               </div>
               {m.role === "tool" && m.tool_call ? (
-                <ToolCard msg={m} />
+                <ToolCard msg={m} onResolve={chatHook ? chatHook.resolveApproval : undefined} />
               ) : (
                 <div className="msg-b">
                   {m.role === "assistant" && <Thinking text={m.thinking} />}
@@ -272,6 +319,14 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
           />
+          {isTyping && (
+            <button
+              className="btn ghost"
+              data-testid="board-chat-stop"
+              title="Stop the current turn (keeps the thread)"
+              onClick={() => chatHook && chatHook.stop()}
+            >Stop</button>
+          )}
           <button
             className="btn"
             data-testid="board-chat-send"

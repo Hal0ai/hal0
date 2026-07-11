@@ -43,6 +43,7 @@ production it is wired to hal0-api's ``/v1/chat/completions`` against the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -61,6 +62,25 @@ log = structlog.get_logger(__name__)
 # (max_rounds / completion_timeout_s), read per-request via
 # _brain_chat_config(); the BrainChatConfig defaults (8 rounds, 300 s) are the
 # single source of truth.
+
+# Gated-tool pause. When a call parks on the ApprovalQueue the turn WAITS
+# for the operator's decision instead of racing ahead — otherwise the model
+# ends the turn with "let me know when approved" and the executed result
+# lands nowhere, breaking the flow. Pings keep the SSE stream alive through
+# proxies while paused; on timeout the turn continues with the pending
+# result (the operator can still approve later via the bell).
+_APPROVAL_WAIT_S = 300.0
+_APPROVAL_POLL_S = 1.0
+_APPROVAL_PING_EVERY_S = 15.0
+
+# Per-round completion cap. The request is non-streaming with a bounded
+# transport timeout ([brain_chat] completion_timeout_s), so an uncapped
+# runaway generation (observed: ~25k tokens at ~84 tok/s on the agent-slot
+# fallback) burns the whole window and surfaces as "primary slot transport
+# failure" before the turn can emit a single tool call. 4096 tokens ≈ 50 s
+# worst-case on the slowest resident model — plenty for a steward reply +
+# tool calls.
+_MAX_COMPLETION_TOKENS = 4096
 
 # The slot the steward drives. Points at the dedicated `brain` slot (the
 # hal0-brain profile's default model) — the resolver's generalized chain
@@ -435,6 +455,80 @@ def _brain_tool_policy(request: Request) -> Any | None:
     return ToolPolicy.from_persona(persona)
 
 
+# Body-arg schemas for the tools the steward misuses most when left to guess
+# (the generic catalog only names PATH args; body fields were invisible, so
+# the model invented arg names — observed: model_inspect called without
+# hf_repo, model_pull called with model_id='org/repo'). properties are merged
+# over the path-arg stubs; 'required' extends the path-arg list.
+_ADMIN_TOOL_PARAM_OVERRIDES: dict[str, dict[str, Any]] = {
+    "model_inspect": {
+        "properties": {
+            "hf_repo": {"type": "string", "description": "HuggingFace repo as 'org/name'"},
+            "hf_url": {
+                "type": "string",
+                "description": "Alternative: full https://huggingface.co/... URL",
+            },
+        },
+    },
+    "model_pull": {
+        "properties": {
+            "model_id": {
+                "type": "string",
+                "description": (
+                    "LOCAL model id — short name, NO slashes; invent one for a new model"
+                ),
+            },
+            "hf_repo": {"type": "string", "description": "HF source repo 'org/name'"},
+            "hf_filename": {
+                "type": "string",
+                "description": "Exact .gguf filename in the repo (from model_inspect)",
+            },
+            "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
+        },
+    },
+    "model_swap": {
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "SLOT name (e.g. 'agent', 'ops') — NOT the model",
+            },
+            "model_id": {"type": "string", "description": "Registered model id to swap in"},
+        },
+        "required": ["model_id"],
+    },
+    "model_assign": {
+        "properties": {
+            "name": {"type": "string", "description": "SLOT name — NOT the model"},
+            "model": {
+                "type": "string",
+                "description": "Registered model id to set as the slot's default",
+            },
+        },
+        "required": ["model"],
+    },
+    "slot_create": {
+        "properties": {
+            "name": {"type": "string", "description": "New slot name"},
+            "model": {"type": "string", "description": "Registered model id to assign"},
+            "type": {
+                "type": "string",
+                "description": "llm|embedding|reranking|transcription|tts|image (default llm)",
+            },
+            "port": {"type": "integer", "description": "Omit to auto-assign the next free port"},
+            "image": {
+                "type": "string",
+                "description": (
+                    "Container image override — FPX/FP4 quants need "
+                    "ghcr.io/hal0ai/hal0-rocmfpx:c077206 with runtime='container'"
+                ),
+            },
+            "runtime": {"type": "string", "description": "Set 'container' when image is set"},
+        },
+        "required": ["name", "model"],
+    },
+}
+
+
 def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
     """OpenAI tool schemas for the surfaced admin catalog.
 
@@ -456,6 +550,12 @@ def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
         if policy is not None and not policy.allows(name):
             continue
         path_args = _PATH_ARGS.get(name, ())
+        properties: dict[str, Any] = {arg: {"type": "string"} for arg in path_args}
+        required = list(path_args)
+        override = _ADMIN_TOOL_PARAM_OVERRIDES.get(name)
+        if override:
+            properties.update(override.get("properties", {}))
+            required += [r for r in override.get("required", []) if r not in required]
         schemas.append(
             {
                 "type": "function",
@@ -464,8 +564,8 @@ def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
                     "description": description,
                     "parameters": {
                         "type": "object",
-                        "properties": {arg: {"type": "string"} for arg in path_args},
-                        "required": list(path_args),
+                        "properties": properties,
+                        "required": required,
                         "additionalProperties": True,
                     },
                 },
@@ -1004,6 +1104,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
         "messages": messages,
         "tools": _surfaced_tool_schemas(request),
         "stream": False,
+        "max_tokens": int(payload.get("max_tokens") or _MAX_COMPLETION_TOKENS),
     }
 
     try:
@@ -1049,6 +1150,78 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
                 yield _sse(
                     {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
                 )
+                if isinstance(result, dict) and result.get("status") == "pending_approval":
+                    # Surface the gate in the chat thread itself — the top-bar
+                    # bell polls /api/agent/approvals, but without this frame
+                    # the thread shows a generic tool card and the operator
+                    # has no in-chat cue that the call is parked on them.
+                    approval_id = str(result.get("approval_id") or "")
+                    yield _sse(
+                        {
+                            "type": "approval_required",
+                            "id": tc["id"],
+                            "name": tc["name"],
+                            "approval_id": approval_id,
+                        }
+                    )
+                    # Pause the turn until the operator decides (or timeout).
+                    queue = getattr(request.app.state, "approval_queue", None)
+                    decided: dict[str, Any] | None = None
+                    waited = 0.0
+                    since_ping = 0.0
+                    while queue is not None and approval_id and waited < _APPROVAL_WAIT_S:
+                        entry = queue.get(approval_id)
+                        if entry is None:
+                            break
+                        if entry.state == "executed":
+                            raw = entry.result
+                            decided = (
+                                raw
+                                if isinstance(raw, dict)
+                                else {"status": "executed", "result": raw}
+                            )
+                            break
+                        if entry.state == "failed":
+                            decided = {
+                                "status": "error",
+                                "error": entry.error or "approved call failed",
+                            }
+                            break
+                        if entry.state == "denied":
+                            decided = {
+                                "status": "denied",
+                                "detail": (
+                                    "the operator denied this call — do not retry it; "
+                                    "ask what they want instead"
+                                ),
+                            }
+                            break
+                        await asyncio.sleep(_APPROVAL_POLL_S)
+                        waited += _APPROVAL_POLL_S
+                        since_ping += _APPROVAL_POLL_S
+                        if since_ping >= _APPROVAL_PING_EVERY_S:
+                            since_ping = 0.0
+                            yield _sse({"type": "ping"})
+                    if decided is not None:
+                        result = decided
+                        yield _sse(
+                            {
+                                "type": "tool_result",
+                                "id": tc["id"],
+                                "name": tc["name"],
+                                "result": result,
+                            }
+                        )
+                    else:
+                        result = {
+                            **result,
+                            "detail": (
+                                "queued for operator approval — no decision arrived while "
+                                "the turn waited. Tell the operator it is still pending "
+                                "(chat card or top-bar bell); once approved they can ask "
+                                "you to re-check the outcome."
+                            ),
+                        }
                 messages.append(
                     {
                         "role": "tool",

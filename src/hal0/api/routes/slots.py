@@ -334,49 +334,70 @@ def _slot_port_range() -> tuple[int, int]:
         return _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
 
 
-def _next_free_slot_port(start: int | None = None, end: int | None = None) -> int:
+def _collect_port_claims(start: int, end: int, slot_snapshots: list[dict] | None = None):
+    """Every known claim in the pool via the central registry (hal0.ports).
+
+    Config TOMLs alone are NOT the truth — runtime rows can claim ports no
+    TOML mentions (FLM-trio virtual ports), and something else may already
+    be listening. See :mod:`hal0.ports` for the full source list.
+    """
+    from hal0.config.paths import slots_config_dir
+    from hal0.ports import collect_claims
+
+    return collect_claims(
+        slots_dir=slots_config_dir(),
+        pool=(start, end),
+        slot_snapshots=slot_snapshots,
+        reserved={8080: "api"},
+    )
+
+
+def _next_free_slot_port(
+    start: int | None = None,
+    end: int | None = None,
+    slot_snapshots: list[dict] | None = None,
+) -> int:
     """Return the next free port in the configured slot range (#275 bug 2).
 
-    Walks ``/etc/hal0/slots/*.toml`` collecting both top-level ``port``
-    and nested ``[server] port`` values. Returns the lowest port in
-    ``[start, end]`` not already claimed. The bounds default to the
-    configured pool (hal0.toml ``[slots] port_range_start/end``); callers
-    with the live config in hand may thread the bounds explicitly to
-    avoid a disk read.
+    Free = unclaimed by ANY registry source: slot configs (incl. disabled
+    slots), runtime slot rows, reserved ports, and live listeners — see
+    :mod:`hal0.ports`. The bounds default to the configured pool
+    (hal0.toml ``[slots] port_range_start/end``); callers with the live
+    config in hand may thread the bounds explicitly to avoid a disk read.
     """
-    import tomllib
-
-    from hal0.config.paths import slots_config_dir
+    from hal0.ports import next_free
 
     if start is None or end is None:
         cfg_start, cfg_end = _slot_port_range()
         start = cfg_start if start is None else start
         end = cfg_end if end is None else end
 
-    used: set[int] = set()
-    slots_dir = slots_config_dir()
-    if slots_dir.is_dir():
-        for f in slots_dir.glob("*.toml"):
-            try:
-                with f.open("rb") as fh:
-                    cfg = tomllib.load(fh)
-            except (OSError, tomllib.TOMLDecodeError):
-                continue
-            top = cfg.get("port")
-            if isinstance(top, int):
-                used.add(top)
-            srv = cfg.get("server")
-            if isinstance(srv, dict):
-                nested = srv.get("port")
-                if isinstance(nested, int):
-                    used.add(nested)
-    for p in range(start, end + 1):
-        if p not in used:
-            return p
+    port = next_free(_collect_port_claims(start, end, slot_snapshots), start, end)
+    if port is not None:
+        return port
     raise BadRequest(
         f"no free port in {start}-{end} (all slots occupied)",
         code="slot.no_free_port",
     )
+
+
+def _reject_port_conflict(
+    port: int, owner_slot: str, slot_snapshots: list[dict] | None = None
+) -> None:
+    """409-style 400 when an explicitly requested port is already owned."""
+    from hal0.ports import claimed_by_other
+
+    start, end = _slot_port_range()
+    lo, hi = min(start, port), max(end, port)
+    claims = _collect_port_claims(lo, hi, slot_snapshots)
+    others = claimed_by_other(claims, port, f"slot:{owner_slot}")
+    if others:
+        raise BadRequest(
+            f"port {port} is already claimed by {', '.join(sorted(others))} — "
+            "omit 'port' to auto-assign a free one (see GET /api/ports)",
+            code="slot.port_conflict",
+            details={"port": port, "owners": sorted(others)},
+        )
 
 
 def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
@@ -410,6 +431,7 @@ def _normalize_create_body(
     *,
     port_start: int | None = None,
     port_end: int | None = None,
+    slot_snapshots: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Normalize a POST /api/slots body to the canonical nested shape.
 
@@ -432,7 +454,7 @@ def _normalize_create_body(
     if isinstance(model_val, str):
         out["model"] = {"default": model_val}
     if "port" not in out or not isinstance(out.get("port"), int) or out.get("port") in (0, None):
-        out["port"] = _next_free_slot_port(port_start, port_end)
+        out["port"] = _next_free_slot_port(port_start, port_end, slot_snapshots)
     return out
 
 
@@ -474,22 +496,35 @@ async def create_slot(request: Request) -> dict[str, object]:
     # /api/settings change applies to the next creation without a restart.
     slots_cfg = getattr(getattr(request.app.state, "hal0_config", None), "slots", None)
     max_slots = int(getattr(slots_cfg, "max_slots", 0) or 0)
-    if max_slots:
-        existing = await sm.list()
-        if len(existing) >= max_slots:
-            raise BadRequest(
-                f"slot budget reached: [slots].max_slots={max_slots} and "
-                f"{len(existing)} slots already exist (seeded slots count "
-                "toward the budget — raise max_slots or delete a slot)",
-                code="slot.capacity_exhausted",
-                details={"max_slots": max_slots, "existing_slots": len(existing)},
-            )
+    # Runtime rows feed the port registry: a slot's LIVE port can differ
+    # from any TOML (FLM-trio virtual ports), so auto-assign and conflict
+    # checks must see them or they hand out an occupied port.
+    existing = await sm.list()
+    runtime_ports = [
+        {
+            "name": getattr(s, "name", None),
+            "port": getattr(s, "port", None),
+            "coresident_group": getattr(s, "coresident_group", None),
+        }
+        for s in existing
+    ]
+    if max_slots and len(existing) >= max_slots:
+        raise BadRequest(
+            f"slot budget reached: [slots].max_slots={max_slots} and "
+            f"{len(existing)} slots already exist (seeded slots count "
+            "toward the budget — raise max_slots or delete a slot)",
+            code="slot.capacity_exhausted",
+            details={"max_slots": max_slots, "existing_slots": len(existing)},
+        )
 
     body = _normalize_create_body(
         body,
         port_start=(int(slots_cfg.port_range_start) if slots_cfg else None),
         port_end=(int(slots_cfg.port_range_end) if slots_cfg else None),
+        slot_snapshots=runtime_ports,
     )
+    if isinstance(body.get("port"), int):
+        _reject_port_conflict(int(body["port"]), name, runtime_ports)
     _reject_unknown_config_keys(body)
     async with record_action(
         request,
@@ -1135,6 +1170,19 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     _reject_unknown_config_keys(body)
+    # Port moves go through the registry so an edit can't land on a port
+    # another slot (config or runtime) or listener already owns.
+    new_port = body.get("port")
+    if isinstance(new_port, int) and new_port > 0:
+        runtime_ports = [
+            {
+                "name": getattr(s, "name", None),
+                "port": getattr(s, "port", None),
+                "coresident_group": getattr(s, "coresident_group", None),
+            }
+            for s in await sm.list()
+        ]
+        _reject_port_conflict(new_port, name, runtime_ports)
     before = await _safe_config(sm, name)
     async with record_action(
         request, category="slot", action="slot.edit_config", target=name, before=before
