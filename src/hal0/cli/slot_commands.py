@@ -576,7 +576,12 @@ def slot_delete(
     name: str = typer.Argument(..., help="Slot name to delete"),
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
-    """Delete a slot (DELETE /api/slots/{name})."""
+    """Delete a slot (DELETE /api/slots/{name}).
+
+    ``--force`` skips the confirm prompt AND deletes a seeded slot
+    (primary/embed/stt/tts + the NPU trio), which is otherwise protected. A
+    seeded slot may be re-seeded by a later install/update reconcile.
+    """
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -586,7 +591,8 @@ def slot_delete(
             abort=True,
         )
     try:
-        api_delete(f"/api/slots/{name}")
+        # ``force`` also bypasses the server-side seeded-slot guard.
+        api_delete(f"/api/slots/{name}", params={"force": "true"} if force else None)
     except CliApiError as exc:
         die(str(exc))
         return

@@ -1935,13 +1935,21 @@ class SlotManager:
             )
         return await self.status(slot_name)
 
-    async def delete(self, slot_name: str) -> None:
-        """Delete a dynamic slot. Seeded slots cannot be deleted."""
+    async def delete(self, slot_name: str, *, force: bool = False) -> None:
+        """Delete a slot. Seeded slots are protected unless ``force=True``.
+
+        A seeded slot (``primary`` / ``embed`` / … + the NPU trio) is normally
+        undeletable — disable it via ``capabilities.toml`` instead. ``force``
+        overrides that guard so an operator can remove a seeded slot outright;
+        note an install/update reconcile may re-seed it later, and the name stays
+        reserved (``create`` still rejects it) until then.
+        """
         slot_name = self._resolve_alias(slot_name)
-        if slot_name in self.seeded_slots():
+        if slot_name in self.seeded_slots() and not force:
             raise SlotConfigError(
-                f"cannot delete seeded slot {slot_name!r}",
-                details={"slot": slot_name},
+                f"cannot delete seeded slot {slot_name!r} — disable it via "
+                "capabilities.toml, or pass force to delete it anyway",
+                details={"slot": slot_name, "seeded": True},
             )
         self._ensure_known(slot_name)
         # Make sure it's stopped first.

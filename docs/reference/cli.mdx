@@ -257,12 +257,16 @@ The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
 | `doctor` | Re-run the installer's preflight battery (systemd, python, container runtime, disk, ports). | `--plain`, `--ports "8080 3001"` |
 | `doctor toolbox-pull` | Verify each pinned toolbox image is anonymously pullable from ghcr.io. | `--json`, `--manifest` |
 | `doctor perms` | Audit ownership for the editable-checkout root-clobber regression (group-share drift). | `--fix` (repair in place; needs root) |
-| `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability. | — |
+| `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability, env-vs-TOML store divergence, and an unmounted external store path. | `--fix` (repair FLM store ownership/mode; needs root) |
+| `doctor migrations` | Surface a pending v0.1→v0.2 model-layout migration (dry-run of the symlink planner; points at `hal0 migrate model-layout --apply`). | — |
+| `doctor profiles` | Audit the slot↔profile layer: slots referencing a missing profile (fails), and in-use profile images not pulled locally (advisory). | — |
 
 `hal0 doctor` shells out to `installer/lib/preflight.sh` and preserves its exit
 code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
 drift is reported but does not fail), `1` if any image is unreachable, and `2`
-when the manifest has no toolbox images.
+when the manifest has no toolbox images. `doctor models` exits `1` on any
+actionable finding; `doctor migrations` exits `1` when links are pending;
+`doctor profiles` exits `1` only when a slot references a missing profile.
 
 ## `hal0 capabilities` — capability-slot repair
 

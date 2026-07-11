@@ -236,6 +236,25 @@ async def test_agent_slot_non_deletable_without_flm(
         await sm.delete("agent")
 
 
+async def test_seeded_slot_deletable_with_force(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # force=True overrides the seeded-slot guard so an operator can remove one
+    # outright. Seed the config on disk, confirm the guard still refuses without
+    # force, then force-delete it.
+    monkeypatch.setattr("hal0.slots.manager.shutil.which", lambda name: None)
+    sm = SlotManager()
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "agent.toml").write_text(
+        'name = "agent"\nport = 8081\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
+    )
+    with pytest.raises(SlotConfigError, match="seeded"):
+        await sm.delete("agent")
+    await sm.delete("agent", force=True)
+    assert not (slots_dir / "agent.toml").exists()
+
+
 async def test_add_slot_rejects_invalid_type(tmp_hal0_home: str) -> None:
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="slot type"):

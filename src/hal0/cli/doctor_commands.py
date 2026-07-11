@@ -26,6 +26,7 @@ Sub-commands:
 
 from __future__ import annotations
 
+import contextlib
 import grp
 import os
 import pwd
@@ -706,11 +707,149 @@ def perms(
     raise typer.Exit(0)
 
 
+# ── hal0 doctor models — FLM (NPU) store pure helpers ─────────────────────────
+#
+# The FLM store is the single most reboot-fragile surface on the box: the NPU
+# slot bind-mounts it, and a missing / non-writable / not-yet-mounted source
+# makes podman exit 125 ("statfs ... no such file or directory") — a silent,
+# post-reboot slot death. These three pure classifiers cover the incident modes
+# the old inline check missed, and feed a root-gated ``--fix``.
+
+# uid the FLM toolbox container runs as — fixed by the image (mirror of
+# hal0.providers.flm._FLM_CONTAINER_UID; kept local to avoid importing the
+# provider, which pulls in podman spec machinery, into the CLI path).
+_FLM_CONTAINER_UID = 1000
+# Path prefixes that almost always denote an external mount (an off-root
+# filesystem). A store here that isn't backed by a live mount is the classic
+# "NPU slot exits 125 after reboot because /mnt wasn't up yet" trap.
+_EXTERNAL_MOUNT_PREFIXES = ("/mnt/", "/srv/", "/media/")
+
+
+def flm_store_divergence(env_val: str | None, toml_val: str | None) -> dict[str, str] | None:
+    """Warn when the env var and the TOML field name *different* FLM stores.
+
+    ``HAL0_FLM_MODELS_DIR`` wins over ``[models].flm_store`` (see
+    :func:`hal0.config.paths.flm_models_dir`), so an operator who relocates the
+    store by editing hal0.toml while a stale env var is still exported gets a
+    silently-ignored edit — pulls land in one dir, the slot mounts the other,
+    and every model reports installed=False. Returns a row only on genuine
+    disagreement; equal values or either side unset is fine.
+    """
+    env = (env_val or "").strip().rstrip("/")
+    toml = (toml_val or "").strip().rstrip("/")
+    if env and toml and env != toml:
+        return {
+            "status": "warn",
+            "detail": (
+                f"HAL0_FLM_MODELS_DIR={env} overrides [models].flm_store={toml} — "
+                f"the env var wins; unset it or align the TOML to avoid a split store."
+            ),
+        }
+    return None
+
+
+def _deepest_mountpoint(path: Path, *, ismount: Callable[[str], bool]) -> str:
+    """Return the deepest ancestor of ``path`` (incl. itself) that is a mountpoint.
+
+    Falls back to ``/`` which is always a mountpoint — so a store sitting on the
+    root filesystem resolves here to ``/``.
+    """
+    for cand in (path, *path.parents):
+        if ismount(str(cand)):
+            return str(cand)
+    return "/"
+
+
+def flm_mount_guard(
+    store: Path,
+    *,
+    ismount: Callable[[str], bool] = os.path.ismount,
+) -> dict[str, str] | None:
+    """Warn when the store lives under an external mount prefix that isn't mounted.
+
+    Matches the documented reboot failure: the store is configured under
+    ``/mnt/...`` (an off-root disk) but nothing along that path is a live
+    mountpoint, so the directory is either absent or an empty stub on the root
+    filesystem. At the next NPU slot start podman bind-mounts a phantom source
+    and dies with exit 125. Advisory (warn), because a deliberate on-root
+    ``/mnt`` dir is legal, just unusual.
+    """
+    s = str(store).rstrip("/")
+    if not any(s.startswith(p) for p in _EXTERNAL_MOUNT_PREFIXES):
+        return None
+    if _deepest_mountpoint(store, ismount=ismount) != "/":
+        return None  # a real mount backs the path — all good
+    return {
+        "status": "warn",
+        "detail": (
+            f"{s} is under an external mount path that is not mounted — the NPU slot "
+            f"will exit 125 at boot until it is up. Order the slot after the mount "
+            f"(systemd RequiresMountsFor=) or move the store onto the root fs."
+        ),
+    }
+
+
+def flm_store_writability(
+    store: Path,
+    *,
+    stat_of: Callable[[Path], os.stat_result],
+) -> dict[str, object] | None:
+    """Classify FLM-store writability for the container uid; ``None`` when fine.
+
+    The container runs as uid 1000 (image-fixed, not the host hal0 uid). The
+    store is writable for it when owned by 1000 *or* group/other-writable. When
+    neither holds, returns a row carrying the repair target so ``--fix`` can
+    apply ``chown 1000:hal0`` + ``chmod 2775`` without re-deriving it.
+    """
+    st = stat_of(store)
+    world_or_group_w = bool(st.st_mode & 0o020) or bool(st.st_mode & 0o002)
+    if st.st_uid == _FLM_CONTAINER_UID or world_or_group_w:
+        return None
+    return {
+        "status": "fail",
+        "uid": st.st_uid,
+        "mode": st.st_mode & 0o7777,
+        "detail": (
+            f"not writable by the FLM container uid ({_FLM_CONTAINER_UID}): "
+            f"owner uid {st.st_uid}, mode {oct(st.st_mode & 0o7777)}"
+        ),
+    }
+
+
+def repair_flm_store(
+    store: Path,
+    *,
+    group: str = "hal0",
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[bool, str]:
+    """Apply ``chown {uid}:{group}`` + ``chmod 2775`` to the FLM store (needs root).
+
+    Idempotent and matches the guidance the audit prints. Returns ``(ok, msg)``;
+    the first failing step short-circuits with its stderr.
+    """
+    steps = (
+        (["chown", f"{_FLM_CONTAINER_UID}:{group}", str(store)], "chown"),
+        (["chmod", "2775", str(store)], "chmod 2775"),
+    )
+    for argv, label in steps:
+        proc = run(argv, capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip() or f"exit {proc.returncode}"
+            return False, f"{label} failed: {detail}"
+    return True, f"FLM store {store} → uid {_FLM_CONTAINER_UID}:{group} mode 2775"
+
+
 # ── hal0 doctor models ────────────────────────────────────────────────────────
 
 
 @app.command("models")
-def doctor_models() -> None:
+def doctor_models(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Repair FLM store ownership/mode drift in place (needs root).",
+    ),
+) -> None:
     """Audit the model pipeline: registry paths, store/roots agreement, FLM dir.
 
     Catches the classic install failures in one pass:
@@ -721,8 +860,13 @@ def doctor_models() -> None:
         (pull_root/store not scanned on older installs)
       * an FLM (NPU) store dir that is missing or not writable by the
         container uid (podman exit 125 statfs after a reboot)
+      * an FLM store split between HAL0_FLM_MODELS_DIR and [models].flm_store
+        (the env var silently wins — pulls and the slot mount diverge)
+      * an FLM store under an external mount (/mnt/...) that isn't mounted
+        (the classic post-reboot exit-125 before the disk is up)
 
-    Exits non-zero when anything actionable is found.
+    ``--fix`` repairs FLM store ownership/mode drift in place (chown 1000:hal0,
+    chmod 2775 — needs root). Exits non-zero when anything actionable is found.
     """
     from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get
     from hal0.config import paths as cfg_paths
@@ -790,24 +934,314 @@ def doctor_models() -> None:
                 console.print(f"      {f}")
         console.print(f"[dim]store: {effective}  ·  scan roots: {', '.join(scan_roots)}[/dim]")
 
-    # 3. FLM (NPU) store: exists + writable by the container uid (1000).
+    # 3a. FLM store divergence: env var silently overriding the TOML field.
+    env_flm = os.environ.get("HAL0_FLM_MODELS_DIR")
+    toml_flm = None
+    with contextlib.suppress(Exception):  # already surfaced under step 2's hal0.toml read
+        toml_flm = load_hal0_config().models.flm_store
+    divergence = flm_store_divergence(env_flm, toml_flm)
+    if divergence:
+        problems += 1
+        console.print(f"[yellow]![/yellow]  {divergence['detail']}")
+
+    # 3b. FLM (NPU) store: mount-backed, exists, writable by the container uid.
     flm_dir = Path(cfg_paths.flm_models_dir())
+    mount_warn = flm_mount_guard(flm_dir)
+    if mount_warn:
+        problems += 1
+        console.print(f"[yellow]![/yellow]  {mount_warn['detail']}")
+
     if flm_dir.exists():
-        st = flm_dir.stat()
-        world_or_group_w = bool(st.st_mode & 0o020) or bool(st.st_mode & 0o002)
-        if st.st_uid != 1000 and not world_or_group_w:
+        writ = flm_store_writability(flm_dir, stat_of=lambda p: p.stat())
+        if writ is None:
+            console.print(f"[green]✓[/green]  FLM store {flm_dir} present.")
+        elif fix:
+            if os.geteuid() != 0:
+                problems += 1
+                console.print(
+                    f"[red]✗[/red]  FLM store {flm_dir}: {writ['detail']}\n"
+                    "      --fix needs root — re-run `sudo hal0 doctor models --fix`."
+                )
+            else:
+                ok, msg = repair_flm_store(flm_dir)
+                if ok:
+                    console.print(f"[green]✓[/green]  repaired {msg}")
+                else:
+                    problems += 1
+                    console.print(f"[red]✗[/red]  repair failed: {msg}")
+        else:
             problems += 1
             console.print(
-                f"[yellow]![/yellow]  FLM store {flm_dir} is not writable by the FLM "
-                f"container uid (1000): owner uid {st.st_uid}, mode {oct(st.st_mode & 0o7777)}.\n"
-                f"      Fix: sudo chown 1000:hal0 {flm_dir} && sudo chmod 2775 {flm_dir}"
+                f"[yellow]![/yellow]  FLM store {flm_dir} {writ['detail']}.\n"
+                "      Fix: sudo hal0 doctor models --fix   "
+                f"(chown {_FLM_CONTAINER_UID}:hal0 + chmod 2775)"
             )
-        else:
-            console.print(f"[green]✓[/green]  FLM store {flm_dir} present.")
-    else:
+    elif not mount_warn:
         console.print(
             f"[dim]FLM store {flm_dir} absent (fine unless you use the NPU slot — "
             f"it is created on the next NPU slot start).[/dim]"
         )
 
     raise typer.Exit(1 if problems else 0)
+
+
+# ── hal0 doctor migrations ────────────────────────────────────────────────────
+
+
+def pending_layout_migration() -> tuple[int, int] | None:
+    """Dry-run the v0.1→v0.2 model-layout migration; return ``(create, overwrite)``.
+
+    Returns the count of symlinks the migration *would* write (``create`` +
+    ``would-overwrite`` kinds), or ``None`` when the migration machinery can't be
+    consulted at all (e.g. running from a build with no migrate module). A box
+    that is already on the canonical layout — or a fresh install with no v0.1.x
+    store — yields ``(0, 0)``: nothing pending. Never raises; a missing store or
+    registry degrades to an empty plan inside ``plan_migration``.
+    """
+    try:
+        from hal0.cli.migrate_commands import (
+            DEFAULT_CANONICAL_ROOT,
+            DEFAULT_MOUNT_ROOT,
+            DEFAULT_REGISTRY_PATH,
+            plan_migration,
+        )
+    except ImportError:
+        return None
+    try:
+        report = plan_migration(
+            registry_path=DEFAULT_REGISTRY_PATH,
+            mount_root=DEFAULT_MOUNT_ROOT,
+            canonical_root=DEFAULT_CANONICAL_ROOT,
+            force=False,
+        )
+    except Exception:
+        return None
+    create = sum(1 for a in report.actions if a.kind == "create")
+    overwrite = sum(1 for a in report.actions if a.kind == "would-overwrite")
+    return (create, overwrite)
+
+
+@app.command("migrations")
+def doctor_migrations() -> None:
+    """Surface a pending v0.1→v0.2 model-layout migration (read-only).
+
+    The canonical ``<recipe>/<capability>/`` symlink farm is populated by
+    ``hal0 migrate model-layout --apply``, but nothing tells an upgrading
+    operator it's outstanding — so slots that expect the canonical paths quietly
+    find nothing. This dry-runs the same planner and reports how many links are
+    missing, pointing at the apply command. It never writes.
+
+    Exit codes:
+      0 — up to date (or nothing to migrate).
+      1 — links are pending (advisory; run the apply command to reconcile).
+    """
+    pending = pending_layout_migration()
+    if pending is None:
+        console.print("[dim]model-layout migration: planner unavailable — skipped.[/dim]")
+        raise typer.Exit(0)
+    create, overwrite = pending
+    if not create and not overwrite:
+        console.print("[green]✓[/green]  model layout is current — no migration pending.")
+        raise typer.Exit(0)
+    detail = f"{create} link(s) to create"
+    if overwrite:
+        detail += f", {overwrite} to overwrite (needs --force)"
+    console.print(
+        f"[yellow]![/yellow]  model-layout migration pending: {detail}.\n"
+        "      Preview: hal0 migrate model-layout        (dry-run)\n"
+        "      Apply:   hal0 migrate model-layout --apply"
+    )
+    raise typer.Exit(1)
+
+
+# ── hal0 doctor profiles — the slot↔profile referential + fitness layer ────────
+#
+# Profiles sit between a slot and the runtime image/backend. Nothing validates
+# that layer until a slot actually *starts* (resolve_slot_profile raises
+# KeyError late, on the start path), so a dangling reference or an un-pulled
+# image is invisible to an operator staring at a "degraded" slot. These pure
+# classifiers surface it up front. Check 1 (broken refs) is the hard failure;
+# check 2 (image-present) is advisory.
+
+
+def check_slot_profile_refs(
+    slot_profiles: list[tuple[str, str | None]],
+    valid_names: set[str],
+) -> list[dict[str, str]]:
+    """Flag slots whose ``profile = "..."`` names a profile not in the catalog.
+
+    ``resolve_slot_profile`` raises ``KeyError`` for a missing name only when the
+    slot starts — so a renamed/deleted profile is a latent slot-start failure.
+    A slot with ``profile = None`` (base-image resolution) is legal and skipped.
+    Returns one row per slot: ``ok`` when the reference resolves, ``drift`` when
+    it dangles.
+    """
+    rows: list[dict[str, str]] = []
+    for slot, profile in slot_profiles:
+        if not profile:
+            continue  # base-image slot — no profile to resolve
+        if profile in valid_names:
+            rows.append(
+                {"label": slot, "status": "ok", "detail": f"→ {profile}"},
+            )
+        else:
+            rows.append(
+                {
+                    "label": slot,
+                    "status": "drift",
+                    "detail": (
+                        f"references missing profile {profile!r} — the slot will fail "
+                        f"to start (KeyError). Repoint it: hal0 slot edit {slot} "
+                        f"--profile <name>, or recreate {profile!r}."
+                    ),
+                },
+            )
+    return rows
+
+
+def _image_repo(ref: str) -> str:
+    """Strip the tag/digest → the bare ``registry/repo`` of an image ref."""
+    body = ref.split("@", 1)[0]  # drop @sha256:... digest
+    # A ':' after the last '/' is a tag; a ':' inside the host part is a port.
+    head, _, tail = body.rpartition("/")
+    tail = tail.split(":", 1)[0]
+    return f"{head}/{tail}" if head else tail
+
+
+def check_profile_images_present(
+    profiles: list[Any],
+    local_repos: set[str] | None,
+) -> list[dict[str, str]]:
+    """Warn when an *in-use* profile's image repo isn't present locally.
+
+    ``local_repos`` is the set of ``registry/repo`` strings from ``podman
+    images`` (tag-insensitive to avoid false alarms on a re-pinned tag), or
+    ``None`` when podman couldn't be queried — in which case the whole check is
+    skipped (no rows). Only profiles referenced by a slot are checked: an unused
+    profile whose image was never pulled is not a live problem.
+    """
+    if local_repos is None:
+        return []
+    rows: list[dict[str, str]] = []
+    for p in profiles:
+        if not getattr(p, "used_by", ()) or not getattr(p, "image", ""):
+            continue
+        repo = _image_repo(p.image)
+        if repo in local_repos:
+            rows.append({"label": p.name, "status": "ok", "detail": f"image {repo} present"})
+        else:
+            rows.append(
+                {
+                    "label": p.name,
+                    "status": "warn",
+                    "detail": (
+                        f"image repo {repo} not pulled (used by "
+                        f"{', '.join(p.used_by)}) — first slot start will pull it, "
+                        f"or pre-pull: podman pull {p.image}"
+                    ),
+                },
+            )
+    return rows
+
+
+def _local_image_repos() -> set[str] | None:
+    """Query ``podman images`` for the set of local ``registry/repo`` strings.
+
+    Returns ``None`` (→ image check skipped) when podman is absent or errors, so
+    a box without podman never gets spurious "not pulled" rows.
+    """
+    podman = shutil.which("podman")
+    if podman is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [podman, "images", "--format", "{{.Repository}}"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip() and line != "<none>"}
+
+
+def _render_profiles(title: str, rows: list[dict[str, str]]) -> None:
+    """Print profile audit rows with an ok/warn/drift badge, drift/warn detailed."""
+    badge = {
+        "ok": "[green]ok[/green]",
+        "warn": "[yellow]warn[/yellow]",
+        "drift": "[red]DRIFT[/red]",
+    }
+    console.print(f"\n[bold]{title}[/bold]")
+    if not rows:
+        console.print("  [dim](nothing to check)[/dim]")
+        return
+    for r in rows:
+        # ``ok`` rows stay terse; warn/drift carry the actionable detail.
+        if r["status"] == "ok":
+            console.print(f"  {badge['ok']}  {r['label']}  [dim]{r['detail']}[/dim]")
+        else:
+            console.print(f"  {badge[r['status']]}  {r['label']} — {r['detail']}")
+
+
+@app.command("profiles")
+def doctor_profiles() -> None:
+    """Audit the slot↔profile layer: dangling references + un-pulled images.
+
+    Two checks, surfaced before a slot has to fail on start:
+
+      * broken refs — a slot's ``profile = "..."`` names a profile that no longer
+        exists (the slot dies with KeyError at start). This is the only failing
+        check.
+      * image present — an in-use profile's toolbox image isn't pulled locally
+        (advisory; the first slot start pulls it).
+
+    Exit codes:
+      0 — no broken references (advisory warnings may still be printed).
+      1 — at least one slot references a missing profile.
+    """
+    try:
+        from hal0.config.loader import list_slots, load_slot_config
+        from hal0.profiles import ProfileCatalog
+    except ImportError as exc:  # pragma: no cover — profile layer always present
+        console.print(f"[red]✗[/red]  profile layer unavailable: {exc}")
+        raise typer.Exit(2) from exc
+
+    catalog = ProfileCatalog()
+    try:
+        profiles = catalog.list()
+    except Exception as exc:
+        console.print(f"[red]✗[/red]  could not read the profile catalog: {exc}")
+        raise typer.Exit(2) from exc
+    valid_names = {p.name for p in profiles}
+
+    # Scan slots → (slot, profile_name) here (not via the catalog's private
+    # helper) so a malformed slot is surfaced, not silently skipped.
+    slot_profiles: list[tuple[str, str | None]] = []
+    for slot_name in list_slots():
+        try:
+            cfg = load_slot_config(slot_name)
+        except Exception as exc:
+            console.print(
+                f"[yellow]![/yellow]  slot {slot_name}: unreadable TOML ({exc}) — skipped."
+            )
+            continue
+        slot_profiles.append((slot_name, cfg.profile))
+
+    ref_rows = check_slot_profile_refs(slot_profiles, valid_names)
+    img_rows = check_profile_images_present(profiles, _local_image_repos())
+
+    _render_profiles("Slot → profile references", ref_rows)
+    _render_profiles("Profile images (in-use)", img_rows)
+
+    broken = [r for r in ref_rows if r["status"] == "drift"]
+    if broken:
+        console.print(
+            f"\n[red]✗[/red]  {len(broken)} slot(s) reference a missing profile — "
+            "fix before those slots can start."
+        )
+        raise typer.Exit(1)
+    console.print("\n[green]✓[/green]  every slot resolves to a real profile.")
+    raise typer.Exit(0)
