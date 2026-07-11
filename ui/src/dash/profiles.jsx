@@ -541,9 +541,12 @@ function ProfilesHeader({ count, onNew, onImport }) {
   return (
     <div className="engine-h pf-engine-h">
       <span className="engine-glyph">{Icons.slots}</span>
-      <span className="cpane-titles">
-        <span className="engine-title">Profiles</span>
-        <span className="engine-sub">launch profiles · image + bench-tuned flags per workload</span>
+      <span className="sec-label">
+        <b>Profiles</b>
+        <span className="dim">·</span>
+        <span className="meta">launch profiles</span>
+        <span className="dim">·</span>
+        <span className="meta">bench-tuned flags per workload</span>
       </span>
       {count != null && (
         <span className="cpill">

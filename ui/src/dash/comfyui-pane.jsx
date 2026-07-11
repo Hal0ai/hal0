@@ -395,9 +395,12 @@ function CardHead({ engine, run, pct }) {
   return (
     <div className="engine-h wcard-h">
       <span className="engine-glyph"><Ci name="comfy" size={16} /></span>
-      <span className="col">
-        <span className="engine-title">ComfyUI</span>
-        <span className="engine-sub">image-gen engine · docker</span>
+      <span className="sec-label">
+        <b>ComfyUI</b>
+        <span className="dim">·</span>
+        <span className="meta">image-gen engine</span>
+        <span className="dim">·</span>
+        <span className="meta">docker</span>
       </span>
       <span className={'epill' + (hasRun ? ' generating' : '')}>
         <span className="dot" />
