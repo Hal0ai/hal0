@@ -264,6 +264,9 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "npu_status",
         "env_report",
         "model_store_probe",
+        "upstream_list",
+        "upstream_get",
+        "upstream_test",
     }
 )
 
@@ -307,6 +310,9 @@ GATED_TOOLS: frozenset[str] = frozenset(
         # Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
         # docs/internal/phase-8-pending/mcp-backend.md §2.
         "logs_tail",
+        "upstream_create",
+        "upstream_update",
+        "upstream_delete",
         # memory_delete with len(ids) > 1 routes here at call time.
     }
 )
@@ -371,6 +377,13 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     # endpoint. We register the tool anyway so the catalog matches the
     # ADR; calls land in a 404 surface until the route exists.
     "provider_credential_write": ("POST", "/api/providers/{name}/credentials"),
+    # Upstream CRUD
+    "upstream_list": ("GET", "/api/upstreams"),
+    "upstream_get": ("GET", "/api/upstreams/{name}"),
+    "upstream_create": ("POST", "/api/upstreams"),
+    "upstream_update": ("PATCH", "/api/upstreams/{name}"),
+    "upstream_delete": ("DELETE", "/api/upstreams/{name}"),
+    "upstream_test": ("POST", "/api/upstreams/{name}/test"),
 }
 
 
@@ -391,6 +404,10 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "profile_status": ("name",),
     "profile_export": ("name",),
     "profile_delete": ("name",),
+    "upstream_get": ("name",),
+    "upstream_update": ("name",),
+    "upstream_delete": ("name",),
+    "upstream_test": ("name",),
 }
 
 
@@ -740,6 +757,25 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "provider_credential_write": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    # Upstream CRUD
+    "upstream_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_test": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "upstream_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
     # Mutating, reversible, non-idempotent (each call has additional effect).
     "memory_add": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
@@ -896,6 +932,23 @@ def build_server(
     _register(
         "provider_credential_write",
         "Write provider credentials (gated; secrets never echoed back).",
+    )
+
+    # Upstream CRUD
+    _register("upstream_list", "List all configured upstream LLM providers.")
+    _register("upstream_get", "Get one upstream provider's full detail.")
+    _register("upstream_test", "Probe an upstream's reachability and auth status.")
+    _register(
+        "upstream_create",
+        "Register a new remote upstream LLM provider (gated).",
+    )
+    _register(
+        "upstream_update",
+        "Update an upstream provider's settings (visibility, filters, enabled) (gated).",
+    )
+    _register(
+        "upstream_delete",
+        "Remove an upstream provider (gated).",
     )
 
     return server

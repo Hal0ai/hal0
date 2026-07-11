@@ -35,6 +35,7 @@ from hal0.cli.bench_commands import bench as bench_command
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
+from hal0.cli.upstream_commands import app as upstream_app
 from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
@@ -66,6 +67,7 @@ app.add_typer(model_app, name="model")
 app.add_typer(memory_app, name="memory")
 app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
+app.add_typer(upstream_app, name="upstream")
 app.add_typer(capabilities_app, name="capabilities")
 app.add_typer(agent_app, name="agent")
 # Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps
