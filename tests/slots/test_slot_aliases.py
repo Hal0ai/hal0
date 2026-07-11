@@ -38,7 +38,7 @@ def test_agent_is_gpu_seeded_not_npu():
     assert "agent" in SEEDED_SLOTS
     assert "agent" not in NPU_SEEDED_SLOTS
     assert "agent-hermes" not in NPU_SEEDED_SLOTS
-    assert NPU_SEEDED_SLOTS == ("stt-npu", "embed-npu")
+    assert NPU_SEEDED_SLOTS == ("flm-stt", "flm-embed")
 
 
 def test_slot_aliases_map():
