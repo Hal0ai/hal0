@@ -261,6 +261,18 @@ header bell + inbox modal in the dashboard, with CLI parity via
 [docs/reference/mcp-tools.mdx](./docs/reference/mcp-tools.mdx), and
 [docs/guides/run-agents.mdx](./docs/guides/run-agents.mdx).
 
+The **hal0-brain steward** is a third, built-in persona wired to the
+dashboard's top-bar agent chat — no install step. It drives the platform
+through the full **74-tool `hal0-admin` catalog** (models, slots, stacks,
+profiles, settings, upstreams, benchmarks) under a **per-persona tool
+policy**: `tools_allowed` hides tools, `require_approval` tightens them,
+and a `POLICY_NO_LOOSEN` floor keeps destructive/secret-bearing tools
+(`*_delete`, `config_write`, `provider_credential_write`) always gated —
+no persona edit can disarm them. Gated calls **pause the turn** for
+inline approve/deny; a `[brain_chat]` config gives operators a hard kill
+switch, a read-only mode, loop-budget knobs, and a slot override (run the
+steward on any slot, e.g. `hal0/npu`) from **Settings → Agents / Brain**.
+
 ## Backends
 
 Each capability runs in its own container, supervised by
@@ -396,6 +408,15 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
 
 ### Shipped (v0.9 / public beta)
 
+- **hal0-brain steward** — the top-bar agent chat drives the whole
+  platform through the 74-tool `hal0-admin` catalog under a per-persona
+  tool policy, pausing turns on gated tools for inline approve/deny
+- **Upstream model controls** — manage external providers (OpenRouter,
+  Anthropic, OpenAI, Google AI Studio, Ollama, custom) with reactive
+  CRUD, per-upstream model filters, and an `enabled` kill-switch, all
+  from the CLI, MCP, and dashboard
+- **In-dashboard benchmarks** — the `hal0.bench` engine, `/api/benchmarks`,
+  and a Benchmarks page (roster / runs / evals / run-queue)
 - **Dashboard redesign + live telemetry header** — fixed-band layout
   with a unified-memory hero, and a combined throughput / GPU / CPU /
   NPU-occupancy metrics card that reads only from live probes
@@ -442,8 +463,8 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
 
 - **Federated memory** — recall across local + remote sources behind
   one memory surface (the MCP-client side shipped in v0.9)
-- **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,
-  plus curated loadout presets you can flash onto a fresh install
+- **Loadout presets** — curated model/slot presets you can flash onto
+  a fresh install (the in-dashboard benchmark runs already shipped)
 - **AUR PKGBUILD & Ubuntu PPA** — native distro packages on top of
   the install script; pacman and apt as first-class install paths
 - Light mode toggle

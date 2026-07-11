@@ -21,7 +21,40 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-07-11
+
+The steward release. The dashboard's agent chat graduates from a
+side-panel into a real control surface for the whole platform, external
+LLM providers get a first-class management surface, and the FLM/NPU
+stack settles onto canonical names with an automatic migration.
+
+### Highlights
+- **hal0-brain steward.** The top-bar agent chat now drives every platform surface: it runs the full 74-tool `hal0-admin` MCP catalog under a per-persona tool policy, **pauses turns on gated tools** for inline approve/deny, replays tool history across turns, and renders reasoning + tool cards inline (#1208, #1215, #1221, #1222, #1223).
+- **Upstream model controls.** A full management surface for external providers (OpenRouter, Anthropic, OpenAI, Google AI Studio, Ollama, custom) — reactive CRUD, per-upstream model filters, an `enabled` kill-switch, and CLI + MCP + dashboard parity (#1228).
+- **Graceful restarts keep your downloads.** Model pulls no longer block a clean `hal0-api` shutdown, so restarting mid-download no longer trips the 90s SIGKILL that was killing in-flight pulls (#1225).
+- **FLM / NPU canonicalization.** The NPU trio's shadow slots settle onto `flm-stt` / `flm-embed`, `/v1/models` alias routing is finalized, and a naming migration + `hal0 doctor` audits move existing installs onto the new scheme (#1210, #1229, #1231, #1214).
+- **Agent is the new anchor.** Seeded `agent` and `brain` slots replace `chat` as the default LLM anchor, and are seeded on every startup — not just fresh installs (#1204, #1217, #1218, #1230).
+- **`hal0 update` verification actually works again.** Release signing now dual-emits a Sigstore bundle (with an embedded Rekor timestamp) so cosign verification survives the short-lived Fulcio cert's expiry — `curl … | bash` installs and in-app updates were failing verification 100% of the time on v0.9.2/0.9.3/0.9.5. Fully back-compatible with already-deployed clients (#1159).
+
 ### Added
+- **hal0-brain steward / agent chat as a control surface.** The dashboard's top-bar agent chat becomes a first-class operator for the whole platform:
+  - **Full `hal0-admin` platform surface (#1208).** The admin MCP catalog grew from **28 to 74 tools**, replacing the slide-out's old hardcoded ~25-tool list, so the Brain can drive every surface end-to-end:
+    - *Models* — `model_inspect` (read an HF repo before pulling), register / add-from-path, metadata edit (PUT), in-place HF re-pull (`model_update`), pull status/cancel, scan (+preview), catalogue, update-check, and store show/set/migrate. Pulls always land in the operator's configured `[models].store` (re-read per call; the tool descriptions state the contract).
+    - *Slots* — load / unload / edit-config (PUT) / metrics / capacity / logs, on top of create / delete / restart / swap.
+    - *Stacks* — create / update / export / snapshot, joining apply / import / delete.
+    - *Profiles* — create / update, joining import / export / delete (author a profile straight from a model card).
+    - *Settings & platform* — `settings_get` / `schema` / `apply_plan` / `reload`, `upstream_list`, and benchmark runs/status/queue reads plus gated enqueue/control.
+    - Two new guards make catalog drift impossible to reintroduce: **import-time catalog validation** (classification ↔ REST-map ↔ annotations ↔ path-args must cohere) and a **`build_server` registration-completeness check**.
+  - **Per-persona tool policy (#1215).** The persona TOML's `tools_allowed` + `[persona.approval]` tables — previously decorative on the sidebar path — become an enforced server-side overlay (`admin.ToolPolicy`, fnmatch globs over tool names): `tools_allowed` hides tools from the surface entirely; `require_approval` tightens an autonomous tool behind the approval queue; `auto_approve` / `default_policy=auto-approve` grants standing approval to gated tools; `default_policy=never` refuses gated calls outright. Precedence is **hide > tighten > loosen > server verdict**. A **`POLICY_NO_LOOSEN` floor** means `model`/`slot`/`stack`/`profile_delete`, bulk `memory_delete`, `config_write`, and `provider_credential_write` can **never** be loosened by a persona edit; denials are typed (`mcp.tool_not_allowed` / `mcp.gated_tool_refused`) with audit rows.
+  - **Tool-use hardening (#1222)** — fixes for four failure modes seen live:
+    - *Runaway generation* — every round now carries `max_tokens` (default **4096**, payload-overridable); an uncapped completion against a slow local slot used to burn ~25k tokens and the 300s transport window, killing the turn before the first tool call.
+    - *Invisible approvals* — gated calls no longer park silently on the queue; the loop emits an `approval_required` SSE frame and **pauses (with keepalive pings) until the operator approves/denies**, then streams a second `tool_result` so the *same* turn continues (timeout falls back to the pending result).
+    - *Guessed argument names* — high-traffic tools ship real parameter schemas + explicit descriptions (no more `model_inspect` without `hf_repo` → 400, or `model_pull` with `model_id='org/repo'` → 405); path args containing `/` are rejected with an actionable hint.
+    - *Round budget* — `_MAX_ROUNDS` raised **8 → 90** (with per-round caps it's now a runaway backstop, not a working limit multi-step sessions kept hitting).
+    - *UI* — `useBoardChat.send()` now **replays full tool history** (calls + results) in the outgoing conversation; previously it rebuilt from user/assistant *text only*, so after one tool chain the model saw no tool calls in its own history and learned to skip tools and hallucinate results. Adds inline **approval cards**, a **Stop** button, an **auto-approve** toggle, and **new-session**.
+    - A **global port-claim registry** — the single authority for which slot owns which port — lands alongside in the same PR.
+  - **`[brain_chat]` server-side guardrails (#1221)**, enforced independently of the persona TOML (a persona edit can loosen the persona, never these): **`enabled`** is a hard kill switch (the endpoint refuses every turn — no LLM call, no board request); **`read_only`** lets reads through but refuses every mutating/admin-write tool at the single `_dispatch_tool` chokepoint (unknown tools fail closed); **`max_rounds` / `completion_timeout_s`** move the loop budget + per-round transport timeout out of module constants into config, with the schema as the single source of truth.
+  - **Agents / Brain settings + slot override (#1223).** A dashboard **Settings → "Agents / Brain"** section surfaces `[brain_chat]` (enabled + read-only toggles, `max_rounds` / `completion_timeout_s` inputs) plus a **slot-override picker** built from the live slots list — point the steward at any slot (e.g. `hal0/npu` to run it on the NPU chat slot). Model precedence is explicit: per-request model > `[brain_chat]` override > persona/default; the rows carry a live badge (`brain_chat.*` is apply-plan `immediate`).
 - **Upstream model controls** — full management surface for external LLM providers (OpenRouter, Anthropic, OpenAI, Google AI Studio, Ollama, custom):
   - Reactive CRUD: `POST/PATCH/DELETE /api/upstreams` (create prefills from the provider catalog via `catalog_id`); `upstreams.toml` stays canonical — every write rewrites it atomically before touching the running registry.
   - `hal0 upstream` CLI group (`list/show/create/update/delete/test/set-credentials`); `create --catalog openrouter --api-key` wires a provider end-to-end in one command.
@@ -30,11 +63,33 @@ applying. Add those subsections to a version's section to surface them; see
   - Per-upstream `model_filters` (`models` allowlist + `include`/`exclude` globs, exclude wins) curating `/v1/models` and `/api/models` advertising — dispatch stays unfiltered so hidden models remain addressable by name (per the 2026-07-06 upstream-model-filters spec).
   - `enabled` kill-switch on every upstream: `false` removes it from dispatch routing and the model catalog while retaining config + credentials.
   - `auth_key_present` in upstream serializations — whether the declared env-var actually holds a key (drives the dashboard auth badge), distinct from `auth_configured`.
+- **Install / lifecycle:**
+  - Safe capture of an existing Hermes install — `--adopt`, a fatal claim abort, foreign-gateway preflight, and ownership reconcile so hal0 can take over an already-running gateway without clobbering it (#1220).
+  - Static slot TOMLs plus the `agent` + `brain` slots are now seeded on **every `hal0-api` startup**, not only on fresh install (#1217, #1218, #1230).
+- **`hal0 doctor`** grows FLM / migration / profile audits and a `--force` delete for seeded slots (#1214).
+- **Dashboard / UI** — slots-page polish: unified headings + status indicators, an NPU activity tint, a full-height slot-logs drawer surfaced from the Logs page, an image-gen header pass, and a Documentation button in the topbar (#1205, #1207, #1209, #1213, #1216).
+- **`scripts/push-dev.sh`** — a push-based inner-loop deploy onto an editable box (#1193).
+
+### Changed
+- The default LLM anchor is the seeded **`agent`** slot; the `coder` seed is retired and `hal0/chat` resolves to `hal0/agent`, on every install path (#1204, #1217).
+- The NPU trio's shadow slots are canonicalized to `flm-stt` / `flm-embed`, with a startup reconcile that migrates legacy names (#1210).
+- FLM host pulls land in the operator's resolved model store (#1211).
 
 ### Fixed
+- Model pulls no longer block a graceful `hal0-api` restart — the shutdown path drains pulls instead of being SIGKILLed at the 90s deadline, which was killing in-flight downloads (#1225).
+- FLM model pulls that died instantly in production — uvloop rejects the user/group spawn kwargs the pull worker passed (#1192).
+- FLM host pulls now land in the resolved store with robust 0-byte progress reporting (#1211).
+- NPU-trio alias routing is finalized in the `/v1/models` route (#1231).
+- Static slot seeding no longer pollutes every test's zero-slot baseline (#1219).
+- Dashboard: real update-banner actions, NPU-grid colours keyed to the primary FLM slot, and a single unified "Needs attention" + bell notifications source (#1194, #1195).
 - `upstreams.toml` schema drift: `auth_style = "anthropic"`/`"google_query"` (long implemented by the dispatcher) now validate; `auth_header` is a real schema field so `auth_style = "header"` works; warmup vocabulary canonicalized to `none|ondemand|always` with `lazy`/`eager` accepted as normalizing aliases — a TOML authored in the runtime vocabulary no longer fails validation and silently empties the upstream registry.
 - `/api/models` no longer stamps slot-backed advertisements as `origin="upstream"`: the composite `hal0` aggregate and container slots serve local models, but a raw GGUF id whose casing differed from the registry id (e.g. `Qwopus3.5-4B-Coder-MTP-Q6_K`) surfaced in the Models page Upstream tab as "via hal0". Only genuine remotes contribute upstream rows, honoring `enabled`/`advertise_models`/`model_filters`.
 - `hal0 upstream` first cut sent field names the API rejects (`openai_base_url`, `kind`, `allow`/`deny`, `api_key`) — every write 422'd; request bodies now match the route contracts exactly and are pinned by tests.
+- **Release signing survives Fulcio cert expiry (#1159).** Keyless cosign signing issues a ~10-minute Fulcio certificate; the old detached `.sig` + `.crt` carried no Rekor Signed Entry Timestamp, so `curl … | bash` installs and in-app `hal0 update` — which run hours or days after signing — had no trusted timestamp to anchor the signature and failed `verify-blob` **100% of the time** on v0.9.2/0.9.3/0.9.5 (the in-CI self-verify passed only because it ran seconds after signing). Releases now **dual-emit** a Sigstore bundle (`.tar.gz.bundle`, embedding the cert + signature + Rekor SET) alongside the legacy pair; the manifest carries `bundle_url` next to `sig_url`/`cert_url`, and `installer/bootstrap.sh` + the updater prefer `cosign verify-blob --bundle`, falling back to the legacy pair on manifests without it — so already-deployed (≤ v0.9.6.1) clients keep verifying through the transition. The legacy fields drop once fleet adoption is confirmed.
+
+### Migrations
+- **FLM / NPU naming migration (#1229).** Existing NPU-trio installs move from the legacy shadow-slot names to canonical `flm-stt` / `flm-embed`. The migration runs automatically on startup, and `hal0 doctor` audits + repairs any slot left on the old scheme. Custom `profiles.toml` overrides that reference the old names should be updated.
+- **Agent replaces chat as the LLM anchor (#1204, #1217).** The `coder` seed is retired and `hal0/chat` now resolves to `hal0/agent`. Operators who pinned `hal0/chat` in a custom config should confirm the `agent` slot is seeded (it is, on startup) or repoint to `hal0/agent`.
 
 ## [0.9.6.1] — 2026-07-11
 
