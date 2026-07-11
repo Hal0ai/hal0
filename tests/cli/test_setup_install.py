@@ -1,5 +1,7 @@
-from hal0.cli.setup_install import _apply_in_process, choose_apply_mode
-from hal0.install.orchestrate import SetupResult
+import httpx
+
+from hal0.cli.setup_install import _apply_in_process, _apply_via_api, choose_apply_mode
+from hal0.install.orchestrate import Selections, SetupResult
 
 
 def test_mode_in_process_when_api_down(monkeypatch):
@@ -73,3 +75,83 @@ async def test_apply_in_process_no_token_passes_none(monkeypatch):
     await _apply_in_process(sel=object(), hw=object(), no_pull=True)
 
     assert captured["hf_token"] is None
+
+
+# ── _apply_via_api: graceful 409 handling (issue #1158) ──────────────────────
+
+
+def _empty_selections() -> Selections:
+    return Selections(storage_dir="", slots=[], extensions={})
+
+
+class _FakeAsyncClient:
+    """Stand-in for ``httpx.AsyncClient`` that returns a canned POST response.
+
+    ``apply-selections`` is POSTed; ``_dashboard_url`` issues a GET we don't
+    care about here, so GET raises and the URL resolver falls back to the API
+    base (its documented degradation)."""
+
+    _post_response: httpx.Response
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, **kwargs):
+        return type(self)._post_response
+
+    async def get(self, url, **kwargs):
+        raise httpx.ConnectError("dashboard url probe not stubbed")
+
+
+def _install_fake_client(monkeypatch, response: httpx.Response) -> None:
+    _FakeAsyncClient._post_response = response
+    monkeypatch.setattr("hal0.cli.setup_install.httpx.AsyncClient", _FakeAsyncClient)
+
+
+async def test_apply_via_api_409_is_recoverable(monkeypatch, capsys):
+    """A 409 from apply-selections must NOT abort setup with an HTTPStatusError.
+
+    The endpoint is idempotent/re-runnable, so a conflict means "already applied
+    or apply in progress" — we surface the message and continue (issue #1158)."""
+    resp = httpx.Response(
+        status_code=409,
+        json={
+            "error": {
+                "code": "install.apply_in_progress",
+                "message": "an apply is already in progress",
+                "details": {},
+            }
+        },
+        request=httpx.Request("POST", "http://127.0.0.1:8080/api/install/apply-selections"),
+    )
+    _install_fake_client(monkeypatch, resp)
+
+    # Must not raise (previously raise_for_status() blew up here).
+    await _apply_via_api(_empty_selections())
+
+    out = capsys.readouterr().out
+    assert "already" in out.lower()
+    assert "an apply is already in progress" in out
+
+
+async def test_apply_via_api_non_conflict_error_still_raises(monkeypatch):
+    """A genuine server failure (500) still surfaces — we only soften 409."""
+    resp = httpx.Response(
+        status_code=500,
+        json={"error": {"code": "system.internal", "message": "boom"}},
+        request=httpx.Request("POST", "http://127.0.0.1:8080/api/install/apply-selections"),
+    )
+    _install_fake_client(monkeypatch, resp)
+
+    try:
+        await _apply_via_api(_empty_selections())
+    except httpx.HTTPStatusError:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected HTTPStatusError for a 500 response")
