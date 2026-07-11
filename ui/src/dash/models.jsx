@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -17,7 +17,7 @@ import { MODEL_SORT_FIELDS, sortModels, fmtAdded } from '@/dash/model-sort.js'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
-// ── Simplified filter chips ────────────────────────────────────────────
+// ── Simplified filter chips ───────────────────────────────────────
 // Each chip is a multi-select toggle with OR semantics (empty = show all).
 // "DENSE" means neither MTP nor MOE; checked by absence of those tags.
 const FILTER_CHIPS = [
@@ -38,7 +38,7 @@ function modelMatchesFilters(m, filterSel) {
   });
 }
 
-// ── Pagination ─────────────────────────────────────────────────────────
+// ── Pagination ─────────────────────────────────────────────────
 const PER_PAGE_OPTS = [10, 25, 50, "all"];
 
 function usePageReset(deps) {
@@ -51,7 +51,7 @@ function usePageReset(deps) {
   return changed;
 }
 
-// ── ModelsView ─────────────────────────────────────────────────────────
+// ── ModelsView ────────────────────────────────────────────────
 function ModelsView() {
   const [selId, setSelId] = useStateM(null);
   // Simplified multi-select OR filters
@@ -84,6 +84,22 @@ function ModelsView() {
   // mount; /api/models then carries per-row `update_available` flags.
   useModelUpdatesCheck();
   const updateAll = useModelUpdateAll();
+  const forceCheck = useModelUpdatesForceCheck();
+  const onCheckUpdates = async () => {
+    try {
+      const res = await forceCheck.mutateAsync();
+      window.__hal0Toast && window.__hal0Toast(
+        res.updates_available > 0
+          ? `${res.updates_available} model update${res.updates_available === 1 ? "" : "s"} available`
+          : `All ${res.checked} checked model${res.checked === 1 ? "" : "s"} up to date`,
+        "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Update check failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
   const updatable = modelList.filter(m => m.installed && m.update_available);
   const onUpdateAll = async () => {
     if (!updatable.length) return;
@@ -119,14 +135,14 @@ function ModelsView() {
 
   const selected = modelList.find(m => m.id === selId) || modelList[0];
 
-  // ── isComfy helper ──────────────────────────────────────────────────
+  // ── isComfy helper ───────────────────────────────────────────
   const isComfy = m =>
     m.owned_by === "comfyui" ||
     (Array.isArray(m.backends) && m.backends.includes("comfyui")) ||
     !!m.comfyui_category ||
     m.type === "image";
 
-  // ── Combined filter (text + OR chips) ───────────────────────────────
+  // ── Combined filter (text + OR chips) ──────────────────────────────
   const fil = m => {
     if (!modelMatchesFilters(m, filterSel)) return false;
     if (q.trim()) {
@@ -139,7 +155,7 @@ function ModelsView() {
 
   const bySort = rows => sortModels(rows, sortField, sortDir);
 
-  // ── Tab datasets ────────────────────────────────────────────────────
+  // ── Tab datasets ────────────────────────────────────────────
   // Inference: installed + blessed + user.* (not upstream, not comfy)
   const installed = modelList.filter(m => m.installed && !isComfy(m) && !isUpstreamModel(m) && fil(m));
   const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && !isComfy(m) && !isUpstreamModel(m) && fil(m));
@@ -170,7 +186,7 @@ function ModelsView() {
   for (const cat of comfyCats) comfyRows.push(...bySort(comfyByCat[cat]));
   const comfyTotal = modelList.filter(m => m.installed && isComfy(m)).length;
 
-  // ── Pagination logic ────────────────────────────────────────────────
+  // ── Pagination logic ───────────────────────────────────────
   const activeRows = tab === "inference" ? inferenceRows
     : tab === "upstream" ? upstreamRows
     : comfyRows;
@@ -206,7 +222,7 @@ function ModelsView() {
 
   const pullsList = usePullsList();
 
-  // ── Render ──────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────
   const tabLabel = tab === "inference" ? `Inference Models${inferenceRows.length ? ` · ${inferenceRows.length}` : ""}`
     : tab === "upstream" ? `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`
     : `Image / ComfyUI${comfyTotal ? ` · ${comfyTotal}` : ""}`;
@@ -217,7 +233,7 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
-        {updatable.length > 0 && (
+        {updatable.length > 0 ? (
           <button
             className="btn"
             data-testid="mdl-update-all"
@@ -225,6 +241,17 @@ function ModelsView() {
             title="Re-pull every installed model whose HuggingFace file has changed"
             onClick={onUpdateAll}
           >{Icons.download} {updateAll.isPending ? "Starting…" : `Update all (${updatable.length})`}</button>
+        ) : (
+          /* Everything current → the update surface would otherwise be
+             invisible. Keep an explicit check affordance so the feature is
+             discoverable and the TTL cache can be bypassed on demand. */
+          <button
+            className="btn ghost"
+            data-testid="mdl-check-updates"
+            disabled={forceCheck.isPending}
+            title="Compare every installed model against its HuggingFace repo now"
+            onClick={onCheckUpdates}
+          >{Icons.download} {forceCheck.isPending ? "Checking…" : "Check updates"}</button>
         )}
         <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
@@ -410,7 +437,7 @@ function ModelsView() {
   );
 }
 
-// ── HF Search Panel ───────────────────────────────────────────────────
+// ── HF Search Panel ──────────────────────────────────────────────
 function HfSearchPanel({ q, onQ, onPick, onClose }) {
   const search = useHfSearch(q);
   const rows = search.data?.results ?? [];
@@ -469,7 +496,7 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
   );
 }
 
-// ── ModelRow ──────────────────────────────────────────────────────────
+// ── ModelRow ──────────────────────────────────────────────────
 function ModelRow({ model, selected, onSelect }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
   return (
@@ -504,7 +531,7 @@ function ModelRow({ model, selected, onSelect }) {
   );
 }
 
-// ── ModelDetail ───────────────────────────────────────────────────────
+// ── ModelDetail ──────────────────────────────────────────────
 function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   const pull = usePullJob();
   const slotsQuery = useSlots();
@@ -702,7 +729,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   );
 }
 
-// ── DownloadRow ───────────────────────────────────────────────────────
+// ── DownloadRow ──────────────────────────────────────────────
 // One row in the Downloads pane. Owns its own cancelling state via
 // useStateM — must be its own component because it is rendered from a
 // list (jobs.map). Calling a hook inside a .map() callback causes
@@ -786,7 +813,7 @@ function DownloadRow({ job, clearJob }) {
   );
 }
 
-// ── DownloadsPane ─────────────────────────────────────────────────────
+// ── DownloadsPane ────────────────────────────────────────────
 function DownloadsPane() {
   const { jobs } = usePullsList();
   const clearJob = useClearPullJob();
