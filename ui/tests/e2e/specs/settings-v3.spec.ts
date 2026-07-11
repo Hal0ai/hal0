@@ -15,11 +15,11 @@
 import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
-  'General', 'Slots', 'NPU', 'Memory', 'Voice', 'Image-gen', 'Storage', 'Secrets', 'Updates', 'Advanced', 'About',
+  'General', 'Slots', 'NPU', 'Memory', 'Agents / Brain', 'Voice', 'Image-gen', 'Storage', 'Secrets', 'Updates', 'Advanced', 'About',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
-  test('renders rail nav with all 11 sections', async ({ page }) => {
+  test('renders rail nav with all 12 sections', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.view .vh h1')).toHaveText('Settings')
     const nav = page.locator('.settings-nav .nav-item')
