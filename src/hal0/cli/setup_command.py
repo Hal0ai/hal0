@@ -26,8 +26,11 @@ from hal0.install.profile_derive import npu_healthy
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
 #: tts) and adds rerank/vision on free ports in the 8081-8099 pool. ``img`` is
 #: handled via the ComfyUI ``comfyui_defaults`` sidecar, not this table.
+#: The chat capability's slot is NAMED ``agent`` per ADR-0023: `agent` is the
+#: default LLM anchor every ``hal0/<slot>`` fallback chain ends in, so first
+#: run must seed a slot by that name or the chains dead-end on fresh boxes.
 _SETUP_SLOTS = {
-    "chat": ("chat", 8081),
+    "chat": ("agent", 8081),
     "coder": ("coder", 8082),
     "embed": ("embed", 8083),
     "stt": ("stt", 8084),
@@ -35,6 +38,14 @@ _SETUP_SLOTS = {
     "rerank": ("rerank", 8086),
     "vision": ("vision", 8087),
 }
+
+#: The dashboard steward's dedicated slot, scaffolded (empty, chat-capability
+#: device derivation) alongside the table above. The sidebar agent chat targets
+#: ``hal0/brain`` and falls back to ``agent`` while this slot has no model —
+#: seeding it makes the intent visible in the dashboard instead of the chat
+#: failing opaquely on fresh installs. Port 8089: 8088 belongs to the flm
+#: static seed (installer/etc-hal0/slots/flm.toml).
+_BRAIN_SLOT = ("brain", 8089)
 
 #: Capabilities scaffolded (empty, no model) by ``--auto``. ``coder`` is added
 #: separately, gated on an agent extension. ``apply_setup`` derives each slot's
@@ -85,9 +96,10 @@ def build_auto_selections(
     unset for the operator to choose later.  We never pick a model for the user.
 
     When *with_extensions* is ``False`` every extension is disabled (all keys
-    present, all values ``False``).  The coder/agent slot is gated on an agent
+    present, all values ``False``).  The coder slot is gated on an agent
     extension being enabled, so it is skipped when extensions are off.  The
-    chat slot is always included.
+    ``agent`` slot (the chat capability's slot — ADR-0023's LLM anchor) and
+    the ``brain`` scaffold are always included.
 
     When *with_slots* is ``False`` NO model picks are seeded at all — the
     returned selection has an empty slot list and no ComfyUI capability
@@ -119,6 +131,12 @@ def build_auto_selections(
             name, port = _SETUP_SLOTS[cap]
             if name not in existing_slots:
                 slots.append(SlotSelection(cap, name, port, None))
+        # The steward's `brain` slot — an empty chat-capability scaffold so
+        # hal0/brain has a visible home (falls back to `agent` until a model
+        # is bound). Same never-overwrite rule as the capability slots.
+        brain_name, brain_port = _BRAIN_SLOT
+        if brain_name not in existing_slots:
+            slots.append(SlotSelection("chat", brain_name, brain_port, None))
         # Coder slot only when an agent extension is enabled (and not present).
         if (
             any(_kind(eid) == "agent" and on for eid, on in ext.items())

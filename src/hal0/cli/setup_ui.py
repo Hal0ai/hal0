@@ -16,7 +16,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-from hal0.cli.setup_command import _SETUP_SLOTS
+from hal0.cli.setup_command import _BRAIN_SLOT, _SETUP_SLOTS, _existing_slot_names
 from hal0.cli.setup_copy import PANE_COPY
 from hal0.cli.setup_plan import _free_space_gib, _port_in_use
 from hal0.config.schema import HardwareInfo
@@ -630,6 +630,13 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
         s = _provision_slot("main", "chat", hw, name, port)
         if s:
             slots.append(s)
+        # The steward's `brain` slot rides along silently — an empty
+        # chat-capability scaffold (no model prompt): the sidebar agent
+        # chat targets hal0/brain and falls back to `agent` until the
+        # operator binds a model. Never overwrites an existing config.
+        brain_name, brain_port = _BRAIN_SLOT
+        if brain_name not in _existing_slot_names():
+            slots.append(SlotSelection("chat", brain_name, brain_port, None))
     if "agent" in steps:
         name, port = _SETUP_SLOTS["coder"]
         s = _provision_slot("agent", "coder", hw, name, port, prefer_coder=True)
