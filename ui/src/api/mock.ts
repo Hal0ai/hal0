@@ -1007,6 +1007,23 @@ function buildBankReflect() {
   }
 }
 
+// #1228 upstream model controls — UpstreamProvidersPanel (Slots ▸ Endpoints)
+// calls useUpstreams()/useProvidersCatalog() unconditionally on mount. Never
+// baked into HAL0_DATA, so under forced-mock the GET fell through to the
+// dev-server proxy (no backend behind it), returning a non-array body and
+// crashing `(upstreamsQuery.data ?? []).filter` — took the whole Endpoints
+// tab down via the view error boundary. Empty defaults match the real
+// fresh-install state (no upstreams.toml entries) and keep the row count at
+// zero so LocalEndpointsPanel's `.eplist .eprow` count assertions (which
+// share the `.eprow` class with UpstreamRow) aren't inflated.
+function buildUpstreams() {
+  return data().upstreams ?? []
+}
+
+function buildProvidersCatalog() {
+  return data().providersCatalog ?? {}
+}
+
 // ADR-0023 graph-extraction gate status (served by routes/memory.py, not the
 // admin proxy). Mocked so the Agent pointer's "Graph extraction" panel renders
 // a clean OFF state in forced-mock mode instead of a 500.
@@ -1055,6 +1072,8 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/profiles$/, build: buildProfiles, networkFirst: true },
   { re: /^\/api\/stacks$/, build: buildStacksList, networkFirst: true },
   { re: /^\/api\/chat-templates$/, build: buildChatTemplates, networkFirst: true },
+  { re: /^\/api\/upstreams$/, build: buildUpstreams },
+  { re: /^\/api\/providers\/catalog$/, build: buildProvidersCatalog },
   // ── Memory (Hindsight) — engine + bank-scoped surface ────────────
   // Forced-mock + 404-fallback story for the Memory graph overhaul. The
   // bank id is captured as group 1. ORDER MATTERS: the more-specific

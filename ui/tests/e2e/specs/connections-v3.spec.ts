@@ -111,12 +111,22 @@ test.describe('Local endpoints (Slots ▸ Endpoints, #slots/endpoints)', () => {
     await expect(page.locator('.view .vh h1')).toHaveText('Slots')
     await expect(page.locator('.cpane.live')).toBeVisible()
     await expect(page.locator('.cpane-title', { hasText: 'Local endpoints' })).toBeVisible()
+    // Regression (#1228 introduced UpstreamProvidersPanel on this same tab,
+    // reading GET /api/upstreams via useUpstreams() — unmocked in mock.ts
+    // meant the fetch fell through to the (absent) backend and threw on
+    // render, taking the whole Endpoints tab down via the view error
+    // boundary, not just its own pane). Assert it renders its legitimate
+    // empty state instead of crashing.
+    await expect(page.locator('.cpane-title', { hasText: 'Upstream providers' })).toBeVisible()
+    await expect(page.getByText('No external providers configured.')).toBeVisible()
   })
 
   test('local endpoints list one row per slot', async ({ page }) => {
     // The default mock state carries 9 slots (one row per useSlots() entry,
     // including the disabled `legacy` slot; the synthetic hal0 endpoint is
-    // filtered out).
+    // filtered out). UpstreamRow shares the `.eprow` class with EndpointRow,
+    // so this count also pins that the (empty-by-default) upstreams mock
+    // contributes zero rows.
     await expect(page.locator('.eplist .eprow')).toHaveCount(9)
     const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
     await expect(primary.locator('.ep-dot.serving')).toBeVisible()
