@@ -1,11 +1,15 @@
 // hal0 dashboard — collectible agent cards (Agents Overview).
 //
 // Two presentational cards, productionised from Design/agent-card-kit:
-//   LiveAgentCard   — the `serving` foil (Hermes). Full-bleed portrait,
-//                     live health (status dot + throughput + context meter)
-//                     on the front, abilities/skills on the flip side, and a
-//                     quick-actions zone (Logs · Persona) above a primary
-//                     Restart button pinned to the very bottom edge.
+//   LiveAgentCard   — the `serving` foil (Hermes · Pi). Front face is either
+//                     a full-bleed portrait (Hermes' `art`) or the abstract
+//                     grid+mark treatment (Pi's `logo`, no portrait art),
+//                     with live health (status dot + throughput + context
+//                     meter) on top. Flips to abilities/skills, then an
+//                     optional quick-actions zone — Logs/Persona/Restart only
+//                     render for agents that actually support them (Hermes
+//                     is a systemd service; Pi is a CLI tool with none of
+//                     the three).
 //   LockedAgentCard — a roadmap entry behind a grey "coming soon" mask. The
 //                     dummy module tile + identity show through; the card is
 //                     non-interactive (no flip) until the integration ships.
@@ -106,7 +110,7 @@ function HealthBlock({ health, statusCls }) {
 
 const RESTART_LABELS = { idle: "Restart", busy: "Restarting…", ok: "Restarted", err: "Restart failed" };
 
-// ── live foil card (Hermes) ─────────────────────────────────────────
+// ── live foil card (Hermes · Pi) ─────────────────────────────────────
 function LiveAgentCard({ agent, health, statusCls, statusLabel, restart, onLogs, onPersona }) {
   const Icon = window.Icon;
   const StatusDot = window.StatusDot;
@@ -114,13 +118,15 @@ function LiveAgentCard({ agent, health, statusCls, statusLabel, restart, onLogs,
   const { innerRef, flipped, setFlipped, reduce } = useFlip();
   const { tiltRef, onMove, onLeave } = useTilt(reduce, { x: -10, y: 12 });
   const stop = (e) => e.stopPropagation();
-  const rState = restart.state || "idle";
+  const rState = (restart && restart.state) || "idle";
   const restartBusy = rState === "busy";
+  const hasActions = !!(onLogs || onPersona || restart);
 
   return (
     <div
       className="fcard"
-      data-testid="agent-card-hermes"
+      data-testid={"agent-card-" + a.id}
+      style={a.el ? { "--el": a.el, "--el-glow": a.elGlow } : undefined}
       onMouseMove={onMove}
       onMouseLeave={onLeave}
       onClick={() => setFlipped((f) => !f)}
@@ -131,7 +137,24 @@ function LiveAgentCard({ agent, health, statusCls, statusLabel, restart, onLogs,
           {/* ── FRONT ── */}
           <div className="fc-face fc-front" style={{ opacity: flipped ? 0 : 1 }}>
             <div className="foilb-clip">
-              <img className="foilb-img" src={a.art} alt={a.name} />
+              {/* Agents with a full-bleed portrait (Hermes) render it; agents
+                  with only a logo mark (Pi) reuse the abstract grid+mark
+                  treatment authored for the roadmap cards. */}
+              {a.art ? (
+                <img className="foilb-img" src={a.art} alt={a.name} />
+              ) : (
+                <div className="pi-stage">
+                  <span className="pi-grid" />
+                  <div className="pi-mark-wrap">
+                    <img
+                      className="pi-mark"
+                      src={a.logo}
+                      alt={a.name + " logo"}
+                      style={{ width: (a.logoScale || 0.86) * 100 + "%", height: (a.logoScale || 0.86) * 100 + "%" }}
+                    />
+                  </div>
+                </div>
+              )}
               <span className="foilb-vig" />
               <span className="foilb-scan" />
               <span className="foilb-holo" />
@@ -194,26 +217,38 @@ function LiveAgentCard({ agent, health, statusCls, statusLabel, restart, onLogs,
               </div>
             </div>
 
-            {/* quick actions — secondary row, then Restart pinned to the bottom */}
-            <div className="fcb-actions" onClick={stop}>
-              <div className="fcb-act-row">
-                <button className="fc-act" data-testid="agent-action-logs" onClick={(e) => { stop(e); onLogs && onLogs(); }}>
-                  <Icon name="logs" size={12} sw={1.5} />Logs
-                </button>
-                <button className="fc-act" data-testid="agent-action-persona" onClick={(e) => { stop(e); onPersona && onPersona(); }}>
-                  <Icon name="agent" size={12} sw={1.5} />Persona
-                </button>
+            {/* quick actions — secondary row, then Restart pinned to the bottom.
+                CLI-shape agents (Pi) have no systemd unit to restart and no
+                persona store, so the block only renders what applies. */}
+            {hasActions && (
+              <div className="fcb-actions" onClick={stop}>
+                {(onLogs || onPersona) && (
+                  <div className="fcb-act-row">
+                    {onLogs && (
+                      <button className="fc-act" data-testid="agent-action-logs" onClick={(e) => { stop(e); onLogs(); }}>
+                        <Icon name="logs" size={12} sw={1.5} />Logs
+                      </button>
+                    )}
+                    {onPersona && (
+                      <button className="fc-act" data-testid="agent-action-persona" onClick={(e) => { stop(e); onPersona(); }}>
+                        <Icon name="agent" size={12} sw={1.5} />Persona
+                      </button>
+                    )}
+                  </div>
+                )}
+                {restart && (
+                  <button
+                    className={"fc-restart" + (rState !== "idle" ? " " + rState : "")}
+                    data-testid="agent-action-restart"
+                    disabled={restartBusy}
+                    onClick={(e) => { stop(e); restart.onClick && restart.onClick(); }}
+                  >
+                    <Icon name="refresh" size={13} sw={1.7} className={restartBusy ? "spin" : undefined} />
+                    {RESTART_LABELS[rState] || RESTART_LABELS.idle}
+                  </button>
+                )}
               </div>
-              <button
-                className={"fc-restart" + (rState !== "idle" ? " " + rState : "")}
-                data-testid="agent-action-restart"
-                disabled={restartBusy}
-                onClick={(e) => { stop(e); restart.onClick && restart.onClick(); }}
-              >
-                <Icon name="refresh" size={13} sw={1.7} className={restartBusy ? "spin" : undefined} />
-                {RESTART_LABELS[rState] || RESTART_LABELS.idle}
-              </button>
-            </div>
+            )}
           </div>
 
         </div>
