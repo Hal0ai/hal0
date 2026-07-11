@@ -1092,6 +1092,12 @@ a { color: inherit; text-decoration: none; }
 .memmap-legend .name { color: var(--fg-2); flex: 1; }
 .memmap-legend .sz { color: var(--fg-4); }
 
+/* #373: per-slot memory sparkline — sits between the swatch and the slot name. */
+.memmap-spark { display: inline-flex; align-items: flex-end; gap: 1px; width: 36px; height: 14px; vertical-align: middle; }
+.memmap-spark i { flex: 1; min-height: 2px; background: var(--accent); border-radius: 0; opacity: 0.55; }
+.memmap-spark i:last-child { opacity: 1; }
+
+
 /* PVE-detected-unconfigured nudge band — Memory map sidebar + expanded.
    Lives below the bar with an amber border-top. */
 .memmap-pve-nudge {

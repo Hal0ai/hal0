@@ -12,6 +12,7 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useProxmoxSettings } from '@/api/hooks/useProxmoxSettings'
 import { isSlotLive } from './slot-status.js'
+import { useSlotMemoryHistory } from '@/api/hooks/useSlotMemoryHistory'
 const SAFETY_MARGIN_GB = 2
 const MB_PER_GB = 1024
 
@@ -119,6 +120,7 @@ export function useMemoryMapModel() {
   const slotsQ = useSlots()
   const pveSettings = useProxmoxSettings()
   const slots = slotsQ.data || []
+  const slotMemoryHistory = useSlotMemoryHistory()  // #373: per-slot ring buffer
 
   // Pool total = the real ceiling for GPU model loads. On UMA (Strix Halo)
   // that is the GTT cap (amdgpu.gttsize, ~80 GiB — live as
@@ -281,6 +283,7 @@ export function useMemoryMapModel() {
         }))
       })(),
     },
+    memoryHistory: slotMemoryHistory,  // #373: per-slot memory sparkline data
     headroom: { availableGb, limitedBy },
     loading: hw.isLoading || stats.isLoading || slotsQ.isLoading || pveSettings.isLoading,
   }
@@ -400,10 +403,26 @@ function slotLegendSub(slot) {
   return `${slot.device}${slot.approx ? ' · ≈' : ''}`
 }
 
-function LegendRow({ swatch, name, sub, sz }) {
+// --- Memory sparkline (#373) ------------------------------------
+// Mini bar chart: one vertical bar per sample, scaled to the local max.
+// Follows the same pattern as slots.jsx Spark + ThroughputCard2 spark-bar.
+function MemorySpark({ ticks }) {
+  if (!ticks || ticks.length < 2) return null
+  const max = Math.max(...ticks.map(t => t.bytesGb), 0.01)
+  return (
+    <span className="memmap-spark" title={`${ticks.length} samples · ${fmtGb(ticks[ticks.length - 1].bytesGb)} now`}>
+      {ticks.map((t, i) => (
+        <i key={t.ts} style={{ height: `${Math.max((t.bytesGb / max) * 100, 8)}%` }} />
+      ))}
+    </span>
+  )
+}
+
+function LegendRow({ swatch, name, sub, sz, sparkTicks }) {
   return (
     <div className="ln mono">
       <span className="sw" style={{ background: swatch }} />
+      {sparkTicks && sparkTicks.length >= 2 && <MemorySpark ticks={sparkTicks} />}
       <span className="name">{name}</span>
       {sub && <span className="dim memmap-legend-sub">{sub}</span>}
       <span className="sz">{fmtGb(sz)}</span>
@@ -413,7 +432,7 @@ function LegendRow({ swatch, name, sub, sz }) {
 
 export function MemoryMap({ variant = 'sidebar', onConfigure }) {
   const model = useMemoryMapModel()
-  const { pool, host, self, headroom, loading } = model
+  const { pool, host, self, headroom, loading, memoryHistory } = model
   const total = pool.totalGb
   // Headline "used" = model memory held by loaded models (+ KV), NOT host
   // system RAM. Host pressure is a separate secondary block (expanded).
@@ -446,6 +465,11 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
               name={s.name}
               sub={`${slotLegendSub(s)}${s.modelId ? ' · ' + s.modelId : ''}`}
               sz={s.bytesGb}
+              sparkTicks={
+                memoryHistory && memoryHistory[s.name] && memoryHistory[s.name].length >= 2
+                  ? memoryHistory[s.name]
+                  : null
+              }
             />
           ))}
           <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
