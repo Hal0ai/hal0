@@ -83,6 +83,72 @@ Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads
 while still routing anything destructive through a human.
 </Aside>
 
+## The hal0-brain steward: driving the platform from chat
+
+The bundled Hermes agent above is a full service. hal0 also ships a lighter,
+**built-in** operator: **hal0-brain**, a persona wired directly to the
+dashboard's top-bar agent chat. There's nothing to install — it's always there,
+and its job is narrow and concrete: *run the platform for you*. Ask it to
+"download and set up a coding model" or "benchmark the model on the NPU slot"
+and it drives the same admin surfaces you'd otherwise click through.
+
+Under the hood the steward is a tool-calling loop over the **full 74-tool
+`hal0-admin` MCP catalog** — models, slots, stacks, profiles, settings,
+upstreams, and benchmarks. Each turn hal0 hands the model the catalog as
+structured tool schemas; the model emits a tool call; hal0 dispatches it through
+the same admin core the CLI and MCP clients use; the result streams back as a
+folded **tool card**, and the loop continues until the task is done (reasoning is
+split out of the reply and rendered as a foldable "thinking" block). Gated tools
+— pulls, deletes, slot/stack/config writes — don't just run: the turn **pauses**
+and an approval card appears inline, resolving through the same
+[approval queue](#the-approval-queue-a-human-in-the-loop) as the service agent. A
+`[brain_chat]` config block adds a hard kill switch, a read-only mode, a
+per-round token cap, and a round budget (`max_rounds`) enforced server-side,
+independent of the persona — a persona edit can loosen the persona, never these.
+
+### Why it runs on a 1B model
+
+The steward is deliberately designed so a **very small local model** — one
+billion parameters — can drive the whole platform. The trick is that the model
+is never asked to *reason its way* to an answer; it's asked to *pick a tool and
+fill in its arguments*. hal0 moves the intelligence out of the weights and into
+the scaffolding around them:
+
+- **Real tool schemas, not guesswork.** Every high-traffic admin tool ships an
+  explicit argument schema and description, so the model fills a small
+  structured form (`model_pull(model_id=…)`) instead of inventing an API. This
+  alone turned "the small model 400s and 405s on every call" into reliable
+  dispatch.
+- **Tool-history replay.** The model sees its *own* prior tool calls and their
+  results in context on every turn. Without that, a small model quickly "forgets"
+  it has tools and starts narrating imaginary results; with it, it keeps calling
+  tools across a long, multi-step task.
+- **Many small steps, not one big leap.** A per-round `max_tokens` cap plus a
+  generous round budget mean the model takes lots of cheap, bounded steps rather
+  than one brittle mega-completion — exactly the shape a 1B model is good at.
+- **The guardrails are external.** Because the per-persona tool policy and a
+  `POLICY_NO_LOOSEN` floor gate every destructive tool *at the platform*, you
+  don't have to trust the model's judgment: a weak model simply **cannot** delete
+  a slot or write a credential without your sign-off. That's what makes it safe
+  to hand the keys to a 1B model in the first place.
+
+The net effect: the model is the *hands*, hal0 is the *rails*. A 1B model is
+plenty to read a request, choose the right admin tool, and fill its arguments —
+and anything that could go wrong is caught by the schema, the replayed history,
+or the approval floor, rather than by the model needing to be clever.
+
+<Aside type="tip" title="Recommended steward model: MiniCPM5-1B">
+The reference steward model is **MiniCPM5-1B** — a one-billion-parameter dense
+model with unusually strong tool-calling for its size, small enough to stay
+resident and answer in well under a second on Strix Halo. Run it through the
+**VKFPX DENSE no-jinja** profile: it's a base model with a baked-in chat
+template, so it needs no Jinja templating and loads FP-accelerated on the iGPU.
+Register the `minicpm5-1b-fable5-q8` (quality) or `-q4` (fastest) build and point
+the `brain` slot at it — or, if you'd rather not dedicate a slot, set a **slot
+override** under *Settings → Agents / Brain* to run the steward on any slot you
+already have warm.
+</Aside>
+
 ## Spending budgets
 
 For agents that can make paid calls (such as routing to an external provider —
