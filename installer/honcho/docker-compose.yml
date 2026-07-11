@@ -42,12 +42,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
+      # CMD-SHELL (not a CMD array): podman's healthcheck runner word-splits
+      # array args, mangling the python -c payload into a SyntaxError.
       test:
         [
-          "CMD",
-          "/app/.venv/bin/python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()",
+          "CMD-SHELL",
+          "/app/.venv/bin/python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()\"",
         ]
       interval: 5s
       timeout: 5s
