@@ -8,11 +8,20 @@ preflight battery post-install without touching the installer.
 Locating the script:
 
 * ``HAL0_PREFLIGHT_SH`` env var wins, when set — useful for tests and
-  for the eventual FHS install layout (``/opt/hal0/installer/lib/...``).
-* Otherwise we walk up from this module's path to find a sibling
-  ``installer/lib/preflight.sh``. ``install.sh`` does an editable
-  ``pip install -e <repo>`` today, so ``Path(hal0.__file__).parents[2]``
-  resolves to the repo root in every install.sh-produced environment.
+  for install layouts this module doesn't know about.
+* In an editable checkout (``pip install -e <repo>``, e.g. ``--dev``
+  installs) ``hal0.__file__`` is ``<repo>/src/hal0/__init__.py``, so
+  ``Path(hal0.__file__).parents[2]`` resolves to the repo root.
+* ``installer/install.sh`` normally builds a real wheel into a shared
+  venv (prod FHS layout), so ``hal0.__file__`` lives under
+  ``site-packages/`` with no repo neighbours and the editable probe
+  above always misses. We fall back to the FHS release tree instead:
+  ``<HAL0_FHS_ROOT or HAL0_PREFIX>/current/installer/lib/preflight.sh``,
+  defaulting to ``/usr/lib/hal0/current`` (via
+  :func:`hal0.config.paths.usr_lib`, which also honours ``HAL0_HOME``
+  for tests) when neither env var is set, plus a bare
+  ``HAL0_PREFIX/installer/lib/preflight.sh`` for dev-prefix installs
+  that have no ``current`` symlink.
 
 The command preserves the script's exit code so it composes with other
 shell tooling (``hal0 doctor && hal0 status``).
@@ -76,25 +85,49 @@ def _locate_preflight() -> Path | None:
 
     Returns ``None`` when the script is missing — the caller surfaces a
     clear error rather than a confused subprocess failure. We check the
-    explicit env-var first, then derive from the package location.
+    explicit env-var first, then the editable-checkout layout, then the
+    FHS release-tree layout (see the module docstring for the full
+    precedence). The first candidate that exists on disk wins.
     """
     override = os.environ.get("HAL0_PREFLIGHT_SH", "").strip()
     if override:
         candidate = Path(override)
         return candidate if candidate.is_file() else None
 
-    # In an editable install, ``hal0.__file__`` is
-    # ``<repo>/src/hal0/__init__.py``; parents[2] is the repo root.
-    # In a future wheel-style install the file may live under
-    # ``site-packages/hal0/`` with no repo neighbours — at that point
-    # the install layout will need to bundle ``installer/lib/`` and
-    # set ``HAL0_PREFLIGHT_SH``.
+    candidates: list[Path] = []
+
+    # Editable install: ``hal0.__file__`` is ``<repo>/src/hal0/__init__.py``;
+    # parents[2] is the repo root.
     try:
         repo_root = Path(hal0.__file__).resolve().parents[2]
     except (AttributeError, IndexError):
-        return None
-    candidate = repo_root / "installer" / "lib" / "preflight.sh"
-    return candidate if candidate.is_file() else None
+        pass
+    else:
+        candidates.append(repo_root / "installer" / "lib" / "preflight.sh")
+
+    # FHS install (installer/install.sh's default, non-editable wheel in a
+    # shared venv): the script ships inside the versioned release tree,
+    # reachable through the ``current`` symlink. Honour an explicit root
+    # override first, then fall back to the compiled-in default.
+    fhs_root = os.environ.get("HAL0_FHS_ROOT", "").strip()
+    if fhs_root:
+        candidates.append(Path(fhs_root) / "current" / "installer" / "lib" / "preflight.sh")
+
+    # ``HAL0_PREFIX`` — dev-prefix installs (``installer/install.sh --dev``)
+    # point straight at the prefix with no ``current`` symlink.
+    prefix = os.environ.get("HAL0_PREFIX", "").strip()
+    if prefix:
+        candidates.append(Path(prefix) / "installer" / "lib" / "preflight.sh")
+
+    if not fhs_root:
+        from hal0.config import paths as cfg_paths
+
+        candidates.append(cfg_paths.usr_lib() / "installer" / "lib" / "preflight.sh")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 @app.callback(invoke_without_command=True)
@@ -154,6 +187,11 @@ def doctor(
         env["HAL0_PLAIN"] = "1"
     if ports is not None:
         env["HAL0_DOCTOR_PORTS"] = ports
+    # This is a post-install self-check, not the pre-install gate — on a
+    # healthy box the default ports are bound by hal0's own hal0-api /
+    # hal0-openwebui units. Don't fail the whole run over that (see
+    # preflight_ports in installer/lib/preflight.sh).
+    env["HAL0_DOCTOR_PORTS_SOFT"] = "1"
 
     try:
         result = subprocess.run(
