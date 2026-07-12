@@ -152,6 +152,31 @@ class TestApplyHonchoEnv:
         assert result2["restarted"] is False
         assert ran == []
 
+    def test_missing_unit_is_a_benign_skip_not_an_error(self, monkeypatch, tmp_path: Path):
+        """Honcho is opt-in — before it's provisioned, ``hal0-honcho.service``
+        doesn't exist yet. render-env should still succeed (exit 0, no error),
+        just skip the restart."""
+        env_path = tmp_path / "honcho.env"
+        monkeypatch.setattr(he, "HONCHO_ENV_PATH", env_path)
+        monkeypatch.setattr(he, "SECRETS_PATH", tmp_path / "missing.env")
+
+        def fake_run(args, **_kw):
+            raise he.subprocess.CalledProcessError(
+                returncode=5,
+                cmd=args,
+                output="",
+                stderr="Failed to restart hal0-honcho.service: Unit hal0-honcho.service not found.\n",
+            )
+
+        monkeypatch.setattr(he.subprocess, "run", fake_run)
+
+        result = he.apply_honcho_env(_honcho_cfg())
+        assert result["written"] is True
+        assert result["changed"] is True
+        assert result["restarted"] is False
+        assert result["error"] is None
+        assert env_path.exists()
+
     def test_no_restart_skips_systemctl(self, monkeypatch, tmp_path: Path):
         env_path = tmp_path / "honcho.env"
         monkeypatch.setattr(he, "HONCHO_ENV_PATH", env_path)
