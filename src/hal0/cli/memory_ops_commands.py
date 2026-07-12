@@ -136,7 +136,18 @@ def ops_retry_cmd(
             banks = [bank] if bank else _all_bank_ids()
             for b in banks:
                 for op in _list_bank_ops(b, failed_only=True):
-                    targets.append((b, str(op["id"])))
+                    # The live Hindsight operations schema (0.8.x) isn't
+                    # runtime-verified here — accept either ``id`` or
+                    # ``operation_id`` and skip-with-warning rather than
+                    # KeyError the whole retry loop on an unexpected row.
+                    oid = op.get("id") or op.get("operation_id")
+                    if not oid:
+                        console.print(
+                            f"[yellow]skipping failed op in {b!r} with no "
+                            f"id/operation_id: {op!r}[/yellow]"
+                        )
+                        continue
+                    targets.append((b, str(oid)))
             for b, oid in targets:
                 r = api_post(f"/api/memory/banks/{b}/operations/{oid}/retry")
                 r["bank_id"] = b

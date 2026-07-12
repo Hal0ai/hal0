@@ -455,136 +455,20 @@ def _brain_tool_policy(request: Request) -> Any | None:
     return ToolPolicy.from_persona(persona)
 
 
-# Body-arg schemas for the tools the steward misuses most when left to guess
-# (the generic catalog only names PATH args; body fields were invisible, so
-# the model invented arg names — observed: model_inspect called without
-# hf_repo, model_pull called with model_id='org/repo'). properties are merged
-# over the path-arg stubs; 'required' extends the path-arg list.
-_ADMIN_TOOL_PARAM_OVERRIDES: dict[str, dict[str, Any]] = {
-    "model_inspect": {
-        "properties": {
-            "hf_repo": {"type": "string", "description": "HuggingFace repo as 'org/name'"},
-            "hf_url": {
-                "type": "string",
-                "description": "Alternative: full https://huggingface.co/... URL",
-            },
-        },
-    },
-    "model_pull": {
-        "properties": {
-            "model_id": {
-                "type": "string",
-                "description": (
-                    "LOCAL model id — short name, NO slashes; invent one for a new model"
-                ),
-            },
-            "hf_repo": {"type": "string", "description": "HF source repo 'org/name'"},
-            "hf_filename": {
-                "type": "string",
-                "description": "Exact .gguf filename in the repo (from model_inspect)",
-            },
-            "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
-        },
-    },
-    "model_swap": {
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "SLOT name (e.g. 'agent', 'ops') — NOT the model",
-            },
-            "model_id": {"type": "string", "description": "Registered model id to swap in"},
-        },
-        "required": ["model_id"],
-    },
-    "model_assign": {
-        "properties": {
-            "name": {"type": "string", "description": "SLOT name — NOT the model"},
-            "model": {
-                "type": "string",
-                "description": "Registered model id to set as the slot's default",
-            },
-        },
-        "required": ["model"],
-    },
-    "slot_create": {
-        "properties": {
-            "name": {"type": "string", "description": "New slot name"},
-            "model": {"type": "string", "description": "Registered model id to assign"},
-            "type": {
-                "type": "string",
-                "description": "llm|embedding|reranking|transcription|tts|image (default llm)",
-            },
-            "port": {"type": "integer", "description": "Omit to auto-assign the next free port"},
-            "image": {
-                "type": "string",
-                "description": (
-                    "Container image override — FPX/FP4 quants need "
-                    "ghcr.io/hal0ai/hal0-rocmfpx:c077206 with runtime='container'"
-                ),
-            },
-            "runtime": {"type": "string", "description": "Set 'container' when image is set"},
-        },
-        "required": ["name", "model"],
-    },
-    "upstream_create": {
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "New upstream name — lowercase alnum plus -/_ ('hal0' reserved)",
-            },
-            "catalog_id": {
-                "type": "string",
-                "description": (
-                    "Optional provider template: openai|anthropic|openrouter|"
-                    "google_ai_studio|ollama — prefills url/auth"
-                ),
-            },
-            "url": {
-                "type": "string",
-                "description": "OpenAI-compatible base URL (required without catalog_id)",
-            },
-            "auth_value_env": {
-                "type": "string",
-                "description": "Env-var NAME for the API key (never the key itself)",
-            },
-        },
-        "required": ["name"],
-    },
-    "upstream_update": {
-        "properties": {
-            "name": {"type": "string", "description": "Upstream name to update"},
-            "enabled": {
-                "type": "boolean",
-                "description": "Routing kill-switch — false removes it from dispatch",
-            },
-            "advertise_models": {
-                "type": "boolean",
-                "description": "Whether its models list in /v1/models",
-            },
-            "model_filters": {
-                "type": "object",
-                "description": (
-                    "{models: [exact ids], include: [globs], exclude: [globs]} — "
-                    "exclude wins; all-empty clears"
-                ),
-            },
-        },
-    },
-}
-
-
 def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
     """OpenAI tool schemas for the surfaced admin catalog.
 
-    Path args (from the admin server's ``_PATH_ARGS``) become required
-    string properties; ``additionalProperties`` stays open so the model
-    can pass body/query fields the descriptions call out (e.g.
-    ``model_pull``'s ``hf_repo``/``hf_filename``). A ``policy`` narrows
-    the surface to its ``tools_allowed`` globs — hidden tools never
-    reach the LLM's tool list (dispatch still refuses them if guessed).
+    The per-tool ``parameters`` come straight from
+    :func:`hal0.mcp.admin.tool_param_schema` — the SAME schema the MCP
+    server advertises (path args as required strings, curated body-field
+    hints, ``additionalProperties`` open). Keeping the builder in
+    ``admin`` means a hint authored once reaches both surfaces and can't
+    drift. A ``policy`` narrows the surface to its ``tools_allowed`` globs
+    — hidden tools never reach the LLM's tool list (dispatch still refuses
+    them if guessed).
     """
     try:
-        from hal0.mcp.admin import _PATH_ARGS, TOOL_DESCRIPTIONS
+        from hal0.mcp.admin import TOOL_DESCRIPTIONS, tool_param_schema
     except ImportError:
         return []
     schemas: list[dict[str, Any]] = []
@@ -593,25 +477,13 @@ def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
             continue
         if policy is not None and not policy.allows(name):
             continue
-        path_args = _PATH_ARGS.get(name, ())
-        properties: dict[str, Any] = {arg: {"type": "string"} for arg in path_args}
-        required = list(path_args)
-        override = _ADMIN_TOOL_PARAM_OVERRIDES.get(name)
-        if override:
-            properties.update(override.get("properties", {}))
-            required += [r for r in override.get("required", []) if r not in required]
         schemas.append(
             {
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required,
-                        "additionalProperties": True,
-                    },
+                    "parameters": tool_param_schema(name),
                 },
             }
         )

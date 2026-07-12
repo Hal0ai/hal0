@@ -557,6 +557,159 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 
+# ── Per-tool call-arg schemas (shared with the dashboard agent chat) ─────────
+#
+# _PATH_ARGS names only the URL path args; the body/query fields stay
+# invisible to a caller reading tools/list, so the model invented arg
+# names (observed: model_inspect called without hf_repo, model_pull
+# called with model_id='org/repo'). These hints enrich the tools the
+# agent misuses most: they extend the generated schema with named body
+# fields + descriptions and add to 'required'. This dict is the SINGLE
+# source of truth — both surfaces build their advertised schema from
+# :func:`tool_param_schema` (the dashboard chat wraps it as an OpenAI
+# function's ``parameters``; :func:`build_server` nests it under the MCP
+# passthrough ``args`` object), so a hint authored once reaches every
+# agent that can call the tool. Keys must be catalog tools (guarded by
+# :func:`_validate_catalog`).
+TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
+    "model_inspect": {
+        "properties": {
+            "hf_repo": {"type": "string", "description": "HuggingFace repo as 'org/name'"},
+            "hf_url": {
+                "type": "string",
+                "description": "Alternative: full https://huggingface.co/... URL",
+            },
+        },
+    },
+    "model_pull": {
+        "properties": {
+            "model_id": {
+                "type": "string",
+                "description": (
+                    "LOCAL model id — short name, NO slashes; invent one for a new model"
+                ),
+            },
+            "hf_repo": {"type": "string", "description": "HF source repo 'org/name'"},
+            "hf_filename": {
+                "type": "string",
+                "description": "Exact .gguf filename in the repo (from model_inspect)",
+            },
+            "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
+        },
+    },
+    "model_swap": {
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "SLOT name (e.g. 'agent', 'ops') — NOT the model",
+            },
+            "model_id": {"type": "string", "description": "Registered model id to swap in"},
+        },
+        "required": ["model_id"],
+    },
+    "model_assign": {
+        "properties": {
+            "name": {"type": "string", "description": "SLOT name — NOT the model"},
+            "model": {
+                "type": "string",
+                "description": "Registered model id to set as the slot's default",
+            },
+        },
+        "required": ["model"],
+    },
+    "slot_create": {
+        "properties": {
+            "name": {"type": "string", "description": "New slot name"},
+            "model": {"type": "string", "description": "Registered model id to assign"},
+            "type": {
+                "type": "string",
+                "description": "llm|embedding|reranking|transcription|tts|image (default llm)",
+            },
+            "port": {"type": "integer", "description": "Omit to auto-assign the next free port"},
+            "image": {
+                "type": "string",
+                "description": (
+                    "Container image override — FPX/FP4 quants need "
+                    "ghcr.io/hal0ai/hal0-rocmfpx:c077206 with runtime='container'"
+                ),
+            },
+            "runtime": {"type": "string", "description": "Set 'container' when image is set"},
+        },
+        "required": ["name", "model"],
+    },
+    "upstream_create": {
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "New upstream name — lowercase alnum plus -/_ ('hal0' reserved)",
+            },
+            "catalog_id": {
+                "type": "string",
+                "description": (
+                    "Optional provider template: openai|anthropic|openrouter|"
+                    "google_ai_studio|ollama — prefills url/auth"
+                ),
+            },
+            "url": {
+                "type": "string",
+                "description": "OpenAI-compatible base URL (required without catalog_id)",
+            },
+            "auth_value_env": {
+                "type": "string",
+                "description": "Env-var NAME for the API key (never the key itself)",
+            },
+        },
+        "required": ["name"],
+    },
+    "upstream_update": {
+        "properties": {
+            "name": {"type": "string", "description": "Upstream name to update"},
+            "enabled": {
+                "type": "boolean",
+                "description": "Routing kill-switch — false removes it from dispatch",
+            },
+            "advertise_models": {
+                "type": "boolean",
+                "description": "Whether its models list in /v1/models",
+            },
+            "model_filters": {
+                "type": "object",
+                "description": (
+                    "{models: [exact ids], include: [globs], exclude: [globs]} — "
+                    "exclude wins; all-empty clears"
+                ),
+            },
+        },
+    },
+}
+
+
+def tool_param_schema(tool: str) -> dict[str, Any]:
+    """The flat JSON-Schema for one tool's call args — shared by both surfaces.
+
+    Path args (:data:`_PATH_ARGS`) become required string properties;
+    :data:`TOOL_PARAM_HINTS` merge over them with named body/query fields +
+    descriptions and extend ``required``. ``additionalProperties`` stays
+    open so an agent can still pass undeclared body fields a description
+    calls out (e.g. ``slot_edit``'s arbitrary config keys) without the
+    schema rejecting them. Returns the object schema itself; callers wrap
+    it into their own envelope.
+    """
+    path_args = _PATH_ARGS.get(tool, ())
+    properties: dict[str, Any] = {arg: {"type": "string"} for arg in path_args}
+    required = list(path_args)
+    hint = TOOL_PARAM_HINTS.get(tool)
+    if hint:
+        properties.update(hint.get("properties", {}))
+        required += [r for r in hint.get("required", ()) if r not in required]
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": True,
+    }
+
+
 def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
     """Separate path-substitution args from body/query args.
 
@@ -1414,6 +1567,19 @@ def _validate_catalog() -> None:
                 f"{sorted(placeholders)}"
             )
 
+    # Param hints must reference real catalog tools, and every 'required'
+    # field they add must actually be declared (as a hint property or a
+    # path arg) — else the shared schema advertises a required field with
+    # no matching property.
+    if stray := set(TOOL_PARAM_HINTS) - catalog:
+        problems.append(f"TOOL_PARAM_HINTS references unknown tools: {sorted(stray)}")
+    for tool, hint in TOOL_PARAM_HINTS.items():
+        declared = set(hint.get("properties", {})) | set(_PATH_ARGS.get(tool, ()))
+        if orphan := set(hint.get("required", ())) - declared:
+            problems.append(
+                f"{tool}: TOOL_PARAM_HINTS required {sorted(orphan)} not in properties/path args"
+            )
+
     if problems:
         raise RuntimeError("hal0.mcp.admin catalog drift: " + " | ".join(problems))
 
@@ -1475,6 +1641,21 @@ def build_server(
         annotations = _ANNOTATIONS.get(tool_name)
         server.tool(name=tool_name, description=description, annotations=annotations)(_tool)
 
+        # The wrapper's ``args: dict`` signature is deliberate — it passes the
+        # whole arg dict through to ``dispatch`` untouched (a flat signature
+        # would make FastMCP silently drop undeclared body fields). But that
+        # signature also advertises an opaque ``{args: object}`` in tools/list,
+        # leaving the caller to guess every field. Override the ADVERTISED
+        # schema (not the validation model, which stays permissive) so the
+        # nested ``args`` object carries the SAME per-tool schema the dashboard
+        # agent chat surfaces — one source of truth, two envelopes.
+        schema = tool_param_schema(tool_name)
+        server._tool_manager.get_tool(tool_name).parameters = {
+            "type": "object",
+            "properties": {"args": schema},
+            "required": ["args"] if schema["required"] else [],
+        }
+
     for _name, _description in TOOL_DESCRIPTIONS.items():
         _register(_name, _description)
 
@@ -1487,9 +1668,11 @@ __all__ = [
     "GATED_TOOLS",
     "POLICY_NO_LOOSEN",
     "TOOL_DESCRIPTIONS",
+    "TOOL_PARAM_HINTS",
     "_ANNOTATIONS",
     "ToolPolicy",
     "build_server",
     "dispatch",
     "is_gated",
+    "tool_param_schema",
 ]

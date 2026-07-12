@@ -647,6 +647,229 @@ async def set_memory_provider(request: Request) -> dict[str, Any]:
     }
 
 
+# ── GET /api/memory/honcho/stats, GET/PUT /api/memory/honcho/sync ─────────
+#
+# Observability + control surface for the self-hosted Honcho v3 stack,
+# powering the dashboard's "Honcho" provider card. Distinct from
+# ``/provider`` above: that endpoint reports per-agent routing + a plain
+# health probe of both engines; this one drills into Honcho itself (peer/
+# conclusion counts, deriver queue depth) and the recurring graph-sync job
+# defined in :mod:`hal0.memory.honcho_migrate` / ``hal0 memory sync-graph``.
+
+_HONCHO_SYNC_TIMER = "hal0-honcho-sync.timer"
+_HONCHO_SYNC_SERVICE = "hal0-honcho-sync.service"
+_HONCHO_STATS_TIMEOUT = 5.0
+
+
+async def _honcho_probe_json(
+    client: httpx.AsyncClient, method: str, path: str, **kwargs: Any
+) -> Any | None:
+    """Best-effort JSON call against the Honcho API; ``None`` on any failure."""
+    try:
+        resp = await client.request(method, path, **kwargs)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+@router.get("/honcho/stats")
+async def honcho_stats() -> dict[str, Any]:
+    """Fail-soft Honcho engine aggregate — powers the dashboard's Honcho card.
+
+    Response shape (stable contract, every key always present)::
+
+        {
+          "enabled":            bool,       # [honcho].enabled in hal0.toml
+          "reachable":          bool,       # /health answered 2xx
+          "version":            "3.0.11" | None,
+          "url":                "http://127.0.0.1:8000",
+          "workspace":          "hal0",
+          "peers":              int | None,
+          "observations":       int | None,  # conclusions with level="explicit"
+                                              # (directly extracted from messages)
+          "conclusions":        int | None,  # conclusions with level in
+                                              # {deductive, inductive, contradiction}
+                                              # (produced by dreaming/reasoning)
+          "deriver_pending":    int | None,
+          "deriver_processing": int | None,
+        }
+
+    Unreachable → every count stays ``None`` and the endpoint still returns
+    HTTP 200 (mirrors ``GET /api/memory/engine`` in memory_admin.py) so the
+    dashboard always has a card to paint.
+    """
+    cfg = load_hal0_config()
+    honcho = cfg.honcho
+    url = f"http://127.0.0.1:{honcho.port}"
+
+    out: dict[str, Any] = {
+        "enabled": honcho.enabled,
+        "reachable": False,
+        "version": None,
+        "url": url,
+        "workspace": honcho.workspace,
+        "peers": None,
+        "observations": None,
+        "conclusions": None,
+        "deriver_pending": None,
+        "deriver_processing": None,
+    }
+
+    out["reachable"] = await _probe_health(f"{url}/health")
+    if not out["reachable"]:
+        return out
+
+    import asyncio
+
+    ws = honcho.workspace
+    async with httpx.AsyncClient(base_url=url, timeout=_HONCHO_STATS_TIMEOUT) as client:
+        openapi, peers, all_conclusions, explicit_conclusions, queue = await asyncio.gather(
+            _honcho_probe_json(client, "GET", "/openapi.json"),
+            _honcho_probe_json(
+                client, "POST", f"/v3/workspaces/{ws}/peers/list", json={"filters": None}
+            ),
+            _honcho_probe_json(
+                client,
+                "POST",
+                f"/v3/workspaces/{ws}/conclusions/list",
+                params={"page": 1, "size": 1},
+                json={"filters": None},
+            ),
+            _honcho_probe_json(
+                client,
+                "POST",
+                f"/v3/workspaces/{ws}/conclusions/list",
+                params={"page": 1, "size": 1},
+                json={"filters": {"level": "explicit"}},
+            ),
+            _honcho_probe_json(client, "GET", f"/v3/workspaces/{ws}/queue/status"),
+        )
+
+    if isinstance(openapi, dict):
+        out["version"] = (openapi.get("info") or {}).get("version")
+    if isinstance(peers, dict):
+        out["peers"] = peers.get("total")
+
+    explicit_total = (
+        explicit_conclusions.get("total") if isinstance(explicit_conclusions, dict) else None
+    )
+    all_total = all_conclusions.get("total") if isinstance(all_conclusions, dict) else None
+    if explicit_total is not None:
+        out["observations"] = explicit_total
+    if all_total is not None and explicit_total is not None:
+        out["conclusions"] = max(all_total - explicit_total, 0)
+
+    if isinstance(queue, dict):
+        out["deriver_pending"] = queue.get("pending_work_units")
+        out["deriver_processing"] = queue.get("in_progress_work_units")
+
+    return out
+
+
+@router.get("/honcho/sync")
+async def honcho_sync_status() -> dict[str, Any]:
+    """Report the recurring ``hal0-honcho-sync.timer`` graph-sync job's health.
+
+    Response shape (stable contract)::
+
+        {
+          "timer_enabled":     bool,        # unit-file enabled (survives reboot)
+          "interval":          "hourly" | "*-*-* *:00:00" | None,  # OnCalendar=
+          "last_run_at":       iso8601 | None,
+          "last_run_ok":       bool | None,
+          "last_run_error":    str | None,
+          "last_synced_count": int | None,   # conclusions migrated by that one run
+          "next_run_at":       str | None,   # raw systemd timestamp (not ISO)
+        }
+
+    All fields are fail-soft: a host without systemd, or a fresh state file
+    that has never run, yields honest ``None``/``False`` rather than an
+    error — matches ``GET /api/memory/graph/status``'s posture.
+    """
+    import asyncio
+
+    from hal0.memory.honcho_migrate import MigrateState
+    from hal0.services.systemd import timer_schedule, unit_state
+
+    state_info, timer_info = await asyncio.gather(
+        unit_state(_HONCHO_SYNC_TIMER), timer_schedule(_HONCHO_SYNC_TIMER)
+    )
+    timer_enabled = state_info.get("unit_file_state") == "enabled"
+
+    run_info = MigrateState().data.get("honcho_to_hindsight", {})
+
+    return {
+        "timer_enabled": timer_enabled,
+        "interval": timer_info.get("calendar"),
+        "last_run_at": run_info.get("last_run_at"),
+        "last_run_ok": run_info.get("last_run_ok"),
+        "last_run_error": run_info.get("last_run_error"),
+        "last_synced_count": run_info.get("last_synced_count"),
+        "next_run_at": timer_info.get("next_elapse"),
+    }
+
+
+@router.put("/honcho/sync")
+async def set_honcho_sync_timer(request: Request) -> dict[str, Any]:
+    """Enable/disable the recurring graph-sync timer. Body: ``{"enabled": bool}``.
+
+    ``enabled: true`` runs the systemd equivalent of ``enable --now``
+    (enable the unit file, then start it immediately); ``enabled: false``
+    runs the equivalent of ``disable --now`` (stop, then disable). Fail-soft
+    like the services management surface's ``unit_action``: a systemctl
+    failure is reported via ``ok: false`` + ``note``, not raised, since the
+    caller can retry or fall back to a manual ``systemctl`` call.
+
+    Returns the updated status (same shape as ``GET /honcho/sync``) plus
+    ``ok``/``note`` describing whether the systemctl calls succeeded.
+    """
+    body = await _read_json_body(request)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise BadRequest(
+            "'enabled' is required and must be a bool",
+            details={"path": "/api/memory/honcho/sync"},
+        )
+
+    from hal0.services.systemd import unit_action
+
+    if enabled:
+        results = [
+            await unit_action(_HONCHO_SYNC_TIMER, "enable"),
+            await unit_action(_HONCHO_SYNC_TIMER, "start"),
+        ]
+    else:
+        results = [
+            await unit_action(_HONCHO_SYNC_TIMER, "stop"),
+            await unit_action(_HONCHO_SYNC_TIMER, "disable"),
+        ]
+    ok = all(bool(r.get("ok")) for r in results)
+    note = None if ok else "; ".join(str(r.get("message")) for r in results if not r.get("ok"))
+
+    status = await honcho_sync_status()
+    status["ok"] = ok
+    status["note"] = note
+    return status
+
+
+@router.post("/honcho/sync/run")
+async def run_honcho_sync_now() -> dict[str, bool | str | None]:
+    """Trigger one graph-sync run now, non-blocking.
+
+    Starts the oneshot ``hal0-honcho-sync.service`` unit (the same unit the
+    timer fires) and returns immediately — the run itself may take a while
+    against a large Honcho conclusion backlog, so this does not wait for
+    completion. Poll ``GET /honcho/sync`` for ``last_run_at``/``last_run_ok``
+    to see the outcome.
+    """
+    from hal0.services.systemd import unit_action
+
+    result = await unit_action(_HONCHO_SYNC_SERVICE, "start")
+    started = bool(result.get("ok"))
+    return {"started": started, "note": None if started else str(result.get("message"))}
+
+
 # ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────
 #
 # Plain-HTTP veneer over CogneeWrapper for callers that don't speak the
