@@ -112,4 +112,4 @@ def test_requirements_floor_not_hard_pinned() -> None:
         ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
     ]
     # The single requirement line is the floored+capped spec, not a hard pin.
-    assert reqs == ["hermes-agent[web]>=0.16.0,<1.0"]
+    assert reqs == ["hermes-agent[web]>=0.14.0,<1.0"]

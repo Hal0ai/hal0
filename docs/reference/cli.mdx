@@ -247,22 +247,60 @@ and per-slot TOMLs are **not** migrated (v0.1.x → v0.2 is a clean break).
 | `memory graph status` | Show graph-extraction state (enabled, extraction slot, available slots, counters). | `--json` |
 | `memory graph enable` | Turn graph extraction on (optionally repoint the extraction slot). | `--slot <name>`, `--json` |
 | `memory graph disable` | Turn graph extraction off (cancels any in-flight build). | `--json` |
-| `memory migrate` | Migrate a legacy Cognee store to Hindsight banks (dry-run only), **or** run the Hindsight&lt;-&gt;Honcho engine when `--from`/`--to` are given. | `--from`/`--to hindsight\|honcho`, `--agent`, `--dataset` (repeatable), `--since`, `--resume`, `--dry-run`/`--no-dry-run`, `--cognee-dir`, `--json` |
+| `memory migrate` | Run the Hindsight&lt;-&gt;Honcho engine migration (requires `--from`/`--to`). | `--from`/`--to hindsight\|honcho`, `--agent`, `--dataset` (repeatable), `--since`, `--resume`, `--dry-run`/`--no-dry-run`, `--json` |
+| `memory migrate unify` | Plan/execute folding one or more source Hindsight banks into a target bank via the document-transfer API, tagging provenance (`agent:<name>`, `visibility:private`). | `--source <bank>` (repeatable), `--target` (default `shared`), `--apply`/`--dry-run` (default), `--add-tag` (repeatable), `--on-conflict {skip,replace,new-id}` (default `skip`), `--skip-observations`, `--json` |
 | `memory sync-graph` | Sync Honcho conclusions -> Hindsight, resuming from the saved watermark (the `hal0-honcho-sync.timer` job). | `--agent`, `--json` |
 | `memory provider list` / `memory provider status` | Show engine health (Hindsight/Honcho) and the live per-agent provider routing. | `--json` |
 | `memory provider set` | Route an agent's memory to `hindsight` or `honcho` and persist it. | `--private`/`--no-private`, `--restart`/`--no-restart`, `--json` |
 | `memory honcho render-env` | Render `/etc/hal0/honcho.env` from `hal0.toml [honcho]` and restart the stack if it changed. | `--restart`/`--no-restart`, `--json` |
+| `memory bank list` | List Hindsight banks with fact counts and last-activity timestamps. | `--json` |
+| `memory bank stats <bank>` | Show detailed stats for a bank (nodes, links, documents, operations). | `--json` |
+| `memory bank profile get <bank>` | Show a bank's profile (name, disposition traits, missions — via `/config`). | `--json` |
+| `memory bank profile set <bank>` | Set a bank's profile (single `PATCH /config` call). | `--retain-mission`, `--observations-mission`, `--reflect-mission`, `--skepticism`, `--literalism`, `--empathy`, `--json` |
+| `memory bank export <bank>` | Export a bank as a portable template manifest. | `--out <path>` (default: stdout) |
+| `memory bank import <bank>` | Import a bank template manifest. | `--file <path>` (required), `--dry-run`, `--json` |
+| `memory bank delete <bank>` | Irreversibly delete a bank (drops every memory/document/entity in it). | `--confirm <bank>` (required, must match exactly), `--json` |
+| `memory bank consolidate <bank>` | Trigger consolidation for a bank (async — returns an operation id). | `--scope <tag>` (repeatable), `--json` |
+| `memory ops list` | List async operations (retain, consolidation, refresh, ...), fanning out across banks if `--bank` is omitted. | `--bank <bank>`, `--failed`, `--json` |
+| `memory ops retry` | Retry failed operations — one by id or every failed op in scope. | `--bank <bank>`, `--all-failed`, `--id <operation_id>`, `--json` |
+| `memory mm list <bank>` | List a bank's mental models. | `--json` |
+| `memory mm refresh <bank> <id>` | Trigger a refresh of a mental model (async). | `--json` |
+| `memory mm history <bank> <id>` | Show a mental model's revision history. | `--json` |
+| `memory recall <query>` | Debug recall through the ACL front door (`/api/memory/recall`) — see what an agent would get back. | `--bank <namespace>`, `--tags` (repeatable), `--types` (repeatable), `--max-tokens`, `--json` |
 
 `memory graph enable --slot <name>` repoints the Hindsight engine's native
 extraction LLM at the named slot (ADR-0023). `<name>` must be an enabled
 `type=llm` slot — the server validates it against the live slot set and restarts
 `hindsight-api` to apply. Omit `--slot` to keep the current slot. The legacy
 `--route`/`--provider`/`--model` options were removed in ADR-0023.
-`memory migrate` with no `--from`/`--to` reports the legacy Cognee plan without
-writing; apply/write mode is not yet implemented there. With `--from`/`--to`
-it runs the Hindsight&lt;-&gt;Honcho backfill/graph-sync engine in-process
-against the local hal0-api + Honcho REST surfaces, defaulting to a live run
-(`--dry-run` opts into a scan-only report).
+`memory migrate` requires `--from`/`--to` — it runs the Hindsight&lt;-&gt;Honcho
+backfill/graph-sync engine in-process against the local hal0-api + Honcho REST
+surfaces, defaulting to a live run (`--dry-run` opts into a scan-only report).
+Use `memory migrate unify` to fold per-agent banks into a shared bank.
+
+`memory bank profile get`/`set` both go through `GET`/`PATCH
+.../config` alone now — `GET`/`PUT .../profile` is deprecated upstream
+(disposition-only, and confirmed live to not actually apply): a bank's
+fully-resolved config carries `disposition_skepticism`/
+`disposition_literalism`/`disposition_empathy` alongside
+`retain_mission`/`observations_mission`/`reflect_mission`, so `set` is one
+`PATCH` with whichever of the six fields you passed (a partial merge
+server-side — no read-modify-write needed), and `get` merges that with
+`GET .../profile` just for the bank's `name`. `memory bank delete`
+requires `--confirm <bank>` to exactly match the target bank id before it
+even calls the API; the server enforces the same rule server-side.
+`memory migrate unify --apply` requires hindsight-api's document-transfer
+API (`features.document_export_api`/`document_import_api` on `/version`)
+— live as of hindsight-api 0.8.4. `--dry-run` (the default) works on any
+version since it only reads bank stats. There is no per-document tag-rewrite option on the transfer
+itself, so `--add-tag`/derived tags are applied as a separate post-import
+pass — a document-id diff of the target bank before/after each source's
+import, then a read-merge-write `PATCH` of each new document's tags (the
+document tags field is a full-replace, unlike bank config's partial-merge
+`updates`, so the CLI reads current tags first and unions them in rather
+than overwriting). Retagging N documents queues N Hindsight re-consolidation
+passes — the CLI warns before starting; consider running large unifies
+off-hours.
 
 <Aside type="caution">
 The memory subsystem is opt-in. Graph extraction defaults **off** (ADR-0023):

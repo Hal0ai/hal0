@@ -1,9 +1,11 @@
-"""hal0-memory — Hermes ``MemoryProvider`` plugin.
+"""hal0-memory — Hermes ``MemoryProvider`` plugin (canonical, shipped source).
 
-Canonical source; the installer seed at
-``installer/agents/hermes/plugins/hal0-memory/`` is a byte-identical copy.
-Two-bank model (private:<agent-id> + shared, agent-id ``hermes``, explicit
-memory tools). See ``provider.py`` / ``_client.py`` docstrings.
+Implements the two-bank model (private:hermes + shared, agent-id ``hermes``,
+explicit memory tools). See ``provider.py`` / ``_client.py`` docstrings. An
+earlier mirror of this plugin lived at
+``src/hal0/agents/hermes/plugins/memory_hindsight/``; it drifted out of sync
+(async client, no tools, stale agent-id default) and was deleted — this
+directory is the only copy now.
 
 Copied verbatim into ``$HERMES_HOME/plugins/hal0-memory/`` at provision time
 by ``hal0.agents.hermes_provision._phase_install``. At runtime it resolves

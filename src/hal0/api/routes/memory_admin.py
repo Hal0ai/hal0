@@ -33,7 +33,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from hal0.api._audit import record_action
 from hal0.api.routes import _memory_subgraph as _sg
@@ -300,6 +300,110 @@ async def delete_bank(request: Request, bank_id: str) -> Any:
         return await _forward(client, "DELETE", f"/v1/default/banks/{bank_id}")
 
 
+# ── /banks/{bank_id}/document-transfer — cross-bank migration (NOT a table
+#    passthrough) ─────────────────────────────────────────────────────────────
+#
+# hindsight-api>=0.8.0 (source-verified against the v0.8.4 tag; absent from
+# the 0.7.2 instance this router was built against — gate on
+# ``features.document_export_api``/``document_import_api`` from ``/version``,
+# not the version string). GET returns a ZIP file (source bank's documents +
+# optionally their observations); POST accepts that ZIP as a multipart
+# upload and starts an async transfer into the target bank
+# (``?on_conflict=skip|replace|new-id``, default ``skip``), returning
+# ``202 {operation_id}`` — poll the existing ``operations/{id}`` passthrough
+# for ``result_metadata`` (documents_imported / facts_imported /
+# observations_imported). Both verbs move raw bytes, so they can't go
+# through ``_forward``/``request_json`` (JSON-only) — they reach into the
+# Hindsight client's private ``_http``/``_headers()`` rather than adding a
+# second public method to hal0.memory.hindsight_client, which is owned by a
+# parallel unified-bank effort (see PLAN note in the CLI's migrate_unify
+# docstring for the full boundary rationale).
+
+
+async def _raise_transfer_error(exc: Exception) -> None:
+    if isinstance(exc, httpx.HTTPStatusError):
+        upstream_status = exc.response.status_code
+        try:
+            detail: Any = exc.response.json()
+        except ValueError:
+            detail = {"body": exc.response.text[:500]}
+        err = MemoryEngineError(
+            "memory engine returned an error",
+            details={"upstream_status": upstream_status, "upstream": detail},
+        )
+        if 400 <= upstream_status < 500:
+            err.status = upstream_status
+        raise err from exc
+    if isinstance(exc, httpx.HTTPError):
+        raise MemoryEngineUnreachable(
+            "memory engine is unreachable", details={"error": str(exc)}
+        ) from exc
+    raise exc
+
+
+@router.get("/banks/{bank_id}/document-transfer")
+async def bank_document_transfer_export(request: Request, bank_id: str) -> Response:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    include_observations = request.query_params.get("include_observations", "true")
+    try:
+        resp = await client._http.get(
+            f"/v1/default/banks/{bank_id}/document-transfer",
+            headers=client._headers(),
+            params={"include_observations": include_observations},
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        await _raise_transfer_error(exc)
+    return Response(
+        content=resp.content,
+        media_type=resp.headers.get("content-type", "application/zip"),
+    )
+
+
+@router.post("/banks/{bank_id}/document-transfer")
+async def bank_document_transfer_import(request: Request, bank_id: str) -> Any:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    on_conflict = request.query_params.get("on_conflict", "skip")
+    if on_conflict not in ("skip", "replace", "new-id"):
+        raise BadRequest(
+            f"invalid on_conflict: {on_conflict!r} (skip|replace|new-id)",
+            code="memory.invalid_query",
+        )
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None:
+        raise BadRequest("multipart 'file' field is required", code="memory.invalid_body")
+    content = await upload.read()
+    headers = {k: v for k, v in client._headers().items() if k.lower() != "content-type"}
+    try:
+        async with record_action(
+            request,
+            category="memory",
+            action="memory.bank.document_transfer_import",
+            target=bank_id,
+        ):
+            resp = await client._http.post(
+                f"/v1/default/banks/{bank_id}/document-transfer",
+                headers=headers,
+                params={"on_conflict": on_conflict},
+                files={
+                    "file": (
+                        getattr(upload, "filename", None) or "transfer.zip",
+                        content,
+                        "application/zip",
+                    )
+                },
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        await _raise_transfer_error(exc)
+    if not resp.content:
+        return {}
+    return resp.json()
+
+
 # ── allowlisted passthrough table ──────────────────────────────────────────────
 #
 # (hal0 method, hal0 path under /api/memory, upstream path template).
@@ -351,6 +455,17 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/banks/{bank_id}/documents", "/v1/default/banks/{bank_id}/documents"),
     (
         "GET",
+        "/banks/{bank_id}/documents/{document_id}",
+        "/v1/default/banks/{bank_id}/documents/{document_id}",
+    ),
+    (
+        # ``PATCH .../documents/{id}`` is the only tag-edit surface Hindsight
+        # has (no per-memory tag field on UpdateMemoryRequest) — body
+        # ``{"tags": [...]}`` is a full replace that propagates to every
+        # memory unit under the document and invalidates derived
+        # observations (queues re-consolidation). ``migrate unify --add-tag``
+        # relies on this: read-merge-write, never a bare overwrite.
+        "PATCH",
         "/banks/{bank_id}/documents/{document_id}",
         "/v1/default/banks/{bank_id}/documents/{document_id}",
     ),
