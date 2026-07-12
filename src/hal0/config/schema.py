@@ -958,6 +958,61 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "VULKFPX · MOE · MTP (best decode t/s)",
         "quant": "ROCmFPX",
     },
+    # ── Dense-family variants (no-jinja / small / long-context) ──────────────
+    # Reusable workload templates that sit alongside the 2x2 dense/moe grid.
+    # They stay lean — model-specific KV/sampler tuning still belongs in the
+    # model's defaults.extra_args, not here. Contributed from the operator
+    # catalog after the 2026-07-05 ROCmFPX tuning (same -b/-ub/threads shape as
+    # the retuned dense seeds, no SMT-oversub `--threads-batch`).
+    "rocm-dense-nojinja": {
+        # rocm-dense minus `--jinja`: for base models / GGUFs that carry a
+        # baked-in chat template, where llama.cpp's jinja layer would
+        # double-wrap the prompt. mtp False — no draft head assumed.
+        "image": DEFAULT_ROCMFPX_IMAGE,
+        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "ROCmFPX · DENSE · no-jinja (baked chat template)",
+        "quant": "ROCmFP4",
+    },
+    "vulkan-dense-nojinja": {
+        # Vulkan sibling of rocm-dense-nojinja (see it for the no-jinja
+        # rationale). Mirrors vulkan-dense minus `--jinja`.
+        "image": DEFAULT_ROCMFPX_IMAGE,
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "VULKFPX · DENSE · no-jinja (baked chat template)",
+        "quant": "ROCmFP4",
+    },
+    "rocm-dense-small": {
+        # The dense batch/mmap tuning without MTP — for small dense chat models
+        # (≤~2B) that have no self-speculative draft head, where the spec-draft
+        # bundle would be inert. Keeps `--jinja`. Operators on a Vulkan-only box
+        # clone this to Vulkan0.
+        "image": DEFAULT_ROCMFPX_IMAGE,
+        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "ROCmFPX · DENSE · small (no MTP draft head)",
+        "quant": "ROCmFP4",
+    },
+    "rocm-longctx": {
+        # Dense long-context template: q8_0 KV halves the KV-cache footprint so
+        # more context fits in the shared pool, plus `--poll` tuning for steady
+        # decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
+        # back to f16 KV (iSWA regresses on quantized KV). mtp False.
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "Dense · long-context (q8_0 KV)",
+        "quant": "FP4",
+    },
     "vulkan": {
         # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
         # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
