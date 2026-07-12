@@ -1340,6 +1340,8 @@ def test_brain_profile_mcp_wire_merges_and_preserves_upstream_keys(tmp_path: Pat
     assert servers["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__hal0-brain"
     assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == 1
     assert servers["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__hal0-brain"
+    # memory provider is written too (scalar merge, safe)…
+    assert merged["memory"]["provider"] == "hal0-memory"
     # …without clobbering upstream/operator keys.
     assert merged["model"] == {"default": "agent"}
     assert servers["some-operator-server"] == {"type": "http", "url": "http://x"}

@@ -3042,17 +3042,25 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
 
 
 def _phase_brain_profile_mcp_wire(ctx: PhaseContext) -> PhaseResult:
-    """Reproducibly wire hal0-admin + hal0-memory into the hal0-brain profile.
+    """Reproducibly write hal0's brain-profile keys: MCP servers + memory provider.
 
-    Deep-merges the hal0-owned servers into the profile config.yaml (merge,
-    never clobber), only writing when something actually changed so a correctly
-    wired box (and its comments) is left untouched. Skips when the profile
-    config is absent — the upstream hermes binary owns profile creation. Any
-    I/O / PyYAML gap degrades warn-as-OK; bootstrap never blocks on it.
+    Deep-merges the hal0-owned keys (hal0-admin + hal0-memory MCP servers, and
+    ``memory.provider = hal0-memory``) into the profile config.yaml (merge,
+    never clobber; scalars/dicts only — no list keys), only writing when
+    something actually changed so a correctly configured box (and its comments)
+    is left untouched. Skips when the profile config is absent — the upstream
+    hermes binary owns profile creation. Any I/O / PyYAML gap degrades
+    warn-as-OK; bootstrap never blocks on it.
     """
     state = ctx.state
     path = _brain_profile_config_path(state)
-    desired = {"mcp_servers": _build_brain_profile_mcp_servers()}
+    # hal0-owned profile keys: the two MCP servers + the memory provider. Only
+    # scalar/dict keys are set — never a list (``_deep_merge`` replaces lists,
+    # which would clobber an operator's ``plugins.enabled`` / other entries).
+    desired = {
+        "mcp_servers": _build_brain_profile_mcp_servers(),
+        "memory": {"provider": "hal0-memory"},
+    }
 
     if not path.exists():
         return PhaseResult(
