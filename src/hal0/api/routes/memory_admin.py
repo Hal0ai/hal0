@@ -275,6 +275,33 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
 # and/or a JSON body ``{"confirm": ...}``. Registered before the _FORWARDS loop
 # so the guarded route owns the verb; only forwards once confirmation matches.
 
+#: #1024 dry-run preview: bank-stats keys carrying stored-item counts. Best
+#: effort — Hindsight versions differ, so absent keys are simply omitted.
+_PREVIEW_COUNT_KEYS = ("memory_count", "document_count", "entity_count")
+
+
+async def _delete_preview(client: Any, bank_id: str) -> dict[str, Any]:
+    """Fail-soft blast-radius preview for a bank delete (#1024).
+
+    Returns ``{bank_id, item_count, counts, stats_available}`` so the confirm
+    dialog can show *how much* a wipe would destroy before the operator echoes
+    the id back. ``item_count`` is the headline memory-unit count when known.
+    The stats probe is a convenience, never a gate: any failure degrades to
+    ``stats_available=False`` and the request is still rejected loudly below.
+    """
+    preview: dict[str, Any] = {"bank_id": bank_id, "item_count": None, "stats_available": False}
+    try:
+        stats = await client.request_json("GET", f"/v1/default/banks/{bank_id}/stats")
+    except Exception:
+        return preview
+    if not isinstance(stats, dict):
+        return preview
+    counts = {k: stats[k] for k in _PREVIEW_COUNT_KEYS if isinstance(stats.get(k), int)}
+    preview["stats_available"] = True
+    preview["counts"] = counts
+    preview["item_count"] = counts.get("memory_count")
+    return preview
+
 
 @router.delete("/banks/{bank_id}")
 async def delete_bank(request: Request, bank_id: str) -> Any:
@@ -285,10 +312,14 @@ async def delete_bank(request: Request, bank_id: str) -> Any:
     if confirm is None and isinstance(body, dict):
         confirm = body.get("confirm")
     if confirm != bank_id:
+        # #1024: return a dry-run preview (bank id + item counts) instead of a
+        # bare rejection so operators see the blast radius. Status stays 400 and
+        # the DELETE is NOT forwarded — the echoed-id confirm is still required.
+        preview = await _delete_preview(client, bank_id)
         raise BadRequest(
             f"confirm={bank_id} required to delete bank {bank_id}",
             code="memory.confirm_required",
-            details={"bank_id": bank_id},
+            details={"bank_id": bank_id, "requires_confirm": True, "preview": preview},
         )
     log.warning("memory_admin: deleting bank %r (confirmed)", bank_id)
     # #1024 hardening: every confirmed destructive op lands in the audit store
