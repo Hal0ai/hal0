@@ -111,12 +111,7 @@ class TestMemoryAgentProviders:
 
     def test_hal0_config_carries_agent_providers(self) -> None:
         c = Hal0Config.model_validate(
-            {
-                "memory": {
-                    "agent_providers": {"hermes": "honcho"},
-                    "agent_private": {"hermes": False},
-                }
-            }
+            {"memory": {"agent_providers": {"hermes": "honcho"}, "agent_private": {"hermes": False}}}
         )
         assert c.memory.agent_providers == {"hermes": "honcho"}
         assert c.memory.agent_private == {"hermes": False}

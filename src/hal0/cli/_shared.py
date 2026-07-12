@@ -50,32 +50,64 @@ def api_unreachable_exit(url: str) -> None:
     sys.exit(1)
 
 
-def api_get(path: str, *, base: str | None = None, **kwargs: Any) -> Any:
+def api_get(path: str, *, base: str | None = None, timeout: float = 10.0, **kwargs: Any) -> Any:
     """GET ``path`` and return parsed JSON; raises ``CliApiError`` on non-2xx."""
-    return _api_request("GET", path, base=base, **kwargs)
+    return _api_request("GET", path, base=base, timeout=timeout, **kwargs)
 
 
-def api_post(path: str, *, base: str | None = None, json: Any = None, **kwargs: Any) -> Any:
-    return _api_request("POST", path, base=base, json=json, **kwargs)
+def api_post(
+    path: str, *, base: str | None = None, json: Any = None, timeout: float = 10.0, **kwargs: Any
+) -> Any:
+    return _api_request("POST", path, base=base, json=json, timeout=timeout, **kwargs)
 
 
-def api_put(path: str, *, base: str | None = None, json: Any = None, **kwargs: Any) -> Any:
-    return _api_request("PUT", path, base=base, json=json, **kwargs)
+def api_put(
+    path: str, *, base: str | None = None, json: Any = None, timeout: float = 10.0, **kwargs: Any
+) -> Any:
+    return _api_request("PUT", path, base=base, json=json, timeout=timeout, **kwargs)
 
 
-def api_patch(path: str, *, base: str | None = None, json: Any = None, **kwargs: Any) -> Any:
-    return _api_request("PATCH", path, base=base, json=json, **kwargs)
+def api_patch(
+    path: str, *, base: str | None = None, json: Any = None, timeout: float = 10.0, **kwargs: Any
+) -> Any:
+    return _api_request("PATCH", path, base=base, json=json, timeout=timeout, **kwargs)
 
 
-def api_delete(path: str, *, base: str | None = None, **kwargs: Any) -> Any:
-    return _api_request("DELETE", path, base=base, **kwargs)
+def api_delete(path: str, *, base: str | None = None, timeout: float = 10.0, **kwargs: Any) -> Any:
+    return _api_request("DELETE", path, base=base, timeout=timeout, **kwargs)
 
 
-def _api_request(method: str, path: str, *, base: str | None, **kwargs: Any) -> Any:
+def api_get_bytes(
+    path: str, *, base: str | None = None, timeout: float = 60.0, **kwargs: Any
+) -> tuple[bytes, str]:
+    """GET ``path`` and return ``(raw_bytes, content_type)`` — for binary payloads
+    (e.g. the ``document-transfer`` export ZIP) that ``api_get``'s JSON decode
+    would otherwise mangle. Raises ``CliApiError`` on non-2xx, same as the
+    other ``api_*`` helpers.
+    """
+    url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(url, **kwargs)
+    except httpx.HTTPError as exc:
+        raise CliApiError(f"GET {url} failed: {type(exc).__name__}: {exc}") from exc
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+            msg = body.get("error", {}).get("message") or body
+        except ValueError:
+            msg = resp.text[:300]
+        raise CliApiError(f"GET {url} → HTTP {resp.status_code}: {msg}")
+    return resp.content, resp.headers.get("content-type", "application/octet-stream")
+
+
+def _api_request(
+    method: str, path: str, *, base: str | None, timeout: float = 10.0, **kwargs: Any
+) -> Any:
     """Issue a single HTTP request and decode JSON or raise CliApiError."""
     url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             resp = client.request(method, url, **kwargs)
     except httpx.HTTPError as exc:
         raise CliApiError(f"{method} {url} failed: {type(exc).__name__}: {exc}") from exc

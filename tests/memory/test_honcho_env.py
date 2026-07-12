@@ -85,7 +85,8 @@ class TestRenderEnvCloudOverride:
             "https://openrouter.ai/api/v1" in out
         )
         assert (
-            "DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__API_KEY_ENV=OPENROUTER_API_KEY" in out
+            "DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__API_KEY_ENV=OPENROUTER_API_KEY"
+            in out
         )
         # Other features unaffected — still local.
         assert "DERIVER_MODEL_CONFIG__MODEL=hal0/utility" in out

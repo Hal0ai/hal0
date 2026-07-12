@@ -299,32 +299,6 @@ def _worklist_suite(item: dict, base: Suite | None) -> Suite:
     )
 
 
-def _worker_eval(model: str, api: str) -> bool:
-    """Run the full agentic-eval task set for one queued model (the dashboard's
-    Tool Bench). Unlike suite runs this drives the LIVE inference endpoint via
-    Hermes, so it never takes the GPU seam. Same politeness rule as cmd_eval:
-    re-check for live traffic before each task and back off (leave the item
-    queued) rather than pile onto production. Returns True when every task ran;
-    False when the operator hit Stop/Pause or traffic appeared mid-run."""
-    import tempfile
-
-    from . import control, evalrun
-
-    run_id = _now_stamp()
-    with tempfile.TemporaryDirectory(prefix="hal0-bench-eval-") as tmp:
-        workroot = Path(tmp)
-        for task in evalrun.TASKS:
-            if not control.worker_should_run():
-                return False
-            if traffic_in_flight(api):
-                print(f"[worker] live traffic — backing off eval {model}")
-                return False
-            print(f"[worker] eval {model} :: {task.id} …", flush=True)
-            rec = evalrun.run_task(task, model, run_id, api, workroot)
-            evalrun.append_eval(rec)
-    return True
-
-
 def cmd_worker(args: argparse.Namespace) -> int:
     """Drain the run queue (DESIGN §7 POST /api/run, wired out-of-request).
 
@@ -355,29 +329,6 @@ def cmd_worker(args: argparse.Namespace) -> int:
         ctrl = control.read_control()
         try:
             models = fetch_registry_models(args.api)
-            if item.get("kind") == "eval" and item.get("model"):
-                resolved = _resolve_model_id(item["model"], models)
-                from . import evalrun
-
-                control.write_status(
-                    {
-                        "item": item,
-                        "suite": f"eval:{resolved.rsplit('/', 1)[-1]}",
-                        "cells": len(evalrun.TASKS),
-                        "started": _now_stamp(),
-                        "exclusive": False,  # eval drives the live endpoint, never the seam
-                    },
-                    _now_stamp(),
-                )
-                if not _worker_eval(resolved, args.api):
-                    print(f"[worker] eval {resolved} deferred — item stays queued")
-                    control.write_status(None, _now_stamp())
-                    time.sleep(args.poll)
-                    continue
-                control.dequeue(item.get("id"))
-                print(f"[worker] eval {resolved} done: {len(evalrun.TASKS)} task(s)")
-                control.write_status(None, _now_stamp())
-                continue
             if item.get("suite"):
                 try:
                     suite = _load_suite(item["suite"])

@@ -231,7 +231,8 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
                 "Reads always span all three tiers. Write to your profile bank by default; "
                 "set shared=true to publish cross-agent. Tag writes with agent:hermes. "
                 "Use hal0_memory_search or hal0_memory_recall before asking the user to "
-                "repeat themselves; use hal0_memory_add to persist durable facts." + degraded_note
+                "repeat themselves; use hal0_memory_add to persist durable facts."
+                + degraded_note
             )
         return (
             "# hal0 memory\n"
@@ -299,19 +300,13 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             if tool_name == "hal0_memory_search":
                 query = (args.get("query") or "").strip()
                 if not query:
-                    return json.dumps(
-                        {"status": "error", "error": "Missing required parameter: query"}
-                    )
-                return json.dumps(
-                    self._client.search(query, limit=int(args.get("limit", 10) or 10))
-                )
+                    return json.dumps({"status": "error", "error": "Missing required parameter: query"})
+                return json.dumps(self._client.search(query, limit=int(args.get("limit", 10) or 10)))
 
             if tool_name == "hal0_memory_recall":
                 query = (args.get("query") or "").strip()
                 if not query:
-                    return json.dumps(
-                        {"status": "error", "error": "Missing required parameter: query"}
-                    )
+                    return json.dumps({"status": "error", "error": "Missing required parameter: query"})
                 return json.dumps(
                     self._client.recall(query, max_tokens=int(args.get("max_tokens", 2048) or 2048))
                 )
@@ -319,22 +314,16 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             if tool_name == "hal0_memory_add":
                 text = (args.get("text") or "").strip()
                 if not text:
-                    return json.dumps(
-                        {"status": "error", "error": "Missing required parameter: text"}
-                    )
+                    return json.dumps({"status": "error", "error": "Missing required parameter: text"})
                 shared = bool(args.get("shared", False))
                 tags = args.get("tags")
-                tag_list = (
-                    [str(t) for t in tags] if isinstance(tags, list) and tags else ["agent:hermes"]
-                )
+                tag_list = [str(t) for t in tags] if isinstance(tags, list) and tags else ["agent:hermes"]
                 result = self._client.add(text, tags=tag_list, private=not shared)
                 if isinstance(result, dict) and "error" not in result:
                     result["bank"] = "shared" if shared else f"private:{self._agent_id()}"
                 return json.dumps(result)
 
-            return json.dumps(
-                {"status": "error", "error": f"hal0-memory: unknown tool '{tool_name}'"}
-            )
+            return json.dumps({"status": "error", "error": f"hal0-memory: unknown tool '{tool_name}'"})
         except Hal0MemoryClientError as exc:
             self._note_failure(f"tool:{tool_name}", exc)
             return json.dumps({"status": "error", "error": str(exc)})

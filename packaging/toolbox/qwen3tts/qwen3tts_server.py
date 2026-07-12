@@ -31,7 +31,6 @@ Body shape for /v1/audio/speech (OpenAI compatible + extensions):
       "instruct":        "Speak warmly."                         # extension
     }
 """
-
 from __future__ import annotations
 
 import argparse
@@ -54,30 +53,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 # CustomVoice built-in timbres (Qwen3-TTS-12Hz-1.7B-CustomVoice).
 KNOWN_SPEAKERS = [
-    "Vivian",
-    "Serena",
-    "Uncle_Fu",
-    "Dylan",
-    "Eric",  # Chinese / dialects
-    "Ryan",
-    "Aiden",  # English
-    "Ono_Anna",  # Japanese
-    "Sohee",  # Korean
+    "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",  # Chinese / dialects
+    "Ryan", "Aiden",                                    # English
+    "Ono_Anna",                                         # Japanese
+    "Sohee",                                            # Korean
 ]
 # Qwen3-TTS covers 10 languages; "Auto" lets the model detect from the text,
 # which is what we want for translated output.
 KNOWN_LANGUAGES = [
-    "Auto",
-    "Chinese",
-    "English",
-    "Japanese",
-    "Korean",
-    "German",
-    "French",
-    "Russian",
-    "Portuguese",
-    "Spanish",
-    "Italian",
+    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+    "French", "Russian", "Portuguese", "Spanish", "Italian",
 ]
 
 _state: dict[str, object] = {
@@ -139,20 +124,17 @@ def _load_model(model_path: str | None, default_voice: str, default_language: st
     _state["loaded"] = True
     log.info(
         "qwen3-tts loaded: default_voice=%s default_language=%s",
-        _state["default_voice"],
-        _state["default_language"],
+        _state["default_voice"], _state["default_language"],
     )
 
     # Warm the kernels so the first real request isn't paying JIT/allocation cost.
     try:
         wavs, sr = model.generate_custom_voice(
-            text="Ready.",
-            language="English",
-            speaker=str(_state["default_voice"]),
+            text="Ready.", language="English", speaker=str(_state["default_voice"]),
         )
         _state["sample_rate"] = int(sr)
         log.info("qwen3-tts warmup ok: sr=%d", int(sr))
-    except Exception:
+    except Exception:  # noqa: BLE001
         log.exception("warmup synth failed (continuing; /health stays loaded)")
 
 
@@ -166,9 +148,7 @@ _FORMAT_MIME = {
 }
 
 
-def _encode_audio(
-    samples: np.ndarray, sample_rate: int, response_format: str, speed: float
-) -> tuple[bytes, str]:
+def _encode_audio(samples: np.ndarray, sample_rate: int, response_format: str, speed: float) -> tuple[bytes, str]:
     """Encode float32 mono samples to the requested format, applying ``speed``.
 
     Speed is applied via ffmpeg's atempo filter for compressed/wav outputs.
@@ -197,22 +177,9 @@ def _encode_audio(
         out_path = wav_path + "." + fmt
         try:
             af = [] if abs(speed - 1.0) < 1e-3 else ["-filter:a", f"atempo={speed:.3f}"]
-            codec = {"mp3": "libmp3lame", "opus": "libopus", "wav": "pcm_s16le", "flac": "flac"}[
-                fmt
-            ]
+            codec = {"mp3": "libmp3lame", "opus": "libopus", "wav": "pcm_s16le", "flac": "flac"}[fmt]
             subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-i",
-                    wav_path,
-                    *af,
-                    "-c:a",
-                    codec,
-                    out_path,
-                ],
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", wav_path, *af, "-c:a", codec, out_path],
                 check=True,
             )
             with open(out_path, "rb") as f:
@@ -285,7 +252,7 @@ def speech(req: SpeechRequest) -> Response:
         if req.instruct:
             kwargs["instruct"] = req.instruct
         wavs, sr = model.generate_custom_voice(**kwargs)  # type: ignore[union-attr]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.exception("synthesis failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

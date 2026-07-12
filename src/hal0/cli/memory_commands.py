@@ -414,10 +414,10 @@ def provider_set_cmd(
 # engine migration, and the new cross-bank ``unify`` — so ``migrate`` is a
 # Typer sub-app (memory_migrate_commands.py) instead of a single
 # ``@app.command``. honcho's migrate_cmd body (and its four helpers) moved
-# there verbatim as the sub-app's default callback; behaviour is
-# unchanged, only the registration shape is. ``sync-graph`` and ``honcho
-# render-env`` below still need those helpers, so they're imported rather
-# than redefined.
+# there verbatim as the sub-app's default callback; behaviour is unchanged,
+# only the registration shape is. ``sync-graph`` and ``honcho render-env``
+# below still need those helpers, so they're imported rather than
+# redefined.
 app.add_typer(migrate_app, name="migrate")
 
 

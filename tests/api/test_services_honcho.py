@@ -38,7 +38,7 @@ def test_honcho_unit_file_shipped() -> None:
     assert unit.is_file()
     text = unit.read_text(encoding="utf-8")
     assert "ExecStart=" in text
-    assert "podman compose" in text
+    assert "docker compose" in text
     assert "hal0-honcho" in text
     assert "[Install]" in text and "WantedBy=multi-user.target" in text
 
