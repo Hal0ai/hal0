@@ -486,7 +486,9 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
     * A hermes-compatible Python (3.11-3.13) resolvable — the venv is
       built with an explicit interpreter, and hermes-agent wheels cap
       ``requires-python <3.14``, so \"≥ 3.11\" alone is not enough
-      (Ubuntu 26.04 ships 3.14 only, #1248).
+      (Ubuntu 26.04 ships 3.14 only, #1248). A host with uv passes even
+      without one — the install phase provisions a managed interpreter
+      (#1250).
     * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
       reach hal0 are useless. Catch it now instead of during config_write.
     * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
@@ -507,7 +509,14 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
     venv_python = _resolve_supported_python()
     details["venv_python"] = venv_python
     if venv_python is None:
-        failures.append(_python_range_error())
+        # No system interpreter in range. uv can still provision one during
+        # the install phase (#1250) — we only check availability here, not
+        # download: preflight must stay fast and side-effect free. Fail only
+        # when that fallback is closed too.
+        uv = _uv_available()
+        details["uv_python_fallback"] = uv is not None
+        if uv is None:
+            failures.append(_python_range_error())
 
     rc = ctx.io.http_get(DAEMON_HEALTH_URL)
     details["daemon_http_status"] = rc
@@ -602,8 +611,79 @@ def _python_range_error() -> str:
         f"`requires-python <{cap}`, so the hermes venv needs {lo}-{hi}. "
         f"Install one and re-run, e.g. `apt install python{hi} python{hi}-venv`; "
         f"on distros that ship only {cap}+ (Ubuntu 26.04) use the deadsnakes "
-        f"PPA or `uv python install {hi}`"
+        f"PPA — or install uv (https://astral.sh/uv), and hal0 will provision "
+        f"Python {UV_PYTHON_FALLBACK} itself"
     )
+
+
+#: Minor version uv provisions when no system interpreter qualifies (#1250).
+#: Newest supported release — keep inside [PYTHON_MIN, PYTHON_MAX_EXCLUSIVE).
+UV_PYTHON_FALLBACK = "3.13"
+
+#: Where uv-managed interpreters land. uv's default (~/.local/share/uv) is
+#: under /root with mode 0700 when provisioning runs as root — but the hermes
+#: venv executes as the ``hal0`` user via a symlinked base interpreter, which
+#: would then be unreachable. A world-readable tree under /var/lib/hal0 keeps
+#: the interpreter usable by the service and survives root-homedir cleanups.
+UV_PYTHON_INSTALL_DIR = Path("/var/lib/hal0/python")
+
+
+def _uv_available(prober: Callable[[str], str | None] = shutil.which) -> str | None:
+    return prober("uv")
+
+
+def _provision_python_via_uv(
+    prober: Callable[[str], str | None] = shutil.which,
+    runner: Any = subprocess,
+) -> str | None:
+    """Fetch a uv-managed Python as the last resort (#1250).
+
+    ``uv python install`` is idempotent (a no-op when the version is already
+    present), and ``uv python find`` returns a stable path under
+    ``UV_PYTHON_INSTALL_DIR`` — so repeat runs and ``--repair`` deterministically
+    reuse the interpreter from the first provisioning instead of hunting anew.
+    Returns ``None`` when uv is absent or the fetch fails (offline) — callers
+    fall through to the actionable range error.
+    """
+    uv = _uv_available(prober)
+    if uv is None:
+        return None
+    env = {**os.environ, "UV_PYTHON_INSTALL_DIR": str(UV_PYTHON_INSTALL_DIR)}
+    try:
+        runner.run(  # nosec B603 — argv is a constant uv invocation
+            [uv, "python", "install", UV_PYTHON_FALLBACK],
+            check=True,
+            env=env,
+        )
+        found = runner.run(  # nosec B603
+            [uv, "python", "find", UV_PYTHON_FALLBACK],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    path = (found.stdout or "").strip()
+    return path or None
+
+
+def _ensure_supported_python(
+    prober: Callable[[str], str | None] = shutil.which,
+    *,
+    runner: Any = subprocess,
+    running: tuple[int, int] | None = None,
+) -> str | None:
+    """Resolve a venv interpreter: system Python first, uv-managed as fallback.
+
+    A qualifying system interpreter always wins — the uv download only fires
+    when PATH and the running interpreter both fail the range check, so hosts
+    with a packaged 3.11-3.13 never pull a managed build (#1250).
+    """
+    found = _resolve_supported_python(prober, running=running)
+    if found is not None:
+        return found
+    return _provision_python_via_uv(prober, runner)
 
 
 def _resolve_supported_python(
@@ -656,13 +736,13 @@ def _install_venv(
     requirements: Path,
     *,
     runner: Any = subprocess,
-    python_resolver: Callable[[], str | None] = _resolve_supported_python,
+    python_resolver: Callable[[], str | None] = _ensure_supported_python,
 ) -> None:
     """Create the venv at ``venv`` and install ``requirements`` into it.
 
-    Two-step: ``python3.x -m venv`` then ``pip install -r``. We don't
-    use ``uv`` here to keep the dependency footprint zero — the
-    runtime venv is small and pip is universally available.
+    Two-step: ``python3.x -m venv`` then ``pip install -r``. The venv itself
+    is stdlib-built — uv enters only inside the resolver, as the last-resort
+    interpreter fetch on hosts with no packaged 3.11-3.13 (#1250).
     """
     py = python_resolver()
     if py is None:
