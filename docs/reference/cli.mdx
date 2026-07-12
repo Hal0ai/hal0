@@ -350,6 +350,16 @@ Walks `/etc/hal0/capabilities.toml`: selections whose backend can't serve the
 model are snapped to the model's first legal backend; selections whose model
 left the catalog are cleared. Idempotent.
 
+## `hal0 comfyui` — ComfyUI model provisioning
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `comfyui orchestrate-models` | Pull the curated ComfyUI model set (the default variant of every capability — SDXL/Qwen/Wan/LTX-2/Hunyuan/ESRGAN) in one logged sequence. A failed *optional* asset (e.g. the ESRGAN 4x-UltraSharp mirror) never blocks the others; the run exits non-zero only when a *required* family fails. Already-present files are skipped, so it is safe to re-run. | `--dry-run`, `--log-dir` |
+
+Each step's start and exit code plus a final summary are written to
+`<model-store>/comfyui/logs/orchestrate-<timestamp>.log`; the path is printed on
+completion.
+
 ## `hal0 app` — optional apps
 
 | Command | Purpose | Key options |
