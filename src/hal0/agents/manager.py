@@ -538,12 +538,36 @@ class AgentManager:
 def installer_script_path(name: str) -> Path:
     """Return the absolute path to ``installer/agents/<name>.sh``.
 
-    Resolution mirrors the uninstall CLI wrapper: editable install →
-    ``src/hal0/agents/manager.py`` lives at ``parents[3]/installer/...``.
+    ``install.sh`` pip-installs hal0 as a NON-editable wheel in production
+    (v0.9.7.1+; only ``pip install -e <repo>`` dev checkouts differ) — see
+    the FHS-layout note in :mod:`hal0.config.paths`. The two install shapes
+    resolve ``__file__`` completely differently, so we try both candidates
+    and return whichever exists:
+
+    * Editable / dev checkout — ``src/hal0/agents/manager.py`` lives at
+      ``<repo_root>/src/hal0/agents/manager.py``; ``parents[3]`` is the
+      repo root, so the script is ``<repo_root>/installer/agents/<name>.sh``.
+    * FHS / wheel install (the production case) — ``__file__`` resolves
+      into ``<venv>/lib/pythonX/site-packages/hal0/...``, which has no
+      ``installer/`` sibling. The scripts instead ship alongside the code
+      root :func:`hal0.config.paths.usr_lib` resolves
+      (``/usr/lib/hal0/current`` by default, honouring ``HAL0_HOME`` for
+      dev/test root overrides — same convention the rest of the manager
+      uses for its own etc/var roots).
+
+    If neither candidate exists we return the FHS candidate anyway, so the
+    caller's "installer script missing" error points at the real
+    production path rather than a venv path the operator won't recognise.
     """
     # parents[0]=agents, [1]=hal0, [2]=src, [3]=repo root
-    repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / "installer" / "agents" / f"{name}.sh"
+    editable_candidate = (
+        Path(__file__).resolve().parents[3] / "installer" / "agents" / f"{name}.sh"
+    )
+    fhs_candidate = _paths.usr_lib() / "installer" / "agents" / f"{name}.sh"
+
+    if editable_candidate.is_file():
+        return editable_candidate
+    return fhs_candidate
 
 
 def _all_known_drivers() -> Iterable[str]:

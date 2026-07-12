@@ -542,3 +542,108 @@ def test_hermes_uninstall_refuses_unmanaged_home(
     assert home.exists()
     assert (home / "user-data.txt").exists()
     assert not manager._config_path("hermes").exists()
+
+
+# ── installer_script_path: FHS-aware resolution for wheel installs ───────────
+
+
+def test_installer_script_path_resolves_editable_when_present() -> None:
+    """Editable / dev checkout: this test runs against the real
+    checkout, which has ``installer/agents/pi-coder.sh`` three parents
+    up from ``src/hal0/agents/manager.py`` — no monkeypatching needed,
+    this exercises the real resolution path."""
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved.is_file()
+    assert resolved == (
+        Path(mgr_mod.__file__).resolve().parents[3] / "installer" / "agents" / "pi-coder.sh"
+    )
+
+
+def test_installer_script_path_falls_back_to_fhs_for_wheel_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-editable wheel install has ``manager.py`` under
+    ``<venv>/lib/pythonX/site-packages/hal0/agents/manager.py`` — three
+    parents up from there is a venv dir, not a repo root, so it has no
+    ``installer/`` sibling. The function must fall back to the FHS code
+    root (:func:`hal0.config.paths.usr_lib`, ``/usr/lib/hal0/current``
+    in production) and find the script there — this was the root cause
+    of ``hal0 agent install pi-coder`` 500ing on a real FHS install."""
+    fake_module_path = (
+        tmp_path
+        / "venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "hal0"
+        / "agents"
+        / "manager.py"
+    )
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    fhs_root = tmp_path / "usr-lib-hal0-current"
+    script_dir = fhs_root / "installer" / "agents"
+    script_dir.mkdir(parents=True)
+    fhs_script = script_dir / "pi-coder.sh"
+    fhs_script.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
+
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved == fhs_script
+    assert resolved.is_file()
+
+
+def test_installer_script_path_prefers_editable_when_both_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an editable-shaped repo root has the script, it wins over
+    the FHS candidate (resolution order: editable first, FHS fallback)."""
+    fake_module_path = tmp_path / "repo" / "src" / "hal0" / "agents" / "manager.py"
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    editable_script_dir = tmp_path / "repo" / "installer" / "agents"
+    editable_script_dir.mkdir(parents=True)
+    editable_script = editable_script_dir / "pi-coder.sh"
+    editable_script.write_text("#!/bin/sh\n")
+
+    fhs_root = tmp_path / "fhs"
+    fhs_script_dir = fhs_root / "installer" / "agents"
+    fhs_script_dir.mkdir(parents=True)
+    (fhs_script_dir / "pi-coder.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
+
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved == editable_script
+
+
+def test_installer_script_path_missing_everywhere_returns_fhs_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the script exists in neither location, the function still
+    returns a path rather than raising/None — the FHS candidate — so
+    the caller's "installer script missing" error points at the real
+    production path, not a venv path nobody would recognise."""
+    fake_module_path = (
+        tmp_path
+        / "venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "hal0"
+        / "agents"
+        / "manager.py"
+    )
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    fhs_root = tmp_path / "usr-lib-hal0-current"
+    monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
+
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved == fhs_root / "installer" / "agents" / "pi-coder.sh"
+    assert not resolved.is_file()
