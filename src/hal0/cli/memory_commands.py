@@ -435,6 +435,12 @@ def sync_graph_cmd(
     Equivalent to ``migrate --from honcho --to hindsight``, wired as its own
     command for the recurring ``hal0-honcho-sync.timer`` job — no
     ``--resume``/``--dataset`` plumbing to think about, just "sync what's new".
+
+    Every invocation (success or failure) is recorded via
+    :meth:`~hal0.memory.honcho_migrate.MigrateState.record_sync_run` so
+    ``GET /api/memory/honcho/sync`` can report the timer job's health.
+    A failure exits non-zero (systemd marks the service run failed) but the
+    state file is still saved first, so the dashboard sees the error.
     """
     from hal0.cli.memory_migrate_commands import (
         _load_honcho_cli_config,
@@ -445,15 +451,22 @@ def sync_graph_cmd(
     cfg = _load_honcho_cli_config()
     honcho_base = f"http://127.0.0.1:{cfg.honcho.port}"
     state = _migrate_state()
-    report = _run_migrate_honcho_to_hindsight(
-        honcho_base=honcho_base,
-        workspace=cfg.honcho.workspace,
-        agent_id=agent,
-        since=None,
-        dry_run=False,
-        state=state,
-        json_out=json_out,
-    )
+    try:
+        report = _run_migrate_honcho_to_hindsight(
+            honcho_base=honcho_base,
+            workspace=cfg.honcho.workspace,
+            agent_id=agent,
+            since=None,
+            dry_run=False,
+            state=state,
+            json_out=json_out,
+        )
+    except Exception as exc:
+        state.record_sync_run(ok=False, error=str(exc), synced_count=0)
+        state.save()
+        die(f"sync-graph failed: {exc}")
+        return
+    state.record_sync_run(ok=True, error=None, synced_count=report.get("migrated", 0))
     state.save()
     if json_out:
         typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))

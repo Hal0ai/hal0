@@ -16,6 +16,7 @@ import {
 } from 'd3-force'
 
 import {
+  useAggregateBankStats,
   useBankDelete,
   useBankDocuments,
   useBankGraph,
@@ -48,7 +49,21 @@ import {
 // graph on/off line + slot picker from these (same source as the #agent
 // Memory tab; bridged here too so #memory doesn't depend on that tab's
 // bridge load order).
-import { useMemoryGraphStatus, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
+import {
+  useMemoryGraphStatus,
+  useRetryFailedExtractions,
+  useUpdateMemoryGraph,
+} from '@/api/hooks/useMemory'
+// Provider-routing (Hindsight vs Honcho) + Honcho engine/sync stats — back
+// the two-provider-card layout and the per-agent routing strip.
+import {
+  useHonchoStats,
+  useHonchoSync,
+  useHonchoSyncRun,
+  useMemoryProvider,
+  useSetHonchoSync,
+  useSetMemoryProvider,
+} from '@/api/hooks/useHoncho'
 
 Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseMemoryEngine: useMemoryEngine,
@@ -56,6 +71,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseUpdateMemoryGraph: useUpdateMemoryGraph,
   __hal0UseMemoryBanks: useMemoryBanks,
   __hal0UseBankStats: useBankStats,
+  __hal0UseAggregateBankStats: useAggregateBankStats,
   __hal0UseBankTimeseries: useBankTimeseries,
   __hal0UseBankUpsert: useBankUpsert,
   __hal0UseBankDelete: useBankDelete,
@@ -64,6 +80,13 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseOperationRetry: useOperationRetry,
   __hal0UseOperationCancel: useOperationCancel,
   __hal0UseConsolidate: useConsolidate,
+  __hal0UseRetryFailedExtractions: useRetryFailedExtractions,
+  __hal0UseMemoryProvider: useMemoryProvider,
+  __hal0UseSetMemoryProvider: useSetMemoryProvider,
+  __hal0UseHonchoStats: useHonchoStats,
+  __hal0UseHonchoSync: useHonchoSync,
+  __hal0UseSetHonchoSync: useSetHonchoSync,
+  __hal0UseHonchoSyncRun: useHonchoSyncRun,
   __hal0UseBankGraph: useBankGraph,
   __hal0UseBankSubgraph: useBankSubgraph,
   __hal0UseEntityGraph: useEntityGraph,

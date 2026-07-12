@@ -71,9 +71,13 @@ def stub_honcho_cfg(monkeypatch: pytest.MonkeyPatch):
     class _FakeState:
         def __init__(self) -> None:
             self.saved = False
+            self.sync_runs: list[dict[str, Any]] = []
 
         def save(self) -> None:
             self.saved = True
+
+        def record_sync_run(self, *, ok: bool, error: str | None, synced_count: int) -> None:
+            self.sync_runs.append({"ok": ok, "error": error, "synced_count": synced_count})
 
     state = _FakeState()
     monkeypatch.setattr(memory_migrate_commands, "_migrate_state", lambda: state)

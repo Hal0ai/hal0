@@ -226,6 +226,19 @@ export const ENDPOINTS = {
   // Bulk-requeue every failed extraction/consolidation op across banks.
   memoryGraphRetry: '/api/memory/graph/retry',
 
+  // ── Memory providers (Hindsight vs Honcho routing) ───────────────
+  // GET → {engines: {hindsight: {healthy, url}, honcho: {healthy, url}},
+  //        agents: {"<agent_id>": {provider, private}}}
+  // PUT body {agent, provider, private?, restart?=true} → 409 if the
+  // target provider is down.
+  memoryProvider: '/api/memory/provider',
+  // Honcho engine stats — nulls when unreachable (fail-soft mirror of
+  // /api/memory/engine for the Hindsight side).
+  memoryHonchoStats: '/api/memory/honcho/stats',
+  // Graph-sync timer status/toggle + one-shot run trigger.
+  memoryHonchoSync: '/api/memory/honcho/sync',
+  memoryHonchoSyncRun: '/api/memory/honcho/sync/run',
+
   // ── Journal (HTTP backfill + SSE tail) ───────────────────────────
   // Per #322 Phase 1 (PR #330): the ``/api/journal`` surface
   // supersedes ``/api/logs``.
