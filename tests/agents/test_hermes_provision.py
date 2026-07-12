@@ -155,6 +155,7 @@ def test_phase_names_in_planned_order() -> None:
         "context_link",
         "namespace_register",
         "brain_profile_seed",
+        "brain_profile_mcp_wire",
         "model_automap",
         "voice_wire",
         # Late always-run ownership reconcile: re-chown HERMES_HOME + repair
@@ -1297,6 +1298,63 @@ def test_brain_profile_seed_continues_on_mcp_failure() -> None:
     # Warn-as-OK: the phase never blocks bootstrap on the memory layer.
     assert out.status == hp.PhaseStatus.OK
     assert out.details["registered"] is False
+
+
+# ── brain_profile_mcp_wire — reproducible profile MCP wiring ────────────────
+
+
+def _brain_profile_state(tmp_path: Path) -> Any:
+    return hp.BootstrapState(hermes_home=str(tmp_path / ".hermes"))
+
+
+def test_brain_profile_mcp_wire_skips_when_profile_absent(tmp_path: Path) -> None:
+    state = _brain_profile_state(tmp_path)
+    out = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["wired"] is False  # upstream owns profile creation
+
+
+def test_brain_profile_mcp_wire_merges_and_preserves_upstream_keys(tmp_path: Path) -> None:
+    import yaml
+
+    state = _brain_profile_state(tmp_path)
+    cfg = hp._brain_profile_config_path(state)
+    cfg.parent.mkdir(parents=True)
+    # An existing profile config with upstream keys + an unrelated MCP server.
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"default": "agent"},
+                "mcp_servers": {"some-operator-server": {"type": "http", "url": "http://x"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["wired"] is True and out.details["changed"] is True
+
+    merged = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    servers = merged["mcp_servers"]
+    # hal0-owned servers wired under the brain profile identity…
+    assert servers["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__hal0-brain"
+    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == 1
+    assert servers["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__hal0-brain"
+    # …without clobbering upstream/operator keys.
+    assert merged["model"] == {"default": "agent"}
+    assert servers["some-operator-server"] == {"type": "http", "url": "http://x"}
+
+
+def test_brain_profile_mcp_wire_is_idempotent(tmp_path: Path) -> None:
+    state = _brain_profile_state(tmp_path)
+    cfg = hp._brain_profile_config_path(state)
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("model:\n  default: agent\n", encoding="utf-8")
+    first = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    assert first.details["changed"] is True
+    second = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    # Already-correct box: no rewrite, so its comments/formatting survive.
+    assert second.details["wired"] is True and second.details["changed"] is False
 
 
 def test_namespace_register_continues_on_mcp_failure(

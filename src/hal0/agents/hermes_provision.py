@@ -2995,6 +2995,107 @@ def _phase_brain_profile_seed(ctx: PhaseContext) -> PhaseResult:
     )
 
 
+# ── Phase H.7: brain_profile_mcp_wire ───────────────────────────────────────
+#
+# The hal0-brain profile (``~/.hermes/profiles/hal0-brain/``, created by the
+# upstream hermes binary) needs the two hal0-owned MCP servers — hal0-admin
+# (platform control) + hal0-memory (its private 3-tier bank) — so the steward
+# can actually interact with + control the box. On a hand-configured host these
+# were wired out-of-band; this phase makes them reproducible. ``hermes config
+# set`` has no per-profile target, so — exactly like honcho.json and the YAML
+# list-keys — hal0 deep-merges the block into the profile's config.yaml,
+# preserving every upstream/operator key. Only rewrites when the wiring is
+# actually missing/wrong (a correct box is left byte-untouched, so the file's
+# comments/formatting survive). Warn-as-OK; skips when the profile isn't there.
+
+_BRAIN_PROFILE_NAME = "hal0-brain"  # on-disk hermes profile directory name
+
+
+def _brain_profile_config_path(state: BootstrapState) -> Path:
+    return Path(state.hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
+
+
+def _build_brain_profile_mcp_servers() -> dict[str, Any]:
+    """The hal0-owned MCP servers the hal0-brain profile is wired to.
+
+    Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
+    to the brain identity (``X-hal0-Agent: hermes__hal0-brain``); memory is
+    private (its own 3-tier bank). google_workspace/hal0-browser are
+    deliberately NOT included — the steward gets platform control + memory only.
+    """
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+
+    return {
+        "hal0-admin": {
+            "type": "http",
+            "url": "http://127.0.0.1:8080/mcp/admin/mcp",
+            "headers": {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID},
+            "timeout": 60,
+        },
+        "hal0-memory": {
+            "type": "http",
+            "url": "http://127.0.0.1:8080/mcp/memory/mcp",
+            "headers": {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": 1},
+            "timeout": 30,
+        },
+    }
+
+
+def _phase_brain_profile_mcp_wire(ctx: PhaseContext) -> PhaseResult:
+    """Reproducibly wire hal0-admin + hal0-memory into the hal0-brain profile.
+
+    Deep-merges the hal0-owned servers into the profile config.yaml (merge,
+    never clobber), only writing when something actually changed so a correctly
+    wired box (and its comments) is left untouched. Skips when the profile
+    config is absent — the upstream hermes binary owns profile creation. Any
+    I/O / PyYAML gap degrades warn-as-OK; bootstrap never blocks on it.
+    """
+    state = ctx.state
+    path = _brain_profile_config_path(state)
+    desired = {"mcp_servers": _build_brain_profile_mcp_servers()}
+
+    if not path.exists():
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={"wired": False, "reason": "profile config absent", "path": str(path)},
+            reason="hal0-brain profile not present (upstream owns creation); MCP wiring skipped",
+        )
+
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={"wired": False, "reason": "PyYAML unavailable", "path": str(path)},
+            reason="PyYAML absent; brain profile MCP not wired (continuing)",
+        )
+
+    try:
+        current = path.read_text(encoding="utf-8")
+        base = yaml.safe_load(current) or {}
+        merged = _deep_merge(base, desired)
+        out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+        changed = out != current
+        if changed:
+            path.write_text(out, encoding="utf-8")
+    except (OSError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={"wired": False, "error": str(exc), "path": str(path)},
+            reason=f"brain profile MCP wire failed ({exc}); continuing",
+        )
+
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "wired": True,
+            "changed": changed,
+            "path": str(path),
+            "servers": sorted(desired["mcp_servers"].keys()),
+        },
+    )
+
+
 # ── Phase I: model_automap ──────────────────────────────────────────────────
 #
 # Walks the live slot/model surface and rewrites the [model_aliases]
@@ -4766,6 +4867,9 @@ PHASES: list[Phase] = [
     # Register the hal0-brain profile identity right after the default agent's
     # card, once the memory layer is up. Warn-as-OK like namespace_register.
     Phase("brain_profile_seed", _phase_brain_profile_seed),
+    # Wire the hal0-owned MCP servers (admin + memory) into the hal0-brain
+    # profile config so the steward can control the box. Warn-as-OK.
+    Phase("brain_profile_mcp_wire", _phase_brain_profile_mcp_wire),
     # Both re-apply their slice of the overlay via `hermes config set` (no
     # full re-render), so neither reads mcp_wire's probed-server checkpoint
     # any more — only config_write still does (needs_previous above).
