@@ -2233,7 +2233,14 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "
         [[ -z "${reply}" || "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
     }
     if [[ -r /dev/tty ]] && _confirm_launch_setup; then
-        "${HAL0_BIN}" setup \
+        # Redirect stdin to the controlling terminal (the confirm prompt
+        # above already does this for exactly this reason). Without it, a
+        # piped install (`curl … | bash`) run from a real terminal answers
+        # "Y" here but the launched `hal0 setup` inherits the INSTALLER'S
+        # pipe as stdin — sys.stdin.isatty() is False, so setup_command
+        # prints "run it from a terminal" and exits 0 without ever running
+        # the wizard the operator just opted into.
+        HAL0_FORCE_INTERACTIVE=1 "${HAL0_BIN}" setup </dev/tty \
             || warn "guided setup exited non-zero — re-run '${BOLD}hal0 setup${RST}' anytime"
     else
         printf '\n'
