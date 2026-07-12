@@ -1,8 +1,9 @@
 # hal0 profile catalog — OPERATOR CUSTOM PROFILES ONLY.
 #
-# Seed profiles are VIRTUAL: the built-in catalog (rocm / rocm-dnse / rocm-moe /
-# vulkan / cuda / embed / rerank / flm / tts / tts-qwen3 / cpu-llm / comfyui)
-# lives in code (SEED_PROFILES in hal0.config.schema) and is overlaid on every
+# Seed profiles are VIRTUAL: the built-in catalog (rocm / rocm-dense / rocm-moe /
+# vulkan-dense / vulkan-moe / vulkan / cuda / embed / rerank / vulkan-embed /
+# vulkan-rerank / flm / tts / tts-qwen3 / cpu-llm / comfyui) lives in code
+# (SEED_PROFILES in hal0.config.schema) and is overlaid on every
 # load. It is intentionally NOT materialised here so that a re-tuned seed — new
 # flags, a bumped toolbox image — reaches every install on upgrade instead of
 # being frozen by a stale on-disk copy. hal0-api serves the seeds from code

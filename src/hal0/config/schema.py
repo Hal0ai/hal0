@@ -911,7 +911,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # workload's preferred memory pattern; per-model KV + spec-draft
         # tuning come from the model's defaults.extra_args.
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -925,7 +925,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # backend lane across all their ROCmFPX slots. -sm none (single GPU)
         # and --no-context-shift per the validated Tool-Eval card.
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -938,7 +938,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # cache miss). Small ubatch wins on gfx1151; per-model KV + spec-draft
         # tuning come from the model's defaults.extra_args.
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
@@ -951,7 +951,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # templates (e.g. Froggeric Qwen fixed) are set per-slot via
         # [server].extra_args.
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --threads-batch 32 --no-context-shift --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
@@ -1020,6 +1020,35 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "Reranking",
         "quant": "",
     },
+    "vulkan-embed": {
+        # Vulkan-backend sibling of `embed`. The rocm-backed `embed`/`rerank`
+        # seeds fail the #807 device/backend coherence check on a gpu-vulkan box,
+        # so a Vulkan-only or CUDA-less GPU host has no device-coherent embed
+        # lane — derive_profile used to fall through to the plain `vulkan` CHAT
+        # profile, which never emits --embedding and silently serves
+        # /v1/completions instead of /v1/embeddings. Same llama-server / flag
+        # bundle as `embed`, just on the RADV image. See profile_derive.derive_profile.
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "Embeddings · Vulkan",
+        "quant": "",
+    },
+    "vulkan-rerank": {
+        # Vulkan-backend sibling of `rerank` (see `vulkan-embed` for why this
+        # exists). MUST be a SEPARATE instance from vulkan-embed — combining
+        # --embedding and --reranking on one server yields all-zero scores
+        # (llama.cpp #20085).
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "vulkan",
+        "intent": "Reranking · Vulkan",
+        "quant": "",
+    },
     "flm": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
         "flags": "",
@@ -1054,8 +1083,13 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # CPU-optimal flags: no flash-attn (not available without GPU), smaller
         # batch to limit peak RAM, and a thread count sensible for a typical
         # multi-core host.  backend=None keeps the #807 coherence check happy.
+        # NOTE: mmap is intentionally left ON here (no --no-mmap) — the CPU-only
+        # path is the documented exception to the universal-GPU --no-mmap rule
+        # (2026-07-04 Strix Halo consolidation, fact 6): CPU-only wants the page
+        # cache (faster re-loads, no GTT involved); --no-mmap would force the
+        # whole model into anonymous RAM and forfeit page-cache-backed reloads.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap --jinja",
+        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja",
         "mtp": False,
         "device_class": "cpu",
         "intent": "CPU",
@@ -1075,10 +1109,13 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: ``tps`` = tokens/sec (LLM throughput); ``rtf`` = real-time factor (synth,
 #: e.g. TTS).  Grounded in hal0-container-bench-2026-06-08.md.  Custom
 #: profiles have no entry → the card shows "—" until benched.
-#: Unchanged by the 2026-07-04 Strix Halo flag re-tune: every adopted change
-#: (rocm-moe -ub 1024, vulkan -ub 256, dropped threads-batch/poll) is a prefill
-#: (pp) win — token-generation throughput was flat across all matrix cells, so
-#: these decode-based hero numbers still hold.
+#: The FP4 2x2 grid (rocm/vulkan x dense/moe) was tuned by the 2026-07-05
+#: ROCmFPX matrix (27B dense -b 512 -ub 512 ~29 t/s; 35B-A3B MoE -b 2048 -ub 512
+#: ~76 t/s — handoffs/rocmfpx-bench-results-2026-07-05.md), and the SMT-oversub
+#: `--threads-batch 32` / `--poll` debris carried over from the pre-consolidation
+#: Q-quant profiles was dropped per the 2026-07-04 consolidation. The four grid
+#: cards intentionally carry no hero entry (they render "—"); their decode
+#: numbers live on the per-model roster.
 PROFILE_BENCH: dict[str, dict[str, float]] = {
     "rocm": {"tps": 52.8},
     "vulkan": {"tps": 41.0},
