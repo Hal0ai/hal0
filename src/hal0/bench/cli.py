@@ -299,25 +299,49 @@ def _worklist_suite(item: dict, base: Suite | None) -> Suite:
     )
 
 
-def _worker_eval(model: str, api: str) -> bool:
+def _eval_run_id(item: dict) -> str:
+    """A STABLE run_id for a queued eval, derived from the queue item id.
+
+    The suite path is resumable because it appends per-cell as it goes and, on a
+    defer, leaves the item queued so the next tick re-plans only what's still
+    stale — the same records never get rewritten. Eval has no planner, so we get
+    the same property by deriving a run_id from the (unique, ``token_hex``) queue
+    item id: an eval that defers (Stop/Pause or live traffic) resumes under the
+    SAME run_id on the next tick instead of restarting under a fresh ``_now_stamp``
+    and duplicating the records of tasks that already completed. A fresh enqueue
+    gets a new item id → new run_id → a clean full re-run."""
+    return f"eval-{item.get('id') or 'adhoc'}"
+
+
+def _worker_eval(model: str, api: str, item: dict) -> bool:
     """Run the full agentic-eval task set for one queued model (the dashboard's
     Tool Bench). Unlike suite runs this drives the LIVE inference endpoint via
     Hermes, so it never takes the GPU seam. Same politeness rule as cmd_eval:
     re-check for live traffic before each task and back off (leave the item
     queued) rather than pile onto production. Returns True when every task ran;
-    False when the operator hit Stop/Pause or traffic appeared mid-run."""
+    False when the operator hit Stop/Pause or traffic appeared mid-run.
+
+    Resumable across defers (like the suite path): tasks already recorded under
+    this item's stable run_id in a prior tick are skipped, so a resumed eval runs
+    only the remainder and never double-writes a record."""
     import tempfile
 
     from . import control, evalrun
 
-    run_id = _now_stamp()
+    run_id = _eval_run_id(item)
+    done = {r.get("task_id") for r in evalrun.read_evals() if r.get("run_id") == run_id}
+    pending = [t for t in evalrun.TASKS if t.id not in done]
+    if not pending:
+        return True
     with tempfile.TemporaryDirectory(prefix="hal0-bench-eval-") as tmp:
         workroot = Path(tmp)
-        for task in evalrun.TASKS:
+        for task in pending:
             if not control.worker_should_run():
                 return False
             if traffic_in_flight(api):
-                print(f"[worker] live traffic — backing off eval {model}")
+                print(
+                    f"[worker] live traffic — backing off eval {model} (resumes where it left off)"
+                )
                 return False
             print(f"[worker] eval {model} :: {task.id} …", flush=True)
             rec = evalrun.run_task(task, model, run_id, api, workroot)
@@ -369,9 +393,24 @@ def cmd_worker(args: argparse.Namespace) -> int:
                     },
                     _now_stamp(),
                 )
-                if not _worker_eval(resolved, args.api):
-                    print(f"[worker] eval {resolved} deferred — item stays queued")
+                if not _worker_eval(resolved, args.api, item):
                     control.write_status(None, _now_stamp())
+                    if not control.worker_should_run():
+                        # Stop/Pause: leave the item at the queue head so Start
+                        # resumes THIS eval (its completed tasks persist under the
+                        # stable run_id) — mirrors the suite path's "stopped" branch.
+                        print(
+                            f"[worker] eval {resolved} paused — item stays queued (resumes on Start)"
+                        )
+                        continue
+                    # Deferred over live traffic. Eval is polite by design (never
+                    # piles onto production), but shouldn't stall the whole queue
+                    # while it waits — yield head-of-line so non-eval items behind
+                    # it can drain. The item keeps its id, so it resumes where it
+                    # left off when it next reaches the head on a quiet box.
+                    print(f"[worker] eval {resolved} deferred (live traffic) — yielding queue head")
+                    control.dequeue(item.get("id"))
+                    control.enqueue(item)
                     time.sleep(args.poll)
                     continue
                 control.dequeue(item.get("id"))
