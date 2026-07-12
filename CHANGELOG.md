@@ -21,6 +21,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.7.2] — 2026-07-11
+
+Hotfix for a fresh-install blocker on Python-3.14-only distros (Ubuntu 26.04,
+the Strix Halo target): the Hermes venv was built on 3.14, where pip silently
+resolves the broken hermes-agent 0.15.2 wheel, and the gateway crash-looped on
+`ModuleNotFoundError: No module named 'hermes_cli.dashboard_auth'`.
+
+### Highlights
+- **Fresh installs now work on Ubuntu 26.04 / Python 3.14** — when the system has no Python 3.11-3.13, hal0 provisions a uv-managed 3.13 for the Hermes venv automatically; zero manual steps (#1250, #1252).
+
+### Fixed
+- **Hermes venv could be built on Python 3.14**, where every supported hermes-agent wheel is filtered out (`requires-python <3.14`) and pip silently installs the broken 0.15.2 build. The interpreter resolver now accepts only 3.11-3.13, probes `python3.13`/`python3.12`/`python3.11` newest-first (hosts with only 3.12/3.13 on PATH were previously ignored), and preflight fails early with an actionable message instead of a crash-loop three phases later (#1248, #1251).
+- **hermes-agent version floor raised to 0.16.0** — the 0.15.2 wheel imports `hermes_cli.dashboard_auth` but ships without it; it can no longer be selected on any interpreter (#1247, #1251).
+- **Broken venvs self-heal**: a venv previously built on an unsupported interpreter is detected from its on-disk layout and rebuilt during `hal0 agent bootstrap hermes --repair` — no manual removal needed (#1251).
+
+### Added
+- **uv-managed Python fallback** for the Hermes venv: system Python always wins; when nothing qualifies and uv is on PATH, the install phase runs `uv python install 3.13` into `/var/lib/hal0/python` (kept out of root's home so the `hal0` service user can execute it) and builds the venv on the managed interpreter (#1250, #1252).
+
 ## [0.9.7.1] — 2026-07-11
 
 Hotfix for a fresh-install blocker — Hermes never auto-provisioned on a clean
