@@ -1,13 +1,14 @@
 """Auto-derive a slot's device + profile from the hardware probe (design D4).
 
 Maps a capability to a ``DeviceLiteral`` via the probe, then to a
-``SEED_PROFILES`` name. The chat lane prefers the MTP profile on ROCm;
-embed/aux take the plain GPU profile. NPU lanes are selected only when the
-NPU is present AND the operator opted in.
+``SEED_PROFILES`` name. Chat/coder take the plain GPU base profile (MTP is
+never auto-forced — slots opt into the ROCmFPX MTP profiles explicitly);
+embed/rerank take their dedicated backend-coherent lanes. NPU lanes are
+selected only when the NPU is present AND the operator opted in.
 
 The (device, profile) pairs this produces are backend-coherent per #807:
-``gpu-rocm``→``rocm``/``rocm-dnse`` (backend rocm), ``gpu-vulkan``→``vulkan``,
-``npu``→``flm``, ``cpu``→``tts``/``vulkan``.
+``gpu-rocm``→``rocm`` (backend rocm), ``gpu-vulkan``→``vulkan``,
+``npu``→``flm``, ``cpu``→``tts``/``cpu-llm``.
 """
 
 from __future__ import annotations
@@ -112,14 +113,22 @@ def derive_profile(capability: str, device: str) -> str:
     Reads the canonical device-class base profile from the single-source
     :data:`~hal0.config.schema.DEVICE_DEFAULT_PROFILES` table (gpu-rocm→rocm,
     gpu-vulkan→vulkan, cpu→cpu-llm, npu→flm) and layers the install path's
-    TWO genuine specialisations on top:
+    capability specialisations on top:
 
-    * ``gpu-rocm`` + dense chat/coder → the MTP ``rocm-dnse`` image. This MTP
-      preference is what makes this the *install*-flavoured resolver — the
-      picker/reconcile fit path (:func:`hal0.capabilities.profile_fit.profile_name_for_fit`)
-      and the drawer device-flip (``_base_profile_for_backend``) deliberately
-      stay on plain ``rocm`` so nothing silently forces a slot onto MTP.
+    * ``embed`` → the backend-coherent embed lane: ``gpu-rocm``→``embed``,
+      ``gpu-vulkan``→``vulkan-embed`` (llama-server ``--embedding``). The base
+      chat profile never emits ``--embedding`` and would silently serve
+      ``/v1/completions``, so embed always takes a dedicated encoder profile.
+    * ``rerank`` → the backend-coherent rerank lane: ``gpu-rocm``→``rerank``,
+      ``gpu-vulkan``→``vulkan-rerank`` (llama-server ``--reranking`` →
+      ``/v1/rerank``); MUST stay a separate instance from embed.
     * ``cpu`` + ``tts`` → the kokoro ``tts`` profile.
+
+    Chat/coder take the plain base profile — MTP is never auto-forced (the legacy
+    MTP ``rocm-dnse`` profile was removed 2026-07-05; slots opt into the ROCmFPX
+    MTP profiles explicitly). NOTE: CPU has no dedicated embed/rerank seed yet, so
+    a CPU-only box's embed/rerank slot falls back to ``cpu-llm`` (a chat profile)
+    — that lane is still latent until a cpu-embed/cpu-rerank seed exists.
 
     An unknown device falls back to ``cpu-llm`` (the CPU-coherent llama-server
     profile) — returning a GPU profile there caused #807 to reject the slot on
@@ -130,16 +139,25 @@ def derive_profile(capability: str, device: str) -> str:
         # 2026-07-05; MTP dense now lives on the ROCmFPX profiles, which slots
         # opt into explicitly — derivation never silently forces MTP.)
         return "rocm"
-    if device == "gpu-rocm" and capability == "embed":
-        # Embeddings get the dedicated GPU embed profile (llama-server
-        # --embedding, -ub 8192) rather than the chat-tuned plain `rocm` — the
-        # chat KV-quant/batch flags are meaningless for a pooled encoder and it
-        # never emitted --embedding at all on the container path.
-        return "embed"
-    if device == "gpu-rocm" and capability == "rerank":
-        # Rerankers get the dedicated GPU rerank profile (llama-server
-        # --reranking → /v1/rerank); MUST stay a separate instance from embed.
-        return "rerank"
+    if capability == "embed":
+        # Embeddings get a dedicated embed profile (llama-server --embedding,
+        # -ub 8192) rather than the chat-tuned base — the chat KV-quant/batch
+        # flags are meaningless for a pooled encoder and the base chat profile
+        # never emits --embedding, so it would silently serve /v1/completions
+        # instead of /v1/embeddings. Route to the backend-coherent embed lane:
+        # gpu-rocm→embed, gpu-vulkan→vulkan-embed; other devices (incl. CPU,
+        # which has no dedicated embed seed yet) fall back to the base profile.
+        return {"gpu-rocm": "embed", "gpu-vulkan": "vulkan-embed"}.get(
+            device
+        ) or DEVICE_DEFAULT_PROFILES.get(device, "cpu-llm")
+    if capability == "rerank":
+        # Rerankers get a dedicated rerank profile (llama-server --reranking →
+        # /v1/rerank); MUST stay a separate instance from embed. Same backend-
+        # coherent routing as embed (gpu-rocm→rerank, gpu-vulkan→vulkan-rerank);
+        # non-GPU falls back to the base profile (no dedicated CPU rerank seed).
+        return {"gpu-rocm": "rerank", "gpu-vulkan": "vulkan-rerank"}.get(
+            device
+        ) or DEVICE_DEFAULT_PROFILES.get(device, "cpu-llm")
     if device == "cpu" and capability == "tts":
         # ``tts`` stays on the kokoro/CPU profile; everything else on CPU takes
         # the CPU-coherent llama-server profile from the base table below.

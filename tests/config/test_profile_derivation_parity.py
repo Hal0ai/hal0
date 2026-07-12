@@ -48,12 +48,14 @@ _DERIVE_MATRIX: dict[tuple[str, str], str] = {
     ("tts", "gpu-rocm"): "rocm",
     ("agent", "gpu-rocm"): "rocm",
     ("image", "gpu-rocm"): "rocm",
-    # gpu-vulkan — always the vulkan profile (no dedicated vulkan embed/rerank
-    # variants yet; the vulkan lane serves them until those ship).
+    # gpu-vulkan — chat/coder/utility/etc. get the plain vulkan chat profile;
+    # embed/rerank take the dedicated Vulkan encoder lanes (a plain vulkan chat
+    # profile never emits --embedding/--reranking, so it would silently serve
+    # /v1/completions instead of /v1/embeddings — see vulkan-embed/vulkan-rerank).
     ("chat", "gpu-vulkan"): "vulkan",
     ("coder", "gpu-vulkan"): "vulkan",
-    ("embed", "gpu-vulkan"): "vulkan",
-    ("rerank", "gpu-vulkan"): "vulkan",
+    ("embed", "gpu-vulkan"): "vulkan-embed",
+    ("rerank", "gpu-vulkan"): "vulkan-rerank",
     ("utility", "gpu-vulkan"): "vulkan",
     ("tts", "gpu-vulkan"): "vulkan",
     ("agent", "gpu-vulkan"): "vulkan",
