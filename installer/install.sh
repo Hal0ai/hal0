@@ -110,8 +110,25 @@ ui_banner
 HAL0_PORT="${HAL0_PORT:-8080}"
 PY="${HAL0_PYTHON:-python3}"
 
-# API binds 0.0.0.0:8080 unconditionally. TLS is upstream's job — see
-# the comment on TLS posture near the flag parser.
+# ==========================================================================
+# SECURITY — LAN-ONLY BIND. READ BEFORE CHANGING.
+# --------------------------------------------------------------------------
+# hal0-api binds 0.0.0.0:8080, i.e. EVERY network interface. This is a
+# deliberate zero-config choice so the dashboard is reachable from any
+# device on the *local network* without setup. It is NOT hardened for the
+# public internet: hal0 ships NO TLS, NO edge auth, NO rate limiting on
+# this bind.
+#
+#   * SAFE:   a trusted LAN / VPN / private subnet behind a firewall.
+#   * UNSAFE: exposing 0.0.0.0:8080 directly to the internet (port-forward,
+#             cloud VM with a public IP, DMZ). Anyone who can reach the
+#             port can drive the API.
+#
+# To expose hal0 externally, put a reverse proxy (Traefik / nginx /
+# Cloudflare Tunnel) in FRONT of it for TLS + auth — see docs/operate/tls.md
+# — and firewall :8080 off from the public interface. Do NOT flip this to a
+# loopback-only bind: 127.0.0.1 breaks the zero-config LAN dashboard.
+# ==========================================================================
 API_BIND_HOST="0.0.0.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
