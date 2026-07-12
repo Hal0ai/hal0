@@ -80,20 +80,25 @@ hal0's profile-tuning work are:
 
 ```sh
 # /etc/default/grub — append to GRUB_CMDLINE_LINUX_DEFAULT, then update-grub && reboot
-amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856
+amd_iommu=off ttm.pages_limit=32505856
 ```
 
 | Parameter | Value | Meaning |
 |---|---|---|
-| `amdgpu.gttsize` | `126976` | GTT window in **MiB** (≈ 124 GiB) |
-| `ttm.pages_limit` | `32505856` | TTM page cap in **4 KiB pages** (≈ 124 GiB — keep it equal to `gttsize`) |
+| `ttm.pages_limit` | `32505856` | GTT cap in **4 KiB pages** (≈ 124 GiB) |
 | `amd_iommu=off` | — | Disables the IOMMU; measured worth ~5–12% on this workload |
 
 <Aside type="tip">
-`126976` MiB leaves only ~4 GB for the host on a 128 GB machine — fine for
-a dedicated inference LXC, aggressive if the host runs other tenants.
-Scale both numbers down together (they must stay equal) to reserve more
-host RAM. After rebooting, `cat /proc/cmdline` should show the params.
+`32505856` pages ≈ 124 GiB leaves only ~4 GB for the host on a 128 GB
+machine — fine for a dedicated inference LXC, aggressive if the host runs
+other tenants. Scale it down to reserve more host RAM. After rebooting,
+`cat /proc/cmdline` should show the params.
+</Aside>
+
+<Aside type="caution">
+The old `amdgpu.gttsize` parameter is **deprecated** — it is ignored on
+Linux 6.10+ (the GTT window is now driven entirely by `ttm.pages_limit`).
+Set only `ttm.pages_limit`; drop `amdgpu.gttsize` from any older guide.
 </Aside>
 
 ## 2. Create the container
