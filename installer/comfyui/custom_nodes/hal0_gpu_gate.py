@@ -52,7 +52,6 @@ _SWITCH_POLL_S = _float_env("HAL0_COMFYUI_SWITCH_POLL_S", 0.5)
 #: (/object_info, /queue GET, workflow save/load, uploads) always passes.
 _BLOCK_PATHS = frozenset({"/prompt", "/api/prompt"})
 
-
 def _is_prompt_submit(method: str, path: str) -> bool:
     return method == "POST" and path in _BLOCK_PATHS
 

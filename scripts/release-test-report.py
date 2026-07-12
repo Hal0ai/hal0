@@ -53,7 +53,9 @@ def main(argv: list[str]) -> int:
     report = json.loads(path.read_text())
     c = _colours(sys.stdout)
 
-    generated = datetime.fromtimestamp(report.get("generated", 0)).strftime("%Y-%m-%d %H:%M:%S")
+    generated = datetime.fromtimestamp(report.get("generated", 0)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     host = report.get("host", "?")
     prefix = report.get("prefix", "?")
     summary = report.get("summary", {})

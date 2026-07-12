@@ -19,15 +19,17 @@ from pathlib import Path
 
 def _colours(stream: object) -> dict[str, str]:
     if not getattr(stream, "isatty", lambda: False)():
-        return dict.fromkeys(("red", "yellow", "green", "blue", "bold", "dim", "rst"), "")
+        return dict.fromkeys(
+            ("red", "yellow", "green", "blue", "bold", "dim", "rst"), ""
+        )
     return {
-        "red": "\033[0;31m",
+        "red":    "\033[0;31m",
         "yellow": "\033[1;33m",
-        "green": "\033[0;32m",
-        "blue": "\033[0;36m",
-        "bold": "\033[1m",
-        "dim": "\033[2m",
-        "rst": "\033[0m",
+        "green":  "\033[0;32m",
+        "blue":   "\033[0;36m",
+        "bold":   "\033[1m",
+        "dim":    "\033[2m",
+        "rst":    "\033[0m",
     }
 
 
@@ -52,10 +54,12 @@ def main(argv: list[str]) -> int:
     report = json.loads(path.read_text())
     c = _colours(sys.stdout)
 
-    generated = datetime.fromtimestamp(report.get("generated", 0)).strftime("%Y-%m-%d %H:%M:%S")
+    generated = datetime.fromtimestamp(report.get("generated", 0)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     summary = report.get("summary", {})
-    tiers = report.get("tiers", [])
-    rows = report.get("rows", [])
+    tiers   = report.get("tiers", [])
+    rows    = report.get("rows", [])
 
     print(f"\n{c['bold']}hal0 harness report{c['rst']}")
     print(f"  generated : {generated}")
@@ -85,26 +89,22 @@ def main(argv: list[str]) -> int:
 
     # Row table.
     fmt = "  {tier:<10}  {name:<32}  {status:<10}  {dur:>7}  {detail}"
-    print(
-        c["dim"]
-        + fmt.format(tier="tier", name="row", status="status", dur="ms", detail="detail")
-        + c["rst"]
-    )
+    print(c["dim"] + fmt.format(
+        tier="tier", name="row", status="status", dur="ms", detail="detail"
+    ) + c["rst"])
     print(c["dim"] + "  " + "─" * 110 + c["rst"])
     for row in rows:
         colour = c.get(_STATUS_COLOUR.get(row["status"], "rst"), "")
         detail = row.get("detail", "")
         if len(detail) > 80:
             detail = detail[:77] + "..."
-        print(
-            fmt.format(
-                tier=row.get("tier", "?"),
-                name=row["name"],
-                status=f"{colour}{row['status']}{c['rst']}",
-                dur=row["duration_ms"],
-                detail=detail,
-            )
-        )
+        print(fmt.format(
+            tier=row.get("tier", "?"),
+            name=row["name"],
+            status=f"{colour}{row['status']}{c['rst']}",
+            dur=row["duration_ms"],
+            detail=detail,
+        ))
     print()
 
     return 1 if summary.get("fail", 0) else 0

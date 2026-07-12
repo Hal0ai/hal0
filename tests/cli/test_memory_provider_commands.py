@@ -3,17 +3,6 @@ Hindsight<->Honcho migrate paths, ``sync-graph``, and ``honcho render-env``.
 
 Mocks the API layer (``_shared`` helpers) and the migration engine so the
 CLI runs fully offline, mirroring ``tests/cli/test_memory_graph_commands.py``.
-
-feat/memory-bank-cli rebase note: ``migrate``'s ``--from``/``--to`` body and
-its four helper functions (``_load_honcho_cli_config``, ``_migrate_state``,
-``_run_migrate_hindsight_to_honcho``, ``_run_migrate_honcho_to_hindsight``)
-moved from ``memory_commands.py`` into ``memory_migrate_commands.py`` so
-``migrate unify`` could nest under the same ``migrate`` name — same
-behaviour, verbatim body, just relocated. ``sync-graph``/``honcho
-render-env`` (still in ``memory_commands.py``) import those helpers with a
-local ``from ... import`` at call time, so patching them on
-``memory_migrate_commands`` (not ``memory_commands``) is what actually
-takes effect now; ``provider`` itself didn't move.
 """
 
 from __future__ import annotations
@@ -25,7 +14,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from hal0.cli import memory_commands, memory_migrate_commands
+from hal0.cli import memory_commands
 
 runner = CliRunner()
 
@@ -66,7 +55,7 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
 def stub_honcho_cfg(monkeypatch: pytest.MonkeyPatch):
     """Fake ``hal0.toml [honcho]`` config so migrate/sync-graph never touch disk."""
     cfg = SimpleNamespace(honcho=SimpleNamespace(port=8000, workspace="hal0", user_peer="operator"))
-    monkeypatch.setattr(memory_migrate_commands, "_load_honcho_cli_config", lambda: cfg)
+    monkeypatch.setattr(memory_commands, "_load_honcho_cli_config", lambda: cfg)
 
     class _FakeState:
         def __init__(self) -> None:
@@ -76,7 +65,7 @@ def stub_honcho_cfg(monkeypatch: pytest.MonkeyPatch):
             self.saved = True
 
     state = _FakeState()
-    monkeypatch.setattr(memory_migrate_commands, "_migrate_state", lambda: state)
+    monkeypatch.setattr(memory_commands, "_migrate_state", lambda: state)
     return state
 
 
@@ -148,7 +137,7 @@ def test_migrate_dry_run_hindsight_to_honcho_invokes_engine(
             "total": {"scanned": 3, "migrated": 3, "skipped": 0},
         }
 
-    monkeypatch.setattr(memory_migrate_commands, "_run_migrate_hindsight_to_honcho", fake_forward)
+    monkeypatch.setattr(memory_commands, "_run_migrate_hindsight_to_honcho", fake_forward)
     result = runner.invoke(
         memory_commands.app,
         [
@@ -182,7 +171,7 @@ def test_migrate_defaults_engine_dry_run_false(
         calls.append(kwargs)
         return {"total": {"scanned": 0, "migrated": 0, "skipped": 0}}
 
-    monkeypatch.setattr(memory_migrate_commands, "_run_migrate_hindsight_to_honcho", fake_forward)
+    monkeypatch.setattr(memory_commands, "_run_migrate_hindsight_to_honcho", fake_forward)
     result = runner.invoke(
         memory_commands.app, ["migrate", "--from", "hindsight", "--to", "honcho"]
     )
@@ -200,7 +189,7 @@ def test_migrate_honcho_to_hindsight_passes_since(
         calls.append(kwargs)
         return {"scanned": 1, "migrated": 1, "skipped": 0, "watermark": "2026-07-11T00:00:00Z"}
 
-    monkeypatch.setattr(memory_migrate_commands, "_run_migrate_honcho_to_hindsight", fake_reverse)
+    monkeypatch.setattr(memory_commands, "_run_migrate_honcho_to_hindsight", fake_reverse)
     result = runner.invoke(
         memory_commands.app,
         ["migrate", "--from", "honcho", "--to", "hindsight", "--since", "2026-07-01T00:00:00Z"],
@@ -239,7 +228,7 @@ def test_sync_graph_invokes_reverse_engine(
         calls.append(kwargs)
         return {"scanned": 2, "migrated": 1, "skipped": 1, "watermark": "2026-07-11T00:00:00Z"}
 
-    monkeypatch.setattr(memory_migrate_commands, "_run_migrate_honcho_to_hindsight", fake_reverse)
+    monkeypatch.setattr(memory_commands, "_run_migrate_honcho_to_hindsight", fake_reverse)
     result = runner.invoke(memory_commands.app, ["sync-graph", "--agent", "hermes", "--json"])
     assert result.exit_code == 0, result.output
     assert calls[0]["dry_run"] is False
