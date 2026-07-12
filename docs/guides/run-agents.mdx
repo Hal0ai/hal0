@@ -51,6 +51,37 @@ hint rather than crashing mid-build.
 Pass `--switch` to atomically uninstall whatever agent is currently
 installed before installing this one.
 
+## Install OpenCode
+
+[OpenCode](https://opencode.ai) is a terminal coding agent with native
+OpenAI-compatible providers and MCP support. It's a lightweight alternative
+to Hermes — no managed venv, just a CLI plus a single JSON config.
+
+```sh
+hal0 agent install opencode
+```
+
+This runs `installer/agents/opencode.sh` (a track-latest `npm install -g
+opencode-ai`; no version pin per ADR-0004 §3) and writes
+`~/.config/opencode/opencode.json` wiring:
+
+- **Provider** — hal0 as an `@ai-sdk/openai-compatible` provider at
+  `$HAL0_API_URL/v1` (the hal0-api gateway), with the `hal0/*` slot virtuals
+  as the model set and `hal0/agent` as the default. The gateway
+  live-resolves to whichever slot is loaded — warm the slot you want first
+  (a cold slot returns `slot … is warming — not ready to serve`).
+- **Memory** — the hindsight-backed `hal0-memory` MCP mount
+  (`/mcp/memory/mcp`, agent-scoped via `X-hal0-Agent`).
+
+<Aside type="note">
+Single-pick still applies: OpenCode and Hermes can't both be the active
+on-box agent — use `--switch`, or run OpenCode on a **separate box/container**
+and export `HAL0_API_URL=http://<hal0-lan-ip>:8080` so it points at hal0 over
+the LAN. To also give a remote OpenCode the full 30-tool *native* hindsight
+MCP (loopback-only by default), LAN-expose `hindsight-api` and add an
+`mcp.hindsight` entry pointing at `http://<hal0-lan-ip>:9177/mcp`.
+</Aside>
+
 ## Manage the lifecycle
 
 <Tabs>

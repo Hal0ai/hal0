@@ -85,7 +85,7 @@ HermesNotHal0AwareError = HermesUpstreamMissingError
 
 # ── Bundled catalog ──────────────────────────────────────────────────────────
 
-BUNDLED_AGENTS: tuple[str, ...] = ("pi-coder", "hermes")
+BUNDLED_AGENTS: tuple[str, ...] = ("pi-coder", "opencode", "hermes")
 """Canonical names for bundled agents. Adding to this list requires a
 matching driver module + ``installer/agents/<name>.sh``."""
 
@@ -165,6 +165,10 @@ def _driver_for(name: str) -> AgentDriver:
         from hal0.agents.pi_coder import PiCoderDriver
 
         return PiCoderDriver()
+    if name == "opencode":
+        from hal0.agents.opencode import OpenCodeDriver
+
+        return OpenCodeDriver()
     if name == "hermes":
         from hal0.agents.hermes import HermesDriver
 
