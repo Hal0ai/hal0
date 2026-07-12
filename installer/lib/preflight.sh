@@ -72,8 +72,13 @@
 #                        bound almost always means hal0's OWN hal0-api /
 #                        hal0-openwebui units are up and healthy, not a
 #                        collision. install.sh's pre-install gate never
-#                        sets it, so a real collision before install still
-#                        hard-fails.
+#                        sets it — but even there, a port held by hal0's
+#                        OWN hal0-api/hal0-openwebui unit (the documented
+#                        `HAL0_INSTALL_HONCHO=1 sudo bash install.sh`
+#                        re-install-over-a-live-box path, #F24) is
+#                        auto-detected via _preflight_port_is_own_service
+#                        and treated as OK; a FOREIGN process holding the
+#                        port still hard-fails unconditionally.
 #   HAL0_CONTAINER_REQUIRED — when "1", preflight_container_runtime
 #                        auto-installs podman (via the detected package
 #                        manager) and hard-fails (returns non-zero) when it
@@ -790,6 +795,39 @@ _preflight_port_in_use() {
     return 1
 }
 
+# The PID of the process LISTENing on ``port``, or empty when it can't be
+# determined (no `ss`, unreadable, or nothing listening). Requires `ss -p`,
+# which needs root (or the socket's owning uid) to resolve — install.sh
+# always runs as root, so this is reliable there; `hal0 doctor` may run
+# unprivileged, in which case this silently yields nothing and callers fall
+# back to the generic "already in use" message.
+_preflight_port_owner_pid() {
+    local port="$1"
+    command -v ss >/dev/null 2>&1 || return 1
+    ss -ltnp "sport = :${port}" 2>/dev/null \
+        | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2
+}
+
+# True when the process holding ``port`` is the MainPID of one of hal0's own
+# systemd units (hal0-api.service, hal0-openwebui.service) — i.e. re-running
+# the installer over a live, healthy hal0 rather than colliding with an
+# unrelated process (#F24). Never hard-fails the caller: on any ambiguity
+# (no systemctl, no PID, no match) this returns non-zero so preflight_ports
+# keeps its existing hard-fail-on-foreign-holder behaviour.
+_preflight_port_is_own_service() {
+    local port="$1" pid unit mainpid
+    command -v systemctl >/dev/null 2>&1 || return 1
+    pid="$(_preflight_port_owner_pid "${port}")"
+    [[ -n "${pid}" ]] || return 1
+    for unit in hal0-api.service hal0-openwebui.service; do
+        mainpid="$(systemctl show -p MainPID --value "${unit}" 2>/dev/null)"
+        if [[ -n "${mainpid}" && "${mainpid}" != "0" && "${mainpid}" == "${pid}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 preflight_ports() {
     local ports=("$@")
     if (( ${#ports[@]} == 0 )); then
@@ -804,6 +842,8 @@ preflight_ports() {
         if _preflight_port_in_use "${port}"; then
             if [[ "${HAL0_DOCTOR_PORTS_SOFT:-0}" == "1" ]]; then
                 warn "port ${port}: already in use (expected if hal0's own services are running; find the owner with 'ss -ltnp \"sport = :${port}\"')"
+            elif _preflight_port_is_own_service "${port}"; then
+                info "port ${port}: in use by hal0's own service — OK for a re-install"
             else
                 err "port ${port}: already in use (find with 'ss -ltnp \"sport = :${port}\"')"
                 rc=1
