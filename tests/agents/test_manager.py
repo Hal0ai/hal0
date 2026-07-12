@@ -444,21 +444,29 @@ def test_is_present_on_disk_predicate(
 # ── atomic --switch: failure rollback ────────────────────────────────────────
 
 
-def test_switch_failed_install_leaves_no_installed_agent(
+def test_switch_failed_install_rolls_back_incumbent(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the new agent's install fails mid-swap, neither agent is
-    installed — the old one is gone (uninstalled atomically first), the
-    new one rolled back via the seed not being written.
+    """If the target's install fails AFTER the incumbent was torn down
+    (precondition passed, but the driver blew up deeper in), the
+    manager makes a best-effort attempt to reinstall the incumbent
+    rather than leaving the operator with NO agent installed.
 
-    This is the explicit ADR-0004 §2 promise: "Operator never end up
-    with two bundled agents partially installed."
+    Regression test: switching pi-coder→hermes used to uninstall
+    pi-coder unconditionally, then leave the box with nothing installed
+    (and a crash-looping systemd unit) when hermes' install blew up.
+    ADR-0004 §2 promises the operator never ends up with two bundled
+    agents partially installed — it does NOT say they should end up
+    with zero.
     """
     manager.install("pi-coder")
 
-    # Make hermes' install raise after pi-coder is uninstalled.
+    # Make hermes' install raise after pi-coder is uninstalled. Hermes
+    # has no installer script (_SCRIPT_INSTALLED_AGENTS excludes it),
+    # so the pre-uninstall precondition check is a no-op here and the
+    # failure surfaces from the driver itself, same as upstream really
+    # blowing up mid-install.
     stubs = stub_drivers
 
     def _boom(*, bearer_token: str | None = None) -> None:
@@ -469,9 +477,39 @@ def test_switch_failed_install_leaves_no_installed_agent(
     with pytest.raises(RuntimeError, match="simulated upstream-broke"):
         manager.install("hermes", switch=True)
 
-    # pi-coder was torn down; hermes never got a seed written.
-    assert manager.installed_names() == []
+    # pi-coder was uninstalled then rolled back; hermes never got a
+    # seed written.
+    assert manager.installed_names() == ["pi-coder"]
     assert stubs["pi-coder"].uninstalls == 1
+    assert stubs["pi-coder"].installs == [None, None]  # initial install + rollback
+
+
+def test_switch_aborts_without_uninstalling_when_target_script_missing(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#<bug2>: when the target's installer script doesn't exist on
+    disk, ``install(switch=True)`` must refuse the swap WITHOUT
+    uninstalling the incumbent — the precondition check runs before
+    any teardown. Regression for the "switching to a wheel install
+    missing its bundled-agent scripts bricked the incumbent" bug.
+    """
+    manager.install("pi-coder")
+
+    monkeypatch.setattr(
+        mgr_mod,
+        "installer_script_path",
+        lambda name: Path("/nonexistent/installer/agents") / f"{name}.sh",
+    )
+
+    with pytest.raises(mgr_mod.AgentError, match="installer script missing"):
+        manager.install("opencode", switch=True)
+
+    # Incumbent untouched — precondition failed before any teardown.
+    assert manager.installed_names() == ["pi-coder"]
+    assert stub_drivers["pi-coder"].uninstalls == 0
+    assert stub_drivers["opencode"].installs == []
 
 
 # ── #453: converge hermes data_dir onto HERMES_HOME (.hermes) ─────────────────

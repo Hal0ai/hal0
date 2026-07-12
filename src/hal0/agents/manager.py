@@ -106,6 +106,13 @@ _HAL0_MANAGED_MARKER = ".hal0-managed"
 # ``var_lib()``. Agents not listed here keep the per-name layout.
 _AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes"}
 
+# Agents that install by shelling out to ``installer/agents/<name>.sh``
+# (see :func:`installer_script_path`). Hermes provisions through a
+# separate bootstrap pipeline (:mod:`hal0.agents.hermes_provision`) with
+# no matching shell script, so it's excluded from the switch-safety
+# precondition in :meth:`AgentManager._verify_installable`.
+_SCRIPT_INSTALLED_AGENTS = frozenset({"pi-coder", "opencode"})
+
 
 # ── Records ──────────────────────────────────────────────────────────────────
 
@@ -253,6 +260,17 @@ class AgentManager:
         would still re-run the shell script, but we refuse here to keep
         the surface predictable — callers wanting re-run should
         ``uninstall`` then ``install``).
+
+        The swap is crash-safe: before the incumbent is touched, we
+        run a cheap precondition check on the target
+        (:meth:`_verify_installable`) so a target that can't possibly
+        install (e.g. a wheel install missing its bundled installer
+        script) never costs the operator a working agent. If the real
+        install still fails after the incumbent is gone — the
+        precondition passed but the driver blew up deeper in — we make
+        a best-effort attempt to reinstall the incumbent before
+        re-raising, so a broken target leaves the box in its previous
+        state rather than with nothing installed.
         """
         if name not in BUNDLED_AGENTS:
             raise AgentNotFoundError(
@@ -264,27 +282,83 @@ class AgentManager:
             # Already installed — return the existing record. Idempotent.
             return self._read_record(name)
 
-        if current:
-            if not switch:
-                raise AgentAlreadyInstalledError(
-                    f"agent {current[0]!r} already installed; "
-                    f"pass switch=True to atomically swap to {name!r}",
-                )
-            # Atomic swap: tear down the existing one first. If the
-            # tear-down fails we surface the error and DO NOT proceed
-            # — better to leave the old one installed than land in a
-            # half-state.
-            for existing in current:
-                self.uninstall(existing)
+        if not current:
+            return self._install_and_seed(name, bearer_token=bearer_token)
 
+        if not switch:
+            raise AgentAlreadyInstalledError(
+                f"agent {current[0]!r} already installed; "
+                f"pass switch=True to atomically swap to {name!r}",
+            )
+
+        # Verify the target can plausibly install BEFORE tearing down
+        # the incumbent. Raises without touching anything on disk when
+        # the check fails — a missing installer script used to only
+        # surface AFTER the incumbent was already uninstalled, bricking
+        # a working agent for a swap that could never have succeeded.
+        self._verify_installable(name)
+
+        # Atomic swap: tear down the existing one first. If the
+        # tear-down fails we surface the error and DO NOT proceed
+        # — better to leave the old one installed than land in a
+        # half-state.
+        for existing in current:
+            self.uninstall(existing)
+
+        try:
+            return self._install_and_seed(name, bearer_token=bearer_token)
+        except Exception:
+            # The precondition check can't catch every failure mode
+            # (the script can exist and still fail once actually run).
+            # Best-effort restore the incumbent(s) so the operator
+            # isn't left with NO agent installed; rollback failures are
+            # swallowed — the original error is what the caller needs
+            # to see and act on.
+            for existing in current:
+                with contextlib.suppress(Exception):
+                    self._install_and_seed(existing, bearer_token=bearer_token)
+            raise
+
+    def _install_and_seed(self, name: str, *, bearer_token: str | None = None) -> AgentRecord:
+        """Drive the install + seed-write pair.
+
+        Shared by the main ``install()`` path and the switch-failure
+        rollback path below.
+        """
         driver = _driver_for(name)
         # Driver does the heavy lifting (shells out to the installer
         # script). On any exception, the manager rolls back the seed
         # TOML so list() doesn't show a phantom row.
         driver.install(bearer_token=bearer_token)
+        return self._write_seed(name)
 
-        rec = self._write_seed(name)
-        return rec
+    def _verify_installable(self, name: str) -> None:
+        """Cheap precondition check run before ``install(switch=True)``
+        tears down the incumbent agent.
+
+        Only the script-based drivers (:data:`_SCRIPT_INSTALLED_AGENTS`)
+        are checked — Hermes provisions through a separate bootstrap
+        pipeline with no matching shell script, so
+        :func:`installer_script_path` doesn't apply to it; its own
+        precondition (the managed venv being provisioned) can only be
+        evaluated by actually running the driver.
+
+        This doesn't guarantee the install will succeed — the driver
+        can still fail once it actually shells out — it exists to
+        catch the common "packaged without bundled-agent scripts"
+        failure mode up front, before anything is uninstalled.
+        """
+        if name not in _SCRIPT_INSTALLED_AGENTS:
+            return
+        script = installer_script_path(name)
+        if not script.is_file():
+            raise AgentError(
+                f"installer script missing at {script}. This hal0 install "
+                "looks packaged without the bundled-agent scripts — "
+                "reinstall hal0 from a release tarball or git clone. "
+                f"Refusing to switch to {name!r} — the currently-installed "
+                "agent was left in place."
+            )
 
     def uninstall(self, name: str) -> bool:
         """Tear down ``name`` — driver uninstall + seed + data dir + state dir.
