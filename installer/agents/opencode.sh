@@ -38,6 +38,10 @@ LINK_DIR="${HAL0_AGENT_LINK_DIR:-/usr/local/bin}"
 
 mkdir -p "$HAL0_AGENT_DATA_DIR"
 
+# Records which branch install_opencode() took so the uninstall companion
+# (below) knows what to clean up.
+OPENCODE_INSTALL_METHOD=""
+
 # ── Install opencode CLI upstream (track-latest) ─────────────────────────────
 #
 # Upstream distribution: `opencode-ai` on npm. Binary: `opencode`. NO
@@ -50,10 +54,12 @@ install_opencode() {
         info "Installing opencode-ai via npm (track-latest)"
         npm install -g opencode-ai \
             || die "npm install -g opencode-ai failed — upstream may have renamed; check https://opencode.ai/docs"
+        OPENCODE_INSTALL_METHOD="npm"
     elif command -v curl >/dev/null 2>&1; then
         info "npm not found — installing opencode via the official installer"
         curl -fsSL https://opencode.ai/install | bash \
             || die "opencode installer failed — check https://opencode.ai/docs"
+        OPENCODE_INSTALL_METHOD="curl"
     else
         die "neither npm nor curl found on PATH. Install Node.js (https://nodejs.org/) first."
     fi
@@ -114,3 +120,30 @@ fi
 
 info "CLI ready. The driver now writes ~/.config/opencode/opencode.json (hal0 provider + memory MCP)."
 info "hal0 API target: ${HAL0_API_URL}"
+
+# ── Uninstall companion ───────────────────────────────────────────────────────
+#
+# installer/uninstall.sh's uninstall_agents() runs
+# ${VAR_DIR}/agents/<name>/uninstall.sh per agent (mirrors pi-coder.sh).
+# Without this, a full hal0 uninstall left the globally-installed
+# opencode-ai npm package (and its node_modules tree) — or the curl
+# fallback's ~/.opencode tree and our LINK_DIR symlink — orphaned forever.
+{
+    printf '#!/bin/sh\n'
+    printf '# hal0 — opencode uninstall companion (called from installer/uninstall.sh)\n'
+    printf 'set -eu\n'
+    if [ "${OPENCODE_INSTALL_METHOD}" = "npm" ]; then
+        printf 'if command -v npm >/dev/null 2>&1; then\n'
+        printf '    npm uninstall -g opencode-ai 2>/dev/null || true\n'
+        printf 'fi\n'
+    else
+        printf 'rm -rf "%s/.opencode" 2>/dev/null || true\n' "${HOME:-/root}"
+        printf 'rm -rf "/root/.opencode" 2>/dev/null || true\n'
+    fi
+    printf 'if [ -L "%s/opencode" ]; then\n' "${LINK_DIR}"
+    printf '    rm -f "%s/opencode"\n' "${LINK_DIR}"
+    printf 'fi\n'
+} > "$HAL0_AGENT_DATA_DIR/uninstall.sh"
+chmod +x "$HAL0_AGENT_DATA_DIR/uninstall.sh"
+
+exit 0
