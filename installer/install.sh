@@ -1899,6 +1899,7 @@ else
             # Idempotent shallow clone: skip re-cloning if src is already
             # checked out at HONCHO_REF.
             hc_cur_ref=""
+            hc_cur_tag=""
             if [[ -d "${HC_DIR}/src/.git" ]]; then
                 hc_cur_ref="$(git -C "${HC_DIR}/src" rev-parse HEAD 2>/dev/null || true)"
                 hc_cur_tag="$(git -C "${HC_DIR}/src" describe --tags --exact-match 2>/dev/null || true)"
