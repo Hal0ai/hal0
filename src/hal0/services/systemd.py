@@ -125,6 +125,55 @@ async def unit_state(unit: str) -> dict[str, str | None]:
     }
 
 
+async def timer_schedule(unit: str) -> dict[str, str | None]:
+    """Return a ``.timer`` unit's calendar expression + last/next trigger.
+
+    Shape (fail-soft — a host without systemd or an unknown unit yields all
+    ``None``, never an exception)::
+
+        {
+          "calendar":     "hourly" | "*-*-* *:00:00" | None,  # OnCalendar= expression
+          "last_trigger": "Sat 2026-07-11 21:00:00 EDT" | None,  # raw systemd string
+          "next_elapse":  "Sat 2026-07-11 22:00:00 EDT" | None,  # raw systemd string
+        }
+
+    Timestamps are passed through verbatim (not ISO-normalised) — matches
+    :func:`unit_state`'s ``since`` field, which does the same.
+    """
+    fallback: dict[str, str | None] = {"calendar": None, "last_trigger": None, "next_elapse": None}
+    if not valid_unit(unit):
+        return fallback
+    rc, stdout, _stderr = await _run(
+        "show",
+        unit,
+        "--property=TimersCalendar,LastTriggerUSec,NextElapseUSecRealtime",
+        timeout=_SHOW_TIMEOUT,
+    )
+    if rc is None:
+        return fallback
+    props: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            props[key] = value.strip()
+
+    calendar = None
+    match = re.search(r"OnCalendar=(\S+)", props.get("TimersCalendar", ""))
+    if match:
+        calendar = match.group(1)
+
+    def _clean(value: str | None) -> str | None:
+        if not value or value in ("n/a", "0"):
+            return None
+        return value
+
+    return {
+        "calendar": calendar,
+        "last_trigger": _clean(props.get("LastTriggerUSec")),
+        "next_elapse": _clean(props.get("NextElapseUSecRealtime")),
+    }
+
+
 async def unit_is_active(unit: str) -> bool:
     """True when ``systemctl is-active <unit>`` reports ``active``."""
     if not valid_unit(unit):

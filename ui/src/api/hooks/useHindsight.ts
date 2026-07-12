@@ -5,7 +5,7 @@
 // One hook per resource; mutations invalidate the bank-scoped keys so
 // cards/panels refresh without manual plumbing.
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
@@ -102,6 +102,28 @@ export function useBankStats(bank: string | null) {
     staleTime: 10_000,
     refetchInterval: 30_000,
   })
+}
+
+// GET /api/memory/banks is a verbatim Hindsight passthrough — it does NOT
+// reliably carry a per-bank fact count, so there is no cheap client-side sum
+// for "total facts across all banks". The real counts live on each bank's
+// /stats response (`total_nodes`). This aggregates that across every given
+// bank id via useQueries (the sanctioned way to fire a dynamic list of
+// queries without violating rules-of-hooks) using the SAME query key +
+// queryFn as useBankStats, so react-query shares/dedupes the cache with the
+// per-bank bank-grid cards instead of doubling the request count.
+export function useAggregateBankStats(bankIds: string[]) {
+  const queries = useQueries({
+    queries: bankIds.map((bank) => ({
+      queryKey: ['memory', 'banks', bank, 'stats'] as const,
+      queryFn: () => apiGet<BankStats>(ENDPOINTS.memoryBankStats(bank)),
+      staleTime: 10_000,
+      refetchInterval: 30_000,
+    })),
+  })
+  const isLoading = bankIds.length > 0 && queries.some((q) => q.isLoading)
+  const totalFacts = queries.reduce((sum, q) => sum + (q.data?.total_nodes ?? 0), 0)
+  return { isLoading, totalFacts }
 }
 
 export function useBankTimeseries(bank: string | null, period: string) {

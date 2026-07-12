@@ -36,6 +36,7 @@
 .mg-meta { font-size: 11px; color: var(--fg-4); margin-bottom: 10px; }
 .mg-meta b { color: var(--fg-2); font-weight: 500; }
 .mg-meta-dir { margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--line); }
+.mg-meta-honcho { margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--line); color: var(--accent); display: inline-flex; align-items: center; gap: 5px; }
 
 /* position:relative makes the host the containing block for the stage's
    absolutely-positioned children, so any empty/loading placeholder stays
@@ -220,8 +221,53 @@
 .mo-badge { font-size: 10px; color: var(--fg-3); border: 1px solid var(--line); border-radius: var(--rad-xs); padding: 2px 7px; }
 .mo-badge.on { color: var(--ok); border-color: var(--ok-line); display: inline-flex; align-items: center; gap: 5px; }
 .mo-badge.warn { color: var(--warn); border-color: var(--warn-line); }
-.mo-graphline { display: flex; align-items: center; justify-content: space-between; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--fg-3); }
+.mo-graphline { display: flex; align-items: center; justify-content: space-between; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--fg-3); flex-wrap: wrap; gap: 8px; }
 .mo-graphline .dot { margin-right: 4px; }
+
+/* ─── Provider cards (Hindsight + Honcho, side by side) ───────────── */
+.mo-providers-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.mo-provider { flex: 1 1 360px; min-width: 300px; }
+.mo-provider.dimmed { opacity: 0.6; }
+.mo-provider.dimmed .empty { padding: 4px 0 0; }
+
+.mo-provider-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border: 1px solid var(--line); border-radius: var(--rad); overflow: hidden; margin-bottom: 12px; }
+.mo-provider-stat { padding: 10px 12px; border-right: 1px solid var(--line); }
+.mo-provider-stat:last-child { border-right: none; }
+.mo-provider-stat-v { font-size: 19px; color: var(--fg); }
+.mo-provider-stat-v.warn { color: var(--warn); }
+.mo-provider-stat-l { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-4); margin-top: 2px; }
+
+.mo-provider-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 2px; }
+.mo-provider-actions .btn.ok { color: var(--ok); border-color: var(--ok-line); }
+.mo-provider-actions .btn.err { color: var(--err); border-color: var(--err-line); }
+.mo-provider-actions .btn.busy { color: var(--fg-4); }
+
+/* Collapsed capabilities badge + its popover list. */
+.mo-cap-wrap { position: relative; display: inline-flex; }
+.mo-cap-btn { cursor: pointer; background: transparent; }
+.mo-cap-btn.open { color: var(--fg); border-color: var(--line-strong); }
+.mo-cap-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; min-width: 160px; max-width: 260px; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--rad); background: var(--bg-1); box-shadow: var(--shadow-menu); }
+.mo-cap-row { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-3); }
+.mo-cap-row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.mo-cap-row.on { color: var(--fg); }
+
+.mo-migrate-box { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: var(--rad); font-size: 11.5px; color: var(--fg-3); line-height: 1.55; }
+.mo-migrate-hint { margin: 8px 0; padding: 8px 10px; background: var(--bg-2); border-radius: var(--rad-sm); color: var(--fg-2); font-size: 11px; line-height: 1.7; }
+.mo-migrate-box .btn { margin-top: 6px; }
+
+/* ─── Per-agent provider routing strip ─────────────────────────────── */
+.mo-routing { padding: 16px; margin-bottom: 22px; }
+.mo-routing-rows { display: flex; flex-direction: column; gap: 8px; }
+.mo-routing-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--rad-sm); font-size: 12px; }
+.mo-routing-agent { min-width: 120px; color: var(--fg); }
+.mo-routing-row select.input.sm { padding: 4px 8px; font-size: 11.5px; }
+.mo-routing-priv { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--fg-3); cursor: pointer; }
+.mo-routing-confirm { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--warn); }
+.mo-routing-err { font-size: 11px; color: var(--err); }
+
+@media (max-width: 760px) {
+  .mo-providers-row { flex-direction: column; }
+}
 
 .mo-ts { padding: 16px; }
 .mo-ts-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--fg-3); margin-bottom: 12px; }
