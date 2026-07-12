@@ -1,6 +1,6 @@
 """Origin allowlist + HMAC session-cookie helpers for the agent chat proxy.
 
-ADR-0012 removed Bearer auth and now ``X-hal0-Agent`` is the only
+Bearer auth was removed and now ``X-hal0-Agent`` is the only
 identity claim on hal0-api. DA-sec-ops review (MUST-FIX #2) raised that
 exposing a long-running JSON-RPC bridge to the hermes runtime over an
 unauthenticated ``0.0.0.0:8080`` is LAN-RCE: any host on the LAN sets

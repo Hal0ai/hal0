@@ -1,4 +1,4 @@
-"""pi-coder bundled agent (ADR-0004 §6). See :mod:`.driver` for details."""
+"""pi-coder bundled agent. See :mod:`.driver` for details."""
 
 from __future__ import annotations
 

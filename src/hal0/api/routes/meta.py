@@ -11,7 +11,7 @@ The UI reads this once at startup instead of hard-coding its own copies of
 the device/backend/capability enums, so a taxonomy change lands in exactly
 one place. The payload is pure code-level constants — it only changes with
 a hal0 release — so it is served with a version-keyed ``ETag`` and a
-``Cache-Control`` allowing revalidated caching. No auth (ADR-0012: the
+``Cache-Control`` allowing revalidated caching. No auth (the
 read-only /api surface is open), no app state touched.
 """
 

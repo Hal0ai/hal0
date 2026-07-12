@@ -27,7 +27,7 @@ from hal0.memory.provider import MemoryProvider
 
 _SHARED = "shared"
 _PRIVATE = "private:"
-# ADR-0011 §6: the ``agents`` namespace is a federated agent-registry /
+# The ``agents`` namespace is a federated agent-registry /
 # identity-card store (written by the ``hal0 agent`` CLI), NOT chat memory.
 # Unified mode collapses shared/private/project onto ``shared`` but leaves
 # ``agents`` routing to its own bank untouched, both read and write.
@@ -173,7 +173,7 @@ class HindsightProvider(MemoryProvider):
     def _allowed_namespaces(self, requested: str | list[str], client_id: str | None) -> list[str]:
         # Unified mode: one bank. No cross-bank fan-out, no own-private
         # expansion — every read resolves to ``shared`` alone, EXCEPT the
-        # ``agents`` registry namespace, which keeps its own bank (ADR-0011 §6).
+        # ``agents`` registry namespace, which keeps its own bank.
         if self._unified_bank:
             reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
             out: list[str] = []
@@ -202,7 +202,7 @@ class HindsightProvider(MemoryProvider):
         # front door still resolves ``private:<agent>`` (so the private intent
         # survives for the ``visibility:private`` tag in ``add``), but the bank
         # is always ``shared`` here. The ``agents`` registry namespace is the
-        # one exception: it keeps its own bank (ADR-0011 §6).
+        # one exception: it keeps its own bank.
         if self._unified_bank:
             return _AGENTS if requested == _AGENTS else _SHARED
         # The REST/MCP front door already resolved the write namespace via

@@ -16,7 +16,7 @@ The journal route is purposely separate from ``/api/events``: that
 exposes the raw event shape for callers wanting native fidelity, while
 ``/api/journal`` serves the panel envelope.
 
-No auth gate — same rationale as ``/api/events`` (post-ADR-0012 hal0-api
+No auth gate — same rationale as ``/api/events`` (hal0-api
 is open on 0.0.0.0:8080; agent identity rides on ``X-hal0-Agent``, not
 Bearer tokens; the journal panel must surface during first-run before
 any agent identity exists).

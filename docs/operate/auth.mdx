@@ -9,9 +9,9 @@ import { Aside, Steps, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 has no built-in authentication CLI, no user/password store, and no
 bundled reverse proxy. `hal0-api` binds `0.0.0.0:8080` and every endpoint is
-reachable by anything that can reach that port. This was a deliberate cut
-(ADR-0012, "remove-auth-and-caddy") — earlier betas bundled a password store
-and a Caddy TLS-terminating proxy, and both were removed because they
+reachable by anything that can reach that port. This was a deliberate cut —
+earlier betas bundled a password store and a Caddy TLS-terminating proxy,
+and both were removed because they
 duplicated, badly, what a real reverse proxy already does better. There is no
 `--auth=basic` install flag and no `hal0 auth` subcommand.
 

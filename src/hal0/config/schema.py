@@ -60,8 +60,7 @@ log = logging.getLogger(__name__)
 # DEPRECATED v0.2: ``SlotConfig.backend`` is being retired in favour of the
 # hardware-preference field ``SlotConfig.device``. The whitelist is kept for
 # one release so legacy slot TOMLs round-trip cleanly; a warning is logged
-# whenever ``backend`` is read without an accompanying ``device``. See
-# ADR-0006 §7 (v0.2 migration plan, decision 15).
+# whenever ``backend`` is read without an accompanying ``device``.
 _VALID_BACKENDS = frozenset(_LEGACY_BACKENDS)
 
 # v0.2 hardware-preference enum. ``device`` replaces the overloaded
@@ -104,7 +103,7 @@ CURRENT_SCHEMA_VERSION = 1
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version`` — capabilities.toml carries its own counter so
-# the v0.2 backend→device migration (ADR-0006 §7) can be detected and
+# the v0.2 backend→device migration can be detected and
 # applied without coupling the two config files.
 #
 # - schema_version = 1 (or absent): legacy. CapabilitySelection uses
@@ -313,7 +312,7 @@ class SlotConfig(BaseModel):
             "DEPRECATED (v0.2; removed v0.3): legacy overloaded backend enum. "
             "Use ``device`` instead. Reading a SlotConfig that has ``backend`` "
             "set without ``device`` logs a deprecation warning and auto-fills "
-            "``device`` via ``map_backend_to_device``. See ADR-0006 §7."
+            "``device`` via ``map_backend_to_device``."
         ),
     )
     device: str = Field(
@@ -321,7 +320,7 @@ class SlotConfig(BaseModel):
         description=(
             "v0.2 hardware-preference enum: 'gpu-rocm' | 'gpu-vulkan' | "
             "'gpu-cuda' | 'cpu' | 'npu'. Replaces the legacy ``backend`` "
-            "field which mixed providers and backends. See ADR-0006 §7."
+            "field which mixed providers and backends."
         ),
     )
     gpu_index: int | None = Field(
@@ -631,7 +630,7 @@ class SlotConfig(BaseModel):
     def _promote_backend_to_device(cls, data: Any) -> Any:
         """Soft-deprecation hook: derive ``device`` from a legacy ``backend``.
 
-        v0.2 (ADR-0006 §7) renames the hardware-preference field
+        v0.2 renames the hardware-preference field
         ``backend`` → ``device``. For one release we read both: if a TOML
         file or in-memory dict carries ``backend`` but no ``device`` we
         synthesise ``device`` via :func:`map_backend_to_device` so the
@@ -2232,14 +2231,14 @@ class MemoryGraphConfig(BaseModel):
         return v
 
 
-# ── AgentConfig (ADR-0013) ─────────────────────────────────────────────────────
+# ── AgentConfig ────────────────────────────────────────────────────────────────
 
-# ADR-0013 §1: schema version pin so a future incompatible change
+# Schema version pin so a future incompatible change
 # (e.g. nesting tool policies under a `[mcp.servers.<name>.policy]`
 # block) can detect + migrate old agent TOMLs without silent breakage.
 AGENT_CONFIG_SCHEMA_VERSION = 1
 
-# ADR-0013 §6: outbound auth styles. Today only ``bearer-from-env``
+# Outbound auth styles. Today only ``bearer-from-env``
 # (token loaded at agent-process startup from an env file or
 # systemd-credential) is implemented. Listed as a frozenset so future
 # additions (mtls, oauth-device-flow, …) extend a single source.
@@ -2251,7 +2250,7 @@ AgentAuthKindLiteral = Literal["none", "bearer-from-env"]
 class AgentAuthConfig(BaseModel):
     """``[mcp.servers.<name>.auth]`` block.
 
-    ADR-0013 §6: indirection via env var keeps tokens out of TOML so
+    Indirection via env var keeps tokens out of TOML so
     the config file remains commit-safe and the dashboard can render
     it. The actual token is loaded by the agent driver at process
     startup (from systemd-credential or a 0600 env file) and never
@@ -2293,10 +2292,8 @@ class AgentAuthConfig(BaseModel):
 class ToolPolicy(BaseModel):
     """``[mcp.servers.<name>.tools]`` block — three-tier classification.
 
-    ADR-0013 §4:
-
     - ``allow``  : autonomous call (no approval queue).
-    - ``gated``  : enqueue via ADR-0004 approval queue, await user pick.
+    - ``gated``  : enqueue via approval queue, await user pick.
     - ``blocked``: hard-reject at the client; never reaches the server.
 
     The lists MUST be disjoint — overlap is operator error and surfaces
@@ -2319,7 +2316,7 @@ class ToolPolicy(BaseModel):
         default_factory=list,
         description=(
             "Tools the agent may request; each call enqueues an "
-            "approval (ADR-0004 §5). Empty = no gated tools."
+            "approval. Empty = no gated tools."
         ),
     )
     blocked: list[str] = Field(
@@ -2364,7 +2361,7 @@ class ToolPolicy(BaseModel):
 class MCPServerConfig(BaseModel):
     """One ``[mcp.servers.<name>]`` entry in an agent TOML.
 
-    ADR-0013 §3: server-axis default-deny — only servers listed here
+    Server-axis default-deny — only servers listed here
     are reachable. ``builtin = true`` marks hal0-admin / hal0-memory
     which are always reachable for bundled agents and can't be removed
     without an explicit override.
@@ -2391,7 +2388,7 @@ class MCPServerConfig(BaseModel):
     builtin: bool = Field(
         default=False,
         description=(
-            "ADR-0013 §6: marks hal0-admin / hal0-memory. Bundled-agent "
+            "Marks hal0-admin / hal0-memory. Bundled-agent "
             "installers set this; user-added servers leave it False."
         ),
     )
@@ -2419,7 +2416,7 @@ class AgentMetadataConfig(BaseModel):
     workspace: str = Field(
         default="",
         description=(
-            "Filesystem sandbox root (ADR-0013 §5). Empty falls back "
+            "Filesystem sandbox root. Empty falls back "
             "to the canonical /var/lib/hal0/agents/<name>/workspace at "
             "load time."
         ),
@@ -2456,9 +2453,9 @@ class AgentMCPConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Top-level shape of ``/etc/hal0/agents/<name>.toml`` (ADR-0013 §1).
+    """Top-level shape of ``/etc/hal0/agents/<name>.toml``.
 
-    ADR-0013 §1 spells out one file per agent — installer for bundled,
+    By design, one file per agent — installer for bundled,
     user for user-added. Preserved across ``hal0 update``. Schema
     validated at agent bootstrap time + on dashboard-edit save.
 
@@ -2576,7 +2573,7 @@ class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
     Container for the per-subsystem memory tunables. Today carries
-    ``[memory.graph]`` (ADR-0014), ``[memory.embedding]`` (issue #116), and
+    ``[memory.graph]``, ``[memory.embedding]`` (issue #116), and
     the per-agent provider routing (``agent_providers``/``agent_private``).
     Future memory features (retention, prune-policy, archival) land under a
     single namespace rather than scattering top-level tables.
@@ -2753,7 +2750,7 @@ class HonchoConfig(BaseModel):
         default=False,
         description=(
             "Require Bearer auth on the Honcho API. Default False (loopback-only "
-            "posture, ADR-0012: no Bearer needed on LAN)."
+            "posture, no Bearer needed on LAN)."
         ),
     )
     llm: HonchoLLMConfig = Field(default_factory=HonchoLLMConfig)

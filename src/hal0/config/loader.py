@@ -565,11 +565,11 @@ def resolve_profile(profile_name: str) -> ProfileConfig:
     return catalog.profile[profile_name]
 
 
-# ── agents/<name>.toml (ADR-0013) ─────────────────────────────────────────────
+# ── agents/<name>.toml ─────────────────────────────────────────────────────────
 
 
 def load_agent_config(agent_name: str, path: Path | None = None) -> AgentConfig:
-    """Load and validate ``/etc/hal0/agents/<agent_name>.toml`` (ADR-0013).
+    """Load and validate ``/etc/hal0/agents/<agent_name>.toml``.
 
     Raises:
         ConfigNotFound: file missing.
@@ -587,7 +587,7 @@ def load_agent_config(agent_name: str, path: Path | None = None) -> AgentConfig:
 
 
 def save_agent_config(cfg: AgentConfig, path: Path | None = None) -> None:
-    """Atomically write an agent config TOML (ADR-0013).
+    """Atomically write an agent config TOML.
 
     ``exclude_none=True`` keeps tomli_w from choking on optional blocks
     (``auth.env``, ``server.url`` on builtins).

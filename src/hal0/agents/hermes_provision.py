@@ -1585,7 +1585,7 @@ def _build_config_overlay(
             ("delegation.base_url", delegation["base_url"]),
         ]
 
-    # memory.graph.* (ADR-0014) configured hal0's OWN Hindsight
+    # memory.graph.* configured hal0's OWN Hindsight
     # graph-extraction engine — hermes never reads it, so forwarding it into
     # hermes's config.yaml was dead config. Dropped for both branches rather
     # than ported to honcho (feat/honcho-memory).
@@ -1597,7 +1597,7 @@ def _build_config_overlay(
     ]
 
     # mcp_servers via config set (NOT `hermes mcp add` — interactive/hangs).
-    # ADR-0012: no Bearer; agent identity flows via X-hal0-Agent.
+    # No Bearer; agent identity flows via X-hal0-Agent.
     for srv in mcp_servers:
         name = srv["name"]
         pairs += [
@@ -2109,8 +2109,8 @@ def _utility_aux_model(auxiliary_tasks: dict[str, dict[str, Any]] | None) -> str
 #
 # Verifies hal0-admin + hal0-memory MCP servers respond to tools/list +
 # records the discovered tool surface in provision.json for downstream
-# phases (#243 namespace_register, #245 model_automap). Honors ADR-0013:
-# the per-agent allow-list at /etc/hal0/agents/hermes.toml gates which
+# phases (#243 namespace_register, #245 model_automap). Honors the
+# per-agent allow-list at /etc/hal0/agents/hermes.toml, which gates which
 # servers the bootstrap will attempt to connect to.
 
 
@@ -2124,7 +2124,7 @@ def _load_agent_allowlist(
 
     Returns ``None`` when the file is missing (the agent installer
     drops it during install; absence means "allow everything that's
-    builtin" per ADR-0013's installer-managed convention). Returns
+    builtin" per the installer-managed convention). Returns
     ``{server_name: section_dict}`` when present.
     """
     target = path or AGENT_ALLOWLIST_PATH
@@ -2262,7 +2262,7 @@ def _probe_mcp_server(
 def _phase_mcp_wire(ctx: PhaseContext) -> PhaseResult:
     """Verify the two hal0-bundled MCP servers respond + record their tool list.
 
-    ADR-0013 compliance: when an allow-list exists at
+    When an allow-list exists at
     ``/etc/hal0/agents/hermes.toml``, the bootstrap only attempts
     connection for servers listed under ``[mcp.servers.*]``. A
     missing entry (or a missing allow-list file entirely) is a
@@ -2309,7 +2309,7 @@ def _phase_mcp_wire(ctx: PhaseContext) -> PhaseResult:
 
     # Even with warnings we return OK — degraded MCP connectivity is
     # surfaced for smoke_tests + self_report to display, not a fatal
-    # bootstrap blocker (per ADR-0013 + the plan §9 contract).
+    # bootstrap blocker (per the plan §9 contract).
     #
     # ``rendered_servers`` is consumed by Phase 5 (config_write) on the
     # next bootstrap run — it's how Phase 6 hands the template the live
@@ -2697,11 +2697,11 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
 
 # ── Phase H: namespace_register ─────────────────────────────────────────────
 #
-# Writes the Hermes-Agent identity card to the `agents` Cognee dataset
-# (ADR-0011). Card is immutable post-write — re-bootstrap deletes the
+# Writes the Hermes-Agent identity card to the `agents` Cognee dataset.
+# Card is immutable post-write — re-bootstrap deletes the
 # existing card and writes a fresh one to refresh metadata (the only
 # legitimate post-install write). On hal0-memory failure, log + continue
-# (per #243 sharpening + ADR-0013); the card is nice-to-have and
+# (per #243 sharpening); the card is nice-to-have and
 # bootstrap MUST NOT fail because the peer registry is down.
 
 
@@ -2731,7 +2731,7 @@ def _hal0_version_string() -> str:
 
 
 def _build_identity_card(state: BootstrapState) -> dict[str, Any]:
-    """Schema v1 per ADR-0011 §4. Text + structured metadata."""
+    """Schema v1. Text + structured metadata."""
     return {
         "text": (
             "I am Hermes, the hal0 admin agent. I have read/write access to the slot "
@@ -2847,7 +2847,7 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
 
     Idempotency: search for an existing card by ``agent_id`` first;
     if present, delete it before writing the fresh one (cards are
-    immutable per ADR-0011 §2, but bootstrap rewrites refresh the
+    immutable, but bootstrap rewrites refresh the
     snapshot of hal0_version + hermes_version).
 
     Failure mode: any MCP transport error logs + returns OK with a
@@ -3004,7 +3004,7 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
 
 
 def _build_brain_identity_card() -> dict[str, Any]:
-    """Identity card for the hal0-brain profile (schema v1, ADR-0011 §4).
+    """Identity card for the hal0-brain profile (schema v1).
 
     Mirrors :func:`_build_identity_card` (the default agent's card) so the
     dashboard steward registers as a first-class agent identity rather than a
@@ -3872,7 +3872,7 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
     without a full re-render. ``config set`` is idempotent, so a no-drift run
     just re-writes the same values.
 
-    Embed/rerank/img slots are deliberately NOT mapped per ADR-0011 §3
+    Embed/rerank/img slots are deliberately NOT mapped
     (Hermes has no top-level embed abstraction; memory MCP handles it).
     """
     state = ctx.state
@@ -3930,8 +3930,8 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
 # ── Phase J: voice_wire ─────────────────────────────────────────────────────
 #
 # Conditional. Emits STT/TTS provider config + writes
-# /var/lib/hal0/secrets/agents/hermes.env. Per the post-ADR-0012
-# correction on #246, that secrets file is OUTBOUND credentials only
+# /var/lib/hal0/secrets/agents/hermes.env. Per the #246
+# correction, that secrets file is OUTBOUND credentials only
 # now (HF token + external MCP tokens + STT_/TTS_OPENAI_BASE_URL).
 # voice_wire skips with reason when neither slot is `ready`.
 
@@ -4641,7 +4641,7 @@ def _seed_payload(state: BootstrapState) -> dict[str, Any]:
         "agent": {
             "name": "hermes",
             "installed_at": datetime.datetime.now(tz=datetime.UTC).isoformat(),
-            # Track-latest by design (ADR-0004 §3). No version pin.
+            # Track-latest by design. No version pin.
             "version_pin": False,
         },
         "data_dir": str(Path("/var/lib/hal0/agents/hermes")),

@@ -1,6 +1,6 @@
 """Bundled-agent lifecycle endpoints (mounted under /api/agents).
 
-Phase 8, ADR-0004. Thin wrapper around :class:`hal0.agents.AgentManager`
+Phase 8. Thin wrapper around :class:`hal0.agents.AgentManager`
 that mirrors the slot-route shape (``router`` + per-mutation
 ``_writer`` dep). The actual single-pick / atomic-swap / driver dispatch
 logic lives in the manager so the CLI and the API share one
@@ -9,7 +9,7 @@ implementation.
 Approval-queue endpoints (the ``/api/agent/approvals`` surface the CLI
 ``hal0 agent approvals`` subcommand consumes) live in
 :mod:`hal0.api.routes.approvals` and are mounted in-process from
-:mod:`hal0.api` next to this router. Shape per ADR-0004 §5:
+:mod:`hal0.api` next to this router. Shape:
 
     GET    /api/agent/approvals
     POST   /api/agent/approvals/{id}/approve
@@ -159,7 +159,7 @@ async def agent_activity(
     journalctl. ``client_id`` filter is substring-matched against the
     agent name so e.g. ``pi-coder`` matches client_ids like
     ``pi-coder@host``. The MCP server attributes ``client_id`` from the
-    Bearer token (ADR-0004 §7) so the agent identity is forensically
+    Bearer token so the agent identity is forensically
     grounded.
     """
     mgr = _manager()

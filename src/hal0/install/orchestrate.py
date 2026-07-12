@@ -214,7 +214,7 @@ def _clamp_context_size(requested: int, hw: HardwareInfo, *, weights_gb: float =
 async def _set_slot_enabled(slot_manager, slot_name: str, enabled: bool, *, failed: bool) -> None:
     """Best-effort flip of a slot's ``enabled`` flag after its pull settles.
 
-    Non-aborting per ADR-0010: a failed config rewrite must not crash the pull
+    Non-aborting by design: a failed config rewrite must not crash the pull
     driver. On a FAILED pull we also stamp ``[meta].pull_failed`` so the parked
     slot is clearly marked (the dashboard / ``hal0 doctor`` can surface it).
     """
@@ -222,7 +222,7 @@ async def _set_slot_enabled(slot_manager, slot_name: str, enabled: bool, *, fail
     if failed:
         updates["meta"] = {"pull_failed": True}
     # Activation is best-effort — the model still downloaded; the operator can
-    # enable the slot by hand. Never let this abort the pull driver (ADR-0010).
+    # enable the slot by hand. Never let this abort the pull driver.
     with contextlib.suppress(Exception):
         await slot_manager.update_config(slot_name, updates)
 
@@ -337,7 +337,7 @@ def _validate_store_mount(storage_dir: str) -> None:
     Warns (logs only — never raises) when the mount is unwritable, sits on
     the root filesystem, or is short on space (issue #1100 / decision Q4).
     Non-fatal: a bad pick is surfaced to the operator via logs/``hal0
-    doctor`` rather than aborting the setup walk (ADR-0010).
+    doctor`` rather than aborting the setup walk.
     """
     ancestor = _nearest_existing_ancestor(storage_dir)
     if ancestor is None:
@@ -399,7 +399,7 @@ def _persist_store_dir(storage_dir: str) -> None:
     (``_validate_store_mount``), warning on an unwritable dir, a root-FS pick,
     or low free space — never blocking the walk.
 
-    Best-effort per ADR-0010: an empty or relative value is ignored (the pull
+    Best-effort: an empty or relative value is ignored (the pull
     engine keeps its default store), and a config-write failure is swallowed so
     a bad storage pick never aborts the slot/extension walk. Idempotent —
     skips the rewrite when both ``[models].store`` and ``[models].flm_store``
@@ -464,7 +464,7 @@ async def apply_setup(
 ) -> SetupResult:
     """Create the chosen slots OFFLINE, plan their pulls, install extensions,
     and (optionally) write the first-run sentinel. Best-effort, non-aborting
-    per item (ADR-0010): a bad row is reported with ``skipped``/``error`` and
+    per item: a bad row is reported with ``skipped``/``error`` and
     the walk continues. Does NOT run pulls — see ``SetupResult.pulls``."""
     slot_outcomes: list[SlotOutcome] = []
     model_ids: list[str] = []

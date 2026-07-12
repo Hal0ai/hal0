@@ -1,4 +1,4 @@
-"""opencode bundled-agent driver (ADR-0004 §6, sibling of pi-coder).
+"""opencode bundled-agent driver (sibling of pi-coder).
 
 [OpenCode](https://opencode.ai) is a terminal coding agent with native
 OpenAI-compatible providers + MCP support. Unlike pi-coder — whose model
@@ -6,7 +6,7 @@ autodiscovery and memory ride vendored TypeScript extensions — opencode's
 whole hal0 wiring lives in a single JSON config, so this driver only:
 
 1. Runs ``installer/agents/opencode.sh`` (track-latest npm install of the
-   ``opencode-ai`` CLI; NO version pin per ADR-0004 §3 — the nightly smoke
+   ``opencode-ai`` CLI; NO version pin — the nightly smoke
    catches upstream breakage).
 2. Writes ``~/.config/opencode/opencode.json`` wiring:
    - **Provider** — hal0 as an ``@ai-sdk/openai-compatible`` provider at

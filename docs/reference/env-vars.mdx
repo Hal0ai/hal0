@@ -30,7 +30,7 @@ config by env-var name. Never commit a populated `api.env`.
 | `HAL0_ACTIVITY_RETENTION_DAYS` | Override the activity/audit store retention window.          | from `hal0.toml` (`[activity].retention_days`, `30`) |
 
 <Aside type="note">
-hal0 ships with **no built-in auth or TLS** (ADR-0012). The API is open on the
+hal0 ships with **no built-in auth or TLS**. The API is open on the
 local network; put it behind your own reverse proxy for TLS and access control.
 There is no bearer-token or basic-auth flag to enable.
 </Aside>

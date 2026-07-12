@@ -21,7 +21,7 @@ Both POST and PUT are accepted for the set path: the v3 dashboard's
 PUT — accepting both keeps the route honest with the running UI and the
 spec at once.
 
-Security posture (ADR-0012 — auth removed, open on the trusted LAN):
+Security posture (auth removed, open on the trusted LAN):
 
   - Secret VALUES are NEVER returned by any endpoint, never logged, and
     never echoed in an error body.

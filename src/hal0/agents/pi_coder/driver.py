@@ -1,4 +1,4 @@
-"""pi-coder driver (ADR-0004 §6).
+"""pi-coder driver.
 
 pi (upstream `earendil-works/pi`, formerly `badlogic/pi-mono`) is a
 third-party CLI/TUI coding agent. hal0's shim wires it to run against
@@ -52,8 +52,8 @@ from typing import Any
 from hal0.agents.manager import AgentDriver, AgentError, installer_script_path
 from hal0.config import paths as _paths
 
-# MCP endpoints. Both ride the existing hal0-api process per ADR-0004 §4
-# (admin) and ADR-0005 (memory). 127.0.0.1 is intentional: the bundled
+# MCP endpoints. Both ride the existing hal0-api process
+# (admin and memory). 127.0.0.1 is intentional: the bundled
 # agent runs on the same box as the API; LAN-exposed MCP is Phase 9
 # ("MCP client side of hal0"). Memory is NOT wired here — the
 # hal0-memory extension talks to the REST surface directly.
@@ -68,7 +68,7 @@ _PROVIDER_EXT_SRC = _PLUGINS_DIR / "hal0-provider"
 _MEMORY_EXT_SRC = _PLUGINS_DIR / "hal0-memory"
 _THEME_SRC = Path(__file__).resolve().parent / "themes" / "hal0.json"
 
-# Package added for subagent delegation (ADR-0004 §6). Best-effort:
+# Package added for subagent delegation. Best-effort:
 # needs npm + network, and is an enhancement layered on top of the core
 # provider/memory/theme wiring, not a hard requirement.
 _SUBAGENTS_PACKAGE = "npm:pi-subagents"
@@ -217,8 +217,8 @@ class PiCoderDriver(AgentDriver):
         return _paths.var_lib() / "agents" / self.name
 
     def _adapter_config_path(self) -> Path:
-        # pi-mcp-adapter is a proxy-tool MCP routing layer (ADR-0004 §6,
-        # "~200 tokens per dispatch instead of dumping the full tool
+        # pi-mcp-adapter is a proxy-tool MCP routing layer
+        # ("~200 tokens per dispatch instead of dumping the full tool
         # catalog"). Config lives in the per-agent data dir so a
         # ``hal0 agent uninstall`` cleans it up.
         return self._data_dir() / "pi-mcp-adapter.json"
@@ -235,7 +235,7 @@ class PiCoderDriver(AgentDriver):
         }
         if bearer_token:
             # Same Authorization header the dashboard would send
-            # (ADR-0001 Bearer token, reused — no new credential type).
+            # (Bearer token, reused — no new credential type).
             for srv in servers.values():
                 srv["headers"] = {"Authorization": f"Bearer {bearer_token}"}
 

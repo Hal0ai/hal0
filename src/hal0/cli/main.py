@@ -61,7 +61,7 @@ app = typer.Typer(
 # Mount sub-apps
 app.add_typer(slot_app, name="slot")
 app.add_typer(model_app, name="model")
-# Issue #258 — ``hal0 memory graph {status,enable,disable}`` ADR-0014 surface.
+# Issue #258 — ``hal0 memory graph {status,enable,disable}`` surface.
 # Mounted between ``model`` and ``config`` so it sits alongside the other
 # user-facing data subcommands rather than buried under operator surfaces.
 app.add_typer(memory_app, name="memory")

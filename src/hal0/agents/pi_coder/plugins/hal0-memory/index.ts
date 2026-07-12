@@ -10,7 +10,7 @@
  *   - `X-hal0-Private: 0` → shared            (cross-agent; hermes reads too)
  *
  * Identity: `X-hal0-Agent: pi-coder` (override with HAL0_AGENT_ID env).
- * No Bearer auth — LAN trust per ADR-0012.
+ * No Bearer auth — LAN trust.
  *
  * Live-API quirks (verified against src/hal0/api/routes/memory.py on main):
  *   1. `/api/memory/add` is ASYNC. The response carries an `operation_id`,

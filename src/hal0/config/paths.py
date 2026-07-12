@@ -98,7 +98,7 @@ def registry_dir() -> Path:
 def agents_config_dir() -> Path:
     """Return the per-agent allow-list config directory.
 
-    ADR-0013 §1: each bundled or user-added agent gets one TOML at
+    Each bundled or user-added agent gets one TOML at
     ``/etc/hal0/agents/<name>.toml`` carrying its workspace path,
     enabled MCP servers, per-server auth, and the three-tier tool
     classification (allow / gated / blocked).
@@ -109,8 +109,8 @@ def agents_config_dir() -> Path:
 def agent_workspace_dir(agent_name: str) -> Path:
     """Return the filesystem sandbox root for a bundled agent.
 
-    ADR-0013 §5: the agent driver chroots/bind-mounts the agent process
-    to this path; writes outside require ADR-0004 approval. Each agent
+    The agent driver chroots/bind-mounts the agent process
+    to this path; writes outside require approval. Each agent
     gets its own subtree so a malicious / buggy agent can't poke at
     another's workspace.
     """
@@ -271,7 +271,7 @@ def bundle_chosen_marker() -> Path:
 
     Dropped by ``POST /api/bundles/{name}`` (or
     ``GET /api/bundles/skip``) once the operator has engaged the first-
-    run bundle picker (ADR-0010). The dashboard reads this to decide
+    run bundle picker. The dashboard reads this to decide
     whether to render the picker or the regular dashboard on load.
 
     Location: ``$HAL0_HOME/var-lib/hal0/.bundle-chosen`` (or

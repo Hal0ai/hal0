@@ -9,8 +9,8 @@ import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/compo
 
 hal0 makes one security decision explicit and central: it does **not** ship
 built-in authentication or TLS. The API binds `0.0.0.0:8080` and every endpoint
-is open to anything that can reach that port. This is a deliberate design choice
-(ADR-0012), and the rest of your security posture is built on top of it rather
+is open to anything that can reach that port. This is a deliberate design choice,
+and the rest of your security posture is built on top of it rather
 than inside it.
 
 <Aside type="caution">
@@ -23,7 +23,7 @@ it for anything beyond a single trusted LAN.
 ## Why no built-in auth?
 
 Earlier designs bundled an auth layer and a TLS-terminating proxy. That was
-removed (ADR-0012) because it duplicated, badly, what every operator already
+removed because it duplicated, badly, what every operator already
 runs better elsewhere: a real reverse proxy. Bundling auth meant maintaining
 credential storage, token rotation, and TLS certificate plumbing inside the
 inference server — surface area that is someone else's core competency.

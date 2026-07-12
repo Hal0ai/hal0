@@ -213,7 +213,7 @@ back**. Deleting an upstream deliberately leaves its credential in
 `api.env` — remove it via `/api/secrets` if truly unwanted.
 
 <Aside type="caution">
-There is no built-in authentication on the hal0 API (ADR-0012) — it binds
+There is no built-in authentication on the hal0 API — it binds
 to the LAN. `api.env` is a LAN-writable file; treat the host as you would
 any secret-bearing service and reverse-proxy it if it needs to be exposed.
 </Aside>

@@ -1,4 +1,4 @@
-"""hal0 memory subcommands — ADR-0014 graph-extraction gate.
+"""hal0 memory subcommands — graph-extraction gate.
 
 Mirrors the slot / model CLI shape: a thin HTTP client to the local
 hal0 API. The ``graph`` sub-sub-app maps 1:1 to the routes in
@@ -285,7 +285,7 @@ def graph_disable_cmd(
         False, "--json", help="Emit the raw JSON response instead of a panel."
     ),
 ) -> None:
-    """Turn graph extraction OFF; cancels any in-flight build (ADR §6)."""
+    """Turn graph extraction OFF; cancels any in-flight build."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)

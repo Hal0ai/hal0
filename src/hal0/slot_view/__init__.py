@@ -212,7 +212,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     so the dashboard renders cards + drawers without a per-slot
     ``/config`` fetch.
 
-    Coresident grouping (ADR-0008 §5):
+    Coresident grouping:
       A slot of type=llm + device=npu serving as the chat anchor and
       any sibling ``stt`` / ``embed`` alias records that are enabled
       share a ``coresident_group=npu-flm-trio`` marker. The dashboard

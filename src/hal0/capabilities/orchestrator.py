@@ -198,7 +198,7 @@ class CapabilityOrchestrator:
 
         Idempotent: when the file already exists, this method first runs
         :func:`auto_migrate_capabilities_file` so a stale v1 file is
-        promoted to v2 (ADR-0006 §7) before any read. When the file is
+        promoted to v2 before any read. When the file is
         missing we walk ``/etc/hal0/slots/{embed,stt,tts,img}.toml`` and
         lift each slot's current device/provider/model + ``enabled`` flag
         into the matching child. Slots that don't exist on disk get an
@@ -297,7 +297,7 @@ class CapabilityOrchestrator:
                     if anchor_status is not None:
                         status_str = anchor_status
                 selections_out[slot][child] = {
-                    # ``device`` is the v0.2 canonical key (ADR-0006 §7).
+                    # ``device`` is the v0.2 canonical key.
                     "device": selection.device,
                     # ``backend`` is emitted as a one-release alias so the
                     # v0.1.x dashboard frontend keeps rendering until the

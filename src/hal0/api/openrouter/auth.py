@@ -1,12 +1,10 @@
 """OpenRouter OAuth PKCE callback route (Phase 0 scaffold).
 
 This module registers ``GET /api/openrouter/auth/callback`` so the URL
-exists, is reachable, and enforces the loopback guard from ADR-0020
-before V1 lands the actual PKCE exchange flow. The handler returns
-HTTP 501 with a pointer to ADR-0020 — V1's PR opens against this
-branch and fills the body in.
-
-See ``docs/internal/adr/0020-localhost-callback-only-oauth-pkce.md``.
+exists, is reachable, and enforces the loopback guard before V1 lands
+the actual PKCE exchange flow. The handler returns HTTP 501 with a
+pointer in the response body — V1's PR opens against this branch and
+fills the body in.
 """
 
 from __future__ import annotations
@@ -33,7 +31,7 @@ async def callback(
 
     Phase 0 (this PR) registers the route + loopback guard only. The
     PKCE code-for-token exchange + refresh-token persistence ship in
-    V1 (Phase 1) — see ADR-0020 §"Implementation pointer".
+    V1 (Phase 1).
 
     The 501 response is deliberate: it documents the contract for V1
     and lets the dashboard's "Linked Accounts" panel detect that the

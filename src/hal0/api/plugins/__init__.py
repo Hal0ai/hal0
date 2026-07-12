@@ -11,7 +11,7 @@ Both endpoints carry SRI verification (when the manifest declares
 ``integrity``), a path-traversal validator ported verbatim from
 GHSA-5qr3-c538-wm9j, inbound ``Authorization``/``Cookie`` stripping
 (no hal0 session bleeds to upstream), and outbound ``X-hal0-Agent``
-injection per ADR-0012.
+injection by design.
 
 The manifest endpoint additionally sets
 ``Content-Security-Policy: script-src 'self' 'strict-dynamic'`` per

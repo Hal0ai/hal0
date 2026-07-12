@@ -26,7 +26,7 @@ Header policy (DA-sec-ops MUST-FIX #2):
   before forwarding. These are hal0 session credentials; upstream
   Hermes does not need them and must not see them.
 * Outbound: inject ``X-hal0-Agent: hermes`` (resolved from the
-  ``HAL0_AGENT_ID`` env or a per-request override) per ADR-0012.
+  ``HAL0_AGENT_ID`` env or a per-request override) by design.
 
 Networking: upstream is loopback-only (``HERMES_DASHBOARD_BASE_URL``,
 default ``http://127.0.0.1:9119`` to match
@@ -101,7 +101,7 @@ _RESPONSE_HOP_BY_HOP = frozenset(
 
 # Browser session credentials. Stripped from every inbound request
 # before forwarding so upstream Hermes never sees hal0 cookies / bearer
-# tokens (ADR-0012 routes identity through ``X-hal0-Agent`` only; the
+# tokens (identity routes through ``X-hal0-Agent`` only; the
 # DA-sec-ops review locked this in for plugin proxy traffic too).
 _INBOUND_STRIP = frozenset(
     {

@@ -392,8 +392,8 @@ left the catalog are cleared. Idempotent.
 | `agent personas activate <id>` | Switch the active persona and nudge Hermes to hot-reload. | `--reload-url` |
 
 <Aside type="note">
-There is no `rotate-token` subcommand. The daemon has no built-in auth
-(ADR-0012); agent identity flows through the `X-hal0-Agent` header the wrapper
+There is no `rotate-token` subcommand. The daemon has no built-in auth;
+agent identity flows through the `X-hal0-Agent` header the wrapper
 sets from `$HAL0_AGENT_ID`.
 </Aside>
 
@@ -420,7 +420,7 @@ hits `127.0.0.1:8080`. Manage the bundled MCP servers (`hal0-admin`,
 
 <Aside type="note">
 `mcp restart` currently surfaces the `501` supervisor-stub gracefully — live
-MCP process restart lands with ADR-0015. Until then, `restart` reports the
+MCP process restart is a planned follow-up. Until then, `restart` reports the
 stub instead of bouncing the server.
 </Aside>
 

@@ -53,7 +53,7 @@ from hal0.install.orchestrate import (
 from hal0.registry.curated import CURATED_MODELS
 from hal0.slot_config import write_slot_toml
 
-# Auth was removed in ADR-0012. All endpoints are open on the local
+# Auth was removed by design. All endpoints are open on the local
 # network; the first-run wizard runs without any credential.
 
 router = APIRouter()
@@ -397,7 +397,7 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
     :func:`_bundle_to_selections`, then delegates to the same
     :func:`_apply_selections_core` that ``/apply-selections`` uses — one
     shared provisioning path (WS-I, issue #1101). Best-effort, non-aborting
-    per row (ADR-0010). The UI reattaches per model via the existing
+    per row. The UI reattaches per model via the existing
     ``/api/models/{id}/pull/stream`` SSE.
     """
     try:

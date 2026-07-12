@@ -1,6 +1,6 @@
 """Bundle tier registry — locked list + loader.
 
-The five bundle names are fixed by ADR-0010 (no additional tiers in
+The five bundle names are fixed by design (no additional tiers in
 v0.2). Manifests ship under ``installer/manifests/omni/`` and are
 copied by ``install.sh`` to ``/var/lib/hal0/models/collections/omni/``
 at install time; the loader picks them up from the runtime location

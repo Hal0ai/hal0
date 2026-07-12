@@ -17,7 +17,7 @@ subprocess call rather than getting tangled up with the lifecycle routes.
 
 Resolution
 ----------
-v0.3 only resolves ``"hermes"`` (single-pick per ADR-0004). The agent
+v0.3 only resolves ``"hermes"`` (single-pick). The agent
 registry mirrors :mod:`hal0.api.agents.personas` — adding pi-coder in
 v0.4 lights up restart automatically without touching this file.
 
@@ -84,8 +84,8 @@ def _unit_name(agent_id: str) -> str:
 def _resolve_actor(request: Request) -> str:
     """Identify the caller for the audit log.
 
-    Post-ADR-0012 there is no Bearer token store. We fall back to the
-    ``X-hal0-Agent`` header (per ADR-0012 / memory ``hal0_v0.3_auth_removed``),
+    There is no Bearer token store (auth was removed in v0.3). We fall back
+    to the ``X-hal0-Agent`` header (see memory ``hal0_v0.3_auth_removed``),
     defaulting to ``"hal0-dashboard"`` when neither is present. Best-effort
     forensic grounding — the audit row is for "what happened", not "who
     can do this" (the LAN-trust posture handles authorization).

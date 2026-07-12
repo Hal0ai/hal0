@@ -87,7 +87,7 @@ def _activate_img_slot() -> None:
     Delegates to :func:`hal0.install.extensions.install_extension` so activation
     goes through the SAME wiring the extension walk uses. Best-effort: a failure
     is logged, never raised — a landed model with an un-activatable slot is still
-    a better state than crash-looping the caller (ADR-0010)."""
+    a better state than crash-looping the caller."""
     try:
         from hal0.install.extensions import install_extension
 

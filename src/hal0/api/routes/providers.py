@@ -555,7 +555,7 @@ async def write_provider_credential(
 
     The Phase 8 MCP admin server's ``provider_credential_write`` tool
     routes here; that path is gated on owner approval (see
-    ``hal0.mcp.admin.GATED_TOOLS``). Auth was removed in ADR-0012;
+    ``hal0.mcp.admin.GATED_TOOLS``). Auth was removed by design;
     direct REST writes are open on the local network.
 
     Process restart is the caller's responsibility — the registry

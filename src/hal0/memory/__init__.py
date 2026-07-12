@@ -1,4 +1,4 @@
-"""hal0 memory subsystem (ADR-0005 + brain-redesign P0-P2).
+"""hal0 memory subsystem (brain-redesign P0-P2).
 
 Public contract for ``/mcp/memory`` + ``/api/memory/*``. Exposes the
 engine-neutral :class:`MemoryProvider` ABC and the ``provider_from_config``

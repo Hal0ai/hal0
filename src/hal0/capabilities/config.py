@@ -21,8 +21,7 @@ TOML so operators can hand-edit the file::
 v0.1.x wrote the same shape but used ``backend`` instead of ``device``
 and omitted ``schema_version`` (implicit v1). The auto-migration in
 :func:`migrate_capabilities_v1_to_v2` reads a legacy file, snaps the
-field rename + value mapping, and stamps ``schema_version = 2``. See
-ADR-0006 §7.
+field rename + value mapping, and stamps ``schema_version = 2``.
 
 The full file is rewritten atomically on every change via
 :func:`hal0.config.loader.write_toml_atomic` so an interrupted write
@@ -56,8 +55,8 @@ class CapabilitySelection(BaseModel):
     user picked, which provider runs on it, which model id they bound,
     and whether the child is currently active.
 
-    v0.2 rename: the ``backend`` field is now :attr:`device` (ADR-0006
-    §7). For one release the model accepts both: a TOML carrying only
+    v0.2 rename: the ``backend`` field is now :attr:`device`. For one
+    release the model accepts both: a TOML carrying only
     ``backend`` auto-promotes via :func:`map_backend_to_device` and
     round-trips with ``backend`` re-emitted on dump so a v0.1.x downgrade
     sees its old field. Removal in v0.3.
@@ -70,7 +69,7 @@ class CapabilitySelection(BaseModel):
         description=(
             "v0.2 hardware-preference id: 'gpu-rocm' | 'gpu-vulkan' | "
             "'npu' | 'cpu'. Empty == unset (matches the dashboard's "
-            "blank-picker UX). See ADR-0006 §7."
+            "blank-picker UX)."
         ),
     )
     backend: str = Field(
@@ -144,7 +143,7 @@ class CapabilityConfig(BaseModel):
         ge=1,
         description=(
             "Capabilities-file schema version. v1 used ``backend``; v2 "
-            "(ADR-0006 §7) uses ``device``. Auto-migrated on hal0-api "
+            "uses ``device``. Auto-migrated on hal0-api "
             "boot via ``migrate_capabilities_v1_to_v2``."
         ),
     )

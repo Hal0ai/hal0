@@ -43,7 +43,7 @@ router = APIRouter()
 #
 # Mirrors :data:`hal0.api.agents.personas._AGENT_PERSONAS_ROOTS` but
 # resolves the AGENT-LEVEL state directory (the personas/ subdir lives
-# beneath it). Per ADR-0004 §2 + the personas module's seed-default
+# beneath it). Per the personas module's seed-default
 # convention, the canonical layout is::
 #
 #   /var/lib/hal0/agents/{agent_id}/personas/{persona_id}.toml

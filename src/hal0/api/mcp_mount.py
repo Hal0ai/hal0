@@ -37,12 +37,12 @@ from starlette.types import ASGIApp
 
 log = structlog.get_logger("hal0.api.mcp_mount")
 
-# Header carrying the caller's agent identity (post-ADR-0012 — Bearer auth
-# was removed; identity flows on this header, same as the REST memory
+# Header carrying the caller's agent identity (Bearer auth was removed;
+# identity flows on this header, same as the REST memory
 # surface in :mod:`hal0.api.routes.memory`).
 _AGENT_HEADER = "x-hal0-agent"
 
-# ADR-0005 §5 identity grammar — alnum + ``-`` + ``_``, ≤64 chars. The
+# Identity grammar — alnum + ``-`` + ``_``, ≤64 chars. The
 # value feeds the ``private:<agent>`` dataset name + the audit source, so
 # it must be path-traversal-free and bounded. Mirrors
 # ``hal0.api.routes.memory._AGENT_ID_PATTERN`` so MCP + REST resolve the
@@ -77,7 +77,7 @@ def _mcp_transport_security():
     ``421 Invalid Host header`` — exactly what happens the moment another
     homelab node, or the Traefik vhost, tries to reach ``/mcp/*``.
 
-    hal0 removed network auth entirely (ADR-0012) and binds ``0.0.0.0`` on
+    hal0 removed network auth entirely and binds ``0.0.0.0`` on
     the trusted LAN, so the mount has to be reachable by its real host
     name. We keep the secure localhost default but let operators widen it,
     mirroring the ``HAL0_ALLOWED_ORIGINS`` knob in ``api/agents/_auth``:
@@ -195,7 +195,7 @@ def private_resolver() -> bool:
     """Return whether the calling client toggled ``--private`` mode.
 
     Read from the ``X-hal0-Private: 1`` request header off the live MCP
-    request context — namespace promotion per ADR-0005 §3 is opt-in per
+    request context — namespace promotion is opt-in per
     client.
     """
     request = _current_mcp_request()

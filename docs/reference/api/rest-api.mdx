@@ -13,8 +13,8 @@ router groups. For the inference surface see the OpenAI-compat and streaming
 references.
 
 <Aside type="note">
-All endpoints are open on the local network — auth and TLS were removed in
-ADR-0012 and are your reverse proxy's job. The OpenAPI spec is served live at
+All endpoints are open on the local network — there's no built-in auth or
+TLS; that's your reverse proxy's job. The OpenAPI spec is served live at
 `/api/openapi.json` (interactive docs at `/api/docs`).
 </Aside>
 

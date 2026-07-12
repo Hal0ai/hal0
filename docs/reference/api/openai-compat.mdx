@@ -21,7 +21,7 @@ binary for audio speech) and non-streaming responses are both handled by the
 forwarder.
 
 <Aside type="caution">
-There is no built-in authentication (ADR-0012). The server binds open on the
+There is no built-in authentication. The server binds open on the
 local network; put it behind your own reverse proxy if you need auth or TLS.
 `GET /v1/models` and `/v1/models/{id}` are deliberately auth-free so SDKs can
 probe the catalog before sending any `Authorization` header.

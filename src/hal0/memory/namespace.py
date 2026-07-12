@@ -1,4 +1,4 @@
-"""ADR-0005 §3 namespace resolution — shared by the MCP + REST surfaces.
+"""Namespace resolution — shared by the MCP + REST surfaces.
 
 The MCP server (:mod:`hal0.mcp.memory`) and the REST shims
 (:mod:`hal0.api.routes.memory`) both translate caller-supplied
@@ -8,7 +8,7 @@ issue #317 surfaced exactly that kind of drift, where the REST handler
 hardcoded ``"shared"`` while the MCP dispatcher correctly honored
 ``private:<client_id>`` promotion.
 
-The rule (ADR-0005 §3):
+The rule:
 
   - Writes default to ``"shared"``.
   - Callers in "private mode" promote to ``private:<client_id>`` for
@@ -50,7 +50,7 @@ PROJECT_PREFIX = "project:"
 ANONYMOUS_CLIENT_ID = "anonymous"
 
 # Spec §3 namespace grammar — the scoped suffix after ``project:`` follows
-# the same identity rules as agent ids (ADR-0005 §5): alnum + ``-`` + ``_``,
+# the same identity rules as agent ids: alnum + ``-`` + ``_``,
 # ≤64 chars, so bank names derived from it stay path-traversal-free.
 _SCOPED_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
@@ -82,7 +82,7 @@ def resolve_write_dataset(
     """Translate a write request into the effective dataset name.
 
     Mirrors :func:`hal0.mcp.memory._resolve_dataset` (which delegates
-    here) — the docstring rule from ADR-0005 §3 applies:
+    here) — the rule described in the module docstring applies:
 
       - ``private=True`` → ``private:<client_id>`` (raises if no
         ``client_id`` is available).

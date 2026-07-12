@@ -1,8 +1,8 @@
 """hal0 mcp subcommands — thin HTTP client to /api/mcp/*.
 
 Issue #504: ``hal0 mcp {list,status,install,uninstall,restart,catalog list}``
-backing the existing API routes in :mod:`hal0.api.routes.mcp`.  ADR-0015 +
-the Hermes ``MCP-CLIENTS.md.j2`` template already promise this surface.
+backing the existing API routes in :mod:`hal0.api.routes.mcp`.  The Hermes
+``MCP-CLIENTS.md.j2`` template already promises this surface.
 
 Endpoints hit
 -------------
@@ -345,7 +345,7 @@ def catalog_refresh_cmd(
     """Refresh the installable-MCP catalog (re-fetches from upstream).
 
     Currently a stub — re-fetches the static catalog.  The backend will
-    grow a live registry probe per ADR-0013; when that lands this command
+    grow a live registry probe; when that lands this command
     will force a re-index instead of returning the same static payload.
     """
     url = _api_base()

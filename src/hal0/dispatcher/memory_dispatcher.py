@@ -1,6 +1,6 @@
 """In-process memory dispatcher for the MCP admin server.
 
-ADR-0004 §7 plus ADR-0005 §2 together demand: the admin MCP server's
+By design, the admin MCP server's
 ``memory_*`` tool family must reach the memory provider *without* an
 HTTP loop-back through ``/mcp/memory``. The loop-back works (and was the
 v0.2 stopgap), but every round trip pays a transport tax and re-runs
@@ -55,7 +55,7 @@ class MemoryDispatcher:
         leave this None.
     private_resolver:
         Zero-arg callable returning whether the current call opted into
-        the ``private:<client_id>`` namespace (ADR-0005 §3). Defaults
+        the ``private:<client_id>`` namespace. Defaults
         to False.
 
     The instance is callable so existing call sites in
