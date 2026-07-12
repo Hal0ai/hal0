@@ -11,21 +11,28 @@
 #   sudo bash uninstall.sh --keep-data # legacy alias for the conservative default
 #   sudo bash uninstall.sh --force     # skip the --purge DELETE confirmation
 #        bash uninstall.sh --dev       # remove dev-mode tree under $PWD/.hal0ai
-#   HAL0_FORCE=1 sudo bash uninstall.sh # equivalent to --force
+#   HAL0_FORCE=1 sudo -E bash uninstall.sh # equivalent to --force
+#        (the -E is required: plain `sudo` resets the environment on stock
+#        distros — see the "Env overrides" note below — so a bare `sudo`
+#        silently drops HAL0_FORCE/HAL0_PREFIX/HAL0_PATH_LINK)
 #
 # What the CONSERVATIVE default removes (system mode): the hal0-api /
 # hal0-openwebui / hal0-slot@ / hal0-agent@ / hermes-gateway /
-# hindsight-api units (+ drop-in dirs), every hal0 podman CONTAINER
-# (openwebui, hal0-slot-*, comfyui), the FHS code tree + shared venv
-# (/usr/lib/hal0), the install PREFIX (/opt/hal0), the per-agent venvs
-# (/var/lib/hal0/venvs/*), the Hindsight engine venv, and the
-# /usr/local/bin/{hal0,hal0-agent,hermes} shims. It deliberately KEEPS
-# /etc/hal0 (config) and /var/lib/hal0 (models, registry, OpenWebUI
-# state) so a re-install reuses them.
+# hindsight-api / hal0-honcho{,-sync,-sync.timer} units (+ drop-in dirs),
+# every hal0 podman CONTAINER (openwebui, hal0-slot-*, hal0-honcho* — the
+# opt-in Honcho compose stack's api/deriver/postgres/redis, HAL0_INSTALL_HONCHO=1
+# — comfyui), the FHS code tree + shared venv (/usr/lib/hal0), the install
+# PREFIX (/opt/hal0), the per-agent venvs (/var/lib/hal0/venvs/*), the
+# Hindsight engine venv, and the /usr/local/bin/{hal0,hal0-agent,hermes}
+# shims. It deliberately KEEPS /etc/hal0 (config) and /var/lib/hal0 (models,
+# registry, OpenWebUI state, Honcho pgdata/redis-data) so a re-install
+# reuses them.
 #
-# --purge (== --clean-slate) ALSO removes: /etc/hal0, /var/lib/hal0,
-# the hal0 system user AND group, all hal0/toolbox podman IMAGES, and
-# the fastflowlm .deb — a true clean slate for fresh test installs.
+# --purge (== --clean-slate) ALSO removes: /etc/hal0, /var/lib/hal0
+# (including the Honcho stack's pgdata/redis-data under it), the hal0 system
+# user AND group, all hal0/toolbox podman IMAGES (including the locally-built
+# hal0-honcho image), and the fastflowlm .deb — a true clean slate for fresh
+# test installs.
 #
 # Every step is best-effort and continue-on-error: the uninstaller NEVER
 # aborts mid-teardown on an already-gone target or a failing step. It
@@ -39,11 +46,22 @@
 # docker themselves are left installed.
 #
 # Env overrides:
+#   HAL0_FORCE          1 == --force (skip the --purge DELETE confirmation)
 #   HAL0_PREFIX        installation root (default /opt/hal0; --dev defaults
 #                      to $PWD/.hal0ai). When set, --dev path layout is used
 #                      so the uninstall mirrors the matching install.sh run.
 #   HAL0_PATH_LINK     PATH symlink to remove (default /usr/local/bin/hal0;
 #                      ignored in --dev mode)
+#
+# IMPORTANT: these are read from the environment BEFORE this script re-execs
+# itself under sudo (see the root check below). Stock distro sudoers use
+# `Defaults env_reset`, so a plain `HAL0_FORCE=1 sudo bash uninstall.sh`
+# loses HAL0_FORCE/HAL0_PREFIX/HAL0_PATH_LINK the moment sudo starts the
+# child shell — the non-root invocation reads them fine, but the re-exec'd
+# root process would see unset vars again unless we forward them explicitly
+# (mirrors install.sh's `exec sudo -E VAR=... bash "$0" "$@"` at
+# install.sh:242). Either pass `sudo -E` yourself, or just set the vars —
+# this script forwards them across the re-exec either way.
 
 # NOTE on shell options: we deliberately do NOT use `set -e` (errexit) here.
 # An uninstaller's whole job is to tear down a possibly-partial install where
@@ -164,7 +182,17 @@ fi
 # ── Root check (system mode only) ─────────────────────────────────────────────
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo &>/dev/null; then
-        exec sudo bash "$0" "$@"
+        # -E (mirrors install.sh:242) PLUS explicit VAR=value forwarding: stock
+        # sudoers `Defaults env_reset` strips HAL0_FORCE/HAL0_PREFIX/
+        # HAL0_PATH_LINK from the re-exec'd root process even with -E if the
+        # admin's sudoers doesn't env_keep them, so forward the values we
+        # already read in THIS (non-root) shell explicitly rather than relying
+        # on -E alone. Without this, `HAL0_FORCE=1 sudo bash uninstall.sh`
+        # silently loses HAL0_FORCE (--purge then hits the interactive DELETE
+        # prompt) and `HAL0_PREFIX=/custom bash uninstall.sh` re-execs to root
+        # targeting the default /opt/hal0 instead of the custom prefix.
+        exec sudo -E HAL0_FORCE="${HAL0_FORCE:-0}" HAL0_PREFIX="${HAL0_PREFIX:-}" \
+            HAL0_PATH_LINK="${HAL0_PATH_LINK:-}" bash "$0" "$@"
     else
         die "Must run as root or have sudo available."
     fi
@@ -186,8 +214,16 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # writes neither, but an install that predates those changes still
     # has the unit on disk — and a stale hal0-lemonade restart-loops with
     # 203/EXEC once its placeholder binary is gone, so tear it down too.
+    # hal0-honcho{,-sync,-sync.timer} are the opt-in Honcho memory stack
+    # (HAL0_INSTALL_HONCHO=1, install.sh ~1753). hal0-honcho.service's
+    # ExecStop runs `podman compose --project-name hal0-honcho ... down`
+    # (installer/systemd/hal0-honcho.service), so stopping it here tears
+    # down the api/deriver/postgres/redis containers too; the sync
+    # service/timer ship installed but not enabled by default, so the
+    # is-active/is-enabled checks below just no-op for them when absent.
     UNITS=(hal0-api hal0-openwebui hal0-podman-forward hal0-caddy hal0-lemonade \
-           hindsight-api hal0-agent@hermes hermes-gateway)
+           hindsight-api hal0-agent@hermes hermes-gateway hal0-honcho \
+           hal0-honcho-sync hal0-honcho-sync.timer)
 
     # Discover any running slot instances
     while IFS= read -r UNIT; do
@@ -222,12 +258,35 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         fi
     done
 
+    # Honcho compose stack backstop. hal0-honcho.service's ExecStop (above)
+    # only runs `podman compose ... down` when systemd considers the unit
+    # active — a crash-looping or hand-stopped stack skips it, which would
+    # leave the api/deriver/postgres/redis containers running right up to
+    # the point --purge rm -rf's ${VAR_DIR} (and the compose file with it,
+    # out from under them). Run `compose down` directly here too; harmless
+    # no-op if Honcho was never installed (HAL0_INSTALL_HONCHO=1, opt-in)
+    # or the stack is already down.
+    HONCHO_COMPOSE_FILE="${VAR_DIR}/honcho/docker-compose.yml"
+    if [[ -f "${HONCHO_COMPOSE_FILE}" ]] && command -v podman >/dev/null 2>&1; then
+        if podman compose --project-name hal0-honcho -f "${HONCHO_COMPOSE_FILE}" down &>/dev/null; then
+            info "Stopped Honcho compose stack"
+        else
+            soft_fail "Could not stop Honcho compose stack (podman compose down)"
+        fi
+    fi
+
     # Stop + remove every hal0-created container. The unit stops above SHOULD
     # have taken the slot/openwebui containers down (ExecStopPost=podman rm -f),
     # but a half-installed box can have orphaned containers whose units never
     # got the memo. Match hal0's container naming:
     #   - hal0-openwebui                (OpenWebUI)
     #   - hal0-slot-<slot>              (inference slots, base.py:327)
+    #   - hal0-honcho*                  (Honcho compose project containers —
+    #                                    api/deriver/postgres/redis; podman
+    #                                    compose v2 names them
+    #                                    hal0-honcho-<service>-<n>; also
+    #                                    covered by the compose-down backstop
+    #                                    above, kept here too as a sweep)
     #   - the ComfyUI image-gen container
     # Check both podman (current) and docker (docker-era installs) on one pass.
     # `rm -f` stops-then-removes; absent containers are skipped silently.
@@ -236,7 +295,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         while IFS= read -r _cname; do
             [[ -n "${_cname}" ]] || continue
             case "${_cname}" in
-                hal0-openwebui|hal0-slot-*|*comfyui*)
+                hal0-openwebui|hal0-slot-*|hal0-honcho*|*comfyui*)
                     if "${_rt}" rm -f "${_cname}" &>/dev/null; then
                         info "Removed ${_rt} container ${_cname}"
                     else
@@ -315,7 +374,10 @@ for UNIT_FILE in \
     "${UNIT_DIR}/hindsight-api.service" \
     "${UNIT_DIR}/hal0-slot@.service" \
     "${UNIT_DIR}/hal0-agent@.service" \
-    "${UNIT_DIR}/hermes-gateway.service"
+    "${UNIT_DIR}/hermes-gateway.service" \
+    "${UNIT_DIR}/hal0-honcho.service" \
+    "${UNIT_DIR}/hal0-honcho-sync.service" \
+    "${UNIT_DIR}/hal0-honcho-sync.timer"
 do
     rm_path "${UNIT_FILE}"
 done
@@ -337,7 +399,8 @@ done
 for WANTS_LINK in \
     "${UNIT_DIR}/multi-user.target.wants"/hal0-*.service \
     "${UNIT_DIR}/multi-user.target.wants"/hindsight-api.service \
-    "${UNIT_DIR}/multi-user.target.wants"/hermes-gateway.service
+    "${UNIT_DIR}/multi-user.target.wants"/hermes-gateway.service \
+    "${UNIT_DIR}/timers.target.wants"/hal0-honcho-sync.timer
 do
     [[ -L "${WANTS_LINK}" ]] && rm_path "${WANTS_LINK}"
 done
@@ -496,10 +559,12 @@ fi
 
 # ── podman/docker images (clean-slate only) ───────────────────────────────────
 # install.sh + the providers pull a stack of toolbox/serving images
-# (open-webui, hal0-toolbox-{vulkan,rocm,flm,kokoro}, comfyui). These are large
-# (multi-GB) and survive a code uninstall. The conservative default LEAVES them
-# (a re-install reuses the pulled layers — faster, no re-download). --purge
-# removes them for a true clean slate. Best-effort per image.
+# (open-webui, hal0-toolbox-{vulkan,rocm,flm,kokoro}, comfyui, and — opt-in
+# via HAL0_INSTALL_HONCHO=1 — the locally-built hal0-honcho:main-<sha> image,
+# install.sh ~1822). These are large (multi-GB) and survive a code uninstall.
+# The conservative default LEAVES them (a re-install reuses the pulled
+# layers — faster, no re-download). --purge removes them for a true clean
+# slate. Best-effort per image.
 if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
     step "Container images (--purge)"
     for _rt in podman docker; do
@@ -509,7 +574,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
         while IFS= read -r _img; do
             [[ -n "${_img}" ]] || continue
             case "${_img}" in
-                *open-webui*|*openwebui*|*hal0-toolbox*|ghcr.io/hal0ai/*|*amd-strix-halo-comfyui*|*kyuz0/*comfyui*)
+                *open-webui*|*openwebui*|*hal0-toolbox*|ghcr.io/hal0ai/*|*amd-strix-halo-comfyui*|*kyuz0/*comfyui*|hal0-honcho*)
                     if "${_rt}" rmi -f "${_img}" &>/dev/null; then
                         info "Removed ${_rt} image ${_img}"
                     else
