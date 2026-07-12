@@ -72,6 +72,34 @@ class UpdateJobNotFound(Hal0Error):
     status = 404
 
 
+class UpdateEditableRefused(Hal0Error):
+    """Refuses an update on an editable/dev install (409, not a 500)."""
+
+    code = "system.update_editable_install"
+    status = 409
+
+
+def _refuse_if_editable() -> None:
+    """Preflight: hard-refuse an update on an editable/dev install (audit 4.1).
+
+    The ``Updater`` re-checks this inside apply/prepare/commit, but surfacing
+    it at the route boundary turns a background-job failure into an immediate,
+    actionable 409 instead of a queued job that silently fails later. Detection
+    is metadata-driven (:func:`~hal0.updater.updater._editable_install_path`)
+    so an editable checkout cloned from git is caught too.
+    """
+    from hal0.updater.updater import _editable_install_path, _is_editable_install
+
+    if not _is_editable_install():
+        return
+    path = _editable_install_path() or "the current source tree"
+    raise UpdateEditableRefused(
+        f"hal0 is installed in editable mode from {path}. "
+        "Install from release wheel with `pip install hal0`.",
+        details={"editable_path": path},
+    )
+
+
 def _version_tuple(v: str) -> tuple[int, ...]:
     """Parse a dotted version string into a sortable tuple.
 
@@ -557,6 +585,7 @@ async def apply_update(request: Request) -> dict[str, Any]:
     endpoints (issue #37). Failure paths still raise typed 4xx envelopes
     via the middleware.
     """
+    _refuse_if_editable()
     try:
         body = await request.json()
     except Exception:
@@ -631,6 +660,7 @@ async def prepare_update(request: Request) -> dict[str, Any]:
 
     Body (optional): ``{"version": "0.1.0"}`` — pin a version; omit for latest.
     """
+    _refuse_if_editable()
     try:
         body = await request.json()
     except Exception:

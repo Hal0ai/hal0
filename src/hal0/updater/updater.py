@@ -843,12 +843,55 @@ def _current_symlink() -> Path:
     return _usr_lib_root() / "current"
 
 
+def _editable_install_path() -> str | None:
+    """Return the source-tree path if hal0 is a pip *editable* install, else None.
+
+    Authoritative detection via PEP 610 installer metadata: pip records an
+    editable install's source tree in the package's ``direct_url.json`` with
+    ``dir_info.editable`` true. This is reliable even when the editable
+    checkout is itself a git clone — the ``__file__``-outside-``sys.prefix``
+    heuristic (below) misclassifies that as a git-tracked FHS install and lets
+    ``hal0 update`` silently no-op while reporting success (audit 4.1). The
+    recorded ``file://`` URL is returned as a plain path so a refusal can name
+    exactly where the editable tree lives.
+    """
+    try:
+        from importlib.metadata import distribution
+
+        raw = distribution("hal0").read_text("direct_url.json")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    dir_info = data.get("dir_info")
+    if not isinstance(dir_info, dict) or not dir_info.get("editable"):
+        return None
+    url = str(data.get("url") or "")
+    parsed = urlparse(url)
+    if parsed.scheme == "file":
+        return parsed.path or url
+    return url or None
+
+
 def _is_editable_install() -> bool:
     """True when hal0 runs from an editable/dev checkout, not the FHS venv.
+
+    Metadata (PEP 610 ``direct_url.json``) is authoritative — it catches an
+    editable install cloned from git, which the ``__file__`` heuristic below
+    would wave through as a git-tracked FHS install (audit 4.1). The heuristic
+    is the fallback when installer metadata is absent (e.g. a bare source
+    checkout on ``sys.path``).
 
     Returns ``False`` for git-tracked installs under the FHS layout
     (``/usr/lib/hal0/hal0-<version>/``)— those are hosted by `prepare_git()`.
     """
+    if _editable_install_path() is not None:
+        return True
+
     import hal0
 
     try:
@@ -859,6 +902,31 @@ def _is_editable_install() -> bool:
     # Git-tracked FHS installs: code lives in a versioned dir under
     # /usr/lib/hal0/ — not truly editable. Let prepare_git handle them.
     return not _is_git_install()
+
+
+def _raise_if_editable_install() -> None:
+    """Hard-refuse an update when hal0 runs from an editable/dev install.
+
+    ``apply()`` / ``commit()`` manipulate the FHS layout (the
+    ``/usr/lib/hal0/current`` symlink + the shared venv's site-packages),
+    none of which exist in an editable checkout — so proceeding would extract
+    a tree that is never imported and report a phantom success (audit 4.1).
+    The single chokepoint for that refusal; detection is metadata-driven so an
+    editable install cloned from git is caught too.
+    """
+    if not _is_editable_install():
+        return
+    import hal0
+
+    path = _editable_install_path() or str(Path(hal0.__file__).resolve().parent)
+    raise UpdateError(
+        f"hal0 is installed in editable mode from {path}. "
+        "Install from release wheel with `pip install hal0`.",
+        details={
+            "editable_path": path,
+            "hint": "for a dev checkout run 'git pull && pip install -e .' to update",
+        },
+    )
 
 
 def _is_git_install() -> bool:
@@ -1475,13 +1543,7 @@ class Updater:
         # the FHS layout (/usr/lib/hal0/current symlink + venv site-packages)
         # which does not exist in an editable checkout.  Continuing would
         # silently extract a tarball that is never actually loaded.
-        # Re-run `git pull && pip install -e .` instead.
-        if _is_editable_install():
-            raise UpdateError(
-                "update is not supported on an editable (dev) install — "
-                "run 'git pull && pip install -e .' to update",
-                details={"hint": "editable install detected via hal0.__file__ outside sys.prefix"},
-            )
+        _raise_if_editable_install()
 
         # Step 1: fetch + validate manifest.
         log.info("updater.prepare_start", job_id=self.job_id, channel=self.channel, pinned=version)
@@ -1606,12 +1668,7 @@ class Updater:
         fail-soft after a successful commit. Returns the same breadcrumb dict
         shape as the old single-step apply.
         """
-        if _is_editable_install():
-            raise UpdateError(
-                "update is not supported on an editable (dev) install — "
-                "run 'git pull && pip install -e .' to update",
-                details={"hint": "editable install detected via hal0.__file__ outside sys.prefix"},
-            )
+        _raise_if_editable_install()
         target_version = (version or "").strip()
         if not target_version:
             raise UpdateManifestInvalid(
@@ -1792,6 +1849,10 @@ class Updater:
         that want to show release notes / gate on confirmation between the two
         phases call :meth:`prepare` then :meth:`commit` directly instead.
         """
+        # Single chokepoint: hard-refuse on editable/dev installs before any
+        # download/extract work (prepare/commit re-check, so the two-phase
+        # route path is covered too).
+        _raise_if_editable_install()
         prepared = await self.prepare(version)
         return await self.commit(str(prepared["version"]))
 
