@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -490,6 +491,12 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
 _HEALTH_PROBE_TIMEOUT = 1.0
 
+#: systemd unit laid down only when the operator opts into Honcho at
+#: install time (``HAL0_INSTALL_HONCHO=1`` — see installer/install.sh). Its
+#: absence means the compose stack was never provisioned on this box, not
+#: merely stopped, so the remediation for those two cases must differ.
+_HONCHO_UNIT_PATH = Path("/etc/systemd/system/hal0-honcho.service")
+
 
 class MemoryProviderInvalid(Hal0Error):
     """Unknown ``provider`` value in a ``PUT /api/memory/provider`` body."""
@@ -602,11 +609,26 @@ async def set_memory_provider(request: Request) -> dict[str, Any]:
     if provider == "honcho":
         honcho_url = f"http://127.0.0.1:{cfg.honcho.port}"
         if not await _probe_health(f"{honcho_url}/health"):
+            provisioned = _HONCHO_UNIT_PATH.exists()
+            if provisioned:
+                remediation = (
+                    "start it (hal0 services start honcho) or enable it first "
+                    "(hal0.toml [honcho] enabled = true)"
+                )
+            else:
+                # Honcho is opt-in; a default install never lays down the
+                # unit, so "services start" would just fail with "Unit not
+                # found". Point at the real provisioning path instead.
+                remediation = (
+                    "it has never been provisioned on this box (Honcho is "
+                    "opt-in) — re-run the installer with "
+                    "HAL0_INSTALL_HONCHO=1 to provision the hal0-honcho "
+                    "service, then retry"
+                )
             raise MemoryProviderUnavailable(
-                f"honcho engine is not reachable at {honcho_url} — start it "
-                "(hal0 services start honcho) or enable it first "
-                "(hal0.toml [honcho] enabled = true) before routing an agent to it",
-                details={"url": honcho_url},
+                f"honcho engine is not reachable at {honcho_url} — {remediation} "
+                "before routing an agent to it",
+                details={"url": honcho_url, "provisioned": provisioned},
             )
 
     cfg.memory.agent_providers[agent] = provider
