@@ -397,6 +397,20 @@ def update(
         return
 
     if rollback:
+        # Same confirm gate as the apply path below: interactive TTY without
+        # --yes prompts, headless/piped invocations proceed unattended. A
+        # rollback reverts the whole install tree — at least as consequential
+        # as an apply, so it shouldn't fire on zero confirmation.
+        if (
+            not yes
+            and _interactive()
+            and not typer.confirm(
+                "Roll back to the previous hal0 install? This reverts the entire install tree.",
+                default=False,
+            )
+        ):
+            console.print("[dim]rollback cancelled.[/dim]")
+            return
         try:
             body = api_post("/api/updates/rollback")
         except CliApiError as exc:

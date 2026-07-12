@@ -327,9 +327,11 @@ The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
 | Command | Purpose | Key options |
 |---|---|---|
 | `doctor` | Re-run the installer's preflight battery (systemd, python, container runtime, disk, ports). | `--plain`, `--ports "8080 3001"` |
+| `doctor verify` | Render the post-setup report card (checks + live URLs + doc links) against the live API. The bare `--verify` flag on `hal0 doctor` still works as a deprecated pass-through. | — |
+| `doctor logs` | Print or follow hal0-api's own systemd journal (`GET /api/logs`); `doctor` had no surface for hal0's *own* log before, only `slot logs` (per-slot) and `agent log` (per-agent). | `--unit` (default `hal0-api`), `--follow`/`-f`, `--lines`/`-n`, `--level`, `--since` |
 | `doctor toolbox-pull` | Verify each pinned toolbox image is anonymously pullable from ghcr.io. | `--json`, `--manifest` |
-| `doctor perms` | Audit ownership for the editable-checkout root-clobber regression (group-share drift). | `--fix` (repair in place; needs root) |
-| `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability, env-vs-TOML store divergence, and an unmounted external store path. | `--fix` (repair FLM store ownership/mode; needs root) |
+| `doctor perms` | Audit ownership for the editable-checkout root-clobber regression (group-share drift). | `--fix` (repair in place; needs root + confirmation, `--force`/`-f` skips the prompt) |
+| `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability, env-vs-TOML store divergence, and an unmounted external store path. | `--fix` (repair FLM store ownership/mode; needs root + confirmation, `--force`/`-f` skips the prompt) |
 | `doctor migrations` | Surface a pending v0.1→v0.2 model-layout migration (dry-run of the symlink planner; points at `hal0 migrate model-layout --apply`). | — |
 | `doctor profiles` | Audit the slot↔profile layer: slots referencing a missing profile (fails), and in-use profile images not pulled locally (advisory). | — |
 
@@ -340,15 +342,18 @@ when the manifest has no toolbox images. `doctor models` exits `1` on any
 actionable finding; `doctor migrations` exits `1` when links are pending;
 `doctor profiles` exits `1` only when a slot references a missing profile.
 
-## `hal0 capabilities` — capability-slot repair
+## `hal0 capabilities` — capability-slot list/set + repair
 
 | Command | Purpose | Key options |
 |---|---|---|
-| `capabilities migrate` | Rewrite persisted capability selections that are illegal against the live catalog. | `--dry-run` |
+| `capabilities list` | List capability-slot selections (embed/voice/img/vision) from the live API (`GET /api/capabilities`). | — |
+| `capabilities set <slot> <child>` | Apply a partial capability selection update (`POST /api/capabilities/{slot}/{child}`); reconciles slot lifecycle via the running orchestrator, same path the dashboard uses. | `--model`, `--backend`, `--provider`, `--enabled`/`--disabled` |
+| `capabilities migrate` | Rewrite persisted capability selections that are illegal against the live catalog. | `--apply` (default is dry-run, matching `migrate model-layout`) |
 
 Walks `/etc/hal0/capabilities.toml`: selections whose backend can't serve the
 model are snapped to the model's first legal backend; selections whose model
-left the catalog are cleared. Idempotent.
+left the catalog are cleared. Idempotent. Default is a dry-run preview; pass
+`--apply` to write.
 
 ## `hal0 app` — optional apps
 
@@ -361,7 +366,7 @@ left the catalog are cleared. Idempotent.
 | Command | Purpose | Key options |
 |---|---|---|
 | `agent install <name>` | Install a bundled agent (`hermes` provisions a managed venv in the foreground, including the Telegram/Discord gateway). | `--switch`, `--gateway`/`--no-gateway` |
-| `agent uninstall <name>` | Uninstall a bundled agent. | `--keep-memory` |
+| `agent uninstall <name>` | Uninstall a bundled agent. Deletes the agent's private memory unless `--keep-memory` is passed; prompts for confirmation unless `--force`/`-f`. | `--keep-memory`, `--force`/`-f` |
 | `agent list` | List installed bundled agents. | `--json` |
 | `agent peers` | List discoverable agent identity cards from the `agents` memory dataset. | — |
 | `agent status [name]` | Pretty-print the agent's `provision.json` checkpoint (default `hermes`). | — |

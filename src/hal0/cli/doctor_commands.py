@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import grp
+import json as jsonlib
 import os
 import pwd
 import shutil
@@ -102,7 +103,8 @@ def doctor(
     verify: bool = typer.Option(
         False,
         "--verify",
-        help="Render the post-setup report card (checks + live URLs + doc links) against the live API.",
+        hidden=True,
+        help="Deprecated — use `hal0 doctor verify`.",
     ),
     plain: bool = typer.Option(
         False,
@@ -117,10 +119,11 @@ def doctor(
 ) -> None:
     """Re-run pre-flight checks (systemd, python, docker, disk, ports).
 
-    ``--verify`` instead renders the WS-K report card: a pass/warn/fail summary
-    over the live health seams (API, runners, capability slots, hindsight,
+    ``hal0 doctor verify`` instead renders the WS-K report card: a pass/warn/fail
+    summary over the live health seams (API, runners, capability slots, hindsight,
     OpenWebUI, Hermes) plus the computed URLs + help links. Non-blocking; exits
-    2 only on a critical (no reachable URL / zero healthy runners).
+    2 only on a critical (no reachable URL / zero healthy runners). The bare
+    ``--verify`` flag on this callback still works as a deprecated pass-through.
     """
     # When a sub-command (e.g. ``toolbox-pull``) is invoked, Typer still
     # calls the callback first. Bail out without running preflight so the
@@ -167,6 +170,100 @@ def doctor(
     # Preserve the script's exit code verbatim so chained shells see a
     # non-zero on the first failed check.
     raise typer.Exit(result.returncode)
+
+
+# ── hal0 doctor verify ──────────────────────────────────────────────────────
+
+
+@app.command("verify")
+def doctor_verify_cmd() -> None:
+    """Render the post-setup report card (checks + live URLs + doc links).
+
+    First-class home for what used to be reachable only via the hidden
+    ``hal0 doctor --verify`` flag — every other doctor audit (``perms``,
+    ``models``, ``migrations``, ``profiles``, ``toolbox-pull``) is a
+    discoverable subcommand, so this one is now too. See the module-level
+    docstring for the health seams this composes.
+    """
+    from hal0.cli.doctor_verify import run_verify
+
+    raise typer.Exit(run_verify(console=console))
+
+
+# ── hal0 doctor logs ─────────────────────────────────────────────────────────
+
+
+@app.command("logs")
+def doctor_logs(
+    unit: str = typer.Option(
+        "hal0-api",
+        "--unit",
+        help="systemd unit to tail (default: hal0-api — hal0's own daemon).",
+    ),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Stream logs (SSE tail)."),
+    lines: int = typer.Option(
+        200, "--lines", "-n", min=1, max=5000, help="Trailing line count (ignored with --follow)."
+    ),
+    level: str | None = typer.Option(
+        None, "--level", help="Filter to this journald priority and higher (e.g. 'warning')."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="journalctl --since value (ISO timestamp or '5min ago')."
+    ),
+) -> None:
+    """Print or follow hal0-api's own systemd journal.
+
+    ``hal0 slot logs`` covers per-slot logs and ``hal0 agent log`` covers
+    per-agent provisioning logs, but nothing surfaced hal0-api's *own*
+    log — operators were pushed to ``journalctl -u hal0-api`` by hand,
+    defeating the point of ``doctor`` as the diagnostics entry point.
+    Thin client over ``GET /api/logs`` (and ``/api/logs/stream`` with
+    ``--follow``), the same endpoints the dashboard's log panel uses.
+    """
+    from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    if not follow:
+        params: dict[str, object] = {"unit": unit, "n": lines}
+        if level is not None:
+            params["level"] = level
+        if since is not None:
+            params["since"] = since
+        try:
+            data = api_get("/api/logs", params=params)
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        log_lines = data.get("lines") or [] if isinstance(data, dict) else []
+        if not log_lines:
+            hint = data.get("hint") if isinstance(data, dict) else None
+            console.print(f"[dim]no logs{f' ({hint})' if hint else ''}.[/dim]")
+            return
+        for line in log_lines:
+            console.print(line)
+        return
+
+    # Stream SSE — line-buffered passthrough (mirrors `hal0 slot logs --follow`).
+    stream_params: dict[str, object] = {"unit": unit}
+    if level is not None:
+        stream_params["level"] = level
+    if since is not None:
+        stream_params["since"] = since
+    try:
+        with httpx.stream("GET", url + "/api/logs/stream", params=stream_params, timeout=None) as r:
+            for raw in r.iter_lines():
+                if not raw or not raw.startswith("data:"):
+                    continue
+                payload = raw[5:].strip()
+                try:
+                    console.print(jsonlib.loads(payload))
+                except ValueError:
+                    console.print(payload)
+    except (httpx.HTTPError, KeyboardInterrupt):
+        return
 
 
 # ── hal0 doctor toolbox-pull ──────────────────────────────────────────────────
@@ -586,14 +683,24 @@ def perms(
         "--fix",
         help="Repair editable-checkout group-share drift in place (needs root).",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Skip the confirmation prompt before applying --fix.",
+    ),
 ) -> None:
     """Audit ownership for the root-clobber regression (#843) + the path table.
 
     Covers three surfaces: Hermes runtime state (/var/lib/hal0/.hermes), the
     editable code checkout's group-share, and the canonical path-ownership table
-    (:mod:`hal0.install.perms`, overhaul plan §5). ``--fix`` repairs the
-    group-share in place AND applies the ownership table (both need root); Hermes
-    drift is still reconciled via ``sudo hal0 agent bootstrap hermes --repair``.
+    (:mod:`hal0.install.perms`, overhaul plan §5). The audit tables above print
+    the concrete before/after (path, current owner:group:mode, wanted
+    owner:group:mode) before anything is touched. ``--fix`` then repairs the
+    group-share in place AND applies the ownership table (both need root, and
+    both prompt for confirmation unless ``--force``/``-f`` is also passed);
+    Hermes drift is still reconciled via ``sudo hal0 agent bootstrap hermes
+    --repair``.
     """
 
     def _owner(p: Path) -> str | None:
@@ -659,6 +766,12 @@ def perms(
         elif os.geteuid() != 0:
             console.print("[red]✗[/red]  --fix needs root — re-run `sudo hal0 doctor perms --fix`.")
             raise typer.Exit(1)
+        elif not force and not typer.confirm(
+            f"Apply group-share repair to {root}? (chgrp -R {_SHARED_GROUP}, chmod g+rwX, "
+            "setgid on every dir — see the drift rows above)",
+            default=False,
+        ):
+            console.print("[dim]group-share repair skipped (not confirmed).[/dim]")
         else:
             ok, msg = repair_tree_group_share(root, _SHARED_GROUP)
             if not ok:
@@ -675,15 +788,23 @@ def perms(
                     "re-run `sudo hal0 doctor perms --fix`."
                 )
                 raise typer.Exit(1)
-            try:
-                changed = perms_mod.commit(own_plan)
-            except (OSError, KeyError) as exc:
-                console.print(f"[red]✗[/red]  ownership repair failed: {exc}")
-                raise typer.Exit(1) from exc
-            console.print(
-                f"[green]✓[/green]  ownership table applied ({len(changed)} path(s) reconciled)."
-            )
-            own_drift = False
+            elif not force and not typer.confirm(
+                f"Apply the ownership table to {len(own_plan.drifted)} drifted path(s)? "
+                "(see the 'is X, want Y' rows above)",
+                default=False,
+            ):
+                console.print("[dim]ownership repair skipped (not confirmed).[/dim]")
+            else:
+                try:
+                    changed = perms_mod.commit(own_plan)
+                except (OSError, KeyError) as exc:
+                    console.print(f"[red]✗[/red]  ownership repair failed: {exc}")
+                    raise typer.Exit(1) from exc
+                console.print(
+                    f"[green]✓[/green]  ownership table applied "
+                    f"({len(changed)} path(s) reconciled)."
+                )
+                own_drift = False
 
     hermes_drift = has_ownership_drift(hermes_rows)
     if hermes_drift:
@@ -849,6 +970,12 @@ def doctor_models(
         "--fix",
         help="Repair FLM store ownership/mode drift in place (needs root).",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Skip the confirmation prompt before applying --fix.",
+    ),
 ) -> None:
     """Audit the model pipeline: registry paths, store/roots agreement, FLM dir.
 
@@ -866,7 +993,8 @@ def doctor_models(
         (the classic post-reboot exit-125 before the disk is up)
 
     ``--fix`` repairs FLM store ownership/mode drift in place (chown 1000:hal0,
-    chmod 2775 — needs root). Exits non-zero when anything actionable is found.
+    chmod 2775 — needs root, and prompts for confirmation unless ``--force``/
+    ``-f`` is also passed). Exits non-zero when anything actionable is found.
     """
     from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get
     from hal0.config import paths as cfg_paths
@@ -962,6 +1090,13 @@ def doctor_models(
                     f"[red]✗[/red]  FLM store {flm_dir}: {writ['detail']}\n"
                     "      --fix needs root — re-run `sudo hal0 doctor models --fix`."
                 )
+            elif not force and not typer.confirm(
+                f"Apply chown {_FLM_CONTAINER_UID}:hal0 + chmod 2775 to {flm_dir}? "
+                f"(currently: {writ['detail']})",
+                default=False,
+            ):
+                problems += 1
+                console.print(f"[dim]FLM store repair skipped (not confirmed): {flm_dir}[/dim]")
             else:
                 ok, msg = repair_flm_store(flm_dir)
                 if ok:
