@@ -131,7 +131,10 @@ def test_seed_hal0_brain_targets_brain_slot_with_own_memory(tmp_path: Path) -> N
     brain = P.load_persona("hal0-brain", root=tmp_path)
     assert brain.preferred_model == "hal0/brain"
     assert brain.preferred_upstream == "hal0"
-    assert brain.memory_namespace == "private:hal0-brain"
+    # The steward is a first-class profile agent-id, not just a persona — its
+    # memory rides the profile bank private:hermes__hal0-brain.
+    assert brain.memory_namespace == f"private:{P.BRAIN_PROFILE_AGENT_ID}"
+    assert brain.memory_namespace == "private:hermes__hal0-brain"
     # Its memory bank is its own — distinct from the other seeds.
     others = {P.load_persona(p, root=tmp_path).memory_namespace for p in ("hermes",)}
     assert brain.memory_namespace not in others

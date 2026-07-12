@@ -80,6 +80,94 @@ async def test_enqueue_distinct_targets_not_deduped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unmapped_tool_distinct_args_get_distinct_ids() -> None:
+    """Regression: gated tools with no registered primary-target arg
+    (``profile_delete``, ``stack_*``, ``upstream_*``, …) used to fall
+    back to a ``""`` dedup key, collapsing EVERY distinct call onto one
+    approval_id and silently discarding all but the first call's args.
+
+    Distinct targets must now mint distinct approvals so approving one
+    runs the operator's actual target, not the first-ever call's.
+    """
+    q = ApprovalQueue()
+    a = await q.enqueue(
+        tool="profile_delete",
+        args={"name": "profile-a"},
+        client_id="claude-code",
+        executor=_noop_executor,
+    )
+    b = await q.enqueue(
+        tool="profile_delete",
+        args={"name": "profile-b"},
+        client_id="claude-code",
+        executor=_noop_executor,
+    )
+    assert a != b, "distinct profile_delete targets collapsed onto one approval_id"
+    pending = q.list_pending()
+    assert len(pending) == 2
+    names = sorted(e["args"]["name"] for e in pending)
+    assert names == ["profile-a", "profile-b"]
+    assert all(e["hit_count"] == 1 for e in pending)
+
+
+@pytest.mark.asyncio
+async def test_unmapped_tool_identical_args_still_dedup() -> None:
+    """A genuine retry of an unmapped gated tool (identical args) should
+    still collapse to one row — the hash-of-args fallback keeps
+    retry-dedup working, only distinct args diverge."""
+    q = ApprovalQueue()
+    first = await q.enqueue(
+        tool="stack_delete",
+        args={"slug": "prod"},
+        client_id="claude-code",
+        executor=_noop_executor,
+    )
+    second = await q.enqueue(
+        tool="stack_delete",
+        args={"slug": "prod"},
+        client_id="claude-code",
+        executor=_noop_executor,
+    )
+    assert first == second
+    pending = q.list_pending()
+    assert len(pending) == 1
+    assert pending[0]["hit_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unmapped_tool_approve_runs_correct_target() -> None:
+    """After the collapse fix, approving the second-target entry must run
+    the executor with THAT target's args — not the first call's."""
+    captured: list[dict[str, Any]] = []
+
+    async def _exec(args: dict[str, Any]) -> dict[str, Any]:
+        captured.append(dict(args))
+        return {"deleted": args.get("name")}
+
+    q = ApprovalQueue()
+    await q.enqueue(
+        tool="profile_delete",
+        args={"name": "keep-a"},
+        client_id="claude-code",
+        executor=_exec,
+    )
+    bid = await q.enqueue(
+        tool="profile_delete",
+        args={"name": "delete-b"},
+        client_id="claude-code",
+        executor=_exec,
+    )
+    result = await q.approve(bid)
+    assert result["state"] == "executed"
+    assert result["result"] == {"deleted": "delete-b"}
+    assert captured == [{"name": "delete-b"}]
+    # The other target is untouched and still pending.
+    still = q.list_pending()
+    assert len(still) == 1
+    assert still[0]["args"] == {"name": "keep-a"}
+
+
+@pytest.mark.asyncio
 async def test_approve_runs_executor_and_records_result() -> None:
     captured: dict[str, Any] = {}
 
