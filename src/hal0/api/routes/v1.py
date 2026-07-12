@@ -782,6 +782,20 @@ async def list_models(
     # If restoring: iterate DEFAULT_CHAINS and append a live-resolve model
     # object per resolved virtual name.
 
+    # Optional per-consumer owner filter (#1148). A consumer that only wants
+    # hal0-local slots — e.g. Hermes' model picker, which floods with ~340
+    # openrouter passthroughs otherwise — asks for just the hal0-owned rows
+    # via either the ``X-hal0-Model-Filter: hal0`` request header (how Hermes
+    # is provisioned) or a ``?owned_by=hal0`` query param (curl-debuggable).
+    # This is discovery-surface only; dispatch by explicit id is unaffected,
+    # and the default response (no header, no param) is byte-identical to
+    # before, so pi and third-party SDKs are untouched.
+    owner_filter = request.query_params.get("owned_by") or request.headers.get(
+        "x-hal0-model-filter"
+    )
+    if owner_filter:
+        data = [d for d in data if d.get("owned_by") == owner_filter]
+
     return {"object": "list", "data": data}
 
 
