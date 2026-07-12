@@ -184,6 +184,7 @@ NPU/FLM store directory — and names the exact fix command for each finding.
 |---|---|---|
 | `upstream list` | List configured upstreams (enabled/advertise/auth/filter summary). | `--json` |
 | `upstream show <name>` | Full detail for one upstream. | `--json` |
+| `upstream advertise <name> <on\|off>` | Flip `/v1/models` visibility live (no restart); dispatch unaffected. | — |
 | `upstream create <name>` | Register a remote provider (persists to `upstreams.toml`). | `--catalog`/`-c`, `--url`, `--auth-style`, `--auth-header`, `--auth-env`, `--timeout`, `--api-key`/`-k`, `--advertise-models/--hide-models`, `--enabled/--disabled` |
 | `upstream update <name>` | Partial update: settings, toggles, model filters. | `--url`, `--auth-style`, `--auth-header`, `--auth-env`, `--timeout`, `--advertise-models/--hide-models`, `--enabled/--disabled`, `--model`, `--include`, `--exclude`, `--clear-filters` |
 | `upstream delete <name>` | Remove a remote upstream (credential in `api.env` is retained). | `--force`/`-f` |
