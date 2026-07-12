@@ -1000,10 +1000,12 @@ async def dispatch(
             "approval_id": approval_id,
             "detail": (
                 "queued for operator approval — the call runs only after the "
-                "operator approves it (inline chat card or top-bar bell). The "
-                "chat turn pauses while the operator decides; if you are "
-                "reading this, the wait timed out — tell the operator it is "
-                "still pending."
+                "operator approves it (top-bar bell / approvals inbox). This "
+                "response returns immediately; nothing waits on this transport, "
+                "so the outcome is NOT returned inline here. Tell the operator "
+                "the call is pending and, once they approve, the tool executes "
+                "out-of-band — re-check the result via slot/model/profile reads "
+                "rather than expecting it in this reply."
             ),
         }
 
