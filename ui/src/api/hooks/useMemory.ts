@@ -9,7 +9,7 @@
 //   useAgentMemoryStats — GET /api/agents/{id}/memory/stats (per-agent counts)
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPut } from '../client'
+import { apiGet, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── Memory list ────────────────────────────────────────────────────────────
@@ -123,6 +123,13 @@ export interface MemoryGraphUpdateResponse extends MemoryGraphStatus {
   propagation?: MemoryGraphPropagation
 }
 
+// Per-bank tally returned by POST /api/memory/graph/retry.
+export interface MemoryGraphRetryResponse {
+  queued: number
+  skipped: number
+  banks: Record<string, { queued: number; skipped: number; failed: number }>
+}
+
 const POLL_MS = 15_000
 
 export function useMemoryGraphStatus() {
@@ -152,9 +159,25 @@ export function useUpdateMemoryGraph() {
   })
 }
 
+// Bulk "retry all failed extractions" — requeues every failed op across banks.
+// Invalidates both the graph-status counters and the per-bank operation lists
+// so the health panel + operations queue reflect the requeue immediately.
+export function useRetryFailedExtractions() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<MemoryGraphRetryResponse>(ENDPOINTS.memoryGraphRetry),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['memory', 'graph', 'status'] })
+      // useHindsight keys its operation lists under ['memory', ...]; a broad
+      // invalidate refreshes the bank stats + operations queue too.
+      qc.invalidateQueries({ queryKey: ['memory'] })
+    },
+  })
+}
+
 // 0.4 release gate. /api/status carries `memory_enabled`, gated by
-// HAL0_MEMORY_ENABLED at create_app. The dashboard reads it to show/hide
-// the Agent → Memory nav so the UI and backend can never disagree.
+// [memory].enabled in hal0.toml at create_app. The dashboard reads it to
+// show/hide the Agent → Memory nav so the UI and backend can never disagree.
 //
 // Treat the loading/unknown state as OFF (`=== true`): 0.4 ships memory
 // disabled, so the common case stays hidden with no flicker; a dev build

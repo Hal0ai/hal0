@@ -84,18 +84,15 @@ reverse proxy, or when a service binds loopback-only. See
 
 ## Memory & MCP
 
+The memory subsystem (Hindsight-backed, `/mcp/memory`, `/api/memory/*`) is no
+longer gated by an env var — it's controlled by `[memory].enabled` in
+`hal0.toml`, defaulting to `true`. Toggle it with `hal0 memory enable` /
+`hal0 memory disable` (see [Enable memory](/guides/enable-memory/)).
+
 | Variable                  | What it does                                                       | Default |
 |---------------------------|-------------------------------------------------------------------|---------|
-| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Hindsight-backed, `/mcp/memory`, `/api/memory/*`). | `0` (disabled) if unset |
 | `HAL0_MCP_ALLOWED_HOSTS`  | Comma-separated `Host` headers (or `host:port` / `host:*`) added to the MCP mounts' localhost allowlist. `*` disables the DNS-rebinding check entirely. | unset (localhost only) |
 | `HAL0_MCP_ALLOWED_ORIGINS`| Comma-separated browser origins for MCP transport requests. When unset, `http`/`https` origins are derived from `HAL0_MCP_ALLOWED_HOSTS`. | unset (derived from hosts) |
-
-<Aside type="note">
-The code-level default for `HAL0_MEMORY_ENABLED` is off, but a fresh install's
-`/etc/hal0/api.env` explicitly sets `HAL0_MEMORY_ENABLED=1` — so a new install
-ships with memory **on**. An in-place upgrade never rewrites an existing
-`api.env`, so an install that previously had it unset (or off) stays off.
-</Aside>
 
 ## Models & providers
 

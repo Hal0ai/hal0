@@ -148,7 +148,7 @@ function App() {
   const agentChat = useBoardChatHook ? useBoardChatHook() : undefined;
 
   // 0.4 gate: the Agent route is reduced to the Memory tab, so it only
-  // renders when the memory subsystem is live (HAL0_MEMORY_ENABLED, surfaced
+  // renders when the memory subsystem is live ([memory].enabled, surfaced
   // via /api/status). Read through the window bridge to keep this strict
   // no-ES-imports prototype file within the dash/*.jsx contract — the bridge
   // is imported in main.tsx before main.jsx evaluates, so the ref is stable.

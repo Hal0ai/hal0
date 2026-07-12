@@ -470,7 +470,7 @@ function useNavItems() {
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
   // 0.4 gate: the Agent route is reduced to the Memory tab, so when the
-  // memory subsystem is disabled (HAL0_MEMORY_ENABLED!=1) there is nothing
+  // memory subsystem is disabled ([memory].enabled=false) there is nothing
   // to show — drop the nav item entirely. Driven by /api/status so the UI
   // can never disagree with the backend. main.jsx applies the matching
   // route guard for deep links.

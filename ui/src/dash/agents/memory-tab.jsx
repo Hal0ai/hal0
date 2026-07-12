@@ -186,9 +186,9 @@ function MemoryGraphPanel() {
           </div>
           <div style={{display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, border: "1px solid var(--line)", borderRadius: "var(--rad)", overflow: "hidden", marginBottom: 12}}>
             {[
-              { l: "Builds OK", v: String(builds),  sub: "lifetime" },
-              { l: "Errors",    v: String(errors),  sub: errors ? "see logs" : "—" },
-              { l: "In flight", v: String(inFlight),sub: "pending" },
+              { l: "Built", v: String(builds),  sub: "lifetime" },
+              { l: "Errors", v: String(errors),  sub: errors ? "see logs" : "—" },
+              { l: "Live",  v: String(inFlight),sub: "pending" },
             ].map((s, i) => (
               <div key={i} style={{padding: 14, borderRight: i < 2 ? "1px solid var(--line)" : "none"}}>
                 <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em"}}>{s.l}</div>

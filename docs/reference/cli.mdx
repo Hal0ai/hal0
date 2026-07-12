@@ -241,6 +241,9 @@ and per-slot TOMLs are **not** migrated (v0.1.x → v0.2 is a clean break).
 
 | Command | Purpose | Key options |
 |---|---|---|
+| `memory status` | Show whether the memory subsystem is enabled and live. | `--json` |
+| `memory enable` | Enable the memory subsystem (persists `[memory].enabled=true`). | `--json` |
+| `memory disable` | Disable the memory subsystem (persists `[memory].enabled=false`). | `--json` |
 | `memory graph status` | Show graph-extraction state (enabled, extraction slot, available slots, counters). | `--json` |
 | `memory graph enable` | Turn graph extraction on (optionally repoint the extraction slot). | `--slot <name>`, `--json` |
 | `memory graph disable` | Turn graph extraction off (cancels any in-flight build). | `--json` |
