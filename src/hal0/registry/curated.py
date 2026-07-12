@@ -581,6 +581,43 @@ CURATED_MODELS: list[CuratedModel] = [
         capability="embed",
         backend="llamacpp",
     ),
+    # qwen3-embedding-0-6b-q8-0 is the memory pipeline's default embedding
+    # pick (hal0.memory.honcho_env.DEFAULT_FEATURE_MODELS["embedding"] and
+    # HonchoLLMConfig.embedding_dimensions both default to it/1024) — it
+    # must stay pullable via the curated catalogue or the Honcho/Hindsight
+    # embedding pipeline has no model to pull (#F28, live-reproduced: `hal0
+    # model pull qwen3-embedding-0-6b-q8-0` 422'd with "no hugging face
+    # source" before this entry existed). Qwen's own GGUF quant natively
+    # emits 1024-dim vectors, matching hal0's EMBEDDING_VECTOR_DIMENSIONS
+    # default exactly — no truncation/padding needed.
+    CuratedModel(
+        id="qwen3-embedding-0-6b-q8-0",
+        display_name="Qwen3 Embedding 0.6B (Q8_0)",
+        description=(
+            "Qwen's own 1024-dim embedding model. Default pick for hal0's "
+            "memory pipeline (Hindsight + Honcho) — its native output "
+            "dimension matches hal0's EMBEDDING_VECTOR_DIMENSIONS default."
+        ),
+        family="qwen",
+        size_gb=0.64,
+        vram_gb_min=0.5,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="Qwen/Qwen3-Embedding-0.6B-GGUF",
+        hf_file="Qwen3-Embedding-0.6B-Q8_0.gguf",
+        context_length=32768,
+        recommended_slot="embed",
+        tags=["embed", "light"],
+        notes=(
+            "1024-dim native output — the memory pipeline (Hindsight "
+            "retain + the Honcho deriver) is wired to this id by default; "
+            "changing it means also updating "
+            "[honcho.llm.embedding]/EMBEDDING_VECTOR_DIMENSIONS to match "
+            "the replacement's dimension."
+        ),
+        capability="embed",
+        backend="llamacpp",
+    ),
     CuratedModel(
         id="bge-base-en-v1.5-q4_k_m",
         display_name="BGE Base EN v1.5 (Q4_K_M)",

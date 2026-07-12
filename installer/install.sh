@@ -1856,39 +1856,62 @@ else
         info "setting up Honcho memory engine (podman compose stack) — this can take a few minutes…"
 
         # podman-native (see hal0-honcho.service): `podman compose`
-        # delegates to the docker-compose v2 binary over podman.socket —
-        # no docker engine (whose default AppArmor profile can't even load
-        # inside an unprivileged LXC).
+        # delegates to a compose provider binary over podman.socket — no
+        # docker engine required.
         hc_compose_ok=0
         if podman compose version >/dev/null 2>&1; then
             hc_compose_ok=1
         else
-            # Package NAME differs by distro ecosystem (docker-compose-v2 on
-            # Debian/Ubuntu, podman-compose on Fedora/Arch/openSUSE) — route
-            # through lib/distro.sh's pkg_mgr/distro_family dispatch instead
-            # of a bare apt-get, which was a silent no-op on every non-apt
-            # host (the only unguarded apt-get in this script; every FLM
-            # apt-get elsewhere sits behind a `command -v apt-get` gate).
-            hc_compose_pkg=""
-            case "$(distro_family 2>/dev/null)" in
-                debian) hc_compose_pkg="docker-compose-v2" ;;
-                fedora | suse | arch) hc_compose_pkg="podman-compose" ;;
+            # Prefer podman-compose (pure-Python, no Docker engine, no
+            # AppArmor profile pull) on EVERY distro — honcho's own unit
+            # (hal0-honcho.service) invokes `podman compose`, so podman is
+            # always the runtime here regardless of distro ecosystem.
+            # Live-reproduced on Ubuntu 24.04 (unprivileged LXC, #F26):
+            # this block used to install docker-compose-v2 on every Debian
+            # family host, which drags in Docker's AppArmor integration —
+            # "install profile containers-default apparmor: exit 243" —
+            # and broke `podman run` entirely, taking down the box's
+            # PRIMARY runtime while standing up an *optional* memory
+            # backend. podman-compose carries no such dependency chain.
+            case "$(pkg_mgr 2>/dev/null)" in
+                apt-get) apt-get install -y podman-compose >/dev/null 2>&1 || true ;;
+                dnf) dnf install -y podman-compose >/dev/null 2>&1 || true ;;
+                yum) yum install -y podman-compose >/dev/null 2>&1 || true ;;
+                zypper) zypper install -y podman-compose >/dev/null 2>&1 || true ;;
+                pacman) pacman -S --noconfirm podman-compose >/dev/null 2>&1 || true ;;
             esac
-            if [[ -n "${hc_compose_pkg}" ]]; then
-                warn "podman compose provider missing — attempting to install ${hc_compose_pkg}"
-                case "$(pkg_mgr 2>/dev/null)" in
-                    apt-get) apt-get install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    dnf) dnf install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    yum) yum install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    zypper) zypper install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    pacman) pacman -S --noconfirm "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                esac
-            fi
             if podman compose version >/dev/null 2>&1; then
                 hc_compose_ok=1
-            else
-                hc_compose_hint="$(pkg_install_cmd "${hc_compose_pkg:-docker-compose-v2}" 2>/dev/null \
-                    || echo "install a docker-compose-v2-compatible provider")"
+            elif [[ "$(distro_family 2>/dev/null)" == "debian" ]]; then
+                # podman-compose isn't packaged (older Debian/Ubuntu):
+                # fall back to docker-compose-v2, but harden podman's own
+                # AppArmor posture FIRST via a containers.conf.d drop-in
+                # (survives package upgrades, never touches an
+                # operator-owned containers.conf) so the primary runtime
+                # keeps working even after docker-compose-v2's
+                # containerd.io/docker.io dependency chain lands.
+                warn "podman-compose unavailable — falling back to docker-compose-v2 (hardening podman's apparmor profile first)"
+                mkdir -p /etc/containers/containers.conf.d
+                cat > /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf <<'HC_APPARMOR_EOF'
+# Written by hal0's installer (Honcho standup, #F26): installing
+# docker-compose-v2 as the podman-compose fallback pulls Docker's
+# AppArmor integration, which in an unprivileged LXC can leave podman's
+# own "containers-default" profile unloadable. Pin podman to
+# apparmor_profile=unconfined so it keeps working regardless.
+[containers]
+apparmor_profile = "unconfined"
+HC_APPARMOR_EOF
+                apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
+                if podman compose version >/dev/null 2>&1; then
+                    hc_compose_ok=1
+                fi
+                if ! podman info >/dev/null 2>&1; then
+                    warn "podman appears broken after installing docker-compose-v2 — check 'podman info' (apparmor hardening is at /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf)"
+                fi
+            fi
+            if [[ "${hc_compose_ok}" -ne 1 ]]; then
+                hc_compose_hint="$(pkg_install_cmd podman-compose 2>/dev/null \
+                    || echo "install podman-compose or a docker-compose-v2-compatible provider")"
                 warn "podman compose still unavailable — Honcho will be skipped (${hc_compose_hint} and re-run)"
             fi
         fi
@@ -1956,6 +1979,56 @@ else
                 # the rest of this block reports for a missing prerequisite
                 # (same defensive posture as the openwebui/hindsight blocks).
                 if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
+                    # ── pgvector dim reconciliation (#F27, HIGH) ───────────
+                    # Honcho's pgvector schema initializes at its OWN
+                    # default embedding dimension (1536) on first DB boot —
+                    # it has no idea hal0 already pinned
+                    # EMBEDDING_VECTOR_DIMENSIONS to whatever hal0's actual
+                    # embedding model produces (1024 for qwen3-embedding).
+                    # honcho-api treats that mismatch as fatal
+                    # (StartupValidationError) and crash-loops forever
+                    # rather than reconciling itself — live-reproduced on
+                    # Ubuntu 24.04 LXC. Bring up ONLY database+redis first,
+                    # run honcho's own scripts/configure_embeddings.py
+                    # --yes (inside the honcho image, against the compose
+                    # DB) to align the schema, THEN start the full stack —
+                    # so api/deriver boot against an already-correct schema
+                    # instead of racing it during compose's
+                    # dependency-ordered startup. Verified manually: this
+                    # is the exact fix that gets honcho-api healthy.
+                    hc_embed_dim="$(sed -n 's/^EMBEDDING_VECTOR_DIMENSIONS=//p' /etc/hal0/honcho.env 2>/dev/null | tail -1)"
+                    hc_embed_dim="${hc_embed_dim:-1024}"
+                    hc_db_uri="postgresql+psycopg://postgres:postgres@database:5432/postgres"
+                    info "reconciling Honcho pgvector schema to ${hc_embed_dim} dims…"
+                    if podman compose --project-name hal0-honcho -f "${HC_DIR}/docker-compose.yml" \
+                        up -d --no-build database redis >/dev/null 2>&1; then
+                        hc_db_up=0
+                        for _ in $(seq 1 20); do
+                            if podman run --rm --network hal0-honcho_default pgvector/pgvector:pg15 \
+                                pg_isready -h database -U postgres >/dev/null 2>&1; then
+                                hc_db_up=1
+                                break
+                            fi
+                            sleep 3
+                        done
+                        if [[ "${hc_db_up}" -eq 1 ]]; then
+                            if podman run --rm --network hal0-honcho_default \
+                                -e DB_CONNECTION_URI="${hc_db_uri}" \
+                                -e EMBEDDING_VECTOR_DIMENSIONS="${hc_embed_dim}" \
+                                --entrypoint /app/.venv/bin/python \
+                                "${HC_IMAGE_TAG}" scripts/configure_embeddings.py --yes >/dev/null 2>&1; then
+                                info "Honcho pgvector schema reconciled to ${hc_embed_dim} dims"
+                            else
+                                warn "configure_embeddings.py failed — honcho-api may crash-loop on a dimension mismatch"
+                                warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} -e EMBEDDING_VECTOR_DIMENSIONS=${hc_embed_dim} --entrypoint /app/.venv/bin/python ${HC_IMAGE_TAG} scripts/configure_embeddings.py --yes"
+                            fi
+                        else
+                            warn "Honcho database did not become reachable in time — skipping pgvector dim reconciliation (honcho-api may crash-loop)"
+                        fi
+                    else
+                        warn "failed to start Honcho database+redis ahead of schema reconciliation — honcho-api may crash-loop"
+                    fi
+
                     systemctl enable --now hal0-honcho
 
                     # Persist [honcho].enabled=true so hal0's own config
