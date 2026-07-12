@@ -11,7 +11,10 @@
 #   sudo bash uninstall.sh --keep-data # legacy alias for the conservative default
 #   sudo bash uninstall.sh --force     # skip the --purge DELETE confirmation
 #        bash uninstall.sh --dev       # remove dev-mode tree under $PWD/.hal0ai
-#   HAL0_FORCE=1 sudo bash uninstall.sh # equivalent to --force
+#   HAL0_FORCE=1 sudo -E bash uninstall.sh # equivalent to --force
+#        (the -E is required: plain `sudo` resets the environment on stock
+#        distros — see the "Env overrides" note below — so a bare `sudo`
+#        silently drops HAL0_FORCE/HAL0_PREFIX/HAL0_PATH_LINK)
 #
 # What the CONSERVATIVE default removes (system mode): the hal0-api /
 # hal0-openwebui / hal0-slot@ / hal0-agent@ / hermes-gateway /
@@ -39,11 +42,22 @@
 # docker themselves are left installed.
 #
 # Env overrides:
+#   HAL0_FORCE          1 == --force (skip the --purge DELETE confirmation)
 #   HAL0_PREFIX        installation root (default /opt/hal0; --dev defaults
 #                      to $PWD/.hal0ai). When set, --dev path layout is used
 #                      so the uninstall mirrors the matching install.sh run.
 #   HAL0_PATH_LINK     PATH symlink to remove (default /usr/local/bin/hal0;
 #                      ignored in --dev mode)
+#
+# IMPORTANT: these are read from the environment BEFORE this script re-execs
+# itself under sudo (see the root check below). Stock distro sudoers use
+# `Defaults env_reset`, so a plain `HAL0_FORCE=1 sudo bash uninstall.sh`
+# loses HAL0_FORCE/HAL0_PREFIX/HAL0_PATH_LINK the moment sudo starts the
+# child shell — the non-root invocation reads them fine, but the re-exec'd
+# root process would see unset vars again unless we forward them explicitly
+# (mirrors install.sh's `exec sudo -E VAR=... bash "$0" "$@"` at
+# install.sh:242). Either pass `sudo -E` yourself, or just set the vars —
+# this script forwards them across the re-exec either way.
 
 # NOTE on shell options: we deliberately do NOT use `set -e` (errexit) here.
 # An uninstaller's whole job is to tear down a possibly-partial install where
@@ -164,7 +178,17 @@ fi
 # ── Root check (system mode only) ─────────────────────────────────────────────
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo &>/dev/null; then
-        exec sudo bash "$0" "$@"
+        # -E (mirrors install.sh:242) PLUS explicit VAR=value forwarding: stock
+        # sudoers `Defaults env_reset` strips HAL0_FORCE/HAL0_PREFIX/
+        # HAL0_PATH_LINK from the re-exec'd root process even with -E if the
+        # admin's sudoers doesn't env_keep them, so forward the values we
+        # already read in THIS (non-root) shell explicitly rather than relying
+        # on -E alone. Without this, `HAL0_FORCE=1 sudo bash uninstall.sh`
+        # silently loses HAL0_FORCE (--purge then hits the interactive DELETE
+        # prompt) and `HAL0_PREFIX=/custom bash uninstall.sh` re-execs to root
+        # targeting the default /opt/hal0 instead of the custom prefix.
+        exec sudo -E HAL0_FORCE="${HAL0_FORCE:-0}" HAL0_PREFIX="${HAL0_PREFIX:-}" \
+            HAL0_PATH_LINK="${HAL0_PATH_LINK:-}" bash "$0" "$@"
     else
         die "Must run as root or have sudo available."
     fi
