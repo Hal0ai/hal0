@@ -648,25 +648,42 @@ UI_DIST="${UI_DIR}/dist"
 if [[ -f "${UI_DIST}/index.html" ]]; then
     info "ui/dist already built — left alone"
 elif command -v npm >/dev/null 2>&1; then
-    # Two phases — install can dominate first-boot time, build is steady.
-    # Wrap each so the user sees what npm is doing instead of staring at
-    # a blank line for several minutes.
-    #
-    # Non-fatal: a registry flake, an OOM'd `vite build` on a small LXC, or
-    # a peer-dep error here used to trip the ERR trap and abort the WHOLE
-    # install — after the venv, hal0 wheel, config, and (partially) systemd
-    # units were already written — even though the API itself doesn't need
-    # the built UI (`_mount_dashboard` degrades to "no dashboard" when dist
-    # is absent). Degrade to the same soft warning as the npm-absent
-    # branch below instead.
-    if ui_spinner_run "Installing dashboard npm packages" \
-            bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund" \
-        && ui_spinner_run "Building dashboard (npm run build)" \
-            bash -c "cd '${UI_DIR}' && npm run build"; then
-        info "wrote ${UI_DIST}"
+    # ui/package.json pins vite ^6.0.3 + @tailwindcss/vite ^4.2.2, both of
+    # which need a modern Node; `command -v npm` alone doesn't catch a Node
+    # older than that (Debian 11 / older-Ubuntu apt nodejs, a stale nvm
+    # default) — it fails deep inside esbuild/oxide with a cryptic version
+    # error instead of a clear message. Gate on the major version and take
+    # the same soft-skip path as the npm-absent branch below rather than
+    # attempting a build that's certain to fail.
+    _ui_node_ver="" _ui_node_major=0
+    if command -v node >/dev/null 2>&1; then
+        _ui_node_ver="$(node -v 2>/dev/null || true)"
+        [[ "${_ui_node_ver}" =~ ^v([0-9]+) ]] && _ui_node_major="${BASH_REMATCH[1]}"
+    fi
+    if (( _ui_node_major < 20 )); then
+        warn "node ${_ui_node_ver:-not found} is too old to build the dashboard (need Node >=20 LTS) — skipping"
+        warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
     else
-        warn "dashboard build failed — the API still serves; the UI at :${HAL0_PORT}/ will 404 until you build it"
-        warn "  scroll up for the real npm error; retry later: cd ${UI_DIR} && npm install && npm run build"
+        # Two phases — install can dominate first-boot time, build is
+        # steady. Wrap each so the user sees what npm is doing instead of
+        # staring at a blank line for several minutes.
+        #
+        # Non-fatal: a registry flake, an OOM'd `vite build` on a small
+        # LXC, or a peer-dep error here used to trip the ERR trap and abort
+        # the WHOLE install — after the venv, hal0 wheel, config, and
+        # (partially) systemd units were already written — even though the
+        # API itself doesn't need the built UI (`_mount_dashboard`
+        # degrades to "no dashboard" when dist is absent). Degrade to the
+        # same soft warning as the npm-absent branch below instead.
+        if ui_spinner_run "Installing dashboard npm packages" \
+                bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund" \
+            && ui_spinner_run "Building dashboard (npm run build)" \
+                bash -c "cd '${UI_DIR}' && npm run build"; then
+            info "wrote ${UI_DIST}"
+        else
+            warn "dashboard build failed — the API still serves; the UI at :${HAL0_PORT}/ will 404 until you build it"
+            warn "  scroll up for the real npm error; retry later: cd ${UI_DIR} && npm install && npm run build"
+        fi
     fi
 else
     warn "npm not found — dashboard at :${HAL0_PORT}/ will return 404 until you build the UI"
