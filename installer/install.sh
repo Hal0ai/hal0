@@ -1893,9 +1893,10 @@ else
                     warn "hal0 CLI not available yet — skipping honcho.env render (rerun 'hal0 memory honcho render-env' later)"
                 fi
 
+                HC_IMAGE_TAG="hal0-honcho:main-73453f8"
                 info "building Honcho image (podman build — this is slow on first run)…"
-                if ! podman image exists "hal0-honcho:main-73453f8" \
-                    && ! (cd "${HC_DIR}/src" && podman build -t "hal0-honcho:main-73453f8" .); then
+                if ! podman image exists "${HC_IMAGE_TAG}" \
+                    && ! (cd "${HC_DIR}/src" && podman build -t "${HC_IMAGE_TAG}" .); then
                     warn "Honcho image build failed; check the build log above"
                 fi
 
@@ -1903,17 +1904,30 @@ else
                 install -m644 "${HONCHO_SYNC_UNIT_SRC}" /etc/systemd/system/hal0-honcho-sync.service
                 install -m644 "${HONCHO_SYNC_TIMER_SRC}" /etc/systemd/system/hal0-honcho-sync.timer
                 systemctl daemon-reload
-                systemctl enable --now hal0-honcho
 
                 hc_up=0
-                for _ in $(seq 1 40); do
-                    if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
-                    sleep 3
-                done
-                if [[ "${hc_up}" -eq 1 ]]; then
-                    info "Honcho is running (memory engine on 127.0.0.1:8000)"
+                # Only enable the unit when the image actually exists — its
+                # ExecStart is `podman compose ... up --no-build`, so on a
+                # missing image (build failed above) it would just
+                # restart-loop until systemd's StartLimitBurst trips and
+                # then sit `failed`, instead of the honest "not installed"
+                # the rest of this block reports for a missing prerequisite
+                # (same defensive posture as the openwebui/hindsight blocks).
+                if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
+                    systemctl enable --now hal0-honcho
+
+                    for _ in $(seq 1 40); do
+                        if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
+                        sleep 3
+                    done
+                    if [[ "${hc_up}" -eq 1 ]]; then
+                        info "Honcho is running (memory engine on 127.0.0.1:8000)"
+                    else
+                        warn "Honcho not healthy yet; check 'journalctl -u hal0-honcho -n 40' or 'docker compose --project-name hal0-honcho -f ${HC_DIR}/docker-compose.yml ps'"
+                    fi
                 else
-                    warn "Honcho not healthy yet; check 'journalctl -u hal0-honcho -n 40' or 'docker compose --project-name hal0-honcho -f ${HC_DIR}/docker-compose.yml ps'"
+                    warn "skipping 'systemctl enable --now hal0-honcho' — no local ${HC_IMAGE_TAG} image (build failed above); the unit would just restart-loop"
+                    warn "  fix the build (see the log above) then: systemctl enable --now hal0-honcho"
                 fi
             fi
         fi
