@@ -57,7 +57,7 @@ app.add_typer(personas_app, name="personas")
 
 @app.command("install")
 def agent_install(
-    name: str = typer.Argument(..., help="Bundled agent name (pi-coder | hermes)."),
+    name: str = typer.Argument(..., help="Bundled agent name (pi-coder | opencode | hermes)."),
     switch: bool = typer.Option(
         False,
         "--switch",
