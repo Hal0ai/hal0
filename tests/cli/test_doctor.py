@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json as jsonlib
 import os
+import socket
 import stat
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +28,7 @@ import httpx
 import pytest
 import typer
 
+import hal0
 from hal0.cli.doctor_commands import _locate_preflight, doctor, toolbox_pull
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="preflight.sh is Linux-only")
@@ -170,6 +173,176 @@ def test_locate_preflight_missing_override_returns_none(
     """A bogus HAL0_PREFLIGHT_SH path resolves to None, not a falsy default."""
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", "/no/such/file.sh")
     assert _locate_preflight() is None
+
+
+def _patch_non_editable_hal0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``hal0.__file__`` at a site-packages-shaped path with no repo
+    neighbours, simulating install.sh's default non-editable wheel install
+    (``pip install <wheel>`` into a shared venv, not ``pip install -e``).
+    """
+    fake_pkg = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "hal0" / "__init__.py"
+    fake_pkg.parent.mkdir(parents=True)
+    fake_pkg.write_text("")
+    monkeypatch.setattr(hal0, "__file__", str(fake_pkg))
+
+
+def test_locate_preflight_fhs_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HAL0_FHS_ROOT resolves ``<root>/current/installer/lib/preflight.sh``.
+
+    Reproduces the reported bug: a non-editable FHS install (real wheel in
+    the shared venv) where the editable ``parents[2]`` probe can't find a
+    repo checkout, so the locator must fall back to the FHS release tree.
+    """
+    monkeypatch.delenv("HAL0_PREFLIGHT_SH", raising=False)
+    monkeypatch.delenv("HAL0_PREFIX", raising=False)
+    _patch_non_editable_hal0(tmp_path, monkeypatch)
+
+    fhs_root = tmp_path / "fhs"
+    script = fhs_root / "current" / "installer" / "lib" / "preflight.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("HAL0_FHS_ROOT", str(fhs_root))
+
+    assert _locate_preflight() == script
+
+
+def test_locate_preflight_prefix_env_no_current_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HAL0_PREFIX resolves ``<prefix>/installer/lib/preflight.sh`` directly.
+
+    Dev-prefix installs (``installer/install.sh --dev``) have no ``current``
+    symlink, unlike the prod FHS layout.
+    """
+    monkeypatch.delenv("HAL0_PREFLIGHT_SH", raising=False)
+    monkeypatch.delenv("HAL0_FHS_ROOT", raising=False)
+    _patch_non_editable_hal0(tmp_path, monkeypatch)
+
+    prefix = tmp_path / "prefix"
+    script = prefix / "installer" / "lib" / "preflight.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("HAL0_PREFIX", str(prefix))
+
+    assert _locate_preflight() == script
+
+
+def test_locate_preflight_default_fhs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no override env vars set, falls back to the compiled-in default
+    (``/usr/lib/hal0/current`` via :func:`hal0.config.paths.usr_lib`, which
+    is itself ``HAL0_HOME``-aware — exercised here via ``HAL0_HOME`` so the
+    test doesn't need real root-owned ``/usr/lib/hal0``).
+    """
+    monkeypatch.delenv("HAL0_PREFLIGHT_SH", raising=False)
+    monkeypatch.delenv("HAL0_FHS_ROOT", raising=False)
+    monkeypatch.delenv("HAL0_PREFIX", raising=False)
+    _patch_non_editable_hal0(tmp_path, monkeypatch)
+
+    home = tmp_path / "home"
+    script = home / "usr-lib" / "hal0" / "current" / "installer" / "lib" / "preflight.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("HAL0_HOME", str(home))
+
+    assert _locate_preflight() == script
+
+
+def test_locate_preflight_env_override_wins_over_fhs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HAL0_PREFLIGHT_SH still wins even when an FHS candidate also resolves."""
+    custom = tmp_path / "custom.sh"
+    custom.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(custom))
+
+    fhs_root = tmp_path / "fhs"
+    other = fhs_root / "current" / "installer" / "lib" / "preflight.sh"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("HAL0_FHS_ROOT", str(fhs_root))
+
+    assert _locate_preflight() == custom
+
+
+def test_locate_preflight_editable_still_wins_over_fhs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editable-checkout probe is tried before the FHS fallbacks.
+
+    Regression guard: this test suite runs from a real repo checkout, so
+    ``hal0.__file__`` genuinely resolves to it — even with FHS env vars set
+    (pointing at a script that doesn't exist), the editable probe must still
+    win rather than the locator returning None.
+    """
+    monkeypatch.delenv("HAL0_PREFLIGHT_SH", raising=False)
+    monkeypatch.setenv("HAL0_FHS_ROOT", str(tmp_path / "no-such-fhs-root"))
+    monkeypatch.setenv("HAL0_PREFIX", str(tmp_path / "no-such-prefix"))
+
+    found = _locate_preflight()
+    assert found is not None
+    assert found.name == "preflight.sh"
+    assert "installer" in found.parts
+
+
+def test_doctor_sets_ports_soft_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """`hal0 doctor` doesn't fail solely because hal0's own ports are bound.
+
+    The stub mirrors the contract ``preflight_ports`` in
+    ``installer/lib/preflight.sh`` implements: a bound port is a hard
+    failure by default, but ``HAL0_DOCTOR_PORTS_SOFT=1`` (which the ``doctor``
+    command sets unconditionally — it's the post-install self-check, not
+    the pre-install gate) downgrades it to a warning.
+    """
+    stub = _make_stub(
+        tmp_path,
+        (
+            'if [[ "${HAL0_DOCTOR_PORTS_SOFT:-0}" == "1" ]]; then\n'
+            '  printf "port 8080: already in use (expected — hal0 is running)\\n"\n'
+            "  exit 0\n"
+            "else\n"
+            '  printf "port 8080: already in use\\n"\n'
+            "  exit 1\n"
+            "fi\n"
+        ),
+    )
+    monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(stub))
+
+    with pytest.raises(typer.Exit) as exc:
+        doctor(ctx=_fake_ctx(), verify=False, plain=False, ports=None)
+
+    assert _exit_code(exc) == 0
+    captured = capfd.readouterr()
+    assert "expected — hal0 is running" in captured.out
+
+
+def test_preflight_ports_soft_mode_downgrades_to_warning() -> None:
+    """Direct contract test against the real script (not a stub).
+
+    Binds a real listening TCP socket so ``preflight_ports`` observes a
+    genuine ``ss -ltn`` hit, then asserts: hard mode (install.sh's
+    pre-install gate, the default) still fails on a real collision, while
+    ``HAL0_DOCTOR_PORTS_SOFT=1`` (set by `hal0 doctor`) does not.
+    """
+    preflight_sh = Path(__file__).resolve().parents[2] / "installer" / "lib" / "preflight.sh"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        script = f"source {preflight_sh!s}\npreflight_ports {port}\n"
+
+        hard = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        assert hard.returncode != 0, hard.stdout + hard.stderr
+
+        soft_env = {**os.environ, "HAL0_DOCTOR_PORTS_SOFT": "1"}
+        soft = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=soft_env)
+        assert soft.returncode == 0, soft.stdout + soft.stderr
+    finally:
+        sock.close()
 
 
 # ── hal0 doctor toolbox-pull ──────────────────────────────────────────────────

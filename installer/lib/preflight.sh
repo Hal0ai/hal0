@@ -38,6 +38,8 @@
 #                                silently running CPU-only.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
+#                                (soft — informational only — when
+#                                HAL0_DOCTOR_PORTS_SOFT=1)
 #   preflight_bootstrap_prereqs — Linux host + curl/tar/sha256sum on PATH,
 #                                mirroring bootstrap.sh's own preflight() so
 #                                the direct `sudo bash install.sh` path
@@ -53,6 +55,15 @@
 #                        when running `hal0 doctor` on a fresh container)
 #   HAL0_DOCTOR_PORTS  — space-separated port list for preflight_ports
 #                        (default "8080 3001")
+#   HAL0_DOCTOR_PORTS_SOFT — when "1", preflight_ports treats "already in
+#                        use" as informational (warn, doesn't flip the
+#                        aggregate rc) instead of a hard failure. `hal0
+#                        doctor` sets this: post-install, 8080/3001 being
+#                        bound almost always means hal0's OWN hal0-api /
+#                        hal0-openwebui units are up and healthy, not a
+#                        collision. install.sh's pre-install gate never
+#                        sets it, so a real collision before install still
+#                        hard-fails.
 #   HAL0_CONTAINER_REQUIRED — when "1", preflight_container_runtime
 #                        auto-installs podman (via the detected package
 #                        manager) and hard-fails (returns non-zero) when it
@@ -667,8 +678,12 @@ preflight_ports() {
     local rc=0 port
     for port in "${ports[@]}"; do
         if _preflight_port_in_use "${port}"; then
-            err "port ${port}: already in use (find with 'ss -ltnp \"sport = :${port}\"')"
-            rc=1
+            if [[ "${HAL0_DOCTOR_PORTS_SOFT:-0}" == "1" ]]; then
+                warn "port ${port}: already in use (expected if hal0's own services are running; find the owner with 'ss -ltnp \"sport = :${port}\"')"
+            else
+                err "port ${port}: already in use (find with 'ss -ltnp \"sport = :${port}\"')"
+                rc=1
+            fi
         else
             info "port ${port}: free"
         fi
