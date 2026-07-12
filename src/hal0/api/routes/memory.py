@@ -109,7 +109,7 @@ def _agent_id(request: Request) -> str:
         prefix through the header. The ``private`` toggle is the
         only path to the namespace.
       - Values must match ``^[a-zA-Z0-9_\\-]{1,64}$`` — agent ids
-        flow into the Cognee dataset name + the audit log's
+        flow into the memory dataset name + the audit log's
         ``source`` field. Path-traversal candidates (``../etc``),
         control chars, and over-long values are all rejected here.
     """
@@ -873,7 +873,7 @@ async def run_honcho_sync_now() -> dict[str, bool | str | None]:
 
 # ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────
 #
-# Plain-HTTP veneer over CogneeWrapper for callers that don't speak the
+# Plain-HTTP veneer over the memory provider for callers that don't speak the
 # MCP protocol (Hermes bootstrap CLI, dashboard Agents > Peers tab,
 # in-process scripts). The MCP transport at /mcp/memory/mcp stays
 # available for proper MCP clients; these routes are a parallel path
@@ -907,7 +907,7 @@ async def memory_add(request: Request) -> dict[str, Any]:
     treated as an attempt to impersonate, matching the MCP rule. Use
     the ``X-hal0-Agent`` header to claim identity.
 
-    Returns ``{id, timestamp}`` from :meth:`CogneeWrapper.add`.
+    Returns ``{id, timestamp}`` from :meth:`MemoryProvider.add`.
     """
     body = await _read_json_body(request)
     text = body.get("text")
@@ -1110,7 +1110,7 @@ async def memory_delete(request: Request) -> dict[str, int]:
     sweep). Identity headers otherwise are not consulted: id-scoped
     delete bypasses the namespace surface entirely (the wrapper's audit
     log still stamps the call with the agent identity for forensics —
-    see :meth:`CogneeWrapper._audit`).
+    see the provider's audit hook).
     """
     body = await _read_json_body(request)
     ids = body.get("ids")

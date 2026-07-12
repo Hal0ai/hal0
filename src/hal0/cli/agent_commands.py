@@ -463,7 +463,7 @@ def agent_uninstall(
         False,
         "--keep-memory",
         help=(
-            "Preserve the agent's private:<agent_id> Cognee namespace + "
+            "Preserve the agent's private:<agent_id> memory namespace + "
             "its identity card. Default: full teardown including memory."
         ),
     ),
@@ -848,7 +848,7 @@ def agent_peers() -> None:
     """List discoverable agent identity cards.
 
     Thin wrapper over ``memory_search`` against the dedicated
-    ``agents`` Cognee dataset. Sibling of ``hal0 agent list`` (which
+    ``agents`` memory dataset. Sibling of ``hal0 agent list`` (which
     shows installed bundled agents on this host); ``peers`` shows
     every card published into the federated registry.
     """

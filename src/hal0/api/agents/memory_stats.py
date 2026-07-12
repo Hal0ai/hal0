@@ -203,7 +203,7 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
         if isinstance(first, dict):
             ts = first.get("timestamp")
             if isinstance(ts, (int, float)):
-                # Cognee's timestamps are seconds-since-epoch; convert
+                # the engine's timestamps are seconds-since-epoch; convert
                 # to ISO so the dashboard renders a stable string.
                 from datetime import UTC, datetime
 

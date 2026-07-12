@@ -1,11 +1,11 @@
-"""hal0 memory MCP server — Cognee-backed long-term memory tools.
+"""hal0 memory MCP server — Hindsight-backed long-term memory tools.
 
 By design, memory is a first-class MCP surface so bundled and
 external agents share one persistence layer for "what the user
-remembers about themselves and their hal0". The wrapper around Cognee
-itself lives in :mod:`hal0.memory.cognee_wrapper` (Memory-engine team
-owns that module); this module exposes the four MCP tools and the
-schema validation that bridges agent calls to the wrapper.
+remembers about themselves and their hal0". The active engine is
+resolved through :class:`hal0.memory.MemoryProvider` (Hindsight, with a
+PgVector boot-degrade fallback); this module exposes the four MCP tools
+and the schema validation that bridges agent calls to the provider.
 
 Tool catalog
 ------------
@@ -171,7 +171,7 @@ def _iso_now() -> str:
 # ── Tool implementations ─────────────────────────────────────────────────────
 #
 # Each helper returns the JSON payload an MCP client should see. They
-# share one CogneeWrapper instance held by the caller — we pass it in
+# share one MemoryProvider instance held by the caller — we pass it in
 # rather than importing globally so tests can substitute a mock.
 
 
@@ -248,9 +248,9 @@ async def _memory_search(
     """memory_search(query, limit=10, dataset="shared"|list, tags=[],
                      before=null, after=null) → {results}.
 
-    CogneeWrapper contract::
+    MemoryProvider contract::
 
-        await wrapper.search(query, limit, dataset, tags, before, after)
+        await provider.search(query, limit, dataset, tags, before, after)
             -> list[ItemDict]
 
     ``dataset`` MAY be a list — a private-mode client sees both
@@ -421,7 +421,7 @@ def make_dispatcher(
 
     The admin server passes this into :func:`hal0.mcp.admin.dispatch`
     via ``memory_dispatcher=`` so memory tool calls bypass the HTTP
-    round-trip and hit Cognee directly in-process. Validation errors
+    round-trip and hit the memory engine directly in-process. Validation errors
     surface as the same error envelope shape the REST routes use.
 
     ``client_id_resolver`` is a 0-arg callable that returns the

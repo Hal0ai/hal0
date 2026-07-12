@@ -12,7 +12,7 @@ Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
 | Server | URL | Transport | Description |
 |--------|-----|-----------|-------------|
 | hal0-admin | `http://127.0.0.1:8080/mcp/admin/mcp` | `http` (POST-only) | Slot/model management, system admin, hardware probes |
-| hal0-memory | `http://127.0.0.1:8080/mcp/memory/mcp` | `http` (POST-only) | Cognee vector/graph memory, agent identity cards |
+| hal0-memory | `http://127.0.0.1:8080/mcp/memory/mcp` | `http` (POST-only) | Hindsight vector/graph memory, agent identity cards |
 
 **Important:** hal0 MCP servers only support plain HTTP POST transport. Do NOT use `streamable-http` or SSE — these will fail with HTTP 406 or 405.
 

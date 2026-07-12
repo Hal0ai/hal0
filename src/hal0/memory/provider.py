@@ -1,13 +1,13 @@
 """The explicit MemoryProvider contract (brain-redesign P0).
 
-Promotes the implicit five-method ``CogneeWrapper`` surface into an ABC so
-hal0 can swap engines (Cognee → Hindsight, fallback Mem0/PgVector) without
-touching a single call site. The ABC is the anti-lock-in seam (spec §1).
+Promotes the implicit five-method memory surface into an ABC so hal0 can
+swap engines (Hindsight, with Mem0/PgVector fallbacks) without touching a
+single call site. The ABC is the anti-lock-in seam (spec §1).
 
 The *core five* (``add/search/list_items/delete`` + the three runtime
 toggles ``graph_status/set_graph_enabled/set_rerank_enabled``) are abstract:
 every engine must implement them, byte-compatible in **signature + return
-shape** with ``CogneeWrapper`` so the REST shims + MCP dispatcher need no
+shape** with ``MemoryProvider`` so the REST shims + MCP dispatcher need no
 changes. The *optional* methods (``recall/reflect/consolidate/
 register_compiled``) ship concrete safe defaults so an engine without
 consolidation still satisfies the contract.
@@ -22,7 +22,7 @@ from typing import Any
 
 
 class Mode(enum.StrEnum):
-    """Search mode — mirrors CogneeWrapper's accepted ``mode`` values."""
+    """Search mode — mirrors the ``MemoryProvider`` accepted ``mode`` values."""
 
     VECTOR = "vector"
     GRAPH = "graph"
@@ -59,15 +59,15 @@ class MemoryItem:
         }
 
 
-# Back-compat alias: ``MemoryRecord`` was the original (cognee-era) name for this
-# wire shape. Kept as an alias so existing importers keep working after the cognee
-# wrapper was removed (ADR-0023).
+# Back-compat alias: ``MemoryRecord`` was the original name for this wire
+# shape. Kept as an alias so existing importers keep working after the legacy
+# memory wrapper was removed (ADR-0023).
 MemoryRecord = MemoryItem
 
 
 @dataclass
 class AddResult:
-    """Return shape of ``add`` — matches ``CogneeWrapper.add``."""
+    """Return shape of ``add`` — matches ``MemoryProvider.add``."""
 
     id: str
     timestamp: str
@@ -78,7 +78,7 @@ class AddResult:
 
 @dataclass
 class ListPage:
-    """Return shape of ``list_items`` — matches ``CogneeWrapper.list_items``."""
+    """Return shape of ``list_items`` — matches ``MemoryProvider.list_items``."""
 
     items: list[dict[str, Any]]
     next_cursor: str | None = None
@@ -89,7 +89,7 @@ class ListPage:
 
 @dataclass
 class DeleteResult:
-    """Return shape of ``delete`` — matches ``CogneeWrapper.delete``."""
+    """Return shape of ``delete`` — matches ``MemoryProvider.delete``."""
 
     deleted: int
 

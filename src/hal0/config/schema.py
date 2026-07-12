@@ -2608,9 +2608,12 @@ class MemoryConfig(BaseModel):
     engine: str = Field(
         default="hindsight",
         description=(
-            "Active memory engine. One of 'cognee' | 'hindsight' | 'mem0' | "
-            "'pgvector'. Default 'hindsight' (P2 cutover). Set to 'cognee' to "
-            "revert to the untouched Cognee store for one release."
+            "Active memory engine. 'hindsight' (default) is the platform "
+            "engine; 'mem0' and 'pgvector' are alternates. 'cognee' is "
+            "DEPRECATED — the legacy Cognee store has been dark since v0.4 and "
+            "its wrapper was removed; the value is still accepted for "
+            "back-compat but resolves to 'hindsight' at runtime. Use "
+            "'hindsight'."
         ),
     )
     agent_providers: dict[str, str] = Field(

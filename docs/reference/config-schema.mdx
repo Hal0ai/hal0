@@ -116,7 +116,7 @@ NPU weights off the root filesystem too.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `engine` | str | `"hindsight"` | Active memory engine: `cognee` \| `hindsight` \| `mem0` \| `pgvector`. `hindsight` is the current default. |
+| `engine` | str | `"hindsight"` | Active memory engine: `hindsight` (default) \| `mem0` \| `pgvector`. `cognee` is **deprecated** — accepted for back-compat but resolves to `hindsight`. |
 
 <Aside type="note">
 The validator also accepts `cognee`/`mem0`, but the Advanced Settings dropdown

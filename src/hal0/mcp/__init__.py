@@ -5,7 +5,7 @@ external agents use to drive hal0 without re-implementing the REST API:
 
   - :mod:`hal0.mcp.admin`  — slot / model / capability / config /
     provider / version / hardware / logs tools.
-  - :mod:`hal0.mcp.memory` — Cognee-backed long-term memory tools.
+  - :mod:`hal0.mcp.memory` — Hindsight-backed long-term memory tools.
 
 Both servers mount as sub-ASGI apps under the main FastAPI app at
 ``/mcp/admin`` and ``/mcp/memory`` respectively. The wiring lives in

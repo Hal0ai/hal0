@@ -215,7 +215,7 @@ def mount_mcp_servers(
     """Build + mount the admin and (optionally) memory MCP sub-apps.
 
     Called once from :func:`create_app`. ``memory_provider`` may be None
-    when Cognee isn't initialized (e.g. tests that don't exercise
+    when the memory engine isn't initialized (e.g. tests that don't exercise
     /mcp/memory); the mount silently skips the memory server in that
     case.
 

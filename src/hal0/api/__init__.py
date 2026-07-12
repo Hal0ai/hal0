@@ -1529,7 +1529,7 @@ def create_app() -> FastAPI:
     # Agent memory stats (v0.3 PR-11). GET /api/agents/{id}/memory/stats
     # returns the counts the dashboard sidecar memory chip renders.
     # Fallback to ``available=false`` when the wrapper isn't initialised,
-    # so a hal0 install without Cognee still renders sensibly.
+    # so a hal0 install without a memory engine still renders sensibly.
     app.include_router(
         agents_memory_stats_routes.router,
         prefix="/api/agents",
@@ -1634,9 +1634,9 @@ def create_app() -> FastAPI:
     app.state.memory_provider = memory_provider
 
     # In-process memory dispatcher (Phase 8 closeout).
-    # When Cognee is up, instantiate one MemoryDispatcher and hand it to
+    # When memory is up, instantiate one MemoryDispatcher and hand it to
     # mount_mcp_servers so the admin MCP server's ``memory_*`` tools hit
-    # Cognee directly instead of looping back through HTTP to
+    # the memory engine directly instead of looping back through HTTP to
     # ``/mcp/memory``. The same client-id + private-mode resolvers the
     # memory MCP uses thread through the dispatcher so audit grounding
     # and namespace promotion stay identical across transports.

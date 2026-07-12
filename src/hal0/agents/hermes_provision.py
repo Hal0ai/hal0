@@ -2697,7 +2697,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
 
 # ── Phase H: namespace_register ─────────────────────────────────────────────
 #
-# Writes the Hermes-Agent identity card to the `agents` Cognee dataset.
+# Writes the Hermes-Agent identity card to the `agents` memory dataset.
 # Card is immutable post-write — re-bootstrap deletes the
 # existing card and writes a fresh one to refresh metadata (the only
 # legitimate post-install write). On hal0-memory failure, log + continue
@@ -2843,7 +2843,7 @@ def _mcp_memory_call(
 
 
 def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
-    """Write the Hermes identity card to the `agents` Cognee dataset.
+    """Write the Hermes identity card to the `agents` memory dataset.
 
     Idempotency: search for an existing card by ``agent_id`` first;
     if present, delete it before writing the fresh one (cards are

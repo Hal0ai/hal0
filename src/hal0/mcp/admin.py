@@ -940,7 +940,7 @@ async def dispatch(
 
     ``memory_dispatcher`` is the in-process callable the memory server
     exposes for direct invocation (avoiding the HTTP round-trip for
-    Cognee calls). When ``None``, memory tools route through REST like
+    memory-engine calls). When ``None``, memory tools route through REST like
     everything else, which is the safer default.
 
     ``policy`` is the caller persona's :class:`ToolPolicy` overlay;
@@ -1033,7 +1033,7 @@ async def _execute_tool(
     """Actually run a tool (no gating, no audit — caller handles both).
 
     Memory tools take the in-process dispatcher when available so we
-    don't bounce through HTTP for a Cognee call that runs in the same
+    don't bounce through HTTP for a memory-engine call that runs in the same
     process. All other tools go through REST so the API's auth +
     validation layer is the single source of truth for permissions.
     """
@@ -1226,7 +1226,7 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_store_probe": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Read-shaped memory tools — surface a Cognee query, no writes.
+    # Read-shaped memory tools — surface a memory query, no writes.
     "memory_search": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
