@@ -124,8 +124,12 @@ def agent_install(
 def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
-    Four steps, all local + foreground:
+    Five steps, all local + foreground:
 
+    0. **Single-pick** — :func:`_enforce_hermes_single_pick` refuses (or,
+       with ``--switch``, uninstalls) a different incumbent bundled agent
+       BEFORE any provisioning side effect — see its docstring for why this
+       can't wait for the daemon call in step 3.
     1. **Toolchain** — ``installer/agents/hermes-prereqs.sh`` ensures
        python3 (>=3.11), python3-venv (the clean-Ubuntu trap), python3-pip
        and pipx via the distro helper. Idempotent.
@@ -145,6 +149,19 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     import subprocess as _subprocess
 
     from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER, bootstrap_cli
+
+    # Enforce single-pick BEFORE any provisioning side effect. Hermes
+    # provisions locally (this function) and only calls the daemon's
+    # /api/agents/install at the very end (see step 3 below) — by then
+    # hermes_provision._write_seed_toml has already dropped
+    # /etc/hal0/agents/hermes.toml, so AgentManager.install() sees
+    # "hermes" already in installed_names() and takes its idempotent
+    # no-op path instead of raising AgentAlreadyInstalledError. That let
+    # `hal0 agent install hermes` (no --switch) land ALONGSIDE an
+    # existing pi-coder/opencode install. Check disk truth here, up
+    # front, so hermes gets the same guarantee the manager enforces for
+    # the other bundled agents.
+    _enforce_hermes_single_pick(switch=switch)
 
     # Bail out cleanly (before the toolchain shell-out) when we can't write the
     # provisioning trees — otherwise the bootstrap crashes several phases deep
@@ -204,6 +221,51 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
             border_style="green",
         )
     )
+
+
+def _bundled_agent_manager() -> Any:
+    """Construct the :class:`~hal0.agents.manager.AgentManager` used for the
+    hermes single-pick check. Imported lazily (mirrors the rest of this
+    module's ``hermes_provision`` imports) so plain ``hal0 agent`` commands
+    that never touch hermes don't pay the import cost. Factored out as a
+    seam so tests can monkeypatch ``ac._bundled_agent_manager`` to return a
+    manager rooted at a tmp_path instead of the real ``/etc`` and
+    ``/var/lib`` trees.
+    """
+    from hal0.agents.manager import AgentManager
+
+    return AgentManager()
+
+
+def _enforce_hermes_single_pick(*, switch: bool) -> None:
+    """Refuse (or atomically clear) a different incumbent bundled agent
+    before hermes provisioning writes anything to disk.
+
+    Mirrors the contract :meth:`hal0.agents.manager.AgentManager.install`
+    enforces for pi-coder/opencode: at most one bundled agent installed at
+    a time, ``switch=True`` required to swap. Hermes can't just call
+    ``AgentManager.install()`` up front (provisioning has to happen first —
+    there's no venv/binary for the manager to register yet), so this checks
+    the same disk-truth ``installed_names()`` the manager uses and either
+    dies with the same message shape as ``AgentAlreadyInstalledError``, or
+    — with ``--switch`` — uninstalls the incumbent(s) before provisioning
+    starts.
+    """
+    mgr = _bundled_agent_manager()
+    current = [n for n in mgr.installed_names() if n != "hermes"]
+    if not current:
+        return
+    if not switch:
+        die(
+            f"agent {current[0]!r} already installed; pass --switch to "
+            "atomically swap to 'hermes' (single-pick enforced)."
+        )
+        return
+    console.print(
+        f"[bold]--switch[/bold]: uninstalling {', '.join(current)} before provisioning hermes…"
+    )
+    for existing in current:
+        mgr.uninstall(existing)
 
 
 # The agent unit runs as this user (User= in installer/systemd/hal0-agent@.service).
