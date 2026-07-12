@@ -1,11 +1,11 @@
-"""ADR-0013 MCP client surface for bundled agents.
+"""MCP client surface for bundled agents.
 
 Reads ``/etc/hal0/agents/<name>.toml``, loads tokens from
 systemd-credential / env file, and exposes the three-tier tool
 classification (allow / gated / blocked) to the agent driver.
 
 This module is **transport-agnostic**: it doesn't speak MCP over the
-wire itself. ADR-0013 §6 says Hermes's MCP client does the wire work;
+wire itself. By design, Hermes's MCP client does the wire work;
 the AgentMCPClient defined here is the *policy* layer that sits in
 front of it. The agent driver wires this in via:
 
@@ -40,16 +40,16 @@ from hal0.config.schema import AgentConfig, MCPServerConfig
 log = structlog.get_logger(__name__)
 
 
-# ADR-0013 §4 — three-tier classification verdict.
+# Three-tier classification verdict.
 ClassificationLiteral = Literal["allow", "gated", "blocked", "unknown_server", "unknown_tool"]
 
 
 class ToolNotPermittedError(Exception):
     """Raised by :meth:`AgentMCPClient.guard` for hard-blocked tools.
 
-    Maps to the wire-level ``tool.not_permitted`` error code per
-    ADR-0013 §3. Agent drivers should catch + translate into whatever
-    error envelope their LLM wire format expects.
+    Maps to the wire-level ``tool.not_permitted`` error code. Agent
+    drivers should catch + translate into whatever error envelope
+    their LLM wire format expects.
     """
 
     def __init__(self, server: str, tool: str, reason: str = "tool blocked by allow-list"):
@@ -62,7 +62,7 @@ class ToolNotPermittedError(Exception):
 class WorkspaceEscapeError(Exception):
     """Raised when filesystem-style MCP args try to escape the workspace.
 
-    ADR-0013 §5: tool arguments that use ``../`` or pass absolute paths
+    Tool arguments that use ``../`` or pass absolute paths
     outside the workspace get rejected client-side BEFORE they hit the
     server. The agent driver translates this to a tool error visible to
     the LLM so it can retry with a corrected path.
@@ -90,7 +90,7 @@ class AgentMCPClient:
     def __init__(self, config: AgentConfig, *, workspace: Path | None = None) -> None:
         """Build a policy client.
 
-        :param config: Validated AgentConfig (see ADR-0013 §2 schema).
+        :param config: Validated AgentConfig.
         :param workspace: Override the workspace root (tests use this
             with ``tmp_path``). When None, derived from
             ``config.agent.workspace`` if set, else from
@@ -137,7 +137,7 @@ class AgentMCPClient:
     def enabled_servers(self) -> dict[str, MCPServerConfig]:
         """Return the servers the agent is allowed to *connect* to.
 
-        ADR-0013 §3 server-axis default-deny: a server not in the
+        Server-axis default-deny: a server not in the
         config or with ``enabled = false`` is unreachable. Builtins
         (hal0-admin / hal0-memory) flow through unchanged — they're
         always-allowed for bundled agents.
@@ -151,19 +151,18 @@ class AgentMCPClient:
 
         Verdicts:
 
-        - ``unknown_server`` : server not in config (or disabled). Per
-          ADR-0013 §3 the agent should treat this as ``blocked``, but
+        - ``unknown_server`` : server not in config (or disabled). The
+          agent should treat this as ``blocked``, but
           we return a distinct verdict so callers can audit the cause
           (typo vs intentional removal).
         - ``unknown_tool``   : server is reachable, tool isn't on any
-          list. Default-deny per ADR-0013 §3 tool-axis.
+          list. Default-deny on the tool axis.
         - ``blocked``        : on ``tools.blocked``. Hard reject.
         - ``gated``          : on ``tools.gated``. Approval-queue path.
         - ``allow``          : on ``tools.allow``. Autonomous call.
 
         Blocked is checked FIRST so installer-pinned blocks beat user
-        edits that placed the same tool on ``allow`` (ADR-0013 §4
-        "installer-pinned blocks override user edits"). The pydantic
+        edits that placed the same tool on ``allow``. The pydantic
         ``ToolPolicy.lists_are_disjoint`` validator should prevent that
         overlap from ever reaching here, but defense-in-depth is cheap.
         """
@@ -200,7 +199,7 @@ class AgentMCPClient:
     def token_for(self, server: str) -> str | None:
         """Return the outbound bearer token for ``server`` or None.
 
-        ADR-0013 §6: tokens load at process startup from env vars (or
+        Tokens load at process startup from env vars (or
         systemd-credential, which systemd materialises as an env var
         via ``LoadCredential=``); never live in TOML. This method is
         the single read site so audit-log scaffolding can wrap a
@@ -209,7 +208,7 @@ class AgentMCPClient:
         Returns None when ``auth.kind != "bearer-from-env"`` (no token
         needed) OR when the env var is unset. The agent driver decides
         whether a missing token should fail bootstrap or skip the
-        server gracefully — ADR-0013 §6 picks "log + continue" for
+        server gracefully — by design, "log + continue" is used for
         non-builtin connection failures.
         """
         srv = self._config.mcp.servers.get(server)
@@ -236,7 +235,7 @@ class AgentMCPClient:
     def rewrite_path(self, raw: str) -> Path:
         """Resolve ``raw`` against the workspace; raise on escape attempts.
 
-        ADR-0013 §5: filesystem MCPs run with their server-side root
+        Filesystem MCPs run with their server-side root
         pinned to the workspace, but the agent can still pass paths
         that try to escape (``../``, absolute paths outside the
         workspace). We resolve here BEFORE the server sees the call so

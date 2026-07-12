@@ -54,7 +54,7 @@ class SlotType(StrEnum):
 
     Maps to the slot-type vocab from PLAN.md §1 v0.2 slot model:
     ``llm | embedding | reranking | transcription | tts | image``.
-    The dispatcher routes by ``type`` (per ADR-0008 §6); without this
+    The dispatcher routes by ``type``; without this
     flag the CLI couldn't create embedding/rerank/transcription/tts
     slots at all.
     """
@@ -373,7 +373,7 @@ def slot_create(
         "-t",
         help=(
             "Slot type: llm | embedding | reranking | transcription | tts | image. "
-            "Determines how the dispatcher routes requests (ADR-0008 §6)."
+            "Determines how the dispatcher routes requests."
         ),
         case_sensitive=False,
     ),

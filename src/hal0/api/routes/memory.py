@@ -1,4 +1,4 @@
-"""Memory endpoints — ADR-0014 graph-extraction gate + status.
+"""Memory endpoints — graph-extraction gate + status.
 
 Mounted under ``/api/memory/*``. The dashboard's Memory tab + the
 ``hal0 memory graph {enable,disable,status}`` CLI both read + write
@@ -44,10 +44,11 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
-# ── ADR-0012 identity + ADR-0005 §3 namespace helpers ─────────────────────
+# ── identity + namespace helpers ────────────────────────────────────────
 #
-# Post-ADR-0012 hal0-api is open on 0.0.0.0:8080; agent identity flows on
-# the ``X-hal0-Agent`` header (NOT Bearer — auth surface was removed).
+# Auth was removed, so hal0-api is open on 0.0.0.0:8080; agent identity
+# flows on the ``X-hal0-Agent`` header (NOT Bearer — auth surface was
+# removed).
 # Private-mode opt-in flows on ``X-hal0-Private`` to match the MCP mount
 # (:mod:`hal0.api.mcp_mount`); the same toggle gates the same namespace
 # promotion rule across both surfaces (issue #317).
@@ -57,7 +58,7 @@ _AGENT_HEADER = "x-hal0-agent"
 _PRIVATE_HEADER = "x-hal0-private"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# ADR-0005 §5 security hardening: agent identity feeds the
+# Security hardening: agent identity feeds the
 # ``private:<agent>`` dataset name AND the audit log's ``source``
 # field. We allow alnum + ``-`` + ``_`` only, up to 64 chars — keeps
 # the resolved namespace path-traversal-free, sql-quotable, and
@@ -79,7 +80,7 @@ class MemoryNamespaceInvalid(Hal0Error):
 
 
 class MemoryAgentIdInvalid(Hal0Error):
-    """The ``X-hal0-Agent`` header value failed the ADR-0005 §5
+    """The ``X-hal0-Agent`` header value failed the
     identity-shape check.
 
     Distinct from :class:`MemoryNamespaceInvalid` so the dashboard
@@ -99,7 +100,7 @@ def _agent_id(request: Request) -> str:
     surface — both translate the absence of an identity header into the
     same sentinel so audit + dataset resolution stay consistent.
 
-    Validation (ADR-0005 §5 hardening, surfaced by PR #366 review):
+    Validation (hardening surfaced by PR #366 review):
 
       - Empty / whitespace → ``"anonymous"`` (back-compat with
         unauthenticated callers).
@@ -108,7 +109,7 @@ def _agent_id(request: Request) -> str:
         prefix through the header. The ``private`` toggle is the
         only path to the namespace.
       - Values must match ``^[a-zA-Z0-9_\\-]{1,64}$`` — agent ids
-        flow into the Cognee dataset name + the audit log's
+        flow into the memory dataset name + the audit log's
         ``source`` field. Path-traversal candidates (``../etc``),
         control chars, and over-long values are all rejected here.
     """
@@ -872,7 +873,7 @@ async def run_honcho_sync_now() -> dict[str, bool | str | None]:
 
 # ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────
 #
-# Plain-HTTP veneer over CogneeWrapper for callers that don't speak the
+# Plain-HTTP veneer over the memory provider for callers that don't speak the
 # MCP protocol (Hermes bootstrap CLI, dashboard Agents > Peers tab,
 # in-process scripts). The MCP transport at /mcp/memory/mcp stays
 # available for proper MCP clients; these routes are a parallel path
@@ -895,18 +896,18 @@ async def memory_add(request: Request) -> dict[str, Any]:
 
     Identity headers (issue #317):
 
-      - ``X-hal0-Agent``: post-ADR-0012 agent identity. Stamped onto
+      - ``X-hal0-Agent``: agent identity. Stamped onto
         the wrapper's ``source`` field — server-injected so callers
-        cannot lie (ADR-0005 §5). Absent header → ``"anonymous"``.
+        cannot lie. Absent header → ``"anonymous"``.
       - ``X-hal0-Private: 1``: opt into the private namespace.
         Promotes ``dataset`` to ``private:<agent>`` regardless of the
-        body value (ADR-0005 §3).
+        body value.
 
     The body's ``source`` field is REJECTED — clients supplying it is
     treated as an attempt to impersonate, matching the MCP rule. Use
     the ``X-hal0-Agent`` header to claim identity.
 
-    Returns ``{id, timestamp}`` from :meth:`CogneeWrapper.add`.
+    Returns ``{id, timestamp}`` from :meth:`MemoryProvider.add`.
     """
     body = await _read_json_body(request)
     text = body.get("text")
@@ -916,7 +917,7 @@ async def memory_add(request: Request) -> dict[str, Any]:
             details={"path": "/api/memory/add"},
         )
     if "source" in body:
-        # ADR-0005 §5 — source is server-injected from the X-hal0-Agent
+        # Source is server-injected from the X-hal0-Agent
         # header so callers cannot impersonate another agent in the
         # audit log.
         raise Hal0Error(
@@ -962,7 +963,7 @@ async def memory_search(request: Request) -> dict[str, Any]:
 
     Identity headers behave like ``/add`` — ``X-hal0-Private: 1``
     expands a default-empty ``dataset`` to ``[shared, private:<agent>]``
-    per ADR-0005 §3 so a private-mode caller sees both their own scoped
+    so a private-mode caller sees both their own scoped
     items + the shared bucket without per-call opt-in.
 
     Returns ``{items: [MemoryRecord, ...]}`` — wrapped in an envelope so
@@ -1109,7 +1110,7 @@ async def memory_delete(request: Request) -> dict[str, int]:
     sweep). Identity headers otherwise are not consulted: id-scoped
     delete bypasses the namespace surface entirely (the wrapper's audit
     log still stamps the call with the agent identity for forensics —
-    see :meth:`CogneeWrapper._audit`).
+    see the provider's audit hook).
     """
     body = await _read_json_body(request)
     ids = body.get("ids")

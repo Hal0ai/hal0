@@ -270,7 +270,7 @@ async def list_features(request: Request) -> dict[str, Any]:
         ``cognee`` | ``mem0`` | …) — a string, not a bool.
       - ``npu``: an NPU was detected by the (cached) hardware probe.
       - ``mcp_supervisor``: the MCP process supervisor (start/stop/
-        restart) — not implemented yet (pending ADR-0015), always false.
+        restart) — not implemented yet, always false.
     """
     features: dict[str, Any] = {
         "comfyui_switchover": True,

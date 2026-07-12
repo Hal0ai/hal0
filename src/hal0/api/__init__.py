@@ -1194,7 +1194,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with contextlib.suppress(asyncio.CancelledError):
                 await gpu_arbiter_idle_task
 
-    # OmniRouter (PR-16, plan §7 + ADR-0008 §8). Client-side OpenAI
+    # OmniRouter (PR-16). Client-side OpenAI
     # tool-calling loop. Wired here so the /v1/chat/completions route
     # can pick it up via ``request.app.state.omni_router`` when a
     # request body carries ``omni: true``. The router holds a
@@ -1229,7 +1229,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.omni_router = None
 
-    # NPU trio router (ADR-0008 §5 + ADR-0009). The containerized npu
+    # NPU trio router. The containerized npu
     # slot's single ``flm serve`` process answers chat + STT + embed on
     # one static port; chat routes through the slot upstream like any
     # other slot, while v1.py's STT/embed routes post the two shadow
@@ -1300,7 +1300,7 @@ def create_app() -> FastAPI:
     app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
     app.include_router(v1.router, prefix="/v1", tags=["v1"])
 
-    # /api/install drives the first-run wizard. Auth was removed in ADR-0012
+    # /api/install drives the first-run wizard. Auth was removed
     # so these endpoints are open; the installer surface is admin-only by
     # convention (network-level access control).
     app.include_router(
@@ -1358,7 +1358,7 @@ def create_app() -> FastAPI:
         prefix="/api/settings/proxmox",
         tags=["settings", "proxmox"],
     )
-    # ADR-0014 memory.graph gate + status. Mounted under /api/memory
+    # memory.graph gate + status. Mounted under /api/memory
     # so the dashboard Memory tab + `hal0 memory graph` CLI both read
     # + write through one surface. Constructed early enough that the
     # dashboard SPA fallback doesn't shadow these paths.
@@ -1419,16 +1419,16 @@ def create_app() -> FastAPI:
     )
 
     # Health + config/urls routers carry endpoints that are entirely
-    # public (e.g. /api/status, /api/config/urls). Auth was removed in
-    # ADR-0012; all endpoints on this server are open on the local network.
+    # public (e.g. /api/status, /api/config/urls). Auth was removed;
+    # all endpoints on this server are open on the local network.
     app.include_router(health.router, prefix="/api", tags=["health"])
     # Static backend vocabulary (GET /api/meta/enums) — the canonical
     # device/backend/capability enums from hal0.model_meta, read once by the
-    # dashboard at startup. Code-level constants only; no auth (ADR-0012).
+    # dashboard at startup. Code-level constants only; no auth.
     app.include_router(meta_routes.router, prefix="/api/meta", tags=["meta"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
 
-    # Profile catalog — read-only, no auth (ADR-0012). Returns every profile
+    # Profile catalog — read-only, no auth. Returns every profile
     # from /etc/hal0/profiles.toml (falling back to the built-in seeds on a
     # fresh install). Profiles are P1 container-runtime templates (issue #653).
     app.include_router(profiles_routes.router, prefix="/api/profiles", tags=["profiles"])
@@ -1436,7 +1436,7 @@ def create_app() -> FastAPI:
     # Stack catalog — named, portable bundles of slots + profiles + model
     # assignments + capability selections. Read + declarative apply (dry-run
     # diff → atomic commit → lifecycle converge) + export/import/snapshot.
-    # Public on the local network (ADR-0012), same rationale as profiles.
+    # Public on the local network, same rationale as profiles.
     app.include_router(stacks_routes.router, prefix="/api/stacks", tags=["stacks"])
 
     # Benchmarks — roster board, run detail, history, evals, and the run-queue
@@ -1485,7 +1485,7 @@ def create_app() -> FastAPI:
     # URLs and could leak prompts via filename if exposed publicly.
     app.include_router(images.router, prefix="/api/images", tags=["images"])
 
-    # Bundled-agent lifecycle (ADR-0004 §2). Install / uninstall / list /
+    # Bundled-agent lifecycle. Install / uninstall / list /
     # status. Single-pick + atomic switch enforced inside AgentManager.
     app.include_router(
         agents_routes.router,
@@ -1529,7 +1529,7 @@ def create_app() -> FastAPI:
     # Agent memory stats (v0.3 PR-11). GET /api/agents/{id}/memory/stats
     # returns the counts the dashboard sidecar memory chip renders.
     # Fallback to ``available=false`` when the wrapper isn't initialised,
-    # so a hal0 install without Cognee still renders sensibly.
+    # so a hal0 install without a memory engine still renders sensibly.
     app.include_router(
         agents_memory_stats_routes.router,
         prefix="/api/agents",
@@ -1548,7 +1548,7 @@ def create_app() -> FastAPI:
         tags=["agents", "chat-proxy"],
     )
 
-    # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
+    # Approval inbox. The dashboard bell, the MCP admin
     # server's gated-tool enqueue, and the ``hal0 agent approvals``
     # CLI all read from the same lifespan-scoped ApprovalQueue. GETs
     # require any token; POST approve/deny require admin (writer)
@@ -1563,14 +1563,14 @@ def create_app() -> FastAPI:
     # servers, connected clients (audit-derived), the installable
     # catalog, and an SSE tail of ``mcp.tool.*`` events. The lifecycle
     # mutations (install / uninstall / restart / config-write) stub at
-    # 501 — ADR-0013's ``mcp_client.py`` work owns those.
+    # 501 — future ``mcp_client.py`` work owns those.
     app.include_router(
         mcp_routes.router,
         prefix="/api/mcp",
         tags=["mcp"],
     )
 
-    # OpenRouter OAuth callback scaffold (ADR-0020, Phase 0).  The route
+    # OpenRouter OAuth callback scaffold (Phase 0).  The route
     # is gated behind HAL0_OPENROUTER_OAUTH_ENABLED so the 501 placeholder
     # does not appear in the API surface while the linked-account PKCE flow
     # is unimplemented (#775).  Set the env var to "1" or "true" to mount
@@ -1595,7 +1595,7 @@ def create_app() -> FastAPI:
         tags=["plugins"],
     )
 
-    # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────
+    # ── MCP servers ──────────────────────────────────────────────
     # Mounted BEFORE _mount_dashboard so the dashboard's SPA fallback
     # doesn't shadow /mcp/* paths. ApprovalQueue + the memory provider are
     # constructed eagerly here (no async setup needed for either) so
@@ -1633,10 +1633,10 @@ def create_app() -> FastAPI:
             log.warning("hal0.memory.init_failed", error=str(exc))
     app.state.memory_provider = memory_provider
 
-    # In-process memory dispatcher (Phase 8 closeout, ADR-0004 §7).
-    # When Cognee is up, instantiate one MemoryDispatcher and hand it to
+    # In-process memory dispatcher (Phase 8 closeout).
+    # When memory is up, instantiate one MemoryDispatcher and hand it to
     # mount_mcp_servers so the admin MCP server's ``memory_*`` tools hit
-    # Cognee directly instead of looping back through HTTP to
+    # the memory engine directly instead of looping back through HTTP to
     # ``/mcp/memory``. The same client-id + private-mode resolvers the
     # memory MCP uses thread through the dispatcher so audit grounding
     # and namespace promotion stay identical across transports.

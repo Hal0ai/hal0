@@ -111,7 +111,7 @@ SEEDED_SLOTS: tuple[str, ...] = (
 #: ride the same coresident FLM process as the NPU chat anchor — the
 #: separate ``flm`` slot, NOT listed here. ``agent`` was previously
 #: (wrongly) in this set; it is a GPU chat-role slot and moved to
-#: SEEDED_SLOTS in #679. Opt-in at Pro+ bundle tier (ADR-0008 §5).
+#: SEEDED_SLOTS in #679. Opt-in at Pro+ bundle tier.
 #:
 #: Named ``{anchor}-stt`` / ``{anchor}-embed`` (anchor is ``flm``) to match
 #: the occupancy-pane virtual sub-cards (:mod:`hal0.api.routes.npu` synthesises
@@ -1583,7 +1583,7 @@ class SlotManager:
         :data:`SEEDED_SLOTS` lands on every hal0 install. The NPU trio
         shadows (``flm-stt`` / ``flm-embed``) only seed when the
         FastFlowLM ``.deb`` is installed (``shutil.which('flm')``
-        truthy). Per plan §10.2 + §4.2 + ADR-0008 §5.
+        truthy). Per plan §10.2 + §4.2.
 
         Args:
             include_npu: ``None`` (default) detects FLM presence at
@@ -1912,7 +1912,7 @@ class SlotManager:
         ``load()``. The TOML is the only on-disk artefact at create
         time.
 
-        PR-11 (plan §5.3 + ADR-0008 §5): rejects a second ``device=npu,
+        PR-11 (plan §5.3): rejects a second ``device=npu,
         type=llm, enabled=true`` slot — the AMDXDNA hardware context
         admits exactly one NPU LLM at a time. Disabled NPU LLM slots
         coexist; only the live anchor count is bounded.
@@ -2572,7 +2572,7 @@ class SlotManager:
     ) -> None:
         """Reject a write that would land a second NPU LLM anchor.
 
-        Plan §5.3 + ADR-0008 §5: the AMDXDNA hardware context admits
+        Plan §5.3: the AMDXDNA hardware context admits
         ONE ``device=npu, type=llm`` slot at a time. Disabled NPU LLM
         slots may coexist with another disabled (or enabled) one, but
         two enabled anchors cannot be configured. This guard runs on

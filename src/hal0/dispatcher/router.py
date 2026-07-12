@@ -800,7 +800,7 @@ class Dispatcher:
                 enter_dispatch(effective_slot)
             try:
                 if call.slot_name:
-                    # B1 (ADR-0022): backend-aware lazy-load. On a cold miss we
+                    # B1: backend-aware lazy-load. On a cold miss we
                     # kick SlotManager.load(slot_name) FIRST so the slot's
                     # declared device/profile drives the load, then gate on
                     # readiness.
@@ -849,7 +849,7 @@ class Dispatcher:
     async def _ensure_slot_loaded_backend_aware(self, call: UpstreamCall) -> None:
         """Kick a backend-aware load on a cold miss before forwarding.
 
-        B1 (ADR-0022) — the name-based lazy-load gap. When a request
+        B1 — the name-based lazy-load gap. When a request
         resolves to a slot whose model is not loaded, we drive
         ``SlotManager.load(slot_name)`` here so the slot's declared
         device/profile picks the backend.

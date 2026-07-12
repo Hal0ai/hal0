@@ -1,4 +1,4 @@
-"""Hermes-Agent driver (ADR-0004 §6).
+"""Hermes-Agent driver.
 
 Hermes is user-owned upstream — and crucially, the user cannot PR
 upstream NousResearch/hermes-agent. So hal0-awareness lives on the
@@ -262,7 +262,7 @@ class HermesDriver(AgentDriver):
         return _paths.var_lib() / "agents" / self.name
 
     def _env_file_path(self) -> Path:
-        # ADR-0004 §6: "writes /etc/hal0/agents/hermes.env". Lives in
+        # Writes /etc/hal0/agents/hermes.env. Lives in
         # /etc so the user/admin can tweak it without disturbing
         # /var/lib state, same posture as openwebui.env. The wrapper
         # sources this file on every hermes invocation.

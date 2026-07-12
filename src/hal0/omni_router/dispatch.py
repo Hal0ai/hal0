@@ -35,7 +35,7 @@ Endpoints (per plan §7.2):
   ============================== =================================
 
 The base URL is hal0-api's own loopback URL (``http://127.0.0.1:8080``
-by default per ADR-0008 §1). PR-19 introduces direct-to-FLM-child
+by default). PR-19 introduces direct-to-FLM-child
 routing for ``flm-stt``/``flm-embed`` slots; PR-16 sticks to the
 single-URL contract.
 """

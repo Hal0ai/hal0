@@ -23,7 +23,7 @@ REST). Direct wrapper access keeps the stats endpoint cheap.
 
 Namespace resolution
 --------------------
-Per ADR-0005 §3, a bundled agent's writes land under
+By design, a bundled agent's writes land under
 ``private:<agent_id>`` and reads can union ``shared`` + the agent's
 own private namespace. Stats are scoped to the **per-agent private
 namespace** so the sidebar reflects what THIS agent has done — the
@@ -86,8 +86,8 @@ def _namespace_for(agent_id: str) -> str:
     Matches the resolver pattern :mod:`hal0.api.mcp_mount` plumbs onto
     the memory MCP — single source of truth would couple this module
     to the resolver's internal API. Keeping the format literal here is
-    cheap because the convention (``private:<agent_id>``) is documented
-    in ADR-0005 §3 and won't change.
+    cheap because the convention (``private:<agent_id>``) is fixed
+    by design and won't change.
     """
     return f"private:{agent_id}"
 
@@ -203,7 +203,7 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
         if isinstance(first, dict):
             ts = first.get("timestamp")
             if isinstance(ts, (int, float)):
-                # Cognee's timestamps are seconds-since-epoch; convert
+                # the engine's timestamps are seconds-since-epoch; convert
                 # to ISO so the dashboard renders a stable string.
                 from datetime import UTC, datetime
 

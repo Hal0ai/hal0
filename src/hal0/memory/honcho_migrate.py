@@ -14,7 +14,7 @@ Two directions, both loopback REST, both idempotent:
   migration-created sessions from the forward direction are skipped so the
   two directions never loop.
 
-Both ends are loopback REST with no required auth (ADR-0012 posture), so
+Both ends are loopback REST with no required auth, so
 this module talks plain ``httpx.Client`` — no SDK dependency, no auth
 plumbing, and trivially fakeable in tests via ``httpx.MockTransport``
 threaded through as an injected client.

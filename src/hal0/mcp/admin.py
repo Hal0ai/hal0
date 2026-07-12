@@ -32,11 +32,11 @@ app — including its own session manager, SSE/HTTP transports, and
 ``/messages`` writer — that we want to expose unmodified. Wrapping it
 in an APIRouter would force us to re-export the SDK's internal route
 table by hand and re-implement its lifespan hooks, which is exactly
-the brittleness ADR-0004 §7 warns against. ``app.mount()`` cleanly
+the kind of brittleness we want to avoid. ``app.mount()`` cleanly
 delegates everything below the mount path to the sub-app.
 
-Tool catalog (ADR-0004 §4)
---------------------------
+Tool catalog
+------------
 
 Autonomous read::
 
@@ -93,7 +93,7 @@ The agent presents its Bearer token through the MCP transport's HTTP
 headers. The server extracts ``client_id`` from that token by hitting
 ``/api/auth/me`` (same identity the dashboard sees) and stamps every
 audit row with it. Internal API calls re-attach the same Bearer so we
-honour the "no new privileged surface" rule from ADR-0004 §7 — an
+honour the "no new privileged surface" rule — an
 agent can only do what its token already permits via REST.
 
 Fail-fast import
@@ -314,7 +314,7 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
 )
 
 # Mutating tools that are safe enough to run without approval
-# (reversible, scoped, low blast radius). Per ADR-0004 §4.
+# (reversible, scoped, low blast radius).
 AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
     {
         # Model. model_scan only ADDS registry entries for files already
@@ -405,15 +405,15 @@ GATED_TOOLS: frozenset[str] = frozenset(
 
 # (method, path-template). Path templates use ``{arg_name}`` placeholders
 # that we resolve from the tool call's args dict.
-# NOTE — drift between ADR-0004 §4 and live REST routes (2026-05-22):
+# NOTE — drift between the original tool-catalog spec and live REST routes (2026-05-22):
 #
-# ADR-0004 §4 names a few routes that don't exist verbatim. Where the
-# ADR's stated URL doesn't match what ``hal0.api.routes`` actually
+# The original spec names a few routes that don't exist verbatim. Where the
+# spec's stated URL doesn't match what ``hal0.api.routes`` actually
 # exposes, we route to the live URL and flag the divergence in
-# WAVE1_MCP_PENDING.md. The tool catalog itself stays ADR-faithful so
+# WAVE1_MCP_PENDING.md. The tool catalog itself stays spec-faithful so
 # agents see the documented names; only the HTTP target moves.
 #
-#   ADR §4                              Live route                    Note
+#   Spec                                Live route                    Note
 #   ──────────────────────────────────  ─────────────────────────────  ────────────────
 #   model_swap → /api/slots/{n}/model   /api/slots/{n}/swap           name diff
 #   model_pull → /api/models/pull       /api/models/{id}/pull         id-in-path
@@ -940,7 +940,7 @@ async def dispatch(
 
     ``memory_dispatcher`` is the in-process callable the memory server
     exposes for direct invocation (avoiding the HTTP round-trip for
-    Cognee calls). When ``None``, memory tools route through REST like
+    memory-engine calls). When ``None``, memory tools route through REST like
     everything else, which is the safer default.
 
     ``policy`` is the caller persona's :class:`ToolPolicy` overlay;
@@ -1033,7 +1033,7 @@ async def _execute_tool(
     """Actually run a tool (no gating, no audit — caller handles both).
 
     Memory tools take the in-process dispatcher when available so we
-    don't bounce through HTTP for a Cognee call that runs in the same
+    don't bounce through HTTP for a memory-engine call that runs in the same
     process. All other tools go through REST so the API's auth +
     validation layer is the single source of truth for permissions.
     """
@@ -1104,7 +1104,8 @@ async def _execute_tool(
 #
 # These are advisory — server-side gating in :func:`is_gated` is still
 # the authoritative policy. The annotations exist so MCP clients render
-# the right approval-prompt language without having to read ADR-0004.
+# the right approval-prompt language without having to inspect server
+# internals.
 
 _ANNOTATIONS: dict[str, ToolAnnotations] = {
     # ── Autonomous read — pure reads against the local REST surface. ─────
@@ -1225,7 +1226,7 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_store_probe": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Read-shaped memory tools — surface a Cognee query, no writes.
+    # Read-shaped memory tools — surface a memory query, no writes.
     "memory_search": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),

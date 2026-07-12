@@ -1,8 +1,8 @@
 """In-memory approval queue for gated MCP tool calls.
 
 Phase 8 (Agents v0.2) MCP servers split tool catalogs into autonomous
-(executes immediately) and gated (requires owner approval) buckets per
-ADR-0004 §4. Gated invocations land here; the owner then approves or
+(executes immediately) and gated (requires owner approval) buckets.
+Gated invocations land here; the owner then approves or
 denies via ``POST /api/agent/approvals/{id}/{approve|deny}``.
 
 Design notes

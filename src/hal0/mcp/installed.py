@@ -13,8 +13,8 @@ Scope (v0.3 alpha)
   layout so users get a single mental model.
 * Provide list / add / remove / patch helpers the FastAPI route layer
   calls through.
-* No process supervision yet — that lives in a follow-up ADR (see
-  ADR-0013 §6 "Bootstrap path"). Installed servers report
+* No process supervision yet — that's deferred to a follow-up
+  bootstrap-path effort. Installed servers report
   ``state="stopped"`` in :func:`hal0.api.routes.mcp.list_servers` until
   the supervisor ships.
 

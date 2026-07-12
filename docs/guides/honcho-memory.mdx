@@ -75,7 +75,7 @@ renders them to `/etc/hal0/honcho.env`, which the compose stack mounts via
 | `honcho.port` | `8000` | Host port Honcho's API listens on (loopback). |
 | `honcho.workspace` | `"hal0"` | Unified workspace name shared by non-private agents. |
 | `honcho.user_peer` | `"operator"` | Single human peer id shared by all clients in the unified workspace. |
-| `honcho.auth_enabled` | `false` | Require Bearer auth on the Honcho API (loopback-only posture by default — ADR-0012). |
+| `honcho.auth_enabled` | `false` | Require Bearer auth on the Honcho API (loopback-only posture by default). |
 
 `[honcho.llm]` routes five features independently — `deriver`, `dialectic`,
 `summary`, `dream`, `embedding` — each with `transport` (`openai` \|

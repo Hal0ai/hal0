@@ -1,4 +1,4 @@
-"""opencode bundled agent (ADR-0004 §6). See :mod:`.driver` for details."""
+"""opencode bundled agent. See :mod:`.driver` for details."""
 
 from __future__ import annotations
 

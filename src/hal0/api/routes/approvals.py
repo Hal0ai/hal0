@@ -1,8 +1,8 @@
 """Approval inbox REST routes (mounted under ``/api/agent/approvals``).
 
-The hal0 admin MCP server (ADR-0004 §4) puts every gated tool call into
+The hal0 admin MCP server puts every gated tool call into
 an in-process :class:`hal0.mcp.approval_queue.ApprovalQueue`. The
-dashboard's bell + inbox modal (ADR-0004 §5) reads that queue through
+dashboard's bell + inbox modal reads that queue through
 these routes, and the owner approves / denies inline.
 
 Endpoints
@@ -23,7 +23,7 @@ queue mutates.
 Auth
 ----
 
-Auth was removed in ADR-0012 — all routes here are open on the local
+Auth was removed — all routes here are open on the local
 network. This module declares no auth dependency itself.
 """
 
@@ -44,7 +44,7 @@ from hal0.mcp.approval_queue import ApprovalQueue
 
 router = APIRouter()
 
-# Auth was removed in ADR-0012. POST /approve and POST /deny are
+# Auth was removed. POST /approve and POST /deny are
 # unrestricted on the local network; access control is LAN-only.
 
 

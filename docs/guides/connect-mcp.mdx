@@ -17,7 +17,7 @@ servers, mounted on the API as Streamable-HTTP sub-apps:
   to the memory server.
 
 <Aside type="caution">
-hal0 has **no built-in network auth** (ADR-0012). The MCP mounts are
+hal0 has **no built-in network auth**. The MCP mounts are
 reachable to anything that can reach the API. Run hal0 on a trusted LAN
 or behind your own reverse proxy — do not expose `/mcp/*` to the
 internet.
@@ -34,8 +34,8 @@ http://localhost:8080/mcp/memory
 
 ### Identify with X-hal0-Agent
 
-Caller identity flows on the **`X-hal0-Agent`** request header (Bearer
-auth was removed in ADR-0012). The value must match
+Caller identity flows on the **`X-hal0-Agent`** request header (hal0 has
+no bearer-token auth to carry identity instead). The value must match
 `^[a-zA-Z0-9_-]{1,64}$`. It stamps the audit trail and powers the
 `private:<agent>` memory namespace.
 

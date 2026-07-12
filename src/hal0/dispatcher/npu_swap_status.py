@@ -15,7 +15,7 @@ the slot's lifecycle state. Transitional states (PULLING/STARTING/
 WARMING/UNLOADING) map to ``in_progress=True``; settled states
 (READY/SERVING/IDLE/OFFLINE/ERROR) map to ``in_progress=False``.
 
-Per ADR-0008 §5, only one NPU LLM slot may be enabled at a time.
+By design, only one NPU LLM slot may be enabled at a time.
 :meth:`hal0.slots.manager.SlotManager._check_npu_exclusivity` guards the
 *write* path; this module observes the *runtime* state.
 """

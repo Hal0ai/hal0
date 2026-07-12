@@ -8,7 +8,7 @@ on the 2nd call (one ``AsyncClient`` reused across per-call event loops →
 is reused safely for the session.
 
 Talks to hal0-api's ``/api/memory/*`` routes, NOT the ``/mcp/memory``
-JSON-RPC transport. Identity is carried via ``X-hal0-Agent`` per ADR-0012;
+JSON-RPC transport. Identity is carried via ``X-hal0-Agent``;
 there is no Bearer auth on the hal0 LAN.
 
 Two banks, selected per write by ``X-hal0-Private``:

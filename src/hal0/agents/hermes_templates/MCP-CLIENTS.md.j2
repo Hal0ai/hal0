@@ -1,5 +1,5 @@
 {# /etc/hal0/MCP-CLIENTS.md — hal0 MCP wiring reference for external clients.
-   Rendered by context_link phase per ADR-0021 post-provision hook.
+   Rendered by context_link phase's post-provision hook.
    This file documents the MCP connection contract for tools like
    Claude Code, OpenWebUI, and other external MCP consumers.
    hal0 does not manage these tools — it documents how to wire them. #}
@@ -12,7 +12,7 @@ Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
 | Server | URL | Transport | Description |
 |--------|-----|-----------|-------------|
 | hal0-admin | `http://127.0.0.1:8080/mcp/admin/mcp` | `http` (POST-only) | Slot/model management, system admin, hardware probes |
-| hal0-memory | `http://127.0.0.1:8080/mcp/memory/mcp` | `http` (POST-only) | Cognee vector/graph memory, agent identity cards |
+| hal0-memory | `http://127.0.0.1:8080/mcp/memory/mcp` | `http` (POST-only) | Hindsight vector/graph memory, agent identity cards |
 
 **Important:** hal0 MCP servers only support plain HTTP POST transport. Do NOT use `streamable-http` or SSE — these will fail with HTTP 406 or 405.
 
@@ -20,7 +20,7 @@ Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
 
 > **Planned:** a `hal0 connect <client>` helper that auto-discovers MCP
 > servers and wires them into your client (with `--dry-run` /
-> `--repair`) is planned per ADR-0021 but **not yet implemented** —
+> `--repair`) is planned but **not yet implemented** —
 > running it today yields a "no such command" error. Until it ships,
 > wire clients with the manual configuration below.
 
@@ -84,10 +84,10 @@ Should return the tool count (typically 25+ for admin, 4 for memory).
 | HTTP 405 Method Not Allowed | URL missing `/mcp` suffix (e.g. `/mcp/admin`) | Use full path: `/mcp/admin/mcp` |
 | HTTP 406 Not Acceptable | Using `streamable-http` transport (sends GET + POST) | Use `http` transport (POST-only) |
 | Connection refused | hal0 API not running | `systemctl status hal0-api` |
-| Unknown tool | MCP server not connected | Re-apply the manual configuration above (the `hal0 connect <client>` helper is planned, ADR-0021, not yet shipped) |
+| Unknown tool | MCP server not connected | Re-apply the manual configuration above (the `hal0 connect <client>` helper is planned, not yet shipped) |
 
 ## See Also
 
 - `/etc/hal0/AGENTS.md` — agent-facing project context
 - `/root/.dexto/agents/hal0-services/agent.yml` — working reference config
-- `hal0 connect --list` (planned, ADR-0021) — will list all supported connectors and their status once implemented
+- `hal0 connect --list` (planned) — will list all supported connectors and their status once implemented

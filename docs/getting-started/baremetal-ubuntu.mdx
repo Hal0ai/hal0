@@ -51,19 +51,23 @@ on the host kernel command line:
 
 ```sh
 # /etc/default/grub — append to GRUB_CMDLINE_LINUX_DEFAULT
-amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856
+amd_iommu=off ttm.pages_limit=32505856
 ```
 
 ```sh
 sudo update-grub && sudo reboot
 ```
 
-`amdgpu.gttsize` is in **MiB** (`126976` ≈ 124 GiB); `ttm.pages_limit` is
-in **4 KiB pages** (`32505856` ≈ 124 GiB — keep it equal to `gttsize`);
-`amd_iommu=off` is worth ~5–12% on this workload. These reference values
-target a 128 GB box and leave only ~4 GB for the host — scale both down
-together to reserve more host RAM. After rebooting, confirm with
-`cat /proc/cmdline`.
+`ttm.pages_limit` is the GTT cap in **4 KiB pages** (`32505856` ≈ 124 GiB);
+`amd_iommu=off` is worth ~5–12% on this workload. This reference value
+targets a 128 GB box and leaves only ~4 GB for the host — scale it down to
+reserve more host RAM. After rebooting, confirm with `cat /proc/cmdline`.
+
+<Aside type="caution">
+The old `amdgpu.gttsize` parameter is **deprecated** — it is ignored on
+Linux 6.10+ (the GTT window is now driven entirely by `ttm.pages_limit`).
+Set only `ttm.pages_limit`; drop `amdgpu.gttsize` from any older guide.
+</Aside>
 
 ## 3. Install hal0
 

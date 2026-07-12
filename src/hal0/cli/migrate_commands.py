@@ -4,8 +4,7 @@ This module hosts disk-layout reshapes that v0.2 needs the operator to
 run once. Today there is exactly one such command: ``model-layout``,
 which reorganises the v0.1.x ad-hoc model store at ``/mnt/ai-models/``
 into the canonical ``<recipe>/<capability>/`` tree rooted at
-``/var/lib/hal0/models/`` (see the v0.2 adoption plan §6.1 + ADR-0008
-§7).
+``/var/lib/hal0/models/`` (see the v0.2 adoption plan §6.1).
 
 Design contract (from plan §11 PR-7):
 

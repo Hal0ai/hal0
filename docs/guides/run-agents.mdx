@@ -62,7 +62,7 @@ hal0 agent install opencode
 ```
 
 This runs `installer/agents/opencode.sh` (a track-latest `npm install -g
-opencode-ai`; no version pin per ADR-0004 §3) and writes
+opencode-ai`; no version pin, by design) and writes
 `~/.config/opencode/opencode.json` wiring:
 
 - **Provider** — hal0 as an `@ai-sdk/openai-compatible` provider at

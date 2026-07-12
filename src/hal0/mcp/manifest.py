@@ -69,7 +69,7 @@ _FETCH_TIMEOUT = httpx.Timeout(connect=4.0, read=6.0, write=2.0, pool=6.0)
 # ── SSRF guard ──────────────────────────────────────────────────────────────
 #
 # The manifest fetcher is reachable through ``GET /api/mcp/resolve?url=…``
-# with no auth on the LAN (ADR-0012). Without a guard, an unauthenticated
+# with no auth on the LAN. Without a guard, an unauthenticated
 # caller can use hal0 as a blind probe against the LAN, IMDS, and loopback.
 # We enforce a deny-list at the URL/IP layer and refuse to follow redirects
 # (a 30x to a private host would otherwise bypass the pre-flight check).

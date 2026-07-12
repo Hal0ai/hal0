@@ -13,7 +13,7 @@ stream is split by concern):
 - ``GET /api/slots/{name}/logs/stream`` — line-by-line journal tail
   for the slot's systemd unit.
 
-PR-11 (plan §11 + ADR-0008 §5): list responses are enriched with
+PR-11: list responses are enriched with
 config-derived fields (drawer seeds, declared backend) plus live
 container state (``container_status`` / ``container_health``), and a
 ``coresident_group`` ID grouping slots that back the same FLM process
@@ -44,7 +44,7 @@ from hal0.slot_view import (
 )
 from hal0.slots.manager import Slot, SlotManager
 
-# Auth was removed in ADR-0012. All routes are open on the local network.
+# Auth was removed by design. All routes are open on the local network.
 
 router = APIRouter()
 

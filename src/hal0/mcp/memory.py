@@ -1,14 +1,14 @@
-"""hal0 memory MCP server — Cognee-backed long-term memory tools.
+"""hal0 memory MCP server — Hindsight-backed long-term memory tools.
 
-Per ADR-0005 §2, memory is a first-class MCP surface so bundled and
+By design, memory is a first-class MCP surface so bundled and
 external agents share one persistence layer for "what the user
-remembers about themselves and their hal0". The wrapper around Cognee
-itself lives in :mod:`hal0.memory.cognee_wrapper` (Memory-engine team
-owns that module); this module exposes the four MCP tools and the
-schema validation that bridges agent calls to the wrapper.
+remembers about themselves and their hal0". The active engine is
+resolved through :class:`hal0.memory.MemoryProvider` (Hindsight, with a
+PgVector boot-degrade fallback); this module exposes the four MCP tools
+and the schema validation that bridges agent calls to the provider.
 
-Tool catalog (ADR-0005 §2)
---------------------------
+Tool catalog
+------------
 
 ::
 
@@ -17,7 +17,7 @@ Tool catalog (ADR-0005 §2)
     memory_list    — paginated walk; returns {items, next_cursor}
     memory_delete  — remove by id(s); returns {deleted}
 
-Per ADR-0005 §2 the v0.2 schema is rich from day 1 so we don't pay a
+By design the v0.2 schema is rich from day 1 so we don't pay a
 schema-versioning tax in Phase 9::
 
     memory_add(text, dataset="shared", tags=[], metadata={},
@@ -25,8 +25,8 @@ schema-versioning tax in Phase 9::
         → {id: str, timestamp: iso8601, operation_id?: str}
         # `source` is auto-extracted server-side from the caller's
         # client_id (Bearer-derived). Clients CANNOT pass `source`
-        # themselves — that's how ADR-0005 §5 keeps the audit trail
-        # forensically grounded. `document_id` reuse upserts one
+        # themselves — that keeps the audit trail forensically
+        # grounded. `document_id` reuse upserts one
         # logical document; `operation_id` surfaces async ingestion.
 
     memory_search(query, limit=10, dataset="shared"|list, tags=[],
@@ -40,7 +40,7 @@ schema-versioning tax in Phase 9::
     memory_delete(ids: list[str], dataset=null)
         → {deleted: int}
 
-Namespace rule (ADR-0005 §3): writes default to dataset ``shared``;
+Namespace rule: writes default to dataset ``shared``;
 clients opting into private mode at the transport layer promote to
 ``private:<client_id>``. We resolve the effective dataset in
 :func:`_resolve_dataset` so callers don't have to know the rule.
@@ -98,11 +98,11 @@ log = structlog.get_logger(__name__)
 
 
 class MemorySchemaError(ValueError):
-    """Raised when a memory tool call's args don't match the ADR-0005 §2 schema."""
+    """Raised when a memory tool call's args don't match the tool schema."""
 
 
 # document_id becomes a URL path segment on the engine's documents API —
-# same bounded grammar as agent ids (ADR-0005 §5) keeps it traversal-free.
+# same bounded grammar as agent ids keeps it traversal-free.
 _AGENT_ID_LIKE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
 
@@ -129,7 +129,7 @@ def _optional(args: dict[str, Any], key: str, type_: type) -> Any:
 def _normalise_tags(value: Any) -> list[str]:
     """Tags may arrive as None, list, or stringified CSV (some MCP clients
     don't speak JSON-array literals well). Normalise to list[str] (possibly
-    empty) per ADR-0005 §2's default of ``[]``.
+    empty) matching the schema's default of ``[]``.
     """
     if value is None:
         return []
@@ -141,7 +141,7 @@ def _normalise_tags(value: Any) -> list[str]:
     raise MemorySchemaError(f"tags must be list[str] or comma-string, got {type(value).__name__}")
 
 
-# ── Namespace resolution (ADR-0005 §3) ───────────────────────────────────────
+# ── Namespace resolution ─────────────────────────────────────────────────────
 #
 # The actual rule lives in :mod:`hal0.memory.namespace` so the REST shims
 # in ``hal0.api.routes.memory`` apply the same logic (issue #317). This
@@ -171,7 +171,7 @@ def _iso_now() -> str:
 # ── Tool implementations ─────────────────────────────────────────────────────
 #
 # Each helper returns the JSON payload an MCP client should see. They
-# share one CogneeWrapper instance held by the caller — we pass it in
+# share one MemoryProvider instance held by the caller — we pass it in
 # rather than importing globally so tests can substitute a mock.
 
 
@@ -185,7 +185,7 @@ async def _memory_add(
     """memory_add(text, dataset?, tags?, metadata?, document_id?)
     → {id, timestamp, operation_id?}.
 
-    ADR-0005 §2 schema:
+    Schema:
       - ``text``: required, non-empty str.
       - ``dataset``: defaults to ``"shared"``; ``--private`` promotes
         to ``private:<client_id>``.
@@ -195,8 +195,8 @@ async def _memory_add(
         across adds to upsert the same logical document (conversation
         evolution). Same identity grammar as agent ids.
       - ``source``: NOT accepted from the caller. Server-injected from
-        ``client_id`` so callers cannot lie about their identity
-        (ADR-0005 §5 audit grounding).
+        ``client_id`` so callers cannot lie about their identity,
+        keeping the audit trail grounded.
 
     ``operation_id`` appears when the engine ingests asynchronously
     (Hindsight retain) — poll it via the engine-admin operations surface.
@@ -248,13 +248,13 @@ async def _memory_search(
     """memory_search(query, limit=10, dataset="shared"|list, tags=[],
                      before=null, after=null) → {results}.
 
-    CogneeWrapper contract::
+    MemoryProvider contract::
 
-        await wrapper.search(query, limit, dataset, tags, before, after)
+        await provider.search(query, limit, dataset, tags, before, after)
             -> list[ItemDict]
 
     ``dataset`` MAY be a list — a private-mode client sees both
-    ``shared`` + their own ``private:<client_id>`` per ADR-0005 §3.
+    ``shared`` + their own ``private:<client_id>``.
     """
     query = _require(args, "query", str)
     if not query.strip():
@@ -322,7 +322,7 @@ async def _memory_delete(
 ) -> dict[str, Any]:
     """memory_delete(ids, dataset?) → {deleted: int}.
 
-    Returns the count of deleted rows per ADR-0005 §2. ``ids`` must be
+    Returns the count of deleted rows. ``ids`` must be
     non-empty. ``dataset`` optionally directs the engine's bank sweep
     (e.g. ``project:<id>`` items live outside the default
     shared + own-private sweep). Approval-gating for bulk deletes
@@ -347,7 +347,7 @@ async def _memory_delete(
     deleted_raw = result.get("deleted", len(ids))
     # Accept either a count or the list of deleted ids from the wrapper
     # so we're forgiving of either contract while still returning the
-    # ADR-0005 count shape.
+    # expected count shape.
     if isinstance(deleted_raw, list):
         deleted_count = len(deleted_raw)
     elif isinstance(deleted_raw, int):
@@ -421,7 +421,7 @@ def make_dispatcher(
 
     The admin server passes this into :func:`hal0.mcp.admin.dispatch`
     via ``memory_dispatcher=`` so memory tool calls bypass the HTTP
-    round-trip and hit Cognee directly in-process. Validation errors
+    round-trip and hit the memory engine directly in-process. Validation errors
     surface as the same error envelope shape the REST routes use.
 
     ``client_id_resolver`` is a 0-arg callable that returns the

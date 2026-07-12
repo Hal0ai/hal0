@@ -1,6 +1,6 @@
 """Loopback-only guard helpers for the OpenRouter OAuth callback.
 
-Quoting ADR-0020:
+The callback is loopback-only by design:
 
 > The OAuth PKCE callback URL is constrained to
 > ``http://127.0.0.1:<port>/api/openrouter/auth/callback``.
@@ -19,7 +19,7 @@ PKCE exchange flow) inherits a well-behaved foundation.
 The loopback guard is implemented per-route, not as a global
 middleware, because every other hal0-api surface intentionally accepts
 LAN traffic. A global middleware would force allowlisting the rest of
-the API, inverting the decision recorded in ADR-0012.
+the API, undoing that open-LAN posture.
 """
 
 from __future__ import annotations

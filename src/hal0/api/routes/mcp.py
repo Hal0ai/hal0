@@ -58,8 +58,8 @@ class McpNotImplemented(Hal0Error):
     """``POST /{id}/{action}`` (start / stop / restart) still stubs here.
 
     Install / uninstall / config-patch landed in #305; start / stop /
-    restart need the still-pending process-supervisor layer (ADR-0015,
-    not yet written). The code is the explicit
+    restart need the still-pending process-supervisor layer, not yet
+    written. The code is the explicit
     ``mcp.supervisor_unavailable`` so the dashboard can key on it and
     render a "supervisor not implemented yet" affordance distinct from a
     generic 501.
@@ -73,7 +73,7 @@ class McpNotImplemented(Hal0Error):
 #
 # Mirrors the prototype's ``MCP_CATALOG`` in ``ui/src/dash/mcp-data.jsx``
 # so the v3 page renders the same set of installable servers it did
-# while wired to the mock. ADR-0013 will eventually replace this with a
+# while wired to the mock. This will eventually be replaced with a
 # real registry probe; for v0.3-alpha the static list is enough to let
 # operators browse + reason about what they could install.
 
@@ -630,7 +630,7 @@ def _client_role(client_id: str) -> str:
 async def list_catalog() -> dict[str, Any]:
     """Return the installable-MCPs catalog.
 
-    Static module-level constant for v0.3-alpha — ADR-0013's
+    Static module-level constant for v0.3-alpha — future
     ``mcp_client.py`` work will eventually swap in a live registry
     probe. The shape matches the prototype's ``MCP_CATALOG`` so the
     dashboard's InstallDrawer renders unchanged.

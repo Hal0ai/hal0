@@ -3,8 +3,7 @@
 Mirrors :mod:`hal0.cli.slot_commands` shape (Typer sub-app + thin HTTP
 client). The lifecycle subcommands hit the routes in
 :mod:`hal0.api.routes.agents`; the ``approvals`` sub-sub-app hits the
-MCP-backend's approval queue at ``/api/agent/approvals`` (shape per
-ADR-0004 §5 "Pending items").
+MCP-backend's approval queue at ``/api/agent/approvals``.
 """
 
 from __future__ import annotations
@@ -63,7 +62,7 @@ def agent_install(
         "--switch",
         help=(
             "If another agent is already installed, atomically uninstall it before "
-            "installing this one (single-pick enforced; ADR-0004 §2)."
+            "installing this one (single-pick enforced)."
         ),
     ),
     gateway: bool = typer.Option(
@@ -464,7 +463,7 @@ def agent_uninstall(
         False,
         "--keep-memory",
         help=(
-            "Preserve the agent's private:<agent_id> Cognee namespace + "
+            "Preserve the agent's private:<agent_id> memory namespace + "
             "its identity card. Default: full teardown including memory."
         ),
     ),
@@ -493,7 +492,7 @@ def agent_uninstall(
 
     # Memory cleanup BEFORE we tear down the agent surface so a failed
     # memory call doesn't leave half-state. Skipped on --keep-memory
-    # (per #246 + ADR-0011 §6 — re-install reuses the existing card).
+    # (per #246 — re-install reuses the existing card).
     if name == "hermes" and not keep_memory:
         outcome = _uninstall_hermes_memory()
         _warn_memory_outcome(outcome)
@@ -730,7 +729,7 @@ def agent_list(
     console.print(table)
 
 
-# ── Approvals (MCP-backend owns the route shape; CLI assumes ADR-0004 §5) ────
+# ── Approvals (MCP-backend owns the route shape) ────────────────────────────
 
 
 def _fmt_enqueued_at(value: Any) -> str:
@@ -863,10 +862,10 @@ def approvals_deny(
 
 @app.command("peers")
 def agent_peers() -> None:
-    """List discoverable agent identity cards (ADR-0011 §6).
+    """List discoverable agent identity cards.
 
     Thin wrapper over ``memory_search`` against the dedicated
-    ``agents`` Cognee dataset. Sibling of ``hal0 agent list`` (which
+    ``agents`` memory dataset. Sibling of ``hal0 agent list`` (which
     shows installed bundled agents on this host); ``peers`` shows
     every card published into the federated registry.
     """
@@ -1082,7 +1081,7 @@ def agent_upgrade(
     raise typer.Exit(rc)
 
 
-# Note: post-ADR-0012 there is no `rotate-token` subcommand. The hal0
+# Note: there is no `rotate-token` subcommand. The hal0
 # daemon has no auth; agent identity flows via the X-hal0-Agent header
 # the wrapper exports from $HAL0_AGENT_ID. See #246 sharpening's second
 # correction comment for the supersede.

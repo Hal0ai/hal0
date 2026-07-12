@@ -235,7 +235,7 @@ class StackApplyEngine:
             device = canonical_device(entry.device)
             if device:
                 updates["device"] = device
-                # Deprecated field, kept for one release — see ADR-0006 §7.
+                # Deprecated field, kept for one release.
                 legacy = device_to_legacy_backend(device)
                 if legacy:
                     updates["backend"] = legacy

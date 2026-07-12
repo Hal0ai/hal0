@@ -40,15 +40,15 @@ from hal0.upstreams.filters import apply_filters
 log = structlog.get_logger("hal0-v1")
 
 # Inference router. Mounted by hal0.api.create_app() on /v1.
-# Auth was removed in ADR-0012; the server is open on the local network.
+# Auth was removed; the server is open on the local network.
 router = APIRouter()
 
 # Public probe router — auth-free. Mounted on the same /v1 prefix.
 # OpenAI clients (OpenWebUI, third-party SDKs) GET /v1/models before
 # they have anywhere to send an Authorization header; gating it would
-# break the "drop in an OpenAI-shaped base_url" UX. Per ADR-0001 Child
-# B, publicness is declared by NOT attaching an auth dep — not by
-# allowlisting the path in a frozenset.
+# break the "drop in an OpenAI-shaped base_url" UX. Publicness is
+# declared by NOT attaching an auth dep — not by allowlisting the path
+# in a frozenset.
 public_router = APIRouter()
 
 
@@ -699,8 +699,7 @@ async def list_models(
       represented exactly once, by its alias.
 
     PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
-    catalog before sending Authorization headers continue to work after
-    ADR-0001 Child B.
+    catalog before sending Authorization headers continue to work.
     """
     from hal0.api import hal0_chat_slot_model_ids, hal0_slot_alias_models
 
@@ -829,8 +828,7 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # PR-16: OmniRouter opt-in. When the body carries ``"omni": true``
     # AND we can resolve the request to a known chat slot whose model
     # advertises ``tool-calling``, route through the client-side
-    # tool-calling loop instead of doing a direct passthrough. Plan §7
-    # + ADR-0008 §8.
+    # tool-calling loop instead of doing a direct passthrough.
     #
     # The opt-in mechanism is a body field (vs query param) because:
     #   1. ``_dispatch_and_forward`` already parses the body, so we
@@ -892,7 +890,7 @@ async def _is_npu_trio_request(
 ) -> bool:
     """Detect whether this request should go through the FLM trio router.
 
-    PR-19 (plan §5.2 + ADR-0009). We route to the trio when:
+    PR-19. We route to the trio when:
 
       1. The request body's ``model`` matches an enabled slot whose
          ``device == "npu"`` AND ``type == slot_type``. We look at both

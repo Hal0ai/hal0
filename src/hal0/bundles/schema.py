@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Fixed values from plan §8 / ADR-0010. Bumping these requires a v0.3 PR.
+# Fixed values from plan §8. Bumping these requires a v0.3 PR.
 SCHEMA_VERSION: int = 1
 
 

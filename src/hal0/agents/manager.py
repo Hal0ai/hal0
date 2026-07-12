@@ -1,4 +1,4 @@
-"""Bundled-agent lifecycle manager (Phase 8, ADR-0004 §2 + §6).
+"""Bundled-agent lifecycle manager (Phase 8).
 
 State on disk:
 
@@ -27,7 +27,7 @@ was still on disk (#346).
 Single-pick is enforced here, not in the API or CLI. ``install()``
 refuses to add a second agent unless ``switch=True``, in which case it
 performs an atomic uninstall-then-install so the operator never ends up
-with two bundled agents partially installed (ADR-0004 §2).
+with two bundled agents partially installed.
 
 The actual install work is delegated to per-agent driver modules
 (:mod:`hal0.agents.pi_coder`, :mod:`hal0.agents.hermes`) which in turn
@@ -64,13 +64,13 @@ class AgentNotFoundError(AgentError):
 
 class AgentAlreadyInstalledError(AgentError):
     """Raised when ``install()`` is called and a different agent is already
-    bundled (single-pick enforcement, ADR-0004 §2). Pass ``switch=True``
+    bundled (single-pick enforcement). Pass ``switch=True``
     to atomically swap."""
 
 
 class HermesUpstreamMissingError(AgentError):
     """Raised by the Hermes driver when the hal0-owned ``hal0-hermes``
-    wrapper is not installed or not functional (ADR-0004 §6). The
+    wrapper is not installed or not functional. The
     wrapper is hal0's integration seam against upstream
     NousResearch/hermes-agent; install path refuses to wire an env file
     the wrapper can't source rather than half-wiring something that
@@ -455,7 +455,7 @@ class AgentManager:
             "agent": {
                 "name": name,
                 "installed_at": installed_at,
-                # Track-latest by design (ADR-0004 §3). No version pin.
+                # Track-latest by design. No version pin.
                 "version_pin": False,
             },
             "data_dir": str(self._data_dir(name)),

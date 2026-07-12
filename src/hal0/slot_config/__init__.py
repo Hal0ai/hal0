@@ -567,7 +567,7 @@ class SlotConfigStore:
             slot_backend = device_to_legacy_backend(selection.device)
             slot_device = canonical_device(selection.device)
             if slot_backend:
-                # Deprecated field, kept for one release — see ADR-0006 §7.
+                # Deprecated field, kept for one release.
                 updates["backend"] = slot_backend
             if slot_device:
                 updates["device"] = slot_device

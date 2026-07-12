@@ -12,7 +12,7 @@ We do NOT invent model names.
 
 Device choice respects the canonical device enum
 (``hal0.model_meta.VALID_DEVICES`` — ``gpu-rocm``, ``gpu-vulkan``,
-``cpu``, ``npu``, ADR-0006 §7). The output also emits the legacy
+``cpu``, ``npu``). The output also emits the legacy
 ``backend`` field for one release so a downgrade to v0.1.x reads the
 recommendation file cleanly. Both translations (backend→device, device→
 default profile) come from the canonical maps in :mod:`hal0.model_meta`.
@@ -225,8 +225,8 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     # more flat hard-coded 8192. (#513)
     context_size = _resolve_primary_ctx(model_id)
 
-    # v0.2: emit ``device`` as the canonical hardware-preference field
-    # (ADR-0006 §7). ``backend`` is also emitted so a downgrade to
+    # v0.2: emit ``device`` as the canonical hardware-preference field.
+    # ``backend`` is also emitted so a downgrade to
     # v0.1.x can still read the file before re-running the recommender.
     device = map_backend_to_device(backend)
 

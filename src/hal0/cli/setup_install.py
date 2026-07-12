@@ -214,7 +214,7 @@ async def _apply_via_api(sel) -> None:
     """API-up path: POST the selections to the live service.
 
     ``apply-selections`` is idempotent server-side: re-applying over
-    already-created slots is a per-slot no-op (ADR-0010), and the route is
+    already-created slots is a per-slot no-op, and the route is
     documented to be safely re-runnable at any time. A ``409 Conflict`` from
     this endpoint therefore does NOT mean setup failed — it means the live
     service reports the install as already applied, or that another apply is

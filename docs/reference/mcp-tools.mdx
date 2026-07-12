@@ -1,6 +1,6 @@
 ---
 title: MCP tools
-description: Reference for hal0's two MCP servers — memory and admin tools, classified as autonomous-read, autonomous-write, or approval-gated per ADR-0004 and ADR-0005.
+description: Reference for hal0's two MCP servers — memory and admin tools, classified as autonomous-read, autonomous-write, or approval-gated by blast radius.
 sidebar:
   order: 60
 ---
@@ -20,7 +20,7 @@ autonomous-write, or approval-gated. Gated tools enqueue for owner approval
 before they run; autonomous tools execute immediately.
 
 <Aside type="note">
-hal0 has no built-in auth (ADR-0012) — there are no bearer tokens. When Hermes
+hal0 has no built-in auth — there are no bearer tokens. When Hermes
 or another bundled agent calls the MCP server, it identifies itself with the
 `X-hal0-Agent` header (set from `$HAL0_AGENT_ID` by the agent wrapper). The
 server stamps that identity on every audit row and carries it onto the internal

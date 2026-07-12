@@ -109,7 +109,7 @@ class DeviceMeta:
     description: str
 
 
-#: The canonical devices (ADR-0006 §7, gpu-cuda added by the GPU
+#: The canonical devices (gpu-cuda added by the GPU
 #: generalization wave), with per-device metadata.
 #: Ordering is presentation order for pickers: recommended first, then the
 #: fallbacks (Vulkan, then the experimental CUDA path), then the non-GPU
@@ -192,7 +192,8 @@ RUNTIME_FAMILIES: tuple[str, ...] = ("llama-server", "flm", "kokoro", "qwen3tts"
 
 #: Legacy ``backend`` token → canonical ``device``. Used by the SlotConfig
 #: model-validator (auto-promote on load), the capabilities v1→v2 migration,
-#: and the capabilities on-load auto-migration. Keep aligned with ADR-0006 §7.
+#: and the capabilities on-load auto-migration. Keep aligned with the
+#: canonical device enum above.
 #: moonshine/kokoro map to ``cpu`` because those toolboxes were always CPU
 #: runtimes — the legacy enum overloaded ``backend`` with provider identity.
 #: Canonical device ids are included idempotently so both SlotConfig.backend
@@ -485,7 +486,7 @@ def capability_from_filename(name: str) -> str | None:
 
 # ── device → recipe/backend mapping ──────────────────────────────────────────
 #
-# Plan §4.1 + ADR-0008 §6 locked the four-way mapping; the result feeds
+# By design, the four-way mapping is locked; the result feeds
 # container profile/argv derivation. ``gpu-*`` slots load through
 # llama.cpp with an explicit backend flag; ``cpu`` is the same recipe
 # with CPU-only inference; ``npu`` uses the FLM recipe (NPU FastFlowLM)
@@ -540,7 +541,7 @@ def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
 def canonical_device(value: str) -> str:
     """Normalise a backend/device string to the canonical ``device`` enum.
 
-    After ADR-0006 §7 both the slot TOML and the capabilities catalog
+    Both the slot TOML and the capabilities catalog
     speak the same enum (``gpu-rocm | gpu-vulkan | cpu | npu``), so this
     is a near-identity. It still tolerates a legacy ``backend``-style
     input (``vulkan|rocm|flm|moonshine|kokoro``) for forward
