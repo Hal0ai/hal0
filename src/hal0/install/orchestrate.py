@@ -270,11 +270,27 @@ def _sentinel_path() -> Path:
 
 
 def mark_first_run_done() -> None:
+    """Write the first-run sentinel. Best-effort, like ``_persist_store_dir``
+    and the other setup-walk helpers: a non-root interactive ``hal0 setup``
+    run (e.g. while troubleshooting a down hal0-api, which routes ``apply_setup``
+    through the in-process path instead of the root-owned API) can't write
+    under ``/var/lib/hal0`` and would otherwise blow up with an unguarded
+    ``PermissionError`` after already creating/skipping every slot — the
+    operator needs the setup summary, not a raw traceback."""
     p = _sentinel_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text("")
-    tmp.replace(p)  # atomic
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text("")
+        tmp.replace(p)  # atomic
+    except OSError as exc:
+        log.warning(
+            "could not write first-run sentinel %s (%s) — re-run `hal0 setup` "
+            "with sudo/root, or ignore if hal0-api is already up and tracking "
+            "first-run state itself",
+            p,
+            exc,
+        )
 
 
 def _nearest_existing_ancestor(path: str) -> Path | None:

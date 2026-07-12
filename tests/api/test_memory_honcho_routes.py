@@ -398,3 +398,44 @@ def test_post_honcho_sync_run_reports_failure(client: TestClient) -> None:
     body = r.json()
     assert body["started"] is False
     assert "unit not found" in body["note"]
+
+
+# ── PUT /api/memory/provider (unreachable-honcho remediation) ──────────────
+
+
+def test_provider_switch_unreachable_and_unprovisioned_points_at_installer(
+    client: TestClient,
+) -> None:
+    """Default install (never opted into Honcho): don't tell the operator to
+    ``services start`` a unit that was never laid down — point at the real
+    provisioning path instead."""
+    with (
+        patch(f"{_ROUTE}._probe_health", new_callable=AsyncMock, return_value=False),
+        patch(f"{_ROUTE}._HONCHO_UNIT_PATH", new=Path("/nonexistent/hal0-honcho.service")),
+    ):
+        r = client.put("/api/memory/provider", json={"agent": "hermes", "provider": "honcho"})
+    assert r.status_code == 409
+    body = r.json()
+    message = body["error"]["message"]
+    assert "hal0 services start honcho" not in message
+    assert "HAL0_INSTALL_HONCHO=1" in message
+    assert body["error"]["details"]["provisioned"] is False
+
+
+def test_provider_switch_unreachable_but_provisioned_points_at_services_start(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Honcho was provisioned (unit exists) but is merely stopped/disabled:
+    the ``services start`` remediation is still valid here."""
+    fake_unit = tmp_path / "hal0-honcho.service"
+    fake_unit.write_text("")
+    with (
+        patch(f"{_ROUTE}._probe_health", new_callable=AsyncMock, return_value=False),
+        patch(f"{_ROUTE}._HONCHO_UNIT_PATH", new=fake_unit),
+    ):
+        r = client.put("/api/memory/provider", json={"agent": "hermes", "provider": "honcho"})
+    assert r.status_code == 409
+    body = r.json()
+    message = body["error"]["message"]
+    assert "hal0 services start honcho" in message
+    assert body["error"]["details"]["provisioned"] is True

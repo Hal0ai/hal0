@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
@@ -371,6 +373,62 @@ def test_mark_first_run_done_writes_sentinel(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrate, "_sentinel_path", lambda: sentinel)
     orchestrate.mark_first_run_done()
     assert sentinel.exists()
+
+
+def test_mark_first_run_done_warns_instead_of_raising_on_permission_error(
+    tmp_path, caplog, monkeypatch
+):
+    """Non-root interactive ``hal0 setup`` against a root-owned
+    ``/var/lib/hal0`` (e.g. troubleshooting a down hal0-api, which routes
+    ``apply_setup`` through the in-process path) must not blow up with a raw
+    ``PermissionError`` after the slot walk already ran — it should log and
+    return so the caller still gets its ``SetupResult``."""
+    from hal0.install import orchestrate
+
+    sentinel = tmp_path / "unwritable" / ".first_run_done"
+    monkeypatch.setattr(orchestrate, "_sentinel_path", lambda: sentinel)
+
+    def _raise_mkdir(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
+    with caplog.at_level("WARNING", logger="hal0.install.orchestrate"):
+        orchestrate.mark_first_run_done()  # must not raise
+    assert "first-run sentinel" in caplog.text
+    assert not sentinel.exists()
+
+
+async def test_apply_setup_survives_sentinel_permission_error(tmp_hal0_home, tmp_path, monkeypatch):
+    """``apply_setup`` still returns a normal ``SetupResult`` (not a raw
+    traceback) end-to-end when the sentinel write hits a ``PermissionError``
+    — the non-root + API-down combo (issue: non-root interactive
+    ``hal0 setup`` crashing after already creating/skipping every slot)."""
+    from hal0.install import orchestrate
+
+    sentinel = tmp_path / "unwritable" / ".first_run_done"
+    monkeypatch.setattr(orchestrate, "_sentinel_path", lambda: sentinel)
+
+    def _raise_mkdir(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
+
+    sel = Selections(
+        storage_dir="",
+        slots=[SlotSelection(capability="embed", slot_name="embed", port=8083, model_id=None)],
+        extensions={},
+        npu_opt_in=False,
+    )
+    result = await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=_FakeSlotManager(),
+        registry={},
+        jobs={},
+        write_sentinel=True,
+    )
+    assert result.slots[0].created is True
+    assert not sentinel.exists()
 
 
 def test_install_extensions_dispatches(monkeypatch):
