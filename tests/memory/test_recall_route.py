@@ -24,6 +24,7 @@ class RecordingProvider(FakeMemoryProvider):
         max_tokens=4096,
         dataset="shared",
         tags=None,
+        tags_match=None,
         client_id=None,
     ):
         self.recall_calls.append({"query": query, "max_tokens": max_tokens})

@@ -36,6 +36,24 @@ async def test_retain_recall_delete_hit_v1_bank_paths():
 
 
 @pytest.mark.asyncio
+async def test_delete_document_percent_encodes_id_in_path():
+    """A deterministic ``<agent>:<session_id>`` document id (colon) must be
+    percent-encoded in the DELETE URL path so reserved chars can't mangle it."""
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(200, json={"memory_units_deleted": 1})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177") as http:
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+        await client.delete_document(bank_id="shared", document_id="hermes:s7")
+
+    assert seen == ["/v1/default/banks/shared/documents/hermes%3As7"]
+
+
+@pytest.mark.asyncio
 async def test_list_memories_hits_list_endpoint_and_returns_json():
     seen: list[tuple[str, str]] = []
     payload = {

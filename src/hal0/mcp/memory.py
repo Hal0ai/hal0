@@ -389,12 +389,14 @@ async def _memory_recall(
         raise MemorySchemaError("dataset must be str | list[str] | null")
     tags = _normalise_tags(args.get("tags"))
     types = args.get("types")
+    tags_match = _optional(args, "tags_match", str)
     results = await wrapper.recall(
         query=query,
         types=types,
         max_tokens=max_tokens,
         dataset=dataset,
         tags=tags,
+        tags_match=tags_match,
         client_id=client_id,
     )
     return {"results": list(results)}
@@ -647,6 +649,7 @@ def build_server(
         types: list[str] | None = None,
         dataset: str | list[str] | None = None,
         tags: list[str] | str | None = None,
+        tags_match: str | None = None,
         args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await dispatcher(
@@ -658,6 +661,7 @@ def build_server(
                 types=types,
                 dataset=dataset,
                 tags=tags,
+                tags_match=tags_match,
             ),
         )
 

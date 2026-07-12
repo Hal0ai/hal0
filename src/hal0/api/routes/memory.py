@@ -819,6 +819,7 @@ async def memory_recall(request: Request) -> dict[str, Any]:
         max_tokens=int(body.get("max_tokens", 4096)),
         dataset=dataset,
         tags=body.get("tags") or [],
+        tags_match=body.get("tags_match"),
         client_id=agent_id if agent_id != "anonymous" else None,
     )
     return {"items": items}
