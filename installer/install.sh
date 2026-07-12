@@ -277,14 +277,27 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
 fi
 
 # preflight_python returns 1 when python is missing OR the version is
-# outside 3.11–3.14 (it logs an `err` / `warn` itself). The installer
-# only treats *missing* python as fatal — a wrong-version warning is OK
-# because pip may still work. We disambiguate by re-checking PATH.
+# below hal0's floor (pyproject.toml requires-python >=3.12; it logs an
+# `err`/`warn` itself). A below-floor interpreter is NOT survivable — pip
+# install "${REPO_ROOT}" always fails on it — so unlike a merely-missing
+# python (which just needs installing per the hint below), we actively try
+# to resolve or auto-install a compatible interpreter (mirrors the
+# Hindsight venv's resolve_hindsight_python) instead of limping ahead only
+# to die minutes later, deep inside "pip install", on Debian 12 (python3
+# 3.11) / Ubuntu 22.04 (python3 3.10) — every stock LTS whose system
+# python3 predates 3.12.
 if ! preflight_python; then
     if ! command -v "${PY}" >/dev/null 2>&1; then
         die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
-    # Version warning already printed; keep going.
+    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
+        info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
+        PY="${resolved_py}"
+        export HAL0_PYTHON="${PY}"
+    else
+        die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
+  install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
+    fi
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always

@@ -9,7 +9,11 @@
 # Public API (all functions return 0 on success, non-zero on failure;
 # none of them exit the calling shell):
 #   preflight_systemd          — systemctl on PATH
-#   preflight_python           — `${PY:-python3}` resolvable + version 3.11–3.14
+#   preflight_python           — `${PY:-python3}` resolvable + version 3.12–3.14
+#                                (matches pyproject.toml's requires-python
+#                                floor). resolve_main_python (below) can
+#                                resolve/auto-install a compatible interpreter
+#                                when the default is below the floor.
 #   preflight_container_runtime — a usable container runtime (podman
 #                                preferred, docker accepted). Soft by
 #                                default (returns 0 with a warning, since
@@ -117,12 +121,81 @@ preflight_python() {
         err "could not read Python version from ${py}"
         return 1
     fi
-    if [[ "${ver}" =~ ^3\.(11|12|13|14)$ ]]; then
+    if [[ "${ver}" =~ ^3\.(12|13|14)$ ]]; then
         info "python: ${py} (${ver})"
         return 0
     fi
-    warn "python: ${py} (${ver}) — hal0 is tested on 3.11-3.14"
+    warn "python: ${py} (${ver}) — hal0 requires >=3.12 (pyproject.toml requires-python; tested on 3.12-3.14)"
     return 1
+}
+
+# ── Main hal0 venv interpreter selection ────────────────────────────────────
+# pyproject.toml pins `requires-python = ">=3.12"`. Stock Debian 12 (python3
+# = 3.11) and Ubuntu 22.04 (python3 = 3.10) both fail preflight_python's
+# floor check above; historically install.sh treated that as a non-fatal
+# warning ("pip may still work") and only hard-failed minutes later at
+# `pip install`, with a recovery hint (HAL0_PYTHON=python3.12) that's a dead
+# end on those distros' base repos. resolve_main_python finds — or, when
+# asked, installs — a floor-compatible interpreter up front, mirroring
+# resolve_hindsight_python's pattern for the (separate) Hindsight venv.
+MAIN_PY_MIN_MINOR=12
+
+# Best-effort: install python3.MAIN_PY_MIN_MINOR via the detected package
+# manager. Echoes the resolved interpreter name on success; returns 1
+# otherwise (nothing installed / no recognised manager / distro doesn't
+# package a pinned minor). Only fires when HAL0_PY_AUTOINSTALL=1 (install.sh
+# sets it) so `hal0 doctor` and read-only preflight never mutate the system.
+_main_py_autoinstall() {
+    [[ "${HAL0_PY_AUTOINSTALL:-0}" == "1" ]] || return 1
+    pkg_mgr >/dev/null 2>&1 || return 1
+    local fam cand; fam="$(distro_family)"
+    cand="python3.${MAIN_PY_MIN_MINOR}"
+    info "no Python >=3.${MAIN_PY_MIN_MINOR} found — attempting to install ${cand} (${fam})"
+    case "${fam}" in
+        debian)
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || return 1 ;;
+        fedora) "$(pkg_mgr)" install -y "${cand}" >/dev/null 2>&1 || return 1 ;;
+        # Arch/openSUSE/Alpine ship a single rolling python; a pinned older
+        # minor isn't reliably in the base repos (mirrors
+        # _hindsight_py_autoinstall's same limitation).
+        *) return 1 ;;
+    esac
+    if command -v "${cand}" >/dev/null 2>&1; then
+        info "installed ${cand} for the main hal0 venv"
+        printf '%s\n' "${cand}"
+        return 0
+    fi
+    return 1
+}
+
+# Resolve the interpreter the MAIN hal0 venv should be built with. Selection
+# order:
+#   1. the default ${HAL0_PY:-${HAL0_PYTHON:-python3}} when already >=3.12
+#   2. python3.14 → python3.12 already on PATH
+#   3. auto-install python3.12 (only when HAL0_PY_AUTOINSTALL=1)
+# Echoes the resolved interpreter name and returns 0, or returns 1 if none
+# could be resolved. Unlike resolve_hindsight_python there is no
+# metadata-gate bypass to fall back on here — `pip install "${REPO_ROOT}"`
+# hard-requires >=3.12 — so callers must die on a 1 return.
+resolve_main_python() {
+    local def="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
+    if command -v "${def}" >/dev/null 2>&1; then
+        local m; m="$(_py_minor "${def}" 2>/dev/null)" || m=""
+        if [[ -n "${m}" ]] && (( m >= MAIN_PY_MIN_MINOR )); then
+            printf '%s\n' "${def}"
+            return 0
+        fi
+    fi
+    local v cand
+    for v in 14 13 12; do
+        cand="python3.${v}"
+        if command -v "${cand}" >/dev/null 2>&1; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+    _main_py_autoinstall
 }
 
 # ── Hindsight interpreter selection ─────────────────────────────────────────
