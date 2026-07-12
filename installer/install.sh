@@ -1793,12 +1793,33 @@ else
         if podman compose version >/dev/null 2>&1; then
             hc_compose_ok=1
         else
-            warn "podman compose provider missing — attempting docker-compose-v2 install"
-            apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
+            # Package NAME differs by distro ecosystem (docker-compose-v2 on
+            # Debian/Ubuntu, podman-compose on Fedora/Arch/openSUSE) — route
+            # through lib/distro.sh's pkg_mgr/distro_family dispatch instead
+            # of a bare apt-get, which was a silent no-op on every non-apt
+            # host (the only unguarded apt-get in this script; every FLM
+            # apt-get elsewhere sits behind a `command -v apt-get` gate).
+            hc_compose_pkg=""
+            case "$(distro_family 2>/dev/null)" in
+                debian) hc_compose_pkg="docker-compose-v2" ;;
+                fedora | suse | arch) hc_compose_pkg="podman-compose" ;;
+            esac
+            if [[ -n "${hc_compose_pkg}" ]]; then
+                warn "podman compose provider missing — attempting to install ${hc_compose_pkg}"
+                case "$(pkg_mgr 2>/dev/null)" in
+                    apt-get) apt-get install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    dnf) dnf install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    yum) yum install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    zypper) zypper install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    pacman) pacman -S --noconfirm "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                esac
+            fi
             if podman compose version >/dev/null 2>&1; then
                 hc_compose_ok=1
             else
-                warn "podman compose still unavailable — Honcho will be skipped (install docker-compose-v2 and re-run)"
+                hc_compose_hint="$(pkg_install_cmd "${hc_compose_pkg:-docker-compose-v2}" 2>/dev/null \
+                    || echo "install a docker-compose-v2-compatible provider")"
+                warn "podman compose still unavailable — Honcho will be skipped (${hc_compose_hint} and re-run)"
             fi
         fi
 
