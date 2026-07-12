@@ -68,8 +68,16 @@ def test_spec_provider_vulkan_returns_none() -> None:
 # ── load_sync kokoro TTS path ──────────────────────────────────────────────────
 
 
-def test_tts_kokoro_slot_renders_spec_unit() -> None:
-    """TTS/kokoro slot: spec unit rendered with --model_path, no --device=, correct --publish."""
+def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
+    """TTS/kokoro slot: spec unit rendered with --model_path, no --device=, correct --publish.
+
+    Isolated via ``tmp_hal0_home`` (tests/conftest.py): ``_render_unit_text``
+    threads the live ``[slots].publish_host`` into every render
+    (``_slot_publish_host()`` -> ``load_hal0_config()``), so without this
+    fixture a host with a non-default ``publish_host`` (e.g. LAN-exposed
+    0.0.0.0) renders a different --publish= address than the default
+    asserted here.
+    """
     provider = ContainerProvider()
     slot_cfg = {
         "name": "tts",

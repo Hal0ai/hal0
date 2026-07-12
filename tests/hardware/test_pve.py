@@ -345,6 +345,22 @@ def test_pve_status_fetch_error_recorded(
 class TestDetectProxmoxHost:
     """detect_proxmox_host() is best-effort, signal-driven, and never raises."""
 
+    @pytest.fixture(autouse=True)
+    def _no_host_container_markers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Point the cgroup-v2 container markers at guaranteed-missing paths.
+
+        Without this, tests that don't explicitly set _PROC_1_ENVIRON /
+        _DEV_LXC / _RUN_SYSTEMD_CONTAINER fall through to the REAL host
+        paths (/proc/1/environ, /dev/.lxc, /run/systemd/container). On a
+        real Proxmox LXC those exist and leak host state into the test,
+        making bare-metal/pve-only fixtures falsely detect as LXC. Tests
+        that want the marker present override these with their own
+        monkeypatch.setattr calls after this fixture runs.
+        """
+        monkeypatch.setattr(pve, "_PROC_1_ENVIRON", tmp_path / "no-environ")
+        monkeypatch.setattr(pve, "_DEV_LXC", tmp_path / "no-dev-lxc")
+        monkeypatch.setattr(pve, "_RUN_SYSTEMD_CONTAINER", tmp_path / "no-systemd-container")
+
     def test_returns_detected_when_pve_kernel_and_lxc_cgroup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

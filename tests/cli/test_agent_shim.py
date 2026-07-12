@@ -267,8 +267,21 @@ class TestHermesEnv:
         # A stale python3.12 path inherited from an old unit drop-in does NOT
         # exist → must be replaced by the auto-resolved python3.14 dir. This is
         # the in-place fix for boxes that didn't re-run the installer.
+        #
+        # NB: the stale path must live under tmp_path — a hardcoded
+        # ``/var/lib/hal0/...`` literal collides with the real hermes install
+        # on a live hal0 box (this suite runs on the host itself), where that
+        # directory genuinely exists and would be wrongly "honored" as valid.
         dist = self._mk_web_dist(tmp_path, "python3.14")
-        stale = "/var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/hermes_cli/web_dist"
+        stale = str(
+            tmp_path
+            / "old-venv"
+            / "lib"
+            / "python3.12"
+            / "site-packages"
+            / "hermes_cli"
+            / "web_dist"
+        )
         with patch.dict(os.environ, {"HERMES_WEB_DIST": stale}):
             env = agent_shim._build_hermes_env(_cfg(venv=tmp_path))
         assert env["HERMES_WEB_DIST"] == str(dist)
@@ -287,7 +300,20 @@ class TestHermesEnv:
     def test_web_dist_env_dropped_when_missing(self, tmp_path: Path) -> None:
         # No built dist anywhere + a stale inherited value → pop it so hermes
         # falls back to its own __file__ default, not a known-wrong path.
-        stale = "/var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/hermes_cli/web_dist"
+        #
+        # NB: see test_stale_web_dist_env_replaced_with_resolved above — the
+        # stale path must be guaranteed not to exist, so it's scoped under
+        # tmp_path rather than a hardcoded absolute path that may be real on
+        # the host running the suite.
+        stale = str(
+            tmp_path
+            / "old-venv"
+            / "lib"
+            / "python3.12"
+            / "site-packages"
+            / "hermes_cli"
+            / "web_dist"
+        )
         with patch.dict(os.environ, {"HERMES_WEB_DIST": stale}):
             env = agent_shim._build_hermes_env(_cfg(venv=tmp_path))
         assert "HERMES_WEB_DIST" not in env

@@ -526,8 +526,18 @@ def test_switchover_is_not_env_gated(client: TestClient) -> None:
 
 
 def test_switchover_unwired_returns_503_not_501(client: TestClient) -> None:
+    # No arbiter wired → the route falls back to the legacy docker/systemd
+    # probe to check "already there". That probe hits the REAL host (systemctl
+    # is-active hal0-slot@img / docker inspect) unless stubbed, so on a box
+    # that actually has ComfyUI running this would resolve "already in
+    # generation mode" and short-circuit to a 200 noop before ever reaching
+    # the arbiter-unavailable check. Stub it down to "absent" (mirrors
+    # test_switchover_503_when_arbiter_unwired above) so the assertion holds
+    # regardless of what's really running on this machine.
     client.app.state.slot_manager = None
-    r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
 

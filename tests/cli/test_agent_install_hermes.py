@@ -55,6 +55,15 @@ def test_install_hermes_runs_prereqs_then_bootstrap_then_register(
     # it here so this test exercises only the toolchain→bootstrap→register order.
     monkeypatch.setattr("shutil.which", lambda _n: None)
     monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    # _chown_hermes_trees_to_agent_user() only no-ops when euid != 0 OR the
+    # `hal0` agent user doesn't exist. On a real hal0 box (running as root,
+    # with the agent user provisioned and its trees already present on
+    # disk) both guards pass, so it shells out to `chown` once per existing
+    # tree — extra "subprocess" events this test never expects. That step
+    # is its own concern (untested here); neutralise it so this test
+    # exercises only the toolchain->bootstrap->register sequence regardless
+    # of host euid/user state.
+    monkeypatch.setattr(ac, "_chown_hermes_trees_to_agent_user", lambda: None)
 
     # Gateway wiring is its own concern (tested in the "gateway" section
     # below) — disable it here so this test exercises only the

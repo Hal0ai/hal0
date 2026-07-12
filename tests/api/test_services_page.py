@@ -67,6 +67,16 @@ def _stub_all_down() -> list:
             new_callable=AsyncMock,
             return_value=(False, "unreachable (ConnectError)"),
         ),
+        # honcho (and n8n, when its probe env is set) go through the generic
+        # loopback HTTP probe. Left unstubbed, this hits the REAL
+        # 127.0.0.1:8000/health on any host that happens to be running a
+        # honcho stack, silently flipping "up" to True and leaking host
+        # state into an "everything stubbed down" assertion.
+        patch(
+            f"{_ROUTE}._probe_http_env",
+            new_callable=AsyncMock,
+            return_value=(False, "unreachable"),
+        ),
         patch(
             f"{_ROUTE}.svc_systemd.unit_state",
             new_callable=AsyncMock,

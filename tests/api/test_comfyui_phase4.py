@@ -388,6 +388,10 @@ class TestWorkflowList:
         (wf_dir / "beta.json").write_text("{}")
         (wf_dir / "notes.txt").write_text("ignore me")  # non-json skipped
         monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+        # Isolate the user/default fallback too — otherwise it defaults to the
+        # real /mnt/ai-models/comfyui bind mount on hosts that have one, and
+        # real workflow files leak into the result set.
+        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
 
         r = client.get("/api/comfyui/workflows")
         assert r.status_code == 200
@@ -431,6 +435,9 @@ class TestWorkflowList:
         # A file whose stem carries a path-ish char must not surface.
         (wf_dir / "a b.json").write_text("{}")  # space fails the name regex
         monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+        # Isolate the user/default fallback too — see comment in
+        # test_lists_json_files_from_primary_dir above.
+        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
 
         r = client.get("/api/comfyui/workflows")
         names = {w["name"] for w in r.json()["workflows"]}

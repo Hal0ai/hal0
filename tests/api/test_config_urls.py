@@ -7,6 +7,8 @@ saying whether the OpenWebUI unit is actually up.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 from fastapi.testclient import TestClient
 
 
@@ -58,13 +60,23 @@ def test_urls_openwebui_enabled_false_when_systemctl_missing(
 
 def test_urls_behind_proxy_without_public_url_uses_openwebui_port(client: TestClient) -> None:
     """Proxy deploys without custom DNS still get the default :3001 link."""
-    resp = client.get(
-        "/api/config/urls",
-        headers={
-            "x-forwarded-host": "ai-dev.thinmint.dev",
-            "x-forwarded-proto": "https",
-        },
-    )
+    # `openwebui_enabled` shells out to the *real* systemctl on whatever host
+    # runs this test — on a dev box with hal0-openwebui.service genuinely
+    # active it would come back True regardless of test config, leaking host
+    # state into an assertion that only cares about URL shape. Stub it so
+    # the test is hermetic across hosts.
+    with patch(
+        "hal0.api.routes.config._openwebui_is_active",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        resp = client.get(
+            "/api/config/urls",
+            headers={
+                "x-forwarded-host": "ai-dev.thinmint.dev",
+                "x-forwarded-proto": "https",
+            },
+        )
     assert resp.status_code == 200
     body = resp.json()
     assert body["openwebui"] == "http://ai-dev.thinmint.dev:3001", body

@@ -38,9 +38,17 @@ def preview_client(
 
 def test_preview_returns_detection_rows_without_registering(
     preview_client: tuple[TestClient, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preview must NOT mutate the registry — that's the whole point."""
     client, root = preview_client
+    # GET /api/models also merges in whatever the host's real FLM toolbox
+    # reports (hal0.providers.flm.flm_served_models probes the live `flm`
+    # binary, uncached per-process on first call). On a box with FLM
+    # actually installed that injects real rows unrelated to this
+    # registry-mutation check — neutralise it so the assertion below is
+    # hermetic regardless of host FLM state.
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: [])
     # Plain .gguf — header read will fail (no magic) so detect() falls
     # back to filename heuristic. confidence stays "low" but the row is
     # still emitted with the GGUF backend seed.

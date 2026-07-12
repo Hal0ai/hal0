@@ -15,6 +15,7 @@ Exercises:
 
 from __future__ import annotations
 
+import os
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
@@ -240,10 +241,27 @@ def test_set_store_rejects_file_not_directory(isolated_client: TestClient, tmp_p
     assert r.json()["error"]["code"] == "models.store_not_directory"
 
 
-def test_set_store_rejects_non_writable_path(isolated_client: TestClient, tmp_path: Path) -> None:
+def test_set_store_rejects_non_writable_path(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ro = tmp_path / "readonly"
     ro.mkdir()
     ro.chmod(0o555)
+    # The route probes writability via os.access(candidate, os.W_OK). That
+    # probe reflects the *real* filesystem permission bits only for a
+    # non-root process — running as root (as CI/this host sometimes does),
+    # the kernel grants root write access regardless of the 0o555 mode, so
+    # the 400 never fires. Force the probe's outcome directly so the test
+    # asserts the route's handling of "not writable" rather than the
+    # euid-dependent behavior of chmod.
+    real_access = os.access
+
+    def _fake_access(path: object, mode: int) -> bool:
+        if Path(path) == ro and mode == os.W_OK:
+            return False
+        return real_access(path, mode)
+
+    monkeypatch.setattr("hal0.api.routes.settings.os.access", _fake_access)
     try:
         r = isolated_client.post(
             "/api/settings/models/store",
