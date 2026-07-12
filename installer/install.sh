@@ -17,6 +17,18 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# A hardened root umask (0027/0077 from a CIS/STIG host, or a login shell
+# that sets `umask 077`) leaks into everything this script creates — the
+# venv, the FHS code tree, /etc/hal0, /var/lib/hal0 — leaving it 0700 and
+# breaking the non-root `hal0` CLI (PermissionError reading /usr/lib/hal0,
+# /etc/hal0/slots, /var/lib/hal0/{registry,models}). Chmod-patching one
+# path at a time (as the /etc/hal0 fix below already does) doesn't scale;
+# normalize to the conventional 022 for the whole install body instead.
+# Restored at the very end of the script — this process's umask never
+# escapes to the caller's shell anyway, but symmetry is cheap.
+_HAL0_ORIG_UMASK="$(umask)"
+umask 022
+
 # Shared UI helpers — banner, step counter, spinner, boxed summary, plus
 # info / warn / err / die. ui_step maintains CURRENT_STEP for the ERR
 # trap below. Honors HAL0_PLAIN=1 and NO_COLOR=1 for non-fancy terms.
@@ -2141,3 +2153,6 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "
         info "  (guided: network, model store, slots, NPU, image gen, apps)"
     fi
 fi
+
+# Restore the caller's umask (see the save near the top of the file).
+umask "${_HAL0_ORIG_UMASK}"
