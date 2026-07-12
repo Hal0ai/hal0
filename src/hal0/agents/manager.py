@@ -634,9 +634,7 @@ def installer_script_path(name: str) -> Path:
     production path rather than a venv path the operator won't recognise.
     """
     # parents[0]=agents, [1]=hal0, [2]=src, [3]=repo root
-    editable_candidate = (
-        Path(__file__).resolve().parents[3] / "installer" / "agents" / f"{name}.sh"
-    )
+    editable_candidate = Path(__file__).resolve().parents[3] / "installer" / "agents" / f"{name}.sh"
     fhs_candidate = _paths.usr_lib() / "installer" / "agents" / f"{name}.sh"
 
     if editable_candidate.is_file():
