@@ -335,11 +335,11 @@ def main():
     # Emit v2 records (new benchmark system)
     if EMIT_V2:
         from pathlib import Path
+
         V2_DIR = Path(RESULT_DIR) / "v2"
         V2_DIR.mkdir(parents=True, exist_ok=True)
         RECORDS_PATH = V2_DIR / "records.jsonl"
         import hashlib
-        from datetime import datetime, timezone
 
         for rec in records:
             # Build identity block for cell_key
