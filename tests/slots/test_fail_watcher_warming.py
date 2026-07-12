@@ -11,6 +11,7 @@ consecutive is-active failures flip the slot to ERROR.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -102,3 +103,79 @@ async def test_warming_slot_tolerates_a_transient_inactive_blip(
     await asyncio.sleep(0.5)
 
     assert sm._current_state("chat") == SlotState.WARMING
+
+
+def _spy_recovery(sm: SlotManager, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Record calls to sm.unload / sm.load while delegating to the originals."""
+    calls: list[tuple[str, str]] = []
+    orig_unload = sm.unload
+    orig_load = sm.load
+
+    async def spy_unload(name: str) -> Any:
+        calls.append(("unload", name))
+        return await orig_unload(name)
+
+    async def spy_load(name: str, model_id: str | None = None) -> Any:
+        calls.append(("load", name))
+        return await orig_load(name, model_id)
+
+    monkeypatch.setattr(sm, "unload", spy_unload)
+    monkeypatch.setattr(sm, "load", spy_load)
+    return calls
+
+
+async def test_warming_slot_with_fresh_timestamp_is_not_recovered(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    fast_fail_watch: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A freshly-WARMING slot (active unit, /health still down) must NOT trip
+    the staleness watchdog — a slow cold load below the threshold is left alone.
+    """
+    sm = SlotManager()
+    await _load_into_warming(sm, container_stub)
+    calls = _spy_recovery(sm, monkeypatch)
+
+    # Model server still loading: /health down, unit active, timestamp fresh.
+    container_stub.healthy = False
+    await asyncio.sleep(0.6)  # several poll intervals
+
+    assert calls == [], f"a fresh WARMING slot must not be recovered by the watchdog; got {calls}"
+    assert sm._current_state("chat") == SlotState.WARMING
+
+
+async def test_warming_slot_recovers_when_stale(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    fast_fail_watch: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WARMING slot stuck past _WARMING_STALE_AFTER_S (unit still active) is
+    auto-recovered via unload → load, self-healing the wedged anchor.
+    """
+    sm = SlotManager()
+    await _load_into_warming(sm, container_stub)
+    assert "chat" in sm._fail_watchers
+    calls = _spy_recovery(sm, monkeypatch)
+
+    # On the reload, let the model converge so recovery lands in READY.
+    async def _wait_ok(port: int, timeout_s: float | None = None) -> None:
+        return None
+
+    container_stub.wait_ready = _wait_ok  # type: ignore[method-assign]
+
+    # Age the slot past the staleness ceiling (unit stays active throughout).
+    sm._states["chat"].updated_at = time.time() - mgr_mod._WARMING_STALE_AFTER_S - 1
+
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        if ("unload", "chat") in calls and ("load", "chat") in calls:
+            break
+        await asyncio.sleep(0.05)
+
+    assert ("unload", "chat") in calls, f"watchdog never unloaded wedged slot; {calls}"
+    assert ("load", "chat") in calls, f"watchdog never reloaded wedged slot; {calls}"
+    # unload must precede load (recovery order), and the reload converged.
+    assert calls.index(("unload", "chat")) < calls.index(("load", "chat"))
+    assert sm._current_state("chat") == SlotState.READY

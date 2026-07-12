@@ -173,6 +173,19 @@ _HEALTH_FAIL_STRIKES: int = 2
 # two while podman brings the container up — a warming slot must only be
 # flipped when the unit is *stably* down, never while a big model loads.
 _WARMING_INACTIVE_STRIKES: int = 3
+# WARMING-only staleness watchdog. /health is deliberately NOT probed while a
+# slot is WARMING (a large NPU/GGUF model can legitimately hold /health down
+# for minutes during a cold load — see ``_await_ready`` and its ceiling
+# ``providers.container._HEALTH_TIMEOUT_S`` = 180s per attempt), so a unit that
+# stays *active* forever while its model server never converges would otherwise
+# sit in WARMING indefinitely — 503ing every /v1/embeddings and NPU-trio
+# consumer with ``npu.trio_unavailable`` and never self-healing (a wedged FLM
+# NPU chat-anchor). This bound catches that: once a slot has been WARMING
+# longer than this, treat it as wedged and auto-recover (unload → load). It
+# MUST sit well ABOVE the legitimate cold-load ceiling so a slow-but-healthy
+# load is never demoted — 900s (15 min) is ~5x the 180s per-attempt health-wait
+# ceiling, comfortably clear of any real large-model load.
+_WARMING_STALE_AFTER_S: float = 900.0
 # Config-drift comparison keys. Spelling no longer needs to match the launch
 # renderer exactly: both sides of the comparison are canonicalized through
 # slots.argv.FLAG_ALIASES (so ``--batch-size`` in a running argv matches a
@@ -866,7 +879,40 @@ class SlotManager:
                         # the health probe entirely (a big-model load can hold
                         # /health down for minutes without being wedged).
                         health_failures = 0
-                        continue
+                        # …but an active unit whose model server never converges
+                        # would otherwise sit in WARMING forever, 503ing every
+                        # embed/STT consumer (a wedged FLM NPU anchor). Bound the
+                        # WARMING dwell: once it exceeds the cold-load ceiling,
+                        # treat the slot as wedged and auto-recover. WARMING →
+                        # STARTING is an illegal transition, so recovery is
+                        # unload → load (as ``restart()`` does), not a direct
+                        # reload.
+                        rec = self._states.get(slot_name)
+                        warming_elapsed = time.time() - rec.updated_at if rec is not None else 0.0
+                        if warming_elapsed <= _WARMING_STALE_AFTER_S:
+                            continue
+                        log.warning(
+                            "slot.fail_watch_warming_stale",
+                            extra={
+                                "slot": slot_name,
+                                "warming_elapsed_s": round(warming_elapsed, 1),
+                                "stale_after_s": _WARMING_STALE_AFTER_S,
+                            },
+                        )
+                        try:
+                            await self.unload(slot_name)
+                            await self.load(slot_name)
+                        except Exception as exc:
+                            log.warning(
+                                "slot.fail_watch_warming_recover_failed",
+                                extra={"slot": slot_name, "error": str(exc)},
+                            )
+                        # unload → load re-stamps ``updated_at`` (restarting the
+                        # staleness clock) and re-arms a fresh fail-watcher via
+                        # its own transitions, so this now-orphaned watcher
+                        # returns cleanly instead of racing the new one or
+                        # tight-looping recovery every tick.
+                        return
                     # #783/B4: active is necessary but not sufficient. Probe
                     # the model server's /health — a crashed/wedged server is
                     # active to systemd while /health fails, so an is-active-
