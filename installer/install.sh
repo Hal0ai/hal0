@@ -1856,39 +1856,62 @@ else
         info "setting up Honcho memory engine (podman compose stack) — this can take a few minutes…"
 
         # podman-native (see hal0-honcho.service): `podman compose`
-        # delegates to the docker-compose v2 binary over podman.socket —
-        # no docker engine (whose default AppArmor profile can't even load
-        # inside an unprivileged LXC).
+        # delegates to a compose provider binary over podman.socket — no
+        # docker engine required.
         hc_compose_ok=0
         if podman compose version >/dev/null 2>&1; then
             hc_compose_ok=1
         else
-            # Package NAME differs by distro ecosystem (docker-compose-v2 on
-            # Debian/Ubuntu, podman-compose on Fedora/Arch/openSUSE) — route
-            # through lib/distro.sh's pkg_mgr/distro_family dispatch instead
-            # of a bare apt-get, which was a silent no-op on every non-apt
-            # host (the only unguarded apt-get in this script; every FLM
-            # apt-get elsewhere sits behind a `command -v apt-get` gate).
-            hc_compose_pkg=""
-            case "$(distro_family 2>/dev/null)" in
-                debian) hc_compose_pkg="docker-compose-v2" ;;
-                fedora | suse | arch) hc_compose_pkg="podman-compose" ;;
+            # Prefer podman-compose (pure-Python, no Docker engine, no
+            # AppArmor profile pull) on EVERY distro — honcho's own unit
+            # (hal0-honcho.service) invokes `podman compose`, so podman is
+            # always the runtime here regardless of distro ecosystem.
+            # Live-reproduced on Ubuntu 24.04 (unprivileged LXC, #F26):
+            # this block used to install docker-compose-v2 on every Debian
+            # family host, which drags in Docker's AppArmor integration —
+            # "install profile containers-default apparmor: exit 243" —
+            # and broke `podman run` entirely, taking down the box's
+            # PRIMARY runtime while standing up an *optional* memory
+            # backend. podman-compose carries no such dependency chain.
+            case "$(pkg_mgr 2>/dev/null)" in
+                apt-get) apt-get install -y podman-compose >/dev/null 2>&1 || true ;;
+                dnf) dnf install -y podman-compose >/dev/null 2>&1 || true ;;
+                yum) yum install -y podman-compose >/dev/null 2>&1 || true ;;
+                zypper) zypper install -y podman-compose >/dev/null 2>&1 || true ;;
+                pacman) pacman -S --noconfirm podman-compose >/dev/null 2>&1 || true ;;
             esac
-            if [[ -n "${hc_compose_pkg}" ]]; then
-                warn "podman compose provider missing — attempting to install ${hc_compose_pkg}"
-                case "$(pkg_mgr 2>/dev/null)" in
-                    apt-get) apt-get install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    dnf) dnf install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    yum) yum install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    zypper) zypper install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                    pacman) pacman -S --noconfirm "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
-                esac
-            fi
             if podman compose version >/dev/null 2>&1; then
                 hc_compose_ok=1
-            else
-                hc_compose_hint="$(pkg_install_cmd "${hc_compose_pkg:-docker-compose-v2}" 2>/dev/null \
-                    || echo "install a docker-compose-v2-compatible provider")"
+            elif [[ "$(distro_family 2>/dev/null)" == "debian" ]]; then
+                # podman-compose isn't packaged (older Debian/Ubuntu):
+                # fall back to docker-compose-v2, but harden podman's own
+                # AppArmor posture FIRST via a containers.conf.d drop-in
+                # (survives package upgrades, never touches an
+                # operator-owned containers.conf) so the primary runtime
+                # keeps working even after docker-compose-v2's
+                # containerd.io/docker.io dependency chain lands.
+                warn "podman-compose unavailable — falling back to docker-compose-v2 (hardening podman's apparmor profile first)"
+                mkdir -p /etc/containers/containers.conf.d
+                cat > /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf <<'HC_APPARMOR_EOF'
+# Written by hal0's installer (Honcho standup, #F26): installing
+# docker-compose-v2 as the podman-compose fallback pulls Docker's
+# AppArmor integration, which in an unprivileged LXC can leave podman's
+# own "containers-default" profile unloadable. Pin podman to
+# apparmor_profile=unconfined so it keeps working regardless.
+[containers]
+apparmor_profile = "unconfined"
+HC_APPARMOR_EOF
+                apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
+                if podman compose version >/dev/null 2>&1; then
+                    hc_compose_ok=1
+                fi
+                if ! podman info >/dev/null 2>&1; then
+                    warn "podman appears broken after installing docker-compose-v2 — check 'podman info' (apparmor hardening is at /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf)"
+                fi
+            fi
+            if [[ "${hc_compose_ok}" -ne 1 ]]; then
+                hc_compose_hint="$(pkg_install_cmd podman-compose 2>/dev/null \
+                    || echo "install podman-compose or a docker-compose-v2-compatible provider")"
                 warn "podman compose still unavailable — Honcho will be skipped (${hc_compose_hint} and re-run)"
             fi
         fi
