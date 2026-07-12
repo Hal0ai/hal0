@@ -411,6 +411,24 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # `hal0 setup` / the pull gate re-validates before any download lands.
     preflight_disk "${HAL0_MODELS_DISK_MIN_GB:-20}" "${MODELS_DIR}" \
         || warn "model store ${MODELS_DIR} is low on free space — model pulls may fail until freed"
+    # Container-runtime graphroot disk check: same cross-mount blind spot as
+    # the model-store check above, but for image storage. The VAR_DIR probe
+    # only measures VAR_DIR's own mount; multi-GB toolbox runners +
+    # OpenWebUI + ComfyUI + Honcho images land in the runtime's graphroot
+    # (/var/lib/containers for podman, /var/lib/docker for docker), which is
+    # frequently a separate mount when an operator relocates var-dir or
+    # deliberately puts container storage on its own volume. Without this, a
+    # box passes pre-flight with "20 GB free" and then image pulls fill the
+    # container store and fail. Non-fatal (warn only) — same posture as the
+    # model-store check.
+    if command -v podman >/dev/null 2>&1; then
+        HAL0_GRAPHROOT="$(podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || echo /var/lib/containers)"
+        preflight_disk "${HAL0_CONTAINER_DISK_MIN_GB:-20}" "${HAL0_GRAPHROOT}" \
+            || warn "container image store ${HAL0_GRAPHROOT} is low on free space — image pulls may fail until freed"
+    elif command -v docker >/dev/null 2>&1; then
+        preflight_disk "${HAL0_CONTAINER_DISK_MIN_GB:-20}" /var/lib/docker \
+            || warn "container image store /var/lib/docker is low on free space — image pulls may fail until freed"
+    fi
     preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
     if (( pf_rc != 0 )); then
         false
