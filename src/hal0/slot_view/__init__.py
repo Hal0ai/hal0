@@ -393,8 +393,9 @@ async def container_enrichment(
 
     plus image facts: ``actual_image`` (podman inspect, #663),
     ``image_mismatch`` against the declared profile image, and
-    ``image_status`` (present | pulling | missing — an in-flight job in
-    ``pull_jobs`` wins without an inspect syscall).
+    ``image_status`` (present | pulling | missing | not-configured — an
+    in-flight job in ``pull_jobs`` wins without an inspect syscall;
+    ``not-configured`` marks a slot with no declared profile/image, #1226).
 
     ``provider`` is injectable for unit tests; ``None`` resolves the real
     ContainerProvider lazily so route-level patches on the class keep
@@ -518,7 +519,7 @@ async def container_enrichment(
             if image:
                 entry["image_mismatch"] = _image_mismatch(running_image, image)
 
-        # image_status: present | pulling | missing
+        # image_status: present | pulling | missing | not-configured
         # Check the pull-jobs registry first so an in-flight pull
         # surfaces as "pulling" without an extra inspect syscall.
         active_job = jobs.get(name)
@@ -534,7 +535,11 @@ async def container_enrichment(
             except Exception:
                 entry["image_status"] = "missing"
         else:
-            entry["image_status"] = "missing"
+            # No profile/image declared — the slot runs on the default toolbox.
+            # "No expected image" is NOT a missing-image fault (#1226): report
+            # it distinctly so operators (and the hal0-brain steward) don't
+            # learn to ignore a real "missing" every 30s.
+            entry["image_status"] = "not-configured"
 
         out[name] = entry
 

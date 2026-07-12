@@ -108,12 +108,17 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
         backend = str(slot_cfg.get("backend") or "")
         catalog = load_profiles_config().profile
         base = backend if backend in catalog else "rocm"
-        log.warning(
-            "profile %r not found; falling back to base profile %r",
-            profile_name,
-            base,
-            extra={"event": "profile.fallback", "missing": profile_name, "base": base},
-        )
+        # An empty profile is a legitimate "no profile declared" slot running
+        # on the default toolbox — not a stale/renamed profile. Falling back is
+        # expected, so don't warn on every health probe (#1226); reserve the
+        # warning for a NON-empty name the catalog no longer knows.
+        if profile_name:
+            log.warning(
+                "profile %r not found; falling back to base profile %r",
+                profile_name,
+                base,
+                extra={"event": "profile.fallback", "missing": profile_name, "base": base},
+            )
         return _resolve_profile(base)
 
 
