@@ -1,6 +1,19 @@
 """
 hal0 Browser MCP Server — performant, persistent browser automation.
 
+**EXPERIMENTAL / NOT WIRED IN.** This is a standalone prototype. It is
+never imported by :mod:`hal0.api.mcp_mount` (which only mounts
+``hal0-admin`` and ``hal0-memory``), has no systemd unit, and is not on
+any install/upgrade path — see diagnosis #10. ``playwright`` is
+consequently *not* a declared dependency in ``pyproject.toml``; the
+import is deferred into :meth:`BrowserPool._ensure_browser` so merely
+importing this module (e.g. from a test that globs ``hal0.mcp.*``)
+doesn't hard-fail on a missing package. Running it for real still
+requires ``pip install playwright && playwright install chromium``.
+Kept around as a prototype rather than deleted — wire it into
+``mount_mcp_servers`` (behind an opt-in flag) or delete it outright
+before it's treated as a supported surface.
+
 Provides a small set of composable browser primitives via MCP. The
 browser is launched once at startup and reused across all tool calls
 for zero cold-start latency. Chromium headless shell is used for
@@ -35,15 +48,17 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
-from playwright.async_api import (
-    Browser,
-    BrowserContext,
-    Page,
-    async_playwright,
-)
+
+if TYPE_CHECKING:
+    # Type-only — `from __future__ import annotations` (PEP 563) means
+    # these never need to resolve at runtime, so they don't force the
+    # (undeclared, optional) playwright dependency onto plain imports
+    # of this module. The real import is deferred into
+    # BrowserPool._ensure_browser, the only place it's actually used.
+    from playwright.async_api import Browser, BrowserContext, Page
 
 logger = logging.getLogger("hal0.browser")
 
@@ -68,6 +83,15 @@ class BrowserPool:
 
     async def _ensure_browser(self) -> Browser:
         if self._browser is None or not self._browser.is_connected():
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError as exc:  # pragma: no cover — exercised only if run standalone
+                raise ImportError(
+                    "hal0.mcp.browser_server requires the (optional, undeclared) "
+                    "'playwright' package. Install via 'pip install playwright && "
+                    "playwright install chromium' — this server is experimental and "
+                    "not wired into any hal0 install path (diagnosis #10)."
+                ) from exc
             logger.info("Launching Chromium (headless=%s)", HEADLESS)
             pw = await async_playwright().start()
             self._browser = await pw.chromium.launch(

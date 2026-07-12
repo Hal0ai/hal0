@@ -159,8 +159,23 @@ async def test_memory_search_private_mode_reads_both_datasets(
 
 @pytest.mark.asyncio
 async def test_memory_search_accepts_dataset_list(wrapper: _FakeWrapper, dispatcher: Any) -> None:
-    await dispatcher("memory_search", {"query": "x", "dataset": ["a", "b"]})
-    assert wrapper.search_calls[0]["dataset"] == ["a", "b"]
+    """Known-namespace list entries (spec §3 closed table) pass through."""
+    await dispatcher("memory_search", {"query": "x", "dataset": ["agents", "project:apollo"]})
+    assert wrapper.search_calls[0]["dataset"] == ["agents", "project:apollo"]
+
+
+@pytest.mark.asyncio
+async def test_memory_search_dataset_list_filters_foreign_namespace(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    """Diagnosis #8: a ``dataset`` list containing a foreign/unrecognized
+    namespace must be filtered (fail-open-empty), not forwarded verbatim
+    to the engine — matching the REST resolver (resolve_read_datasets)."""
+    await dispatcher(
+        "memory_search",
+        {"query": "x", "dataset": ["shared", "junk-bank", "private:someone-else"]},
+    )
+    assert wrapper.search_calls[0]["dataset"] == ["shared"]
 
 
 @pytest.mark.asyncio
@@ -290,6 +305,57 @@ async def test_memory_delete_dataset_directs_sweep(wrapper: _FakeWrapper, dispat
     out = await dispatcher("memory_delete", {"ids": ["d1"], "dataset": "project:apollo"})
     assert out["status"] == "ok"
     assert wrapper.delete_calls[0]["dataset"] == "project:apollo"
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_dataset_list_filters_foreign_namespace(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    """Diagnosis #8: same closed-namespace filtering as memory_search/
+    memory_recall applies to memory_delete's dataset list."""
+    out = await dispatcher(
+        "memory_delete", {"ids": ["d1"], "dataset": ["agents", "not-a-real-bank"]}
+    )
+    assert out["status"] == "ok"
+    assert wrapper.delete_calls[0]["dataset"] == ["agents"]
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_dataset_unknown_string_rejected(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    """A single unknown-string dataset raises rather than silently
+    reaching the engine as a literal bank id."""
+    out = await dispatcher("memory_delete", {"ids": ["d1"], "dataset": "not-a-real-bank"})
+    assert out["status"] == "error"
+    assert out["error"]["code"] == "mcp.memory_schema"
+    assert not wrapper.delete_calls
+
+
+@pytest.mark.asyncio
+async def test_memory_recall_dataset_list_filters_foreign_namespace() -> None:
+    """Diagnosis #8: memory_recall's dataset list is namespace-filtered
+    the same way memory_search/memory_delete's are."""
+
+    class _RecallWrapper(_FakeWrapper):
+        def __init__(self) -> None:
+            super().__init__()
+            self.recall_calls: list[dict[str, Any]] = []
+
+        async def recall(self, **kwargs: Any) -> list[dict[str, Any]]:
+            self.recall_calls.append(kwargs)
+            return []
+
+    wrapper = _RecallWrapper()
+    disp = memory.make_dispatcher(
+        wrapper, client_id_resolver=lambda: "pi-coder", private_resolver=lambda: False
+    )
+    out = await disp(
+        "memory_recall",
+        {"query": "cats", "dataset": ["shared", "totally-made-up"]},
+    )
+    assert out["status"] == "ok"
+    assert wrapper.recall_calls[0]["dataset"] == ["shared"]
 
 
 @pytest.mark.asyncio
