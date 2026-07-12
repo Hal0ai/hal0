@@ -25,6 +25,13 @@ const ENGINE = {
   banks_total: 2,
 }
 
+// NOTE: GET /api/memory/banks is a verbatim Hindsight passthrough that does
+// not reliably carry a `fact_count` field (see memory.py's contract notes) —
+// this fixture intentionally omits it so it matches the real shape. It's
+// also currently inert for this endpoint specifically: forced-mock
+// (VITE_MOCK_HAL0) short-circuits /api/memory/banks before the network (see
+// installMemoryMocks below), so the actual DOM assertions run against the
+// baked mock dataset in src/api/mock.ts, not this const.
 const BANKS = {
   banks: [
     {
@@ -33,7 +40,6 @@ const BANKS = {
       mission: 'Platform-wide shared memory',
       created_at: '2026-06-01T00:00:00Z',
       updated_at: '2026-06-07T09:15:14Z',
-      fact_count: 42,
       last_document_at: '2026-06-07T09:11:52Z',
     },
     {
@@ -42,7 +48,6 @@ const BANKS = {
       mission: null,
       created_at: '2026-06-02T00:00:00Z',
       updated_at: '2026-06-07T10:00:00Z',
-      fact_count: 7,
       last_document_at: null,
     },
   ],
@@ -132,7 +137,7 @@ async function installMemoryMocks(page: any) {
 async function gotoMemory(page: any) {
   await page.goto('/#memory')
   await page.waitForFunction(() => typeof (window as any).MemoryView === 'function')
-  await page.waitForSelector('[data-testid="mem-engine-card"]', { timeout: 10_000 })
+  await page.waitForSelector('[data-testid="mem-provider-card-hindsight"]', { timeout: 10_000 })
 }
 
 test.describe('Memory view — Hindsight surface', () => {
@@ -147,12 +152,12 @@ test.describe('Memory view — Hindsight surface', () => {
     const nav = page.locator('[data-testid="nav-memory"]')
     await expect(nav).toBeVisible()
     await nav.click()
-    await expect(page.locator('[data-testid="mem-engine-card"]')).toBeVisible()
+    await expect(page.locator('[data-testid="mem-provider-card-hindsight"]')).toBeVisible()
   })
 
   test('engine card renders version, reachable chip, bank count', async ({ page }) => {
     await gotoMemory(page)
-    const card = page.locator('[data-testid="mem-engine-card"]')
+    const card = page.locator('[data-testid="mem-provider-card-hindsight"]')
     await expect(card).toContainText('hindsight')
     await expect(card).toContainText('0.7.2')
     await expect(card.locator('.chip.ok')).toBeVisible()
@@ -168,7 +173,7 @@ test.describe('Memory view — Hindsight surface', () => {
     // chip on the degraded path — here we pin that the card renders a
     // reachability chip cleanly (reachable case) rather than throwing.
     await gotoMemory(page)
-    const card = page.locator('[data-testid="mem-engine-card"]')
+    const card = page.locator('[data-testid="mem-provider-card-hindsight"]')
     await expect(card).toBeVisible()
     await expect(card.locator('.chip')).toContainText(/reachable/i)
   })
