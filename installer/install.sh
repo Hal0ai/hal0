@@ -651,11 +651,23 @@ elif command -v npm >/dev/null 2>&1; then
     # Two phases — install can dominate first-boot time, build is steady.
     # Wrap each so the user sees what npm is doing instead of staring at
     # a blank line for several minutes.
-    ui_spinner_run "Installing dashboard npm packages" \
-        bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund"
-    ui_spinner_run "Building dashboard (npm run build)" \
-        bash -c "cd '${UI_DIR}' && npm run build"
-    info "wrote ${UI_DIST}"
+    #
+    # Non-fatal: a registry flake, an OOM'd `vite build` on a small LXC, or
+    # a peer-dep error here used to trip the ERR trap and abort the WHOLE
+    # install — after the venv, hal0 wheel, config, and (partially) systemd
+    # units were already written — even though the API itself doesn't need
+    # the built UI (`_mount_dashboard` degrades to "no dashboard" when dist
+    # is absent). Degrade to the same soft warning as the npm-absent
+    # branch below instead.
+    if ui_spinner_run "Installing dashboard npm packages" \
+            bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund" \
+        && ui_spinner_run "Building dashboard (npm run build)" \
+            bash -c "cd '${UI_DIR}' && npm run build"; then
+        info "wrote ${UI_DIST}"
+    else
+        warn "dashboard build failed — the API still serves; the UI at :${HAL0_PORT}/ will 404 until you build it"
+        warn "  scroll up for the real npm error; retry later: cd ${UI_DIR} && npm install && npm run build"
+    fi
 else
     warn "npm not found — dashboard at :${HAL0_PORT}/ will return 404 until you build the UI"
     warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
