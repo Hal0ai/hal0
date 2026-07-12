@@ -42,14 +42,37 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (14: the basic rocm profile, the
-        rocm-dense/rocm-moe/vulkan-dense/vulkan-moe ROCmFPX 2x2 grid, vulkan,
-        the experimental NVIDIA cuda profile, the dedicated embed and rerank
-        GPU lanes, flm NPU, the tts/tts-qwen3 pair, the cpu-llm CPU profile
-        #834, and Phase D comfyui)."""
+        """One entry per seed profile (20: the basic rocm profile, the
+        rocm-dense/rocm-moe/vulkan-dense/vulkan-moe ROCmFPX 2x2 grid, the
+        dense-family variants (rocm-dense-nojinja/vulkan-dense-nojinja/
+        rocm-dense-small/rocm-longctx), vulkan, the experimental NVIDIA cuda
+        profile, the dedicated embed and rerank ROCm GPU lanes plus the
+        vulkan-embed/vulkan-rerank Vulkan lanes, flm NPU, the tts/tts-qwen3
+        pair, the cpu-llm CPU profile #834, and Phase D comfyui)."""
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 14
+        assert len(data) == 20
+
+    def test_dense_family_variant_seeds_present(self, client: TestClient) -> None:
+        """The dense-family variants (no-jinja pair, small, long-context) ship
+        as seeds: gpu, mtp False, backend-coherent, and the no-jinja lanes omit
+        `--jinja` while the long-context lane pins q8_0 KV."""
+        by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
+        for name in (
+            "rocm-dense-nojinja",
+            "vulkan-dense-nojinja",
+            "rocm-dense-small",
+            "rocm-longctx",
+        ):
+            assert name in by_name, f"missing seed: {name}"
+            assert by_name[name]["seed"] is True
+            assert by_name[name]["mtp"] is False
+            assert by_name[name]["device_class"] == "gpu"
+        assert by_name["rocm-dense-nojinja"]["backend"] == "rocm"
+        assert by_name["vulkan-dense-nojinja"]["backend"] == "vulkan"
+        assert "--jinja" not in by_name["rocm-dense-nojinja"]["flags"]
+        assert "--jinja" not in by_name["vulkan-dense-nojinja"]["flags"]
+        assert "-ctk q8_0" in by_name["rocm-longctx"]["flags"]
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""

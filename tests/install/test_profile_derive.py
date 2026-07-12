@@ -56,6 +56,17 @@ def test_rerank_on_rocm_box_uses_rerank_profile():
     assert derive_profile("rerank", "gpu-rocm") == "rerank"
 
 
+def test_embed_on_vulkan_box_uses_vulkan_embed_profile():
+    # A Vulkan-only GPU box must get a dedicated Vulkan embed lane, NOT the plain
+    # `vulkan` chat profile (which never emits --embedding and would silently
+    # serve /v1/completions instead of /v1/embeddings). Backend-coherent per #807.
+    assert derive_profile("embed", "gpu-vulkan") == "vulkan-embed"
+
+
+def test_rerank_on_vulkan_box_uses_vulkan_rerank_profile():
+    assert derive_profile("rerank", "gpu-vulkan") == "vulkan-rerank"
+
+
 def test_npu_chat_lane_requires_present_and_optin():
     # The NPU chat lane (agent / utility role) is selected only when the NPU
     # is present AND the operator opted in.

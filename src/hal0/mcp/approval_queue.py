@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -67,16 +69,39 @@ _PRIMARY_TARGET_ARG: dict[str, str] = {
 }
 
 
+def _hash_args(args: dict[str, Any]) -> str:
+    """Stable short digest of a full arg dict, for dedup fallback.
+
+    Canonicalises with ``sort_keys`` so key order can't split a genuine
+    retry into two rows, and ``default=str`` so any non-JSON value
+    (rare in tool args) still hashes rather than raising. Truncated —
+    collision risk across a per-process inbox is negligible.
+    """
+    canonical = json.dumps(args, sort_keys=True, default=str)
+    return hashlib.sha1(canonical.encode()).hexdigest()[:16]
+
+
 def _primary_target(tool: str, args: dict[str, Any]) -> str:
     """Return the dedup key suffix for a tool invocation.
 
-    Falls back to ``""`` when the tool has no registered primary arg —
-    that bucket then dedups all instances of that tool to a single
-    pending row, which is the conservative default.
+    For a tool with a registered primary arg, the dedup key is that
+    arg's value so retries of the same operation (``model_pull qwen3``)
+    collapse to one pending row even when incidental body fields differ.
+
+    For a tool WITHOUT a registered primary arg we fall back to a digest
+    of the *full* arg set — NOT ``""``. The empty-string fallback was a
+    collapse-all footgun: every distinct call to an unmapped gated tool
+    (``profile_delete{name=A}`` vs ``profile_delete{name=B}``, every
+    ``stack_*`` / ``upstream_*`` / ``profile_*`` op, …) shared the dedup
+    key ``(tool, "")`` and so the SAME approval_id, silently discarding
+    all but the first call's args. Approving then ran the wrong (first)
+    target. Hashing the args keeps true retries deduped while giving
+    distinct calls distinct approvals, and it self-maintains for any new
+    gated tool added without a primary-arg entry.
     """
     key = _PRIMARY_TARGET_ARG.get(tool)
     if key is None:
-        return ""
+        return _hash_args(args)
     value = args.get(key)
     if isinstance(value, list | tuple):
         return ",".join(sorted(str(v) for v in value))

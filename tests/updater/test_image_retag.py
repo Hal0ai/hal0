@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import tomllib
 
+import pytest
+
 from hal0.config.paths import slots_config_dir
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, STALE_ROCMFPX_IMAGE_REFS
 from hal0.updater.updater import retag_stale_slot_images
 
 STALE = "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"
@@ -48,6 +50,19 @@ def test_stale_pins_retag_and_custom_pins_survive(tmp_hal0_home: str) -> None:
     assert _image_of("unpinned") is None
     raw = tomllib.loads((slots_config_dir() / "imggen.toml").read_text(encoding="utf-8"))
     assert raw["image"] == {"steps": 4}
+
+
+@pytest.mark.parametrize("ref", sorted(STALE_ROCMFPX_IMAGE_REFS))
+def test_every_stale_ref_retags(tmp_hal0_home: str, ref: str) -> None:
+    """Every known former-default ref in STALE_ROCMFPX_IMAGE_REFS rolls to the
+    current DEFAULT_ROCMFPX_IMAGE — not just the single ghcr ref the other tests
+    drive. Regression-proofs a future frozenset addition whose retag path might
+    diverge (e.g. the localhost/ prefix or the amd-strix-halo-toolboxes ref).
+    DEFAULT_ROCMFPX_IMAGE is intentionally NOT in the set, so no case is a no-op.
+    """
+    _write_slot("s", f'image = "{ref}"\nname = "s"\n')
+    assert retag_stale_slot_images() == 1
+    assert _image_of("s") == DEFAULT_ROCMFPX_IMAGE
 
 
 def test_retag_is_idempotent(tmp_hal0_home: str) -> None:
