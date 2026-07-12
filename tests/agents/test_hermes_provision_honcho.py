@@ -252,6 +252,8 @@ def test_resolve_memory_provider_legacy_agent_id_suffix():
 
     from hal0.agents.hermes_provision import _resolve_memory_provider
 
-    cfg = SimpleNamespace(memory=SimpleNamespace(agent_providers={"hermes": "honcho"}, agent_private={}))
+    cfg = SimpleNamespace(
+        memory=SimpleNamespace(agent_providers={"hermes": "honcho"}, agent_private={})
+    )
     assert _resolve_memory_provider("hermes-agent", cfg) == "honcho"
     assert _resolve_memory_provider("hermes", cfg) == "honcho"

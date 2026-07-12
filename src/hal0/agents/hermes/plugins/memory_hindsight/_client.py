@@ -196,15 +196,11 @@ class Hal0MemoryClient:
 
     def list_items(self, *, limit: int = 50) -> dict[str, Any]:
         """GET /api/memory/list — page through stored items."""
-        return self._request(
-            "GET", "/api/memory/list", params={"limit": int(limit)}, private=True
-        )
+        return self._request("GET", "/api/memory/list", params={"limit": int(limit)}, private=True)
 
     def delete(self, item_id: str) -> dict[str, Any]:
         """POST /api/memory/delete — remove memory items by id."""
-        return self._request(
-            "POST", "/api/memory/delete", json={"ids": [item_id]}, private=True
-        )
+        return self._request("POST", "/api/memory/delete", json={"ids": [item_id]}, private=True)
 
     # ── transport core ─────────────────────────────────────────────────
 

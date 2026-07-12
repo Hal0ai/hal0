@@ -54,9 +54,7 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def stub_honcho_cfg(monkeypatch: pytest.MonkeyPatch):
     """Fake ``hal0.toml [honcho]`` config so migrate/sync-graph never touch disk."""
-    cfg = SimpleNamespace(
-        honcho=SimpleNamespace(port=8000, workspace="hal0", user_peer="operator")
-    )
+    cfg = SimpleNamespace(honcho=SimpleNamespace(port=8000, workspace="hal0", user_peer="operator"))
     monkeypatch.setattr(memory_commands, "_load_honcho_cli_config", lambda: cfg)
 
     class _FakeState:
@@ -134,12 +132,25 @@ def test_migrate_dry_run_hindsight_to_honcho_invokes_engine(
 
     def fake_forward(**kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        return {"shared": {"scanned": 3, "migrated": 3, "skipped": 0}, "total": {"scanned": 3, "migrated": 3, "skipped": 0}}
+        return {
+            "shared": {"scanned": 3, "migrated": 3, "skipped": 0},
+            "total": {"scanned": 3, "migrated": 3, "skipped": 0},
+        }
 
     monkeypatch.setattr(memory_commands, "_run_migrate_hindsight_to_honcho", fake_forward)
     result = runner.invoke(
         memory_commands.app,
-        ["migrate", "--from", "hindsight", "--to", "honcho", "--agent", "hermes", "--dry-run", "--json"],
+        [
+            "migrate",
+            "--from",
+            "hindsight",
+            "--to",
+            "honcho",
+            "--agent",
+            "hermes",
+            "--dry-run",
+            "--json",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
@@ -230,9 +241,7 @@ def test_sync_graph_invokes_reverse_engine(
 # ── honcho render-env ────────────────────────────────────────────────────────
 
 
-def test_honcho_render_env_reports_status(
-    monkeypatch: pytest.MonkeyPatch, stub_honcho_cfg
-) -> None:
+def test_honcho_render_env_reports_status(monkeypatch: pytest.MonkeyPatch, stub_honcho_cfg) -> None:
     fake_module = SimpleNamespace(
         apply_honcho_env=lambda cfg, restart=True: {
             "written": True,
@@ -249,7 +258,9 @@ def test_honcho_render_env_reports_status(
     assert payload["restarted"] is True
 
 
-def test_honcho_render_env_missing_module_dies(monkeypatch: pytest.MonkeyPatch, stub_honcho_cfg) -> None:
+def test_honcho_render_env_missing_module_dies(
+    monkeypatch: pytest.MonkeyPatch, stub_honcho_cfg
+) -> None:
     import sys
 
     monkeypatch.delitem(sys.modules, "hal0.memory.honcho_env", raising=False)

@@ -24,7 +24,14 @@ def _mock_client(handler) -> Hal0MemoryClient:
 
 def _ok_handler(seen: list) -> object:
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.method, request.url.path, json.loads(request.content or b"{}"), dict(request.headers)))
+        seen.append(
+            (
+                request.method,
+                request.url.path,
+                json.loads(request.content or b"{}"),
+                dict(request.headers),
+            )
+        )
         return httpx.Response(200, json={"items": [{"text": "obs"}]})
 
     return handler

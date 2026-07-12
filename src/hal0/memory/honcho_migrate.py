@@ -76,11 +76,17 @@ class MigrateState:
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"hindsight_to_honcho": {}, "honcho_to_hindsight": {"watermark": None, "count": 0}}
+            return {
+                "hindsight_to_honcho": {},
+                "honcho_to_hindsight": {"watermark": None, "count": 0},
+            }
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {"hindsight_to_honcho": {}, "honcho_to_hindsight": {"watermark": None, "count": 0}}
+            return {
+                "hindsight_to_honcho": {},
+                "honcho_to_hindsight": {"watermark": None, "count": 0},
+            }
         raw.setdefault("hindsight_to_honcho", {})
         raw.setdefault("honcho_to_hindsight", {"watermark": None, "count": 0})
         return raw
@@ -130,7 +136,9 @@ class MigrateState:
 def _honcho_client(honcho_base: str, http_client: httpx.Client | None) -> tuple[httpx.Client, bool]:
     if http_client is not None:
         return http_client, False
-    return httpx.Client(base_url=honcho_base.rstrip("/"), timeout=httpx.Timeout(600.0, connect=5.0)), True
+    return httpx.Client(
+        base_url=honcho_base.rstrip("/"), timeout=httpx.Timeout(600.0, connect=5.0)
+    ), True
 
 
 def _ensure_workspace(client: httpx.Client, workspace: str) -> None:
@@ -150,9 +158,7 @@ def _create_conclusions(
 ) -> None:
     for i in range(0, len(conclusions), _CONCLUSION_BATCH):
         batch = conclusions[i : i + _CONCLUSION_BATCH]
-        resp = client.post(
-            f"/v3/workspaces/{workspace}/conclusions", json={"conclusions": batch}
-        )
+        resp = client.post(f"/v3/workspaces/{workspace}/conclusions", json={"conclusions": batch})
         resp.raise_for_status()
 
 
@@ -166,7 +172,9 @@ def _session_name(dataset: str) -> str:
 def _hal0_client(hal0_base: str, http_client: httpx.Client | None) -> tuple[httpx.Client, bool]:
     if http_client is not None:
         return http_client, False
-    return httpx.Client(base_url=hal0_base.rstrip("/"), timeout=httpx.Timeout(120.0, connect=5.0)), True
+    return httpx.Client(
+        base_url=hal0_base.rstrip("/"), timeout=httpx.Timeout(120.0, connect=5.0)
+    ), True
 
 
 def _hal0_list_page(

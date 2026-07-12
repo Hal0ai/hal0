@@ -299,7 +299,9 @@ def _render_provider_status(s: dict[str, Any]) -> None:
     t.add_column("v")
     for name in ("hindsight", "honcho"):
         e = engines.get(name) or {}
-        healthy = "[bold green]healthy[/bold green]" if e.get("healthy") else "[bold red]down[/bold red]"
+        healthy = (
+            "[bold green]healthy[/bold green]" if e.get("healthy") else "[bold red]down[/bold red]"
+        )
         t.add_row(name, f"{healthy}  [dim]{e.get('url', '—')}[/dim]")
     console.print(Panel(t, title="memory · provider · engines", border_style="dim"))
 
@@ -571,7 +573,10 @@ def _run_migrate_hindsight_to_honcho(
         for ds, counts in report.items():
             if ds == "total":
                 continue
-            t.add_row(ds, f"scanned={counts['scanned']} migrated={counts['migrated']} skipped={counts['skipped']}")
+            t.add_row(
+                ds,
+                f"scanned={counts['scanned']} migrated={counts['migrated']} skipped={counts['skipped']}",
+            )
         total = report["total"]
         t.add_row(
             "[bold]total[/bold]",
@@ -663,7 +668,9 @@ app.add_typer(honcho_app, name="honcho")
 @honcho_app.command("render-env")
 def honcho_render_env_cmd(
     restart: bool = typer.Option(
-        True, "--restart/--no-restart", help="Restart the Honcho compose stack if the rendered env changed."
+        True,
+        "--restart/--no-restart",
+        help="Restart the Honcho compose stack if the rendered env changed.",
     ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit raw JSON instead of the human-readable panel."
