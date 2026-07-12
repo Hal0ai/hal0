@@ -2,15 +2,18 @@
  * agent-view-v3 — v0.5 Agents shell contract.
  *
  * The `#agent` route is the "Agents" shell. It now lands on an **Overview**
- * tab: the agent-card library, where Hermes is the live `serving` foil
- * (status + throughput/context wired to /api/agents + /api/slots, with a
- * Restart action → POST /api/agents/hermes/restart) and the rest of the
- * library are roadmap entries behind a grey "coming soon" mask. Memory (full
- * Hindsight page, gated) and MCP remain as tabs.
+ * tab: the agent-card library, where Hermes and Pi are the live `serving`
+ * foils (Hermes: status + throughput/context wired to /api/agents +
+ * /api/slots, with a Restart action → POST /api/agents/hermes/restart; Pi:
+ * install status only — a CLI tool with no systemd unit, so no
+ * Restart/Persona actions) and the rest of the library are roadmap entries
+ * behind a grey "coming soon" mask. Memory (full Hindsight page, gated) and
+ * MCP remain as tabs.
  *
  * This spec pins:
  *   - bare #agent lands on the Overview tab (selected), cards render
  *   - the live Hermes card is present and flips to a wired Restart button
+ *   - the live Pi card is present and has no Restart/Persona actions
  *   - the locked roadmap cards render behind the coming-soon mask
  *   - Overview · Memory · MCP tabs are present; the long-removed surfaces
  *     (chat / personas / skills / plugins / inbox / peers) stay ABSENT
@@ -45,9 +48,9 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
     // the default mock, which enables the subsystem).
     await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible()
 
-    // The live Hermes foil + the locked roadmap cards are present.
+    // The live Hermes + Pi foils, and the locked roadmap cards, are present.
     await expect(page.locator('[data-testid="agent-card-hermes"]')).toBeVisible()
-    await expect(page.locator('[data-testid="agent-card-locked-pi"]')).toBeVisible()
+    await expect(page.locator('[data-testid="agent-card-pi-coder"]')).toBeVisible()
     await expect(page.locator('[data-testid="agent-card-locked-qwen"]')).toBeVisible()
     await expect(page.locator('[data-testid="agent-card-locked-opencode"]')).toBeVisible()
     await expect(page.locator('.agents-overview .ao-mask-label').first()).toContainText(
@@ -83,6 +86,22 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
 
     await expect.poll(() => restartCalled).toBe(true)
     await expect(restartBtn).toContainText(/Restart/i)
+  })
+
+  test('Pi card flips to abilities with no Restart/Persona actions (CLI tool, no unit)', async ({
+    page,
+  }) => {
+    await page.goto('/#agent')
+    const card = page.locator('[data-testid="agent-card-pi-coder"]')
+    await expect(card).toBeVisible({ timeout: FIVE_S })
+
+    await card.click()
+    // Scoped to Pi's own card — the flip is opacity-toggled, not unmounted,
+    // so Hermes' (always-present) Restart button would otherwise leak into
+    // a page-wide query.
+    await expect(card.locator('[data-testid="agent-action-restart"]')).toHaveCount(0)
+    await expect(card.locator('[data-testid="agent-action-persona"]')).toHaveCount(0)
+    await expect(card.locator('[data-testid="agent-action-logs"]')).toHaveCount(0)
   })
 
   test('header carries the `hermes chat` terminal hint (web chat replaced by TUI)', async ({

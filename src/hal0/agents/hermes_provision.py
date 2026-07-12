@@ -814,8 +814,10 @@ def _copy_plugin_tree(src: Path, dst: Path) -> None:
 def _phase_install(ctx: PhaseContext) -> PhaseResult:
     """Provision the managed Hermes venv + wrapper + plugin stubs.
 
-    The plugin package at ``installer/agents/hermes/plugins/hal0-memory/`` (a local
-    fork of ``memory_hindsight``) is copied into ``$HERMES_HOME/plugins/hal0-memory/``.
+    The plugin package at ``installer/agents/hermes/plugins/hal0-memory/`` (the
+    canonical, shipped ``MemoryProvider`` source — see
+    ``tests/agents/test_hal0_memory_client.py`` for its contract tests) is
+    copied into ``$HERMES_HOME/plugins/hal0-memory/``.
     The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
     hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
     listener, and the composite ``hal0`` upstream in :mod:`hal0.api`

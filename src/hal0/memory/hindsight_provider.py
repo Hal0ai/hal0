@@ -27,6 +27,11 @@ from hal0.memory.provider import MemoryProvider
 
 _SHARED = "shared"
 _PRIVATE = "private:"
+# ADR-0011 §6: the ``agents`` namespace is a federated agent-registry /
+# identity-card store (written by the ``hal0 agent`` CLI), NOT chat memory.
+# Unified mode collapses shared/private/project onto ``shared`` but leaves
+# ``agents`` routing to its own bank untouched, both read and write.
+_AGENTS = "agents"
 
 
 def namespace_to_bank(namespace: str) -> str:
@@ -116,10 +121,20 @@ class HindsightProvider(MemoryProvider):
         reranker: Any = None,
         graph_enabled: bool = False,
         extraction_slot: str = "utility",
+        unified_bank: bool = False,
     ) -> None:
         self._client = client
         self._client_id = client_id
         self._reranker = reranker
+        # Unified-bank mode ([memory] unified_bank): collapse every namespace
+        # onto the single ``shared`` bank. The X-hal0-Private toggle no longer
+        # forks a ``private:<agent>`` bank — writes still land in ``shared`` but
+        # are stamped ``visibility:private`` (see ``add``), and recall stops
+        # fanning out (``_allowed_namespaces`` returns just ``[shared]``). The
+        # constructor default is False so directly-constructed providers keep
+        # the legacy multi-bank behavior; the live default (True) is carried by
+        # config -> ``provider_from_config``.
+        self._unified_bank = bool(unified_bank)
         # ADR-0023: reporting-only on this engine (Hindsight builds its graph
         # natively via its own extraction LLM, which hal0 points at the
         # `extraction_slot` via the hindsight-api systemd drop-in). Seeded from
@@ -136,6 +151,17 @@ class HindsightProvider(MemoryProvider):
     # ── ACL: the caller's allowed namespaces → banks ───────────────────
 
     def _allowed_namespaces(self, requested: str | list[str], client_id: str | None) -> list[str]:
+        # Unified mode: one bank. No cross-bank fan-out, no own-private
+        # expansion — every read resolves to ``shared`` alone, EXCEPT the
+        # ``agents`` registry namespace, which keeps its own bank (ADR-0011 §6).
+        if self._unified_bank:
+            reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
+            out: list[str] = []
+            for ds in reqs:
+                target = _AGENTS if ds == _AGENTS else _SHARED
+                if target not in out:
+                    out.append(target)
+            return out or [_SHARED]
         cid = client_id or self._client_id
         own = f"{_PRIVATE}{cid}"
         reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
@@ -152,6 +178,13 @@ class HindsightProvider(MemoryProvider):
         return out
 
     def _write_namespace(self, requested: str, client_id: str | None) -> str:
+        # Unified mode collapses every resolved namespace onto ``shared`` — the
+        # front door still resolves ``private:<agent>`` (so the private intent
+        # survives for the ``visibility:private`` tag in ``add``), but the bank
+        # is always ``shared`` here. The ``agents`` registry namespace is the
+        # one exception: it keeps its own bank (ADR-0011 §6).
+        if self._unified_bank:
+            return _AGENTS if requested == _AGENTS else _SHARED
         # The REST/MCP front door already resolved the write namespace via
         # namespace.resolve_write_dataset; trust it verbatim here.
         return requested or _SHARED
@@ -168,24 +201,60 @@ class HindsightProvider(MemoryProvider):
         client_id: str | None = None,
         document_id: str | None = None,
     ) -> dict[str, str]:
+        # ``private:<agent>`` still arrives from the front door even in unified
+        # mode; capture the private intent before the bank collapses to shared.
+        requested_private = isinstance(dataset, str) and dataset.startswith(_PRIVATE)
         ns = self._write_namespace(dataset, client_id)
         bank = namespace_to_bank(ns)
-        # The join key. Caller-supplied → Hindsight upserts the same
-        # logical document across adds (conversation evolution); absent →
-        # fresh document per call.
-        document_id = document_id or str(uuid.uuid4())
+
         meta = dict(metadata or {})
         if source:
             meta["source"] = source
+
+        # Resolved agent identity — stamps the ``agent:`` tag + backs the
+        # session-derived document id. ``anonymous`` (the front-door sentinel
+        # for a missing X-hal0-Agent) collapses to ``unknown`` so it can't be
+        # confused with a real id.
+        agent = client_id or source or ""
+        if not agent or agent == "anonymous":
+            agent = "unknown"
+
+        # The join key. Precedence: caller-supplied document_id → deterministic
+        # ``<agent>:<session_id>`` (stable across a conversation, so Hindsight
+        # upserts/groups the same logical document) → fresh uuid4.
+        session_id = meta.get("session_id")
+        if document_id:
+            resolved_id = document_id
+        elif session_id:
+            resolved_id = f"{agent}:{session_id}"
+        else:
+            resolved_id = str(uuid.uuid4())
+
+        # Server-side tag enforcement: an ``agent:<id>`` tag on every write
+        # (unless the caller already supplied one), plus ``visibility:private``
+        # when the write came in under the private toggle. Caller tags are
+        # preserved.
+        out_tags = list(tags or [])
+        if not any(str(t).startswith("agent:") for t in out_tags):
+            out_tags.append(f"agent:{agent}")
+        if requested_private and "visibility:private" not in out_tags:
+            out_tags.append("visibility:private")
+
+        # Extraction quality suffers without a ``context`` line and a
+        # timestamp; always supply both unless the caller already did.
+        context = meta.pop("context", None) or meta.get("source") or f"{agent} conversation turn"
+        timestamp = meta.pop("timestamp", None) or _now()
+
         resp = await self._client.retain(
             bank_id=bank,
             content=text,
-            document_id=document_id,
-            context=meta.get("source"),
+            document_id=resolved_id,
+            context=context,
             metadata={k: str(v) for k, v in meta.items()},
-            tags=list(tags or []),
-            timestamp=None,
+            tags=out_tags,
+            timestamp=timestamp,
         )
+        document_id = resolved_id
         out = {"id": document_id, "timestamp": _now()}
         # retain is async on this engine — surface the operation id so
         # callers (dashboard ingestion indicator, CLI) can poll instead of
@@ -292,12 +361,18 @@ class HindsightProvider(MemoryProvider):
         max_tokens: int = 4096,
         dataset: str | list[str] = _SHARED,
         tags: list[str] | None = None,
+        tags_match: str | None = None,
         client_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Fan out per-bank recall to the caller's allowed banks, merge under
         one token budget. Hindsight has no server-side cross-bank query and
         returns no numeric score, so we re-rank the union via the :8086
         reranker, with the §4b precedence ladder as the tiebreak.
+
+        In unified-bank mode ``_allowed_namespaces`` collapses to a single
+        ``shared`` bank, so this is a one-bank recall (the rerank + budget still
+        apply). ``tags_match`` (``any``/``all``) is a passthrough to Hindsight's
+        tag filter — only forwarded when set.
         """
         import asyncio
 
@@ -307,9 +382,18 @@ class HindsightProvider(MemoryProvider):
         effective_types = list(types) if types else list(_DEFAULT_RECALL_TYPES)
 
         async def _one(bank: str) -> list[dict[str, Any]]:
-            resp = await self._client.recall(
-                bank_id=bank, query=query, types=effective_types, max_tokens=max_tokens, tags=tags
-            )
+            kwargs: dict[str, Any] = {
+                "bank_id": bank,
+                "query": query,
+                "types": effective_types,
+                "max_tokens": max_tokens,
+                "tags": tags,
+            }
+            # Only forward tags_match when the caller set it, so clients/fakes
+            # that don't know the param stay compatible.
+            if tags_match is not None:
+                kwargs["tags_match"] = tags_match
+            resp = await self._client.recall(**kwargs)
             return [self._fact_to_item(f, bank) for f in resp.get("results", [])]
 
         per_bank = await asyncio.gather(*[_one(b) for b in banks])

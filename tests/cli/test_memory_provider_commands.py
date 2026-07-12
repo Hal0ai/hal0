@@ -217,14 +217,12 @@ def test_migrate_rejects_same_engine(stub_honcho_cfg) -> None:
     assert result.exit_code != 0
 
 
-def test_migrate_legacy_cognee_path_unaffected(tmp_path) -> None:
-    # No --from/--to → legacy cognee dry-run path, unrelated to Honcho.
-    result = runner.invoke(
-        memory_commands.app, ["migrate", "--cognee-dir", str(tmp_path), "--json"]
-    )
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload == {"rows_total": 0, "rows_mapped": 0, "rows_unmapped": 0, "noop": True}
+def test_migrate_requires_from_to(stub_honcho_cfg) -> None:
+    # No --from/--to → error directing to the engine migration or unify;
+    # the legacy Cognee dry-run path was removed.
+    result = runner.invoke(memory_commands.app, ["migrate"])
+    assert result.exit_code != 0
+    assert "--from" in result.output and "--to" in result.output
 
 
 # ── sync-graph ───────────────────────────────────────────────────────────────

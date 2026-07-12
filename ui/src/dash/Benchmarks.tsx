@@ -12,8 +12,8 @@
  *            the staleness plan.
  *
  * Data: GET  /api/benchmarks/roster|cells|history|runs|runs/{id}|evals|plan|queue
- *       POST /api/benchmarks/queue {model|suite} · POST /control {action,exclusive}
- *       DELETE /api/benchmarks/queue/{id}
+ *       POST /api/benchmarks/queue {model|suite, lanes?, configs?, kind?}
+ *       POST /control {action,exclusive} · DELETE /api/benchmarks/queue/{id}
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -114,6 +114,99 @@ const chipStyle: React.CSSProperties = {
 };
 
 const Dash = () => <span style={{ color: 'var(--fg-4)' }}>{'—'}</span>;
+
+/* ── bench menu (the queue dropdown) ── */
+
+interface BenchOption {
+  key: string;
+  label: string;
+  desc: string;
+  body: Record<string, unknown>; // merged into POST /api/benchmarks/queue {model, ...body}
+}
+
+// Flag grid for Tune Bench — every flag must be in the planner's _TUNE_FLAGS
+// whitelist or the plan step rejects the variant.
+const TUNE_CONFIGS = [
+  { label: 'default', flags: {} },
+  { label: 'b512-ub256', flags: { '-b': '512', '-ub': '256' } },
+  { label: 'b1024-ub512', flags: { '-b': '1024', '-ub': '512' } },
+  { label: 'fa-on', flags: { '-fa': '1' } },
+  { label: 'kv-q8', flags: { '-ctk': 'q8_0', '-ctv': 'q8_0' } },
+];
+
+const BENCH_OPTIONS: BenchOption[] = [
+  { key: 'vulkan', label: 'Vulkan Bench', desc: 'pp + tg on the vulkan_radv lane', body: { lanes: ['vulkan_radv'] } },
+  { key: 'rocm', label: 'ROCm Bench', desc: 'pp + tg on the rocm lane', body: { lanes: ['rocm'] } },
+  { key: 'compare', label: 'Comparison of Both', desc: 'same cells on rocm + vulkan_radv', body: { lanes: ['rocm', 'vulkan_radv'] } },
+  { key: 'tools', label: 'Tool Bench', desc: 'agentic tool-calling eval (live endpoint)', body: { kind: 'eval' } },
+  { key: 'tune', label: 'Tune Bench', desc: `flag-tuning grid — ${TUNE_CONFIGS.length} configs`, body: { configs: TUNE_CONFIGS } },
+];
+
+function QueueMenu({ onPick, label = '+ queue', disabled = false, title }: {
+  onPick: (opt: BenchOption) => void;
+  label?: string;
+  disabled?: boolean;
+  title?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', display: 'inline-block' }} onClick={e => e.stopPropagation()}>
+      <button
+        className="btn ghost sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled}
+        title={title || 'Queue a benchmark run for this model'}
+        onClick={() => setOpen(o => !o)}
+        style={{ fontSize: 10, padding: '2px 8px' }}
+      >
+        {label} <span style={{ fontSize: 8, opacity: 0.7 }}>{'▾'}</span>
+      </button>
+      {open && (
+        <div role="menu" style={{
+          position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 30,
+          minWidth: 220, padding: 4,
+          background: 'var(--bg-1)', border: '1px solid var(--line)',
+          borderRadius: 'var(--rad-lg, 8px)', boxShadow: '0 8px 24px rgba(0, 0, 0, 0.35)',
+        }}>
+          {BENCH_OPTIONS.map(opt => (
+            <button
+              key={opt.key}
+              role="menuitem"
+              onClick={() => { setOpen(false); onPick(opt); }}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left', padding: '6px 9px',
+                background: 'transparent', border: 'none', borderRadius: '0.3rem',
+                cursor: 'pointer', color: 'var(--fg)',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-2)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              <div style={{ fontFamily: mono, fontSize: 11 }}>{opt.label}</div>
+              <div style={{ fontFamily: mono, fontSize: 9, color: 'var(--fg-4)', marginTop: 1 }}>{opt.desc}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function Num({ v, unit }: { v: number | null | undefined; unit?: string }) {
   if (v == null) return <Dash />;
@@ -216,10 +309,10 @@ const Benchmarks: React.FC = () => {
     return () => clearInterval(t);
   }, [loadQueue]);
 
-  const enqueueModel = useCallback(async (id: string) => {
+  const enqueueBench = useCallback(async (id: string, opt: BenchOption) => {
     try {
-      await apiPost('/api/benchmarks/queue', { model: id });
-      toast(`Queued ${cleanName(id)} — start the worker on the Run tab`, 'ok');
+      await apiPost('/api/benchmarks/queue', { model: id, ...opt.body });
+      toast(`Queued ${opt.label} for ${cleanName(id)} — start the worker on the Run tab`, 'ok');
       loadQueue();
     } catch (e: any) { toast(`Queue failed: ${e.message}`, 'err'); }
   }, [loadQueue]);
@@ -270,12 +363,12 @@ const Benchmarks: React.FC = () => {
 
       <div style={{ marginTop: 18 }}>
         {tab === 'roster' && (
-          <RosterTab roster={roster} loading={rosterLoading} error={rosterErr} onQueue={enqueueModel} />
+          <RosterTab roster={roster} loading={rosterLoading} error={rosterErr} onQueue={enqueueBench} />
         )}
         {tab === 'runs' && <RunsTab />}
         {tab === 'evals' && <EvalsTab />}
         {tab === 'queue' && (
-          <QueueTab queue={queue} roster={roster} refresh={loadQueue} onQueueModel={enqueueModel} />
+          <QueueTab queue={queue} roster={roster} refresh={loadQueue} onQueueModel={enqueueBench} />
         )}
       </div>
     </div>
@@ -286,7 +379,7 @@ const Benchmarks: React.FC = () => {
 
 function RosterTab({ roster, loading, error, onQueue }: {
   roster: RosterModel[]; loading: boolean; error: string | null;
-  onQueue: (id: string) => void;
+  onQueue: (id: string, opt: BenchOption) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] }>>({});
@@ -338,7 +431,7 @@ function RosterTab({ roster, loading, error, onQueue }: {
             model={m}
             expanded={expanded === m.id}
             onToggle={() => toggleExpand(m.id)}
-            onQueue={() => onQueue(m.id)}
+            onQueue={opt => onQueue(m.id, opt)}
             detail={detailCache[m.id]}
           />
         ))}
@@ -351,7 +444,7 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail }: {
   model: RosterModel;
   expanded: boolean;
   onToggle: () => void;
-  onQueue: () => void;
+  onQueue: (opt: BenchOption) => void;
   detail?: { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] };
 }) {
   const specKv = [m.spec, m.kv].filter(Boolean).join(' / ') || '—';
@@ -395,14 +488,7 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail }: {
         <td style={{ ...numTd, fontSize: 11, color: 'var(--fg-4)' }}>{m.last_run || '—'}</td>
         <td style={numTd}>{m.runs || 0}</td>
         <td style={{ ...cellTd, textAlign: 'right' }}>
-          <button
-            className="btn ghost sm"
-            title="Queue a benchmark run for this model"
-            onClick={e => { e.stopPropagation(); onQueue(); }}
-            style={{ fontSize: 10, padding: '2px 8px' }}
-          >
-            + queue
-          </button>
+          <QueueMenu onPick={onQueue} />
         </td>
       </tr>
       {expanded && (
@@ -882,7 +968,7 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
   queue: QueueState | null;
   roster: RosterModel[];
   refresh: () => void;
-  onQueueModel: (id: string) => void;
+  onQueueModel: (id: string, opt: BenchOption) => void;
 }) {
   const [plan, setPlan] = useState<any>(null);
   const [planLoading, setPlanLoading] = useState(true);
@@ -991,7 +1077,12 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
               <option value="">single model from the roster&hellip;</option>
               {roster.map(m => <option key={m.id} value={m.id}>{m.name || cleanName(m.id)}</option>)}
             </select>
-            <button className="btn ghost sm" disabled={!modelPick} onClick={() => modelPick && onQueueModel(modelPick)}>Queue model</button>
+            <QueueMenu
+              label="Queue model"
+              disabled={!modelPick}
+              title={modelPick ? 'Pick a bench for this model' : 'Select a model first'}
+              onPick={opt => modelPick && onQueueModel(modelPick, opt)}
+            />
           </div>
         </div>
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -68,12 +69,16 @@ class HindsightRestClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def recall(self, *, bank_id, query, types=None, max_tokens=4096, tags=None):
+    async def recall(
+        self, *, bank_id, query, types=None, max_tokens=4096, tags=None, tags_match=None
+    ):
         body: dict[str, Any] = {"query": query, "max_tokens": max_tokens}
         if types:
             body["types"] = list(types)
         if tags:
             body["tags"] = list(tags)
+        if tags_match is not None:
+            body["tags_match"] = tags_match
         resp = await self._http.post(
             f"/v1/default/banks/{bank_id}/memories/recall", headers=self._headers(), json=body
         )
@@ -95,9 +100,14 @@ class HindsightRestClient:
         return resp.json()
 
     async def delete_document(self, *, bank_id, document_id):
+        # document_id is the only user-influenced value that lands in a URL path
+        # segment (e.g. the deterministic ``<agent>:<session_id>`` id). Percent-
+        # encode it so a colon / other reserved char can't mangle the path;
+        # Hindsight's ``{document_id:path}`` route + Starlette unquote it back.
+        doc = quote(str(document_id), safe="")
         resp = await self._http.request(
             "DELETE",
-            f"/v1/default/banks/{bank_id}/documents/{document_id}",
+            f"/v1/default/banks/{bank_id}/documents/{doc}",
             headers=self._headers(),
         )
         resp.raise_for_status()

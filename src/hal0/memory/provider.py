@@ -215,10 +215,14 @@ class MemoryProvider(ABC):
         max_tokens: int = 4096,
         dataset: str | list[str] = "shared",
         tags: list[str] | None = None,
+        tags_match: str | None = None,
         client_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Token-budgeted recall. Default delegates to ``search`` so an
-        engine without a richer recall surface still answers the route."""
+        engine without a richer recall surface still answers the route.
+
+        ``tags_match`` (``any``/``all``) is an engine-specific tag-filter hint;
+        the search-delegating default ignores it."""
         return await self.search(
             query=query,
             limit=max(1, max_tokens // 256),

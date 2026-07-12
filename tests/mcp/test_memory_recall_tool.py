@@ -10,7 +10,15 @@ from tests.memory.fakes import FakeMemoryProvider
 
 class RecallProvider(FakeMemoryProvider):
     async def recall(
-        self, query, *, types=None, max_tokens=4096, dataset="shared", tags=None, client_id=None
+        self,
+        query,
+        *,
+        types=None,
+        max_tokens=4096,
+        dataset="shared",
+        tags=None,
+        tags_match=None,
+        client_id=None,
     ):
         return [
             {

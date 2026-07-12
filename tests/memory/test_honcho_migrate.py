@@ -102,15 +102,15 @@ def test_forward_migration_batches_and_ensures_resources(tmp_path):
     assert f"/v3/workspaces/{WORKSPACE}/sessions" in paths
 
     # Conclusions were sent in batches of <=100.
-    conclusion_calls = [
-        httpx_json(r) for r in honcho_calls if r.url.path.endswith("/conclusions")
-    ]
+    conclusion_calls = [httpx_json(r) for r in honcho_calls if r.url.path.endswith("/conclusions")]
     for body in conclusion_calls:
         assert len(body["conclusions"]) <= 100
     total_conclusions = sum(len(b["conclusions"]) for b in conclusion_calls)
     assert total_conclusions == 160
     first = conclusion_calls[0]["conclusions"][0]
-    assert first["observer_id"] == AGENT
+    # observer = user peer (not the agent): user-peer dialectic only
+    # retrieves conclusions the peer itself observed.
+    assert first["observer_id"] == USER_PEER
     assert first["observed_id"] == USER_PEER
     assert first["session_id"] == "migration__hindsight__shared"
 
@@ -182,9 +182,7 @@ def test_forward_migration_resume_skips_migrated_ids(tmp_path):
     assert report["shared"]["scanned"] == 2
     assert report["shared"]["migrated"] == 1
     assert report["shared"]["skipped"] == 1
-    conclusion_calls = [
-        httpx_json(r) for r in honcho_calls if r.url.path.endswith("/conclusions")
-    ]
+    conclusion_calls = [httpx_json(r) for r in honcho_calls if r.url.path.endswith("/conclusions")]
     assert len(conclusion_calls) == 1
     assert conclusion_calls[0]["conclusions"][0]["content"] == "b"
 
@@ -224,7 +222,16 @@ def _reverse_conclusions_handler(pages, add_calls):
             page_num = int(request.url.params.get("page", "1"))
             idx = page_num - 1
             if idx >= len(pages):
-                return httpx.Response(200, json={"items": [], "total": 0, "page": page_num, "pages": len(pages), "size": 100})
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [],
+                        "total": 0,
+                        "page": page_num,
+                        "pages": len(pages),
+                        "size": 100,
+                    },
+                )
             return httpx.Response(200, json=pages[idx])
         return httpx.Response(404, json={"error": "unhandled"})
 
@@ -267,7 +274,9 @@ def test_reverse_migration_writes_hal0_and_skips_migration_sessions(tmp_path):
         "size": 100,
     }
     add_calls: list[httpx.Request] = []
-    honcho_transport = httpx.MockTransport(_reverse_conclusions_handler([conclusions_page], add_calls))
+    honcho_transport = httpx.MockTransport(
+        _reverse_conclusions_handler([conclusions_page], add_calls)
+    )
     hal0_transport = httpx.MockTransport(_hal0_add_recorder(add_calls))
 
     with (
@@ -386,7 +395,13 @@ def test_hindsight_to_honcho_skips_derived_types(tmp_path):
     ]
 
     def hal0_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"items": items if "shared" not in str(request.url) or True else [], "next_cursor": None})
+        return httpx.Response(
+            200,
+            json={
+                "items": items if "shared" not in str(request.url) or True else [],
+                "next_cursor": None,
+            },
+        )
 
     calls = {"n": 0}
 
@@ -406,8 +421,13 @@ def test_hindsight_to_honcho_skips_derived_types(tmp_path):
         datasets=["private:hermes"],
         dry_run=True,
         state=state,
-        hal0_http_client=httpx.Client(transport=httpx.MockTransport(hal0_once), base_url="http://hal0"),
-        honcho_http_client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})), base_url="http://honcho"),
+        hal0_http_client=httpx.Client(
+            transport=httpx.MockTransport(hal0_once), base_url="http://hal0"
+        ),
+        honcho_http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
+            base_url="http://honcho",
+        ),
     )
     assert report["private:hermes"]["migrated"] == 2
     assert report["private:hermes"]["skipped"] == 1

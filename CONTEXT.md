@@ -46,7 +46,14 @@ Two distinct memory surfaces coexist on a hal0 box. They serve different scopes 
 
 ## pi-coder
 
-Bundled agent option (CLI shape). Upstream: `badlogic/pi-mono`. Minimal-by-design (4 tools: read/write/edit/bash; no native MCP, no native memory). hal0's pi shim adds `pi-mcp-adapter` (MCP routing) + leaves `pi-memory-md` in place. Track-latest upstream (NOT pinned).
+Bundled agent option (CLI shape). Upstream: `earendil-works/pi` (formerly `badlogic/pi-mono`), hard-forked at `Hal0ai/pi-mono`. Track-latest upstream (NOT pinned). hal0's shim (`hal0.agents.pi_coder`) wires it up on install:
+
+- **hal0 theme** — deployed + set as default.
+- **Model provider** — the `hal0-provider` extension auto-discovers active hal0 slots from `/v1/models` and registers them as pi's default provider (`hal0/agent`). No remote-provider config needed out of the box.
+- **Memory** — the `hal0-memory` extension talks to hal0-api's `/api/memory/*` REST surface directly, with dual private/shared banks (see "memory" above). Supersedes routing memory through `pi-mcp-adapter`; only `hal0-admin` still rides that generic MCP proxy.
+- **Delegation** — best-effort `pi install npm:pi-subagents` for scout/planner/worker/reviewer/oracle-style child agents. Subagents inherit the hal0 default model unless overridden.
+
+`pi-memory-md` (upstream's own project-scoped markdown memory) is left in place — different scope from hal0's memory surface.
 
 ## Hermes-Agent
 
@@ -307,7 +314,7 @@ A file under `/var/lib/hal0/agents/hermes/personas/{id}.toml` declaring `[person
 
 ## hal0-memory (Hermes plugin)
 
-The hal0-owned `MemoryProvider` plugin at `src/hal0/agents/hermes/plugins/memory_hindsight/` (renamed from `hal0-cognee`), mounted into `$HERMES_HOME/plugins/memory/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block`) rather than as an explicit tool call. Per-persona namespace via persona TOML `memory_namespace`; an omitted namespace on writes resolves to `private:<agent_id>` server-side. Supersedes Hal0MemoryProvider above as the canonical name.
+The hal0-owned `MemoryProvider` plugin at `installer/agents/hermes/plugins/hal0-memory/` (renamed from `hal0-cognee`; this is the canonical, shipped source — no mirror elsewhere), mounted into `$HERMES_HOME/plugins/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,recall,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block` + `prefetch`), plus explicit `hal0_memory_{search,recall,add}` tools. Two banks: `private:<agent_id>` (default, agent_id `hermes`) + `shared`, selected per write via `X-hal0-Private`; reads are a server-side union of both. Supersedes Hal0MemoryProvider above as the canonical name.
 
 ## hermes-sdk-diff
 

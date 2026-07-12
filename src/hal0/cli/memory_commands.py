@@ -59,9 +59,9 @@ provider_app = typer.Typer(help="Per-agent memory provider (Hindsight | Honcho).
 app.add_typer(provider_app, name="provider")
 
 # Beefier Hindsight bank-admin CLI: bank/ops/mm sub-apps, a debug ``recall``,
-# and ``migrate`` (legacy Cognee dry-run default + honcho's --from/--to engine
-# migration + ``migrate unify``, all coexisting under one sub-app — see
-# memory_migrate_commands.py's docstring for how the three share the
+# and ``migrate`` (honcho's --from/--to Hindsight<->Honcho engine migration
+# on the default callback + ``migrate unify``, coexisting under one sub-app —
+# see memory_migrate_commands.py's docstring for how the two share the
 # ``migrate`` name). Implementations live in
 # hal0/cli/memory_{bank,ops,mm,recall,migrate}_commands.py so this file only
 # needs this import block + the add_typer/command calls below.
@@ -409,15 +409,14 @@ def provider_set_cmd(
 
 # ── ``hal0 memory migrate`` / ``migrate unify`` ────────────────────────────────
 #
-# Three things now share the ``migrate`` name — the legacy Cognee→Hindsight
-# dry-run (P2-4), honcho's bidirectional --from/--to hindsight<->honcho
-# engine migration, and the new cross-bank ``unify`` — so ``migrate`` is a
-# Typer sub-app (memory_migrate_commands.py) instead of a single
-# ``@app.command``. honcho's migrate_cmd body (and its four helpers) moved
-# there verbatim as the sub-app's default callback; behaviour is unchanged,
-# only the registration shape is. ``sync-graph`` and ``honcho render-env``
-# below still need those helpers, so they're imported rather than
-# redefined.
+# Two things now share the ``migrate`` name — honcho's bidirectional
+# --from/--to hindsight<->honcho engine migration and the new cross-bank
+# ``unify`` — so ``migrate`` is a Typer sub-app (memory_migrate_commands.py)
+# instead of a single ``@app.command``. honcho's migrate_cmd body (and its
+# four helpers) moved there as the sub-app's default callback; behaviour is
+# unchanged, only the registration shape is. ``sync-graph`` and ``honcho
+# render-env`` below still need those helpers, so they're imported rather
+# than redefined.
 app.add_typer(migrate_app, name="migrate")
 
 

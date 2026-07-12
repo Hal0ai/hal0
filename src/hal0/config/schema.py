@@ -2504,6 +2504,18 @@ class MemoryConfig(BaseModel):
     )
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
+    unified_bank: bool = Field(
+        default=True,
+        description=(
+            "Route all memory into ONE Hindsight bank ('shared') instead of "
+            "per-agent private banks. When true, the X-hal0-Private toggle no "
+            "longer forks a private:<agent> bank — the write still lands in "
+            "'shared' but is stamped with a 'visibility:private' tag (plus an "
+            "'agent:<id>' tag), and recall is single-bank (no cross-bank "
+            "fan-out). Set false to restore the legacy multi-bank model "
+            "(private:<agent> / project:<id> banks + fan-out recall)."
+        ),
+    )
     engine: str = Field(
         default="hindsight",
         description=(

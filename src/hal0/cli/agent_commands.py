@@ -523,9 +523,10 @@ class MemoryUninstallOutcome:
         ``not_found`` / ``unreachable`` (we never got to the delete).
     leftover_count
         Rows the post-delete verify search saw matching
-        ``agent_id=hermes-agent``. ``None`` when the verify call itself
-        couldn't run (transport error, unparseable response, etc.) —
-        distinct from a confirmed zero.
+        ``agent_id=hermes`` (the identity card's real slug — see
+        ``BootstrapState.agent_id``). ``None`` when the verify call
+        itself couldn't run (transport error, unparseable response,
+        etc.) — distinct from a confirmed zero.
     url
         The hal0 API base we tried (handy in stderr warnings so the
         operator knows what endpoint to check).
@@ -549,18 +550,32 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
     import urllib.error
     import urllib.request
 
+    # The identity card is written by ``_build_identity_card`` in
+    # hermes_provision.py with ``metadata.agent_id = state.agent_id``,
+    # whose dataclass default is ``"hermes"`` (BootstrapState.agent_id).
+    # This helper used to hardcode the pre-rename "hermes-agent" id,
+    # which meant it could never find (or delete) the real card, and
+    # every search/delete round-trip touched the memory API under a
+    # stray "hermes-agent" identity that was never actually provisioned
+    # (observed live 2026-07-11: stray private:hermes-agent + agents
+    # bank rows from a bootstrap smoke test's uninstall phase). Reuse
+    # the same default so this stays in lockstep with the writer.
+    from hal0.agents.hermes_provision import BootstrapState
+
+    agent_id = BootstrapState().agent_id
+
     # #302: REST shims at /api/memory/{search,delete} instead of the
     # broken /mcp/memory JSON-RPC POST. Same idempotent uninstall
     # semantics: failure is tolerated (memory unreachable shouldn't
     # strand the operator with a half-uninstalled agent).
     url = _api_base()
-    headers = {"Content-Type": "application/json", "X-hal0-Agent": "hermes-agent"}
+    headers = {"Content-Type": "application/json", "X-hal0-Agent": agent_id}
 
     def _search_ids() -> list[str] | None:
         """Return matching ids, or ``None`` if the search couldn't run."""
         search_body = _json.dumps(
             {
-                "query": "hermes-agent",
+                "query": agent_id,
                 "tags": ["agent-identity"],
                 "dataset": "agents",
                 "limit": 50,
@@ -582,7 +597,7 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
             if not isinstance(it, dict):
                 continue
             md = it.get("metadata") or {}
-            if md.get("agent_id") == "hermes-agent" and it.get("id"):
+            if md.get("agent_id") == agent_id and it.get("id"):
                 ids.append(it["id"])
         return ids
 
@@ -652,7 +667,7 @@ def _warn_memory_outcome(outcome: MemoryUninstallOutcome) -> None:
         leftover = outcome.leftover_count if outcome.leftover_count is not None else "?"
         _stderr_console.print(
             f"[yellow]warning[/yellow]: memory teardown incomplete — "
-            f"{leftover} hermes-agent row(s) still in the [bold]agents[/bold] "
+            f"{leftover} hermes identity-card row(s) still in the [bold]agents[/bold] "
             "dataset after delete. Inspect with "
             "[bold]hal0 agent peers[/bold] and clean up by id via "
             "[bold]/api/memory/delete[/bold]."

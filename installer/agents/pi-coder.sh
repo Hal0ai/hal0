@@ -19,9 +19,9 @@
 #   HAL0_AGENT_DATA_DIR  per-agent data dir (default:
 #                         /var/lib/hal0/agents/pi-coder)
 #   HAL0_API_URL         hal0 API base URL (default: http://127.0.0.1:8080)
-#   HAL0_BEARER_TOKEN    Bearer token to wire into adapter config + pi
-#                         provider config (default: read from
-#                         /etc/hal0/tokens.toml first row)
+#   HAL0_BEARER_TOKEN    Bearer token to wire into the adapter config
+#                         (default: read from /etc/hal0/tokens.toml
+#                         first row)
 #
 # Idempotent: re-runs cleanly. Stops at the first install step that
 # materially fails, emitting an actionable error so the operator (or
@@ -81,36 +81,24 @@ install_pi_mcp_adapter() {
 install_pi_mono
 install_pi_mcp_adapter
 
-# ── Write pi config (provider = hal0's OpenAI-compatible /v1) ────────────────
+# ── Provider/memory/theme/delegation config ───────────────────────────────────
 #
-# pi-mono picks up its provider config from $HOME/.pi/config.toml (or
-# $PI_CONFIG_PATH). We point it at hal0's /v1 endpoint. NOTE: this
-# overwrites the existing config — back up before re-running if the
-# user has hand-edits they care about. The adapter config (separate
-# file, written by the Python driver) is the canonical MCP wiring.
-PI_CONFIG_DIR="${PI_CONFIG_PATH:-${HOME:-/root}/.pi}"
-mkdir -p "$PI_CONFIG_DIR"
-PI_CONFIG_FILE="$PI_CONFIG_DIR/config.toml"
-
-info "Writing pi config → $PI_CONFIG_FILE"
-{
-    printf '# hal0 — pi-coder provider config (managed; safe to back up + edit)\n'
-    printf '[provider]\n'
-    printf 'base_url = "%s/v1"\n' "$HAL0_API_URL"
-    if [ -n "$HAL0_BEARER_TOKEN" ]; then
-        printf 'api_key = "%s"\n' "$HAL0_BEARER_TOKEN"
-    else
-        printf '# api_key = "<paste a hal0 Bearer token here>"\n'
-    fi
-    printf 'model = "chat"\n'
-} > "${PI_CONFIG_FILE}.tmp"
-mv "${PI_CONFIG_FILE}.tmp" "$PI_CONFIG_FILE"
+# pi's real config surface is $HOME/.pi/agent/settings.json plus
+# extensions dropped into $HOME/.pi/agent/extensions/ — NOT a
+# $HOME/.pi/config.toml `[provider]` block (that legacy shape predates
+# pi-mono's settings.json + `pi.registerProvider()` extension
+# architecture and is not read by any documented pi mechanism; an
+# earlier version of this script wrote one and it was silently dead).
+# The Python driver (hal0.agents.pi_coder.driver) owns all of that:
+# deploying the hal0-provider (slot autodiscovery) and hal0-memory
+# (shared banks) extensions, the hal0 theme, the settings.json
+# defaults, and `pi install npm:pi-subagents` for delegation.
 
 # ── pi-memory-md left alone (project-scoped markdown; CONTEXT.md) ────────────
 info "Leaving pi-memory-md upstream extension in place (different scope from hal0 memory MCP)."
 
-# ── Adapter config (written by Python driver after this exits) ───────────────
-info "Install complete. Adapter config will be written at $HAL0_AGENT_DATA_DIR/pi-mcp-adapter.json by the hal0 driver."
+# ── Everything else (written by Python driver after this exits) ─────────────
+info "Install complete. Provider/memory/theme/delegation wiring will be written by the hal0 driver."
 
 # Drop a tiny uninstall companion so the uninstall hook can find it.
 {
@@ -121,7 +109,6 @@ info "Install complete. Adapter config will be written at $HAL0_AGENT_DATA_DIR/p
     printf '    npm uninstall -g pi-mcp-adapter 2>/dev/null || true\n'
     printf '    npm uninstall -g @earendil-works/pi-coding-agent 2>/dev/null || true\n'
     printf 'fi\n'
-    printf 'rm -f "%s/config.toml" 2>/dev/null || true\n' "$PI_CONFIG_DIR"
 } > "$HAL0_AGENT_DATA_DIR/uninstall.sh"
 chmod +x "$HAL0_AGENT_DATA_DIR/uninstall.sh"
 
