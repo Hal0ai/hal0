@@ -928,6 +928,126 @@ def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+# Small / non-native models — e.g. a chat slot whose llama-server was started
+# WITHOUT ``--jinja``, so llama.cpp never applies the tool grammar — emit tool
+# calls as TEXT instead of the OpenAI-native ``message.tool_calls`` field. The
+# call then leaks into the chat bubble (``<tool_call>{"name": "get_board"…}``,
+# a fenced JSON block, a bare ``<function=…>`` tag, or a whole-content JSON
+# object) and never runs. As a fallback we scan the assistant text for those
+# conventions and — ONLY when the extracted name is a real surfaced tool, so
+# ordinary prose can never misfire — synthesise the call and strip its syntax
+# from the visible reply. The slot-side fix (``--jinja`` + a tool-capable
+# chat template) is still preferred; this keeps a weak model usable meanwhile.
+_TEXT_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+_FUNCTION_TAG_RE = re.compile(
+    r"<function=([A-Za-z0-9_.\-]+)>\s*(\{.*?\})?\s*</function>", re.DOTALL | re.IGNORECASE
+)
+_FENCED_JSON_RE = re.compile(r"```(?:json|tool_call)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _coerce_args(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+def _toolcall_from_obj(obj: Any) -> tuple[str, dict[str, Any]] | None:
+    """Pull ``(name, arguments)`` from a parsed dict in the common shapes."""
+    if not isinstance(obj, dict):
+        return None
+    fn = obj.get("function") if isinstance(obj.get("function"), dict) else {}
+    name = obj.get("name") or fn.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    for key in ("arguments", "parameters", "args"):
+        if obj.get(key) is not None:
+            return name, _coerce_args(obj[key])
+    if fn.get("arguments") is not None:
+        return name, _coerce_args(fn["arguments"])
+    return name, {}
+
+
+def _parse_text_tool_calls(
+    text: str, known_names: frozenset[str]
+) -> tuple[list[dict[str, Any]], str]:
+    """Best-effort extraction of text-embedded tool calls.
+
+    Returns ``(calls, cleaned_text)``. Only calls whose name is a real
+    surfaced tool are accepted; matched spans are removed from the returned
+    text so the raw tool syntax is never shown to the operator.
+    """
+    if not text or not known_names:
+        return [], text
+    calls: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+
+    def _accept(name: str, args: dict[str, Any], span: tuple[int, int]) -> None:
+        if name in known_names:
+            calls.append({"id": f"txt-{len(calls)}-{name}", "name": name, "arguments": args})
+            spans.append(span)
+
+    # 1) <tool_call>…</tool_call> — JSON body or a nested <function=…> tag.
+    for m in _TEXT_TOOLCALL_RE.finditer(text):
+        body = m.group(1).strip()
+        fn = _FUNCTION_TAG_RE.search(body)
+        if fn:
+            _accept(fn.group(1), _coerce_args(fn.group(2) or "{}"), m.span())
+            continue
+        try:
+            parsed = _toolcall_from_obj(json.loads(body))
+        except ValueError:
+            parsed = None
+        if parsed:
+            _accept(parsed[0], parsed[1], m.span())
+
+    # 2) bare <function=NAME>{…}</function> outside a wrapper.
+    for m in _FUNCTION_TAG_RE.finditer(text):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        _accept(m.group(1), _coerce_args(m.group(2) or "{}"), m.span())
+
+    # 3) fenced ```json {…}``` blocks.
+    for m in _FENCED_JSON_RE.finditer(text):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        try:
+            parsed = _toolcall_from_obj(json.loads(m.group(1)))
+        except ValueError:
+            parsed = None
+        if parsed:
+            _accept(parsed[0], parsed[1], m.span())
+
+    # 4) the whole trimmed reply is a single JSON tool-call object.
+    if not calls:
+        stripped = text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = _toolcall_from_obj(json.loads(stripped))
+            except ValueError:
+                parsed = None
+            if parsed:
+                start = text.index(stripped)
+                _accept(parsed[0], parsed[1], (start, start + len(stripped)))
+
+    if not calls:
+        return [], text
+    cleaned = text
+    for s, e in sorted(spans, reverse=True):
+        cleaned = cleaned[:s] + cleaned[e:]
+    return calls, cleaned.strip()
+
+
+def _surfaced_tool_names(request: Request) -> frozenset[str]:
+    """Names of the tools currently surfaced to the brain (for text-call gating)."""
+    return frozenset(s["function"]["name"] for s in _surfaced_tool_schemas(request))
+
+
 def _assistant_text(response: dict[str, Any]) -> str:
     choices = response.get("choices") or []
     if not choices:
@@ -1015,14 +1135,18 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     if not messages or not (isinstance(messages[0], dict) and messages[0].get("role") == "system"):
         messages.insert(0, {"role": "system", "content": system_prompt})
 
-    # Model precedence: an explicit per-request model wins, then the
-    # [brain_chat] model override (e.g. hal0/npu to run on the NPU chat slot),
-    # then the persona's preferred_model / built-in default.
-    model = payload.get("model") or (cfg.model or None) or default_model
+    tools = _surfaced_tool_schemas(request)
+    # Model precedence: an explicit per-request model wins; then — because the
+    # steward always offers tools — the [brain_chat] tool_model (route tool
+    # turns to a capable, tool-format-compatible model when the brain slot's
+    # own model can't emit parseable calls); then the [brain_chat] model
+    # override (e.g. hal0/npu); then the persona's preferred_model / default.
+    tool_model = cfg.tool_model if (tools and cfg.tool_model) else ""
+    model = payload.get("model") or (tool_model or None) or (cfg.model or None) or default_model
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "tools": _surfaced_tool_schemas(request),
+        "tools": tools,
         "stream": False,
         "max_tokens": int(payload.get("max_tokens") or _MAX_COMPLETION_TOKENS),
     }
@@ -1037,13 +1161,20 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
 
             explicit_thinking = _assistant_thinking(response)
             inline_thinking, text = _split_thinking(_assistant_text(response))
+
+            # Native tool_calls first; fall back to text-embedded calls (a slot
+            # without --jinja leaks them as content). The fallback strips the
+            # matched syntax from `text` so the raw call isn't shown as a token.
+            tool_calls = _extract_tool_calls(response)
+            if not tool_calls:
+                tool_calls, text = _parse_text_tool_calls(text, _surfaced_tool_names(request))
+
             thinking = "\n".join(t for t in (explicit_thinking, inline_thinking) if t)
             if thinking:
                 yield _sse({"type": "thinking", "text": thinking})
             if text:
                 yield _sse({"type": "token", "text": text})
 
-            tool_calls = _extract_tool_calls(response)
             if not tool_calls:
                 yield _sse({"type": "done"})
                 return

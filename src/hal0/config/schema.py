@@ -2953,6 +2953,14 @@ class BrainChatConfig(BaseModel):
     # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
     # explicit per-request ``model`` in the chat body still wins over this.
     model: str = ""
+    # Route tool-calling turns to a capable, tool-format-compatible model. The
+    # steward always offers tools, so when set this is the model its tool loop
+    # runs on — the escape hatch for boxes whose ``model`` (e.g. a small 1B
+    # brain slot) can't emit tool calls the local runtime parses natively (it
+    # leaks/500s). Point it at a model that tool-calls cleanly on this runtime
+    # (a capable local slot like ``hal0/agent``, or the fallback provider).
+    # Empty → use ``model``/persona. An explicit per-request ``model`` wins.
+    tool_model: str = ""
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
 

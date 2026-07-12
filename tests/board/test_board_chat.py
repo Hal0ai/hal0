@@ -1017,3 +1017,39 @@ def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
         json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
     )
     assert stub.calls[0]["model"] == "hal0/utility"
+
+
+def test_tool_model_routes_tool_turns_to_capable_model(tmp_path) -> None:
+    # The steward always offers tools, so tool_model routes the whole loop to a
+    # capable, tool-format-compatible model (the "split": 1B chat, capable tools).
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, model="hal0/brain", tool_model="hal0/agent")
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    # tool_model wins over model because tools are surfaced.
+    assert stub.calls[0]["model"] == "hal0/agent"
+
+
+def test_explicit_request_model_wins_over_tool_model(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, tool_model="hal0/agent")
+
+    client.post(
+        "/api/board/chat",
+        json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert stub.calls[0]["model"] == "hal0/utility"
+
+
+def test_no_tool_model_keeps_brain_model(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, model="hal0/brain", tool_model="")  # unset → no reroute
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.calls[0]["model"] == "hal0/brain"
