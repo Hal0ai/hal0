@@ -23,6 +23,7 @@ threaded through as an injected client.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,18 @@ DEFAULT_STATE_PATH = Path("/var/lib/hal0/honcho/migrate-state.json")
 _MAX_CONTENT_CHARS = 60_000
 
 _CONCLUSION_BATCH = 25
+
+#: Honcho embeds each conclusion synchronously on write via hal0's
+#: ``/v1/embeddings`` (an NPU embed slot). When that slot is transiently
+#: unavailable Honcho surfaces a 5xx; a single such blip shouldn't abort a
+#: multi-thousand-item backfill, so the POST is retried with exponential
+#: backoff. 4xx (client errors) are permanent and never retried.
+_CONCLUSION_MAX_RETRIES = 3
+
+#: Base seconds for the exponential backoff between conclusion-POST retries
+#: (``_RETRY_BASE_DELAY * 2 ** attempt``). Kept small and module-level so
+#: tests can monkeypatch ``time.sleep`` to run instantly.
+_RETRY_BASE_DELAY = 0.5
 
 #: Session-name prefix stamped on every hindsight->honcho migration session,
 #: so the reverse (honcho->hindsight) direction can recognise + skip its own
@@ -191,13 +204,70 @@ def _ensure_session(client: httpx.Client, workspace: str, session: str) -> None:
     client.post(f"/v3/workspaces/{workspace}/sessions", json={"id": session}).raise_for_status()
 
 
+def _post_conclusions_batch(
+    client: httpx.Client, workspace: str, batch: list[dict[str, Any]]
+) -> None:
+    """POST one batch of conclusions, retrying transient backend failures.
+
+    Honcho embeds each conclusion synchronously on write; when the embed
+    backend (an NPU slot behind hal0's ``/v1/embeddings``) is transiently
+    down, Honcho returns a 5xx whose body carries the real cause (e.g.
+    ``503 npu.trio_unavailable``). We retry such 5xx responses and transport
+    errors with exponential backoff up to ``_CONCLUSION_MAX_RETRIES`` times.
+    4xx responses are permanent client errors and are raised immediately.
+
+    On any raised error the Honcho response body (``resp.text``) is attached
+    to the message — the bare :class:`httpx.HTTPStatusError` omits it — so
+    the operator sees the cause instead of an opaque ``500``. The original
+    exception is chained via ``raise ... from``.
+    """
+    url = f"/v3/workspaces/{workspace}/conclusions"
+    last_exc: Exception | None = None
+    for attempt in range(_CONCLUSION_MAX_RETRIES + 1):
+        try:
+            resp = client.post(url, json={"conclusions": batch})
+        except httpx.TransportError as exc:
+            last_exc = exc
+            if attempt < _CONCLUSION_MAX_RETRIES:
+                time.sleep(_RETRY_BASE_DELAY * (2**attempt))
+                continue
+            raise RuntimeError(
+                f"honcho conclusions POST failed after {attempt + 1} attempts: {exc}"
+            ) from exc
+
+        status = resp.status_code
+        if status < 400:
+            return
+        # 4xx: permanent client error — do not retry, but still surface body.
+        if status < 500:
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(
+                    f"honcho conclusions POST failed with {status}: {resp.text}"
+                ) from exc
+        # 5xx: transient — retry with backoff, then give up with the body.
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if attempt < _CONCLUSION_MAX_RETRIES:
+                time.sleep(_RETRY_BASE_DELAY * (2**attempt))
+                continue
+            raise RuntimeError(
+                f"honcho conclusions POST failed with {status} after "
+                f"{attempt + 1} attempts: {resp.text}"
+            ) from exc
+    # Unreachable: loop either returns or raises. Guard for type-checkers.
+    raise RuntimeError("honcho conclusions POST failed") from last_exc
+
+
 def _create_conclusions(
     client: httpx.Client, workspace: str, conclusions: list[dict[str, Any]]
 ) -> None:
     for i in range(0, len(conclusions), _CONCLUSION_BATCH):
         batch = conclusions[i : i + _CONCLUSION_BATCH]
-        resp = client.post(f"/v3/workspaces/{workspace}/conclusions", json={"conclusions": batch})
-        resp.raise_for_status()
+        _post_conclusions_batch(client, workspace, batch)
 
 
 def _session_name(dataset: str) -> str:
