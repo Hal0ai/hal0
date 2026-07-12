@@ -449,14 +449,52 @@ _resolve_container_runtime() {
     return 1
 }
 
+# `<rt> info`/`podman pull` (the probes above) can succeed in an unprivileged
+# Proxmox/LXC container WITHOUT `features: nesting=1` — podman reports itself
+# usable, but every actual `<rt> run` fails on cgroup/mount-namespace setup it
+# can't do without nesting. That's the false-OK this closes: pre-flight
+# passes, install reports success, then every hal0-slot@ inference slot,
+# hal0-openwebui, ComfyUI, and the Honcho compose stack die at runtime with
+# cgroup/mount errors the operator never saw at install time. Bounded with
+# `timeout` so an offline host fails fast instead of hanging the install;
+# HAL0_CONTAINER_SMOKE_IMAGE overrides the pulled image for air-gapped/
+# mirrored registries.
+_container_run_smoke_test() {
+    local rt="$1" image="${HAL0_CONTAINER_SMOKE_IMAGE:-quay.io/podman/hello}"
+    timeout 30 "${rt}" run --rm "${image}" true >/dev/null 2>&1
+}
+
+# Run the real `<rt> run` smoke test and print the LXC-nesting remedy on
+# failure. Only called in REQUIRED mode (install.sh) — `hal0 doctor` stays
+# fast and side-effect-free (no image pull) in the default soft mode.
+_container_runtime_gate() {
+    local rt="$1"
+    if _container_run_smoke_test "${rt}"; then
+        return 0
+    fi
+    err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+    if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+        warn "  inside an unprivileged Proxmox/LXC container this needs 'features: nesting=1' (and often keyctl=1)"
+        warn "  set it in /etc/pve/lxc/<CTID>.conf on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
+    else
+        warn "  inspect the error above (cgroup/mount-namespace setup, subuid/newuidmap, or a daemon issue)"
+    fi
+    return 1
+}
+
 preflight_container_runtime() {
-    # Fast path: a runtime is already installed and working.
+    local required="${HAL0_CONTAINER_REQUIRED:-${HAL0_DOCKER_REQUIRED:-0}}"
+
+    # Fast path: a runtime is already installed and working per `<rt> info`.
     local rt
     if rt="$(_resolve_container_runtime)"; then
         if [[ "${rt}" == podman ]]; then
             info "podman: $(podman version --format '{{.Version}}' 2>/dev/null || echo unknown)"
         else
             info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+        fi
+        if [[ "${required}" == "1" ]]; then
+            _container_runtime_gate "${rt}" || return 1
         fi
         return 0
     fi
@@ -508,6 +546,7 @@ preflight_container_runtime() {
         esac
         if [[ "${ok}" -eq 1 ]] && rt="$(_resolve_container_runtime)" && [[ "${rt}" == podman ]]; then
             info "podman: $(podman version --format '{{.Version}}' 2>/dev/null || echo unknown)"
+            _container_runtime_gate "${rt}" || return 1
             return 0
         fi
         err "podman install/initialisation failed — see output above; check 'podman info'"
