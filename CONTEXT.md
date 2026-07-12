@@ -46,7 +46,14 @@ Two distinct memory surfaces coexist on a hal0 box. They serve different scopes 
 
 ## pi-coder
 
-Bundled agent option (CLI shape). Upstream: `badlogic/pi-mono`. Minimal-by-design (4 tools: read/write/edit/bash; no native MCP, no native memory). hal0's pi shim adds `pi-mcp-adapter` (MCP routing) + leaves `pi-memory-md` in place. Track-latest upstream (NOT pinned).
+Bundled agent option (CLI shape). Upstream: `earendil-works/pi` (formerly `badlogic/pi-mono`), hard-forked at `Hal0ai/pi-mono`. Track-latest upstream (NOT pinned). hal0's shim (`hal0.agents.pi_coder`) wires it up on install:
+
+- **hal0 theme** — deployed + set as default.
+- **Model provider** — the `hal0-provider` extension auto-discovers active hal0 slots from `/v1/models` and registers them as pi's default provider (`hal0/agent`). No remote-provider config needed out of the box.
+- **Memory** — the `hal0-memory` extension talks to hal0-api's `/api/memory/*` REST surface directly, with dual private/shared banks (see "memory" above). Supersedes routing memory through `pi-mcp-adapter`; only `hal0-admin` still rides that generic MCP proxy.
+- **Delegation** — best-effort `pi install npm:pi-subagents` for scout/planner/worker/reviewer/oracle-style child agents. Subagents inherit the hal0 default model unless overridden.
+
+`pi-memory-md` (upstream's own project-scoped markdown memory) is left in place — different scope from hal0's memory surface.
 
 ## Hermes-Agent
 
