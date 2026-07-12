@@ -27,9 +27,22 @@ EXTENSIONS: list[Extension] = [
     Extension("openwebui", "app", "Open WebUI", "Chat web UI for your models", True),
     Extension("comfyui", "app", "ComfyUI", "Image & video generation (iGPU)", True),
     Extension("hermes", "agent", "Hermes", "Conversational agent with memory", True),
+    # Extension id stays "pi" (setup answers/state dicts + UI keys are keyed
+    # off this id across several other CLI modules) even though the bundled
+    # agent driver's canonical id is "pi-coder" (agents/manager.BUNDLED_AGENTS).
+    # See _AGENT_ID_ALIASES below for the translation at the install boundary.
     Extension("pi", "agent", "Pi", "Coding agent", False),
 ]
 _BY_ID = {e.id: e for e in EXTENSIONS}
+
+# Extension id -> the bundled-agent id ``hal0 agent install`` actually
+# recognises (``hal0.agents.manager.BUNDLED_AGENTS``). Today only "pi"
+# diverges: the setup screen's "Pi" label maps to extension id "pi", but the
+# driver module is registered as "pi-coder". Without this translation,
+# enabling "Pi" during setup silently failed — ``install_extension("pi")``
+# shelled out to ``hal0 agent install pi``, which AgentManager rejects with
+# "unknown bundled agent" since "pi" isn't in BUNDLED_AGENTS.
+_AGENT_ID_ALIASES: dict[str, str] = {"pi": "pi-coder"}
 
 
 def list_extensions(kind: str | None = None) -> list[Extension]:
@@ -123,7 +136,8 @@ def install_extension(ext_id: str) -> ExtensionOutcome:
         if ext.id == "openwebui":
             return install_openwebui()
         elif ext.kind == "agent":
-            _run(["hal0", "agent", "install", ext.id])
+            agent_id = _AGENT_ID_ALIASES.get(ext.id, ext.id)
+            _run(["hal0", "agent", "install", agent_id])
         elif ext.id == "comfyui":
             # ComfyUI is owned by the seeded img slot. The legacy
             # /opt/comfyui scripts remain manual operator tools only.

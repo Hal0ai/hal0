@@ -24,6 +24,17 @@ def _write_manifest(path: Path, payload: dict) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _not_editable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the editable-install check off (the test venv is itself editable).
+
+    The apply/prepare routes hard-refuse an editable install with a 409
+    (audit 4.1); without this the whole suite would trip that preflight. The
+    dedicated refusal test flips it back on explicitly.
+    """
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+
 @pytest.fixture
 def isolated_client(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -243,6 +254,35 @@ def test_apply_creates_a_queued_job_returning_id(isolated_client: TestClient) ->
     assert "id" in body and isinstance(body["id"], str)
     assert body["state"] in ("queued", "running", "failed")
     assert body["channel"] == "stable"
+
+
+def test_apply_refuses_editable_install_with_409(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editable/dev install is refused at the route boundary (audit 4.1).
+
+    Preflight returns a typed 409 before any job is queued, so the operator
+    gets an immediate, actionable error instead of a background job that
+    silently fails later.
+    """
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+    monkeypatch.setattr("hal0.updater.updater._editable_install_path", lambda: "/opt/hal0")
+    r = isolated_client.post("/api/updates/apply", json={})
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "system.update_editable_install"
+    assert "editable mode from /opt/hal0" in err["message"]
+
+
+def test_prepare_refuses_editable_install_with_409(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prepare route shares the same editable preflight (audit 4.1)."""
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+    monkeypatch.setattr("hal0.updater.updater._editable_install_path", lambda: "/opt/hal0")
+    r = isolated_client.post("/api/updates/prepare", json={})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "system.update_editable_install"
 
 
 def test_status_unknown_job_returns_envelope(isolated_client: TestClient) -> None:

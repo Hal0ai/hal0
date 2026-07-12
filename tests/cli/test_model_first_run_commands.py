@@ -71,6 +71,141 @@ def test_model_add_posts_add_from_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "hal0 model run" in result.output
 
 
+def test_model_add_with_license_follows_up_with_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI consolidation: `add` folded in `register`'s explicit-metadata
+    flags — `--license` isn't accepted by add-from-path, so it's applied
+    via a follow-up PUT /api/models/{id}."""
+    put_calls: list[tuple[str, Any]] = []
+
+    monkeypatch.setattr(
+        shared,
+        "api_post",
+        lambda path, **_kw: {"id": "demo-model", "path": "/mnt/ai-models/demo.gguf"},
+    )
+    monkeypatch.setattr(
+        model_commands,
+        "api_put",
+        lambda path, *, json=None, **_kw: (
+            put_calls.append((path, json))
+            or {"id": "demo-model", "path": "/mnt/ai-models/demo.gguf", "license": json["license"]}
+        ),
+    )
+    result = runner.invoke(
+        model_commands.app,
+        ["add", "/mnt/ai-models/demo.gguf", "--license", "Apache-2.0"],
+    )
+    assert result.exit_code == 0, result.output
+    assert put_calls == [("/api/models/demo-model", {"license": "Apache-2.0"})]
+
+
+def test_model_add_without_license_skips_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    put_calls: list[tuple[str, Any]] = []
+    monkeypatch.setattr(
+        shared,
+        "api_post",
+        lambda path, **_kw: {"id": "demo-model", "path": "/mnt/ai-models/demo.gguf"},
+    )
+    monkeypatch.setattr(
+        model_commands,
+        "api_put",
+        lambda path, *, json=None, **_kw: put_calls.append((path, json)),
+    )
+    result = runner.invoke(model_commands.app, ["add", "/mnt/ai-models/demo.gguf"])
+    assert result.exit_code == 0, result.output
+    assert put_calls == []
+
+
+def _visible_command_names(typer_app) -> set[str]:
+    """Return the subcommand names Click would actually list in --help
+    (i.e. excluding ``hidden=True`` commands) — substring checks against
+    rendered --help text are unreliable since command names can appear
+    inside *other* commands' help strings (e.g. "add" mentions "Register")."""
+    import click
+    import typer
+
+    click_cmd = typer.main.get_command(typer_app)
+    ctx = click.Context(click_cmd)
+    return {
+        name for name in click_cmd.list_commands(ctx) if not click_cmd.get_command(ctx, name).hidden
+    }
+
+
+def test_model_register_is_hidden_deprecated_alias_for_add(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`model register` still works (no breaking removal), delegates to
+    `model add`, and is no longer advertised in `--help`."""
+    assert "register" not in _visible_command_names(model_commands.app)
+
+    captured: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> dict[str, Any]:
+        captured["post_path"] = path
+        captured["post_json"] = json
+        return {"id": json["id"], "path": json["path"]}
+
+    put_calls: list[tuple[str, Any]] = []
+
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    monkeypatch.setattr(
+        model_commands,
+        "api_put",
+        lambda path, *, json=None, **_kw: (
+            put_calls.append((path, json))
+            or {"id": "demo-model", "path": "/mnt/ai-models/demo.gguf", "license": json["license"]}
+        ),
+    )
+    result = runner.invoke(
+        model_commands.app,
+        ["register", "demo-model", "--path", "/mnt/ai-models/demo.gguf"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "deprecat" in result.stderr.lower()
+    assert "model add" in result.stderr.lower()
+    # Delegated straight through to add-from-path with the explicit id.
+    assert captured["post_path"] == "/api/models/add-from-path"
+    assert captured["post_json"]["id"] == "demo-model"
+    # register's default license ("unknown") is applied via the follow-up PUT.
+    assert put_calls == [("/api/models/demo-model", {"license": "unknown"})]
+
+
+def test_model_assign_is_hidden_deprecated_alias_for_slot_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`model assign` still works, delegates to the same PUT
+    /api/slots/{slot}/config endpoint `slot edit --model` uses, and is no
+    longer advertised in `--help`."""
+    from hal0.cli import slot_commands
+
+    assert "assign" not in _visible_command_names(model_commands.app)
+
+    put_calls: list[tuple[str, Any]] = []
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(
+        slot_commands,
+        "api_get",
+        lambda path, **_kw: {"model": {"default": "old-model", "context_size": 4096}},
+    )
+    monkeypatch.setattr(
+        slot_commands,
+        "api_put",
+        lambda path, *, json=None, **_kw: put_calls.append((path, json)) or {"state": "idle"},
+    )
+    result = runner.invoke(
+        model_commands.app,
+        ["assign", "demo-model", "--slot", "primary"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "deprecat" in result.stderr.lower()
+    assert "slot edit" in result.stderr.lower()
+    assert put_calls == [
+        (
+            "/api/slots/primary/config",
+            {"model": {"default": "demo-model", "context_size": 4096}},
+        )
+    ]
+
+
 def test_model_store_show_reports_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         model_commands,

@@ -1,30 +1,37 @@
 """``hal0 capabilities`` subcommands.
 
-Operator tooling that touches ``/etc/hal0/capabilities.toml`` directly,
-bypassing the running API. Used during upgrades and for repair after
-a manual edit goes wrong.
+Operator tooling for the capability-slot surface (embed/voice/img/vision).
+Two kinds of command live here:
 
-Currently exposes::
-
-    hal0 capabilities migrate
-        Rewrite illegal (backend, model) pairs against the live catalog.
+* ``list`` / ``set`` — thin clients over the live API
+  (``GET /api/capabilities``, ``POST /api/capabilities/{slot}/{child}``),
+  the same endpoints the dashboard's Capability slots section and the
+  hal0-admin MCP (``capability_list``/``capability_set``) already use.
+  These need a *running* ``hal0-api`` — they go through the orchestrator
+  so slot lifecycle (start/stop/reconcile) stays consistent.
+* ``migrate`` — repair tooling that touches
+  ``/etc/hal0/capabilities.toml`` directly, bypassing the running API.
+  Used during upgrades and for repair after a manual edit goes wrong.
 
 (The schema_version=1 → 2 migration that used to live here as a CLI
 command now runs automatically on config load — see
 ``hal0.capabilities.config``. The old ``sync`` command is gone too:
 ``registry.toml`` is the sole model catalog.)
 
-Migration is the first reason this module exists: when the catalog
-reshape landed (model-first grouped rows + per-(backend, model)
-validation), any previously-persisted selection that mixed an FLM
-chat tag with a GGUF backend (or vice-versa) became illegal. The
-runtime orchestrator now rejects such writes, but already-on-disk
-selections survive until a write touches them. ``migrate`` walks the
-file, snaps illegal pairs to a legal one (or clears the selection
-when the model is gone entirely), and writes back atomically.
+Migration is the reason ``migrate`` exists: when the catalog reshape
+landed (model-first grouped rows + per-(backend, model) validation), any
+previously-persisted selection that mixed an FLM chat tag with a GGUF
+backend (or vice-versa) became illegal. The runtime orchestrator now
+rejects such writes, but already-on-disk selections survive until a
+write touches them. ``migrate`` walks the file, snaps illegal pairs to a
+legal one (or clears the selection when the model is gone entirely), and
+writes back atomically. Default is dry-run (matching
+``hal0 migrate model-layout``'s contract) — pass ``--apply`` to write.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -37,17 +44,126 @@ from hal0.capabilities.config import (
     load_capabilities_config,
     save_capabilities_config,
 )
-from hal0.capabilities.orchestrator import _CHILD_TO_CAPABILITY
+from hal0.capabilities.orchestrator import _CHILD_TO_CAPABILITY, LEGAL_SLOTS, legal_children
+from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, api_post, die
 from hal0.config.locking import file_lock
 from hal0.registry.store import ModelRegistry
 
 app = typer.Typer(
     name="capabilities",
-    help="Capability-slot configuration repair + migration.",
+    help="Capability-slot configuration: list, set, repair + migration.",
     no_args_is_help=True,
 )
 
 console = Console()
+
+
+# ── `hal0 capabilities list` — GET /api/capabilities ────────────────────────
+
+
+@app.command("list")
+def list_capabilities() -> None:
+    """List capability-slot selections (embed/voice/img/vision) from the live API.
+
+    Thin client over ``GET /api/capabilities`` — the same payload the
+    dashboard's Capability slots section renders. Shows the persisted
+    (backend, provider, model, enabled) selection for every (slot, child)
+    pair the orchestrator knows about.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        data = api_get("/api/capabilities")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+
+    selections = data.get("selections") if isinstance(data, dict) else None
+    if not isinstance(selections, dict) or not selections:
+        console.print("[dim]no capability selections configured.[/dim]")
+        return
+
+    table = Table(title="Capability selections")
+    table.add_column("Slot", style="bold")
+    table.add_column("Child")
+    table.add_column("Backend")
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Enabled")
+    for slot, children in sorted(selections.items()):
+        if not isinstance(children, dict):
+            continue
+        for child, sel in sorted(children.items()):
+            if not isinstance(sel, dict):
+                continue
+            enabled = sel.get("enabled")
+            table.add_row(
+                slot,
+                child,
+                str(sel.get("backend") or "—"),
+                str(sel.get("provider") or "—"),
+                str(sel.get("model") or "—"),
+                "[green]yes[/green]" if enabled else "[dim]no[/dim]",
+            )
+    console.print(table)
+
+
+# ── `hal0 capabilities set` — POST /api/capabilities/{slot}/{child} ─────────
+
+
+@app.command("set")
+def set_capability(
+    slot: str = typer.Argument(..., help=f"Capability slot: {', '.join(LEGAL_SLOTS)}."),
+    child: str = typer.Argument(..., help="Child within the slot (e.g. 'default')."),
+    model: str | None = typer.Option(None, "--model", help="Model id to select."),
+    backend: str | None = typer.Option(None, "--backend", help="Backend id to select."),
+    provider: str | None = typer.Option(None, "--provider", help="Provider tag for the backend."),
+    enabled: bool | None = typer.Option(
+        None,
+        "--enabled/--disabled",
+        help="Enable or disable this (slot, child) selection.",
+    ),
+) -> None:
+    """Apply a partial capability selection update.
+
+    Thin client over ``POST /api/capabilities/{slot}/{child}`` — reconciles
+    slot lifecycle via the running ``CapabilityOrchestrator`` (starts/stops/
+    swaps the backing slot as needed), the same path the dashboard uses.
+    Only the flags you pass are sent; omitted fields keep their current value.
+    """
+    if slot not in LEGAL_SLOTS:
+        die(f"unknown capability slot {slot!r} — legal: {', '.join(LEGAL_SLOTS)}")
+        return
+    legal = legal_children(slot)
+    if child not in legal:
+        die(f"child {child!r} not valid for slot {slot!r} — legal: {', '.join(legal)}")
+        return
+
+    body: dict[str, Any] = {}
+    if model is not None:
+        body["model"] = model
+    if backend is not None:
+        body["backend"] = backend
+    if provider is not None:
+        body["provider"] = provider
+    if enabled is not None:
+        body["enabled"] = enabled
+    if not body:
+        die("nothing to set — pass at least one of --model/--backend/--provider/--enabled.")
+        return
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        result = api_post(f"/api/capabilities/{slot}/{child}", json=body)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+
+    selection = result.get("selection") if isinstance(result, dict) else None
+    console.print(f"[green]✓[/green]  {slot}/{child} → {selection or body}")
 
 
 def _classify_pair(
@@ -88,10 +204,16 @@ def _classify_pair(
 
 @app.command()
 def migrate(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply the migration. Without this, the command is a dry-run.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Show what would change without writing the file.",
+        hidden=True,
+        help="Deprecated no-op — dry-run is now the default; pass --apply to write.",
     ),
 ) -> None:
     """Rewrite persisted selections that are illegal against the live catalog.
@@ -103,8 +225,12 @@ def migrate(
     whose model is no longer in the catalog are cleared (backend stays
     intact so the dashboard can still show what was previously chosen).
 
-    Idempotent — running it twice is a no-op once everything is legal.
+    Default is dry-run (no flags = safe preview); pass ``--apply`` to
+    write, matching ``hal0 migrate model-layout --apply``'s contract.
+    Idempotent — running ``--apply`` twice is a no-op once everything is
+    legal.
     """
+    del dry_run  # deprecated hidden flag — dry-run is the unconditional default now
     # SC-10: the load → diff → save is one read-modify-write. Hold the same
     # capabilities.toml advisory lock the running API uses so a ``migrate``
     # invoked while hal0-api is applying a selection cannot read a stale copy
@@ -149,7 +275,7 @@ def migrate(
                             "reason": "backend cannot serve model",
                         }
                     )
-                    if not dry_run:
+                    if apply:
                         children[child] = CapabilitySelection(
                             backend=new_backend,
                             provider=new_provider,
@@ -167,7 +293,7 @@ def migrate(
                             "reason": "model not in catalog",
                         }
                     )
-                    if not dry_run:
+                    if apply:
                         children[child] = CapabilitySelection(
                             backend=sel.backend,
                             provider=sel.provider,
@@ -193,10 +319,10 @@ def migrate(
             table.add_row(c["slot"], c["child"], c["model"], c["before"], c["after"], c["reason"])
         console.print(table)
 
-        if dry_run:
+        if not apply:
             console.print(
-                f"\n[yellow]--dry-run[/yellow] — {len(changes)} selection(s) "
-                f"would be rewritten in {capabilities_toml_path()}."
+                f"\n[yellow]--dry-run[/yellow] — would rewrite {len(changes)} selection(s) "
+                f"in {capabilities_toml_path()}; pass --apply to write."
             )
             raise typer.Exit(0)
 

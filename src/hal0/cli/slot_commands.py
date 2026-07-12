@@ -673,3 +673,106 @@ def slot_show(
             border_style="cyan",
         )
     )
+
+
+@app.command("metrics")
+def slot_metrics(
+    name: str | None = typer.Argument(None, help="Slot name (omit to show all slots)."),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw /api/slots/metrics JSON for CI/pipe use (no Rich table).",
+    ),
+) -> None:
+    """Show live per-slot runtime metrics (tok/s, KV%, mem, uptime, queue depth)."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        data = api_get("/api/slots/metrics")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if name is not None:
+        entry = data.get(name) if isinstance(data, dict) else None
+        if entry is None:
+            die(f"no metrics for slot {name!r} (unknown slot, or it has never served a request)")
+            return
+        data = {name: entry}
+    if json_out:
+        typer.echo(jsonlib.dumps(data, indent=2))
+        return
+    table = Table(title="hal0 slot metrics")
+    table.add_column("Name", style="bold")
+    table.add_column("tok/s", justify="right")
+    table.add_column("KV%", justify="right")
+    table.add_column("Mem MB", justify="right")
+    table.add_column("Uptime s", justify="right")
+    table.add_column("Reqs", justify="right")
+    if not data:
+        console.print("[dim]No slot metrics available.[/dim]")
+        return
+    for slot_name, m in data.items():
+        if not isinstance(m, dict):
+            continue
+        tps = m.get("tokens_per_sec")
+        kv = m.get("kv_cache_usage")
+        table.add_row(
+            slot_name,
+            f"{tps:.1f}" if isinstance(tps, (int, float)) else "—",
+            f"{kv * 100:.0f}" if isinstance(kv, (int, float)) else "—",
+            str(m.get("mem_rss_mb", "—")),
+            str(m.get("uptime_seconds", "—")),
+            str(m.get("requests_processing", "—")),
+        )
+    console.print(table)
+
+
+@app.command("capacity")
+def slot_capacity(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw /api/slots/capacity JSON for CI/pipe use (no Rich table).",
+    ),
+) -> None:
+    """Show per-slot resident memory and the slot-count budget."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        data = api_get("/api/slots/capacity")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(data, indent=2))
+        return
+    budget = data.get("slot_budget") or {}
+    used = budget.get("used_slots", "—")
+    max_slots = budget.get("max_slots", 0)
+    cap = "unlimited" if not max_slots else str(max_slots)
+    console.print(f"Slot budget: [bold]{used}[/bold] / {cap}")
+    per_slot = data.get("per_slot") or {}
+    table = Table(title="Per-slot memory")
+    table.add_column("Name", style="bold")
+    table.add_column("State")
+    table.add_column("Model")
+    table.add_column("VRAM MB", justify="right")
+    table.add_column("RAM MB", justify="right")
+    table.add_column("Total MB", justify="right")
+    if not per_slot:
+        console.print("[dim]No slot capacity data.[/dim]")
+        return
+    for slot_name, s in per_slot.items():
+        if not isinstance(s, dict):
+            continue
+        table.add_row(
+            slot_name,
+            _fmt_state(s.get("state")),
+            s.get("model_id") or "—",
+            str(s.get("vram_mb", "—")),
+            str(s.get("ram_mb", "—")),
+            str(s.get("mem_mb", "—")),
+        )
+    console.print(table)

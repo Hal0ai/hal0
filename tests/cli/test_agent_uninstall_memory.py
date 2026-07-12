@@ -262,7 +262,7 @@ def test_cli_silent_on_deleted_outcome(
             url="http://127.0.0.1:8080",
         ),
     )
-    result = runner.invoke(agent_commands.app, ["uninstall", "hermes"])
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes", "--force"])
     assert result.exit_code == 0, result.output
     # No warning markup on stderr.
     assert "warning" not in (result.stderr or "")
@@ -283,7 +283,7 @@ def test_cli_silent_on_not_found_outcome(
             url="http://127.0.0.1:8080",
         ),
     )
-    result = runner.invoke(agent_commands.app, ["uninstall", "hermes"])
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes", "--force"])
     assert result.exit_code == 0, result.output
     assert "warning" not in (result.stderr or "")
 
@@ -304,7 +304,7 @@ def test_cli_warns_on_unreachable_outcome(
     # Pin a wide console so Rich doesn't truncate the URL we assert on.
     monkeypatch.setenv("COLUMNS", "200")
 
-    result = runner.invoke(agent_commands.app, ["uninstall", "hermes"])
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes", "--force"])
 
     assert result.exit_code == 0, result.output
     assert "warning" in result.stderr
@@ -327,7 +327,7 @@ def test_cli_warns_on_leftover_outcome(
     )
     monkeypatch.setenv("COLUMNS", "200")
 
-    result = runner.invoke(agent_commands.app, ["uninstall", "hermes"])
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes", "--force"])
 
     assert result.exit_code == 0, result.output
     assert "warning" in result.stderr
@@ -351,8 +351,45 @@ def test_cli_keep_memory_skips_outcome_path(
 
     monkeypatch.setattr(agent_commands, "_uninstall_hermes_memory", _should_not_run)
 
-    result = runner.invoke(agent_commands.app, ["uninstall", "hermes", "--keep-memory"])
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes", "--keep-memory", "--force"])
     assert result.exit_code == 0, result.output
     assert called["n"] == 0
     # Stdout still surfaces the preservation hint.
     assert "memory preserved" in result.output
+
+
+# ── confirmation gate (footgun fix) ───────────────────────────────────────────
+
+
+def test_cli_aborts_without_force_when_declined(
+    stub_uninstall_api: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No --force, operator declines the prompt → aborts before any teardown."""
+    stub_uninstall_api()
+    called: dict[str, int] = {"n": 0}
+
+    def _should_not_run() -> agent_commands.MemoryUninstallOutcome:
+        called["n"] += 1
+        raise AssertionError("memory teardown ran despite declined confirm")
+
+    monkeypatch.setattr(agent_commands, "_uninstall_hermes_memory", _should_not_run)
+
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes"], input="n\n")
+    assert result.exit_code != 0
+    assert called["n"] == 0
+
+
+def test_cli_proceeds_without_force_when_confirmed(
+    stub_uninstall_api: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No --force, operator confirms → teardown proceeds as usual."""
+    stub_uninstall_api()
+    _stub_memory_outcome(
+        monkeypatch,
+        agent_commands.MemoryUninstallOutcome(
+            outcome="deleted", deleted_count=1, leftover_count=0, url="http://127.0.0.1:8080"
+        ),
+    )
+    result = runner.invoke(agent_commands.app, ["uninstall", "hermes"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Uninstalled" in result.output

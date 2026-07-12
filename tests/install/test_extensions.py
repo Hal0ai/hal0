@@ -34,6 +34,21 @@ def test_install_unknown_extension_skips():
     assert out.installed is False and out.skipped == "unknown_extension"
 
 
+def test_install_pi_extension_resolves_to_bundled_agent_id(monkeypatch):
+    """Extension id "pi" must translate to the "pi-coder" bundled-agent id
+    at the ``hal0 agent install`` boundary (BUNDLED_AGENTS in
+    agents/manager.py only recognises "pi-coder") — without this, enabling
+    "Pi" during setup silently failed with "unknown bundled agent"."""
+    from hal0.agents.manager import BUNDLED_AGENTS
+
+    ran = []
+    monkeypatch.setattr(ext_mod, "_run", lambda *a, **k: ran.append(a[0]))
+    out = install_extension("pi")
+    assert isinstance(out, ExtensionOutcome) and out.installed is True
+    assert ran == [["hal0", "agent", "install", "pi-coder"]]
+    assert "pi-coder" in BUNDLED_AGENTS
+
+
 # ── OpenWebUI wiring (issue #1102 / Q9) ─────────────────────────────────────
 #
 # install_extension("openwebui") and the standalone install_openwebui() must

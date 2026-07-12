@@ -35,6 +35,9 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     }
 
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    # The test venv is itself an editable install, so the audit-4.1 refusal
+    # would fire before staging; pin it off so the apply flow is exercised.
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
 
     def fake_get(path: str, **kwargs: object) -> dict:
         captured["get_paths"].append(path)
@@ -150,6 +153,7 @@ def test_post_apply_shows_drift_banner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
     monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
 
     def fake_get(path: str, **kwargs: object) -> dict:
         if path == "/api/updates/slot-drift":
@@ -213,6 +217,26 @@ def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatc
     assert stub_api["commit_json"] == {"version": "0.1.1"}
 
 
+def test_update_refuses_on_editable_install(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editable/dev install is hard-refused before staging (audit 4.1).
+
+    The refusal names the editable tree and points at the release wheel; it
+    must never reach /prepare or /commit.
+    """
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+    monkeypatch.setattr("hal0.updater.updater._editable_install_path", lambda: "/opt/hal0")
+    result = runner.invoke(app, ["update", "--target", "0.1.1"])
+    assert result.exit_code != 0
+    assert "editable mode from /opt/hal0" in result.output
+    assert "pip install hal0" in result.output
+    # Never staged or committed.
+    assert stub_api["prepare_json"] is None
+    assert stub_api["commit_json"] is None
+
+
 def test_yes_flag_present_and_skips_confirm(
     stub_api: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -241,6 +265,57 @@ def test_tty_decline_stages_without_commit(stub_api: dict, monkeypatch: pytest.M
     assert result.exit_code == 0, result.output
     assert stub_api["prepare_json"] == {"version": "0.1.1"}
     assert stub_api["commit_json"] is None  # declined → no commit
+
+
+def test_rollback_headless_proceeds_without_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headless/piped (non-TTY) rollback proceeds unattended, like apply."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    posted: list[str] = []
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted.append(path)
+        return {"channel": "stable"}
+
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "/api/updates/rollback" in posted
+    assert "rolled back" in result.output
+
+
+def test_rollback_yes_flag_skips_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--yes`` drives straight to the rollback POST even on a TTY."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    monkeypatch.setattr(uc, "_interactive", lambda: True)
+    called = {"confirm": False}
+    monkeypatch.setattr(
+        uc.typer, "confirm", lambda *a, **k: called.__setitem__("confirm", True) or True
+    )
+    posted: list[str] = []
+    monkeypatch.setattr(
+        uc, "api_post", lambda path, **k: posted.append(path) or {"channel": "stable"}
+    )
+    result = runner.invoke(app, ["update", "--rollback", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert called["confirm"] is False
+    assert "/api/updates/rollback" in posted
+
+
+def test_rollback_tty_decline_never_posts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a TTY without --yes, declining the prompt never issues the rollback POST."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
+    monkeypatch.setattr(uc, "_interactive", lambda: True)
+    monkeypatch.setattr(uc.typer, "confirm", lambda *a, **k: False)
+    posted: list[str] = []
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: posted.append(path) or {})
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert posted == []
+    assert "cancelled" in result.output
 
 
 def test_render_notes_shows_breaking_and_migrations(capsys: pytest.CaptureFixture[str]) -> None:

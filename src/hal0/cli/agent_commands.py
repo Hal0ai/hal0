@@ -468,8 +468,25 @@ def agent_uninstall(
             "its identity card. Default: full teardown including memory."
         ),
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Skip confirmation prompt.",
+    ),
 ) -> None:
     """Uninstall a bundled agent."""
+    if not force:
+        memory_note = (
+            "its memory will be preserved"
+            if keep_memory
+            else "this also deletes its private memory"
+        )
+        typer.confirm(
+            f"Uninstall agent {name!r}? {memory_note} — this cannot be undone.",
+            abort=True,
+        )
+
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)

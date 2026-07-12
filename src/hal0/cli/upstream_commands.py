@@ -1,12 +1,20 @@
 """hal0 upstream subcommands — thin HTTP client to the hal0 API.
 
-Provides ``hal0 upstream {list,show,create,update,delete,test,set-credentials}``.
+Provides ``hal0 upstream {list,show,create,update,delete,test}`` plus the
+``hal0 upstream credentials set`` noun-subgroup.
 
 Request/response shapes mirror ``hal0.api.routes.providers`` exactly:
 create/update bodies are ``extra="forbid"`` on the server, so every flag
 here maps 1:1 onto a real body field. Credentials go through the separate
 ``/api/providers/{name}/credentials`` route (``{key, value}``) so secrets
 never transit the CRUD surface; ``create --api-key`` chains the two calls.
+
+CLI consolidation (2026-07): ``hal0 upstream set-credentials`` is renamed to
+``hal0 upstream credentials set`` — every other multi-facet resource in this
+cluster (``agent bootstrap``, ``mcp catalog``, ``memory graph``) uses a
+noun-subgroup, and the flat verb left no home for a future ``credentials
+show``/``credentials clear``. ``set-credentials`` remains as a hidden
+deprecated alias.
 """
 
 from __future__ import annotations
@@ -414,26 +422,15 @@ def test_upstream(
         raise typer.Exit(1)
 
 
-# ── set-credentials ───────────────────────────────────────────────────────
+# ── credentials ──────────────────────────────────────────────────────────
+
+credentials_app = typer.Typer(help="Manage upstream provider credentials.")
+app.add_typer(credentials_app, name="credentials")
 
 
-@app.command("set-credentials")
-def set_credentials(
-    name: str = typer.Argument(..., help="Provider name."),
-    key: str = typer.Option(
-        ...,
-        "--key",
-        prompt="API key",
-        hide_input=True,
-        help="API key VALUE (secret; prompted securely if omitted).",
-    ),
-    env_var: str = typer.Option(
-        None,
-        "--env-var",
-        help="Env-var name to write (defaults to the upstream's declared auth_value_env).",
-    ),
-) -> None:
-    """Set an API key for a provider (writes to api.env)."""
+def _do_set_credentials(name: str, key: str, env_var: str | None) -> None:
+    """Shared implementation behind ``upstream credentials set`` and the
+    deprecated ``upstream set-credentials`` alias."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -467,3 +464,48 @@ def set_credentials(
         f"[green]✓[/green] Credential stored for [bold]{name}[/bold] "
         f"in api.env as [bold]{env_var}[/bold]"
     )
+
+
+@credentials_app.command("set")
+def credentials_set(
+    name: str = typer.Argument(..., help="Provider name."),
+    key: str = typer.Option(
+        ...,
+        "--key",
+        prompt="API key",
+        hide_input=True,
+        help="API key VALUE (secret; prompted securely if omitted).",
+    ),
+    env_var: str = typer.Option(
+        None,
+        "--env-var",
+        help="Env-var name to write (defaults to the upstream's declared auth_value_env).",
+    ),
+) -> None:
+    """Set an API key for a provider (writes to api.env)."""
+    _do_set_credentials(name, key, env_var)
+
+
+@app.command("set-credentials", hidden=True)
+def set_credentials(
+    name: str = typer.Argument(..., help="Provider name."),
+    key: str = typer.Option(
+        ...,
+        "--key",
+        prompt="API key",
+        hide_input=True,
+        help="API key VALUE (secret; prompted securely if omitted).",
+    ),
+    env_var: str = typer.Option(
+        None,
+        "--env-var",
+        help="Env-var name to write (defaults to the upstream's declared auth_value_env).",
+    ),
+) -> None:
+    """[DEPRECATED] alias for `upstream credentials set`; use that instead."""
+    typer.echo(
+        "[deprecated] `upstream set-credentials` is renamed to "
+        "`upstream credentials set`; use `hal0 upstream credentials set`.",
+        err=True,
+    )
+    _do_set_credentials(name, key, env_var)

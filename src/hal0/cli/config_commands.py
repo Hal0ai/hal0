@@ -5,6 +5,7 @@ from __future__ import annotations
 import json as jsonlib
 import os
 import subprocess
+from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -18,18 +19,51 @@ app = typer.Typer(help="Inspect and manage hal0 configuration.")
 console = Console()
 
 
-def _hal0_toml_path() -> Path:
-    """Return the on-disk hal0.toml path, honouring HAL0_HOME."""
+class ConfigFile(StrEnum):
+    """Which on-disk config file a `config show`/`config edit` targets.
+
+    Mirrors the three files ``hal0 config validate`` already checks
+    (hal0.toml, upstreams.toml, providers.toml) — before this, ``show``/
+    ``edit`` were hardcoded to hal0.toml only, so a validate failure in
+    upstreams.toml or providers.toml had no matching ``edit`` target.
+    """
+
+    hal0 = "hal0"
+    upstreams = "upstreams"
+    providers = "providers"
+
+
+_CONFIG_FILENAMES: dict[ConfigFile, str] = {
+    ConfigFile.hal0: "hal0.toml",
+    ConfigFile.upstreams: "upstreams.toml",
+    ConfigFile.providers: "providers.toml",
+}
+
+
+def _config_path(which: ConfigFile) -> Path:
+    """Return the on-disk path for one of hal0's config files, honouring HAL0_HOME."""
+    filename = _CONFIG_FILENAMES[which]
     base = os.environ.get("HAL0_HOME")
     if base:
-        return Path(base) / "etc" / "hal0" / "hal0.toml"
-    return Path("/etc/hal0/hal0.toml")
+        return Path(base) / "etc" / "hal0" / filename
+    return Path("/etc/hal0") / filename
+
+
+def _hal0_toml_path() -> Path:
+    """Return the on-disk hal0.toml path, honouring HAL0_HOME."""
+    return _config_path(ConfigFile.hal0)
 
 
 @app.command("show")
-def config_show() -> None:
-    """Print the current hal0 configuration (hal0.toml on disk)."""
-    path = _hal0_toml_path()
+def config_show(
+    which: ConfigFile = typer.Argument(
+        ConfigFile.hal0,
+        help="Which config file to show: hal0 | upstreams | providers.",
+        case_sensitive=False,
+    ),
+) -> None:
+    """Print a hal0 config file as it exists on disk (default: hal0.toml)."""
+    path = _config_path(which)
     if not path.exists():
         console.print(f"[dim]No config at {path}[/dim]")
         raise typer.Exit(0)
@@ -59,17 +93,28 @@ def config_show() -> None:
 
 
 @app.command("edit")
-def config_edit() -> None:
-    """Open hal0.toml in $EDITOR (falls back to $VISUAL then 'vi')."""
+def config_edit(
+    which: ConfigFile = typer.Argument(
+        ConfigFile.hal0,
+        help="Which config file to edit: hal0 | upstreams | providers.",
+        case_sensitive=False,
+    ),
+) -> None:
+    """Open a hal0 config file in $EDITOR (default: hal0.toml; falls back to $VISUAL then 'vi')."""
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
-    path = _hal0_toml_path()
+    path = _config_path(which)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(
-            "# hal0 configuration — see `hal0 config show` for the live shape.\n"
-            "[meta]\nschema_version = 1\n\n"
-            "[slots]\nport_range_start = 8081\nport_range_end = 8099\n"
-        )
+        if which == ConfigFile.hal0:
+            path.write_text(
+                "# hal0 configuration — see `hal0 config show` for the live shape.\n"
+                "[meta]\nschema_version = 1\n\n"
+                "[slots]\nport_range_start = 8081\nport_range_end = 8099\n"
+            )
+        else:
+            path.write_text(
+                f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n"
+            )
     try:
         subprocess.run([editor, str(path)], check=True)
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
@@ -176,13 +221,25 @@ def config_reload() -> None:
 
 
 @app.command("hardware")
-def config_hardware() -> None:
-    """Show the cached hardware probe payload."""
+def config_hardware(
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Force a fresh hardware probe (POST /api/hardware/probe) instead "
+        "of showing the cached payload. Equivalent to the deprecated `hal0 probe`.",
+    ),
+) -> None:
+    """Show the cached hardware probe payload (or force a fresh one with --refresh)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        hw = api_get("/api/hardware")
+        if refresh:
+            from hal0.cli._shared import api_post
+
+            hw = api_post("/api/hardware/probe")
+        else:
+            hw = api_get("/api/hardware")
     except CliApiError as exc:
         die(str(exc))
         return
@@ -194,7 +251,7 @@ def config_hardware() -> None:
                 theme="ansi_dark",
                 background_color="default",
             ),
-            title="hardware",
+            title="hardware (refreshed)" if refresh else "hardware",
             border_style="cyan",
         )
     )

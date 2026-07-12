@@ -144,6 +144,25 @@ def _print_check(body: dict) -> None:
         console.print(table)
 
 
+def _refuse_if_editable() -> None:
+    """Die early on an editable/dev install — `hal0 update` can't swap the FHS tree.
+
+    Mirrors the daemon-side refusal (audit 4.1) so an operator on a
+    `pip install -e` checkout gets an immediate, actionable message instead of
+    a background prepare job that silently fails. Detection is metadata-driven
+    so an editable install cloned from git is caught too.
+    """
+    from hal0.updater.updater import _editable_install_path, _is_editable_install
+
+    if not _is_editable_install():
+        return
+    path = _editable_install_path() or "the current source tree"
+    die(
+        f"hal0 is installed in editable mode from {path}. "
+        "Install from release wheel with `pip install hal0`."
+    )
+
+
 def _poll_job(
     job_id: str,
     *,
@@ -397,6 +416,20 @@ def update(
         return
 
     if rollback:
+        # Same confirm gate as the apply path below: interactive TTY without
+        # --yes prompts, headless/piped invocations proceed unattended. A
+        # rollback reverts the whole install tree — at least as consequential
+        # as an apply, so it shouldn't fire on zero confirmation.
+        if (
+            not yes
+            and _interactive()
+            and not typer.confirm(
+                "Roll back to the previous hal0 install? This reverts the entire install tree.",
+                default=False,
+            )
+        ):
+            console.print("[dim]rollback cancelled.[/dim]")
+            return
         try:
             body = api_post("/api/updates/rollback")
         except CliApiError as exc:
@@ -424,6 +457,11 @@ def update(
     if not body.get("update_available") and not target_version:
         console.print("[dim]nothing to apply.[/dim]")
         return
+
+    # Refuse before staging: an editable/dev install has no FHS tree to swap,
+    # so a prepare/commit would either 409 at the daemon or phantom-succeed
+    # (audit 4.1). Fail fast with an actionable message.
+    _refuse_if_editable()
 
     # ── Stage → review notes → confirm → activate (prepare/commit split) ────────
     # prepare downloads + cosign-verifies + extracts WITHOUT touching the running

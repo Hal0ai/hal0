@@ -190,6 +190,44 @@ def test_set_credentials_explicit_env_var_skips_lookup(api: dict[str, Any]) -> N
     assert body == {"key": "CORP_KEY", "value": "sk-x"}
 
 
+# ── `credentials set` (canonical) + `set-credentials` (deprecated alias) ──
+
+
+def test_credentials_set_is_the_canonical_command(api: dict[str, Any]) -> None:
+    """`upstream credentials set` — the noun-subgroup rename — behaves
+    identically to the old flat `set-credentials` verb."""
+    result = runner.invoke(
+        upstream_commands.app,
+        ["credentials", "set", "openrouter", "--key", "sk-test"],
+    )
+    assert result.exit_code == 0, result.output
+    assert api["gets"] == ["/api/upstreams/openrouter"]
+    path, body = api["posts"][0]
+    assert path == "/api/providers/openrouter/credentials"
+    assert body == {"key": "OPENROUTER_API_KEY", "value": "sk-test"}
+    # No deprecation notice on the canonical command.
+    assert "deprecat" not in result.output.lower()
+
+
+def test_set_credentials_is_hidden_deprecated_alias(api: dict[str, Any]) -> None:
+    from hal0.cli.main import app as main_app
+
+    help_result = runner.invoke(main_app, ["upstream", "--help"])
+    assert help_result.exit_code == 0, help_result.output
+    assert "set-credentials" not in help_result.output
+
+    result = runner.invoke(
+        upstream_commands.app,
+        ["set-credentials", "openrouter", "--key", "sk-test"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "deprecat" in result.stderr.lower()
+    assert "credentials set" in result.stderr.lower()
+    path, body = api["posts"][0]
+    assert path == "/api/providers/openrouter/credentials"
+    assert body == {"key": "OPENROUTER_API_KEY", "value": "sk-test"}
+
+
 def test_list_renders_url_and_filter_summary(api: dict[str, Any]) -> None:
     # Short values throughout — Rich truncates wide cells at the 80-col
     # test terminal, so realistic-length URLs can't be asserted verbatim.
