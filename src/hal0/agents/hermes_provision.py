@@ -2832,6 +2832,169 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
     )
 
 
+# ── Phase H.6: brain_profile_seed ───────────────────────────────────────────
+#
+# ``hal0-brain`` ships both as a hal0 persona (personas.py) AND as a
+# first-class memory *profile* agent-id (``hermes__hal0-brain``). Prior to
+# this phase it was only a persona: its bank was never provisioned and it was
+# never registered as an agent identity, so it was a second-class citizen next
+# to the default ``hermes`` agent. This phase registers its identity card in
+# the ``agents`` dataset — the same treatment ``_phase_namespace_register``
+# gives the default agent — so the steward is a real profile, discoverable and
+# with a provisioned private bank (``private:hermes__hal0-brain``). Warn-as-OK:
+# memory-layer unavailability never blocks bootstrap.
+
+
+def _build_brain_identity_card() -> dict[str, Any]:
+    """Identity card for the hal0-brain profile (schema v1, ADR-0011 §4).
+
+    Mirrors :func:`_build_identity_card` (the default agent's card) so the
+    dashboard steward registers as a first-class agent identity rather than a
+    mere persona overlay. Its memory rides ``private:hermes__hal0-brain``.
+    """
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+
+    return {
+        "text": (
+            "I am hal0-brain, the resident platform steward of this hal0 home AI box, "
+            "embedded in the dashboard's agent chat. I administer the instance itself: "
+            "inference slots, the model library, benchmarks, hardware headroom, the "
+            "Operator Board, and orchestration settings."
+        ),
+        "tags": [AGENT_IDENTITY_TAG, "hal0-brain"],
+        "dataset": AGENTS_DATASET,
+        "metadata": {
+            "agent_id": BRAIN_PROFILE_AGENT_ID,
+            "display_name": "hal0 Brain (platform steward)",
+            "namespace": f"private:{BRAIN_PROFILE_AGENT_ID}",
+            "roles": ["platform-steward", "dashboard-agent-chat"],
+            "hal0_state": {
+                "registered_at": _utcnow(),
+                "bootstrap_version": 1,
+                "hal0_version": _hal0_version_string(),
+                "hermes_version": _hermes_version_pin(),
+            },
+        },
+    }
+
+
+def _phase_brain_profile_seed(ctx: PhaseContext) -> PhaseResult:
+    """Register the hal0-brain profile as a first-class agent identity.
+
+    Writes the brain identity card to the ``agents`` dataset (search → delete
+    stale → add), keyed on the ``hermes__hal0-brain`` agent-id so its private
+    bank is provisioned rather than left to lazy first-write. Idempotent;
+    warn-as-OK so bootstrap never blocks on the memory layer.
+    """
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+
+    card = _build_brain_identity_card()
+    warnings: list[str] = []
+    fallbacks: list[dict[str, str]] = []
+
+    search = ctx.io.mcp_memory_call(
+        "tools/call",
+        {
+            "name": "memory_search",
+            "arguments": {
+                "query": BRAIN_PROFILE_AGENT_ID,
+                "tags": [AGENT_IDENTITY_TAG],
+                "dataset": AGENTS_DATASET,
+                "limit": 50,
+            },
+        },
+        agent_id=BRAIN_PROFILE_AGENT_ID,
+    )
+    existing_ids: list[str] = []
+    if search["ok"] and isinstance(search["result"], dict):
+        items = search["result"].get("items") or []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            md = item.get("metadata") or {}
+            if md.get("agent_id") == BRAIN_PROFILE_AGENT_ID and item.get("id"):
+                existing_ids.append(item["id"])
+    elif not search["ok"]:
+        warnings.append(f"memory_search: {search['error']}")
+        fallbacks.append(
+            {
+                "site": "memory_layer",
+                "detail": f"memory_search failed ({search['error']}) — continuing without dedupe",
+            }
+        )
+
+    if existing_ids:
+        deleted = ctx.io.mcp_memory_call(
+            "tools/call",
+            {"name": "memory_delete", "arguments": {"ids": existing_ids}},
+            agent_id=BRAIN_PROFILE_AGENT_ID,
+        )
+        removed = (deleted.get("result") or {}).get("deleted", 0)
+        # Same guard as namespace_register: a 200 that pruned fewer ids than
+        # asked (the #446 custom-dataset skip) must not trigger a rewrite, or
+        # the Peer view floods with duplicate cards.
+        if not deleted["ok"] or removed != len(existing_ids):
+            detail = (
+                deleted["error"] if not deleted["ok"] else f"removed {removed}/{len(existing_ids)}"
+            )
+            warnings.append(f"memory_delete: {detail} — brain card not rewritten")
+            fallbacks.append(
+                {
+                    "site": "memory_layer",
+                    "detail": f"memory_delete {detail} — brain card not rewritten to avoid duplicates",
+                }
+            )
+            return PhaseResult(
+                status=PhaseStatus.OK,
+                details={
+                    "registered": False,
+                    "refreshed_existing": False,
+                    "card": card,
+                    "warnings": warnings,
+                    "fallbacks": fallbacks,
+                },
+                reason="memory_delete failed/short; not rewriting brain card",
+            )
+
+    add = ctx.io.mcp_memory_call(
+        "tools/call",
+        {"name": "memory_add", "arguments": card},
+        agent_id=BRAIN_PROFILE_AGENT_ID,
+    )
+    if not add["ok"]:
+        warnings.append(f"memory_add: {add['error']}")
+        fallbacks.append(
+            {
+                "site": "memory_layer",
+                "detail": f"memory_add failed ({add['error']}) — brain identity card not registered",
+            }
+        )
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={
+                "registered": False,
+                "card": card,
+                "warnings": warnings,
+                "fallbacks": fallbacks,
+            },
+            reason="hal0-memory unreachable; brain identity card not registered (continuing)",
+        )
+
+    memory_id = add["result"].get("id") if isinstance(add["result"], dict) else None
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "registered": True,
+            "agent_id": BRAIN_PROFILE_AGENT_ID,
+            "memory_id": memory_id,
+            "card": card,
+            "refreshed_existing": bool(existing_ids),
+            "warnings": warnings,
+            "fallbacks": fallbacks,
+        },
+    )
+
+
 # ── Phase I: model_automap ──────────────────────────────────────────────────
 #
 # Walks the live slot/model surface and rewrites the [model_aliases]
@@ -4600,6 +4763,9 @@ PHASES: list[Phase] = [
     Phase("mcp_wire", _phase_mcp_wire),
     Phase("context_link", _phase_context_link),
     Phase("namespace_register", _phase_namespace_register),
+    # Register the hal0-brain profile identity right after the default agent's
+    # card, once the memory layer is up. Warn-as-OK like namespace_register.
+    Phase("brain_profile_seed", _phase_brain_profile_seed),
     # Both re-apply their slice of the overlay via `hermes config set` (no
     # full re-render), so neither reads mcp_wire's probed-server checkpoint
     # any more — only config_write still does (needs_previous above).
