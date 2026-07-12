@@ -224,22 +224,62 @@ def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recor
     assert recorder.requests[-1]["path"] == "/v1/default/banks/scratch"
 
     # Bank deletion is guarded: without a matching ?confirm= it is rejected
-    # (400) and NOT forwarded upstream.
-    before = len(recorder.requests)
+    # (400) with a dry-run preview, and the DELETE is NOT forwarded upstream
+    # (a read-only stats probe for the preview is allowed).
     r = client.delete("/api/memory/banks/scratch")
     assert r.status_code == 400
-    assert len(recorder.requests) == before
+    details = r.json()["error"]["details"]
+    assert details["bank_id"] == "scratch" and details["requires_confirm"] is True
+    assert details["preview"]["bank_id"] == "scratch"
+    assert not any(rq["method"] == "DELETE" for rq in recorder.requests)
 
-    # Mismatched confirmation is likewise rejected.
+    # Mismatched confirmation is likewise rejected without forwarding a DELETE.
     r = client.delete("/api/memory/banks/scratch?confirm=other")
     assert r.status_code == 400
-    assert len(recorder.requests) == before
+    assert not any(rq["method"] == "DELETE" for rq in recorder.requests)
 
     # Matching confirmation forwards the DELETE.
     r = client.delete("/api/memory/banks/scratch?confirm=scratch")
     assert r.status_code == 200
     assert recorder.requests[-1]["method"] == "DELETE"
     assert recorder.requests[-1]["path"] == "/v1/default/banks/scratch"
+
+
+def test_unconfirmed_bank_delete_returns_stats_preview(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#1024: an unconfirmed bank delete surfaces a dry-run item-count preview."""
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/scratch/stats",
+        200,
+        {"memory_count": 42, "document_count": 7, "entity_count": 3, "unrelated": "x"},
+    )
+    r = client.delete("/api/memory/banks/scratch")
+    assert r.status_code == 400
+    preview = r.json()["error"]["details"]["preview"]
+    assert preview["stats_available"] is True
+    assert preview["item_count"] == 42
+    assert preview["counts"] == {"memory_count": 42, "document_count": 7, "entity_count": 3}
+    # The rejection still forwarded no DELETE upstream.
+    assert not any(rq["method"] == "DELETE" for rq in recorder.requests)
+
+
+def test_unconfirmed_bank_delete_preview_failsoft_when_stats_unreachable(
+    recorder: _Recorder,
+) -> None:
+    """The preview degrades gracefully when the stats probe fails — still 400."""
+    recorder.fail_connect = True
+    transport = httpx.MockTransport(recorder.handler)
+    http = httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177")
+    rest = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+    app = _build_app(_HindsightStubProvider(rest))
+    with TestClient(app) as c:
+        r = c.delete("/api/memory/banks/scratch")
+    assert r.status_code == 400
+    preview = r.json()["error"]["details"]["preview"]
+    assert preview["stats_available"] is False
+    assert preview["item_count"] is None
 
 
 def test_operation_retry_and_consolidate_forward(client: TestClient, recorder: _Recorder) -> None:
