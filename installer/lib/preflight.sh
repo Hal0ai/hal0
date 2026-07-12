@@ -40,6 +40,12 @@
 #                                (HAL0_GPU_RC_BROKEN_GID / HAL0_GPU_RC_NO_DEVICE)
 #                                instead of installing "successfully" and then
 #                                silently running CPU-only.
+#   preflight_node             — node on PATH + version >= NODE_MIN_MAJOR
+#                                (default 20). Soft, always returns 0 — a
+#                                Node-less box is a valid install; the
+#                                dashboard UI build / pi-coder / opencode
+#                                agents just aren't available until Node is
+#                                installed (install.sh auto-provisions it).
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #                                (soft — informational only — when
@@ -803,6 +809,31 @@ preflight_ports() {
     return "${rc}"
 }
 
+# Node.js / npm — needed for the dashboard UI build (Vite 6 / Tailwind v4;
+# ui/package.json has no `engines` floor to surface a mismatch) and for the
+# pi-coder / opencode bundled agents, which both shell out to npm. Soft:
+# always returns 0 (a Node-less box is a valid install — the dashboard build
+# and those two agents just aren't available until Node is installed). This
+# is the read-only `hal0 doctor` view; install.sh's own "Node.js toolchain"
+# step actually provisions Node when it's missing/too old.
+NODE_MIN_MAJOR=20
+preflight_node() {
+    if ! command -v node >/dev/null 2>&1; then
+        warn "node: not found — dashboard UI build + pi-coder/opencode agents need Node ${NODE_MIN_MAJOR}+ LTS"
+        return 0
+    fi
+    local ver major
+    ver="$(node -v 2>/dev/null || true)"
+    major=0
+    [[ "${ver}" =~ ^v([0-9]+) ]] && major="${BASH_REMATCH[1]}"
+    if (( major >= NODE_MIN_MAJOR )); then
+        info "node: ${ver}"
+    else
+        warn "node: ${ver} — below the ${NODE_MIN_MAJOR}+ LTS floor (dashboard build / pi-coder / opencode may fail)"
+    fi
+    return 0
+}
+
 # ── aggregate runner ────────────────────────────────────────────────────────
 
 # Run every check; return non-zero if any failed. We deliberately don't
@@ -821,6 +852,7 @@ preflight_all() {
     preflight_container_runtime || rc=$?
     preflight_podman_forward || rc=$?
     preflight_gpu     || rc=$?
+    preflight_node    || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then
