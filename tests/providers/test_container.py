@@ -32,6 +32,7 @@ from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
+    _container_runtime,
     _image_mismatch,
     _render_unit,
     _render_unit_from_plan,
@@ -108,6 +109,72 @@ class TestResolveProfileFlags:
         assert "--spec-type draft-mtp" in MTP_FLAG_BUNDLE
 
 
+# ── Runtime probe (_container_runtime) ─────────────────────────────────────────
+
+
+class TestContainerRuntimeProbe:
+    """``_container_runtime`` must find podman/docker wherever PATH puts them,
+    not just at the hardcoded /usr/bin/ prefix (snap, /usr/local/bin, nix, ...)."""
+
+    def test_env_override_wins_over_everything(self, monkeypatch) -> None:
+        monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "/opt/custom/podman")
+        monkeypatch.setattr("hal0.providers.container.shutil.which", lambda _c: "/usr/bin/podman")
+        assert _container_runtime() == "/opt/custom/podman"
+
+    def test_prefers_absolute_usr_bin_podman(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+        monkeypatch.setattr(
+            "hal0.providers.container.shutil.which",
+            lambda c: c if c == "/usr/bin/podman" else None,
+        )
+        assert _container_runtime() == "/usr/bin/podman"
+
+    def test_falls_back_to_absolute_usr_bin_docker(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+        monkeypatch.setattr(
+            "hal0.providers.container.shutil.which",
+            lambda c: c if c == "/usr/bin/docker" else None,
+        )
+        assert _container_runtime() == "/usr/bin/docker"
+
+    def test_falls_back_to_bare_podman_on_path(self, monkeypatch) -> None:
+        """podman installed somewhere other than /usr/bin/ (snap, nix, ...)
+        must still resolve via a bare PATH lookup — a pinned absolute-path
+        check misses it entirely otherwise."""
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+
+        def fake_which(c: str) -> str | None:
+            if c in ("/usr/bin/podman", "/usr/bin/docker"):
+                return None
+            if c == "podman":
+                return "/snap/bin/podman"
+            return None
+
+        monkeypatch.setattr("hal0.providers.container.shutil.which", fake_which)
+        assert _container_runtime() == "/snap/bin/podman"
+
+    def test_falls_back_to_bare_docker_on_path(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+
+        def fake_which(c: str) -> str | None:
+            if c == "docker":
+                return "/usr/local/bin/docker"
+            return None
+
+        monkeypatch.setattr("hal0.providers.container.shutil.which", fake_which)
+        assert _container_runtime() == "/usr/local/bin/docker"
+
+    def test_raises_when_no_runtime_found_anywhere(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+        monkeypatch.setattr("hal0.providers.container.shutil.which", lambda _c: None)
+        try:
+            _container_runtime()
+        except RuntimeError as exc:
+            assert "no container runtime found" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+
 # ── Unit rendering ────────────────────────────────────────────────────────────
 
 
@@ -134,11 +201,37 @@ class TestRenderUnit:
         exec_start = self._get_exec_start(unit)
         assert exec_start.startswith(f"{_TEST_RUNTIME} run")
 
-    def test_replace_flag_clears_stale_container_records(self) -> None:
+    def test_replace_flag_clears_stale_container_records_podman(self) -> None:
         """An unclean shutdown leaves a stale container record with the slot
         name (``--rm`` never ran), so the next boot fails with podman exit 125
         "name already in use" (#721). ``--replace`` removes any pre-existing
-        same-name container before starting; no-op when none exists."""
+        same-name container before starting; no-op when none exists.
+
+        ``--replace`` is podman-only — see
+        ``test_docker_runtime_omits_replace_flag`` for the docker branch."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin="/usr/bin/podman",
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        assert "--replace" in tokens, f"--replace missing from argv: {tokens}"
+        # Must follow --name so the pairing is obvious in the rendered unit.
+        assert tokens.index("--replace") == tokens.index("--name=hal0-slot-test-slot") + 1
+
+    def test_docker_runtime_omits_replace_flag(self) -> None:
+        """docker has no ``--replace`` flag ("unknown flag: --replace") — a
+        plain ``docker run --replace ...`` aborts immediately, which took
+        every container slot down on a docker-only host. The rendered argv
+        for a docker runtime must NOT carry --replace; the stale-record
+        cleanup instead comes from the ExecStartPre=-docker rm -f the unit
+        skeleton emits for every runtime (see
+        test_docker_runtime_gets_execstartpre_rm_cleanup)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_unit(
@@ -150,9 +243,26 @@ class TestRenderUnit:
             runtime_bin=_TEST_RUNTIME,
         )
         tokens = shlex.split(self._get_exec_start(unit))
-        assert "--replace" in tokens, f"--replace missing from argv: {tokens}"
-        # Must follow --name so the pairing is obvious in the rendered unit.
-        assert tokens.index("--replace") == tokens.index("--name=hal0-slot-test-slot") + 1
+        assert "--replace" not in tokens, f"--replace must not render for docker: {tokens}"
+        assert tokens[0] == _TEST_RUNTIME
+        assert tokens[1] == "run"
+
+    def test_docker_runtime_gets_execstartpre_rm_cleanup(self) -> None:
+        """Every runtime (podman AND docker) gets a tolerant
+        ``ExecStartPre=-{runtime} rm -f <container_name>`` — the docker-safe
+        equivalent of podman's --replace, so an unclean-shutdown stale
+        container record doesn't fail the next docker start either."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        assert f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-test-slot" in unit.splitlines()
 
     def test_identical_path_mount_readonly(self, monkeypatch) -> None:
         """Model store mounted identical-path, read-only, SELinux-relabelled."""
@@ -216,7 +326,8 @@ class TestRenderUnit:
     def test_readonly_mount_not_auto_created(self, monkeypatch) -> None:
         """The read-only model store must NOT get an ExecStartPre mkdir —
         silently creating an empty store would mask a broken mount behind a
-        model-not-found error."""
+        model-not-found error. It still gets the unconditional stale-record
+        rm -f cleanup (every runtime gets that one)."""
         monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
@@ -228,12 +339,15 @@ class TestRenderUnit:
             flags,
             runtime_bin=_TEST_RUNTIME,
         )
-        assert "ExecStartPre" not in unit, unit
+        pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
+        assert pre == [f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-test-slot"], unit
+        assert "mkdir" not in unit, unit
 
     def test_writable_mount_gets_execstartpre_mkdir(self) -> None:
         """Writable bind sources (FLM cache & co) get a tolerant
         ExecStartPre=-mkdir -p so a source dir that vanished across a reboot
-        can't fail every start with podman exit 125."""
+        can't fail every start with podman exit 125 — alongside the
+        unconditional stale-record rm -f cleanup every runtime gets."""
         plan = RuntimeLaunchPlan(
             image="ghcr.io/hal0ai/hal0-toolbox-flm:test",
             command=["serve", "x"],
@@ -243,7 +357,10 @@ class TestRenderUnit:
         )
         unit = _render_unit_from_plan("npu", plan, runtime_bin=_TEST_RUNTIME)
         pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
-        assert pre == ["ExecStartPre=-/usr/bin/mkdir -p /mnt/ai-models/flm/models"], unit
+        assert pre == [
+            f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-npu",
+            "ExecStartPre=-/usr/bin/mkdir -p /mnt/ai-models/flm/models",
+        ], unit
         req = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
         assert req == ["RequiresMountsFor=/mnt/ai-models/flm/models"], unit
 

@@ -80,6 +80,22 @@ def _podman_usable() -> bool:
     return _run_ok(["podman", "info"])
 
 
+def _docker_present() -> bool:
+    """``command -v docker`` — used only to make the OpenWebUI skip reason
+    honest (see :func:`install_openwebui`); it never makes docker a usable
+    runtime for the companion.
+
+    The packaged ``hal0-openwebui.service`` hardcodes ``/usr/bin/podman`` in
+    every ExecStart* line (unlike the per-slot ContainerProvider unit, which
+    is runtime-templated). Force-starting it on a docker-only host would
+    restart-loop with 203/EXEC on the missing podman binary, so the
+    companion genuinely requires podman today — this only distinguishes
+    "docker is present but podman is required" from "no runtime at all" in
+    the skip outcome, so a docker-only operator isn't told there's no
+    runtime when there's one hal0 just can't use for this unit yet."""
+    return shutil.which("docker") is not None
+
+
 def _wait_active(unit: str, timeout: float = 15.0) -> bool:
     """Poll ``systemctl is-active --quiet <unit>`` — Python port of
     install.sh's ``wait_active`` bash helper."""
@@ -111,6 +127,13 @@ def install_openwebui() -> ExtensionOutcome:
         # install.sh's fallback branch.
         _run_ok(["systemctl", "disable", "--now", unit])
         _run_ok(["systemctl", "reset-failed", unit])
+        # The packaged unit is podman-only (hardcoded /usr/bin/podman); a
+        # docker-only host isn't "no container runtime" — it's "the wrong
+        # one for this companion". Surface that distinction instead of
+        # silently implying docker is a viable fallback here (it is for
+        # slots, via ContainerProvider, but not for this unit).
+        if _docker_present():
+            return ExtensionOutcome(ext_id="openwebui", skipped="docker_present_podman_required")
         return ExtensionOutcome(ext_id="openwebui", skipped="no_container_runtime")
 
     if not _run_ok(["systemctl", "enable", "--now", unit]):

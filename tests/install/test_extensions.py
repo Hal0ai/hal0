@@ -83,6 +83,7 @@ def test_install_openwebui_enables_unit_when_podman_usable(monkeypatch):
 def test_install_openwebui_quiesces_unit_without_podman(monkeypatch):
     ran = []
     monkeypatch.setattr(ext_mod, "_podman_usable", lambda: False)
+    monkeypatch.setattr(ext_mod, "_docker_present", lambda: False)
     monkeypatch.setattr(ext_mod, "_run_ok", lambda cmd: ran.append(cmd) or True)
 
     out = install_openwebui()
@@ -93,6 +94,37 @@ def test_install_openwebui_quiesces_unit_without_podman(monkeypatch):
     assert ["systemctl", "reset-failed", "hal0-openwebui.service"] in ran
     # No enable attempt when the runtime is unusable.
     assert all(cmd[:2] != ["systemctl", "enable"] for cmd in ran)
+
+
+def test_install_openwebui_docker_only_host_gets_explicit_skip_reason(monkeypatch):
+    """A docker-present/podman-absent host must NOT collapse into the generic
+    "no_container_runtime" skip — that reads as "no runtime at all", which is
+    false and hides that OpenWebUI's packaged unit (hardcoded /usr/bin/podman)
+    is the thing that's unusable, not the host's container runtime."""
+    ran = []
+    monkeypatch.setattr(ext_mod, "_podman_usable", lambda: False)
+    monkeypatch.setattr(ext_mod, "_docker_present", lambda: True)
+    monkeypatch.setattr(ext_mod, "_run_ok", lambda cmd: ran.append(cmd) or True)
+
+    out = install_openwebui()
+
+    assert out.installed is False
+    assert out.skipped == "docker_present_podman_required"
+    assert ["systemctl", "disable", "--now", "hal0-openwebui.service"] in ran
+    assert ["systemctl", "reset-failed", "hal0-openwebui.service"] in ran
+    assert all(cmd[:2] != ["systemctl", "enable"] for cmd in ran)
+
+
+def test_docker_present_reflects_shutil_which(monkeypatch):
+    from hal0.install.extensions import _docker_present
+
+    monkeypatch.setattr(
+        ext_mod.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None
+    )
+    assert _docker_present() is True
+
+    monkeypatch.setattr(ext_mod.shutil, "which", lambda name: None)
+    assert _docker_present() is False
 
 
 def test_install_openwebui_reports_error_when_enable_fails(monkeypatch):
