@@ -650,6 +650,17 @@ def _provision_python_via_uv(
         return None
     env = {**os.environ, "UV_PYTHON_INSTALL_DIR": str(UV_PYTHON_INSTALL_DIR)}
     try:
+        # Create the install dir world-traversable BEFORE uv writes into it.
+        # uv inherits root's umask, so on a restrictive-umask host (e.g. 077)
+        # the tree lands 0700 and the hal0 service user can't traverse to the
+        # symlinked base interpreter — silently reproducing the very "gateway
+        # venv python won't start" failure this /var/lib/hal0 move was meant to
+        # fix, with no actionable error. chmod the leaf to 0o755 to guarantee
+        # traversal; idempotent under --repair, and mirrors the other
+        # hal0-reachable dirs (e.g. the gateway drop-in .chmod(0o755),
+        # AGENTS_DIR.chmod(0o711)).
+        UV_PYTHON_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        UV_PYTHON_INSTALL_DIR.chmod(0o755)
         runner.run(  # nosec B603 — argv is a constant uv invocation
             [uv, "python", "install", UV_PYTHON_FALLBACK],
             check=True,

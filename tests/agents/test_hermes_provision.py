@@ -680,6 +680,46 @@ def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
     )
 
 
+def test_provision_via_uv_creates_install_dir_world_traversable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under a restrictive umask, root's uv would write a 0700 tree the hal0
+    # service user cannot traverse to reach the symlinked base interpreter —
+    # the exact "gateway venv python won't start" failure the /var/lib/hal0
+    # move was meant to fix. The install dir must be created 0o755 *before*
+    # uv is invoked, so record its mode at the moment the runner is called.
+    install_dir = tmp_path / "python"
+    monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", install_dir)
+
+    modes_at_run: list[int] = []
+
+    class _Result:
+        stdout = f"{install_dir}/cpython-3.13/bin/python3.13\n"
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> _Result:
+            modes_at_run.append(install_dir.stat().st_mode & 0o777)
+            return _Result()
+
+    old_umask = os.umask(0o077)
+    try:
+        out = hp._ensure_supported_python(
+            prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+            runner=_Runner,
+            running=(3, 14),
+        )
+    finally:
+        os.umask(old_umask)
+
+    assert out == f"{install_dir}/cpython-3.13/bin/python3.13"
+    # World-traversable despite the 077 umask (a plain mkdir would be 0700)...
+    assert install_dir.is_dir()
+    assert install_dir.stat().st_mode & 0o777 == 0o755
+    # ...and already so by the time uv's first subcommand ran.
+    assert modes_at_run and modes_at_run[0] == 0o755
+
+
 def test_ensure_python_returns_none_without_uv() -> None:
     out = hp._ensure_supported_python(prober=lambda _name: None, running=(3, 14))
     assert out is None
