@@ -22,7 +22,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -560,15 +562,234 @@ def test_install_phase_runs_venv_install_when_binary_missing(
     assert install_calls == [venv]
 
 
-def test_resolve_python311_prefers_explicit_when_available() -> None:
-    out = hp._resolve_python311(prober=lambda _name: "/opt/python3.11/bin/python3.11")
-    assert out == "/opt/python3.11/bin/python3.11"
+def test_resolve_python_prefers_newest_explicit_in_range() -> None:
+    # All of 3.11-3.13 on PATH → the newest wins; 3.14 is never probed.
+    probed: list[str] = []
+
+    def _prober(name: str) -> str | None:
+        probed.append(name)
+        return f"/opt/{name}/bin/{name}"
+
+    out = hp._resolve_supported_python(prober=_prober)
+    assert out == "/opt/python3.13/bin/python3.13"
+    assert "python3.14" not in probed
 
 
-def test_resolve_python311_falls_back_to_sys_executable() -> None:
-    out = hp._resolve_python311(prober=lambda _name: None)
-    # CI runs on >= 3.11 (pyproject pin); falls back to sys.executable.
-    assert out is not None
+def test_resolve_python_walks_down_to_oldest_supported() -> None:
+    out = hp._resolve_supported_python(
+        prober=lambda name: "/usr/bin/python3.11" if name == "python3.11" else None
+    )
+    assert out == "/usr/bin/python3.11"
+
+
+def test_resolve_python_falls_back_to_sys_executable_in_range() -> None:
+    out = hp._resolve_supported_python(prober=lambda _name: None, running=(3, 12))
+    assert out == sys.executable
+
+
+def test_resolve_python_rejects_unsupported_running_interpreter() -> None:
+    # The Ubuntu 26.04 case (#1248): only a 3.14 interpreter exists. The old
+    # ">= 3.11" fallback accepted it and pip resolved the broken
+    # hermes-agent 0.15.2; now the resolver must return None so the
+    # preflight fails with the actionable range message.
+    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 14)) is None
+    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 10)) is None
+
+
+def test_preflight_fails_actionably_when_no_supported_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    state = hp.BootstrapState(
+        venv=str(var_lib / "venvs" / "hermes"), hermes_home=str(var_lib / ".hermes")
+    )
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
+    monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
+    monkeypatch.setattr(hp, "_uv_available", lambda *a, **k: None)
+    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "3.11-3.13" in (out.reason or "")
+    assert "deadsnakes" in (out.reason or "")
+    assert "uv" in (out.reason or "")
+
+
+def test_preflight_passes_when_uv_can_provision_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 3.14-only host WITH uv: preflight must pass (availability check only,
+    # no download) and flag the fallback — the install phase does the fetch.
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    state = hp.BootstrapState(
+        venv=str(var_lib / "venvs" / "hermes"), hermes_home=str(var_lib / ".hermes")
+    )
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
+    monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
+    monkeypatch.setattr(hp, "_uv_available", lambda *a, **k: "/usr/local/bin/uv")
+    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["uv_python_fallback"] is True
+
+
+def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
+    # A qualifying system Python must win without uv ever being invoked.
+    ran: list[list[str]] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> None:
+            ran.append(argv)
+
+    out = hp._ensure_supported_python(
+        prober=lambda name: "/usr/bin/python3.12" if name == "python3.12" else None,
+        runner=_Runner,
+    )
+    assert out == "/usr/bin/python3.12"
+    assert ran == []
+
+
+def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
+    ran: list[list[str]] = []
+    envs: list[dict[str, str] | None] = []
+
+    class _Result:
+        stdout = "/var/lib/hal0/python/cpython-3.13.5-linux-x86_64-gnu/bin/python3.13\n"
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> _Result:
+            ran.append(argv)
+            envs.append(env)
+            return _Result()
+
+    out = hp._ensure_supported_python(
+        prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+        runner=_Runner,
+        running=(3, 14),
+    )
+    assert out == "/var/lib/hal0/python/cpython-3.13.5-linux-x86_64-gnu/bin/python3.13"
+    # install runs before find, both pinned to UV_PYTHON_FALLBACK...
+    assert [a[1:3] for a in ran] == [["python", "install"], ["python", "find"]]
+    assert all(a[3] == hp.UV_PYTHON_FALLBACK for a in ran)
+    # ...and both redirected to the world-readable install dir (the default
+    # ~/.local/share/uv under root's 0700 home would be unreachable by the
+    # hal0 user the venv runs as).
+    assert all(
+        e is not None and e["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR) for e in envs
+    )
+
+
+def test_provision_via_uv_creates_install_dir_world_traversable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under a restrictive umask, root's uv would write a 0700 tree the hal0
+    # service user cannot traverse to reach the symlinked base interpreter —
+    # the exact "gateway venv python won't start" failure the /var/lib/hal0
+    # move was meant to fix. The install dir must be created 0o755 *before*
+    # uv is invoked, so record its mode at the moment the runner is called.
+    install_dir = tmp_path / "python"
+    monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", install_dir)
+
+    modes_at_run: list[int] = []
+
+    class _Result:
+        stdout = f"{install_dir}/cpython-3.13/bin/python3.13\n"
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> _Result:
+            modes_at_run.append(install_dir.stat().st_mode & 0o777)
+            return _Result()
+
+    old_umask = os.umask(0o077)
+    try:
+        out = hp._ensure_supported_python(
+            prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+            runner=_Runner,
+            running=(3, 14),
+        )
+    finally:
+        os.umask(old_umask)
+
+    assert out == f"{install_dir}/cpython-3.13/bin/python3.13"
+    # World-traversable despite the 077 umask (a plain mkdir would be 0700)...
+    assert install_dir.is_dir()
+    assert install_dir.stat().st_mode & 0o777 == 0o755
+    # ...and already so by the time uv's first subcommand ran.
+    assert modes_at_run and modes_at_run[0] == 0o755
+
+
+def test_ensure_python_returns_none_without_uv() -> None:
+    out = hp._ensure_supported_python(prober=lambda _name: None, running=(3, 14))
+    assert out is None
+
+
+def test_ensure_python_returns_none_when_uv_fetch_fails() -> None:
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> None:
+            raise subprocess.CalledProcessError(1, argv)
+
+    out = hp._ensure_supported_python(
+        prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+        runner=_Runner,
+        running=(3, 14),
+    )
+    assert out is None
+
+
+def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -> None:
+    # A venv already built on 3.14 (the pre-guard fallback) can never
+    # converge by pip alone — _install_venv must detect it from the
+    # lib/pythonX.Y layout and rebuild on the resolved interpreter.
+    venv = tmp_path / "venv"
+    (venv / "lib" / "python3.14" / "site-packages").mkdir(parents=True)
+    stale_marker = venv / "lib" / "python3.14" / "site-packages" / "hermes_cli"
+    stale_marker.mkdir()
+    calls: list[list[str]] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], check: bool) -> None:
+            calls.append(argv)
+
+    hp._install_venv(
+        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.13"
+    )
+    assert not stale_marker.exists()  # stale 3.14 tree removed
+    assert calls[0][:3] == ["/usr/bin/python3.13", "-m", "venv"]
+
+
+def test_install_venv_keeps_supported_venv(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    (venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], check: bool) -> None:
+            calls.append(argv)
+
+    hp._install_venv(
+        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.12"
+    )
+    # No `-m venv` call — straight to pip into the existing venv.
+    assert all(argv[2] != "venv" for argv in calls if len(argv) > 2)
+
+
+def test_requirements_floor_blocks_broken_hermes_agent() -> None:
+    # Regression guard for #1247: hermes-agent 0.15.2's wheel is broken
+    # (imports hermes_cli.dashboard_auth, ships without it). The floor must
+    # stay >= 0.16.0 so no resolver — including old-Python fallbacks — can
+    # ever select it.
+    req = hp.HERMES_REQUIREMENTS
+    line = next(ln for ln in req.read_text().splitlines() if ln.startswith("hermes-agent"))
+    m = re.search(r">=\s*(\d+)\.(\d+)\.(\d+)", line)
+    assert m, f"no version floor in: {line!r}"
+    assert tuple(int(g) for g in m.groups()) >= (0, 16, 0)
 
 
 # ── #241 phase impls — env_probe / config_write ─────────────────────────────

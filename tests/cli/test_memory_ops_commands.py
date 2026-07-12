@@ -136,3 +136,34 @@ def test_ops_retry_all_failed_scoped_to_bank(stub_api) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert {r["operation_id"] for r in payload["retried"]} == {"op-1"}
+
+
+def test_ops_retry_all_failed_tolerates_operation_id_key(
+    monkeypatch: pytest.MonkeyPatch, stub_api
+) -> None:
+    # If the live Hindsight schema keys the field ``operation_id`` (not
+    # ``id``), retry must still find and post it rather than KeyError.
+    def one_op(bank: str, *, failed_only: bool):
+        return [{"operation_id": "op-x", "status": "failed", "bank_id": bank}]
+
+    monkeypatch.setattr(oc, "_list_bank_ops", one_op)
+    result = runner.invoke(oc.app, ["retry", "--bank", "shared", "--all-failed", "--json"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["post"] == ["/api/memory/banks/shared/operations/op-x/retry"]
+
+
+def test_ops_retry_all_failed_skips_op_with_no_id(
+    monkeypatch: pytest.MonkeyPatch, stub_api
+) -> None:
+    # An op row missing both id keys is skipped-with-warning, not crashed on;
+    # the well-formed op alongside it is still retried.
+    def mixed_ops(bank: str, *, failed_only: bool):
+        return [
+            {"status": "failed", "task_type": "retain", "bank_id": bank},  # no id/operation_id
+            {"id": "op-ok", "status": "failed", "bank_id": bank},
+        ]
+
+    monkeypatch.setattr(oc, "_list_bank_ops", mixed_ops)
+    result = runner.invoke(oc.app, ["retry", "--bank", "shared", "--all-failed", "--json"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["post"] == ["/api/memory/banks/shared/operations/op-ok/retry"]

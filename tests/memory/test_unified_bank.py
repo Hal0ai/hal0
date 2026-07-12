@@ -258,6 +258,89 @@ async def test_default_construction_is_legacy_multibank():
     assert p._client.retained[0]["bank_id"] == "private__hermes"
 
 
+# ── Read-side enforcement of visibility:private (unified mode) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_unified_private_recall_returns_to_owner_only():
+    """A ``visibility:private`` doc in the shared bank is recall-visible to its
+    owning agent, but NOT to a different agent and NOT to an anonymous caller."""
+    p = _unified(client_id="hermes")
+    await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+
+    owner = await p.recall("secret", dataset="shared", client_id="hermes")
+    assert any(i["text"] == "hermes secret" for i in owner)
+
+    other = await p.recall("secret", dataset="shared", client_id="scribe")
+    assert not any(i["text"] == "hermes secret" for i in other)
+
+    anon = await p.recall("secret", dataset="shared", client_id="anonymous")
+    assert not any(i["text"] == "hermes secret" for i in anon)
+
+
+@pytest.mark.asyncio
+async def test_unified_private_read_isolated_between_two_agents():
+    """Two agents' private docs coexist in the shared bank; each recalls only
+    its own, while a third agent gets neither."""
+    p = _unified(client_id="hermes")
+    await p.add("hermes note", dataset="private:hermes", client_id="hermes")
+    await p.add("scribe note", dataset="private:scribe", client_id="scribe")
+
+    h = {i["text"] for i in await p.recall("note", dataset="shared", client_id="hermes")}
+    s = {i["text"] for i in await p.recall("note", dataset="shared", client_id="scribe")}
+    third = {i["text"] for i in await p.recall("note", dataset="shared", client_id="ranger")}
+
+    assert h == {"hermes note"}
+    assert s == {"scribe note"}
+    assert third == set()
+
+
+@pytest.mark.asyncio
+async def test_unified_shared_recall_visible_to_everyone():
+    """Non-private (shared) docs remain unified-readable by every caller,
+    including anonymous — the fix must not over-filter."""
+    p = _unified(client_id="hermes")
+    await p.add("public note", dataset="shared", client_id="hermes")
+    for cid in ("hermes", "scribe", "anonymous"):
+        out = await p.recall("note", dataset="shared", client_id=cid)
+        assert any(i["text"] == "public note" for i in out), cid
+
+
+@pytest.mark.asyncio
+async def test_unified_anonymous_provider_denied_foreign_private():
+    """A caller with no resolved identity (provider default ``anonymous`` →
+    ``unknown``) must not receive another agent's private doc."""
+    p = HindsightProvider(client=RecordingClient(), unified_bank=True)
+    await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+    out = await p.recall("secret", dataset="shared")  # no client_id
+    assert not any(i["text"] == "hermes secret" for i in out)
+
+
+@pytest.mark.asyncio
+async def test_unified_private_list_returns_to_owner_only():
+    """list_items applies the same visibility:private enforcement as recall."""
+    p = _unified(client_id="hermes")
+    await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+    await p.add("public", dataset="shared", client_id="hermes")
+
+    owner = {i["text"] for i in (await p.list_items(dataset="shared", client_id="hermes"))["items"]}
+    assert owner == {"hermes secret", "public"}
+
+    other = {i["text"] for i in (await p.list_items(dataset="shared", client_id="scribe"))["items"]}
+    assert other == {"public"}
+
+
+@pytest.mark.asyncio
+async def test_legacy_multibank_private_recall_not_over_filtered():
+    """Legacy multi-bank mode relies on per-bank ACL, not the tag, so a private
+    doc carrying a custom (non-matching) agent tag must still come back to its
+    owner — the read filter is a no-op off unified mode."""
+    p = HindsightProvider(client=RecordingClient(), client_id="hermes", unified_bank=False)
+    await p.add("secret", dataset="private:hermes", client_id="hermes", tags=["agent:override"])
+    out = await p.recall("secret", dataset="private:hermes", client_id="hermes")
+    assert any(i["text"] == "secret" for i in out)
+
+
 # ── Config default ────────────────────────────────────────────────────────────
 
 

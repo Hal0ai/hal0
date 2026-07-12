@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -61,14 +62,36 @@ class MigrateState:
           "hindsight_to_honcho": {
             "<dataset>": {"cursor": str|null, "migrated_ids": [...], "count": int}
           },
-          "honcho_to_hindsight": {"watermark": str|null, "count": int}
+          "honcho_to_hindsight": {
+            "watermark": str|null,
+            "count": int,
+            "last_run_at": iso8601|null,      # UTC timestamp of the most recent sync-graph run
+            "last_run_ok": bool|null,          # did that run complete without raising?
+            "last_run_error": str|null,        # exception message when last_run_ok is False
+            "last_synced_count": int|null,     # conclusions migrated by that one run (not cumulative)
+          }
         }
 
     Loaded eagerly on construction; callers call :meth:`save` explicitly
     after mutating (matches the CLI's "run, then persist" flow — no
     autosave-per-item, so a killed process just re-scans a bit on resume
     rather than corrupting half-written state).
+
+    The ``last_run_*`` fields are consumed by ``GET /api/memory/honcho/sync``
+    (:mod:`hal0.api.routes.memory`) to report the recurring
+    ``hal0-honcho-sync.timer`` job's health on the dashboard — they are
+    written by :func:`hal0.cli.memory_commands.sync_graph_cmd` after every
+    run, success or failure.
     """
+
+    _HONCHO_TO_HINDSIGHT_DEFAULTS: ClassVar[dict[str, Any]] = {
+        "watermark": None,
+        "count": 0,
+        "last_run_at": None,
+        "last_run_ok": None,
+        "last_run_error": None,
+        "last_synced_count": None,
+    }
 
     def __init__(self, path: Path | str = DEFAULT_STATE_PATH) -> None:
         self.path = Path(path)
@@ -78,17 +101,19 @@ class MigrateState:
         if not self.path.exists():
             return {
                 "hindsight_to_honcho": {},
-                "honcho_to_hindsight": {"watermark": None, "count": 0},
+                "honcho_to_hindsight": dict(self._HONCHO_TO_HINDSIGHT_DEFAULTS),
             }
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {
                 "hindsight_to_honcho": {},
-                "honcho_to_hindsight": {"watermark": None, "count": 0},
+                "honcho_to_hindsight": dict(self._HONCHO_TO_HINDSIGHT_DEFAULTS),
             }
         raw.setdefault("hindsight_to_honcho", {})
-        raw.setdefault("honcho_to_hindsight", {"watermark": None, "count": 0})
+        honcho_to_hindsight = raw.setdefault("honcho_to_hindsight", {})
+        for key, default in self._HONCHO_TO_HINDSIGHT_DEFAULTS.items():
+            honcho_to_hindsight.setdefault(key, default)
         return raw
 
     def save(self) -> None:
@@ -128,6 +153,19 @@ class MigrateState:
         self.data["honcho_to_hindsight"]["count"] = (
             self.data["honcho_to_hindsight"].get("count", 0) + n
         )
+
+    def record_sync_run(self, *, ok: bool, error: str | None, synced_count: int) -> None:
+        """Record the outcome of one ``hal0 memory sync-graph`` invocation.
+
+        Called once per run (success or failure) so ``GET
+        /api/memory/honcho/sync`` can report the recurring timer job's
+        health without shelling out to journald.
+        """
+        section = self.data["honcho_to_hindsight"]
+        section["last_run_at"] = datetime.now(UTC).isoformat()
+        section["last_run_ok"] = ok
+        section["last_run_error"] = error
+        section["last_synced_count"] = synced_count
 
 
 # ── honcho REST helpers ──────────────────────────────────────────────────────

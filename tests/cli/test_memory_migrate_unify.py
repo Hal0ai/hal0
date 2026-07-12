@@ -34,12 +34,25 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
             {"bank_id": "private__hermes", "fact_count": 12, "last_document_at": "t1"},
             {"bank_id": "private__pi-coder", "fact_count": 7, "last_document_at": None},
         ],
-        # documents-in-target-bank state, mutated by the fake import so the
-        # before/after diff in _document_ids has something to find.
-        "target_documents": [{"id": "d1", "tags": ["old"]}],
+        # Per-bank document state. ``_document_ids(bank)`` reads the bank in
+        # the path, so source and target banks hold distinct id sets — this
+        # is what lets the retag scope itself to docs the source actually
+        # transferred (vs. anything that appears in the target concurrently).
+        "documents": {
+            "shared": [{"id": "d1", "tags": ["old"]}],
+            "private__hermes": [{"id": "d2"}],
+            "private__pi-coder": [{"id": "d5"}],
+        },
+        # Extra docs a *concurrent* foreign writer lands in the target during
+        # the transfer window — the fake import appends these too, so tests
+        # can assert they are NOT swept into the retag set.
+        "concurrent_docs": [],
         "operation": {"status": "completed", "result_metadata": {"documents_imported": 1}},
         "doc_tags": {"d2": ["existing"]},
     }
+
+    def _bank_of(path: str) -> str:
+        return path.split("/banks/", 1)[1].split("/", 1)[0]
 
     def fake_get(path: str, **kw: Any) -> Any:
         calls["get"].append((path, kw.get("params")))
@@ -48,7 +61,7 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
         if path == "/api/memory/banks":
             return {"banks": state["banks"]}
         if path.endswith("/documents") and "/documents/" not in path:
-            return {"documents": list(state["target_documents"])}
+            return {"documents": list(state["documents"].get(_bank_of(path), []))}
         if path.endswith("/operations/op-1"):
             return {"operation_id": "op-1", **state["operation"]}
         if "/documents/" in path:
@@ -62,9 +75,12 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
 
     def fake_post(path: str, **kw: Any) -> Any:
         calls["post"].append((path, kw.get("params"), bool(kw.get("files"))))
-        # Simulate the import landing a new document so the before/after
-        # diff in _document_ids has something to retag.
-        state["target_documents"].append({"id": "d2", "tags": []})
+        # Simulate the import landing the source's document (id d2) in the
+        # target so the before/after diff in _document_ids has something to
+        # retag, plus any concurrent foreign writes.
+        target = _bank_of(path)
+        landed = [{"id": "d2", "tags": []}, *state["concurrent_docs"]]
+        state["documents"].setdefault(target, []).extend(landed)
         return {"operation_id": "op-1", "status": "queued"}
 
     def fake_patch(path: str, **kw: Any) -> Any:
@@ -191,6 +207,22 @@ def test_unify_apply_success_exports_imports_polls_and_retags(stub_api) -> None:
     patch_path, patch_body = stub_api["calls"]["patch"][0]
     assert patch_path == "/api/memory/banks/shared/documents/d2"
     assert set(patch_body["tags"]) == {"existing", "agent:hermes", "visibility:private"}
+
+
+def test_unify_apply_retag_ignores_concurrent_foreign_doc(stub_api) -> None:
+    # A doc another writer lands in the target during the transfer window
+    # (foreign id, not in the source bank) must NOT be retagged/mis-attributed.
+    stub_api["state"]["features"] = {"document_export_api": True, "document_import_api": True}
+    stub_api["state"]["concurrent_docs"] = [{"id": "foreign-1", "tags": []}]
+    result = runner.invoke(mgc.app, ["unify", "--source", "private__hermes", "--apply", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    tr = payload["transfers"][0]
+    # Only the source's own doc (d2) is retagged; the concurrent foreign doc is not.
+    assert tr["retagged_documents"] == {"d2": "ok"}
+    patched_ids = [path.rsplit("/", 1)[-1] for path, _body in stub_api["calls"]["patch"]]
+    assert patched_ids == ["d2"]
+    assert "foreign-1" not in patched_ids
 
 
 def test_unify_apply_on_conflict_and_skip_observations_thread_through(stub_api) -> None:

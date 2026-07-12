@@ -33,6 +33,26 @@ _PRIVATE = "private:"
 # ``agents`` routing to its own bank untouched, both read and write.
 _AGENTS = "agents"
 
+# Unified-bank visibility tagging (PR #1244). A write made under the
+# X-hal0-Private toggle lands in the single ``shared`` bank stamped
+# ``visibility:private`` + ``agent:<id>`` (see ``add``). Read-side enforcement
+# (below) keeps such a doc addressable only by its owning agent.
+_VISIBILITY_PRIVATE = "visibility:private"
+_AGENT_TAG_PREFIX = "agent:"
+# The front-door sentinel for a missing X-hal0-Agent; collapses to ``unknown``
+# on both write (agent tag) and read (caller identity) so an absent identity
+# can never match a real agent's private docs.
+_ANONYMOUS = "anonymous"
+_UNKNOWN_AGENT = "unknown"
+
+
+def _agent_of(tags: list[str] | tuple[str, ...] | None) -> str | None:
+    """Return the ``<id>`` of the first ``agent:<id>`` tag, else None."""
+    for t in tags or ():
+        if isinstance(t, str) and t.startswith(_AGENT_TAG_PREFIX):
+            return t[len(_AGENT_TAG_PREFIX) :]
+    return None
+
 
 def namespace_to_bank(namespace: str) -> str:
     """Map a hal0 namespace to a Hindsight bank id (spec §3 table)."""
@@ -189,6 +209,44 @@ class HindsightProvider(MemoryProvider):
         # namespace.resolve_write_dataset; trust it verbatim here.
         return requested or _SHARED
 
+    # ── ACL: visibility:private read enforcement (unified mode) ─────────
+
+    def _caller_agent(self, client_id: str | None) -> str:
+        """Resolve the reading caller's agent identity for private-visibility
+        matching. Mirrors the write-path collapse in ``add``: a missing id or
+        the ``anonymous`` front-door sentinel becomes ``unknown`` so an
+        unauthenticated caller can never match another agent's private docs."""
+        cid = client_id or self._client_id or ""
+        if not cid or cid == _ANONYMOUS:
+            return _UNKNOWN_AGENT
+        return cid
+
+    @staticmethod
+    def _is_visible_to(item: dict[str, Any], caller_agent: str) -> bool:
+        """Read-side enforcement of the ``visibility:private`` tag (PR #1244).
+
+        Non-private docs are shared-readable exactly as before. A private doc
+        is returned ONLY to the agent whose id matches the doc's ``agent:<id>``
+        tag; docs missing that tag (should not happen — ``add`` always stamps
+        one) are treated as private-to-nobody and withheld (fail-closed)."""
+        tags = item.get("tags") or []
+        if _VISIBILITY_PRIVATE not in tags:
+            return True
+        owner = _agent_of(tags)
+        return owner is not None and owner == caller_agent
+
+    def _filter_private(
+        self, items: list[dict[str, Any]], client_id: str | None
+    ) -> list[dict[str, Any]]:
+        """Drop other agents' ``visibility:private`` docs from a unified-bank
+        read. No-op in legacy multi-bank mode, where per-bank ACL
+        (``_allowed_namespaces`` never returns a foreign private bank) already
+        isolates private memory and the tag is a harmless marker."""
+        if not self._unified_bank:
+            return items
+        caller = self._caller_agent(client_id)
+        return [it for it in items if self._is_visible_to(it, caller)]
+
     # ── Core five ──────────────────────────────────────────────────────
 
     async def add(
@@ -216,8 +274,8 @@ class HindsightProvider(MemoryProvider):
         # for a missing X-hal0-Agent) collapses to ``unknown`` so it can't be
         # confused with a real id.
         agent = client_id or source or ""
-        if not agent or agent == "anonymous":
-            agent = "unknown"
+        if not agent or agent == _ANONYMOUS:
+            agent = _UNKNOWN_AGENT
 
         # The join key. Precedence: caller-supplied document_id → deterministic
         # ``<agent>:<session_id>`` (stable across a conversation, so Hindsight
@@ -235,10 +293,10 @@ class HindsightProvider(MemoryProvider):
         # when the write came in under the private toggle. Caller tags are
         # preserved.
         out_tags = list(tags or [])
-        if not any(str(t).startswith("agent:") for t in out_tags):
-            out_tags.append(f"agent:{agent}")
-        if requested_private and "visibility:private" not in out_tags:
-            out_tags.append("visibility:private")
+        if not any(str(t).startswith(_AGENT_TAG_PREFIX) for t in out_tags):
+            out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
+        if requested_private and _VISIBILITY_PRIVATE not in out_tags:
+            out_tags.append(_VISIBILITY_PRIVATE)
 
         # Extraction quality suffers without a ``context`` line and a
         # timestamp; always supply both unless the caller already did.
@@ -304,6 +362,10 @@ class HindsightProvider(MemoryProvider):
                 continue  # fail-soft per bank
             for fact in resp.get("items", []):
                 items.append(self._list_fact_to_item(fact, bank))
+        # Same visibility:private enforcement as recall: in unified mode the
+        # shared bank holds every agent's private docs, so list must not surface
+        # other agents' private items. No-op in legacy multi-bank mode.
+        items = self._filter_private(items, client_id)
         return {"items": items[:limit], "next_cursor": None}
 
     @staticmethod
@@ -398,6 +460,11 @@ class HindsightProvider(MemoryProvider):
 
         per_bank = await asyncio.gather(*[_one(b) for b in banks])
         union: list[dict[str, Any]] = [item for bank_items in per_bank for item in bank_items]
+        # Enforce visibility:private BEFORE the rerank + token budget so that
+        # another agent's private docs never consume the caller's budget (and
+        # never leak). No-op in legacy multi-bank mode. Done pre-budget so the
+        # returned count reflects only docs the caller may actually see.
+        union = self._filter_private(union, client_id)
         if not union:
             return []
 

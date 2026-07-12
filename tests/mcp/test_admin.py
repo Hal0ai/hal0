@@ -185,6 +185,51 @@ async def test_registered_tools_carry_their_annotations(queue: ApprovalQueue) ->
     assert by_name[sample].annotations.readOnlyHint is False
 
 
+def test_tool_param_schema_is_the_shared_flat_shape() -> None:
+    """The shared builder yields path args as required strings, merges
+    curated body hints, and stays open for undeclared fields — the exact
+    shape the dashboard agent chat pins on its side."""
+    pull = admin.tool_param_schema("model_pull")
+    assert pull["required"] == ["model_id"]
+    assert pull["properties"]["model_id"]["type"] == "string"
+    # Curated body hint from TOOL_PARAM_HINTS reached the schema.
+    assert "hf_repo" in pull["properties"]
+    assert pull["additionalProperties"] is True
+    # A no-arg read has empty properties/required but still open.
+    reads = admin.tool_param_schema("profile_list")
+    assert reads["required"] == []
+    assert reads["properties"] == {}
+
+
+@pytest.mark.asyncio
+async def test_build_server_advertises_shared_param_schema(queue: ApprovalQueue) -> None:
+    """tools/list must carry the shared per-tool schema under the nested
+    ``args`` object — not the opaque ``{args: object}`` FastMCP derives
+    from the passthrough signature. Same source of truth as the chat."""
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    by_name = {t.name: t for t in await server.list_tools()}
+
+    pull = by_name["model_pull"].inputSchema
+    inner = pull["properties"]["args"]
+    assert inner["properties"]["model_id"]["type"] == "string"
+    assert "hf_repo" in inner["properties"]
+    assert inner["required"] == ["model_id"]
+    assert inner["additionalProperties"] is True
+    # A tool with a required field makes the nested ``args`` object required.
+    assert pull["required"] == ["args"]
+
+    # A no-arg read leaves ``args`` optional.
+    assert by_name["profile_list"].inputSchema["required"] == []
+
+
+def test_catalog_validation_catches_param_hint_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TOOL_PARAM_HINTS entry naming a non-catalog tool must fail import
+    validation rather than advertise a schema for a tool that isn't there."""
+    monkeypatch.setitem(admin.TOOL_PARAM_HINTS, "ghost_tool", {"properties": {}})
+    with pytest.raises(RuntimeError, match="ghost_tool"):
+        admin._validate_catalog()
+
+
 @pytest.mark.asyncio
 async def test_autonomous_read_dispatches_get_with_bearer(
     queue: ApprovalQueue, mock_transport: dict[str, Any]

@@ -273,6 +273,141 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   )
 }
 
+/* ── Memory provider (Hindsight vs Honcho routing) mock defaults ─────
+ *
+ * Frozen contract (feat/honcho-ui): GET/PUT /api/memory/provider, GET
+ * /api/memory/honcho/stats, GET/PUT /api/memory/honcho/sync, POST
+ * /api/memory/honcho/sync/run. None of these are in the forced-mock
+ * (VITE_MOCK_HAL0) allowlist in src/api/mock.ts, so unlike /api/memory/
+ * engine + /api/memory/banks (which short-circuit before the network),
+ * page.route is authoritative here.
+ */
+
+export const MEMORY_PROVIDER_DEFAULT = {
+  engines: {
+    hindsight: { healthy: true, url: 'http://127.0.0.1:9177' },
+    honcho: { healthy: true, url: 'http://127.0.0.1:8000' },
+  },
+  agents: {
+    hermes: { provider: 'hindsight', private: false },
+    'pi-coder': { provider: 'honcho', private: true },
+  },
+} as const
+
+export const HONCHO_STATS_ENABLED = {
+  enabled: true,
+  reachable: true,
+  version: '3.1.0',
+  url: 'http://127.0.0.1:8000',
+  workspace: 'hal0',
+  peers: 3,
+  observations: 1200,
+  conclusions: 67,
+  deriver_pending: 2,
+  deriver_processing: 1,
+} as const
+
+export const HONCHO_STATS_DISABLED = {
+  enabled: false,
+  reachable: false,
+  version: null,
+  url: null,
+  workspace: null,
+  peers: null,
+  observations: null,
+  conclusions: null,
+  deriver_pending: null,
+  deriver_processing: null,
+} as const
+
+export const HONCHO_SYNC_DEFAULT = {
+  timer_enabled: true,
+  interval: '6h',
+  last_run_at: '2026-07-11T02:00:00Z',
+  last_run_ok: true,
+  last_run_error: null,
+  last_synced_count: 42,
+  next_run_at: '2026-07-11T08:00:00Z',
+} as const
+
+export type MemoryProviderMockOptions = {
+  provider?: typeof MEMORY_PROVIDER_DEFAULT
+  honchoStats?: typeof HONCHO_STATS_ENABLED | typeof HONCHO_STATS_DISABLED
+  sync?: typeof HONCHO_SYNC_DEFAULT
+  /** agent ids that 409 (memory.provider_unavailable) when routed to "honcho". */
+  unavailableAgents?: string[]
+  /**
+   * POST /honcho/sync/run response override. The real route is fail-soft —
+   * a systemctl failure to start the sync unit still returns HTTP 200 with
+   * `{started: false, note}` (routes/memory.py `run_honcho_sync`), so tests
+   * need to exercise both outcomes without simulating a network error.
+   * Defaults to `{started: true, note: null}`.
+   */
+  syncRun?: { started: boolean; note?: string | null }
+}
+
+/**
+ * Installs the memory-provider-routing + Honcho engine surface. Call from
+ * a test body (after the auto `cleanState` default mocks, before
+ * `page.goto`) so these specific routes win over the `/api/` catch-all.
+ * Mutations (PUT provider / PUT sync) are applied to a closure-local clone
+ * so subsequent GETs in the same test observe them, mirroring the
+ * `state.boardTasks` pattern above.
+ */
+export async function installMemoryProviderMocks(page: Page, opts: MemoryProviderMockOptions = {}) {
+  const provider = JSON.parse(JSON.stringify(opts.provider ?? MEMORY_PROVIDER_DEFAULT)) as {
+    engines: typeof MEMORY_PROVIDER_DEFAULT.engines
+    agents: Record<string, { provider: string; private: boolean }>
+  }
+  const honchoStats = JSON.parse(JSON.stringify(opts.honchoStats ?? HONCHO_STATS_ENABLED))
+  const sync = JSON.parse(JSON.stringify(opts.sync ?? HONCHO_SYNC_DEFAULT))
+  const unavailable = new Set(opts.unavailableAgents ?? [])
+  const syncRun = JSON.parse(JSON.stringify(opts.syncRun ?? { started: true, note: null }))
+
+  await page.route('**/api/memory/provider', (route) => {
+    if (route.request().method() !== 'PUT') return json(route, provider)
+    const body = route.request().postDataJSON?.() ?? {}
+    if (unavailable.has(body.agent) && body.provider === 'honcho') {
+      return json(
+        route,
+        {
+          error: {
+            code: 'memory.provider_unavailable',
+            message: `honcho engine is not reachable at ${provider.engines.honcho.url} — start it first`,
+            details: { url: provider.engines.honcho.url },
+          },
+        },
+        409,
+      )
+    }
+    provider.agents[body.agent] = { provider: body.provider, private: !!body.private }
+    // Real shape (routes/memory.py `set_memory_provider`): {agent, provider,
+    // private, restarted, provisioned, note} — no `ok` field, and the UI
+    // doesn't read the response body on success, but fixtures shouldn't
+    // invent a shape the backend doesn't send.
+    return json(route, {
+      agent: body.agent,
+      ...provider.agents[body.agent],
+      restarted: true,
+      provisioned: true,
+      note: null,
+    })
+  })
+
+  await page.route('**/api/memory/honcho/stats', (route) => json(route, honchoStats))
+
+  // /sync/run is registered separately below; this literal pattern (no
+  // trailing wildcard) does not match the extra /run path segment.
+  await page.route('**/api/memory/honcho/sync', (route) => {
+    if (route.request().method() !== 'PUT') return json(route, sync)
+    const body = route.request().postDataJSON?.() ?? {}
+    sync.timer_enabled = !!body.enabled
+    return json(route, sync)
+  })
+
+  await page.route('**/api/memory/honcho/sync/run', (route) => json(route, syncRun))
+}
+
 /* ── Test fixture wiring ─────────────────────────────────────────── */
 
 type Fixtures = {
