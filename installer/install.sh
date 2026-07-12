@@ -202,9 +202,14 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
         "Pre-flight checks")
             warn "Recovery: free space under ${VAR_DIR:-/var/lib/hal0} (need ≥20 GB),"
-            warn "         or stop the process holding the port and rerun."
-            warn "         Set HAL0_PORT=<other> to bind a different API port;"
-            warn "         OpenWebUI :3001 is hardcoded in the systemd unit." ;;
+            warn "         or stop the process holding the port and rerun. hal0 own"
+            warn "         units (hal0-api / hal0-openwebui) are exempted automatically,"
+            warn "         so this is a foreign process on the port; find it with"
+            warn "         ss -ltnp sport = :PORT . If it is actually a stuck"
+            warn "         hal0-api / hal0-openwebui the exemption did not recognize, try"
+            warn "         systemctl stop hal0-api hal0-openwebui and rerun. Set"
+            warn "         HAL0_PORT=<other> to bind a different API port; OpenWebUI"
+            warn "         :3001 is hardcoded in the systemd unit." ;;
         "Python environment")
             warn "Recovery: scroll up to the pip output for the real error."
             warn "         Retry with HAL0_PYTHON=python3.12 sudo bash install.sh" ;;
@@ -685,16 +690,39 @@ NETWORK_ENV_LINES="$(
 if [[ -z "${NETWORK_ENV_LINES}" ]]; then
     NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
 fi
+
+# The network block below is rewritten on EVERY run (not just when api.env is
+# first created) — it used to be write-once (guarded by `[[ ! -f api.env ]]`),
+# but the hal0-api unit's ExecStart was later changed to read HAL0_BIND_HOST
+# from this file instead of a --host flag, and that unit IS rewritten every
+# run. A box installed before that change (~v0.9.3) that later re-runs
+# install.sh to repair/upgrade would never gain HAL0_BIND_HOST at all — the
+# unit falls back to the CLI's 127.0.0.1 default, silently killing LAN/
+# dashboard access with no error anywhere. Delimited markers let us refresh
+# just this block on re-runs while leaving hand-edited lines elsewhere in the
+# file (HF_TOKEN, toolbox image overrides, etc.) untouched.
+NETWORK_BEGIN_MARKER="# BEGIN hal0-network"
+NETWORK_END_MARKER="# END hal0-network"
+NETWORK_BLOCK="$(cat <<NETBLOCK
+${NETWORK_BEGIN_MARKER}
+# Network shape — derived from one bind choice (WS-C). HAL0_BIND_HOST is
+# read by BOTH this file's consumer (\`hal0 serve\`) and the hal0-api unit;
+# HAL0_HOSTNAME feeds mDNS; HAL0_ALLOWED_ORIGINS gates the chat-proxy WS
+# upgrade. This block is rewritten on every install.sh run — it's the only
+# way an existing install picks up a changed bind host / LAN IP set. Hand
+# edits inside the markers will be overwritten on the next run; edit
+# elsewhere in this file (or hal0.toml) to persist a change.
+${NETWORK_ENV_LINES}
+${NETWORK_END_MARKER}
+NETBLOCK
+)"
+
 if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
 HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
-# Network shape — derived from one bind choice (WS-C). HAL0_BIND_HOST is
-# read by BOTH this file's consumer (\`hal0 serve\`) and the hal0-api unit;
-# HAL0_HOSTNAME feeds mDNS; HAL0_ALLOWED_ORIGINS gates the chat-proxy WS
-# upgrade. Regenerate with: hal0 doctor / rerun installer.
-${NETWORK_ENV_LINES}
+${NETWORK_BLOCK}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
 # is ENABLED by default via [memory].enabled=true in hal0.toml — no env var
 # needed here (HAL0_MEMORY_ENABLED was removed; use 'hal0 memory enable' /
@@ -716,6 +744,20 @@ ${NETWORK_ENV_LINES}
 # Unset = use the image pinned in the provider at release time.
 EOF
     info "wrote ${API_ENV}"
+else
+    # Idempotent refresh (see comment above NETWORK_BLOCK): strip any
+    # existing marker-delimited block and append a fresh one, atomically.
+    # Everything outside the markers survives untouched.
+    API_ENV_TMP="$(mktemp "${API_ENV}.XXXXXX")"
+    awk -v begin="${NETWORK_BEGIN_MARKER}" -v end="${NETWORK_END_MARKER}" '
+        $0 == begin { skip = 1; next }
+        $0 == end   { skip = 0; next }
+        !skip       { print }
+    ' "${API_ENV}" > "${API_ENV_TMP}"
+    printf '%s\n' "${NETWORK_BLOCK}" >> "${API_ENV_TMP}"
+    chmod 0644 "${API_ENV_TMP}"
+    mv -f "${API_ENV_TMP}" "${API_ENV}"
+    info "refreshed network vars in ${API_ENV}"
 fi
 
 # ── HF_TOKEN gather + persist (WS-D, #1106) ─────────────────────────────────

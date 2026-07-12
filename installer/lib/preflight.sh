@@ -37,7 +37,13 @@
 #                                instead of installing "successfully" and then
 #                                silently running CPU-only.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
-#   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
+#   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing,
+#                                except by hal0's own hal0-api.service /
+#                                hal0-openwebui.service — those are the
+#                                incumbent install this run is about to
+#                                update in place, not a collision (matters
+#                                for both a re-run of install.sh over a live
+#                                box and `hal0 doctor` on a healthy one)
 #   preflight_bootstrap_prereqs — Linux host + curl/tar/sha256sum on PATH,
 #                                mirroring bootstrap.sh's own preflight() so
 #                                the direct `sudo bash install.sh` path
@@ -655,6 +661,38 @@ _preflight_port_in_use() {
     return 1
 }
 
+# A listener on one of hal0's own ports is the incumbent install, not a
+# conflict — both `install.sh` re-runs (repair/upgrade over a live box) and
+# `hal0 doctor` on a healthy, already-running box hit this every time
+# without the exemption below.
+#
+# hal0-api.service is a plain (non-containerized) unit, so its MainPID is
+# the actual PID holding the socket — match that exactly via `ss -ltnp`.
+# hal0-openwebui.service instead runs a podman-published container
+# (`-p 0.0.0.0:3001:8080`); the port-forward is NAT'd through the
+# container's own network namespace, so the host-side PID behind the
+# listener rarely matches the unit's MainPID (a `podman run` wrapper). Its
+# container port is hardcoded to 3001 (see install.sh), so treat "the unit
+# is active" as ownership there instead of chasing PIDs across namespaces.
+_preflight_port_owned_by_hal0() {
+    local port="$1"
+    command -v systemctl >/dev/null 2>&1 || return 1
+
+    if [[ "${port}" == "3001" ]]; then
+        systemctl is-active --quiet hal0-openwebui.service 2>/dev/null
+        return $?
+    fi
+
+    local unit_pid port_pid
+    unit_pid="$(systemctl show -p MainPID --value hal0-api.service 2>/dev/null)"
+    [[ -n "${unit_pid}" && "${unit_pid}" != "0" ]] || return 1
+    command -v ss >/dev/null 2>&1 || return 1
+    # Plain awk (no grep -P / PCRE dependency) to pull the pid=NNN field out
+    # of ss's "users:((\"name\",pid=NNN,fd=N))" column.
+    port_pid="$(ss -ltnp "sport = :${port}" 2>/dev/null | awk -F'pid=' '/pid=/ {split($2, a, ","); print a[1]; exit}')"
+    [[ -n "${port_pid}" && "${port_pid}" == "${unit_pid}" ]]
+}
+
 preflight_ports() {
     local ports=("$@")
     if (( ${#ports[@]} == 0 )); then
@@ -667,8 +705,12 @@ preflight_ports() {
     local rc=0 port
     for port in "${ports[@]}"; do
         if _preflight_port_in_use "${port}"; then
-            err "port ${port}: already in use (find with 'ss -ltnp \"sport = :${port}\"')"
-            rc=1
+            if _preflight_port_owned_by_hal0 "${port}"; then
+                info "port ${port}: in use by hal0's own service — not a conflict"
+            else
+                err "port ${port}: already in use (find with 'ss -ltnp \"sport = :${port}\"'; if it's hal0's own service, 'systemctl stop hal0-api hal0-openwebui' first)"
+                rc=1
+            fi
         else
             info "port ${port}: free"
         fi
