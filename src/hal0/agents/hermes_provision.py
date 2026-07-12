@@ -1501,6 +1501,7 @@ def _build_config_overlay(
     system_prompt: str,
     personality_name: str,
     live_resolve_enabled: bool,
+    memory_provider: str = "hal0-memory",
 ) -> list[tuple[str, Any]]:
     """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
 
@@ -1515,6 +1516,12 @@ def _build_config_overlay(
     ``hal0/chat`` against the gateway with ``discover_models`` on, so the
     picker live-discovers every loaded slot. ``HAL0_HERMES_LIVE_RESOLVE=0``
     pins the single physical backend instead.
+
+    ``memory_provider`` is the resolved hermes ``memory.provider`` value
+    (:func:`_resolve_memory_provider`) — ``"hal0-memory"`` (hindsight,
+    default) or ``"honcho"``. The honcho.json wiring itself is a separate
+    render (:func:`_render_honcho_json`); this only sets the scalar
+    ``memory.*`` keys hermes's own config set can express.
     """
     base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary["backend_url"]
     pairs: list[tuple[str, Any]] = []
@@ -1557,13 +1564,15 @@ def _build_config_overlay(
             ("delegation.base_url", delegation["base_url"]),
         ]
 
+    # memory.graph.* (ADR-0014) configured hal0's OWN Hindsight
+    # graph-extraction engine — hermes never reads it, so forwarding it into
+    # hermes's config.yaml was dead config. Dropped for both branches rather
+    # than ported to honcho (feat/honcho-memory).
     pairs += [
-        ("memory.provider", "hal0-memory"),
+        ("memory.provider", memory_provider),
         ("memory.memory_enabled", True),
         ("memory.user_profile_enabled", True),
         ("memory.nudge_interval", 10),
-        ("memory.graph.enabled", False),  # ADR-0023: graph extraction defaults OFF
-        ("memory.graph.extraction_slot", "utility"),
     ]
 
     # mcp_servers via config set (NOT `hermes mcp add` — interactive/hangs).
@@ -1704,6 +1713,165 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
 OVERRIDES_PATH = Path("/etc/hal0/agents/hermes/overrides.yaml")
 
 
+# ── Honcho memory-provider routing (feat/honcho-memory) ─────────────────────
+#
+# hal0.toml's [memory] agent_providers/agent_private + [honcho] sections
+# (schema.py) let an operator route a given agent's memory onto Honcho
+# instead of hal0's own Hindsight engine. _resolve_memory_provider picks the
+# hermes-side provider string; _render_honcho_json / _disable_honcho_hermes_host
+# keep $HERMES_HOME/honcho.json — the file hermes's BUILT-IN honcho provider
+# reads directly — converged with that choice.
+
+
+def _load_hal0_config() -> Any:
+    """Load hal0.toml. Late import mirrors :func:`_read_env_probe`'s posture
+    (keeps this module importable independent of hal0.config's own import
+    graph). A missing/unreadable config.toml resolves to schema defaults —
+    see :func:`hal0.config.loader.load_hal0_config`.
+    """
+    from hal0.config.loader import load_hal0_config
+
+    return load_hal0_config()
+
+
+def _resolve_memory_provider(agent_id: str, cfg: Any) -> str:
+    """Map ``cfg.memory.agent_providers[agent_id]`` to hermes's ``memory.provider``.
+
+    Absent ``agent_id``, or any value other than ``"honcho"``, resolves to
+    the default hindsight routing → hermes's built-in ``hal0-memory`` plugin.
+    Duck-typed attribute/dict access so tests can hand a bare
+    ``SimpleNamespace`` instead of constructing a full ``Hal0Config``.
+    """
+    agent_providers = getattr(getattr(cfg, "memory", None), "agent_providers", None) or {}
+    # Legacy provision.json state carries agent_id="hermes-agent" (pre-#1056);
+    # the toggle is keyed by the canonical registry name ("hermes").
+    canonical = agent_id.removesuffix("-agent") or agent_id
+    choice = agent_providers.get(agent_id) or agent_providers.get(canonical, "hindsight")
+    return "honcho" if choice == "honcho" else "hal0-memory"
+
+
+def _render_honcho_json(hermes_home: Path, cfg: Any, agent_id: str) -> bool:
+    """Deep-merge hal0's Honcho wiring into ``$HERMES_HOME/honcho.json``.
+
+    Hermes's built-in honcho provider reads this file directly: root
+    ``apiKey``/``baseUrl`` + per-host ``hosts.<key>`` blocks. A stale file
+    left over from an earlier Honcho-CLOUD setup (``apiKey: hch-...``, no
+    ``baseUrl``) is deterministically overwritten on the keys hal0 manages;
+    any unknown key (an operator's hand edit, or a hermes feature hal0
+    doesn't know about) is preserved — same deep-merge posture as
+    :func:`_merge_config_yaml_layers` uses for config.yaml.
+
+    Any EXISTING ``hosts.hermes_<profile>`` block (hermes profile host keys)
+    also gets its ``workspace``/``peerName``/``aiPeer`` corrected — same
+    brain, same identity, just a different session partition — but no NEW
+    profile block is invented here; only present ones are touched.
+
+    ``agent_id`` private (``cfg.memory.agent_private[agent_id]``) routes the
+    host to an isolated ``<workspace>__private__<agent_id>`` workspace
+    instead of the unified one. Returns True iff the file's content changed.
+    """
+    path = hermes_home / "honcho.json"
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, dict):
+            existing = loaded
+
+    private = bool((getattr(cfg.memory, "agent_private", None) or {}).get(agent_id, False))
+    workspace = f"{cfg.honcho.workspace}__private__{agent_id}" if private else cfg.honcho.workspace
+    managed_host_keys: dict[str, Any] = {
+        "workspace": workspace,
+        "peerName": cfg.honcho.user_peer,
+        "aiPeer": agent_id,
+    }
+
+    hosts_overlay: dict[str, Any] = {
+        "hermes": {
+            "enabled": True,
+            **managed_host_keys,
+            "sessionStrategy": "per-session",
+            "pinUserPeer": True,
+            "saveMessages": True,
+        }
+    }
+    existing_hosts = existing.get("hosts")
+    if isinstance(existing_hosts, dict):
+        for key in existing_hosts:
+            if key != "hermes" and key.startswith("hermes_"):
+                hosts_overlay[key] = dict(managed_host_keys)
+
+    overlay = {
+        "baseUrl": f"http://127.0.0.1:{cfg.honcho.port}",
+        "apiKey": "hal0-local-noauth",
+        "hosts": hosts_overlay,
+    }
+    merged = _deep_merge(existing, overlay)
+    out = json.dumps(merged, indent=2, sort_keys=False) + "\n"
+    if path.is_file() and path.read_text(encoding="utf-8") == out:
+        return False
+    _atomic_write(path, out)
+    return True
+
+
+def _disable_honcho_hermes_host(hermes_home: Path) -> bool:
+    """Flip ``hosts.hermes.enabled`` to False in an existing ``honcho.json``.
+
+    Called when the agent is routed to hindsight so a stale ``honcho.json``
+    (left over from a prior honcho run, or an operator's hand-made
+    Honcho-cloud setup) doesn't silently autoenable hermes's built-in honcho
+    provider alongside hal0-memory. Never CREATES the file — a no-op when
+    honcho.json is absent — and preserves every other key untouched.
+    """
+    path = hermes_home / "honcho.json"
+    if not path.is_file():
+        return False
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    hosts = loaded.get("hosts")
+    if not isinstance(hosts, dict) or not isinstance(hosts.get("hermes"), dict):
+        return False
+    if hosts["hermes"].get("enabled") is False:
+        return False
+    hosts["hermes"]["enabled"] = False
+    out = json.dumps(loaded, indent=2, sort_keys=False) + "\n"
+    _atomic_write(path, out)
+    return True
+
+
+_HONCHO_SDK_SPEC = "honcho-ai>=2.1,<3"
+
+
+def _ensure_honcho_sdk(venv: Path, *, run: Callable[..., Any]) -> bool:
+    """Best-effort ``pip install --upgrade`` of the honcho-ai SDK in the hermes venv.
+
+    Hermes's built-in honcho provider already works against the 2.0.1 the
+    base requirements.txt installs; this is hygiene only (picks up the 2.1+
+    line), so a failure (offline box, resolver hiccup) is logged and
+    swallowed — never fails config_write.
+    """
+    pip = _venv_python(venv)
+    if not pip.exists():
+        return False
+    try:
+        run(
+            [str(pip), "-m", "pip", "install", "--upgrade", _HONCHO_SDK_SPEC],
+            check=True,
+            capture_output=True,
+            text=True,
+        )  # nosec B603 — argv from local config
+        return True
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning("hermes_provision.honcho_sdk_upgrade_failed", error=str(exc))
+        return False
+
+
 def _personas_root_for(state: BootstrapState) -> Path:
     """Resolve the personas dir for a given BootstrapState.
 
@@ -1780,6 +1948,9 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     hermes_bin = _hermes_bin(Path(state.venv))
     run = ctx.io.run
 
+    cfg = ctx.io.load_config()
+    memory_provider = _resolve_memory_provider(state.agent_id, cfg)
+
     hermes_home.mkdir(parents=True, exist_ok=True)
     # Snapshot an EXISTING config.yaml to a single rolling ``config.yaml.bak``
     # BEFORE the first mutation (migrate + the config-set overlay), so a
@@ -1847,6 +2018,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
         system_prompt=system_prompt,
         personality_name=personality_name,
         live_resolve_enabled=live_resolve_enabled,
+        memory_provider=memory_provider,
     )
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
@@ -1854,6 +2026,18 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     list_merge_changed = _merge_config_yaml_layers(
         config_path, list_keys=HAL0_CONFIG_LIST_KEYS, overrides_path=OVERRIDES_PATH
     )
+
+    # honcho.json: hermes's built-in honcho provider reads this file
+    # directly (config set can't reach it — it's not part of config.yaml).
+    # Routed-to-honcho renders/enables it; routed-to-hindsight disables a
+    # stale one in place rather than deleting it (keeps a --repair back-flip
+    # to honcho cheap, and never destroys an operator's honcho.json by hand).
+    honcho_sdk_upgraded = False
+    if memory_provider == "honcho":
+        honcho_json_changed = _render_honcho_json(hermes_home, cfg, state.agent_id)
+        honcho_sdk_upgraded = _ensure_honcho_sdk(Path(state.venv), run=run)
+    else:
+        honcho_json_changed = _disable_honcho_hermes_host(hermes_home)
 
     new_hash = (
         content_hash(config_path.read_text(encoding="utf-8")) if config_path.exists() else None
@@ -1878,6 +2062,9 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
+            "memory_provider": memory_provider,
+            "honcho_json_changed": honcho_json_changed,
+            "honcho_sdk_upgraded": honcho_sdk_upgraded,
             "config_set_errors": errors,
             "fallbacks": fallbacks,
         },
@@ -4437,6 +4624,7 @@ class PhaseIO:
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
     install_venv: Callable[..., None] = _install_venv
     read_env_probe: Callable[[], dict[str, Any]] = _read_env_probe
+    load_config: Callable[[], Any] = _load_hal0_config
     run: Callable[..., Any] = subprocess.run
 
 

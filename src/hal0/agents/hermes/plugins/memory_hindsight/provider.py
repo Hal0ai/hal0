@@ -1,44 +1,46 @@
-"""Hermes ``MemoryProvider`` subclass backed by hal0-memory REST.
+"""Hermes ``MemoryProvider`` backed by hal0-memory REST.
 
-Subclasses the upstream ``agent.memory_provider.MemoryProvider`` ABC.
-The import resolves inside the Hermes venv at runtime — when the
-plugin is loaded out of ``$HERMES_HOME/plugins/memory/hal0-memory/``.
-For hal0's own unit tests we import a vendored stub so the suite stays
-runnable without the hermes-agent venv on PYTHONPATH.
+Canonical source. The installer seed at
+``installer/agents/hermes/plugins/hal0-memory/`` is a byte-identical copy
+(enforced by ``tests/agents/hermes_plugins/test_seed_parity.py``); it is
+copied verbatim into ``$HERMES_HOME/plugins/hal0-memory/`` at provision time.
 
-Design notes
-------------
+Design notes:
 
-* ``hal0-memory`` is the plugin name (renamed from ``hal0-cognee`` in P5H-1).
-  The retired stub at ``installer/agents/hermes/plugins/hal0-memory/__init__.py``
-  is replaced by this provider in PR-3.
-* The agent loop's memory hooks (``prefetch``/``sync_turn``) are sync,
-  so we wrap async REST calls via ``asyncio.run``. Each call gets its
-  own event loop so we don't fight whatever loop Hermes hosts above us.
-* The provider is best-effort — transport failures fall back to empty
-  context (prefetch) or silent drop (sync_turn) so a missing hal0-api
-  cannot wedge the agent loop. The upstream ``MemoryProviderError``
-  taxonomy is reserved for explicit tool calls.
-* Identity flows via ``X-hal0-Agent`` (sourced from ``HAL0_AGENT_ID``).
-  We NEVER send a ``dataset`` field — the server resolves the namespace
-  from the header (see ``Hal0MemoryClient`` docstring + #317).
+* Identity defaults to ``hermes`` (hal0's registry name); the server derives
+  the private bank ``private:hermes`` from it.
+* Two banks: ``private:<agent-id>`` (default) + ``shared``. The
+  ``hal0_memory_add`` tool takes ``shared=true`` to write the shared bank.
+  Reads are a union. Profile agent-ids (``hermes__<profile>``) get a
+  three-tier prompt: profile-private, global roll-up, shared.
+* Exposes explicit ``hal0_memory_{search,recall,add}`` tools so the agent can
+  read/write memory directly (robust even if the hal0-memory MCP server's
+  tools aren't surfaced to a given session), on top of prompt-injection recall.
+* **Synchronous** transport — the old async+``asyncio.run`` wrapping broke on
+  the 2nd call (reused AsyncClient bound to a closed per-call loop). The
+  Hermes memory hooks are sync; a sync client is correct and simpler.
+* Transport failures never wedge the agent loop: hooks fall back to empty
+  context / dropped write. The FIRST failure per operation (and every 25th
+  after) logs at WARNING so a dead hal0-api is visible; the rest log at
+  DEBUG. ``initialize()`` runs a 1s reachability probe and surfaces a
+  degraded notice in the system prompt when hal0-api is unreachable.
+
+Subclasses the upstream ``agent.memory_provider.MemoryProvider`` ABC, which
+resolves inside the Hermes venv at runtime. A vendored stub keeps the module
+importable in hal0's own venv for unit tests.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
+from collections import Counter
 from typing import Any
 
 try:
     from agent.memory_provider import MemoryProvider  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover — exercised inside Hermes venv only
-    # Fallback stub so hal0's own test suite can import the provider
-    # without the hermes-agent venv on PYTHONPATH. The real ABC ships
-    # with Hermes; this minimal shim mirrors the abstract surface our
-    # provider actually subclasses against.
     from abc import ABC, abstractmethod
 
     class MemoryProvider(ABC):  # type: ignore[no-redef]
@@ -56,30 +58,96 @@ except ImportError:  # pragma: no cover — exercised inside Hermes venv only
         def get_tool_schemas(self) -> list[dict[str, Any]]: ...
 
 
-from ._client import DEFAULT_AGENT_ID, Hal0MemoryClient, Hal0MemoryClientError
+from ._client import Hal0MemoryClient, Hal0MemoryClientError
 
 logger = logging.getLogger(__name__)
 
-# Honour the same context gate honcho + supermemory ship: skip writes
-# from cron / flush / subagent loops so non-primary contexts don't
-# corrupt the user-facing memory namespace.
+# Skip writes from cron / flush / subagent loops so non-primary contexts
+# don't corrupt the user-facing memory namespace.
 _SKIP_WRITE_CONTEXTS = frozenset({"cron", "flush", "subagent"})
+
+_DEFAULT_AGENT_ID = "hermes"
+
+# Re-warn cadence: after the first WARNING per operation, repeat failures log
+# at DEBUG except every Nth, so a persistently-dead hal0-api stays visible
+# without flooding the journal.
+_WARN_EVERY = 25
+
+
+# ── Tool schemas — explicit read/write surface, with private/shared choice ──
+
+SEARCH_SCHEMA = {
+    "name": "hal0_memory_search",
+    "description": (
+        "Search durable hal0 memory for relevant facts. Returns ranked excerpts "
+        "across BOTH the hermes-private and shared banks (reads are a union). "
+        "Use before asking the user to repeat themselves."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "limit": {"type": "integer", "description": "Max results (default 10)."},
+        },
+        "required": ["query"],
+    },
+}
+
+RECALL_SCHEMA = {
+    "name": "hal0_memory_recall",
+    "description": (
+        "Recall token-budgeted, consolidated memory (Hindsight observations) "
+        "across the hermes-private and shared banks. Prefer over search for a "
+        "synthesized picture rather than raw excerpts."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Topic to recall."},
+            "max_tokens": {"type": "integer", "description": "Token budget (default 2048)."},
+        },
+        "required": ["query"],
+    },
+}
+
+ADD_SCHEMA = {
+    "name": "hal0_memory_add",
+    "description": (
+        "Persist a durable fact to hal0 memory. Defaults to the hermes-PRIVATE "
+        "bank (only Hermes recalls it). Set shared=true to write the SHARED bank, "
+        "readable by every agent on this host."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The fact to remember."},
+            "shared": {
+                "type": "boolean",
+                "description": "true → shared bank; false/omitted → hermes private bank.",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional tags for later filtering.",
+            },
+        },
+        "required": ["text"],
+    },
+}
+
+ALL_TOOL_SCHEMAS = [SEARCH_SCHEMA, RECALL_SCHEMA, ADD_SCHEMA]
 
 
 class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
-    """REST-backed memory provider — wraps hal0-memory.
-
-    Vendored under hal0's tree so the installer can deploy it into the
-    Hermes plugin directory at provision time. Subclasses the upstream
-    ``MemoryProvider`` ABC; see module docstring for the integration
-    contract.
-    """
+    """REST-backed memory provider — wraps hal0-memory (private + shared banks)."""
 
     def __init__(self, *, client: Hal0MemoryClient | None = None) -> None:
         self._client_override = client
         self._client: Hal0MemoryClient | None = None
         self._session_id: str = ""
         self._agent_context: str = "primary"
+        self._degraded: bool = False
+        self._failures: Counter[str] = Counter()
 
     # ── ABC: identity ──────────────────────────────────────────────────
 
@@ -90,65 +158,101 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
     # ── ABC: lifecycle ─────────────────────────────────────────────────
 
     def is_available(self) -> bool:
-        """Cheap config check — does NOT make a network call.
-
-        The ABC docstring is explicit: ``is_available`` must only check
-        installed deps + config. The actual reachability check happens
-        lazily on the first REST call.
-        """
-        # httpx is a hard dep of hal0; we ship the client alongside the
-        # provider. No env-var gate — the defaults already point at the
-        # local hal0-api socket on the same host.
+        # Cheap config check, no network call (ABC contract). Defaults point
+        # at the local hal0-api on the same host. Reachability is probed in
+        # initialize() and surfaced via the degraded prompt notice instead.
         return True
 
-    def initialize(self, session_id: str, **kwargs: Any) -> None:
-        self._session_id = session_id
+    def initialize(self, session_id: str = "", **kwargs: Any) -> None:
+        self._session_id = session_id or kwargs.get("session_id") or ""
         self._agent_context = str(kwargs.get("agent_context") or "primary")
         if self._client_override is not None:
             self._client = self._client_override
-            return
-        base_url = os.environ.get("HAL0_MEMORY_BASE")
-        agent_id = os.environ.get("HAL0_AGENT_ID")
-        self._client = Hal0MemoryClient(base_url=base_url, agent_id=agent_id)
+        else:
+            base_url = os.environ.get("HAL0_MEMORY_BASE")
+            agent_id = os.environ.get("HAL0_AGENT_ID")
+            self._client = Hal0MemoryClient(base_url=base_url, agent_id=agent_id)
+        self._degraded = not self._client.probe()
+        if self._degraded:
+            logger.warning(
+                "hal0-memory unreachable at %s — recall/writes degraded until it returns",
+                self._client.base_url,
+            )
 
     def shutdown(self) -> None:
         if self._client is None:
             return
         try:
-            asyncio.run(self._client.aclose())
-        except RuntimeError:
-            # Already running an event loop (Hermes shutting down inside
-            # its own loop); fire-and-forget close.
-            logger.debug("hal0-memory shutdown: nested event loop, skipping aclose")
+            self._client.close()
         finally:
             self._client = None
+
+    def _agent_id(self) -> str:
+        return self._client.agent_id if self._client else _DEFAULT_AGENT_ID
+
+    def _note_failure(self, op: str, exc: Exception) -> None:
+        """Count a transport failure; WARN on the first (and every Nth), else DEBUG."""
+        self._failures[op] += 1
+        count = self._failures[op]
+        if count == 1 or count % _WARN_EVERY == 0:
+            logger.warning("hal0-memory %s transport failure (#%d): %s", op, count, exc)
+        else:
+            logger.debug("hal0-memory %s transport failure (#%d): %s", op, count, exc)
+        self._degraded = True
+
+    def _note_success(self) -> None:
+        self._degraded = False
+
+    @property
+    def failure_counts(self) -> dict[str, int]:
+        """Per-operation transport-failure counters (observability surface)."""
+        return dict(self._failures)
 
     # ── ABC: prompt + recall ───────────────────────────────────────────
 
     def system_prompt_block(self) -> str:
-        agent_id = self._client.agent_id if self._client else DEFAULT_AGENT_ID
+        degraded_note = (
+            "\n(NOTE: hal0-memory is currently UNREACHABLE — recall may be empty and "
+            "writes may be dropped until it recovers.)"
+            if self._degraded
+            else ""
+        )
+        agent_id = self._agent_id()
+        if "__" in agent_id and agent_id.startswith("hermes__"):
+            profile = agent_id.split("__", 1)[1]
+            parent = agent_id.split("__")[0]
+            return (
+                "# hal0 memory\n"
+                "You have a durable cross-session memory store (hal0 / Hindsight) with "
+                "THREE tiers:\n"
+                f"  - **private:{agent_id}** (your {profile} profile's private bank — writes go here)\n"
+                f"  - **private:{parent}** (the global roll-up bank — promoted facts from all profiles)\n"
+                "  - **shared** (cross-agent — readable by pi-coder, Claude Code, etc.)\n"
+                "Reads always span all three tiers. Write to your profile bank by default; "
+                "set shared=true to publish cross-agent. Tag writes with agent:hermes. "
+                "Use hal0_memory_search or hal0_memory_recall before asking the user to "
+                "repeat themselves; use hal0_memory_add to persist durable facts." + degraded_note
+            )
         return (
-            "You have a durable memory store at hal0-memory "
-            f"(private:{agent_id} namespace, resolved server-side). "
-            "Use memory_search before asking repeat-questions; "
-            "memory_add to persist facts worth recalling across sessions. "
-            "When you memory_add, tag the author with agent:hermes and the "
-            "scope with repo:/topic:/kind: — tag the author, bank the scope."
+            "# hal0 memory\n"
+            "You have a durable cross-session memory store (hal0 / Hindsight) with "
+            f"two banks: a PRIVATE bank (private:{agent_id}) only you recall, "
+            "and a SHARED bank every agent on this host can read. Reads always span "
+            "both. Tag writes with agent:hermes. Use hal0_memory_search or "
+            "hal0_memory_recall before asking the user to repeat themselves; use "
+            "hal0_memory_add to persist durable facts (set shared=true only for facts "
+            "other agents should see)." + degraded_note
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not query or self._client is None:
             return ""
         try:
-            result = asyncio.run(
-                self._client.recall(query, types=["observation", "world"], max_tokens=2048)
-            )
+            result = self._client.recall(query, types=["observation", "world"], max_tokens=2048)
         except Hal0MemoryClientError as exc:
-            logger.debug("hal0-memory prefetch transport failure: %s", exc)
+            self._note_failure("prefetch", exc)
             return ""
-        except RuntimeError as exc:  # nested loop or other asyncio drift
-            logger.debug("hal0-memory prefetch asyncio drift: %s", exc)
-            return ""
+        self._note_success()
 
         items = result.get("items") if isinstance(result, dict) else None
         if not items:
@@ -171,40 +275,69 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         *,
         session_id: str = "",
     ) -> None:
-        if self._client is None:
-            return
-        if self._agent_context in _SKIP_WRITE_CONTEXTS:
+        if self._client is None or self._agent_context in _SKIP_WRITE_CONTEXTS:
             return
         if not user_content and not assistant_content:
             return
         text = f"User: {user_content}\nAssistant: {assistant_content}"
         try:
-            asyncio.run(self._client.add(text, tags=["chat", "agent:hermes"]))
+            self._client.add(text, tags=["chat", "agent:hermes"], private=True)
         except Hal0MemoryClientError as exc:
-            logger.debug("hal0-memory sync_turn transport failure: %s", exc)
-        except RuntimeError as exc:
-            logger.debug("hal0-memory sync_turn asyncio drift: %s", exc)
+            self._note_failure("sync_turn", exc)
+        else:
+            self._note_success()
 
     # ── ABC: tools ─────────────────────────────────────────────────────
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """No model-visible tools.
-
-        Memory surfaces via the system-prompt block + prefetch context.
-        Operator-driven CRUD is exposed via the ``hal0-memory`` MCP
-        server which Hermes loads from ``mcp_servers`` config (PR-3).
-        Keeping the tool list empty avoids schema bloat that competes
-        with the MCP path.
-        """
-        return []
+        return list(ALL_TOOL_SCHEMAS)
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
-        # Defensive: ``get_tool_schemas`` returns []; the loop should
-        # never reach this branch. Match the upstream ABC contract by
-        # returning a JSON-encoded error string.
-        return json.dumps(
-            {"status": "error", "error": f"hal0-memory exposes no tool '{tool_name}'"}
-        )
+        if self._client is None:
+            return json.dumps({"status": "error", "error": "hal0-memory client not initialized"})
+        try:
+            if tool_name == "hal0_memory_search":
+                query = (args.get("query") or "").strip()
+                if not query:
+                    return json.dumps(
+                        {"status": "error", "error": "Missing required parameter: query"}
+                    )
+                return json.dumps(
+                    self._client.search(query, limit=int(args.get("limit", 10) or 10))
+                )
+
+            if tool_name == "hal0_memory_recall":
+                query = (args.get("query") or "").strip()
+                if not query:
+                    return json.dumps(
+                        {"status": "error", "error": "Missing required parameter: query"}
+                    )
+                return json.dumps(
+                    self._client.recall(query, max_tokens=int(args.get("max_tokens", 2048) or 2048))
+                )
+
+            if tool_name == "hal0_memory_add":
+                text = (args.get("text") or "").strip()
+                if not text:
+                    return json.dumps(
+                        {"status": "error", "error": "Missing required parameter: text"}
+                    )
+                shared = bool(args.get("shared", False))
+                tags = args.get("tags")
+                tag_list = (
+                    [str(t) for t in tags] if isinstance(tags, list) and tags else ["agent:hermes"]
+                )
+                result = self._client.add(text, tags=tag_list, private=not shared)
+                if isinstance(result, dict) and "error" not in result:
+                    result["bank"] = "shared" if shared else f"private:{self._agent_id()}"
+                return json.dumps(result)
+
+            return json.dumps(
+                {"status": "error", "error": f"hal0-memory: unknown tool '{tool_name}'"}
+            )
+        except Hal0MemoryClientError as exc:
+            self._note_failure(f"tool:{tool_name}", exc)
+            return json.dumps({"status": "error", "error": str(exc)})
 
     # ── Optional hook: mirror built-in memory writes ───────────────────
 
@@ -222,8 +355,8 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         base = ["builtin-memory", "agent:hermes"]
         tags = [*base, target] if target else base
         try:
-            asyncio.run(self._client.add(content, tags=tags, metadata=metadata))
+            self._client.add(content, tags=tags, metadata=metadata, private=True)
         except Hal0MemoryClientError as exc:
-            logger.debug("hal0-memory on_memory_write transport failure: %s", exc)
-        except RuntimeError as exc:
-            logger.debug("hal0-memory on_memory_write asyncio drift: %s", exc)
+            self._note_failure("on_memory_write", exc)
+        else:
+            self._note_success()

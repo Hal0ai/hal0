@@ -22,13 +22,15 @@ import logging
 import re
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._audit import record_action
-from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import MemoryGraphConfig
+from hal0.memory.hindsight_client import DEFAULT_BASE_URL as _HINDSIGHT_BASE_URL
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
@@ -477,6 +479,174 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     return out
 
 
+# ── GET /api/memory/provider, PUT /api/memory/provider ─────────────────────
+#
+# Per-agent memory-provider routing (hindsight | honcho). Distinct from
+# ``[memory.graph]`` above: that gate controls Hindsight's own extraction
+# LLM, this controls *which engine* an agent's Hermes memory plugin talks
+# to at all. See ``hal0.memory.honcho_migrate`` for the backfill/sync jobs
+# that move data between the two once an agent is switched.
+
+_HEALTH_PROBE_TIMEOUT = 1.0
+
+
+class MemoryProviderInvalid(Hal0Error):
+    """Unknown ``provider`` value in a ``PUT /api/memory/provider`` body."""
+
+    code = "memory.provider_invalid"
+    status = 400
+
+
+class MemoryProviderUnavailable(Conflict):
+    """The requested engine (honcho) failed its health probe.
+
+    Rejecting the switch here — rather than persisting a provider the
+    agent can't actually reach — keeps ``memory.agent_providers`` honest:
+    an entry in that map always names a *live* engine, not an aspirational
+    one. The 409 body carries the remediation the CLI/dashboard print.
+    """
+
+    code = "memory.provider_unavailable"
+
+
+async def _probe_health(url: str) -> bool:
+    """Best-effort GET ``url``; True on any 2xx, False on anything else."""
+    try:
+        async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT) as client:
+            resp = await client.get(url)
+        return resp.status_code < 300
+    except Exception:
+        return False
+
+
+@router.get("/provider")
+async def get_memory_provider() -> dict[str, Any]:
+    """Report engine health + the live per-agent provider map.
+
+    Response shape::
+
+        {
+          "engines": {
+            "hindsight": {"healthy": bool, "url": str},
+            "honcho":    {"healthy": bool, "url": str},
+          },
+          "agents": {"<agent_id>": {"provider": str, "private": bool}, ...},
+        }
+    """
+    cfg = load_hal0_config()
+    honcho_url = f"http://127.0.0.1:{cfg.honcho.port}"
+    hindsight_healthy, honcho_healthy = True, True
+    try:
+        hindsight_healthy = await _probe_health(f"{_HINDSIGHT_BASE_URL}/health")
+    except Exception:
+        hindsight_healthy = False
+    try:
+        honcho_healthy = await _probe_health(f"{honcho_url}/health")
+    except Exception:
+        honcho_healthy = False
+
+    agents: dict[str, Any] = {}
+    for agent_id, provider in cfg.memory.agent_providers.items():
+        agents[agent_id] = {
+            "provider": provider,
+            "private": bool(cfg.memory.agent_private.get(agent_id, False)),
+        }
+
+    return {
+        "engines": {
+            "hindsight": {"healthy": hindsight_healthy, "url": _HINDSIGHT_BASE_URL},
+            "honcho": {"healthy": honcho_healthy, "url": honcho_url},
+        },
+        "agents": agents,
+    }
+
+
+@router.put("/provider")
+async def set_memory_provider(request: Request) -> dict[str, Any]:
+    """Route ``agent`` to ``provider``, persist, and best-effort restart its gateway.
+
+    Body: ``{"agent": str, "provider": "hindsight"|"honcho", "private": bool|None,
+    "restart": bool}`` (``restart`` defaults True). ``private`` is only
+    stored when explicitly supplied — omitting it leaves any existing
+    ``agent_private`` entry untouched.
+
+    When ``provider == "honcho"`` the Honcho engine is health-probed first;
+    an unreachable engine raises 409 with a remediation message rather than
+    persisting a provider the agent can't use.
+
+    On success the agent's gateway unit (``hal0-agent@<agent>.service``) is
+    restarted so the new provider takes effect immediately, unless
+    ``restart: false`` was requested. Restart is best-effort: failure is
+    reported in the response, not raised, since the config write already
+    succeeded and a stale-until-restart agent is recoverable by hand
+    (``systemctl restart`` or ``hal0 agent bootstrap <agent> --repair``).
+    """
+    body = await _read_json_body(request)
+    agent = body.get("agent")
+    provider = body.get("provider")
+    if not isinstance(agent, str) or not agent:
+        raise BadRequest("'agent' is required", details={"path": "/api/memory/provider"})
+    if not _AGENT_ID_PATTERN.match(agent):
+        raise BadRequest(
+            "'agent' must match [a-zA-Z0-9_-]{1,64}", details={"path": "/api/memory/provider"}
+        )
+    if provider not in ("hindsight", "honcho"):
+        raise MemoryProviderInvalid(
+            f"'provider' must be 'hindsight' or 'honcho', got {provider!r}",
+            details={"path": "/api/memory/provider"},
+        )
+
+    cfg = load_hal0_config()
+
+    if provider == "honcho":
+        honcho_url = f"http://127.0.0.1:{cfg.honcho.port}"
+        if not await _probe_health(f"{honcho_url}/health"):
+            raise MemoryProviderUnavailable(
+                f"honcho engine is not reachable at {honcho_url} — start it "
+                "(hal0 services start honcho) or enable it first "
+                "(hal0.toml [honcho] enabled = true) before routing an agent to it",
+                details={"url": honcho_url},
+            )
+
+    cfg.memory.agent_providers[agent] = provider
+    private = body.get("private")
+    if private is not None:
+        cfg.memory.agent_private[agent] = bool(private)
+
+    try:
+        save_hal0_config(cfg)
+    except OSError as exc:
+        raise Hal0Error(
+            f"could not persist hal0 config: {exc}",
+            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+        ) from exc
+
+    restarted = False
+    note = None
+    if body.get("restart", True):
+        from hal0.services.systemd import unit_action
+
+        unit = f"hal0-agent@{agent}.service"
+        try:
+            result = await unit_action(unit, "restart")
+            restarted = bool(result.get("ok"))
+            if not restarted:
+                note = str(result.get("message"))
+        except ValueError as exc:
+            note = str(exc)
+    else:
+        note = f"restart skipped — run: hal0 agent bootstrap {agent} --repair"
+
+    return {
+        "agent": agent,
+        "provider": provider,
+        "private": bool(cfg.memory.agent_private.get(agent, False)),
+        "restarted": restarted,
+        "provisioned": restarted,
+        "note": note,
+    }
+
+
 # ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────
 #
 # Plain-HTTP veneer over CogneeWrapper for callers that don't speak the
@@ -781,6 +951,8 @@ __all__ = [
     "MemoryGraphConfigInvalid",
     "MemoryGraphSlotInvalid",
     "MemoryNamespaceInvalid",
+    "MemoryProviderInvalid",
+    "MemoryProviderUnavailable",
     "MemoryUnavailable",
     "router",
 ]

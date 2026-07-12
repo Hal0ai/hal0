@@ -1723,6 +1723,109 @@ else
         fi
     fi
 
+    # ── Memory engine (Honcho) ────────────────────────────────────────────────
+    # Optional second memory pipeline: self-hosted Honcho v3 (docker compose
+    # stack — api+deriver+pgvector+redis; installer/honcho/README.md has
+    # provenance/upgrade notes). Opt-in only (unlike Hindsight, which is
+    # default-on with a skip switch): set HAL0_INSTALL_HONCHO=1 to install it.
+    # A sync unit (hal0-honcho-sync.service/.timer) mirrors new Honcho
+    # conclusions into Hindsight so graph extraction stays fresh; it ships
+    # installed but NOT enabled — the operator opts in once there's history
+    # worth syncing.
+    if [[ "${HAL0_INSTALL_HONCHO:-0}" -eq 1 ]]; then
+        HC_DIR="${VAR_DIR}/honcho"
+        HONCHO_REF="${HONCHO_REF:-73453f892d8a44e322447dfe06db969caeb200a4}"  # main pin: v3.0.9 lacks STRUCTURED_OUTPUT_MODE (needed for local llama backends)
+        HONCHO_COMPOSE_SRC="${REPO_ROOT}/installer/honcho/docker-compose.yml"
+        HONCHO_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho.service"
+        HONCHO_SYNC_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.service"
+        HONCHO_SYNC_TIMER_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.timer"
+
+        info "setting up Honcho memory engine (podman compose stack) — this can take a few minutes…"
+
+        # podman-native (see hal0-honcho.service): `podman compose`
+        # delegates to the docker-compose v2 binary over podman.socket —
+        # no docker engine (whose default AppArmor profile can't even load
+        # inside an unprivileged LXC).
+        hc_compose_ok=0
+        if podman compose version >/dev/null 2>&1; then
+            hc_compose_ok=1
+        else
+            warn "podman compose provider missing — attempting docker-compose-v2 install"
+            apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
+            if podman compose version >/dev/null 2>&1; then
+                hc_compose_ok=1
+            else
+                warn "podman compose still unavailable — Honcho will be skipped (install docker-compose-v2 and re-run)"
+            fi
+        fi
+
+        if [[ "${hc_compose_ok}" -eq 1 ]]; then
+            mkdir -p "${HC_DIR}/pgdata" "${HC_DIR}/redis-data"
+
+            # Idempotent shallow clone: skip re-cloning if src is already
+            # checked out at HONCHO_REF.
+            hc_cur_ref=""
+            if [[ -d "${HC_DIR}/src/.git" ]]; then
+                hc_cur_ref="$(git -C "${HC_DIR}/src" rev-parse HEAD 2>/dev/null || true)"
+                hc_cur_tag="$(git -C "${HC_DIR}/src" describe --tags --exact-match 2>/dev/null || true)"
+            fi
+            if [[ "${hc_cur_ref}" == "${HONCHO_REF}" || "${hc_cur_tag}" == "${HONCHO_REF}" ]]; then
+                info "Honcho source already at ${HONCHO_REF} — skipping clone"
+            else
+                rm -rf "${HC_DIR}/src"
+                # init+fetch instead of clone --branch: HONCHO_REF may be a
+                # commit sha (tags and branches also work with this form).
+                if git init -q "${HC_DIR}/src" \
+                    && git -C "${HC_DIR}/src" remote add origin https://github.com/plastic-labs/honcho \
+                    && git -C "${HC_DIR}/src" fetch -q --depth 1 origin "${HONCHO_REF}" \
+                    && git -C "${HC_DIR}/src" checkout -q FETCH_HEAD; then
+                    info "checked out plastic-labs/honcho @ ${HONCHO_REF}"
+                else
+                    warn "failed to fetch plastic-labs/honcho @ ${HONCHO_REF} — Honcho will be unavailable"
+                fi
+            fi
+
+            if [[ -d "${HC_DIR}/src" ]]; then
+                install -m644 "${HONCHO_COMPOSE_SRC}" "${HC_DIR}/docker-compose.yml"
+
+                # /etc/hal0/honcho.env is rendered by hal0 itself (DB/cache/
+                # provider config). Best-effort: the compose env_file entry is
+                # `required: false`, so the stack still comes up without it if
+                # the CLI verb isn't available yet at this point in a fresh
+                # install (same posture as the memory bank seeding above).
+                if [[ -x "${HAL0_BIN}" ]]; then
+                    "${HAL0_BIN}" memory honcho render-env --no-restart >/dev/null 2>&1 \
+                        || warn "honcho.env render failed — rerun '${HAL0_BIN} memory honcho render-env' later"
+                else
+                    warn "hal0 CLI not available yet — skipping honcho.env render (rerun 'hal0 memory honcho render-env' later)"
+                fi
+
+                info "building Honcho image (podman build — this is slow on first run)…"
+                if ! podman image exists "hal0-honcho:main-73453f8" \
+                    && ! (cd "${HC_DIR}/src" && podman build -t "hal0-honcho:main-73453f8" .); then
+                    warn "Honcho image build failed; check the build log above"
+                fi
+
+                install -m644 "${HONCHO_UNIT_SRC}" /etc/systemd/system/hal0-honcho.service
+                install -m644 "${HONCHO_SYNC_UNIT_SRC}" /etc/systemd/system/hal0-honcho-sync.service
+                install -m644 "${HONCHO_SYNC_TIMER_SRC}" /etc/systemd/system/hal0-honcho-sync.timer
+                systemctl daemon-reload
+                systemctl enable --now hal0-honcho
+
+                hc_up=0
+                for _ in $(seq 1 40); do
+                    if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
+                    sleep 3
+                done
+                if [[ "${hc_up}" -eq 1 ]]; then
+                    info "Honcho is running (memory engine on 127.0.0.1:8000)"
+                else
+                    warn "Honcho not healthy yet; check 'journalctl -u hal0-honcho -n 40' or 'docker compose --project-name hal0-honcho -f ${HC_DIR}/docker-compose.yml ps'"
+                fi
+            fi
+        fi
+    fi
+
     # Escape hatch: HAL0_SKIP_OPENWEBUI=1 for operators who don't want the
     # bundled chat UI — same "skip now, install later" contract as
     # HAL0_SKIP_HERMES above. `hal0 app install openwebui` (issue #1102 / Q9)
