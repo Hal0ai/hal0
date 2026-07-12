@@ -1,7 +1,8 @@
-name: Agent shim smoke (pi-coder nightly)
+name: Agent shim smoke (pi-coder + opencode nightly)
 
-# Nightly end-to-end re-run of installer/agents/pi-coder.sh + an MCP
-# round-trip against the resulting hal0 MCP memory server.
+# Nightly end-to-end re-run of each bundled agent's installer
+# (installer/agents/<agent>.sh) + an MCP round-trip against the resulting
+# hal0 MCP memory server.
 #
 # Why this exists:
 #   ADR-0004 §3 ("Mitigation for track-latest churn") + PLAN.md §17 risk
@@ -41,9 +42,13 @@ permissions:
 
 jobs:
   smoke:
-    name: pi-coder install + MCP round-trip
+    name: ${{ matrix.agent }} install + MCP round-trip
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [pi-coder, opencode]
 
     steps:
       - name: Checkout
@@ -72,11 +77,11 @@ jobs:
           docker version
           docker info --format '{{.ServerVersion}}'
 
-      - name: Run pi-coder smoke
+      - name: Run ${{ matrix.agent }} smoke
         id: smoke
-        # The script is the contract — see scripts/smoke-pi-coder.sh
+        # The script is the contract — see scripts/smoke-${{ matrix.agent }}.sh
         # header for exit-code semantics.
-        run: bash scripts/smoke-pi-coder.sh
+        run: bash scripts/smoke-${{ matrix.agent }}.sh
 
       - name: Capture journald on failure
         if: failure()
@@ -138,8 +143,9 @@ jobs:
               `Run: ${runUrl}`,
               ``,
               `This is the track-latest mitigation defined in ADR-0004 §3.`,
-              `Likely cause: upstream pi-coder changed a CLI flag, shim`,
-              `contract, or MCP handshake. Diagnose with the run log +`,
+              `Likely cause: an upstream bundled agent (pi-coder / opencode)`,
+              `changed a CLI flag, shim contract, or MCP handshake — check`,
+              `which matrix lane failed. Diagnose with the run log +`,
               `\`agent-shim-smoke-logs\` artifact attached to the run.`,
             ].join('\n');
 
@@ -147,7 +153,7 @@ jobs:
               const created = await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo:  context.repo.repo,
-                title: `agent-shim-broken: pi-coder nightly failing (${today})`,
+                title: `agent-shim-broken: bundled-agent nightly failing (${today})`,
                 body,
                 labels: [label],
               });
