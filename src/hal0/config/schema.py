@@ -2315,8 +2315,7 @@ class ToolPolicy(BaseModel):
     gated: list[str] = Field(
         default_factory=list,
         description=(
-            "Tools the agent may request; each call enqueues an "
-            "approval. Empty = no gated tools."
+            "Tools the agent may request; each call enqueues an approval. Empty = no gated tools."
         ),
     )
     blocked: list[str] = Field(
