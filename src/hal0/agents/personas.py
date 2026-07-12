@@ -39,6 +39,14 @@ log = structlog.get_logger(__name__)
 PERSONAS_ROOT = Path("/var/lib/hal0/.hermes/personas")
 ACTIVE_POINTER = "active.txt"
 
+# The dashboard steward is a first-class Hermes *profile* agent-id, not just a
+# persona overlay: its memory rides its own bank (``private:hermes__hal0-brain``
+# → Hindsight bank ``private__hermes__hal0-brain``) and the installer registers
+# it as an agent identity, the same as the default ``hermes`` agent. The persona
+# id stays ``hal0-brain`` (board_chat + the UI key off it); this is the *memory*
+# identity. See ``hermes_provision._phase_brain_profile_seed``.
+BRAIN_PROFILE_AGENT_ID = "hermes__hal0-brain"
+
 # Default tool patterns. Conservative — the persona file can opt into
 # anything broader via the ``allowed`` glob or escalate by adding to
 # ``auto_approve``. The dashboard reads these so the operator sees what
@@ -486,8 +494,10 @@ def _seed_hal0_brain(agent_id: str) -> Persona:
         tools_allowed=("*",),
         # A dedicated private bank: platform-admin context (slot layouts, model
         # choices, benchmark history) stays out of the general Hermes chat and
-        # the coder persona. Created lazily by Hindsight on first write.
-        memory_namespace="private:hal0-brain",
+        # the coder persona. Provisioned as a first-class profile bank by the
+        # installer (``_phase_brain_profile_seed``) rather than left to lazy
+        # creation, so ``hal0-brain`` is a real profile, not just a persona.
+        memory_namespace=f"private:{BRAIN_PROFILE_AGENT_ID}",
         # Patterns are fnmatch globs over ADMIN TOOL NAMES (slot_create,
         # model_pull, …) — enforced on the sidebar chat via
         # hal0.mcp.admin.ToolPolicy, layered onto the server-side
