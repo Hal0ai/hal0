@@ -1974,27 +1974,34 @@ HC_APPARMOR_EOF
                 # the rest of this block reports for a missing prerequisite
                 # (same defensive posture as the openwebui/hindsight blocks).
                 if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
-                    # ── pgvector dim reconciliation (#F27, HIGH) ───────────
-                    # Honcho's pgvector schema initializes at its OWN
-                    # default embedding dimension (1536) on first DB boot —
-                    # it has no idea hal0 already pinned
+                    # ── schema migration + pgvector dim reconciliation
+                    # (#F27/#F31, HIGH) ─────────────────────────────────────
+                    # A fresh Honcho DB has NO tables at all until Honcho's
+                    # own alembic migrations run — honcho's pgvector schema
+                    # is created (at its OWN default embedding dimension,
+                    # 1536) only as a side effect of the api/deriver
+                    # containers booting. hal0 already pinned
                     # EMBEDDING_VECTOR_DIMENSIONS to whatever hal0's actual
-                    # embedding model produces (1024 for qwen3-embedding).
-                    # honcho-api treats that mismatch as fatal
-                    # (StartupValidationError) and crash-loops forever
-                    # rather than reconciling itself — live-reproduced on
-                    # Ubuntu 24.04 LXC. Bring up ONLY database+redis first,
-                    # run honcho's own scripts/configure_embeddings.py
-                    # --yes (inside the honcho image, against the compose
-                    # DB) to align the schema, THEN start the full stack —
-                    # so api/deriver boot against an already-correct schema
-                    # instead of racing it during compose's
+                    # embedding model produces (1024 for qwen3-embedding),
+                    # and honcho-api treats that mismatch as fatal
+                    # (StartupValidationError), crash-looping forever rather
+                    # than reconciling itself — live-reproduced on Ubuntu
+                    # 24.04 LXC. Bring up ONLY database+redis first, then
+                    # run, in order, inside the honcho image against the
+                    # compose DB: (1) `alembic upgrade head` to CREATE the
+                    # schema — on a fresh DB, configure_embeddings.py itself
+                    # errors with "required vector columns missing —
+                    # Run `alembic upgrade head` first" because there are no
+                    # tables yet; (2) scripts/configure_embeddings.py --yes
+                    # to align pgvector's dimension. THEN start the full
+                    # stack, so api/deriver boot against an already-correct
+                    # schema instead of racing it during compose's
                     # dependency-ordered startup. Verified manually: this
-                    # is the exact fix that gets honcho-api healthy.
+                    # exact order (alembic, then configure_embeddings, then
+                    # the api) is what gets honcho-api healthy.
                     hc_embed_dim="$(sed -n 's/^EMBEDDING_VECTOR_DIMENSIONS=//p' /etc/hal0/honcho.env 2>/dev/null | tail -1)"
                     hc_embed_dim="${hc_embed_dim:-1024}"
                     hc_db_uri="postgresql+psycopg://postgres:postgres@database:5432/postgres"
-                    info "reconciling Honcho pgvector schema to ${hc_embed_dim} dims…"
                     if podman compose --project-name hal0-honcho -f "${HC_DIR}/docker-compose.yml" \
                         up -d --no-build database redis >/dev/null 2>&1; then
                         hc_db_up=0
@@ -2007,21 +2014,37 @@ HC_APPARMOR_EOF
                             sleep 3
                         done
                         if [[ "${hc_db_up}" -eq 1 ]]; then
+                            info "creating Honcho database schema (alembic upgrade head)…"
+                            hc_alembic_ok=0
                             if podman run --rm --network hal0-honcho_default \
                                 -e DB_CONNECTION_URI="${hc_db_uri}" \
-                                -e EMBEDDING_VECTOR_DIMENSIONS="${hc_embed_dim}" \
-                                --entrypoint /app/.venv/bin/python \
-                                "${HC_IMAGE_TAG}" scripts/configure_embeddings.py --yes >/dev/null 2>&1; then
-                                info "Honcho pgvector schema reconciled to ${hc_embed_dim} dims"
+                                --entrypoint /app/.venv/bin/alembic \
+                                "${HC_IMAGE_TAG}" upgrade head >/dev/null 2>&1; then
+                                hc_alembic_ok=1
+                                info "Honcho database schema created"
                             else
-                                warn "configure_embeddings.py failed — honcho-api may crash-loop on a dimension mismatch"
-                                warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} -e EMBEDDING_VECTOR_DIMENSIONS=${hc_embed_dim} --entrypoint /app/.venv/bin/python ${HC_IMAGE_TAG} scripts/configure_embeddings.py --yes"
+                                warn "alembic upgrade head failed — Honcho has no schema; configure_embeddings.py and honcho-api will fail"
+                                warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} --entrypoint /app/.venv/bin/alembic ${HC_IMAGE_TAG} upgrade head"
+                            fi
+
+                            if [[ "${hc_alembic_ok}" -eq 1 ]]; then
+                                info "reconciling Honcho pgvector schema to ${hc_embed_dim} dims…"
+                                if podman run --rm --network hal0-honcho_default \
+                                    -e DB_CONNECTION_URI="${hc_db_uri}" \
+                                    -e EMBEDDING_VECTOR_DIMENSIONS="${hc_embed_dim}" \
+                                    --entrypoint /app/.venv/bin/python \
+                                    "${HC_IMAGE_TAG}" scripts/configure_embeddings.py --yes >/dev/null 2>&1; then
+                                    info "Honcho pgvector schema reconciled to ${hc_embed_dim} dims"
+                                else
+                                    warn "configure_embeddings.py failed — honcho-api may crash-loop on a dimension mismatch"
+                                    warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} -e EMBEDDING_VECTOR_DIMENSIONS=${hc_embed_dim} --entrypoint /app/.venv/bin/python ${HC_IMAGE_TAG} scripts/configure_embeddings.py --yes"
+                                fi
                             fi
                         else
-                            warn "Honcho database did not become reachable in time — skipping pgvector dim reconciliation (honcho-api may crash-loop)"
+                            warn "Honcho database did not become reachable in time — skipping schema migration (honcho-api may crash-loop)"
                         fi
                     else
-                        warn "failed to start Honcho database+redis ahead of schema reconciliation — honcho-api may crash-loop"
+                        warn "failed to start Honcho database+redis ahead of schema migration — honcho-api may crash-loop"
                     fi
 
                     systemctl enable --now hal0-honcho
