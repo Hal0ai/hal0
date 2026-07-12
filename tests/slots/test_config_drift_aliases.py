@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hal0.slots.manager import _CONFIG_DRIFT_KEYS, SlotManager, _argv_values
 from tests.slots.conftest import FakeContainerProvider
 
@@ -89,3 +91,77 @@ async def test_real_drift_still_detected_across_spellings(
     drift = snap.metadata.get("config_drift")
     assert drift is not None and drift["drifted"] is True
     assert {"key": "-b", "running": "512", "rendered": "2048"} in drift["diffs"]
+
+
+async def test_no_false_drift_for_registry_id_model_and_alias(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1226: a slot created with a registry id must not permanently warn.
+
+    The renderer resolves the id → on-disk path (``--model``) and slugifies it
+    for the advertised ``--alias``; the drift preview may surface the raw id.
+    Both sides run through the same resolution, so this is NOT drift.
+    """
+    model_id = "Qwopus3.5-4B-Coder-MTP-Q6_K"
+    model_path = "/mnt/ai-models/qwopus/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"
+
+    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+        return {"_model_key": model_id, "path": model_path}
+
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
+
+    # Running container: id already resolved to a path + slugified alias.
+    container_stub.running_argv_by_slot["chat"] = [
+        "--model",
+        model_path,
+        "--alias",
+        "qwopus3-5-4b-coder-mtp-q6-k",
+    ]
+    # Rendered preview: raw registry id on both flags.
+    container_stub.expected_argv_by_slot["chat"] = [
+        "--model",
+        model_id,
+        "--alias",
+        model_id,
+    ]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
+
+
+async def test_real_model_drift_still_flagged_after_resolution(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolution must not mask a genuinely different running --model path."""
+    model_id = "Qwopus3.5-4B-Coder-MTP-Q6_K"
+    model_path = "/mnt/ai-models/qwopus/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"
+
+    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+        return {"_model_key": model_id, "path": model_path}
+
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
+
+    # Running container is on a DIFFERENT file than the config resolves to.
+    container_stub.running_argv_by_slot["chat"] = [
+        "--model",
+        "/mnt/ai-models/other/stale-model.gguf",
+        "--alias",
+        "qwopus3-5-4b-coder-mtp-q6-k",
+    ]
+    container_stub.expected_argv_by_slot["chat"] = ["--model", model_id, "--alias", model_id]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None and drift["drifted"] is True
+    keys = {d["key"] for d in drift["diffs"]}
+    assert "--model" in keys

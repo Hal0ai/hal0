@@ -325,7 +325,8 @@ def test_profileless_slot_has_null_image_and_command(
     client_with_container_slot: TestClient,
 ) -> None:
     """A profile-less slot is still probed but carries no image facts:
-    profile='', image=None, resolved_command=None, image_status=missing."""
+    profile='', image=None, resolved_command=None, image_status=not-configured
+    (#1226: no declared image is not a missing-image fault)."""
     with (
         patch(
             "hal0.providers.container.ContainerProvider.is_active",
@@ -346,7 +347,7 @@ def test_profileless_slot_has_null_image_and_command(
     assert chat["profile"] == ""
     assert chat["image"] is None
     assert chat["resolved_command"] is None
-    assert chat["image_status"] == "missing"
+    assert chat["image_status"] == "not-configured"
 
 
 # ── #663: actual_image + image_mismatch via running_image (podman inspect) ──────

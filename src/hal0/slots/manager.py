@@ -1273,9 +1273,28 @@ class SlotManager:
             return await self.status(slot_name)
 
     async def restart(self, slot_name: str) -> Slot:
-        """Restart a slot without changing its model assignment."""
+        """Restart a slot without changing its model assignment.
+
+        A slot wedged in ERROR must NOT go through the graceful ``unload()``
+        drain: its systemd unit may be ``failed``, where the stop path can
+        hang and leave the CLI ReadTimeout'ing with the unit never relaunched
+        (#1224). For an errored slot, force a best-effort terminate (which now
+        also ``reset-failed``s the unit) and drop straight to OFFLINE, then run
+        the full load — never short-circuiting on an "already loaded" state,
+        which ERROR is not.
+        """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        if self._current_state(slot_name) == SlotState.ERROR:
+            async with self._lock(slot_name):
+                # Best-effort cleanup of the wedged unit; never let a stuck
+                # stop wedge the restart itself. ``terminate`` resets the
+                # failed unit so the subsequent ``load`` isn't blocked by
+                # systemd's StartLimit.
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
+            return await self.load(slot_name)
         await self.unload(slot_name)
         return await self.load(slot_name)
 
@@ -1479,6 +1498,15 @@ class SlotManager:
 
         running_flags = _argv_values(running, _CONFIG_DRIFT_KEYS)
         rendered_flags = _argv_values(rendered, _CONFIG_DRIFT_KEYS)
+        # #1226: the renderer resolves a registry model id to its on-disk path
+        # (``--model``) and slugifies it for the advertised ``--alias``. A raw
+        # id on either side must be run through the SAME resolution before
+        # comparison, else a slot created with a registry id permanently
+        # false-warns (running path/slug vs rendered id). Resolve both sides.
+        model_key = model_info.get("_model_key") or _model_default(cfg)
+        model_path = model_info.get("path")
+        running_flags = _resolve_drift_flags(running_flags, model_key, model_path)
+        rendered_flags = _resolve_drift_flags(rendered_flags, model_key, model_path)
         diffs = [
             {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
             for key in _CONFIG_DRIFT_KEYS
@@ -3785,6 +3813,36 @@ def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None
         else:
             out[key] = argv[i + 1] if i + 1 < len(argv) else None
             i += 2
+    return out
+
+
+def _resolve_drift_flags(
+    flags: dict[str, str | None],
+    model_key: str | None,
+    model_path: str | None,
+) -> dict[str, str | None]:
+    """Canonicalize the id-bearing drift flags the way the renderer does.
+
+    ``--model`` and ``--alias`` carry a model identity that the unit renderer
+    resolves (registry id → on-disk path for ``--model``; slugified id for
+    ``--alias``). A raw id surfaced on either side of the drift comparison is
+    put through the SAME resolution so a slot created with a registry id does
+    not permanently false-warn (#1226). Values already resolved (a real path,
+    an already-slugified alias) pass through unchanged.
+    """
+    from hal0.registry.discover import _normalise_id
+
+    out = dict(flags)
+    model_val = out.get("--model")
+    # Rendered/running may carry the bare registry id instead of the resolved
+    # path; substitute the known on-disk path so the realpath compare matches.
+    if model_val is not None and model_path and model_key and model_val == model_key:
+        out["--model"] = str(model_path)
+    alias_val = out.get("--alias")
+    if alias_val is not None:
+        # Slug is idempotent: slugifying an already-slugified alias is a no-op,
+        # so both a raw id and a rendered slug collapse to the same token.
+        out["--alias"] = _normalise_id(alias_val)
     return out
 
 

@@ -514,13 +514,15 @@ class TestContainerEnrichment:
         )
         assert out["gpu-chat"]["image_status"] == "pulling"
 
-    async def test_no_image_means_missing_status(self) -> None:
+    async def test_no_image_means_not_configured_status(self) -> None:
+        # #1226: no profile/image declared → "not-configured", not "missing"
+        # (a real missing-image fault). The slot runs on the default toolbox.
         out = await container_enrichment(
             [_container_cfg()],
             pull_jobs={},
             provider=FakeContainerProvider(active=False),
         )
-        assert out["gpu-chat"]["image_status"] == "missing"
+        assert out["gpu-chat"]["image_status"] == "not-configured"
 
     async def test_npu_table_surfaced(self) -> None:
         out = await container_enrichment(

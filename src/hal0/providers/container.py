@@ -108,12 +108,17 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
         backend = str(slot_cfg.get("backend") or "")
         catalog = load_profiles_config().profile
         base = backend if backend in catalog else "rocm"
-        log.warning(
-            "profile %r not found; falling back to base profile %r",
-            profile_name,
-            base,
-            extra={"event": "profile.fallback", "missing": profile_name, "base": base},
-        )
+        # An empty profile is a legitimate "no profile declared" slot running
+        # on the default toolbox — not a stale/renamed profile. Falling back is
+        # expected, so don't warn on every health probe (#1226); reserve the
+        # warning for a NON-empty name the catalog no longer knows.
+        if profile_name:
+            log.warning(
+                "profile %r not found; falling back to base profile %r",
+                profile_name,
+                base,
+                extra={"event": "profile.fallback", "missing": profile_name, "base": base},
+            )
         return _resolve_profile(base)
 
 
@@ -1327,6 +1332,10 @@ class ContainerProvider(Provider):
         unit = self._unit_name(slot_name)
         log.info("container.unit_stop", extra={"slot": slot_name, "unit": unit})
         self._run("systemctl", "stop", unit, check=False)
+        # Clear a ``failed`` sub-state left by a crash-looped/OOM-killed unit
+        # (#1224). Without this, systemd's StartLimit can refuse the next
+        # ``systemctl restart``, wedging a slot that a restart should recover.
+        self._run("systemctl", "reset-failed", unit, check=False)
         # Disable so it doesn't re-start on reboot.
         self._run("systemctl", "disable", unit, check=False)
         # Remove unit file so daemon-reload leaves no stale entry.

@@ -179,3 +179,67 @@ async def test_warming_slot_recovers_when_stale(
     # unload must precede load (recovery order), and the reload converged.
     assert calls.index(("unload", "chat")) < calls.index(("load", "chat"))
     assert sm._current_state("chat") == SlotState.READY
+
+
+async def _await_state(
+    sm: SlotManager, name: str, target: SlotState, timeout_s: float = 5.0
+) -> Any:
+    """Poll until *name* reaches *target* or the deadline lapses."""
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    observed: Any = None
+    while asyncio.get_event_loop().time() < deadline:
+        observed = sm._current_state(name)
+        if observed == target:
+            return observed
+        await asyncio.sleep(0.05)
+    return observed
+
+
+async def test_repeated_warming_error_cycles_recover_without_watcher_leak(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    fast_fail_watch: None,
+) -> None:
+    """A slot that keeps dying while WARMING must resolve to ERROR every cycle,
+    re-arm cleanly on the next load, and never accumulate stale watchers.
+    """
+    sm = SlotManager()
+
+    for cycle in range(3):
+        await _load_into_warming(sm, container_stub)
+        # Exactly one live watcher per slot — no accumulation across cycles.
+        live = [t for t in sm._fail_watchers.values() if not t.done()]
+        assert len(live) <= 1, f"cycle {cycle}: watcher leak ({len(live)} live)"
+
+        # Unit dies while warming → the watcher strikes it to ERROR.
+        container_stub.active.discard("chat")
+        observed = await _await_state(sm, "chat", SlotState.ERROR)
+        assert observed == SlotState.ERROR, f"cycle {cycle}: never reached ERROR ({observed})"
+
+        # The watcher self-retired on its own ERROR transition.
+        w = sm._fail_watchers.get("chat")
+        assert w is None or w.done(), f"cycle {cycle}: watcher not retired after ERROR"
+
+
+async def test_warming_stale_recovery_that_fails_lands_error(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    fast_fail_watch: None,
+) -> None:
+    """A wedged WARMING slot whose staleness-triggered recovery reload ALSO
+    fails must settle in a clean ERROR — not silently re-wedge (the
+    WARMING → recover → ERROR cycle).
+    """
+    sm = SlotManager()
+    await _load_into_warming(sm, container_stub)
+
+    # Recovery reload can't spawn → load() stamps ERROR and re-raises; the
+    # watchdog swallows the exception and returns, leaving the slot ERROR.
+    container_stub.fail_load = RuntimeError("spawn failed on recovery")
+    sm._states["chat"].updated_at = time.time() - mgr_mod._WARMING_STALE_AFTER_S - 1
+
+    observed = await _await_state(sm, "chat", SlotState.ERROR)
+    assert observed == SlotState.ERROR, f"failed recovery never surfaced ERROR ({observed})"
+    # No orphaned live watcher after the terminal ERROR.
+    w = sm._fail_watchers.get("chat")
+    assert w is None or w.done()

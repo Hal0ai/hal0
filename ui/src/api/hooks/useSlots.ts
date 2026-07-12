@@ -116,9 +116,10 @@ export interface Slot {
   /** Container image ref (from the resolved profile). E.g.
    *  "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server". */
   image?: string | null
-  /** Container image availability: "present" | "pulling" | "missing".
-   *  Populated by the backend when image_status is tracked. */
-  image_status?: 'present' | 'pulling' | 'missing' | null
+  /** Container image availability: "present" | "pulling" | "missing" |
+   *  "not-configured" (no profile/image declared — runs on the default
+   *  toolbox, #1226). Populated by the backend when image_status is tracked. */
+  image_status?: 'present' | 'pulling' | 'missing' | 'not-configured' | null
   /** ACTUAL running container image ref, read from ``podman inspect`` by
    *  _container_state_enrichment (#663). Omitted/null when the container is
    *  not running or inspect fails — treat absence as "unknown". */
