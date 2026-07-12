@@ -5,7 +5,7 @@ sidebar:
   order: 40
 ---
 
-import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Steps, Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 With a model pulled and assigned to a slot, you can chat through the
 prewired web UI or directly against the OpenAI-compatible API.
@@ -118,3 +118,25 @@ native path), `audio/transcriptions`, `audio/speech`, and
 `images/generations` — each routed to the appropriate slot. `GET
 /v1/models` lists everything the configured slots and upstreams
 advertise.
+
+## Next
+
+With a working chat loop, from here you can grow the install out:
+
+<CardGrid>
+  <LinkCard
+    title="Manage slots"
+    href="/docs/guides/manage-slots/"
+    description="Create, load, swap, and restart the podman-backed inference slots behind each capability."
+  />
+  <LinkCard
+    title="Choose models"
+    href="/docs/guides/choose-models/"
+    description="The curated catalogue for chat, embed, rerank, and image models, sized for your hardware."
+  />
+  <LinkCard
+    title="Run agents"
+    href="/docs/guides/run-agents/"
+    description="Install and manage the bundled Hermes agent — provisioning, personas, and spending budgets."
+  />
+</CardGrid>
