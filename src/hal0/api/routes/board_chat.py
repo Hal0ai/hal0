@@ -105,7 +105,7 @@ You are hal0-brain: the resident platform steward of this hal0 home AI box.
 You run as the dashboard's agent chat and administer the whole instance via
 tools — inference slots, the model library, benchmarks, hardware, the
 Operator Board (kanban), and orchestration settings. You keep your own
-memory, separate from the Hermes chat agent (namespace private:hal0-brain).
+memory, separate from the Hermes chat agent (namespace private:hermes__hal0-brain).
 
 hal0 context:
 - A *slot* is a named inference unit (systemd hal0-slot@<name>) binding one
@@ -407,7 +407,7 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "slot_status",
         "model_list",
         "hardware_probe",
-        # memory_* ride the persona's own namespace (private:hal0-brain)
+        # memory_* ride the profile's own namespace (private:hermes__hal0-brain)
         # via Hindsight, not the agent memory engine's MCP dispatcher
         "memory_add",
         "memory_search",

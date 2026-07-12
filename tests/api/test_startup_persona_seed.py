@@ -77,7 +77,7 @@ def test_lifespan_seed_converges_old_box_without_touching_edits(
 
     assert not (root / "coder.toml").exists()  # pristine retired seed swept
     brain = personas_mod.load_persona("hal0-brain", root=root)
-    assert brain.memory_namespace == "private:hal0-brain"
+    assert brain.memory_namespace == "private:hermes__hal0-brain"
     assert brain.preferred_model == "hal0/brain"
     hermes = personas_mod.load_persona("hermes", root=root)
     assert hermes.system_prompt == "operator-edited prompt"
