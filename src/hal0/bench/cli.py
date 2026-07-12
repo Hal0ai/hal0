@@ -339,7 +339,9 @@ def _worker_eval(model: str, api: str, item: dict) -> bool:
             if not control.worker_should_run():
                 return False
             if traffic_in_flight(api):
-                print(f"[worker] live traffic — backing off eval {model} (resumes where it left off)")
+                print(
+                    f"[worker] live traffic — backing off eval {model} (resumes where it left off)"
+                )
                 return False
             print(f"[worker] eval {model} :: {task.id} …", flush=True)
             rec = evalrun.run_task(task, model, run_id, api, workroot)
@@ -397,7 +399,9 @@ def cmd_worker(args: argparse.Namespace) -> int:
                         # Stop/Pause: leave the item at the queue head so Start
                         # resumes THIS eval (its completed tasks persist under the
                         # stable run_id) — mirrors the suite path's "stopped" branch.
-                        print(f"[worker] eval {resolved} paused — item stays queued (resumes on Start)")
+                        print(
+                            f"[worker] eval {resolved} paused — item stays queued (resumes on Start)"
+                        )
                         continue
                     # Deferred over live traffic. Eval is polite by design (never
                     # piles onto production), but shouldn't stall the whole queue
