@@ -33,6 +33,7 @@ from hal0.cli.app_commands import app as app_ext_app
 from hal0.cli.bench_commands import BENCH_CONTEXT_SETTINGS, BENCH_HELP
 from hal0.cli.bench_commands import bench as bench_command
 from hal0.cli.capabilities_commands import app as capabilities_app
+from hal0.cli.comfyui_commands import app as comfyui_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
 from hal0.cli.mcp_commands import app as mcp_app
@@ -69,6 +70,9 @@ app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
 app.add_typer(upstream_app, name="upstream")
 app.add_typer(capabilities_app, name="capabilities")
+# Issue #1199 — ``hal0 comfyui orchestrate-models`` pulls the curated ComfyUI
+# model set in one logged sequence.
+app.add_typer(comfyui_app, name="comfyui")
 app.add_typer(agent_app, name="agent")
 # Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps
 # skipped via HAL0_SKIP_OPENWEBUI=1 at install time; Q9 skip/defer parity).
