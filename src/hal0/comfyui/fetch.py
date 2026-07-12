@@ -21,6 +21,15 @@ curated workflow JSON into the ComfyUI workflows dir so it is launchable.
 
 fetch_model returns immediately so POST /api/comfyui/models/fetch can reply
 202 without blocking the FastAPI request for a multi-hour download.
+
+Fix (Finding 5): ``_SCRIPTS_DIR`` / ``_WORKFLOWS_SRC_DIR`` used to be
+module-level constants resolved only via the editable-checkout path
+(``Path(__file__).parent * 4``), same class of bug as #1284/#1285. Under a
+non-editable wheel install that resolves into site-packages, where
+``installer/`` does not exist, so every download 202'd and then immediately
+failed. They are now resolver functions that try the editable candidate
+first and fall back to the FHS code root (``hal0.config.paths.usr_lib()``),
+mirroring ``hal0.agents.manager.installer_script_path``.
 """
 
 from __future__ import annotations
@@ -34,22 +43,70 @@ import uuid
 from pathlib import Path
 
 from hal0.comfyui.capabilities import ModelVariant
+from hal0.config import paths as _paths
 
 log = logging.getLogger(__name__)
 
-# Scripts live at <repo-root>/installer/comfyui/scripts/
-_SCRIPTS_DIR: Path = (
-    Path(__file__).parent.parent.parent.parent / "installer" / "comfyui" / "scripts"
-)
-
-# Curated workflow JSONs ship alongside the scripts and are provisioned into
-# the operational ComfyUI workflows dir when a variant is selected.
-_WORKFLOWS_SRC_DIR: Path = (
-    Path(__file__).parent.parent.parent.parent / "installer" / "comfyui" / "workflows"
-)
-
 # Module-level job registry
 _JOBS: dict[str, dict] = {}
+
+
+def _scripts_dir() -> Path:
+    """Return the directory holding the ComfyUI model-fetch scripts.
+
+    ``install.sh`` pip-installs hal0 as a NON-editable wheel in production
+    (v0.9.7.1+; only ``pip install -e <repo>`` dev checkouts differ) — see
+    the FHS-layout note in :mod:`hal0.config.paths`. The two install shapes
+    resolve ``__file__`` completely differently, so we try both candidates
+    and return whichever exists, mirroring
+    :func:`hal0.agents.manager.installer_script_path`:
+
+    * Editable / dev checkout — ``src/hal0/comfyui/fetch.py`` lives at
+      ``<repo_root>/src/hal0/comfyui/fetch.py``; ``parents[3]`` is the repo
+      root, so the scripts are at
+      ``<repo_root>/installer/comfyui/scripts/``.
+    * FHS / wheel install (the production case) — ``__file__`` resolves
+      into ``<venv>/lib/pythonX/site-packages/hal0/...``, which has no
+      ``installer/`` sibling. The scripts instead ship alongside the code
+      root :func:`hal0.config.paths.usr_lib` resolves
+      (``/usr/lib/hal0/current`` by default, honouring ``HAL0_HOME`` for
+      dev/test root overrides) — ``install.sh`` already rsyncs
+      ``installer/comfyui/scripts`` under ``PREFIX``.
+
+    If neither candidate exists we return the FHS candidate anyway, so a
+    downstream "no such file" subprocess error names the real production
+    path rather than a venv path the operator won't recognise.
+    """
+    editable_candidate = Path(__file__).resolve().parents[3] / "installer" / "comfyui" / "scripts"
+    fhs_candidate = _paths.usr_lib() / "installer" / "comfyui" / "scripts"
+
+    if editable_candidate.is_dir():
+        return editable_candidate
+    return fhs_candidate
+
+
+def _workflows_src_dir() -> Path:
+    """Return the directory holding curated ComfyUI workflow JSONs.
+
+    Ships alongside the fetch scripts (same source tree, same install-shape
+    ambiguity), so this resolves the same way as :func:`_scripts_dir` — see
+    that docstring for the editable-vs-FHS candidate rationale. Not to be
+    confused with :func:`_workflows_dir`, which is the DESTINATION the
+    curated JSON is copied to.
+    """
+    editable_candidate = Path(__file__).resolve().parents[3] / "installer" / "comfyui" / "workflows"
+    fhs_candidate = _paths.usr_lib() / "installer" / "comfyui" / "workflows"
+
+    if editable_candidate.is_dir():
+        return editable_candidate
+    return fhs_candidate
+
+
+# Back-compat module-level alias: hal0.comfyui.orchestrate imports this name
+# directly and uses it as a default-arg value. Now computed via the same
+# editable/FHS resolver as fetch_model() (instead of the broken
+# editable-only path), so that caller gets the fix too.
+_SCRIPTS_DIR: Path = _scripts_dir()
 
 
 def _fetch_env() -> dict[str, str]:
@@ -101,7 +158,7 @@ def _provision_workflow(variant: ModelVariant) -> str | None:
     name = variant.workflow
     if not name:
         return None
-    src = _WORKFLOWS_SRC_DIR / name
+    src = _workflows_src_dir() / name
     if not src.is_file():
         log.warning("comfyui.workflow_asset_missing", extra={"workflow": name})
         return None
@@ -157,7 +214,7 @@ def fetch_model(variant: ModelVariant) -> str:
     thread; poll status via get_job(). Non-blocking so the 202-returning API
     endpoint does not stall on multi-hour downloads.
     """
-    script_path = str(_SCRIPTS_DIR / variant.fetch_script)
+    script_path = str(_scripts_dir() / variant.fetch_script)
     job_id = str(uuid.uuid4())
 
     workflow_path = _provision_workflow(variant)
