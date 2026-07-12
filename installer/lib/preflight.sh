@@ -467,7 +467,13 @@ _resolve_container_runtime() {
 # mirrored registries.
 _container_run_smoke_test() {
     local rt="$1" image="${HAL0_CONTAINER_SMOKE_IMAGE:-quay.io/podman/hello}"
-    timeout 30 "${rt}" run --rm "${image}" true >/dev/null 2>&1
+    # Run the image with its OWN entrypoint — do NOT override the command with
+    # `true`. The default smoke image (quay.io/podman/hello) is distroless and
+    # ships only its greeter binary: `run <image> true` fails with exec 127
+    # ("executable file `true` not found") even when the runtime is perfectly
+    # healthy, which false-failed the REQUIRED container gate on every host and
+    # aborted the install. The hello image self-exits 0; that is the smoke.
+    timeout 30 "${rt}" run --rm "${image}" >/dev/null 2>&1
 }
 
 # Run the real `<rt> run` smoke test and print the LXC-nesting remedy on
