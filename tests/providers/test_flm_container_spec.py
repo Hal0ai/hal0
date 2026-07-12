@@ -96,7 +96,13 @@ def test_start_cmd_matches_container_role_args() -> None:
         assert flag in argv and flag in spec.command
 
 
-def test_default_models_dir_is_flm_cache() -> None:
+def test_default_models_dir_is_flm_cache(tmp_hal0_home: str) -> None:
+    """Isolated via ``tmp_hal0_home`` (tests/conftest.py): without it this
+    reads the box's real /etc/hal0/hal0.toml through
+    ``flm_models_dir()`` -> ``load_hal0_config()``, so a host with
+    ``[models].flm_store`` set (e.g. relocated to /mnt/ai-models/FLM)
+    fails here even though the DEFAULT-path assertion is correct.
+    """
     spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
     # Source follows the resolver default (HAL0_HOME-aware); the target is
     # FLM's hardcoded in-container HOME cache and never moves.

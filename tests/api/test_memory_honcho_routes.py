@@ -185,7 +185,20 @@ _TIMER_SCHEDULE = {
 }
 
 
-def test_honcho_sync_status_fresh_state_is_all_none(client: TestClient) -> None:
+def test_honcho_sync_status_fresh_state_is_all_none(client: TestClient, tmp_path: Path) -> None:
+    from hal0.memory.honcho_migrate import MigrateState
+
+    # The route builds its own `MigrateState()` with no args, whose default
+    # ``path`` is the module-level ``DEFAULT_STATE_PATH`` constant
+    # (``/var/lib/hal0/honcho/migrate-state.json``) — a hardcoded absolute
+    # path, not derived from HAL0_HOME. On a host that has ever actually run
+    # `hal0 memory sync-graph` (or the recurring timer), that real file
+    # exists with real prior-run data, so this "fresh state" assertion
+    # leaks it. Point MigrateState at an empty tmp path instead, matching
+    # the pattern already used by the sibling
+    # ``test_honcho_sync_status_reflects_recorded_run``/``..._failed_run``
+    # tests below.
+    state_path = tmp_path / "migrate-state.json"
     with (
         patch(
             "hal0.services.systemd.unit_state",
@@ -197,6 +210,7 @@ def test_honcho_sync_status_fresh_state_is_all_none(client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value=_TIMER_SCHEDULE,
         ),
+        patch("hal0.memory.honcho_migrate.MigrateState", lambda: MigrateState(state_path)),
     ):
         r = client.get("/api/memory/honcho/sync")
     assert r.status_code == 200

@@ -571,6 +571,25 @@ class TestShadowSlotStatusInheritance:
     the npu anchor's FLM process serves them coresident, so their live
     container status must be the anchor's, not their (always-absent) own."""
 
+    @pytest.fixture(autouse=True)
+    def no_real_systemctl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """container_enrichment's stopped-vs-crashed escalation shells out
+        to a real ``systemctl is-active hal0-slot@{name}.service`` whenever
+        the (fake, injected) provider reports a slot inactive — that raw
+        subprocess call is not mediated by FakeContainerProvider /
+        MapContainerProvider at all. On a live host with real hal0 slot
+        units installed (e.g. ``hal0-slot@embed.service`` /
+        ``hal0-slot@npu.service`` in a ``failed`` state), this leaks real
+        host state into the test and flips the expected ``stopped`` into
+        ``crashed``. Force the escalation probe to see a bare "inactive"
+        unit so status is derived purely from the injected provider."""
+        import subprocess
+
+        class _FakeCompletedProcess:
+            stdout = b"inactive\n"
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeCompletedProcess())
+
     async def test_shadow_inherits_running_anchor(self) -> None:
         out = await container_enrichment(
             [
