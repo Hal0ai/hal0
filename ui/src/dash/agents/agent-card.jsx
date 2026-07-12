@@ -146,12 +146,14 @@ function LiveAgentCard({ agent, health, statusCls, statusLabel, restart, onLogs,
                 <div className="pi-stage">
                   <span className="pi-grid" />
                   <div className="pi-mark-wrap">
-                    <img
-                      className="pi-mark"
-                      src={a.logo}
-                      alt={a.name + " logo"}
-                      style={{ width: (a.logoScale || 0.86) * 100 + "%", height: (a.logoScale || 0.86) * 100 + "%" }}
-                    />
+                    {a.logo ? (
+                      <img
+                        className="pi-mark"
+                        src={a.logo}
+                        alt={a.name + " logo"}
+                        style={{ width: (a.logoScale || 0.86) * 100 + "%", height: (a.logoScale || 0.86) * 100 + "%" }}
+                      />
+                    ) : null}
                   </div>
                 </div>
               )}
@@ -274,12 +276,14 @@ function LockedAgentCard({ agent }) {
               <div className="pi-stage">
                 <span className="pi-grid" />
                 <div className="pi-mark-wrap">
-                  <img
-                    className="pi-mark"
-                    src={a.logo}
-                    alt={a.name + " logo"}
-                    style={{ width: (a.logoScale || 0.86) * 100 + "%", height: (a.logoScale || 0.86) * 100 + "%" }}
-                  />
+                  {a.logo ? (
+                    <img
+                      className="pi-mark"
+                      src={a.logo}
+                      alt={a.name + " logo"}
+                      style={{ width: (a.logoScale || 0.86) * 100 + "%", height: (a.logoScale || 0.86) * 100 + "%" }}
+                    />
+                  ) : null}
                 </div>
               </div>
 
