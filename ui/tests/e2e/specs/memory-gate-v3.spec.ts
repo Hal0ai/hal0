@@ -60,8 +60,8 @@ test.describe('memory gate OFF ([memory].enabled=false)', () => {
     await expect(page.locator('[data-testid="agent-tab-nav"]')).toBeVisible({ timeout: FIVE_S })
     await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible()
     await expect(page.locator('[data-testid="agent-tab-memory"]')).toHaveCount(0)
-    // The Memory surface (engine card) never renders under the gate.
-    await expect(page.locator('[data-testid="mem-engine-card"]')).toHaveCount(0)
+    // The Memory surface (provider cards) never renders under the gate.
+    await expect(page.locator('[data-testid="mem-provider-card-hindsight"]')).toHaveCount(0)
   })
 
   test('removed Runtime widget does not reappear', async ({ page }) => {
