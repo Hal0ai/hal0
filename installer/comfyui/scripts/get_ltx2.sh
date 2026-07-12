@@ -11,6 +11,20 @@ export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"   # persistent HF cache
 # container venv path for in-container execution.
 HF="${HF:-$(command -v hf 2>/dev/null || echo /opt/venv/bin/hf)}"
 
+# Fail early with a clear remediation message if no usable Hugging Face CLI was
+# resolved (#1196). Checked lazily at first real download so --dry-run and the
+# idempotent "already present" paths never require hf to be installed.
+_require_hf() {
+  if command -v "$HF" >/dev/null 2>&1 || [[ -x "$HF" ]]; then
+    return 0
+  fi
+  echo "✗ Hugging Face CLI not found (resolution order: \$HF, 'hf' on PATH, /opt/venv/bin/hf)." >&2
+  echo "  Install it with:  pipx install 'huggingface_hub[hf_transfer]'" >&2
+  echo "               or:  pip install --user 'huggingface_hub[hf_transfer]'" >&2
+  echo "  Or point \$HF at an existing binary:  HF=/path/to/hf $0 ..." >&2
+  exit 127
+}
+
 MODEL_DIR="${MODEL_DIR:-/mnt/ai-models/comfyui/models}"
 STAGE="$MODEL_DIR/.hf_stage_ltx2"                     # persistent staging (enables resume)
 
@@ -35,9 +49,9 @@ download_if_missing () {
   mkdir -p "$(dirname "$staged")"        # ensure stage path exists
   mkdir -p "$dest_dir"                   # ensure dest dir exists
 
+  _require_hf
   "$HF" download "$repo" "$remote" \
       --repo-type model \
-      --cache-dir "$HF_HOME" \
       --local-dir "$STAGE"
   mv -f "$staged" "$dest_file"
 }
@@ -56,7 +70,7 @@ Maintenance:
   clean-cache   Remove Hugging Face cache (~/.cache/huggingface)
 
 Notes:
-- Downloads RESUME automatically via persistent --cache-dir and --local-dir.
+- Downloads RESUME automatically via the persistent staging dir (--local-dir "$STAGE").
 USAGE
 }
 
