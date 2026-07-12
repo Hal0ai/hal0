@@ -1916,6 +1916,30 @@ else
                 if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
                     systemctl enable --now hal0-honcho
 
+                    # Persist [honcho].enabled=true so hal0's own config
+                    # agrees with the unit it just enabled. Without this,
+                    # `hal0-honcho.service` runs but HonchoConfig.enabled
+                    # (default False) stays false — GET
+                    # /api/memory/honcho/stats reports the stack as
+                    # "disabled" while it's actually reachable, and the
+                    # dashboard Honcho card shows a running stack as off.
+                    # Best-effort: the venv/CLI are already up by this
+                    # point, but a config-write hiccup here must not abort
+                    # an otherwise-good install.
+                    if [[ -x "${VENV_DIR}/bin/python" ]]; then
+                        if "${VENV_DIR}/bin/python" -c '
+from hal0.config.loader import load_hal0_config, save_hal0_config
+cfg = load_hal0_config()
+if not cfg.honcho.enabled:
+    cfg.honcho.enabled = True
+    save_hal0_config(cfg)
+' 2>/dev/null; then
+                            info "set [honcho].enabled=true in ${ETC_DIR}/hal0.toml"
+                        else
+                            warn "could not persist [honcho].enabled=true — set it manually: hal0 config edit"
+                        fi
+                    fi
+
                     for _ in $(seq 1 40); do
                         if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
                         sleep 3
