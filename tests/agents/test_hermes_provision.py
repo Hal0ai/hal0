@@ -604,11 +604,99 @@ def test_preflight_fails_actionably_when_no_supported_python(
     )
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
     monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
+    monkeypatch.setattr(hp, "_uv_available", lambda *a, **k: None)
     io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
     out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
     assert "3.11-3.13" in (out.reason or "")
     assert "deadsnakes" in (out.reason or "")
+    assert "uv" in (out.reason or "")
+
+
+def test_preflight_passes_when_uv_can_provision_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 3.14-only host WITH uv: preflight must pass (availability check only,
+    # no download) and flag the fallback — the install phase does the fetch.
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    state = hp.BootstrapState(
+        venv=str(var_lib / "venvs" / "hermes"), hermes_home=str(var_lib / ".hermes")
+    )
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
+    monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
+    monkeypatch.setattr(hp, "_uv_available", lambda *a, **k: "/usr/local/bin/uv")
+    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["uv_python_fallback"] is True
+
+
+def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
+    # A qualifying system Python must win without uv ever being invoked.
+    ran: list[list[str]] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> None:
+            ran.append(argv)
+
+    out = hp._ensure_supported_python(
+        prober=lambda name: "/usr/bin/python3.12" if name == "python3.12" else None,
+        runner=_Runner,
+    )
+    assert out == "/usr/bin/python3.12"
+    assert ran == []
+
+
+def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
+    ran: list[list[str]] = []
+    envs: list[dict[str, str] | None] = []
+
+    class _Result:
+        stdout = "/var/lib/hal0/python/cpython-3.13.5-linux-x86_64-gnu/bin/python3.13\n"
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> _Result:
+            ran.append(argv)
+            envs.append(env)
+            return _Result()
+
+    out = hp._ensure_supported_python(
+        prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+        runner=_Runner,
+        running=(3, 14),
+    )
+    assert out == "/var/lib/hal0/python/cpython-3.13.5-linux-x86_64-gnu/bin/python3.13"
+    # install runs before find, both pinned to UV_PYTHON_FALLBACK...
+    assert [a[1:3] for a in ran] == [["python", "install"], ["python", "find"]]
+    assert all(a[3] == hp.UV_PYTHON_FALLBACK for a in ran)
+    # ...and both redirected to the world-readable install dir (the default
+    # ~/.local/share/uv under root's 0700 home would be unreachable by the
+    # hal0 user the venv runs as).
+    assert all(
+        e is not None and e["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR) for e in envs
+    )
+
+
+def test_ensure_python_returns_none_without_uv() -> None:
+    out = hp._ensure_supported_python(prober=lambda _name: None, running=(3, 14))
+    assert out is None
+
+
+def test_ensure_python_returns_none_when_uv_fetch_fails() -> None:
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> None:
+            raise subprocess.CalledProcessError(1, argv)
+
+    out = hp._ensure_supported_python(
+        prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+        runner=_Runner,
+        running=(3, 14),
+    )
+    assert out is None
 
 
 def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -> None:
