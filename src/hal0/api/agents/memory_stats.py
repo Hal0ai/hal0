@@ -63,10 +63,14 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-# Mirror :data:`hal0.api.agents.personas._AGENT_PERSONAS_ROOTS` — same
-# v0.3 single-pick rationale (hermes only; pi-coder lights up in v0.4
-# by adding a row here, route handler stays unchanged).
-_KNOWN_AGENT_IDS: Final[frozenset[str]] = frozenset({"hermes"})
+# Mirror :data:`hal0.api.agents.personas._AGENT_PERSONAS_ROOTS` in intent
+# (route handler stays unchanged when a new agent lights up). pi-coder is
+# a real bundled agent now (`hal0.agents.manager.BUNDLED_AGENTS`) with its
+# own hal0-memory plugin (``src/hal0/agents/pi_coder/plugins/hal0-memory/``),
+# so it belongs here too — this allowlist had drifted behind
+# ``personas._AGENT_PERSONAS_ROOTS`` staying hermes-only, and the sidebar
+# 404'd on pi-coder's memory chip as a result.
+_KNOWN_AGENT_IDS: Final[frozenset[str]] = frozenset({"hermes", "pi-coder"})
 
 
 # When list_items() is called against a namespace that contains many

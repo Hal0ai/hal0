@@ -56,10 +56,24 @@ def fake_wrapper_empty(client: TestClient) -> _FakeWrapper:
 
 
 def test_memory_stats_unknown_agent_returns_404(client: TestClient) -> None:
-    r = client.get("/api/agents/pi-coder/memory/stats")
+    r = client.get("/api/agents/nonexistent-agent/memory/stats")
     assert r.status_code == 404
     body = r.json()
     assert body["error"]["code"] == "agent.unknown"
+
+
+def test_memory_stats_pi_coder_is_a_known_agent(
+    client: TestClient, fake_wrapper_empty: _FakeWrapper
+) -> None:
+    """pi-coder is a real bundled agent (``hal0.agents.manager.BUNDLED_AGENTS``)
+    with its own hal0-memory plugin — the sidebar chip must not 404 for it."""
+    r = client.get("/api/agents/pi-coder/memory/stats")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["agent_id"] == "pi-coder"
+    assert body["namespace"] == "private:pi-coder"
+    assert body["available"] is True
+    assert fake_wrapper_empty.calls[0]["dataset"] == "private:pi-coder"
 
 
 def test_memory_stats_no_wrapper_returns_available_false(client: TestClient) -> None:

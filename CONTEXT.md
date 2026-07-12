@@ -314,7 +314,7 @@ A file under `/var/lib/hal0/agents/hermes/personas/{id}.toml` declaring `[person
 
 ## hal0-memory (Hermes plugin)
 
-The hal0-owned `MemoryProvider` plugin at `src/hal0/agents/hermes/plugins/memory_hindsight/` (renamed from `hal0-cognee`), mounted into `$HERMES_HOME/plugins/memory/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block`) rather than as an explicit tool call. Per-persona namespace via persona TOML `memory_namespace`; an omitted namespace on writes resolves to `private:<agent_id>` server-side. Supersedes Hal0MemoryProvider above as the canonical name.
+The hal0-owned `MemoryProvider` plugin at `installer/agents/hermes/plugins/hal0-memory/` (renamed from `hal0-cognee`; this is the canonical, shipped source — no mirror elsewhere), mounted into `$HERMES_HOME/plugins/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,recall,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block` + `prefetch`), plus explicit `hal0_memory_{search,recall,add}` tools. Two banks: `private:<agent_id>` (default, agent_id `hermes`) + `shared`, selected per write via `X-hal0-Private`; reads are a server-side union of both. Supersedes Hal0MemoryProvider above as the canonical name.
 
 ## hermes-sdk-diff
 

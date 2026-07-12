@@ -47,8 +47,8 @@ src/hal0/
 │   └── middleware/  # error envelope, request id, log scrub
 ├── agents/          # bundled-agent provisioner + driver
 │   ├── hermes_provision.py    # 15-phase Hermes bootstrap
-│   ├── hermes/                # hal0-bundled Hermes plugins
-│   │   └── plugins/memory_hindsight/  # hal0-hindsight MemoryProvider
+│   ├── hermes/driver.py       # hal0-bundled Hermes driver (plugin sources
+│   │                          #   live under installer/agents/hermes/plugins/)
 │   ├── personas.py            # persona TOML store + hot-reload nudge
 │   ├── manager.py             # single-pick install / uninstall
 │   └── mcp_client.py          # MCP client allow-list (ADR-0013)
@@ -296,7 +296,7 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
 | `src/hal0/agents/hermes_provision.py`          | 15-phase Hermes bootstrap orchestrator       |
 | `src/hal0/agents/personas.py`                  | persona TOML store + hot-reload helper       |
 | `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
-| `src/hal0/agents/hermes/plugins/memory_hindsight/`| hal0-hindsight MemoryProvider plugin       |
+| `installer/agents/hermes/plugins/hal0-memory/`| hal0-hindsight MemoryProvider plugin (canonical source) |
 | `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
 | `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
 | `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |

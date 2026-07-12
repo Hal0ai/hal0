@@ -116,9 +116,9 @@ def test_outcome_deleted_when_delete_succeeds_and_verify_empty(
             # Pre-delete search — three matching rows.
             {
                 "items": [
-                    {"id": "id-1", "metadata": {"agent_id": "hermes-agent"}},
-                    {"id": "id-2", "metadata": {"agent_id": "hermes-agent"}},
-                    {"id": "id-3", "metadata": {"agent_id": "hermes-agent"}},
+                    {"id": "id-1", "metadata": {"agent_id": "hermes"}},
+                    {"id": "id-2", "metadata": {"agent_id": "hermes"}},
+                    {"id": "id-3", "metadata": {"agent_id": "hermes"}},
                 ]
             },
             # Delete response — body is ignored by the helper.
@@ -144,8 +144,8 @@ def test_outcome_leftover_when_verify_still_finds_rows(
             # Pre-delete search — two matching rows.
             {
                 "items": [
-                    {"id": "id-a", "metadata": {"agent_id": "hermes-agent"}},
-                    {"id": "id-b", "metadata": {"agent_id": "hermes-agent"}},
+                    {"id": "id-a", "metadata": {"agent_id": "hermes"}},
+                    {"id": "id-b", "metadata": {"agent_id": "hermes"}},
                 ]
             },
             # Delete reports success.
@@ -153,9 +153,9 @@ def test_outcome_leftover_when_verify_still_finds_rows(
             # But verify still sees rows.
             {
                 "items": [
-                    {"id": "id-a", "metadata": {"agent_id": "hermes-agent"}},
-                    {"id": "id-b", "metadata": {"agent_id": "hermes-agent"}},
-                    {"id": "id-c", "metadata": {"agent_id": "hermes-agent"}},
+                    {"id": "id-a", "metadata": {"agent_id": "hermes"}},
+                    {"id": "id-b", "metadata": {"agent_id": "hermes"}},
+                    {"id": "id-c", "metadata": {"agent_id": "hermes"}},
                 ]
             },
         ]
@@ -187,7 +187,7 @@ def test_outcome_unreachable_when_delete_raises(
     """Search OK but delete raises → outcome=unreachable, deleted_count records intent."""
     fake_urlopen(
         [
-            {"items": [{"id": "id-x", "metadata": {"agent_id": "hermes-agent"}}]},
+            {"items": [{"id": "id-x", "metadata": {"agent_id": "hermes"}}]},
             urllib.error.URLError("daemon died mid-call"),
         ]
     )
@@ -211,7 +211,7 @@ def test_outcome_deleted_when_verify_call_itself_unreachable(
     """
     fake_urlopen(
         [
-            {"items": [{"id": "id-y", "metadata": {"agent_id": "hermes-agent"}}]},
+            {"items": [{"id": "id-y", "metadata": {"agent_id": "hermes"}}]},
             {"deleted": 1},
             urllib.error.URLError("verify call dropped"),
         ]
