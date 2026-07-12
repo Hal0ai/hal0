@@ -373,6 +373,13 @@ def _unit_skeleton(
     Read-only sources are deliberately NOT auto-created — silently mounting
     an empty model store would mask a broken mount with a confusing
     model-not-found error further down.
+
+    An unclean shutdown can leave a stale same-name container record behind
+    (``--rm`` never ran), which fails the next start with "name already in
+    use" (#721). ``_render_unit_from_plan`` handles this for podman via
+    ``--replace`` (docker has no such flag), so EVERY runtime also gets a
+    tolerant ``ExecStartPre=-{runtime} rm -f <container_name>`` here — a
+    no-op when no stale record exists, and the only cleanup docker gets.
     """
     container_name = f"hal0-slot-{slot_name}"
     exec_stop = f"{runtime} stop -t 20 {container_name}"
@@ -392,6 +399,7 @@ def _unit_skeleton(
         "StandardOutput=journal",
         "StandardError=journal",
         "",
+        f"ExecStartPre=-{runtime} rm -f {container_name}",
     ]
     if mkdir_sources:
         joined = " ".join(shlex.quote(s) if " " in s else s for s in mkdir_sources)
@@ -447,25 +455,32 @@ def _render_unit_from_plan(
     """
     runtime = runtime_bin or _container_runtime()
     container_name = f"hal0-slot-{slot_name}"
+    # docker has no --replace flag ("unknown flag: --replace") — a plain
+    # docker run aborts outright, which took EVERY slot down on a docker-only
+    # host. podman gets --replace; docker instead relies on the
+    # ExecStartPre=-{runtime} rm -f cleanup _unit_skeleton emits for every
+    # runtime (same #721 stale-record fix, docker-safe).
+    is_podman = "docker" not in os.path.basename(runtime)
 
     argv: list[str] = [
         runtime,
         "run",
         "--rm",
         f"--name={container_name}",
+    ]
+    if is_podman:
         # Unclean shutdown leaves a stale same-name container record (--rm
         # never ran) → exit 125 "name already in use" at next boot (#721).
         # --replace removes it first; no-op when no stale record exists.
-        "--replace",
-        # B3: the unit already routes conmon's inherited container stdout to
-        # journald via StandardOutput=journal. podman's DEFAULT journald log
-        # driver ALSO writes the same stdout to journald (tagged CONTAINER_NAME),
-        # so `journalctl -u hal0-slot@<name>` matched both copies and every
-        # line appeared twice. Disable podman's own log driver so conmon→unit
-        # is the single sink. (docker ignores an unknown value gracefully; it
-        # accepts --log-driver=none too.)
-        "--log-driver=none",
-    ]
+        argv.append("--replace")
+    # B3: the unit already routes conmon's inherited container stdout to
+    # journald via StandardOutput=journal. podman's DEFAULT journald log
+    # driver ALSO writes the same stdout to journald (tagged CONTAINER_NAME),
+    # so `journalctl -u hal0-slot@<name>` matched both copies and every
+    # line appeared twice. Disable podman's own log driver so conmon→unit
+    # is the single sink. (docker ignores an unknown value gracefully; it
+    # accepts --log-driver=none too.)
+    argv.append("--log-driver=none")
     if plan.network_mode:
         argv.append(f"--network={plan.network_mode}")
     # Explicit device nodes (podman won't recurse the /dev/dri directory, #674).

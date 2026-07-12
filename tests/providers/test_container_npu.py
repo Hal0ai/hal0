@@ -79,13 +79,29 @@ class TestRenderUnitFromSpec:
         unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
         assert "--name=hal0-slot-npu" in unit
 
-    def test_replace_flag_clears_stale_container_records(self) -> None:
-        """Spec-rendered units need ``--replace`` too — same #721 boot race as
-        the llama-server builder (stale name record after unclean shutdown)."""
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+    def test_replace_flag_clears_stale_container_records_podman(self) -> None:
+        """Spec-rendered podman units need ``--replace`` too — same #721 boot
+        race as the llama-server builder (stale name record after unclean
+        shutdown). docker has no --replace flag; see
+        test_docker_runtime_omits_replace_flag below."""
+        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin="/usr/bin/podman")
         argv = _exec_start(unit)
         assert "--replace" in argv, f"--replace missing from argv: {argv}"
         assert argv.index("--replace") == argv.index("--name=hal0-slot-npu") + 1
+
+    def test_docker_runtime_omits_replace_flag(self) -> None:
+        """docker aborts outright on an unknown --replace flag, which took
+        every NPU slot down on a docker-only host. The spec-rendered path
+        must not emit --replace for a docker runtime_bin."""
+        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        argv = _exec_start(unit)
+        assert "--replace" not in argv, f"--replace must not render for docker: {argv}"
+
+    def test_docker_runtime_gets_execstartpre_rm_cleanup(self) -> None:
+        """docker instead relies on the tolerant ExecStartPre=-{runtime} rm -f
+        cleanup the unit skeleton emits for every runtime."""
+        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        assert f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-npu" in unit.splitlines()
 
     def test_security_opts_included(self) -> None:
         unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
