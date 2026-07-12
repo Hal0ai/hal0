@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
+from hal0.memory import honcho_migrate
 from hal0.memory.honcho_migrate import (
     MigrateState,
     migrate_hindsight_to_honcho,
@@ -214,6 +216,122 @@ def test_forward_migration_private_dataset_sets_private_header(tmp_path):
     assert report[f"private:{AGENT}"]["migrated"] == 1
     list_calls = [r for r in calls if r.url.path == "/api/memory/list"]
     assert list_calls[0].headers.get("x-hal0-private") == "1"
+
+
+def _honcho_handler_with_conclusion_responses(recorder, conclusion_responder):
+    """Honcho MockTransport handler where each /conclusions POST is answered by
+    ``conclusion_responder(n_calls, body)`` -> httpx.Response. ``n_calls`` is the
+    1-based count of conclusion POSTs seen so far (so the first POST is 1)."""
+    state = {"conclusion_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        path = request.url.path
+        if path.endswith("/peers") or path == "/v3/workspaces" or path.endswith("/sessions"):
+            return httpx.Response(201, json={"id": "ok"})
+        if path.endswith("/conclusions"):
+            state["conclusion_calls"] += 1
+            return conclusion_responder(state["conclusion_calls"], httpx_json(request))
+        return httpx.Response(404, json={"error": "unhandled"})
+
+    return handler
+
+
+def _run_forward_with_honcho(honcho_handler, tmp_path):
+    """Run a single-item forward migration against ``honcho_handler`` and return
+    (report, state). One shared-dataset item => exactly one /conclusions batch."""
+    page = {"items": [{"id": "h1", "text": "fact"}], "next_cursor": None}
+    hal0_handler, _ = _hal0_pages({"shared": [page], "private": []})
+
+    hal0_transport = httpx.MockTransport(hal0_handler)
+    honcho_transport = httpx.MockTransport(honcho_handler)
+
+    with (
+        httpx.Client(transport=hal0_transport, base_url="http://127.0.0.1:8080") as hal0_client,
+        httpx.Client(transport=honcho_transport, base_url="http://127.0.0.1:8000") as honcho_client,
+    ):
+        state = MigrateState(tmp_path / "state.json")
+        report = migrate_hindsight_to_honcho(
+            honcho_base="http://127.0.0.1:8000",
+            workspace=WORKSPACE,
+            user_peer=USER_PEER,
+            agent_id=AGENT,
+            datasets=["shared"],
+            state=state,
+            hal0_http_client=hal0_client,
+            honcho_http_client=honcho_client,
+        )
+    return report, state
+
+
+def test_create_conclusions_retries_transient_503_then_succeeds(tmp_path, monkeypatch):
+    """A 503 (transient embed-backend outage) is retried; the migration then
+    completes and the expected number of /conclusions POSTs (initial + retries)
+    are observed. time.sleep is patched so the backoff is instant."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(honcho_migrate.time, "sleep", lambda s: sleeps.append(s))
+
+    honcho_calls: list[httpx.Request] = []
+
+    def responder(n_calls, _body):
+        # Fail the first two attempts with 503, succeed on the third.
+        if n_calls <= 2:
+            return httpx.Response(503, json={"detail": "503 npu.trio_unavailable"})
+        return httpx.Response(201, json=[{"id": "c0"}])
+
+    handler = _honcho_handler_with_conclusion_responses(honcho_calls, responder)
+    report, state = _run_forward_with_honcho(handler, tmp_path)
+
+    assert report["shared"]["migrated"] == 1
+    conclusion_posts = [r for r in honcho_calls if r.url.path.endswith("/conclusions")]
+    assert len(conclusion_posts) == 3  # two failed retries + one success
+    assert len(sleeps) == 2  # slept once before each retry
+    assert state.migrated_ids("shared") == {"h1"}
+
+
+def test_create_conclusions_persistent_500_raises_with_body(tmp_path, monkeypatch):
+    """A 500 on every attempt exhausts retries and raises; the raised error
+    string carries the Honcho response body so the operator sees the cause."""
+    monkeypatch.setattr(honcho_migrate.time, "sleep", lambda _s: None)
+
+    honcho_calls: list[httpx.Request] = []
+    body_text = "503 npu.trio_unavailable (embed slot down)"
+
+    def responder(_n_calls, _body):
+        return httpx.Response(500, json={"detail": body_text})
+
+    handler = _honcho_handler_with_conclusion_responses(honcho_calls, responder)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_forward_with_honcho(handler, tmp_path)
+
+    assert body_text in str(excinfo.value)
+    conclusion_posts = [r for r in honcho_calls if r.url.path.endswith("/conclusions")]
+    # 1 initial + _CONCLUSION_MAX_RETRIES retries.
+    assert len(conclusion_posts) == 4
+
+
+def test_create_conclusions_4xx_raises_immediately_without_retry(tmp_path, monkeypatch):
+    """A 4xx is a permanent client error: raise immediately, no retries, and
+    still attach the response body."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(honcho_migrate.time, "sleep", lambda s: sleeps.append(s))
+
+    honcho_calls: list[httpx.Request] = []
+    body_text = "422 validation error: content too long"
+
+    def responder(_n_calls, _body):
+        return httpx.Response(422, json={"detail": body_text})
+
+    handler = _honcho_handler_with_conclusion_responses(honcho_calls, responder)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_forward_with_honcho(handler, tmp_path)
+
+    assert body_text in str(excinfo.value)
+    conclusion_posts = [r for r in honcho_calls if r.url.path.endswith("/conclusions")]
+    assert len(conclusion_posts) == 1  # no retries on 4xx
+    assert sleeps == []
 
 
 def _reverse_conclusions_handler(pages, add_calls):
