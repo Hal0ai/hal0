@@ -15,8 +15,11 @@
 #
 # Tool-calling note: on the FPX brain runtime a 1B can't emit tool calls the
 # native parser accepts (it leaks/500s), so the steward chat routes TOOL turns
-# to a capable model via `[brain_chat] tool_model = "hal0/agent"` (the 35B
-# agent slot) — the 1B here serves the steward's plain chat. See board_chat.
+# to a capable model via `[brain_chat] tool_model` — the 1B here serves the
+# steward's plain chat. Confirmed clean native tool-callers on this runtime are
+# the chadrock family: `hal0/code` (27B coder, lighter) and `hal0/agent` (35B
+# anchor). Recommended `tool_model = "hal0/code"` (falls back to the always-on
+# `agent` slot when the code slot isn't loaded). See board_chat.
 name = "brain"
 type = "llm"
 device = "gpu-vulkan"
