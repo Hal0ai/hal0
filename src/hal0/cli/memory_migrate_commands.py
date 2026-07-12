@@ -455,11 +455,15 @@ def migrate_unify_cmd(
             src = row["source"]
             tags = row["tags_to_add"]
             _progress.print(f"[dim]exporting {src} → importing into {target}…[/dim]")
-            # Only bother listing the target bank's documents (an extra
-            # network round-trip) when there are tags to apply — the
-            # before/after diff is how a document-transfer with no
-            # tag-rewrite option gets retagged after the fact.
+            # Only bother listing documents (an extra network round-trip)
+            # when there are tags to apply — the before/after diff is how a
+            # document-transfer with no tag-rewrite option gets retagged
+            # after the fact. We also capture the *source* bank's own
+            # document-id set so the retag can be scoped to docs this
+            # migration actually transferred (see below), not every id that
+            # appeared in the target during the transfer window.
             ids_before = _document_ids(target) if tags else None
+            source_doc_ids = _document_ids(src) if tags else None
             try:
                 zip_bytes, _ct = api_get_bytes(
                     f"/api/memory/banks/{src}/document-transfer",
@@ -485,8 +489,23 @@ def migrate_unify_cmd(
             retagged: dict[str, str] = {}
             if tags:
                 ids_after = _document_ids(target)
-                new_ids = ids_after - (ids_before or set())
+                # Scope the retag to docs THIS migration transferred. The
+                # document-transfer import returns only counts
+                # (result_metadata), never the ids it created, so the
+                # tightest scoping available without an upstream change is
+                # to intersect the target's before/after diff with the
+                # source bank's own document ids. A doc another writer lands
+                # in the target during the transfer window carries a
+                # foreign id (not in the source bank) and is thus excluded,
+                # instead of being mis-attributed to this source.
+                new_ids = (ids_after - (ids_before or set())) & (source_doc_ids or set())
                 if new_ids:
+                    _progress.print(
+                        "[yellow]-- retag is scoped to documents whose ids match the "
+                        "source bank; under --on-conflict new-id transferred docs receive "
+                        "fresh ids and are not retagged, and a concurrent writer reusing a "
+                        "source id could still be mis-attributed.[/yellow]"
+                    )
                     _progress.print(
                         f"[yellow]retagging {len(new_ids)} document(s) from {src} → "
                         f"queues {len(new_ids)} re-consolidation pass(es); slow on a local "
