@@ -1858,62 +1858,57 @@ else
         # podman-native (see hal0-honcho.service): `podman compose`
         # delegates to a compose provider binary over podman.socket — no
         # docker engine required.
-        hc_compose_ok=0
-        if podman compose version >/dev/null 2>&1; then
-            hc_compose_ok=1
-        else
-            # Prefer podman-compose (pure-Python, no Docker engine, no
-            # AppArmor profile pull) on EVERY distro — honcho's own unit
-            # (hal0-honcho.service) invokes `podman compose`, so podman is
-            # always the runtime here regardless of distro ecosystem.
-            # Live-reproduced on Ubuntu 24.04 (unprivileged LXC, #F26):
-            # this block used to install docker-compose-v2 on every Debian
-            # family host, which drags in Docker's AppArmor integration —
-            # "install profile containers-default apparmor: exit 243" —
-            # and broke `podman run` entirely, taking down the box's
-            # PRIMARY runtime while standing up an *optional* memory
-            # backend. podman-compose carries no such dependency chain.
-            case "$(pkg_mgr 2>/dev/null)" in
-                apt-get) apt-get install -y podman-compose >/dev/null 2>&1 || true ;;
-                dnf) dnf install -y podman-compose >/dev/null 2>&1 || true ;;
-                yum) yum install -y podman-compose >/dev/null 2>&1 || true ;;
-                zypper) zypper install -y podman-compose >/dev/null 2>&1 || true ;;
-                pacman) pacman -S --noconfirm podman-compose >/dev/null 2>&1 || true ;;
-            esac
-            if podman compose version >/dev/null 2>&1; then
-                hc_compose_ok=1
-            elif [[ "$(distro_family 2>/dev/null)" == "debian" ]]; then
-                # podman-compose isn't packaged (older Debian/Ubuntu):
-                # fall back to docker-compose-v2, but harden podman's own
-                # AppArmor posture FIRST via a containers.conf.d drop-in
-                # (survives package upgrades, never touches an
-                # operator-owned containers.conf) so the primary runtime
-                # keeps working even after docker-compose-v2's
-                # containerd.io/docker.io dependency chain lands.
-                warn "podman-compose unavailable — falling back to docker-compose-v2 (hardening podman's apparmor profile first)"
-                mkdir -p /etc/containers/containers.conf.d
-                cat > /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf <<'HC_APPARMOR_EOF'
-# Written by hal0's installer (Honcho standup, #F26): installing
-# docker-compose-v2 as the podman-compose fallback pulls Docker's
+        #
+        # Require docker-compose-v2 (the `docker compose` CLI plugin) as
+        # that provider — NOT podman-compose. Live-reproduced on Ubuntu
+        # 24.04 (unprivileged LXC, #F30): the packaged podman-compose
+        # cannot parse hal0's honcho docker-compose.yml at all — it
+        # crashes inside its own container_to_args() ("TypeError: join()
+        # argument must be str, bytes, or os.PathLike, not 'dict'") on a
+        # perfectly valid compose file, so hal0-honcho.service crash-loops
+        # forever and Honcho never comes up. docker-compose-v2 parses the
+        # same file fine, and `podman compose`'s own provider search
+        # already prefers docker-compose over podman-compose whenever both
+        # are present (see `podman help compose`) — so installing
+        # docker-compose-v2 is enough to win the resolution, without
+        # having to uninstall any podman-compose that's already there.
+        #
+        # docker-compose-v2's package chain still drags in Docker's
+        # AppArmor integration on Debian-family hosts — "install profile
+        # containers-default apparmor: exit 243" — which broke `podman
+        # run` entirely in an unprivileged LXC (#F26), taking down the
+        # box's PRIMARY runtime while standing up an *optional* memory
+        # backend. Harden podman's own AppArmor posture FIRST via a
+        # containers.conf.d drop-in (survives package upgrades, never
+        # touches an operator-owned containers.conf) BEFORE installing
+        # docker-compose-v2, not after.
+        mkdir -p /etc/containers/containers.conf.d
+        cat > /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf <<'HC_APPARMOR_EOF'
+# Written by hal0's installer (Honcho standup, #F26/#F30): installing
+# docker-compose-v2 as the honcho stack's compose provider pulls Docker's
 # AppArmor integration, which in an unprivileged LXC can leave podman's
 # own "containers-default" profile unloadable. Pin podman to
 # apparmor_profile=unconfined so it keeps working regardless.
 [containers]
 apparmor_profile = "unconfined"
 HC_APPARMOR_EOF
-                apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
-                if podman compose version >/dev/null 2>&1; then
-                    hc_compose_ok=1
-                fi
-                if ! podman info >/dev/null 2>&1; then
-                    warn "podman appears broken after installing docker-compose-v2 — check 'podman info' (apparmor hardening is at /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf)"
-                fi
-            fi
-            if [[ "${hc_compose_ok}" -ne 1 ]]; then
-                hc_compose_hint="$(pkg_install_cmd podman-compose 2>/dev/null \
-                    || echo "install podman-compose or a docker-compose-v2-compatible provider")"
-                warn "podman compose still unavailable — Honcho will be skipped (${hc_compose_hint} and re-run)"
-            fi
+
+        case "$(pkg_mgr 2>/dev/null)" in
+            apt-get) apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true ;;
+            dnf) dnf install -y docker-compose-plugin >/dev/null 2>&1 || true ;;
+            yum) yum install -y docker-compose-plugin >/dev/null 2>&1 || true ;;
+            zypper) zypper install -y docker-compose >/dev/null 2>&1 || true ;;
+            pacman) pacman -S --noconfirm docker-compose >/dev/null 2>&1 || true ;;
+        esac
+        if ! podman info >/dev/null 2>&1; then
+            warn "podman appears broken after installing docker-compose-v2 — check 'podman info' (apparmor hardening is at /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf)"
+        fi
+
+        hc_compose_ok=0
+        if podman compose version >/dev/null 2>&1; then
+            hc_compose_ok=1
+        else
+            warn "podman compose still unavailable — Honcho will be skipped (install docker-compose-v2 — the Docker Compose v2 CLI plugin — and re-run)"
         fi
 
         if [[ "${hc_compose_ok}" -eq 1 ]]; then
@@ -1979,27 +1974,34 @@ HC_APPARMOR_EOF
                 # the rest of this block reports for a missing prerequisite
                 # (same defensive posture as the openwebui/hindsight blocks).
                 if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
-                    # ── pgvector dim reconciliation (#F27, HIGH) ───────────
-                    # Honcho's pgvector schema initializes at its OWN
-                    # default embedding dimension (1536) on first DB boot —
-                    # it has no idea hal0 already pinned
+                    # ── schema migration + pgvector dim reconciliation
+                    # (#F27/#F31, HIGH) ─────────────────────────────────────
+                    # A fresh Honcho DB has NO tables at all until Honcho's
+                    # own alembic migrations run — honcho's pgvector schema
+                    # is created (at its OWN default embedding dimension,
+                    # 1536) only as a side effect of the api/deriver
+                    # containers booting. hal0 already pinned
                     # EMBEDDING_VECTOR_DIMENSIONS to whatever hal0's actual
-                    # embedding model produces (1024 for qwen3-embedding).
-                    # honcho-api treats that mismatch as fatal
-                    # (StartupValidationError) and crash-loops forever
-                    # rather than reconciling itself — live-reproduced on
-                    # Ubuntu 24.04 LXC. Bring up ONLY database+redis first,
-                    # run honcho's own scripts/configure_embeddings.py
-                    # --yes (inside the honcho image, against the compose
-                    # DB) to align the schema, THEN start the full stack —
-                    # so api/deriver boot against an already-correct schema
-                    # instead of racing it during compose's
+                    # embedding model produces (1024 for qwen3-embedding),
+                    # and honcho-api treats that mismatch as fatal
+                    # (StartupValidationError), crash-looping forever rather
+                    # than reconciling itself — live-reproduced on Ubuntu
+                    # 24.04 LXC. Bring up ONLY database+redis first, then
+                    # run, in order, inside the honcho image against the
+                    # compose DB: (1) `alembic upgrade head` to CREATE the
+                    # schema — on a fresh DB, configure_embeddings.py itself
+                    # errors with "required vector columns missing —
+                    # Run `alembic upgrade head` first" because there are no
+                    # tables yet; (2) scripts/configure_embeddings.py --yes
+                    # to align pgvector's dimension. THEN start the full
+                    # stack, so api/deriver boot against an already-correct
+                    # schema instead of racing it during compose's
                     # dependency-ordered startup. Verified manually: this
-                    # is the exact fix that gets honcho-api healthy.
+                    # exact order (alembic, then configure_embeddings, then
+                    # the api) is what gets honcho-api healthy.
                     hc_embed_dim="$(sed -n 's/^EMBEDDING_VECTOR_DIMENSIONS=//p' /etc/hal0/honcho.env 2>/dev/null | tail -1)"
                     hc_embed_dim="${hc_embed_dim:-1024}"
                     hc_db_uri="postgresql+psycopg://postgres:postgres@database:5432/postgres"
-                    info "reconciling Honcho pgvector schema to ${hc_embed_dim} dims…"
                     if podman compose --project-name hal0-honcho -f "${HC_DIR}/docker-compose.yml" \
                         up -d --no-build database redis >/dev/null 2>&1; then
                         hc_db_up=0
@@ -2012,21 +2014,37 @@ HC_APPARMOR_EOF
                             sleep 3
                         done
                         if [[ "${hc_db_up}" -eq 1 ]]; then
+                            info "creating Honcho database schema (alembic upgrade head)…"
+                            hc_alembic_ok=0
                             if podman run --rm --network hal0-honcho_default \
                                 -e DB_CONNECTION_URI="${hc_db_uri}" \
-                                -e EMBEDDING_VECTOR_DIMENSIONS="${hc_embed_dim}" \
-                                --entrypoint /app/.venv/bin/python \
-                                "${HC_IMAGE_TAG}" scripts/configure_embeddings.py --yes >/dev/null 2>&1; then
-                                info "Honcho pgvector schema reconciled to ${hc_embed_dim} dims"
+                                --entrypoint /app/.venv/bin/alembic \
+                                "${HC_IMAGE_TAG}" upgrade head >/dev/null 2>&1; then
+                                hc_alembic_ok=1
+                                info "Honcho database schema created"
                             else
-                                warn "configure_embeddings.py failed — honcho-api may crash-loop on a dimension mismatch"
-                                warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} -e EMBEDDING_VECTOR_DIMENSIONS=${hc_embed_dim} --entrypoint /app/.venv/bin/python ${HC_IMAGE_TAG} scripts/configure_embeddings.py --yes"
+                                warn "alembic upgrade head failed — Honcho has no schema; configure_embeddings.py and honcho-api will fail"
+                                warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} --entrypoint /app/.venv/bin/alembic ${HC_IMAGE_TAG} upgrade head"
+                            fi
+
+                            if [[ "${hc_alembic_ok}" -eq 1 ]]; then
+                                info "reconciling Honcho pgvector schema to ${hc_embed_dim} dims…"
+                                if podman run --rm --network hal0-honcho_default \
+                                    -e DB_CONNECTION_URI="${hc_db_uri}" \
+                                    -e EMBEDDING_VECTOR_DIMENSIONS="${hc_embed_dim}" \
+                                    --entrypoint /app/.venv/bin/python \
+                                    "${HC_IMAGE_TAG}" scripts/configure_embeddings.py --yes >/dev/null 2>&1; then
+                                    info "Honcho pgvector schema reconciled to ${hc_embed_dim} dims"
+                                else
+                                    warn "configure_embeddings.py failed — honcho-api may crash-loop on a dimension mismatch"
+                                    warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} -e EMBEDDING_VECTOR_DIMENSIONS=${hc_embed_dim} --entrypoint /app/.venv/bin/python ${HC_IMAGE_TAG} scripts/configure_embeddings.py --yes"
+                                fi
                             fi
                         else
-                            warn "Honcho database did not become reachable in time — skipping pgvector dim reconciliation (honcho-api may crash-loop)"
+                            warn "Honcho database did not become reachable in time — skipping schema migration (honcho-api may crash-loop)"
                         fi
                     else
-                        warn "failed to start Honcho database+redis ahead of schema reconciliation — honcho-api may crash-loop"
+                        warn "failed to start Honcho database+redis ahead of schema migration — honcho-api may crash-loop"
                     fi
 
                     systemctl enable --now hal0-honcho
