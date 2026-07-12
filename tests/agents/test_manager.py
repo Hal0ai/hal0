@@ -444,21 +444,29 @@ def test_is_present_on_disk_predicate(
 # ── atomic --switch: failure rollback ────────────────────────────────────────
 
 
-def test_switch_failed_install_leaves_no_installed_agent(
+def test_switch_failed_install_rolls_back_incumbent(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the new agent's install fails mid-swap, neither agent is
-    installed — the old one is gone (uninstalled atomically first), the
-    new one rolled back via the seed not being written.
+    """If the target's install fails AFTER the incumbent was torn down
+    (precondition passed, but the driver blew up deeper in), the
+    manager makes a best-effort attempt to reinstall the incumbent
+    rather than leaving the operator with NO agent installed.
 
-    This is the explicit ADR-0004 §2 promise: "Operator never end up
-    with two bundled agents partially installed."
+    Regression test: switching pi-coder→hermes used to uninstall
+    pi-coder unconditionally, then leave the box with nothing installed
+    (and a crash-looping systemd unit) when hermes' install blew up.
+    ADR-0004 §2 promises the operator never ends up with two bundled
+    agents partially installed — it does NOT say they should end up
+    with zero.
     """
     manager.install("pi-coder")
 
-    # Make hermes' install raise after pi-coder is uninstalled.
+    # Make hermes' install raise after pi-coder is uninstalled. Hermes
+    # has no installer script (_SCRIPT_INSTALLED_AGENTS excludes it),
+    # so the pre-uninstall precondition check is a no-op here and the
+    # failure surfaces from the driver itself, same as upstream really
+    # blowing up mid-install.
     stubs = stub_drivers
 
     def _boom(*, bearer_token: str | None = None) -> None:
@@ -469,9 +477,39 @@ def test_switch_failed_install_leaves_no_installed_agent(
     with pytest.raises(RuntimeError, match="simulated upstream-broke"):
         manager.install("hermes", switch=True)
 
-    # pi-coder was torn down; hermes never got a seed written.
-    assert manager.installed_names() == []
+    # pi-coder was uninstalled then rolled back; hermes never got a
+    # seed written.
+    assert manager.installed_names() == ["pi-coder"]
     assert stubs["pi-coder"].uninstalls == 1
+    assert stubs["pi-coder"].installs == [None, None]  # initial install + rollback
+
+
+def test_switch_aborts_without_uninstalling_when_target_script_missing(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#<bug2>: when the target's installer script doesn't exist on
+    disk, ``install(switch=True)`` must refuse the swap WITHOUT
+    uninstalling the incumbent — the precondition check runs before
+    any teardown. Regression for the "switching to a wheel install
+    missing its bundled-agent scripts bricked the incumbent" bug.
+    """
+    manager.install("pi-coder")
+
+    monkeypatch.setattr(
+        mgr_mod,
+        "installer_script_path",
+        lambda name: Path("/nonexistent/installer/agents") / f"{name}.sh",
+    )
+
+    with pytest.raises(mgr_mod.AgentError, match="installer script missing"):
+        manager.install("opencode", switch=True)
+
+    # Incumbent untouched — precondition failed before any teardown.
+    assert manager.installed_names() == ["pi-coder"]
+    assert stub_drivers["pi-coder"].uninstalls == 0
+    assert stub_drivers["opencode"].installs == []
 
 
 # ── #453: converge hermes data_dir onto HERMES_HOME (.hermes) ─────────────────
@@ -542,3 +580,108 @@ def test_hermes_uninstall_refuses_unmanaged_home(
     assert home.exists()
     assert (home / "user-data.txt").exists()
     assert not manager._config_path("hermes").exists()
+
+
+# ── installer_script_path: FHS-aware resolution for wheel installs ───────────
+
+
+def test_installer_script_path_resolves_editable_when_present() -> None:
+    """Editable / dev checkout: this test runs against the real
+    checkout, which has ``installer/agents/pi-coder.sh`` three parents
+    up from ``src/hal0/agents/manager.py`` — no monkeypatching needed,
+    this exercises the real resolution path."""
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved.is_file()
+    assert resolved == (
+        Path(mgr_mod.__file__).resolve().parents[3] / "installer" / "agents" / "pi-coder.sh"
+    )
+
+
+def test_installer_script_path_falls_back_to_fhs_for_wheel_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-editable wheel install has ``manager.py`` under
+    ``<venv>/lib/pythonX/site-packages/hal0/agents/manager.py`` — three
+    parents up from there is a venv dir, not a repo root, so it has no
+    ``installer/`` sibling. The function must fall back to the FHS code
+    root (:func:`hal0.config.paths.usr_lib`, ``/usr/lib/hal0/current``
+    in production) and find the script there — this was the root cause
+    of ``hal0 agent install pi-coder`` 500ing on a real FHS install."""
+    fake_module_path = (
+        tmp_path
+        / "venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "hal0"
+        / "agents"
+        / "manager.py"
+    )
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    fhs_root = tmp_path / "usr-lib-hal0-current"
+    script_dir = fhs_root / "installer" / "agents"
+    script_dir.mkdir(parents=True)
+    fhs_script = script_dir / "pi-coder.sh"
+    fhs_script.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
+
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved == fhs_script
+    assert resolved.is_file()
+
+
+def test_installer_script_path_prefers_editable_when_both_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an editable-shaped repo root has the script, it wins over
+    the FHS candidate (resolution order: editable first, FHS fallback)."""
+    fake_module_path = tmp_path / "repo" / "src" / "hal0" / "agents" / "manager.py"
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    editable_script_dir = tmp_path / "repo" / "installer" / "agents"
+    editable_script_dir.mkdir(parents=True)
+    editable_script = editable_script_dir / "pi-coder.sh"
+    editable_script.write_text("#!/bin/sh\n")
+
+    fhs_root = tmp_path / "fhs"
+    fhs_script_dir = fhs_root / "installer" / "agents"
+    fhs_script_dir.mkdir(parents=True)
+    (fhs_script_dir / "pi-coder.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
+
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved == editable_script
+
+
+def test_installer_script_path_missing_everywhere_returns_fhs_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the script exists in neither location, the function still
+    returns a path rather than raising/None — the FHS candidate — so
+    the caller's "installer script missing" error points at the real
+    production path, not a venv path nobody would recognise."""
+    fake_module_path = (
+        tmp_path
+        / "venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "hal0"
+        / "agents"
+        / "manager.py"
+    )
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    fhs_root = tmp_path / "usr-lib-hal0-current"
+    monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
+
+    resolved = mgr_mod.installer_script_path("pi-coder")
+    assert resolved == fhs_root / "installer" / "agents" / "pi-coder.sh"
+    assert not resolved.is_file()
