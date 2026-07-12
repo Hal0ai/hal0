@@ -67,3 +67,23 @@ def test_curated_model_validates_required_fields() -> None:
 def test_lookup_index_matches_list() -> None:
     """CURATED_BY_ID is the same set as the list."""
     assert set(CURATED_BY_ID.keys()) == {m.id for m in CURATED_MODELS}
+
+
+def test_memory_pipeline_default_embed_model_is_pullable() -> None:
+    """The memory pipeline's default embed id must resolve to a real curated pull source (#F28).
+
+    ``hal0.memory.honcho_env.DEFAULT_FEATURE_MODELS["embedding"]`` (and
+    ``HonchoLLMConfig.embedding_dimensions``' default) both point at this
+    id — without a curated ``hf_repo``/``hf_file`` for it, `hal0 model pull
+    qwen3-embedding-0-6b-q8-0` 422s and the memory pipeline (Hindsight
+    retain + the Honcho deriver) has no embedding model to actually pull.
+    """
+    from hal0.memory.honcho_env import DEFAULT_FEATURE_MODELS
+
+    embed_id = DEFAULT_FEATURE_MODELS["embedding"]
+    model = get_curated(embed_id)
+    assert model is not None, (
+        f"{embed_id!r} (memory pipeline's default embed model) has no curated catalogue entry"
+    )
+    assert model.hf_repo and model.hf_file
+    assert model.capability == "embed"
