@@ -17,6 +17,18 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# A hardened root umask (0027/0077 from a CIS/STIG host, or a login shell
+# that sets `umask 077`) leaks into everything this script creates — the
+# venv, the FHS code tree, /etc/hal0, /var/lib/hal0 — leaving it 0700 and
+# breaking the non-root `hal0` CLI (PermissionError reading /usr/lib/hal0,
+# /etc/hal0/slots, /var/lib/hal0/{registry,models}). Chmod-patching one
+# path at a time (as the /etc/hal0 fix below already does) doesn't scale;
+# normalize to the conventional 022 for the whole install body instead.
+# Restored at the very end of the script — this process's umask never
+# escapes to the caller's shell anyway, but symmetry is cheap.
+_HAL0_ORIG_UMASK="$(umask)"
+umask 022
+
 # Shared UI helpers — banner, step counter, spinner, boxed summary, plus
 # info / warn / err / die. ui_step maintains CURRENT_STEP for the ERR
 # trap below. Honors HAL0_PLAIN=1 and NO_COLOR=1 for non-fancy terms.
@@ -214,7 +226,7 @@ info "Pull destination: ${MODELS_DIR}"
 
 # Step total. Kept here so editors who add or remove a ui_step bump the
 # visible counter in the same diff.
-UI_STEP_TOTAL=12
+UI_STEP_TOTAL=13
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -277,14 +289,27 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
 fi
 
 # preflight_python returns 1 when python is missing OR the version is
-# outside 3.11–3.14 (it logs an `err` / `warn` itself). The installer
-# only treats *missing* python as fatal — a wrong-version warning is OK
-# because pip may still work. We disambiguate by re-checking PATH.
+# below hal0's floor (pyproject.toml requires-python >=3.12; it logs an
+# `err`/`warn` itself). A below-floor interpreter is NOT survivable — pip
+# install "${REPO_ROOT}" always fails on it — so unlike a merely-missing
+# python (which just needs installing per the hint below), we actively try
+# to resolve or auto-install a compatible interpreter (mirrors the
+# Hindsight venv's resolve_hindsight_python) instead of limping ahead only
+# to die minutes later, deep inside "pip install", on Debian 12 (python3
+# 3.11) / Ubuntu 22.04 (python3 3.10) — every stock LTS whose system
+# python3 predates 3.12.
 if ! preflight_python; then
     if ! command -v "${PY}" >/dev/null 2>&1; then
         die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
-    # Version warning already printed; keep going.
+    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
+        info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
+        PY="${resolved_py}"
+        export HAL0_PYTHON="${PY}"
+    else
+        die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
+  install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
+    fi
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always
@@ -386,6 +411,24 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # `hal0 setup` / the pull gate re-validates before any download lands.
     preflight_disk "${HAL0_MODELS_DISK_MIN_GB:-20}" "${MODELS_DIR}" \
         || warn "model store ${MODELS_DIR} is low on free space — model pulls may fail until freed"
+    # Container-runtime graphroot disk check: same cross-mount blind spot as
+    # the model-store check above, but for image storage. The VAR_DIR probe
+    # only measures VAR_DIR's own mount; multi-GB toolbox runners +
+    # OpenWebUI + ComfyUI + Honcho images land in the runtime's graphroot
+    # (/var/lib/containers for podman, /var/lib/docker for docker), which is
+    # frequently a separate mount when an operator relocates var-dir or
+    # deliberately puts container storage on its own volume. Without this, a
+    # box passes pre-flight with "20 GB free" and then image pulls fill the
+    # container store and fail. Non-fatal (warn only) — same posture as the
+    # model-store check.
+    if command -v podman >/dev/null 2>&1; then
+        HAL0_GRAPHROOT="$(podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || echo /var/lib/containers)"
+        preflight_disk "${HAL0_CONTAINER_DISK_MIN_GB:-20}" "${HAL0_GRAPHROOT}" \
+            || warn "container image store ${HAL0_GRAPHROOT} is low on free space — image pulls may fail until freed"
+    elif command -v docker >/dev/null 2>&1; then
+        preflight_disk "${HAL0_CONTAINER_DISK_MIN_GB:-20}" /var/lib/docker \
+            || warn "container image store /var/lib/docker is low on free space — image pulls may fail until freed"
+    fi
     preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
     if (( pf_rc != 0 )); then
         false
@@ -616,6 +659,29 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     fi
 fi
 
+ui_step "Node.js toolchain"
+
+# Node/npm is a hard dependency for THREE things: the dashboard UI build
+# right below, and the pi-coder + opencode bundled agents (both shell out to
+# npm; `hal0 agent install pi-coder`/`opencode` fail with a misleading
+# "upstream breaking change" message when npm is simply absent — the real
+# cause is no Node on the box). Provisioning it here, once, up front covers
+# all three instead of only warning in the Dashboard UI step below and
+# leaving the agent installs to fail later with no clue why. Best-effort:
+# resolve_node tries an already-present Node >=20 first, then auto-installs
+# via the detected package manager (NodeSource setup script on Debian/
+# Ubuntu, since their base repos ship an ancient Node; direct package
+# install elsewhere); never fatal — a Node-less box still installs, just
+# without the dashboard build / those two agents until Node is added later.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build / pi-coder / opencode agents)"
+elif HAL0_NODE_AUTOINSTALL=1 resolve_node; then
+    info "node: $(node -v 2>/dev/null || echo present) (>= ${NODE_MIN_MAJOR} LTS)"
+else
+    warn "could not provision Node.js ${NODE_MIN_MAJOR}+ LTS — dashboard UI build will be skipped; pi-coder/opencode agent installs will fail until Node is installed"
+    warn "  install manually: https://nodejs.org/en/download (or your distro's nodejs/NodeSource package), then re-run install.sh"
+fi
+
 ui_step "Dashboard UI"
 
 UI_DIR="${REPO_ROOT}/ui"
@@ -623,14 +689,43 @@ UI_DIST="${UI_DIR}/dist"
 if [[ -f "${UI_DIST}/index.html" ]]; then
     info "ui/dist already built — left alone"
 elif command -v npm >/dev/null 2>&1; then
-    # Two phases — install can dominate first-boot time, build is steady.
-    # Wrap each so the user sees what npm is doing instead of staring at
-    # a blank line for several minutes.
-    ui_spinner_run "Installing dashboard npm packages" \
-        bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund"
-    ui_spinner_run "Building dashboard (npm run build)" \
-        bash -c "cd '${UI_DIR}' && npm run build"
-    info "wrote ${UI_DIST}"
+    # ui/package.json pins vite ^6.0.3 + @tailwindcss/vite ^4.2.2, both of
+    # which need a modern Node; `command -v npm` alone doesn't catch a Node
+    # older than that (Debian 11 / older-Ubuntu apt nodejs, a stale nvm
+    # default) — it fails deep inside esbuild/oxide with a cryptic version
+    # error instead of a clear message. Gate on the major version and take
+    # the same soft-skip path as the npm-absent branch below rather than
+    # attempting a build that's certain to fail.
+    _ui_node_ver="" _ui_node_major=0
+    if command -v node >/dev/null 2>&1; then
+        _ui_node_ver="$(node -v 2>/dev/null || true)"
+        [[ "${_ui_node_ver}" =~ ^v([0-9]+) ]] && _ui_node_major="${BASH_REMATCH[1]}"
+    fi
+    if (( _ui_node_major < 20 )); then
+        warn "node ${_ui_node_ver:-not found} is too old to build the dashboard (need Node >=20 LTS) — skipping"
+        warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
+    else
+        # Two phases — install can dominate first-boot time, build is
+        # steady. Wrap each so the user sees what npm is doing instead of
+        # staring at a blank line for several minutes.
+        #
+        # Non-fatal: a registry flake, an OOM'd `vite build` on a small
+        # LXC, or a peer-dep error here used to trip the ERR trap and abort
+        # the WHOLE install — after the venv, hal0 wheel, config, and
+        # (partially) systemd units were already written — even though the
+        # API itself doesn't need the built UI (`_mount_dashboard`
+        # degrades to "no dashboard" when dist is absent). Degrade to the
+        # same soft warning as the npm-absent branch below instead.
+        if ui_spinner_run "Installing dashboard npm packages" \
+                bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund" \
+            && ui_spinner_run "Building dashboard (npm run build)" \
+                bash -c "cd '${UI_DIR}' && npm run build"; then
+            info "wrote ${UI_DIST}"
+        else
+            warn "dashboard build failed — the API still serves; the UI at :${HAL0_PORT}/ will 404 until you build it"
+            warn "  scroll up for the real npm error; retry later: cd ${UI_DIR} && npm install && npm run build"
+        fi
+    fi
 else
     warn "npm not found — dashboard at :${HAL0_PORT}/ will return 404 until you build the UI"
     warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
@@ -1768,12 +1863,33 @@ else
         if podman compose version >/dev/null 2>&1; then
             hc_compose_ok=1
         else
-            warn "podman compose provider missing — attempting docker-compose-v2 install"
-            apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true
+            # Package NAME differs by distro ecosystem (docker-compose-v2 on
+            # Debian/Ubuntu, podman-compose on Fedora/Arch/openSUSE) — route
+            # through lib/distro.sh's pkg_mgr/distro_family dispatch instead
+            # of a bare apt-get, which was a silent no-op on every non-apt
+            # host (the only unguarded apt-get in this script; every FLM
+            # apt-get elsewhere sits behind a `command -v apt-get` gate).
+            hc_compose_pkg=""
+            case "$(distro_family 2>/dev/null)" in
+                debian) hc_compose_pkg="docker-compose-v2" ;;
+                fedora | suse | arch) hc_compose_pkg="podman-compose" ;;
+            esac
+            if [[ -n "${hc_compose_pkg}" ]]; then
+                warn "podman compose provider missing — attempting to install ${hc_compose_pkg}"
+                case "$(pkg_mgr 2>/dev/null)" in
+                    apt-get) apt-get install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    dnf) dnf install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    yum) yum install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    zypper) zypper install -y "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                    pacman) pacman -S --noconfirm "${hc_compose_pkg}" >/dev/null 2>&1 || true ;;
+                esac
+            fi
             if podman compose version >/dev/null 2>&1; then
                 hc_compose_ok=1
             else
-                warn "podman compose still unavailable — Honcho will be skipped (install docker-compose-v2 and re-run)"
+                hc_compose_hint="$(pkg_install_cmd "${hc_compose_pkg:-docker-compose-v2}" 2>/dev/null \
+                    || echo "install a docker-compose-v2-compatible provider")"
+                warn "podman compose still unavailable — Honcho will be skipped (${hc_compose_hint} and re-run)"
             fi
         fi
 
@@ -1818,9 +1934,10 @@ else
                     warn "hal0 CLI not available yet — skipping honcho.env render (rerun 'hal0 memory honcho render-env' later)"
                 fi
 
+                HC_IMAGE_TAG="hal0-honcho:main-73453f8"
                 info "building Honcho image (podman build — this is slow on first run)…"
-                if ! podman image exists "hal0-honcho:main-73453f8" \
-                    && ! (cd "${HC_DIR}/src" && podman build -t "hal0-honcho:main-73453f8" .); then
+                if ! podman image exists "${HC_IMAGE_TAG}" \
+                    && ! (cd "${HC_DIR}/src" && podman build -t "${HC_IMAGE_TAG}" .); then
                     warn "Honcho image build failed; check the build log above"
                 fi
 
@@ -1828,17 +1945,54 @@ else
                 install -m644 "${HONCHO_SYNC_UNIT_SRC}" /etc/systemd/system/hal0-honcho-sync.service
                 install -m644 "${HONCHO_SYNC_TIMER_SRC}" /etc/systemd/system/hal0-honcho-sync.timer
                 systemctl daemon-reload
-                systemctl enable --now hal0-honcho
 
                 hc_up=0
-                for _ in $(seq 1 40); do
-                    if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
-                    sleep 3
-                done
-                if [[ "${hc_up}" -eq 1 ]]; then
-                    info "Honcho is running (memory engine on 127.0.0.1:8000)"
+                # Only enable the unit when the image actually exists — its
+                # ExecStart is `podman compose ... up --no-build`, so on a
+                # missing image (build failed above) it would just
+                # restart-loop until systemd's StartLimitBurst trips and
+                # then sit `failed`, instead of the honest "not installed"
+                # the rest of this block reports for a missing prerequisite
+                # (same defensive posture as the openwebui/hindsight blocks).
+                if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
+                    systemctl enable --now hal0-honcho
+
+                    # Persist [honcho].enabled=true so hal0's own config
+                    # agrees with the unit it just enabled. Without this,
+                    # `hal0-honcho.service` runs but HonchoConfig.enabled
+                    # (default False) stays false — GET
+                    # /api/memory/honcho/stats reports the stack as
+                    # "disabled" while it's actually reachable, and the
+                    # dashboard Honcho card shows a running stack as off.
+                    # Best-effort: the venv/CLI are already up by this
+                    # point, but a config-write hiccup here must not abort
+                    # an otherwise-good install.
+                    if [[ -x "${VENV_DIR}/bin/python" ]]; then
+                        if "${VENV_DIR}/bin/python" -c '
+from hal0.config.loader import load_hal0_config, save_hal0_config
+cfg = load_hal0_config()
+if not cfg.honcho.enabled:
+    cfg.honcho.enabled = True
+    save_hal0_config(cfg)
+' 2>/dev/null; then
+                            info "set [honcho].enabled=true in ${ETC_DIR}/hal0.toml"
+                        else
+                            warn "could not persist [honcho].enabled=true — set it manually: hal0 config edit"
+                        fi
+                    fi
+
+                    for _ in $(seq 1 40); do
+                        if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
+                        sleep 3
+                    done
+                    if [[ "${hc_up}" -eq 1 ]]; then
+                        info "Honcho is running (memory engine on 127.0.0.1:8000)"
+                    else
+                        warn "Honcho not healthy yet; check 'journalctl -u hal0-honcho -n 40' or 'docker compose --project-name hal0-honcho -f ${HC_DIR}/docker-compose.yml ps'"
+                    fi
                 else
-                    warn "Honcho not healthy yet; check 'journalctl -u hal0-honcho -n 40' or 'docker compose --project-name hal0-honcho -f ${HC_DIR}/docker-compose.yml ps'"
+                    warn "skipping 'systemctl enable --now hal0-honcho' — no local ${HC_IMAGE_TAG} image (build failed above); the unit would just restart-loop"
+                    warn "  fix the build (see the log above) then: systemctl enable --now hal0-honcho"
                 fi
             fi
         fi
@@ -2120,7 +2274,14 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "
         [[ -z "${reply}" || "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
     }
     if [[ -r /dev/tty ]] && _confirm_launch_setup; then
-        "${HAL0_BIN}" setup \
+        # Redirect stdin to the controlling terminal (the confirm prompt
+        # above already does this for exactly this reason). Without it, a
+        # piped install (`curl … | bash`) run from a real terminal answers
+        # "Y" here but the launched `hal0 setup` inherits the INSTALLER'S
+        # pipe as stdin — sys.stdin.isatty() is False, so setup_command
+        # prints "run it from a terminal" and exits 0 without ever running
+        # the wizard the operator just opted into.
+        HAL0_FORCE_INTERACTIVE=1 "${HAL0_BIN}" setup </dev/tty \
             || warn "guided setup exited non-zero — re-run '${BOLD}hal0 setup${RST}' anytime"
     else
         printf '\n'
@@ -2128,3 +2289,6 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "
         info "  (guided: network, model store, slots, NPU, image gen, apps)"
     fi
 fi
+
+# Restore the caller's umask (see the save near the top of the file).
+umask "${_HAL0_ORIG_UMASK}"

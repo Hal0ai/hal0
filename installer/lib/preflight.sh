@@ -9,7 +9,11 @@
 # Public API (all functions return 0 on success, non-zero on failure;
 # none of them exit the calling shell):
 #   preflight_systemd          — systemctl on PATH
-#   preflight_python           — `${PY:-python3}` resolvable + version 3.11–3.14
+#   preflight_python           — `${PY:-python3}` resolvable + version 3.12–3.14
+#                                (matches pyproject.toml's requires-python
+#                                floor). resolve_main_python (below) can
+#                                resolve/auto-install a compatible interpreter
+#                                when the default is below the floor.
 #   preflight_container_runtime — a usable container runtime (podman
 #                                preferred, docker accepted). Soft by
 #                                default (returns 0 with a warning, since
@@ -36,6 +40,12 @@
 #                                (HAL0_GPU_RC_BROKEN_GID / HAL0_GPU_RC_NO_DEVICE)
 #                                instead of installing "successfully" and then
 #                                silently running CPU-only.
+#   preflight_node             — node on PATH + version >= NODE_MIN_MAJOR
+#                                (default 20). Soft, always returns 0 — a
+#                                Node-less box is a valid install; the
+#                                dashboard UI build / pi-coder / opencode
+#                                agents just aren't available until Node is
+#                                installed (install.sh auto-provisions it).
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #                                (soft — informational only — when
@@ -117,12 +127,81 @@ preflight_python() {
         err "could not read Python version from ${py}"
         return 1
     fi
-    if [[ "${ver}" =~ ^3\.(11|12|13|14)$ ]]; then
+    if [[ "${ver}" =~ ^3\.(12|13|14)$ ]]; then
         info "python: ${py} (${ver})"
         return 0
     fi
-    warn "python: ${py} (${ver}) — hal0 is tested on 3.11-3.14"
+    warn "python: ${py} (${ver}) — hal0 requires >=3.12 (pyproject.toml requires-python; tested on 3.12-3.14)"
     return 1
+}
+
+# ── Main hal0 venv interpreter selection ────────────────────────────────────
+# pyproject.toml pins `requires-python = ">=3.12"`. Stock Debian 12 (python3
+# = 3.11) and Ubuntu 22.04 (python3 = 3.10) both fail preflight_python's
+# floor check above; historically install.sh treated that as a non-fatal
+# warning ("pip may still work") and only hard-failed minutes later at
+# `pip install`, with a recovery hint (HAL0_PYTHON=python3.12) that's a dead
+# end on those distros' base repos. resolve_main_python finds — or, when
+# asked, installs — a floor-compatible interpreter up front, mirroring
+# resolve_hindsight_python's pattern for the (separate) Hindsight venv.
+MAIN_PY_MIN_MINOR=12
+
+# Best-effort: install python3.MAIN_PY_MIN_MINOR via the detected package
+# manager. Echoes the resolved interpreter name on success; returns 1
+# otherwise (nothing installed / no recognised manager / distro doesn't
+# package a pinned minor). Only fires when HAL0_PY_AUTOINSTALL=1 (install.sh
+# sets it) so `hal0 doctor` and read-only preflight never mutate the system.
+_main_py_autoinstall() {
+    [[ "${HAL0_PY_AUTOINSTALL:-0}" == "1" ]] || return 1
+    pkg_mgr >/dev/null 2>&1 || return 1
+    local fam cand; fam="$(distro_family)"
+    cand="python3.${MAIN_PY_MIN_MINOR}"
+    info "no Python >=3.${MAIN_PY_MIN_MINOR} found — attempting to install ${cand} (${fam})"
+    case "${fam}" in
+        debian)
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || return 1 ;;
+        fedora) "$(pkg_mgr)" install -y "${cand}" >/dev/null 2>&1 || return 1 ;;
+        # Arch/openSUSE/Alpine ship a single rolling python; a pinned older
+        # minor isn't reliably in the base repos (mirrors
+        # _hindsight_py_autoinstall's same limitation).
+        *) return 1 ;;
+    esac
+    if command -v "${cand}" >/dev/null 2>&1; then
+        info "installed ${cand} for the main hal0 venv"
+        printf '%s\n' "${cand}"
+        return 0
+    fi
+    return 1
+}
+
+# Resolve the interpreter the MAIN hal0 venv should be built with. Selection
+# order:
+#   1. the default ${HAL0_PY:-${HAL0_PYTHON:-python3}} when already >=3.12
+#   2. python3.14 → python3.12 already on PATH
+#   3. auto-install python3.12 (only when HAL0_PY_AUTOINSTALL=1)
+# Echoes the resolved interpreter name and returns 0, or returns 1 if none
+# could be resolved. Unlike resolve_hindsight_python there is no
+# metadata-gate bypass to fall back on here — `pip install "${REPO_ROOT}"`
+# hard-requires >=3.12 — so callers must die on a 1 return.
+resolve_main_python() {
+    local def="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
+    if command -v "${def}" >/dev/null 2>&1; then
+        local m; m="$(_py_minor "${def}" 2>/dev/null)" || m=""
+        if [[ -n "${m}" ]] && (( m >= MAIN_PY_MIN_MINOR )); then
+            printf '%s\n' "${def}"
+            return 0
+        fi
+    fi
+    local v cand
+    for v in 14 13 12; do
+        cand="python3.${v}"
+        if command -v "${cand}" >/dev/null 2>&1; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+    _main_py_autoinstall
 }
 
 # ── Hindsight interpreter selection ─────────────────────────────────────────
@@ -376,14 +455,52 @@ _resolve_container_runtime() {
     return 1
 }
 
+# `<rt> info`/`podman pull` (the probes above) can succeed in an unprivileged
+# Proxmox/LXC container WITHOUT `features: nesting=1` — podman reports itself
+# usable, but every actual `<rt> run` fails on cgroup/mount-namespace setup it
+# can't do without nesting. That's the false-OK this closes: pre-flight
+# passes, install reports success, then every hal0-slot@ inference slot,
+# hal0-openwebui, ComfyUI, and the Honcho compose stack die at runtime with
+# cgroup/mount errors the operator never saw at install time. Bounded with
+# `timeout` so an offline host fails fast instead of hanging the install;
+# HAL0_CONTAINER_SMOKE_IMAGE overrides the pulled image for air-gapped/
+# mirrored registries.
+_container_run_smoke_test() {
+    local rt="$1" image="${HAL0_CONTAINER_SMOKE_IMAGE:-quay.io/podman/hello}"
+    timeout 30 "${rt}" run --rm "${image}" true >/dev/null 2>&1
+}
+
+# Run the real `<rt> run` smoke test and print the LXC-nesting remedy on
+# failure. Only called in REQUIRED mode (install.sh) — `hal0 doctor` stays
+# fast and side-effect-free (no image pull) in the default soft mode.
+_container_runtime_gate() {
+    local rt="$1"
+    if _container_run_smoke_test "${rt}"; then
+        return 0
+    fi
+    err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+    if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+        warn "  inside an unprivileged Proxmox/LXC container this needs 'features: nesting=1' (and often keyctl=1)"
+        warn "  set it in /etc/pve/lxc/<CTID>.conf on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
+    else
+        warn "  inspect the error above (cgroup/mount-namespace setup, subuid/newuidmap, or a daemon issue)"
+    fi
+    return 1
+}
+
 preflight_container_runtime() {
-    # Fast path: a runtime is already installed and working.
+    local required="${HAL0_CONTAINER_REQUIRED:-${HAL0_DOCKER_REQUIRED:-0}}"
+
+    # Fast path: a runtime is already installed and working per `<rt> info`.
     local rt
     if rt="$(_resolve_container_runtime)"; then
         if [[ "${rt}" == podman ]]; then
             info "podman: $(podman version --format '{{.Version}}' 2>/dev/null || echo unknown)"
         else
             info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+        fi
+        if [[ "${required}" == "1" ]]; then
+            _container_runtime_gate "${rt}" || return 1
         fi
         return 0
     fi
@@ -435,6 +552,7 @@ preflight_container_runtime() {
         esac
         if [[ "${ok}" -eq 1 ]] && rt="$(_resolve_container_runtime)" && [[ "${rt}" == podman ]]; then
             info "podman: $(podman version --format '{{.Version}}' 2>/dev/null || echo unknown)"
+            _container_runtime_gate "${rt}" || return 1
             return 0
         fi
         err "podman install/initialisation failed — see output above; check 'podman info'"
@@ -691,6 +809,93 @@ preflight_ports() {
     return "${rc}"
 }
 
+# Node.js / npm — needed for the dashboard UI build (Vite 6 / Tailwind v4;
+# ui/package.json has no `engines` floor to surface a mismatch) and for the
+# pi-coder / opencode bundled agents, which both shell out to npm. Soft:
+# always returns 0 (a Node-less box is a valid install — the dashboard build
+# and those two agents just aren't available until Node is installed). This
+# is the read-only `hal0 doctor` view; install.sh's own "Node.js toolchain"
+# step actually provisions Node when it's missing/too old.
+NODE_MIN_MAJOR=20
+preflight_node() {
+    if ! command -v node >/dev/null 2>&1; then
+        warn "node: not found — dashboard UI build + pi-coder/opencode agents need Node ${NODE_MIN_MAJOR}+ LTS"
+        return 0
+    fi
+    local ver major
+    ver="$(node -v 2>/dev/null || true)"
+    major=0
+    [[ "${ver}" =~ ^v([0-9]+) ]] && major="${BASH_REMATCH[1]}"
+    if (( major >= NODE_MIN_MAJOR )); then
+        info "node: ${ver}"
+    else
+        warn "node: ${ver} — below the ${NODE_MIN_MAJOR}+ LTS floor (dashboard build / pi-coder / opencode may fail)"
+    fi
+    return 0
+}
+
+# ── Node.js provisioning ────────────────────────────────────────────────────
+# Node/npm is a HARD dependency for three hal0 features: the dashboard Vite
+# build (see the "Dashboard UI" step in install.sh), and the pi-coder +
+# opencode bundled agents (installer/agents/*.sh both shell out to npm and
+# fail with a misleading "upstream breaking change" message when npm is
+# simply absent). install.sh used to only WARN on a missing/old npm; this
+# resolves — or, when asked, auto-installs — a Node >= NODE_MIN_MAJOR via the
+# detected package manager, mirroring resolve_main_python's pattern.
+# Best-effort and never fatal: a Node-less box still installs, just without
+# the dashboard build / those two agents until Node is added later.
+
+# Echo the Node major version (e.g. "20") of the `node` on PATH; nothing +
+# non-zero if node isn't found or its version can't be parsed.
+_node_major() {
+    command -v node >/dev/null 2>&1 || return 1
+    local ver; ver="$(node -v 2>/dev/null || true)"
+    [[ "${ver}" =~ ^v([0-9]+) ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# Best-effort: install a Node >= NODE_MIN_MAJOR via the detected package
+# manager. Debian/Ubuntu's own repos ship an ancient Node (10-18 depending
+# on release), so this adds the NodeSource setup script for a current LTS
+# instead of trusting the base repo; other ecosystems' current/rolling
+# nodejs packages are close enough to install directly. Returns 0 on
+# success. Only fires when HAL0_NODE_AUTOINSTALL=1 (install.sh sets it) so
+# `hal0 doctor` and read-only preflight never mutate the system.
+_node_autoinstall() {
+    [[ "${HAL0_NODE_AUTOINSTALL:-0}" == "1" ]] || return 1
+    local fam; fam="$(distro_family 2>/dev/null)" || return 1
+    info "node >=${NODE_MIN_MAJOR} not found — attempting to install Node ${NODE_MIN_MAJOR} LTS (${fam})"
+    case "${fam}" in
+        debian)
+            if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" -o /tmp/hal0-nodesource-setup.sh 2>/dev/null \
+                && DEBIAN_FRONTEND=noninteractive bash /tmp/hal0-nodesource-setup.sh >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs >/dev/null 2>&1
+            fi
+            rm -f /tmp/hal0-nodesource-setup.sh
+            ;;
+        fedora) dnf install -y nodejs >/dev/null 2>&1 || dnf module install -y "nodejs:${NODE_MIN_MAJOR}" >/dev/null 2>&1 ;;
+        arch) pacman -S --noconfirm nodejs npm >/dev/null 2>&1 ;;
+        suse) zypper install -y "nodejs${NODE_MIN_MAJOR}" >/dev/null 2>&1 || zypper install -y nodejs npm >/dev/null 2>&1 ;;
+        alpine) apk add nodejs npm >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+    command -v node >/dev/null 2>&1
+}
+
+# Resolve a Node interpreter meeting NODE_MIN_MAJOR. Returns 0 when a usable
+# Node is on PATH afterwards (already present, or just auto-installed); 1
+# when none is found and auto-install is disabled/unavailable/failed.
+# Read-only unless HAL0_NODE_AUTOINSTALL=1.
+resolve_node() {
+    local m
+    if m="$(_node_major)" && (( m >= NODE_MIN_MAJOR )); then
+        return 0
+    fi
+    _node_autoinstall || return 1
+    m="$(_node_major)" || return 1
+    (( m >= NODE_MIN_MAJOR ))
+}
+
 # ── aggregate runner ────────────────────────────────────────────────────────
 
 # Run every check; return non-zero if any failed. We deliberately don't
@@ -709,6 +914,7 @@ preflight_all() {
     preflight_container_runtime || rc=$?
     preflight_podman_forward || rc=$?
     preflight_gpu     || rc=$?
+    preflight_node    || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then
