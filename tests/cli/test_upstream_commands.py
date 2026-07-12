@@ -157,6 +157,41 @@ def test_update_nothing_is_noop(api: dict[str, Any]) -> None:
     assert api["patches"] == []
 
 
+def test_advertise_on_patches_true_and_echoes_state(api: dict[str, Any]) -> None:
+    result = runner.invoke(upstream_commands.app, ["advertise", "orx", "on"])
+    assert result.exit_code == 0, result.output
+    path, body = api["patches"][0]
+    assert path == "/api/upstreams/orx"
+    assert body == {"advertise_models": True}
+    assert "advertised" in result.output
+
+
+def test_advertise_off_patches_false_and_echoes_state(api: dict[str, Any]) -> None:
+    result = runner.invoke(upstream_commands.app, ["advertise", "orx", "off"])
+    assert result.exit_code == 0, result.output
+    _, body = api["patches"][0]
+    assert body == {"advertise_models": False}
+    assert "hidden" in result.output
+
+
+def test_advertise_rejects_bad_state(api: dict[str, Any]) -> None:
+    result = runner.invoke(upstream_commands.app, ["advertise", "orx", "maybe"])
+    assert result.exit_code != 0
+    assert api["patches"] == []
+
+
+def test_advertise_unknown_upstream_errors_clearly(
+    api: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def raising_patch(path: str, **_kw: Any) -> dict[str, Any]:
+        raise upstream_commands.CliApiError("404 upstream 'nope' not found")
+
+    monkeypatch.setattr(upstream_commands, "api_patch", raising_patch)
+    result = runner.invoke(upstream_commands.app, ["advertise", "nope", "off"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
 def test_delete_requires_confirm_and_force_skips(api: dict[str, Any]) -> None:
     result = runner.invoke(upstream_commands.app, ["delete", "orx"], input="n\n")
     assert result.exit_code == 0

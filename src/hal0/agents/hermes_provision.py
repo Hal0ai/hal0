@@ -1564,9 +1564,18 @@ def _build_config_overlay(
     if live_resolve_enabled:
         # hermes's picker only runs /v1/models discovery when an api_key is
         # present; the gateway ignores the value (it's unauthenticated).
+        #
+        # extra_headers is forwarded by hermes onto the discovery GET, so we
+        # tag it with X-hal0-Model-Filter: hal0 (#1148) — the gateway then
+        # returns ONLY owned_by==hal0 rows (local slots + hal0 virtuals),
+        # keeping the ~340 openrouter / minimax passthroughs out of the
+        # picker. Parity with pi's client-side owned_by filter; dispatch by
+        # explicit remote id is unaffected. Same nested-scalar `config set`
+        # mechanism as mcp_servers.<name>.headers.X-hal0-Agent below.
         pairs += [
             ("providers.custom.api_key", "hal0-local"),
             ("providers.custom.discover_models", True),
+            ("providers.custom.extra_headers.X-hal0-Model-Filter", "hal0"),
         ]
 
     for slot in chat_slots:

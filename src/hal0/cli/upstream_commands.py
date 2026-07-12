@@ -118,6 +118,51 @@ def list_upstreams(
     console.print(table)
 
 
+# ── advertise ──────────────────────────────────────────────────────────────
+
+_ADVERTISE_ON = {"on", "true", "yes", "1", "enable", "show"}
+_ADVERTISE_OFF = {"off", "false", "no", "0", "disable", "hide"}
+
+
+@app.command("advertise")
+def advertise_upstream(
+    name: str = typer.Argument(..., help="Upstream name."),
+    state: str = typer.Argument(..., help="on | off — toggle /v1/models visibility."),
+) -> None:
+    """Flip an upstream's ``advertise_models`` flag live (no hal0-api restart).
+
+    Advertising controls catalog visibility only — dispatch/routing to the
+    upstream by explicit id is unaffected. The change takes effect on the next
+    ``/v1/models`` request (the API punches the composite catalog cache).
+    """
+    key = state.strip().lower()
+    if key in _ADVERTISE_ON:
+        value = True
+    elif key in _ADVERTISE_OFF:
+        value = False
+    else:
+        die(f"Invalid state {state!r} — expected 'on' or 'off'.")
+        return
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    try:
+        result = api_patch(f"/api/upstreams/{name}", json={"advertise_models": value})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+
+    now_on = bool(result.get("advertise_models", value)) if isinstance(result, dict) else value
+    label = "advertised" if now_on else "hidden"
+    mark = "✓" if now_on else "✗"
+    console.print(
+        f"[green]{mark}[/green] Upstream [bold]{name}[/bold] is now [bold]{label}[/bold] "
+        f"in /v1/models (advertise_models={str(now_on).lower()})."
+    )
+
+
 # ── show ──────────────────────────────────────────────────────────────────
 
 

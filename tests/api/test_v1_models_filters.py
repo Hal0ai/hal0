@@ -91,3 +91,45 @@ def test_disabled_upstream_contributes_nothing(client: TestClient) -> None:
     ids = _listed_ids(client)
     for mid in OPENROUTER_MODELS:
         assert mid not in ids
+
+
+# ── owned_by filter (#1148) — Hermes de-pollution ─────────────────────────
+#
+# The raw upstream rows carry owned_by == the upstream name ("openrouter"),
+# so ?owned_by=hal0 (or the X-hal0-Model-Filter header Hermes sends) drops
+# them all, while ?owned_by=openrouter keeps exactly them. Dispatch is
+# unaffected — this only curates the discovery surface.
+
+
+def test_owned_by_query_filters_out_passthroughs(client: TestClient) -> None:
+    _seed_remote(client)
+    resp = client.get("/v1/models", params={"owned_by": "hal0"})
+    assert resp.status_code == 200, resp.text
+    ids = [m["id"] for m in resp.json()["data"]]
+    for mid in OPENROUTER_MODELS:
+        assert mid not in ids
+    # Every surviving row is genuinely hal0-owned.
+    assert all(m["owned_by"] == "hal0" for m in resp.json()["data"])
+
+
+def test_owned_by_query_keeps_matching_owner(client: TestClient) -> None:
+    _seed_remote(client)
+    resp = client.get("/v1/models", params={"owned_by": "openrouter"})
+    assert resp.status_code == 200, resp.text
+    ids = [m["id"] for m in resp.json()["data"]]
+    for mid in OPENROUTER_MODELS:
+        assert mid in ids
+
+
+def test_model_filter_header_matches_query_param(client: TestClient) -> None:
+    _seed_remote(client)
+    resp = client.get("/v1/models", headers={"X-hal0-Model-Filter": "openrouter"})
+    assert resp.status_code == 200, resp.text
+    ids = [m["id"] for m in resp.json()["data"]]
+    for mid in OPENROUTER_MODELS:
+        assert mid in ids
+    # And the hal0 filter header excludes them.
+    resp2 = client.get("/v1/models", headers={"X-hal0-Model-Filter": "hal0"})
+    ids2 = [m["id"] for m in resp2.json()["data"]]
+    for mid in OPENROUTER_MODELS:
+        assert mid not in ids2

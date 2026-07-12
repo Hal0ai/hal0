@@ -50,12 +50,21 @@ def test_live_resolve_enables_live_model_discovery():
     assert keys["providers.custom.api_key"] == "hal0-local"
 
 
+def test_live_resolve_tags_discovery_with_owned_by_filter():
+    """#1148: under live-resolve, providers.custom.extra_headers carries the
+    X-hal0-Model-Filter: hal0 header so /v1/models discovery returns only
+    owned_by==hal0 rows — remote passthroughs stay out of the picker."""
+    keys = _overlay(live_resolve_enabled=True)
+    assert keys["providers.custom.extra_headers.X-hal0-Model-Filter"] == "hal0"
+
+
 def test_disabled_omits_live_model_discovery():
     """With live-resolve OFF, base_url is a single physical slot backend, so
     live discovery is intentionally not enabled."""
     keys = _overlay(live_resolve_enabled=False)
     assert "providers.custom.discover_models" not in keys
     assert "providers.custom.api_key" not in keys
+    assert "providers.custom.extra_headers.X-hal0-Model-Filter" not in keys
 
 
 def test_live_resolve_forces_gateway_for_nonlocal_primary():
