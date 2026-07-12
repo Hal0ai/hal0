@@ -364,16 +364,32 @@ def test_import_cleans_tempdir_on_failure(tmp_path: Path) -> None:
 
 
 def test_registry_command_registered_on_main_app() -> None:
-    """``hal0 registry import`` must be reachable from the top-level app.
+    """``hal0 registry import`` must still be reachable from the top-level
+    app, even though it's now a hidden deprecated alias for ``hal0 model
+    import-backup`` (CLI consolidation) — it should NOT be advertised in
+    ``--help`` any more, but direct invocation must keep working so
+    existing scripts don't break.
 
     Guards against forgetting the ``app.add_typer(registry_app, ...)``
-    wire-up in ``hal0.cli.main`` after the command was added.
+    wire-up in ``hal0.cli.main``.
     """
     from hal0.cli.main import app as main_app
 
-    result = runner.invoke(main_app, ["registry", "--help"])
+    help_result = runner.invoke(main_app, ["registry", "--help"])
+    assert help_result.exit_code == 0, help_result.output
+    assert "import" not in help_result.output
+
+    reach_result = runner.invoke(main_app, ["registry", "import", "--help"])
+    assert reach_result.exit_code == 0, reach_result.output
+
+
+def test_registry_import_prints_deprecation_notice(tmp_path) -> None:
+    tar_path = _make_backup(tmp_path, layout="var-lib")
+    dest = tmp_path / "out" / "registry.toml"
+    result = _invoke(tar_path=tar_path, dest=dest)
     assert result.exit_code == 0, result.output
-    assert "import" in result.output
+    assert "deprecat" in result.output.lower()
+    assert "model import-backup" in result.output
 
 
 def test_registry_import_help_mentions_force_and_dest() -> None:

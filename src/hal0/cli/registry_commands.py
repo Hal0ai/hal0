@@ -7,6 +7,13 @@ extracted from a ``hal0-v0.1-backup-YYYY-MM-DD.tar.gz`` tarball
 produced by following the v0.1.x backup instructions in install.sh
 (see the v0.2 adoption plan §9).
 
+CLI consolidation (2026-07): the standalone ``hal0 registry`` group
+collided in name with the much larger ``hal0 model`` group, which already
+claims to "manage the local model registry". The canonical command is now
+``hal0 model import-backup`` (in ``model_commands.py``, reusing
+:func:`_do_import_backup` from this module); ``hal0 registry import``
+remains as a hidden deprecated alias so existing scripts keep working.
+
 Design contract (from plan §11 PR-21):
 
 * **Registry only.** v0.1.x → v0.2 is a clean break. Slot selections,
@@ -61,10 +68,11 @@ app = typer.Typer(
 def _registry_callback() -> None:
     """Inspect + repair the hal0 model registry.
 
-    Currently exposes ``import`` (v0.1.x backup recovery). Future
-    subcommands will live here; the callback keeps Typer from
-    auto-collapsing the single-command group, which would make a
-    second subcommand a breaking change at the CLI surface.
+    ``import`` (v0.1.x backup recovery) has moved to ``hal0 model
+    import-backup`` — the ``model`` group already owns registry CRUD, and a
+    standalone ``registry`` group holding a single verb collided in name
+    with it. This callback stays so a future second subcommand here isn't a
+    breaking change at the CLI surface.
     """
 
 
@@ -175,37 +183,16 @@ def _atomic_copy(source: Path, dest: Path) -> None:
                     tmp_path.unlink(missing_ok=True)
 
 
-@app.command("import")
-def import_backup(
-    path: Path = typer.Argument(
-        ...,
-        help="Path to hal0-v0.1-backup-YYYY-MM-DD.tar.gz produced by the "
-        "v0.1.x backup instructions in install.sh.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite an existing registry.toml at the destination. "
-        "Without this, the command refuses to clobber a registry that "
-        "may already hold v0.2 selections.",
-    ),
-    dest: Path = typer.Option(
-        DEFAULT_REGISTRY_PATH,
-        "--dest",
-        help="Destination registry.toml path. Test/dev escape hatch — "
-        "production always uses /var/lib/hal0/registry/registry.toml.",
-    ),
-) -> None:
+def _do_import_backup(path: Path, force: bool, dest: Path) -> None:
     """Restore ``registry.toml`` from a v0.1.x backup tarball.
 
-    Reads the tarball at ``PATH``, extracts it into a tempdir, locates
+    Reads the tarball at ``path``, extracts it into a tempdir, locates
     ``registry.toml`` inside (canonical layout is
     ``var/lib/hal0/registry/registry.toml``; bare ``registry/`` and
     flat layouts also accepted for hand-repacked backups), and atomically
-    copies it to ``--dest`` (default: ``/var/lib/hal0/registry/registry.toml``).
+    copies it to ``dest`` (default: ``/var/lib/hal0/registry/registry.toml``).
 
-    Refuses to overwrite an existing destination unless ``--force`` is
+    Refuses to overwrite an existing destination unless ``force`` is
     passed — a freshly-installed v0.2 box may already have curated picks
     from the bundle picker.
 
@@ -213,6 +200,10 @@ def import_backup(
     other v0.1.x state are NOT restored. Plan §9 is explicit: v0.1.x →
     v0.2 is a clean break. After import, redo slot selection via the
     bundle picker or ``hal0 slot create``.
+
+    Shared implementation behind both the canonical ``hal0 model
+    import-backup`` command and the deprecated ``hal0 registry import``
+    alias — see the module docstring for the rename rationale.
     """
     # ── 1. Validate the source tarball ────────────────────────────────
     if not path.exists():
@@ -283,3 +274,34 @@ def import_backup(
         f"Slot selections from v0.1.x are NOT migrated. Use the bundle\n"
         f"picker or [bold]hal0 slot create[/bold] to declare slots."
     )
+
+
+@app.command("import", hidden=True)
+def import_backup(
+    path: Path = typer.Argument(
+        ...,
+        help="Path to hal0-v0.1-backup-YYYY-MM-DD.tar.gz produced by the "
+        "v0.1.x backup instructions in install.sh.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite an existing registry.toml at the destination. "
+        "Without this, the command refuses to clobber a registry that "
+        "may already hold v0.2 selections.",
+    ),
+    dest: Path = typer.Option(
+        DEFAULT_REGISTRY_PATH,
+        "--dest",
+        help="Destination registry.toml path. Test/dev escape hatch — "
+        "production always uses /var/lib/hal0/registry/registry.toml.",
+    ),
+) -> None:
+    """[DEPRECATED] alias for `hal0 model import-backup`; use that instead."""
+    typer.echo(
+        "[deprecated] `hal0 registry import` is renamed to "
+        "`hal0 model import-backup`; use `hal0 model import-backup`.",
+        err=True,
+    )
+    _do_import_backup(path, force, dest)

@@ -31,7 +31,7 @@ directly so they work without a running daemon.
 |---|---|---|
 | `hal0 --version` / `-V` | Print the version and exit. | — |
 | `hal0 status` | System + slot summary (name, version, slot/upstream counts, slot table). | — |
-| `hal0 probe` | Re-run hardware detection (`POST /api/hardware/probe`) and update `hardware.json`. | — |
+| `hal0 probe` | **[Deprecated]** hidden alias for `hal0 config hardware --refresh` — re-runs hardware detection (`POST /api/hardware/probe`) and updates `hardware.json`. | — |
 | `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots`, `--source {release\|git}` |
@@ -99,6 +99,8 @@ hal0 setup --auto --no-pull --no-extensions
 | `slot edit <name>` | Update one or more slot config fields. | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware` |
 | `slot delete <name>` | Delete a slot (stops the unit, removes config). | `--force`/`-f` |
 | `slot logs <name>` | Print or follow slot logs. | `--follow`/`-f`, `--lines`/`-n` (default 200) |
+| `slot metrics [name]` | Live per-slot runtime metrics (tok/s, KV%, mem, uptime, queue depth). Omit `name` for all slots. | `--json` |
+| `slot capacity` | Per-slot resident memory + the `[slots].max_slots` budget. | `--json` |
 
 `slot create` flags:
 
@@ -153,13 +155,14 @@ default.
 | `model list` | List registry + upstream models. | `--json` |
 | `model show <ref>` | Show a model's metadata. | `--json` |
 | `model pull <ref>` | Download a model from Hugging Face into the registry (with progress). | — |
-| `model add <path>` | Register an already-downloaded file; id/capabilities auto-detected from the header. | `--id`, `--name`, `--overwrite` |
+| `model add <path>` | Register an already-downloaded file; id/capabilities auto-detected from the header. | `--id`, `--name`, `--license`, `--overwrite` |
 | `model scan` | Walk the configured roots + store and register new files (no api restart needed). | — |
 | `model store [path]` | Show — or change — the single directory hal0 pulls to, scans, and mounts into slots. | `--migrate` |
 | `model run <ref>` | Assign to a slot, load it, and wait until it serves — the one-command first-run path. | `--slot`/`-s`, `--timeout` |
-| `model register <id>` | Register a model already on disk (explicit id; prefer `model add`). | `--path`/`-p` (required), `--name`, `--license` |
 | `model rm <ref>` | Remove a model from the registry. | `--force`/`-f` |
-| `model assign <ref>` | Assign a model to a slot's default (does not load). | `--slot`/`-s` (required) |
+| `model import-backup <path>` | Restore `registry.toml` from a v0.1.x backup tarball (disaster recovery). | `--force`/`-f`, `--dest` |
+| `model register <id>` | **[Deprecated]** hidden alias for `model add` — its `--id`/`--name`/`--license` flags are folded into `add`. | `--path`/`-p` (required), `--name`, `--license` |
+| `model assign <ref>` | **[Deprecated]** hidden alias for `slot edit --model` (same `PUT /api/slots/{slot}/config` endpoint). | `--slot`/`-s` (required) |
 
 `model pull` accepts a curated alias (e.g. `qwen3-4b`) or a registered model
 id. It starts a background pull on the daemon and polls
@@ -188,7 +191,8 @@ NPU/FLM store directory — and names the exact fix command for each finding.
 | `upstream update <name>` | Partial update: settings, toggles, model filters. | `--url`, `--auth-style`, `--auth-header`, `--auth-env`, `--timeout`, `--advertise-models/--hide-models`, `--enabled/--disabled`, `--model`, `--include`, `--exclude`, `--clear-filters` |
 | `upstream delete <name>` | Remove a remote upstream (credential in `api.env` is retained). | `--force`/`-f` |
 | `upstream test <name>` | Probe reachability + auth; prints latency and model count. | — |
-| `upstream set-credentials <name>` | Write the provider's API key to `api.env` (hidden prompt). | `--key`, `--env-var` |
+| `upstream credentials set <name>` | Write the provider's API key to `api.env` (hidden prompt). | `--key`, `--env-var` |
+| `upstream set-credentials <name>` | **[Deprecated]** hidden alias for `upstream credentials set`. | `--key`, `--env-var` |
 
 `upstream create` with `--catalog openrouter` (or `anthropic`, `openai`,
 `google_ai_studio`, `ollama`) prefills the URL and auth style from the
@@ -227,15 +231,24 @@ the walkthrough.
 
 ## `hal0 registry` — registry repair
 
+<Aside type="note">
+`hal0 registry import` is a **deprecated hidden alias** for `hal0 model
+import-backup` (the `model` group already owns registry CRUD, and a
+standalone `registry` group holding one verb collided in name with it).
+The `registry` group itself now exposes nothing in `--help`; the command
+below still works for existing scripts.
+</Aside>
+
 | Command | Purpose | Key options |
 |---|---|---|
-| `registry import <path>` | Restore `registry.toml` from a v0.1.x backup tarball. | `--force`/`-f`, `--dest` |
+| `registry import <path>` | Restore `registry.toml` from a v0.1.x backup tarball. Prefer `hal0 model import-backup <path>`. | `--force`/`-f`, `--dest` |
 
-`registry import` extracts the backup into a tempdir (with path-traversal
-protection), locates `registry.toml`, and atomically copies it to the
-canonical path. It refuses to overwrite an existing registry unless `--force`
-is set. Only the registry is restored — slot selections, `capabilities.toml`,
-and per-slot TOMLs are **not** migrated (v0.1.x → v0.2 is a clean break).
+`registry import` (and its canonical form, `model import-backup`) extracts the
+backup into a tempdir (with path-traversal protection), locates
+`registry.toml`, and atomically copies it to the canonical path. It refuses to
+overwrite an existing registry unless `--force` is set. Only the registry is
+restored — slot selections, `capabilities.toml`, and per-slot TOMLs are **not**
+migrated (v0.1.x → v0.2 is a clean break).
 
 ## `hal0 memory` — memory + graph extraction
 
@@ -311,16 +324,20 @@ either way. See [Enable memory](/docs/guides/enable-memory).
 
 ## `hal0 config` — configuration
 
-| Command | Purpose |
-|---|---|
-| `config show` | Print `hal0.toml` from disk. |
-| `config edit` | Open `hal0.toml` in `$EDITOR` (then `$VISUAL`, then `vi`). |
-| `config migrate` | Migrate `hal0.toml` forward to the latest config schema version. |
-| `config validate` | Validate `hal0.toml`, `upstreams.toml`, and `providers.toml` against the schema. |
-| `config reload` | Ask the running daemon to re-read its TOML configs (`POST /api/settings/reload`). |
-| `config hardware` | Show the cached hardware probe payload (`GET /api/hardware`). |
+| Command | Purpose | Key options |
+|---|---|---|
+| `config show [which]` | Print a config file from disk (`hal0`, `upstreams`, or `providers`; default `hal0`). | — |
+| `config edit [which]` | Open a config file in `$EDITOR` (then `$VISUAL`, then `vi`); same file choices as `show`. | — |
+| `config migrate` | Migrate `hal0.toml` forward to the latest config schema version. | — |
+| `config validate` | Validate `hal0.toml`, `upstreams.toml`, and `providers.toml` against the schema. | — |
+| `config reload` | Ask the running daemon to re-read its TOML configs (`POST /api/settings/reload`). | — |
+| `config hardware` | Show the cached hardware probe payload (`GET /api/hardware`), or force a fresh probe. | `--refresh` |
 
-The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
+`config show`/`config edit` default to `hal0.toml`; pass `upstreams` or
+`providers` to target the other two files `config validate` already checks —
+useful when validate reports an error in one of them. The config path honours
+`HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml` (siblings `upstreams.toml`,
+`providers.toml` live alongside it).
 
 ## `hal0 doctor` — preflight checks
 
@@ -360,6 +377,8 @@ left the catalog are cleared. Idempotent. Default is a dry-run preview; pass
 | Command | Purpose | Key options |
 |---|---|---|
 | `app install <name>` | Install + enable an app skipped at install time (currently: `openwebui`). Runs the identical wiring as the install-time path (`HAL0_SKIP_OPENWEBUI=1`), so "skip now, install later" is lossless. | — |
+| `app list` | List known apps and their systemd enabled/active state. | — |
+| `app uninstall <name>` | Stop + disable an app's systemd unit (does not remove its container image or data). | `--force`/`-f` |
 
 ## `hal0 agent` — bundled agents
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as jsonlib
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -17,6 +18,7 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
+from hal0.cli.registry_commands import DEFAULT_REGISTRY_PATH, _do_import_backup
 
 app = typer.Typer(help="Manage the local model registry.")
 console = Console()
@@ -137,31 +139,20 @@ def model_pull(
         time.sleep(0.5)
 
 
-@app.command("register")
+@app.command("register", hidden=True)
 def model_register(
     model_id: str = typer.Argument(..., help="Model id, e.g. 'qwen3-4b-q4_k_m'"),
     path: str = typer.Option(..., "--path", "-p", help="Absolute path to the model file."),
     name: str = typer.Option("", "--name", help="Display name."),
     license_id: str = typer.Option("unknown", "--license", help="SPDX license id."),
 ) -> None:
-    """Register a model that's already on disk into the local registry."""
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    payload = {
-        "id": model_id,
-        "path": path,
-        "name": name or model_id,
-        "license": license_id,
-    }
-    try:
-        from hal0.cli._shared import api_post
-
-        m = api_post("/api/models", json=payload)
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    console.print(f"Registered [bold]{m.get('id', model_id)}[/bold] → {m.get('path', path)}")
+    """[DEPRECATED] alias for `model add`; use `hal0 model add <path> --id --license` instead."""
+    typer.echo(
+        "[deprecated] `model register` is replaced by `model add`; "
+        "use `hal0 model add <path> --id <id> --license <license>`.",
+        err=True,
+    )
+    model_add(path=path, model_id=model_id, name=name, license_id=license_id, overwrite=False)
 
 
 @app.command("rm")
@@ -210,21 +201,28 @@ def model_show(
     console.print(table)
 
 
-@app.command("assign")
+@app.command("assign", hidden=True)
 def model_assign(
     ref: str = typer.Argument(..., help="Model ref to assign"),
     slot: str = typer.Option(..., "--slot", "-s", help="Slot name to assign the model to"),
 ) -> None:
-    """Assign a model to a slot's default (does not load the slot)."""
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        api_put(f"/api/slots/{slot}/config", json={"model": {"default": ref}})
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    console.print(f"Assigned [bold]{ref}[/bold] → slot [bold]{slot}[/bold]")
+    """[DEPRECATED] alias for `slot edit --model`; use `hal0 slot edit <slot> --model` instead."""
+    typer.echo(
+        "[deprecated] `model assign` is replaced by `slot edit --model`; "
+        "use `hal0 slot edit <slot> --model <ref>`.",
+        err=True,
+    )
+    from hal0.cli.slot_commands import slot_edit
+
+    slot_edit(
+        name=slot,
+        model=ref,
+        port=None,
+        ctx_size=None,
+        provider=None,
+        hardware=None,
+        backend=None,
+    )
 
 
 @app.command("scan")
@@ -265,12 +263,17 @@ def model_add(
     path: str = typer.Argument(..., help="Absolute path to a model file (.gguf/.safetensors)"),
     model_id: str = typer.Option("", "--id", help="Explicit registry id (default: derived)"),
     name: str = typer.Option("", "--name", help="Display name."),
+    license_id: str = typer.Option(
+        "", "--license", help="SPDX license id (optional; default: 'unknown')."
+    ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing entry."),
 ) -> None:
     """Register an already-downloaded model file — capabilities auto-detected.
 
-    Unlike ``register`` this reads the file header to derive id,
-    capabilities and backends; the file stays where it is (no copy).
+    Reads the file header to derive id, capabilities and backends; the
+    file stays where it is (no copy). Folds in the explicit-metadata flags
+    (``--id``, ``--name``, ``--license``) that the old ``model register``
+    command exposed, so this command now covers both cases.
     """
     url = _api_base()
     if _api_unreachable(url):
@@ -288,6 +291,12 @@ def model_add(
         die(str(exc))
         return
     mid = m.get("id", model_id or "?")
+    if license_id:
+        try:
+            m = api_put(f"/api/models/{mid}", json={"license": license_id})
+        except CliApiError as exc:
+            die(f"registered {mid}, but setting --license failed: {exc}")
+            return
     console.print(f"Registered [bold]{mid}[/bold] → {m.get('path', path)}")
     caps = ", ".join(m.get("capabilities", []) or []) or "—"
     console.print(f"  capabilities: {caps}")
@@ -452,3 +461,36 @@ def model_run(
         console.print(f"  [dim]{state}…[/dim]", end="\r")
         time.sleep(2.0)
     die(f"timed out after {timeout_s}s waiting for slot {target} (last state: {state})")
+
+
+@app.command("import-backup")
+def model_import_backup(
+    path: Path = typer.Argument(
+        ...,
+        help="Path to hal0-v0.1-backup-YYYY-MM-DD.tar.gz produced by the "
+        "v0.1.x backup instructions in install.sh.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite an existing registry.toml at the destination. "
+        "Without this, the command refuses to clobber a registry that "
+        "may already hold v0.2 selections.",
+    ),
+    dest: Path = typer.Option(
+        DEFAULT_REGISTRY_PATH,
+        "--dest",
+        help="Destination registry.toml path. Test/dev escape hatch — "
+        "production always uses /var/lib/hal0/registry/registry.toml.",
+    ),
+) -> None:
+    """Restore ``registry.toml`` from a v0.1.x disaster-recovery backup.
+
+    v0.1.x → v0.2 disaster recovery command (formerly ``hal0 registry
+    import``, moved here because ``hal0 model`` already owns registry
+    CRUD). Slot selections, ``capabilities.toml``, and per-slot TOML files
+    are NOT restored — v0.1.x → v0.2 is a clean break; redo slot selection
+    via the bundle picker or ``hal0 slot create`` after importing.
+    """
+    _do_import_backup(path, force, dest)

@@ -7,7 +7,6 @@ Entry point declared in pyproject.toml:
 
 from __future__ import annotations
 
-import json as jsonlib
 import os
 import sys
 from pathlib import Path
@@ -16,7 +15,6 @@ import typer
 import uvicorn
 from rich.console import Console
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 
 import hal0
@@ -25,7 +23,6 @@ from hal0.cli._shared import (
     _api_base,
     _api_unreachable,
     api_get,
-    api_post,
     die,
 )
 from hal0.cli.agent_commands import app as agent_app
@@ -150,38 +147,17 @@ def status() -> None:
     console.print(table)
 
 
-@app.command()
+@app.command(hidden=True)
 def probe() -> None:
-    """Re-run hardware detection and update hardware.json."""
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        hw = api_post("/api/hardware/probe")
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    summary = {
-        "cpu": hw.get("cpu_name"),
-        "ram_mb": hw.get("ram_mb"),
-        "unified_memory_mb": hw.get("unified_memory_mb"),
-        "gpu": hw.get("gpu_name"),
-        "gtt_total_mb": hw.get("gtt_total_mb"),
-        "vram_total_mb": hw.get("vram_total_mb"),
-        "npu": hw.get("npu_name"),
-    }
-    console.print(
-        Panel(
-            Syntax(
-                jsonlib.dumps(summary, indent=2),
-                "json",
-                theme="ansi_dark",
-                background_color="default",
-            ),
-            title="hardware probe",
-            border_style="cyan",
-        )
+    """[DEPRECATED] alias for `hal0 config hardware --refresh`; use that instead."""
+    typer.echo(
+        "[deprecated] `hal0 probe` is replaced by `hal0 config hardware --refresh`; "
+        "use `hal0 config hardware --refresh`.",
+        err=True,
     )
+    from hal0.cli.config_commands import config_hardware
+
+    config_hardware(refresh=True)
 
 
 # ---------------------------------------------------------------------------
