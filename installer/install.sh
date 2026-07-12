@@ -226,7 +226,7 @@ info "Pull destination: ${MODELS_DIR}"
 
 # Step total. Kept here so editors who add or remove a ui_step bump the
 # visible counter in the same diff.
-UI_STEP_TOTAL=12
+UI_STEP_TOTAL=13
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -657,6 +657,29 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     else
         warn "hal0-agent shim not found at ${HAL0_AGENT_BIN} — agent units will fail until it is linked"
     fi
+fi
+
+ui_step "Node.js toolchain"
+
+# Node/npm is a hard dependency for THREE things: the dashboard UI build
+# right below, and the pi-coder + opencode bundled agents (both shell out to
+# npm; `hal0 agent install pi-coder`/`opencode` fail with a misleading
+# "upstream breaking change" message when npm is simply absent — the real
+# cause is no Node on the box). Provisioning it here, once, up front covers
+# all three instead of only warning in the Dashboard UI step below and
+# leaving the agent installs to fail later with no clue why. Best-effort:
+# resolve_node tries an already-present Node >=20 first, then auto-installs
+# via the detected package manager (NodeSource setup script on Debian/
+# Ubuntu, since their base repos ship an ancient Node; direct package
+# install elsewhere); never fatal — a Node-less box still installs, just
+# without the dashboard build / those two agents until Node is added later.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build / pi-coder / opencode agents)"
+elif HAL0_NODE_AUTOINSTALL=1 resolve_node; then
+    info "node: $(node -v 2>/dev/null || echo present) (>= ${NODE_MIN_MAJOR} LTS)"
+else
+    warn "could not provision Node.js ${NODE_MIN_MAJOR}+ LTS — dashboard UI build will be skipped; pi-coder/opencode agent installs will fail until Node is installed"
+    warn "  install manually: https://nodejs.org/en/download (or your distro's nodejs/NodeSource package), then re-run install.sh"
 fi
 
 ui_step "Dashboard UI"

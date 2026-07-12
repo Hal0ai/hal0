@@ -834,6 +834,68 @@ preflight_node() {
     return 0
 }
 
+# ── Node.js provisioning ────────────────────────────────────────────────────
+# Node/npm is a HARD dependency for three hal0 features: the dashboard Vite
+# build (see the "Dashboard UI" step in install.sh), and the pi-coder +
+# opencode bundled agents (installer/agents/*.sh both shell out to npm and
+# fail with a misleading "upstream breaking change" message when npm is
+# simply absent). install.sh used to only WARN on a missing/old npm; this
+# resolves — or, when asked, auto-installs — a Node >= NODE_MIN_MAJOR via the
+# detected package manager, mirroring resolve_main_python's pattern.
+# Best-effort and never fatal: a Node-less box still installs, just without
+# the dashboard build / those two agents until Node is added later.
+
+# Echo the Node major version (e.g. "20") of the `node` on PATH; nothing +
+# non-zero if node isn't found or its version can't be parsed.
+_node_major() {
+    command -v node >/dev/null 2>&1 || return 1
+    local ver; ver="$(node -v 2>/dev/null || true)"
+    [[ "${ver}" =~ ^v([0-9]+) ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# Best-effort: install a Node >= NODE_MIN_MAJOR via the detected package
+# manager. Debian/Ubuntu's own repos ship an ancient Node (10-18 depending
+# on release), so this adds the NodeSource setup script for a current LTS
+# instead of trusting the base repo; other ecosystems' current/rolling
+# nodejs packages are close enough to install directly. Returns 0 on
+# success. Only fires when HAL0_NODE_AUTOINSTALL=1 (install.sh sets it) so
+# `hal0 doctor` and read-only preflight never mutate the system.
+_node_autoinstall() {
+    [[ "${HAL0_NODE_AUTOINSTALL:-0}" == "1" ]] || return 1
+    local fam; fam="$(distro_family 2>/dev/null)" || return 1
+    info "node >=${NODE_MIN_MAJOR} not found — attempting to install Node ${NODE_MIN_MAJOR} LTS (${fam})"
+    case "${fam}" in
+        debian)
+            if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" -o /tmp/hal0-nodesource-setup.sh 2>/dev/null \
+                && DEBIAN_FRONTEND=noninteractive bash /tmp/hal0-nodesource-setup.sh >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs >/dev/null 2>&1
+            fi
+            rm -f /tmp/hal0-nodesource-setup.sh
+            ;;
+        fedora) dnf install -y nodejs >/dev/null 2>&1 || dnf module install -y "nodejs:${NODE_MIN_MAJOR}" >/dev/null 2>&1 ;;
+        arch) pacman -S --noconfirm nodejs npm >/dev/null 2>&1 ;;
+        suse) zypper install -y "nodejs${NODE_MIN_MAJOR}" >/dev/null 2>&1 || zypper install -y nodejs npm >/dev/null 2>&1 ;;
+        alpine) apk add nodejs npm >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+    command -v node >/dev/null 2>&1
+}
+
+# Resolve a Node interpreter meeting NODE_MIN_MAJOR. Returns 0 when a usable
+# Node is on PATH afterwards (already present, or just auto-installed); 1
+# when none is found and auto-install is disabled/unavailable/failed.
+# Read-only unless HAL0_NODE_AUTOINSTALL=1.
+resolve_node() {
+    local m
+    if m="$(_node_major)" && (( m >= NODE_MIN_MAJOR )); then
+        return 0
+    fi
+    _node_autoinstall || return 1
+    m="$(_node_major)" || return 1
+    (( m >= NODE_MIN_MAJOR ))
+}
+
 # ── aggregate runner ────────────────────────────────────────────────────────
 
 # Run every check; return non-zero if any failed. We deliberately don't
