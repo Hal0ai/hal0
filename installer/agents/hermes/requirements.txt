@@ -11,13 +11,17 @@
 # OWN the whole $HERMES_HOME/config.yaml, so a hermes minor bump could rewrite
 # the schema underneath us. The fix is that hermes owns + migrates its own
 # config.yaml (`hermes config migrate`) and hal0 applies only its specific keys
-# on top — so hermes can move freely. We keep a FLOOR (the oldest release whose
-# config CLI + `custom` provider we rely on) and a MAJOR CAP (1.0 may break the
-# CLI contract; lift the cap deliberately after validating). Operators who want
-# a specific build use `hal0 agent upgrade hermes --to=<version>`.
+# on top — so hermes can move freely. We keep a FLOOR (the oldest release with
+# a working wheel: 0.15.2 imports hermes_cli.dashboard_auth but its wheel
+# omits the subpackage — on Python 3.14, where every 0.16+ wheel is filtered
+# out by its `requires-python <3.14` cap, pip silently resolved that broken
+# build and the gateway crash-looped on ModuleNotFoundError, #1247) and a
+# MAJOR CAP (1.0 may break the CLI contract; lift the cap deliberately after
+# validating). Operators who want a specific build use
+# `hal0 agent upgrade hermes --to=<version>`.
 #
 # The `web` extra pulls fastapi + uvicorn[standard], which the hal0 agent
 # unit needs: it runs `hermes serve` in web/dashboard mode (HERMES_WEB_DIST
 # + HERMES_DASHBOARD_TUI in the unit drop-in). Without it the unit
 # crash-loops on `No module named 'fastapi'`.
-hermes-agent[web]>=0.14.0,<1.0
+hermes-agent[web]>=0.16.0,<1.0
