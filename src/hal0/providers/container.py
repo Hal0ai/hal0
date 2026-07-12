@@ -287,15 +287,23 @@ _MODEL_STORE_MOUNT = DEFAULT_MODEL_STORE
 def _container_runtime() -> str:
     """Resolve the container runtime binary path.
 
-    Priority: $HAL0_CONTAINER_RUNTIME > /usr/bin/podman > /usr/bin/docker.
-    Raises RuntimeError if neither is found.
+    Priority: $HAL0_CONTAINER_RUNTIME > /usr/bin/podman > /usr/bin/docker >
+    ``podman`` on PATH > ``docker`` on PATH.  The absolute-path candidates
+    are checked first (the common, package-manager-installed location); the
+    bare-name PATH lookups are the fallback for a runtime installed
+    somewhere else (snap, /usr/local/bin, nix, ...) — a plain
+    ``shutil.which("/usr/bin/podman")`` never matches those, so without this
+    fallback a perfectly usable runtime not living at /usr/bin/ is invisible
+    to hal0.
+    Raises RuntimeError if none is found.
     """
     override = os.environ.get("HAL0_CONTAINER_RUNTIME")
     if override:
         return override
-    for candidate in ("/usr/bin/podman", "/usr/bin/docker"):
-        if shutil.which(candidate):
-            return candidate
+    for candidate in ("/usr/bin/podman", "/usr/bin/docker", "podman", "docker"):
+        found = shutil.which(candidate)
+        if found:
+            return found
     raise RuntimeError(
         "no container runtime found; install podman or docker or set HAL0_CONTAINER_RUNTIME"
     )

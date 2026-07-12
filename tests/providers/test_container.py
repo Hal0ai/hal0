@@ -32,6 +32,7 @@ from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
+    _container_runtime,
     _image_mismatch,
     _render_unit,
     _render_unit_from_plan,
@@ -106,6 +107,72 @@ class TestResolveProfileFlags:
 
     def test_mtp_flag_bundle_constant_nonempty(self) -> None:
         assert "--spec-type draft-mtp" in MTP_FLAG_BUNDLE
+
+
+# ── Runtime probe (_container_runtime) ─────────────────────────────────────────
+
+
+class TestContainerRuntimeProbe:
+    """``_container_runtime`` must find podman/docker wherever PATH puts them,
+    not just at the hardcoded /usr/bin/ prefix (snap, /usr/local/bin, nix, ...)."""
+
+    def test_env_override_wins_over_everything(self, monkeypatch) -> None:
+        monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "/opt/custom/podman")
+        monkeypatch.setattr("hal0.providers.container.shutil.which", lambda _c: "/usr/bin/podman")
+        assert _container_runtime() == "/opt/custom/podman"
+
+    def test_prefers_absolute_usr_bin_podman(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+        monkeypatch.setattr(
+            "hal0.providers.container.shutil.which",
+            lambda c: c if c == "/usr/bin/podman" else None,
+        )
+        assert _container_runtime() == "/usr/bin/podman"
+
+    def test_falls_back_to_absolute_usr_bin_docker(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+        monkeypatch.setattr(
+            "hal0.providers.container.shutil.which",
+            lambda c: c if c == "/usr/bin/docker" else None,
+        )
+        assert _container_runtime() == "/usr/bin/docker"
+
+    def test_falls_back_to_bare_podman_on_path(self, monkeypatch) -> None:
+        """podman installed somewhere other than /usr/bin/ (snap, nix, ...)
+        must still resolve via a bare PATH lookup — a pinned absolute-path
+        check misses it entirely otherwise."""
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+
+        def fake_which(c: str) -> str | None:
+            if c in ("/usr/bin/podman", "/usr/bin/docker"):
+                return None
+            if c == "podman":
+                return "/snap/bin/podman"
+            return None
+
+        monkeypatch.setattr("hal0.providers.container.shutil.which", fake_which)
+        assert _container_runtime() == "/snap/bin/podman"
+
+    def test_falls_back_to_bare_docker_on_path(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+
+        def fake_which(c: str) -> str | None:
+            if c == "docker":
+                return "/usr/local/bin/docker"
+            return None
+
+        monkeypatch.setattr("hal0.providers.container.shutil.which", fake_which)
+        assert _container_runtime() == "/usr/local/bin/docker"
+
+    def test_raises_when_no_runtime_found_anywhere(self, monkeypatch) -> None:
+        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
+        monkeypatch.setattr("hal0.providers.container.shutil.which", lambda _c: None)
+        try:
+            _container_runtime()
+        except RuntimeError as exc:
+            assert "no container runtime found" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
 
 
 # ── Unit rendering ────────────────────────────────────────────────────────────
