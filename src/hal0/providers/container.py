@@ -1327,6 +1327,10 @@ class ContainerProvider(Provider):
         unit = self._unit_name(slot_name)
         log.info("container.unit_stop", extra={"slot": slot_name, "unit": unit})
         self._run("systemctl", "stop", unit, check=False)
+        # Clear a ``failed`` sub-state left by a crash-looped/OOM-killed unit
+        # (#1224). Without this, systemd's StartLimit can refuse the next
+        # ``systemctl restart``, wedging a slot that a restart should recover.
+        self._run("systemctl", "reset-failed", unit, check=False)
         # Disable so it doesn't re-start on reboot.
         self._run("systemctl", "disable", unit, check=False)
         # Remove unit file so daemon-reload leaves no stale entry.

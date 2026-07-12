@@ -1273,9 +1273,28 @@ class SlotManager:
             return await self.status(slot_name)
 
     async def restart(self, slot_name: str) -> Slot:
-        """Restart a slot without changing its model assignment."""
+        """Restart a slot without changing its model assignment.
+
+        A slot wedged in ERROR must NOT go through the graceful ``unload()``
+        drain: its systemd unit may be ``failed``, where the stop path can
+        hang and leave the CLI ReadTimeout'ing with the unit never relaunched
+        (#1224). For an errored slot, force a best-effort terminate (which now
+        also ``reset-failed``s the unit) and drop straight to OFFLINE, then run
+        the full load — never short-circuiting on an "already loaded" state,
+        which ERROR is not.
+        """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        if self._current_state(slot_name) == SlotState.ERROR:
+            async with self._lock(slot_name):
+                # Best-effort cleanup of the wedged unit; never let a stuck
+                # stop wedge the restart itself. ``terminate`` resets the
+                # failed unit so the subsequent ``load`` isn't blocked by
+                # systemd's StartLimit.
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
+            return await self.load(slot_name)
         await self.unload(slot_name)
         return await self.load(slot_name)
 
