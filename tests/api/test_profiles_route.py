@@ -58,7 +58,12 @@ class TestListProfiles:
         as seeds: gpu, mtp False, backend-coherent, and the no-jinja lanes omit
         `--jinja` while the long-context lane pins q8_0 KV."""
         by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
-        for name in ("rocm-dense-nojinja", "vulkan-dense-nojinja", "rocm-dense-small", "rocm-longctx"):
+        for name in (
+            "rocm-dense-nojinja",
+            "vulkan-dense-nojinja",
+            "rocm-dense-small",
+            "rocm-longctx",
+        ):
             assert name in by_name, f"missing seed: {name}"
             assert by_name[name]["seed"] is True
             assert by_name[name]["mtp"] is False
