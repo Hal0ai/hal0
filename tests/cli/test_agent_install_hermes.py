@@ -12,6 +12,8 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+import pytest
+
 import hal0.cli.agent_commands as ac
 
 
@@ -20,6 +22,43 @@ class _Rec:
 
     def __init__(self) -> None:
         self.events: list[tuple[str, Any]] = []
+
+
+class _FakeAgentManager:
+    """Stand-in for :class:`hal0.agents.manager.AgentManager` — records
+    ``uninstall`` calls without touching disk, and reports a fixed
+    ``installed_names()`` so tests control the single-pick check
+    (:func:`hal0.cli.agent_commands._enforce_hermes_single_pick`)
+    deterministically, independent of whatever's really on the host box.
+    """
+
+    def __init__(self, installed: list[str] | None = None) -> None:
+        self._installed = list(installed or [])
+        self.uninstalled: list[str] = []
+
+    def installed_names(self) -> list[str]:
+        return list(self._installed)
+
+    def uninstall(self, name: str) -> bool:
+        self.uninstalled.append(name)
+        if name in self._installed:
+            self._installed.remove(name)
+            return True
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _fake_bundled_agent_manager(monkeypatch: pytest.MonkeyPatch) -> _FakeAgentManager:
+    """Insulate every test in this module from real host `/etc/hal0` agent
+    state and from single-pick enforcement (Finding 11) by default — no
+    incumbent, so ``_install_hermes`` proceeds exactly like before this
+    fixture existed. Tests exercising the single-pick check itself
+    override this via their own ``monkeypatch.setattr(ac,
+    "_bundled_agent_manager", ...)`` call (last setattr wins).
+    """
+    fake = _FakeAgentManager([])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+    return fake
 
 
 def test_install_hermes_runs_prereqs_then_bootstrap_then_register(
@@ -408,3 +447,106 @@ def test_install_hermes_gateway_warns_without_raising_when_unit_missing(monkeypa
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 1})())
 
     ac._install_hermes_gateway()  # must not raise
+
+
+# ── Single-pick enforcement (Finding 11) ─────────────────────────────────────
+#
+# `hal0 agent install hermes` provisions locally (toolchain + bootstrap_cli)
+# and writes the manager's seed TOML itself, well before it ever calls the
+# daemon's /api/agents/install to honour --switch. That ordering used to let
+# hermes install ALONGSIDE an existing pi-coder/opencode: by the time the
+# daemon saw the request, hermes was already on disk, so AgentManager.install()
+# took its "already installed" idempotent no-op path instead of raising
+# AgentAlreadyInstalledError. _enforce_hermes_single_pick() closes the gap by
+# checking disk-truth installed_names() up front, before any provisioning
+# side effect.
+
+
+def test_enforce_single_pick_noop_when_nothing_installed(monkeypatch) -> None:
+    fake = _FakeAgentManager([])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ac._enforce_hermes_single_pick(switch=False)  # must not raise
+
+    assert fake.uninstalled == []
+
+
+def test_enforce_single_pick_noop_when_only_hermes_installed(monkeypatch) -> None:
+    """A bare re-install of hermes itself (no other incumbent) is not a
+    single-pick conflict — the manager's own idempotent no-op handles it
+    downstream."""
+    fake = _FakeAgentManager(["hermes"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ac._enforce_hermes_single_pick(switch=False)  # must not raise
+
+    assert fake.uninstalled == []
+
+
+def test_enforce_single_pick_dies_on_incumbent_without_switch(monkeypatch) -> None:
+    fake = _FakeAgentManager(["pi-coder"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    with pytest.raises(SystemExit):
+        ac._enforce_hermes_single_pick(switch=False)
+
+    # Refused before touching the incumbent.
+    assert fake.uninstalled == []
+
+
+def test_enforce_single_pick_uninstalls_incumbent_with_switch(monkeypatch) -> None:
+    fake = _FakeAgentManager(["opencode"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ac._enforce_hermes_single_pick(switch=True)  # must not raise
+
+    assert fake.uninstalled == ["opencode"]
+
+
+def test_install_hermes_refuses_when_incumbent_present_without_switch(monkeypatch) -> None:
+    """End-to-end: `hal0 agent install hermes` (no --switch) against an
+    existing pi-coder install must abort BEFORE the toolchain/bootstrap run
+    — the actual regression this finding covers."""
+    fake = _FakeAgentManager(["pi-coder"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ran = {"toolchain": False, "bootstrap": False}
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: ran.__setitem__("toolchain", True))
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision.bootstrap_cli",
+        lambda **_k: ran.__setitem__("bootstrap", True),
+        raising=True,
+    )
+
+    with pytest.raises(SystemExit):
+        ac._install_hermes(switch=False, gateway=False)
+
+    assert ran == {"toolchain": False, "bootstrap": False}
+    assert fake.uninstalled == []
+
+
+def test_install_hermes_switch_uninstalls_incumbent_before_provisioning(monkeypatch) -> None:
+    """`--switch` clears the incumbent first, THEN provisioning proceeds —
+    same atomic-swap contract as AgentManager.install(switch=True)."""
+    fake = _FakeAgentManager(["pi-coder"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    events: list[str] = []
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 0})())
+
+    def _fake_bootstrap_cli(**_k):  # type: ignore[no-untyped-def]
+        events.append("bootstrap_cli")
+        return 0
+
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision.bootstrap_cli", _fake_bootstrap_cli, raising=True
+    )
+    monkeypatch.setattr(ac, "api_post", lambda *_a, **_k: {})
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+
+    ac._install_hermes(switch=True, gateway=False)
+
+    assert fake.uninstalled == ["pi-coder"]
+    assert events == ["bootstrap_cli"]
