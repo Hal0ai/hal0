@@ -278,7 +278,7 @@ def _install_turnstone(*, switch: bool, adopt: bool = False) -> None:
     console.print(
         Panel(
             "[bold green]Installed[/bold green] turnstone  "
-            "[dim](native binary: /var/lib/hal0/bin/turnstone, server :9129)[/dim]",
+            "[dim](managed venv: /var/lib/hal0/venvs/turnstone, server :9129)[/dim]",
             border_style="green",
         )
     )

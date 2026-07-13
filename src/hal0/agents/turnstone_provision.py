@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess  # nosec B404 — needed to run the installer script + smoke exec
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -454,7 +455,11 @@ def _phase_env_probe(ctx: PhaseContext) -> PhaseResult:
             check=False,
             timeout=10,
         )  # nosec B603
-        version = (getattr(proc, "stdout", "") or getattr(proc, "stderr", "") or "").strip() or None
+        raw = (getattr(proc, "stdout", "") or getattr(proc, "stderr", "") or "").strip()
+        # The turnstone CLI has no `--version` flag — it prints its usage/help
+        # to stderr instead. Reject that so we record a real version or None,
+        # not a multi-line usage blob polluting the checkpoint + self_report.
+        version = raw.splitlines()[0] if raw and not raw.lower().startswith("usage") else None
     except Exception:
         version = None
     cast(TurnstoneState, ctx.state).turnstone_version = version
@@ -497,10 +502,15 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     ]
     _atomic_write(DRIVER_ENV_PATH, "\n".join(env_lines) + "\n")
 
-    # Secrets vault — 0600. OPENAI_API_KEY is what turnstone's provider reads.
+    # Secrets vault — 0600. OPENAI_API_KEY is what turnstone's provider reads;
+    # TURNSTONE_JWT_SECRET is REQUIRED by turnstone-server to start (it refuses
+    # to boot without it). Generate a 32-byte hex secret once and reuse it on
+    # re-provision so tokens/sessions survive a --repair (idempotent).
+    jwt_secret = _existing_jwt_secret() or secrets.token_hex(32)
     secret_lines = [
         "# hal0 — turnstone secrets (root:root 0600; sourced by systemd)",
         f"OPENAI_API_KEY={bearer or _DEV_API_KEY}",
+        f"TURNSTONE_JWT_SECRET={jwt_secret}",
     ]
     if bearer:
         secret_lines.append(f"HAL0_BEARER_TOKEN={bearer}")
@@ -508,8 +518,23 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
 
     return PhaseResult(
         PhaseStatus.OK,
-        details={"seed": str(INSTALL_SEED_PATH), "env": str(DRIVER_ENV_PATH)},
+        details={"seed": str(INSTALL_SEED_PATH), "env": str(DRIVER_ENV_PATH), "jwt": "set"},
     )
+
+
+def _existing_jwt_secret() -> str | None:
+    """Return the TURNSTONE_JWT_SECRET already in the vault, if any.
+
+    Reused on re-provision so a --repair doesn't rotate the server's signing
+    key (which would invalidate live sessions).
+    """
+    if not SECRETS_ENV_PATH.exists():
+        return None
+    for line in SECRETS_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        if line.startswith("TURNSTONE_JWT_SECRET="):
+            val = line.split("=", 1)[1].strip()
+            return val or None
+    return None
 
 
 def _phase_database_wire(ctx: PhaseContext) -> PhaseResult:

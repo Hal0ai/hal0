@@ -166,6 +166,15 @@ def test_full_pipeline_writes_all_artifacts(tmp_paths: Path) -> None:
     assert tp.INSTALL_SEED_PATH.exists()
     assert tp.SECRETS_ENV_PATH.exists()
     assert oct(tp.SECRETS_ENV_PATH.stat().st_mode)[-3:] == "600"
+    # turnstone-server refuses to boot without TURNSTONE_JWT_SECRET.
+    secrets_body = tp.SECRETS_ENV_PATH.read_text()
+    assert "TURNSTONE_JWT_SECRET=" in secrets_body
+    jwt = next(
+        line.split("=", 1)[1]
+        for line in secrets_body.splitlines()
+        if line.startswith("TURNSTONE_JWT_SECRET=")
+    )
+    assert len(jwt) == 64  # 32 bytes hex
 
     state = json.loads((tp.STATE_ROOT / "provision.json").read_text())
     assert state["phases"]["config_write"]["status"] == "ok"
@@ -187,6 +196,16 @@ def test_rerun_is_idempotent(tmp_paths: Path) -> None:
     assert res2.failed == []
     # config_write already ok → skipped.
     assert "config_write" in res2.skipped
+
+
+def test_jwt_secret_is_stable_across_reprovision(tmp_paths: Path) -> None:
+    io = _fake_io()
+    tp.run(state_root=tp.STATE_ROOT, io=io, skip_phases=_SKIP)
+    first = tp._existing_jwt_secret()
+    assert first and len(first) == 64
+    # A --repair re-run must NOT rotate the signing key (would drop sessions).
+    tp.run(state_root=tp.STATE_ROOT, io=io, skip_phases=_SKIP, repair=True)
+    assert tp._existing_jwt_secret() == first
 
 
 def test_state_records_turnstone_fields(tmp_paths: Path) -> None:
