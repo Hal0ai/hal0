@@ -21,6 +21,34 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-07-13
+
+Turnstone lands as a second heavyweight bundled agent alongside Hermes and
+becomes a first-class companion service; the unified **hal0-rocmfpx** runner
+becomes the default image for AMD GPUs (with an automatic slot migration on
+update); and a memory security fix stops one agent deleting another's private
+memories.
+
+### Highlights
+- **Turnstone — a second heavyweight bundled agent** joins Hermes: a native `turnstone-server` on loopback :9129, installed into its own managed PyPI venv, coexisting with Hermes via relaxed single-pick (#1299).
+- **Turnstone is a first-class companion service** — it shows in the Services pane and the Overview health card with start/stop/restart controls, next to Hermes/Hindsight/OpenWebUI.
+- **hal0-rocmfpx is now the universal default runner for AMD GPUs** — one unified image (Vulkan/RADV + HIP) replaces the per-lane toolboxes; CUDA and CPU-only lanes keep their lean images (#1297).
+- **Memory: private-visibility is now enforced on delete** — in unified-bank mode one agent could delete another agent's `visibility:private` memory by id; `delete` now applies the same fail-closed ACL as read/search/list.
+
+### Migrations
+- `hal0 update` automatically re-pins existing AMD-GPU slots from the old `amd-strix-halo-toolboxes` images to the unified `hal0-rocmfpx` runner (no-op on CUDA/CPU lanes) (#1297).
+
+### Added
+- **Turnstone bundled agent** — provisioning pipeline (managed PyPI venv, JWT-secret generation, model automap) plus hal0 provider/memory wiring, coexisting with Hermes (#1299).
+- **Turnstone companion-service registration** — a `ServiceDef` + systemd health probe, so turnstone appears in `/api/services` (Services pane, full lifecycle actions) and `/api/services/health` (Overview card + sidebar status).
+
+### Changed
+- **hal0-rocmfpx as the default AMD-GPU image** — basic seed profiles defer to a manifest-driven resolver that returns the unified runner for AMD lanes, the CUDA image for NVIDIA, and the lean toolbox for CPU-only (#1297).
+- PyPI distribution is published under the name **`hal0ai`** (the import package and `hal0`/`hal0-agent` console scripts are unchanged) (#1298).
+
+### Fixed
+- **Memory delete ACL** — `delete` enforces the `visibility:private` owner check in unified-bank mode, so an agent can no longer delete another agent's private memory by (guessable) document id; unresolved ids are withheld fail-closed (#1302).
+
 ## [0.9.7.3] — 2026-07-12
 
 A robustness release. Fresh installs now adapt to the host — provisioning their
