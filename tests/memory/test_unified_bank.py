@@ -55,10 +55,17 @@ class RecordingClient:
         return {"results": list(self._facts_by_bank.get(bank_id, []))}
 
     async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
-        raw = self._facts_by_bank.get(bank_id, [])
+        raw = self._facts_by_bank.get(bank_id, [])[offset : offset + limit]
         return {
             "items": [{"id": f["document_id"], "text": f["text"], "tags": f["tags"]} for f in raw]
         }
+
+    async def delete_document(self, *, bank_id, document_id):
+        facts = self._facts_by_bank.get(bank_id, [])
+        kept = [f for f in facts if f["document_id"] != document_id]
+        removed = len(facts) - len(kept)
+        self._facts_by_bank[bank_id] = kept
+        return {"memory_units_deleted": removed}
 
 
 def _unified(client_id: str = "hermes") -> HindsightProvider:
@@ -339,6 +346,82 @@ async def test_legacy_multibank_private_recall_not_over_filtered():
     await p.add("secret", dataset="private:hermes", client_id="hermes", tags=["agent:override"])
     out = await p.recall("secret", dataset="private:hermes", client_id="hermes")
     assert any(i["text"] == "secret" for i in out)
+
+
+# ── Delete-side enforcement of visibility:private (unified mode) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_unified_delete_refuses_foreign_private():
+    """A caller must NOT be able to delete another agent's visibility:private
+    doc by id — even knowing/guessing the id — because in unified mode it lives
+    in the same ``shared`` bank as their own. Delete enforces the same ACL as
+    read (regression: previously delete swept by id with no owner check)."""
+    p = _unified(client_id="hermes")
+    r = await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+    doc_id = r["id"]
+
+    res = await p.delete([doc_id], client_id="scribe")
+    assert res["deleted"] == 0
+    # Still there for the owner.
+    owner = await p.recall("secret", dataset="shared", client_id="hermes")
+    assert any(i["text"] == "hermes secret" for i in owner)
+
+
+@pytest.mark.asyncio
+async def test_unified_delete_anonymous_refused_foreign_private():
+    """A caller with no resolved identity (provider default ``anonymous`` →
+    ``unknown``) cannot delete a real agent's private doc. Mirrors the read-side
+    ``test_unified_anonymous_provider_denied_foreign_private``."""
+    p = HindsightProvider(client=RecordingClient(), unified_bank=True)
+    r = await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+    res = await p.delete([r["id"]])  # no client_id → unknown
+    assert res["deleted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unified_delete_allows_owner_private():
+    """The owning agent can still delete its own private doc."""
+    p = _unified(client_id="hermes")
+    r = await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+    res = await p.delete([r["id"]], client_id="hermes")
+    assert res["deleted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_delete_allows_shared_for_any_caller():
+    """Non-private (shared) docs stay communally deletable — the gate must not
+    over-restrict, mirroring shared being readable by everyone."""
+    p = _unified(client_id="hermes")
+    r = await p.add("public", dataset="shared", client_id="hermes")
+    res = await p.delete([r["id"]], client_id="scribe")
+    assert res["deleted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_delete_mixed_ids_only_removes_visible():
+    """A batch delete removes the caller's own + shared docs but withholds a
+    foreign private one."""
+    p = _unified(client_id="hermes")
+    own = await p.add("hermes note", dataset="private:hermes", client_id="hermes")
+    shared = await p.add("public", dataset="shared", client_id="hermes")
+    foreign = await p.add("scribe secret", dataset="private:scribe", client_id="scribe")
+
+    res = await p.delete([own["id"], shared["id"], foreign["id"]], client_id="hermes")
+    assert res["deleted"] == 2
+    # The foreign private doc survives and is still visible to its owner.
+    s = await p.recall("secret", dataset="shared", client_id="scribe")
+    assert any(i["text"] == "scribe secret" for i in s)
+
+
+@pytest.mark.asyncio
+async def test_legacy_multibank_delete_unaffected():
+    """Legacy mode keeps deleting by bank ACL (no visibility scan) — the owner
+    deletes its own private doc as before."""
+    p = HindsightProvider(client=RecordingClient(), client_id="hermes", unified_bank=False)
+    r = await p.add("secret", dataset="private:hermes", client_id="hermes")
+    res = await p.delete([r["id"]], dataset="private:hermes", client_id="hermes")
+    assert res["deleted"] == 1
 
 
 # ── Config default ────────────────────────────────────────────────────────────
