@@ -21,6 +21,40 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [0.9.7.3] — 2026-07-12
+
+A robustness release. Fresh installs now adapt to the host — provisioning their
+own Python and Node, tolerating podman **or** docker, and surviving hardened
+umasks and non-root operation — and the self-hosted Honcho memory stack stands
+up cleanly alongside Hindsight. Plus the pi-coder and opencode bundled agents,
+the unified per-agent memory model, and a large batch of install/setup/agent
+fixes surfaced by end-to-end reinstall testing on a clean box.
+
+### Highlights
+- **Installs self-heal across environments** — auto-provision Python 3.12 and Node 20 LTS when missing, tolerate podman or docker, and survive hardened/root umasks (#1291, #1289).
+- **`hal0 doctor` and bundled-agent installs work on packaged installs** — FHS-aware resolution fixes the "packaged without scripts" and "could not locate preflight.sh" failures on non-editable installs (#1284, #1285).
+- **Crash-safe agent switching** — a failed `agent install --switch` no longer bricks the running agent; it verifies the target first and rolls back on failure (#1285).
+- **Self-hosted Honcho as a per-agent memory provider** — unified memory, swappable and migratable with Hindsight per agent, with a clean opt-in standup (#1243, #1294, #1295).
+- **pi-coder and opencode join Hermes** as bundled, single-pick agents (#1254, #1271).
+
+### Added
+- **Node.js LTS auto-provisioning** in the installer (the dashboard build and pi-coder/opencode all need npm) plus a curated `qwen3-embedding-0-6b` model for the memory pipeline (#1291, #1294).
+- **Unified per-agent memory** — self-hosted Honcho v3 provider and a unified-bank model with server-side tagging, plus `hal0 memory bank/ops/mm/recall` and `migrate unify` CLI (#1243, #1244, #1257).
+- **pi-coder** agent (provisioning, hal0 provider/memory plugins, live dashboard card) and the **opencode** bundled agent (#1254, #1271).
+- **hal0-brain** as a first-class profile (#1258), **upstream controls** CLI and UI (#1279), and a **bench queue** dropdown with lane/tool-eval/tune options (#1255).
+
+### Fixed
+- **Installer/preflight robustness** — Python floor raised to 3.12 with auto-install, hardened-umask permissions, a container-runtime smoke test that no longer false-fails, and Node/disk/graphroot preflight gaps (#1291, #1292).
+- **Honcho standup** — unbound-var abort, pgvector embedding-dim reconcile, compose-provider and migration ordering, AppArmor-in-LXC, and full `--purge` teardown (#1293, #1294, #1295, #1287).
+- **docker/podman portability** — runtime-appropriate slot units and a PATH-based runtime probe (#1289).
+- **Slots** — errored-slot restart recovery and the WARMING watchdog, plus drift/image_status false positives (#1278, #1269).
+- **Memory** — private-visibility enforcement on read, migrate-unify retag scoping, and Hermes plugin/bank identity consolidation (#1260, #1262, #1245).
+- **CLI** — editable-install `hal0 update` refusal, footgun confirmation gates, and command consolidation (#1274).
+
+### Changed
+- **comfyui**, **doctor**, and **agent** helpers resolve bundled scripts and assets FHS-aware so they work on packaged (non-editable) installs (#1286, #1284, #1285).
+- Docs — ADR/Cognee→Hindsight sweep, `hal0/chat`→`hal0/agent` alias, fresh-box first-run journey, and a loud LAN-only bind warning (#1280, #1276, #1275).
+
 ## [0.9.7.1] — 2026-07-11
 
 Hotfix for a fresh-install blocker — Hermes never auto-provisioned on a clean
