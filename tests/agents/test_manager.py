@@ -212,6 +212,75 @@ def test_uninstall_when_not_installed_is_noop(
     assert stub_drivers["pi-coder"].uninstalls == 1
 
 
+# ── install: coexistence (ADR-0004 §2 amendment — hermes + turnstone) ────────
+
+
+def test_hermes_and_turnstone_coexist_without_switch(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    # Both are in COEXISTING_AGENTS — installing turnstone alongside hermes
+    # needs no --switch and must NOT tear hermes down.
+    manager.install("hermes")
+    rec = manager.install("turnstone")
+    assert rec.name == "turnstone"
+    assert stub_drivers["hermes"].uninstalls == 0
+    assert set(manager.installed_names()) == {"hermes", "turnstone"}
+
+
+def test_turnstone_over_pi_coder_requires_switch(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    # pi-coder is NOT coexisting, so single-pick still bites.
+    manager.install("pi-coder")
+    with pytest.raises(AgentAlreadyInstalledError) as exc:
+        manager.install("turnstone")
+    assert "pi-coder" in str(exc.value)
+    assert "turnstone" in str(exc.value)
+    assert stub_drivers["turnstone"].installs == []
+    assert manager.installed_names() == ["pi-coder"]
+
+
+def test_turnstone_over_pi_coder_with_switch_clears_pi_coder(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    manager.install("pi-coder")
+    rec = manager.install("turnstone", switch=True)
+    assert rec.name == "turnstone"
+    assert stub_drivers["pi-coder"].uninstalls == 1
+    assert manager.installed_names() == ["turnstone"]
+
+
+def test_pi_coder_over_coexisting_pair_clears_both_with_switch(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    # A non-coexisting agent installed over the hermes+turnstone pair must
+    # tear DOWN both (they both block it) under --switch.
+    manager.install("hermes")
+    manager.install("turnstone")
+    rec = manager.install("pi-coder", switch=True)
+    assert rec.name == "pi-coder"
+    assert stub_drivers["hermes"].uninstalls == 1
+    assert stub_drivers["turnstone"].uninstalls == 1
+    assert manager.installed_names() == ["pi-coder"]
+
+
+def test_pi_coder_over_coexisting_pair_without_switch_raises(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    manager.install("hermes")
+    manager.install("turnstone")
+    with pytest.raises(AgentAlreadyInstalledError):
+        manager.install("pi-coder")
+    # Neither incumbent torn down.
+    assert stub_drivers["hermes"].uninstalls == 0
+    assert stub_drivers["turnstone"].uninstalls == 0
+
+
 def test_uninstall_unknown_agent_raises(manager: AgentManager) -> None:
     with pytest.raises(AgentNotFoundError):
         manager.uninstall("not-real")

@@ -42,6 +42,48 @@ def override_text() -> str:
     return _HERMES_OVERRIDE.read_text()
 
 
+_TURNSTONE_OVERRIDE = (
+    _REPO_ROOT / "installer" / "systemd" / "hal0-agent@turnstone.service.d" / "override.conf"
+)
+
+
+@pytest.fixture(scope="module")
+def turnstone_override_text() -> str:
+    assert _TURNSTONE_OVERRIDE.exists(), f"missing turnstone override at {_TURNSTONE_OVERRIDE}"
+    return _TURNSTONE_OVERRIDE.read_text()
+
+
+class TestTurnstoneOverride:
+    """The turnstone drop-in wires config/home/secrets for the shared template."""
+
+    def test_pins_turnstone_config_and_home(self, turnstone_override_text: str) -> None:
+        assert re.search(
+            r'^Environment="TURNSTONE_HOME=/var/lib/hal0/\.turnstone"',
+            turnstone_override_text,
+            re.MULTILINE,
+        )
+        assert re.search(
+            r'^Environment="TURNSTONE_CONFIG=/var/lib/hal0/\.turnstone/config\.toml"',
+            turnstone_override_text,
+            re.MULTILINE,
+        )
+
+    def test_sources_secrets_env_non_fatally(self, turnstone_override_text: str) -> None:
+        # Leading `-` so a missing secrets file doesn't brick first boot.
+        assert re.search(
+            r"^EnvironmentFile=-/var/lib/hal0/secrets/agents/turnstone\.env",
+            turnstone_override_text,
+            re.MULTILINE,
+        )
+
+    def test_render_context_execstartpre_non_fatal(self, turnstone_override_text: str) -> None:
+        assert re.search(
+            r"^ExecStartPre=-/usr/local/bin/hal0-agent %i render-context",
+            turnstone_override_text,
+            re.MULTILINE,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Dependency wiring
 # ---------------------------------------------------------------------------
