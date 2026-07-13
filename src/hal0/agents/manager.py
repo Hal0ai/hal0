@@ -85,9 +85,18 @@ HermesNotHal0AwareError = HermesUpstreamMissingError
 
 # ── Bundled catalog ──────────────────────────────────────────────────────────
 
-BUNDLED_AGENTS: tuple[str, ...] = ("pi-coder", "opencode", "hermes")
+BUNDLED_AGENTS: tuple[str, ...] = ("pi-coder", "opencode", "hermes", "turnstone")
 """Canonical names for bundled agents. Adding to this list requires a
 matching driver module + ``installer/agents/<name>.sh``."""
+
+# Agents that may coexist with any other bundled agent — they run their own
+# service/binary on distinct ports and don't contend for the single-pick
+# "primary" role (ADR-0004 §2 amendment). hermes hosts the dashboard brain
+# (:9119); turnstone is an independent orchestrator on loopback :9129.
+# Anything NOT in this set still participates in single-pick (one at a time).
+# Keeping the set explicit makes adding a coexisting agent a one-line,
+# reviewable change.
+COEXISTING_AGENTS: frozenset[str] = frozenset({"hermes", "turnstone"})
 
 
 # Marker file the Hermes provisioner stamps into ``$HERMES_HOME`` to
@@ -104,7 +113,7 @@ _HAL0_MANAGED_MARKER = ".hal0-managed"
 # registry must agree or status/list report a dead path and uninstall
 # rmtree's the wrong tree (#453). Value is the home subpath under
 # ``var_lib()``. Agents not listed here keep the per-name layout.
-_AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes"}
+_AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes", "turnstone": ".turnstone"}
 
 # Agents that install by shelling out to ``installer/agents/<name>.sh``
 # (see :func:`installer_script_path`). Hermes provisions through a
@@ -180,6 +189,10 @@ def _driver_for(name: str) -> AgentDriver:
         from hal0.agents.hermes import HermesDriver
 
         return HermesDriver()
+    if name == "turnstone":
+        from hal0.agents.turnstone import TurnstoneDriver
+
+        return TurnstoneDriver()
     raise AgentNotFoundError(
         f"unknown bundled agent {name!r}. Known: {', '.join(BUNDLED_AGENTS)}",
     )
@@ -282,12 +295,25 @@ class AgentManager:
             # Already installed — return the existing record. Idempotent.
             return self._read_record(name)
 
-        if not current:
+        # Single-pick, amended (ADR-0004 §2): a new agent only conflicts with
+        # an incumbent when the two can't coexist. hermes + turnstone each run
+        # their own service on a distinct loopback port and don't contend for
+        # the single "primary" role, so both may be installed at once. For
+        # every other pairing the historical one-at-a-time behaviour holds —
+        # ``blocking`` == ``current`` whenever ``name`` isn't coexisting.
+        blocking = [
+            existing
+            for existing in current
+            if not (name in COEXISTING_AGENTS and existing in COEXISTING_AGENTS)
+        ]
+
+        if not blocking:
+            # Fresh install OR a coexisting sibling join — nothing to swap.
             return self._install_and_seed(name, bearer_token=bearer_token)
 
         if not switch:
             raise AgentAlreadyInstalledError(
-                f"agent {current[0]!r} already installed; "
+                f"agent {blocking[0]!r} already installed; "
                 f"pass switch=True to atomically swap to {name!r}",
             )
 
@@ -298,11 +324,12 @@ class AgentManager:
         # a working agent for a swap that could never have succeeded.
         self._verify_installable(name)
 
-        # Atomic swap: tear down the existing one first. If the
+        # Atomic swap: tear down the blocking agent(s) first. If the
         # tear-down fails we surface the error and DO NOT proceed
         # — better to leave the old one installed than land in a
-        # half-state.
-        for existing in current:
+        # half-state. Coexisting siblings (not in ``blocking``) are
+        # untouched.
+        for existing in blocking:
             self.uninstall(existing)
 
         try:
@@ -310,11 +337,11 @@ class AgentManager:
         except Exception:
             # The precondition check can't catch every failure mode
             # (the script can exist and still fail once actually run).
-            # Best-effort restore the incumbent(s) so the operator
-            # isn't left with NO agent installed; rollback failures are
-            # swallowed — the original error is what the caller needs
-            # to see and act on.
-            for existing in current:
+            # Best-effort restore the torn-down incumbent(s) so the
+            # operator isn't left with NO agent installed; rollback
+            # failures are swallowed — the original error is what the
+            # caller needs to see and act on.
+            for existing in blocking:
                 with contextlib.suppress(Exception):
                     self._install_and_seed(existing, bearer_token=bearer_token)
             raise

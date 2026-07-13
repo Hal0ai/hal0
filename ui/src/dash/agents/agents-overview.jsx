@@ -79,6 +79,37 @@ function _piCoderIdentity() {
   };
 }
 
+// ── static (curated) identity for the live Turnstone card ────────────
+// Turnstone is a self-hosted orchestration platform running its own server
+// on loopback :9129; it routes every model through the hal0-api gateway and
+// mounts hal0-memory + hal0-admin over MCP. Like Pi it has no dedicated
+// backing slot — `model` is the default gateway virtual its config maps to.
+function _turnstoneIdentity() {
+  return {
+    id: "turnstone",
+    name: "Turnstone",
+    model: "hal0/agent",
+    role: "tool-using orchestration · judged · multi-workstream",
+    rarity: 3,
+    el: "#4fa9c9",
+    elGlow: "rgba(79,169,201,0.18)",
+    logo: (window.__hal0AgentArt && window.__hal0AgentArt.turnstone) || "",
+    logoScale: 0.7,
+    abilities: [
+      { name: "Local Routing", cost: 1, desc: "Maps every live hal0 slot to a model alias — all inference stays on the box.", pow: "70" },
+      { name: "Intent Judge", cost: 2, desc: "An LLM grades every tool call for risk before it runs; destructive acts gate for approval.", pow: "80" },
+      { name: "Workstreams", cost: 3, desc: "Runs parallel tool-using sessions with its own memory bank and MCP tools.", pow: "85" },
+    ],
+    skills: [
+      { l: "mcp tools", key: true },
+      { l: "memory", key: true },
+      { l: "judge · approvals", key: true },
+      { l: "web · search" },
+      { l: "server · sse" },
+    ],
+  };
+}
+
 // ── roadmap (coming-soon) cards — curated dummy content ─────────────
 function _lockedRoster() {
   const art = window.__hal0AgentArt || {};
@@ -184,6 +215,13 @@ function AgentsOverview() {
   const { cls: piStatusCls, label: piStatusLabel } = _derive(piRec, null);
   const piHealth = _health(null);
 
+  // Turnstone runs its own server (loopback :9129), not a hal0 backing slot —
+  // like Pi, status comes off the AgentRecord alone and health renders "—".
+  const turnstoneRec =
+    agents.find((a) => a.name === "turnstone" || a.id === "turnstone") || null;
+  const { cls: tsStatusCls, label: tsStatusLabel } = _derive(turnstoneRec, null);
+  const tsHealth = _health(null);
+
   const onRestart = () => {
     if (!restart || restartState === "busy") return;
     setRestartState("busy");
@@ -209,9 +247,9 @@ function AgentsOverview() {
       <div className="ao-head">
         <div className="ao-eye">hal0 · agent library</div>
         <p className="ao-sub">
-          Every agent in the runtime as a collectible card. <b>Hermes</b> and <b>Pi</b> are
-          live — their cards stream real install/endpoint status and flip to abilities,
-          skills, and quick actions. The rest are on the roadmap.
+          Every agent in the runtime as a collectible card. <b>Hermes</b>, <b>Pi</b>, and
+          <b> Turnstone</b> are live — their cards stream real install/endpoint status and
+          flip to abilities, skills, and quick actions. The rest are on the roadmap.
         </p>
         <div className="ao-legend">
           <span className="ao-lz"><span className="d serving" />Serving <span className="k">· live, wired</span></span>
@@ -237,6 +275,14 @@ function AgentsOverview() {
             health={piHealth}
             statusCls={piStatusCls}
             statusLabel={piStatusLabel}
+          />
+        )}
+        {LiveAgentCard && (
+          <LiveAgentCard
+            agent={_turnstoneIdentity()}
+            health={tsHealth}
+            statusCls={tsStatusCls}
+            statusLabel={tsStatusLabel}
           />
         )}
         {LockedAgentCard && _lockedRoster().map((a) => <LockedAgentCard key={a.id} agent={a} />)}
