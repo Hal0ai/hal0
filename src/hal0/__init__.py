@@ -4,7 +4,13 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 try:
-    __version__ = _pkg_version("hal0")
+    # Distribution name is "hal0ai" (PyPI rejects "hal0"); the fallback to
+    # "hal0" covers a transitional editable install whose .dist-info still
+    # carries the old name until it's re-`pip install`-ed.
+    try:
+        __version__ = _pkg_version("hal0ai")
+    except PackageNotFoundError:
+        __version__ = _pkg_version("hal0")
 except PackageNotFoundError:
     # Importing the source tree without `pip install`-ing it (e.g. a
     # `python -c "import hal0"` from a repo clone) bypasses metadata.

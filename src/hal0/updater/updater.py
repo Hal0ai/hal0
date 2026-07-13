@@ -650,8 +650,9 @@ def _looks_like_hal0_install(path: Path) -> bool:
     """Heuristic: does ``path`` look like a prior hal0 tarball extraction?
 
     A safe quarantine candidate has either a top-level ``VERSION`` file
-    or a ``pyproject.toml`` whose ``name`` is ``hal0``. We deliberately
-    refuse to touch unrelated non-empty directories.
+    or a ``pyproject.toml`` whose ``name`` is ``hal0ai`` (or the legacy
+    pre-rename ``hal0``). We deliberately refuse to touch unrelated
+    non-empty directories.
     """
     if (path / "VERSION").is_file():
         return True
@@ -661,7 +662,10 @@ def _looks_like_hal0_install(path: Path) -> bool:
             head = pp.read_text(encoding="utf-8", errors="replace")[:512]
         except OSError:
             return False
-        return 'name = "hal0"' in head or "name = 'hal0'" in head
+        return any(
+            marker in head
+            for marker in ('name = "hal0ai"', "name = 'hal0ai'", 'name = "hal0"', "name = 'hal0'")
+        )
     return False
 
 

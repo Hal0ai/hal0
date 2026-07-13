@@ -2,8 +2,14 @@
 requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
+# NOTE: the DISTRIBUTION name is "hal0ai" (what `pip install` fetches).
+# PyPI rejects "hal0" under its name-similarity guard (too close to the
+# existing "halo" project). The import package stays `hal0` (see
+# [tool.hatch.build.targets.wheel] below) and the console scripts stay
+# `hal0` / `hal0-agent`, so only the pip-install name differs. Anything
+# that resolves this project by distribution name must use "hal0ai".
 [project]
-name = "hal0"
+name = "hal0ai"
 version = "0.9.7.3"
 description = "Open-source home AI inference platform"
 readme = "README.md"
