@@ -99,7 +99,8 @@ def test_gpu_slot_on_old_toolbox_migrates_to_rocmfpx(tmp_hal0_home: str) -> None
     """A GPU slot pinned to the old vulkan toolbox (now a stale former-default
     ref) migrates to the universal rocmfpx runner."""
     _write_slot(
-        "g", f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "g"\nbackend = "vulkan"\ndevice = "gpu-vulkan"\n'
+        "g",
+        f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "g"\nbackend = "vulkan"\ndevice = "gpu-vulkan"\n',
     )
     assert retag_stale_slot_images() == 1
     assert _image_of("g") == DEFAULT_ROCMFPX_IMAGE
@@ -108,8 +109,6 @@ def test_gpu_slot_on_old_toolbox_migrates_to_rocmfpx(tmp_hal0_home: str) -> None
 def test_cpu_slot_on_toolbox_pin_is_noop(tmp_hal0_home: str) -> None:
     """A CPU-only slot already on the lean vulkan toolbox resolves back to
     itself → no rewrite, not counted (rocmfpx is wasteful for CPU)."""
-    _write_slot(
-        "c", f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "c"\ndevice = "cpu"\n'
-    )
+    _write_slot("c", f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "c"\ndevice = "cpu"\n')
     assert retag_stale_slot_images() == 0
     assert _image_of("c") == FALLBACK_VULKAN_IMAGE
