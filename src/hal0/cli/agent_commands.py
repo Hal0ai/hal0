@@ -232,7 +232,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
 # ── Turnstone foreground install ─────────────────────────────────────────────
 
 _TURNSTONE_AGENT_TREES = (
-    "/var/lib/hal0/bin",
+    "/var/lib/hal0/venvs/turnstone",
     "/var/lib/hal0/.turnstone",
     "/var/lib/hal0/agents/turnstone",
     "/var/lib/hal0/state/agents/turnstone",

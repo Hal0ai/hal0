@@ -81,15 +81,16 @@ _BUILTIN_AGENT_TYPES: dict[str, str] = {
 # its server on 9129 (mirrors the convention; dodges hal0-api's :8080).
 _DEFAULT_PORTS: dict[str, int] = {"hermes": 9119, "turnstone": 9129}
 
-# Canonical turnstone server binary search path — the native install lays
-# the binary under /var/lib/hal0/bin with a /usr/local/bin shim.
+# Canonical turnstone-server search path. Turnstone is a PyPI package installed
+# into a managed venv (like hermes-agent), so the console script lives at
+# <venv>/bin/turnstone-server; the /usr/local/bin entry is hal0's shim.
 _TURNSTONE_SERVER_BINS: tuple[Path, ...] = (
+    Path("/var/lib/hal0/venvs/turnstone/bin/turnstone-server"),
     Path("/usr/local/bin/turnstone-server"),
-    Path("/var/lib/hal0/bin/turnstone-server"),
-    # Fall back to the plain CLI in server mode if the server binary wasn't
-    # shipped separately (some builds fold it into one multi-call binary).
+    # Fall back to the plain CLI in server mode if the server entry point is
+    # ever folded into the single `turnstone` console script.
+    Path("/var/lib/hal0/venvs/turnstone/bin/turnstone"),
     Path("/usr/local/bin/turnstone"),
-    Path("/var/lib/hal0/bin/turnstone"),
 )
 
 

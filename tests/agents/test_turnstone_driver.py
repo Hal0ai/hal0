@@ -71,28 +71,35 @@ def test_uninstall_removes_external_artifacts(
 
     # Redirect the module-default artifact paths into tmp so we don't touch
     # the real /usr/local/bin or /var/lib.
-    bin_path = tmp_path / "bin" / "turnstone"
+    venv = tmp_path / "venvs" / "turnstone"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "turnstone").write_text("x")
     shim = tmp_path / "shim" / "turnstone"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("x")
+    server_shim = shim.with_name("turnstone-server")
+    server_shim.write_text("x")
     db = tmp_path / "db" / "turnstone.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("x")
     home = tmp_path / "home"
-    for p in (bin_path, shim, db):
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("x")
     home.mkdir()
     (home / "config.toml").write_text("x")
-    monkeypatch.setattr(drv, "_MANAGED_BIN", bin_path)
+    monkeypatch.setattr(drv, "_VENV", venv)
     monkeypatch.setattr(drv, "_CLI_SHIM", shim)
 
-    # provision.json records the real paths → uninstall reads them.
-    prov = {"binary_path": str(bin_path), "db_path": str(db), "turnstone_home": str(home)}
+    # provision.json records the db + home → uninstall reads them; the venv +
+    # shims come from the module constants.
+    prov = {"db_path": str(db), "turnstone_home": str(home)}
     monkeypatch.setattr(d, "_load_provision", lambda: prov)
 
     d.install()  # create the env file so uninstall has something to remove
     assert d._env_file_path().exists()
 
     d.uninstall()
-    assert not bin_path.exists()
+    assert not venv.exists()  # whole managed venv removed
     assert not shim.exists()
+    assert not server_shim.exists()
     assert not db.exists()
     assert not home.exists()
     assert not d._env_file_path().exists()

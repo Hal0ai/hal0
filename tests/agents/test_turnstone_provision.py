@@ -21,17 +21,23 @@ from hal0.agents.turnstone_provision import TurnstoneIO, TurnstoneState
 
 
 def _slots() -> list[dict]:
+    # Only type=="llm" slots with a model_id are chat backends. The rest
+    # (embed/rerank/tts/etc.) must NOT be mapped as models — this mirrors the
+    # real /api/slots shape that the on-box test surfaced.
     return [
-        {"name": "agent", "state": "ready", "context_length": 32768},
-        {"name": "code", "state": "ready"},
-        {"name": "embed-1", "type": "embedding"},
-        {"name": "rr", "type": "rerank"},
+        {"name": "agent", "type": "llm", "model_id": "m-agent", "context_length": 32768},
+        {"name": "code", "type": "llm", "model_id": "m-code"},
+        {"name": "embed", "type": "embedding", "model_id": "m-e"},
+        {"name": "rerank", "type": "rerank", "model_id": "m-r"},
+        {"name": "tts", "type": "tts"},
+        {"name": "vision", "type": "image", "model_id": "m-v"},
     ]
 
 
 def test_model_blocks_maps_chat_slots_only() -> None:
-    blocks = tp._model_blocks(_slots(), {"hal0/code": 16384}, api_base="http://h:8080")
-    assert set(blocks) == {"agent", "code"}  # embed/rerank skipped
+    # contexts are keyed by alias (== the /v1/models id), matching _fetch_model_contexts.
+    blocks = tp._model_blocks(_slots(), {"code": 16384}, api_base="http://h:8080")
+    assert set(blocks) == {"agent", "code"}  # embed/rerank/tts/vision excluded
     assert blocks["agent"]["context_window"] == 32768
     assert blocks["code"]["context_window"] == 16384
     assert blocks["agent"]["base_url"] == "http://h:8080/v1"
@@ -98,11 +104,16 @@ def tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(tp, "INSTALL_SEED_PATH", tmp_path / "etc" / "turnstone.toml")
     monkeypatch.setattr(tp, "DRIVER_ENV_PATH", tmp_path / "etc" / "turnstone.env")
     monkeypatch.setattr(tp, "SECRETS_ENV_PATH", tmp_path / "secrets" / "turnstone.env")
-    bin_path = tmp_path / "bin" / "turnstone"
-    bin_path.parent.mkdir(parents=True)
-    bin_path.write_text("#!/bin/sh\necho turnstone 9.9\n")
-    bin_path.chmod(0o755)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    bin_path = venv / "bin" / "turnstone"
+    server = venv / "bin" / "turnstone-server"
+    for p in (bin_path, server):
+        p.write_text("#!/bin/sh\necho turnstone 9.9\n")
+        p.chmod(0o755)
+    monkeypatch.setattr(tp, "VENV", venv)
     monkeypatch.setattr(tp, "MANAGED_BIN", bin_path)
+    monkeypatch.setattr(tp, "SERVER_BIN", server)
     monkeypatch.setattr(tp, "CLI_SHIM", bin_path)
     return tmp_path
 
@@ -115,7 +126,7 @@ def _fake_io() -> TurnstoneIO:
         return _slots()
 
     def fetch_ctx() -> dict:
-        return {"hal0/code": 16384}
+        return {"code": 16384}  # keyed by alias, like _fetch_model_contexts
 
     def probe(url: str, **k: object) -> dict:
         return {"ok": True, "tools": [1, 2, 3]}

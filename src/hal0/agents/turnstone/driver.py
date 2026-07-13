@@ -1,11 +1,12 @@
 """Turnstone bundled-agent driver (ADR-0004 §6, sibling of hermes).
 
-Turnstone is a Go-based agent-orchestration platform installed as a
-native host binary. Like hermes, the heavy provisioning (binary pin +
-config.toml render + MCP/model/honcho wiring) is a multi-minute
-foreground job that can't run inside a single HTTP request, so it lives
-in the bootstrap pipeline :mod:`hal0.agents.turnstone_provision`, driven
-by ``hal0 agent install turnstone``.
+Turnstone is a PyPI package (console scripts ``turnstone`` +
+``turnstone-server``) installed into a managed venv, like hermes-agent.
+The heavy provisioning (venv + pip install + config.toml render +
+MCP/model/memory wiring) is a multi-minute foreground job that can't run
+inside a single HTTP request, so it lives in the bootstrap pipeline
+:mod:`hal0.agents.turnstone_provision`, driven by
+``hal0 agent install turnstone``.
 
 This driver is the THIN API/dashboard path:
 
@@ -36,8 +37,12 @@ from hal0.config import paths as _paths
 
 # Keep in sync with :mod:`hal0.agents.turnstone_provision`. Mirrored as plain
 # constants so the driver stays cheap and doesn't import the heavy provisioner
-# at driver-import time (same posture as the hermes driver).
-_MANAGED_BIN = Path("/var/lib/hal0/bin/turnstone")
+# at driver-import time (same posture as the hermes driver). Turnstone is a
+# PyPI package installed into a managed venv (like hermes-agent), NOT a Go
+# binary — the console scripts live under ``<venv>/bin``.
+_VENV = Path("/var/lib/hal0/venvs/turnstone")
+_MANAGED_BIN = _VENV / "bin" / "turnstone"
+_SERVER_BIN = _VENV / "bin" / "turnstone-server"
 _CLI_SHIM = Path("/usr/local/bin/turnstone")
 _SERVER_HOST = "127.0.0.1"
 _SERVER_PORT = 9129
@@ -45,8 +50,8 @@ _UNIT = "hal0-agent@turnstone.service"
 
 
 def _probe_provisioned() -> bool:
-    """True iff the managed turnstone binary (or its shim) is installed."""
-    return _MANAGED_BIN.exists() or _CLI_SHIM.exists()
+    """True iff turnstone is installed in the managed venv (or shimmed)."""
+    return _SERVER_BIN.exists() or _MANAGED_BIN.exists() or _CLI_SHIM.exists()
 
 
 def _probe_systemd_unit_active(unit: str) -> bool:
@@ -161,18 +166,19 @@ class TurnstoneDriver(AgentDriver):
     def _external_artifacts(self, provision: dict[str, Any] | None) -> list[Path]:
         """The out-of-triad paths uninstall must remove.
 
-        Prefers the recorded ``binary_path`` / ``db_path`` / ``turnstone_home``
-        from provision.json (honours an operator override), falling back to the
-        module defaults so a missing/corrupt checkpoint still cleans the
-        canonical locations.
+        The managed venv (~hundreds of MiB, like hermes's), the SQLite DB, the
+        turnstone home, and the two console-script shims. Prefers the recorded
+        ``db_path`` / ``turnstone_home`` from provision.json (honours an
+        operator override), falling back to the module defaults so a
+        missing/corrupt checkpoint still cleans the canonical locations.
         """
         prov = provision or {}
-        bin_path = Path(prov.get("binary_path") or _MANAGED_BIN)
         db_path = Path(
             prov.get("db_path") or (_paths.var_lib() / "agents" / self.name / "turnstone.db")
         )
         home = Path(prov.get("turnstone_home") or (_paths.var_lib() / ".turnstone"))
-        return [_CLI_SHIM, bin_path, db_path, home]
+        server_shim = _CLI_SHIM.with_name("turnstone-server")
+        return [_CLI_SHIM, server_shim, _VENV, db_path, home]
 
     def _write_env_file(self, *, bearer_token: str | None) -> None:
         api_base = os.environ.get("HAL0_API_URL", "http://127.0.0.1:8080").rstrip("/")

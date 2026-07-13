@@ -1,26 +1,28 @@
 """Turnstone bundled-agent bootstrap pipeline.
 
-Turnstone (github.com/turnstonelabs/turnstone) is a self-hosted,
-Go-based agent-orchestration platform. It does NOT host models — it
-consumes an OpenAI-compatible backend (``[api] base_url``), mounts
-external tools over MCP, and has its own memory + LLM-judge layer. hal0
-already exposes exactly that surface: the hal0-api gateway at
+Turnstone (github.com/turnstonelabs/turnstone) is a self-hosted
+agent-orchestration platform distributed as a **Python package on PyPI**
+(console scripts ``turnstone`` + ``turnstone-server``). It does NOT host
+models — it consumes an OpenAI-compatible backend (``[api] base_url``),
+mounts external tools over MCP, and has its own memory + LLM-judge layer.
+hal0 already exposes exactly that surface: the hal0-api gateway at
 ``/v1`` plus the ``hal0-memory`` / ``hal0-admin`` MCP mounts and Honcho
 memory. This pipeline wires turnstone onto those seams.
 
 Modeled on :mod:`hal0.agents.hermes_provision` but built on the shared,
 agent-agnostic :mod:`hal0.agents.provision_engine` (checkpointing,
 skip-if-ok, ``--repair``, fatal-abort, needs-graph validation). The
-hal0-facing helpers (slot fetch, MCP probe/call) are reused by import
-from ``hermes_provision`` rather than duplicated.
+hal0-facing helpers (slot fetch, chat-slot classification, MCP
+probe/call) are reused by import from ``hermes_provision``.
 
-Deploy shape (this pass): the ``turnstone`` Go binary is installed on
-the host (``/var/lib/hal0/bin/turnstone`` + a ``/usr/local/bin/turnstone``
-shim) and run in server mode bound loopback on :9129 by
-``hal0-agent@turnstone.service`` — the :9129 choice mirrors hermes's
-:9119 convention and dodges the :8080 collision with hal0-api. Memory is
-SQLite (no Postgres coupling); the Postgres-backed multi-node server
-stack is a documented follow-up.
+Deploy shape (this pass): turnstone is ``pip install``-ed into a managed
+venv at ``/var/lib/hal0/venvs/turnstone`` (exactly like hermes-agent),
+with ``turnstone`` / ``turnstone-server`` shimmed onto PATH.
+``hal0-agent@turnstone.service`` runs ``turnstone-server`` bound loopback
+on :9129 — the :9129 choice mirrors hermes's :9119 convention and dodges
+the :8080 collision with hal0-api. Memory is SQLite (no Postgres
+coupling); the Postgres-backed multi-node server stack is a documented
+follow-up.
 
 State lives at ``/var/lib/hal0/state/agents/turnstone/provision.json`` —
 outside ``TURNSTONE_HOME`` so an upstream ``turnstone`` reset can't
@@ -46,15 +48,12 @@ from hal0.agents import provision_engine as engine
 from hal0.agents.hermes_provision import (
     HAL0_API_URL,
     MIN_FREE_GIB,
+    _collect_chat_slots,
     _fetch_model_contexts,
     _fetch_slots,
     _http_get,
-    _is_ready,
     _mcp_memory_call,
     _probe_mcp_server,
-    _slot_alias,
-    _slot_context_length,
-    _slot_kind,
     path_is_writable,
 )
 from hal0.agents.provision_engine import (
@@ -77,7 +76,13 @@ TURNSTONE_HOME = Path("/var/lib/hal0/.turnstone")
 TURNSTONE_CONFIG_PATH = TURNSTONE_HOME / "config.toml"
 MCP_SERVERS_JSON = TURNSTONE_HOME / "mcp-servers.json"
 PERSONA_PATH = TURNSTONE_HOME / "persona.txt"
-MANAGED_BIN = Path("/var/lib/hal0/bin/turnstone")
+# Turnstone is a PyPI package (console scripts `turnstone` + `turnstone-server`),
+# so hal0 installs it into a dedicated managed venv exactly like hermes-agent —
+# NOT as a standalone Go binary. MANAGED_BIN is the CLI entry point;
+# SERVER_BIN is what the systemd unit runs.
+VENV = Path("/var/lib/hal0/venvs/turnstone")
+MANAGED_BIN = VENV / "bin" / "turnstone"
+SERVER_BIN = VENV / "bin" / "turnstone-server"
 CLI_SHIM = Path("/usr/local/bin/turnstone")
 DATA_DIR = Path("/var/lib/hal0/agents/turnstone")
 SQLITE_DB = DATA_DIR / "turnstone.db"
@@ -98,8 +103,12 @@ MANAGED_MARKER = ".hal0-managed"
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 9129
 
-# Honcho / hal0-memory identity for turnstone's own memory bank.
+# Honcho / hal0-memory identity for turnstone's own memory bank. NAMESPACE is
+# what turnstone's OWN config references; the hal0-memory REST shim groups
+# identity cards by ``dataset`` (the `agents` dataset, matching hermes) with a
+# required ``text`` field — NOT namespace/content.
 NAMESPACE = f"private:{AGENT_ID}"
+MEMORY_DATASET = "agents"
 # RESERVED — the future hal0-brain re-home identity. Documented so a later
 # pass can move the dashboard steward onto turnstone with a one-line swap;
 # NOT registered this pass (hal0-brain stays on hermes → hermes__hal0-brain).
@@ -189,32 +198,31 @@ def _model_blocks(
     *,
     api_base: str,
 ) -> dict[str, dict[str, Any]]:
-    """Build the ``[models.<alias>]`` table from live chat slots.
+    """Build the ``[models.<alias>]`` table from live CHAT slots.
 
-    Skips embed/rerank/image slots (they aren't chat backends). Each block
-    points at the hal0-api gateway virtual for that alias so turnstone routes
-    through the same stable ``/v1`` surface regardless of which physical slot
-    is loaded. Context window comes from the slot, then ``/v1/models``.
+    Delegates classification to hermes's :func:`_collect_chat_slots`, which
+    keeps only ``type=="llm"`` slots carrying a model_id — so embed / rerank /
+    tts / stt / image / vision slots (and the ``hal0`` gateway virtual) are
+    excluded, not mapped as chat models. Each block points at the hal0-api
+    gateway ``/v1`` so turnstone routes through the stable surface regardless
+    of which physical slot is loaded.
     """
     v1 = f"{api_base}/v1"
     blocks: dict[str, dict[str, Any]] = {}
-    for slot in slots:
-        kind = _slot_kind(slot)
-        if kind in {"embedding", "embed", "rerank", "reranker", "image", "img", "tts", "stt"}:
-            continue
-        alias = _slot_alias(slot)
-        ctx = _slot_context_length(slot) or contexts.get(alias) or contexts.get(f"hal0/{alias}")
+    for chat in _collect_chat_slots(slots, contexts):
+        alias = chat["alias"]
         block: dict[str, Any] = {
             "name": f"hal0/{alias}",
             "provider": "openai",
             "base_url": v1,
         }
+        ctx = chat.get("context_length")
         if ctx:
             block["context_window"] = int(ctx)
         block["capabilities"] = {"supports_vision": False, "supports_web_search": False}
         blocks[alias] = block
-    # Always guarantee the default anchor exists even if no slot is loaded yet,
-    # so config.toml is valid on a fresh box (model_automap re-applies later).
+    # Always guarantee the default anchor exists even if no chat slot is loaded
+    # yet, so config.toml is valid on a fresh box (model_automap re-applies).
     if _DEFAULT_MODEL_ALIAS not in blocks:
         blocks[_DEFAULT_MODEL_ALIAS] = {
             "name": f"hal0/{_DEFAULT_MODEL_ALIAS}",
@@ -406,7 +414,7 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 
 
 def _phase_install(ctx: PhaseContext) -> PhaseResult:
-    """Run installer/agents/turnstone.sh to pin the Go binary + shim."""
+    """Run installer/agents/turnstone.sh to pip-install turnstone into the venv."""
     io: TurnstoneIO = ctx.io
     script = installer_script()
     if not script.is_file():
@@ -415,7 +423,7 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             reason=f"installer script missing at {script}",
         )
     env = os.environ.copy()
-    env["HAL0_TURNSTONE_BIN"] = str(MANAGED_BIN)
+    env["HAL0_TURNSTONE_VENV"] = str(VENV)
     env["HAL0_TURNSTONE_SHIM"] = str(CLI_SHIM)
     try:
         io.run(["bash", str(script)], env=env, check=True)  # nosec B603 B607
@@ -424,11 +432,12 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             PhaseStatus.FAIL,
             reason=f"turnstone install failed ({type(exc).__name__}: {exc})",
         )
-    installed = MANAGED_BIN.exists() or CLI_SHIM.exists()
+    # The server binary is what the unit runs; the CLI is what env_probe checks.
+    installed = SERVER_BIN.exists() or MANAGED_BIN.exists()
     return PhaseResult(
         PhaseStatus.OK if installed else PhaseStatus.FAIL,
-        details={"binary": str(MANAGED_BIN), "shim": str(CLI_SHIM)},
-        reason=None if installed else "installer ran but no binary landed",
+        details={"venv": str(VENV), "cli": str(MANAGED_BIN), "server": str(SERVER_BIN)},
+        reason=None if installed else "installer ran but no turnstone binary landed in the venv",
     )
 
 
@@ -628,7 +637,7 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
         f"turnstone is a hal0-managed tool-using agent. namespace={NAMESPACE}. "
         f"model backend={_api_base()}/v1. server={SERVER_HOST}:{SERVER_PORT}."
     )
-    result = _memory_call(io, "memory_add", {"content": card, "namespace": NAMESPACE})
+    result = _memory_call(io, "memory_add", {"text": card, "dataset": MEMORY_DATASET})
     ok = bool(result.get("ok"))
     return PhaseResult(
         PhaseStatus.OK,
@@ -645,8 +654,7 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
     io: TurnstoneIO = ctx.io
     slots = io.fetch_slots()
     contexts = io.fetch_model_contexts()
-    live = [s for s in slots if _is_ready(s)]
-    blocks = _model_blocks(live or slots, contexts, api_base=_api_base())
+    blocks = _model_blocks(slots, contexts, api_base=_api_base())
 
     # Merge into the existing config.toml (preserve operator keys).
     import tomllib
@@ -666,7 +674,7 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
     _atomic_write(TURNSTONE_CONFIG_PATH, _dumps_toml(cfg))
     return PhaseResult(
         PhaseStatus.OK,
-        details={"model_aliases": sorted(blocks.keys()), "live_slots": len(live)},
+        details={"model_aliases": sorted(blocks.keys()), "chat_slots": len(blocks)},
     )
 
 
@@ -693,7 +701,7 @@ def _phase_smoke_tests(ctx: PhaseContext) -> PhaseResult:
     checks["gateway_models_reachable"] = io.http_get(f"{_api_base()}/v1/models") == 200
 
     # memory MCP round-trip.
-    mem = _memory_call(io, "memory_search", {"query": "turnstone", "namespace": NAMESPACE})
+    mem = _memory_call(io, "memory_search", {"query": "turnstone", "dataset": MEMORY_DATASET})
     checks["memory_mcp_ok"] = bool(mem.get("ok"))
     if not mem.get("ok"):
         checks["memory_mcp_error"] = mem.get("error")
@@ -716,7 +724,7 @@ def _phase_self_report(ctx: PhaseContext) -> PhaseResult:
         f"turnstone bootstrap complete. version={cast(TurnstoneState, ctx.state).turnstone_version}. "
         f"model backend={_api_base()}/v1. smoke_failures={len(fails)}."
     )
-    _memory_call(io, "memory_add", {"content": summary, "namespace": NAMESPACE})
+    _memory_call(io, "memory_add", {"text": summary, "dataset": MEMORY_DATASET})
     return PhaseResult(PhaseStatus.OK, details={"summary": summary})
 
 
