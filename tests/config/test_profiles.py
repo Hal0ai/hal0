@@ -54,11 +54,9 @@ class TestProfileConfigValidation:
         with pytest.raises(ValidationError):
             ProfileConfig(image="x", backend="metal")
 
-    def test_empty_image_allowed_means_defer(self) -> None:
-        # Empty image is intentional: "defer to the HW-gated default"
-        # (resolve_default_image), used by the basic seed profiles. A
-        # whitespace-only value is still a typo (see test_whitespace_image_raises).
-        assert ProfileConfig(image="").image == ""
+    def test_empty_image_raises(self) -> None:
+        with pytest.raises(Exception, match="image"):
+            ProfileConfig(image="")
 
     def test_whitespace_image_raises(self) -> None:
         with pytest.raises(Exception, match="image"):
@@ -206,12 +204,13 @@ class TestLoadProfilesConfig:
         for name in ("rocm-dense", "rocm-moe", "vulkan-dense", "vulkan-moe"):
             assert cfg.profile[name].mtp is True
 
-    def test_seed_vulkan_defers_to_hw_gated_default(self, tmp_path: Path) -> None:
-        """The basic vulkan profile carries no hardcoded image — it defers to the
-        HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere), resolved at
-        launch by providers.container._resolve_image_ref → resolve_default_image."""
+    def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
+        """The basic vulkan profile pins the universal rocmfpx runner (rocmfpx is
+        Vulkan-portable, so it is the default for every AMD GPU lane)."""
+        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["vulkan"].image == ""
+        assert cfg.profile["vulkan"].image == DEFAULT_ROCMFPX_IMAGE
 
     def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")

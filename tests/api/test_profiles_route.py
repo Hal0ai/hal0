@@ -143,10 +143,13 @@ class TestListProfiles:
         dense = next(item for item in data if item["name"] == "rocm-dense")
         assert dense["mtp"] is True
 
-    def test_vulkan_std_image_contains_vulkan(self, client: TestClient) -> None:
+    def test_vulkan_std_image_is_rocmfpx_default(self, client: TestClient) -> None:
+        # The vulkan lane now pins the universal rocmfpx runner (Vulkan-portable).
+        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+
         data = client.get("/api/profiles").json()
         vulkan = next(item for item in data if item["name"] == "vulkan")
-        assert "vulkan" in vulkan["image"]
+        assert vulkan["image"] == DEFAULT_ROCMFPX_IMAGE
 
     def test_mtp_true_resolved_flags_contains_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()

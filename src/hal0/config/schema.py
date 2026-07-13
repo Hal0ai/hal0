@@ -933,7 +933,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # live in rocm-dense / rocm-moe (and the vulkan-dense / vulkan-moe
         # pair on the Vulkan backend); the old rocmfpx-rocm / vkfpx-* slugs
         # were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
@@ -1045,7 +1045,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # more context fits in the shared pool, plus `--poll` tuning for steady
         # decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
         # back to f16 KV (iSWA regresses on quantized KV). mtp False.
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui",
         "mtp": False,
         "device_class": "gpu",
@@ -1058,7 +1058,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
         # is gemma-safe) — per-model KV/batch tuning lives in the model's
         # defaults.extra_args.
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
@@ -1091,7 +1091,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # (Qwen3-Embedding pins --pooling last via its model defaults); no KV
         # quant — meaningless for a single-pass encoder. GPU because these
         # tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1107,7 +1107,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # combining --embedding and --reranking on one server yields all-zero
         # scores (llama.cpp #20085). For parallel scoring raise ctx via the
         # slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1123,7 +1123,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # profile, which never emits --embedding and silently serves
         # /v1/completions instead of /v1/embeddings. Same llama-server / flag
         # bundle as `embed`, just on the RADV image. See profile_derive.derive_profile.
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1136,7 +1136,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # exists). MUST be a SEPARATE instance from vulkan-embed — combining
         # --embedding and --reranking on one server yields all-zero scores
         # (llama.cpp #20085).
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1183,7 +1183,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # (2026-07-04 Strix Halo consolidation, fact 6): CPU-only wants the page
         # cache (faster re-loads, no GTT involved); --no-mmap would force the
         # whole model into anonymous RAM and forfeit page-cache-backed reloads.
-        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
+        "image": FALLBACK_VULKAN_IMAGE,  # CPU-only: lean toolbox in CPU mode (rocmfpx is wasteful)
         "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja",
         "mtp": False,
         "device_class": "cpu",
@@ -1344,14 +1344,9 @@ class ProfileConfig(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def image_blank_or_valid(cls, v: str) -> str:
-        # An EMPTY image is intentional and means "defer to the HW-gated default"
-        # (:func:`resolve_default_image`, applied by the launch renderer via
-        # providers.container._resolve_image_ref) — the basic seed profiles leave
-        # it blank so Strix-Halo boxes land on the rocmfpx runner and other hosts
-        # on the lean toolbox. A whitespace-only value is a typo, not intent.
-        if v and not v.strip():
-            raise ValueError("profile image must not be whitespace-only")
+    def image_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("profile image must not be empty")
         return v
 
 
