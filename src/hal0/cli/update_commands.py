@@ -62,10 +62,11 @@ def _editable_source_version() -> str | None:
     """Return the version in the source-tree pyproject.toml, if this is an
     editable/source checkout; otherwise None.
 
-    In an editable install ``importlib.metadata.version("hal0")`` is frozen
+    In an editable install ``importlib.metadata.version("hal0ai")`` is frozen
     at ``pip install -e`` time and goes stale after a ``git pull``. We detect
     the source tree by walking up from ``hal0.__file__`` for a pyproject.toml
-    whose project name is ``hal0`` and reading its declared version.
+    whose project name is ``hal0ai`` (the distribution name; "hal0" is the
+    legacy pre-rename name) and reading its declared version.
     """
     mod_file = getattr(hal0, "__file__", None)
     if not mod_file:
@@ -79,7 +80,7 @@ def _editable_source_version() -> str | None:
         except (OSError, tomllib.TOMLDecodeError):
             return None
         project = data.get("project", {})
-        if project.get("name") == "hal0":
+        if project.get("name") in ("hal0ai", "hal0"):
             ver = project.get("version")
             return str(ver) if ver else None
         # A pyproject that isn't hal0's - stop walking (we left the tree).
