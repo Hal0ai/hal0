@@ -37,10 +37,15 @@ removes the per-slot FPX hand-add.
 - **`hal0-rocmfpx` is the shipped platform default** for GPU LLM/embed/rerank
   lanes — in `manifest.json` + seed profiles, **not** a per-box `profiles.toml`
   override. The local one-off is promoted into the codebase.
-- **Hardware-gated.** `derive_profile` picks `hal0-rocmfpx` on gfx1151/Strix-Halo;
-  falls back to the generic `amd-strix-halo-toolboxes:vulkan-radv-server` (RADV)
-  on other AMD GPUs, and `llama.cpp:server-cuda` / cpu-llm as today. rocmfpx is
-  never forced onto hardware that can't run it.
+- **Universal default (NOT hardware-gated).** `hal0-rocmfpx` is the default for
+  every AMD GPU lane. It ships `mesa-vulkan-drivers` + a compiled Vulkan/RADV
+  backend (the live Strix slots already run it via `-dev Vulkan0`), so it runs on
+  any AMD GPU — the `CMAKE_HIP_ARCHITECTURES=gfx1151` pin only constrains the HIP
+  kernels, not the portable Vulkan path. Carve-outs: CUDA → `llama.cpp:server-cuda`,
+  CPU-only → the lean vulkan toolbox (a 7.5 GB ROCm image is wasteful for CPU).
+  _(Superseded the earlier "gfx1151 HW-gate" idea — verified the image is
+  Vulkan-portable, so gating added complexity + a hot-path `hardware.json` read
+  for no benefit.)_
 - **Rolling tag + digest pin.** Publish a rolling `hal0-rocmfpx:stable` tag;
   `manifest.json` stores it resolved to an immutable `@sha256` digest via
   `scripts/update-toolbox-digests.sh`. Bump = move tag → re-run script → release.
@@ -83,12 +88,14 @@ separate:
 Seed profiles reference the manifest **key** (or leave `image` empty and let the
 resolver fill it) instead of hardcoding a registry tag.
 
-### 3. Hardware gate (`slots/profile_derive.py` + `providers/_gpu.py`)
+### 3. Default resolver (universal — no hardware probe)
 
-`derive_profile` already selects the profile (hence lane). Extend it to choose the
-image **key** by probed GPU: `gfx1151`/Strix-Halo → `rocmfpx`; other AMD → `vulkan`
-(RADV); NVIDIA → `cuda`; no GPU → `cpu-llm`. Reads the existing `hardware.json`
-probe (`_gpu.py`), never raises on a missing probe (defaults to `vulkan`).
+`resolve_default_image(backend, device_class)` (`config/schema.py`) is a pure,
+deterministic map: CUDA → the cuda image, CPU-only → the lean vulkan toolbox,
+every other (AMD GPU) lane → `hal0-rocmfpx`. No `hardware.json` read, so nothing
+on the hot render path and no test host-dependence. _(As-built. An earlier draft
+gated this on a gfx1151 probe; dropped once the rocmfpx image was confirmed
+Vulkan-portable — see Decisions.)_
 
 ### 4. Update propagation (`cli/update_commands.py`)
 
@@ -115,8 +122,12 @@ install/update slot-render reconcile seam (#1138). Changes:
 
 ## Rollout / risks
 
-- **Size:** rocmfpx ≈ 7.5 GB vs 1.98 GB for vulkan-radv — bigger fresh pull; HW
-  gate keeps non-Strix hosts on the small image.
+- **Size:** rocmfpx ≈ 7.5 GB vs 1.98 GB for vulkan-radv — a bigger pull for every
+  AMD GPU host (accepted: it's the unified runner). Only CUDA / CPU-only hosts stay
+  on a leaner image.
+- **FPX quant off gfx1151:** standard GGUF quants run everywhere via Vulkan; the
+  FPX-specific quant path was tuned on gfx1151, so "unvalidated, not unsupported"
+  elsewhere (non-Strix users typically don't run FPX weights).
 - **Back-compat:** old tags stay resolvable; existing slot TOMLs with explicit
   `image` are never rewritten.
 - **Custom `profiles.toml`** (hand-tuned boxes) keep overriding by design; those
@@ -138,32 +149,30 @@ is "finish the half-done migration", not a greenfield build:
   mirrors the manifest `toolbox_images` block (`updater.py:224`). Tested by
   `tests/updater/test_image_retag.py`, `tests/providers/test_image_resolution.py`.
 
-### The actual remaining gaps (surgical)
-1. **Basic seed profiles still hardcode the old toolbox.** `rocm`, `vulkan`,
+### The remaining gaps
+
+**Consumer side — DONE (PR #1297):**
+1. ✅ **Basic seed profiles no longer hardcode the old toolbox.** `rocm`, `vulkan`,
    `rocm-longctx`, `embed`, `rerank`, `vulkan-embed`, `vulkan-rerank`, `cpu-llm`
-   pin `amd-strix-halo-toolboxes:{vulkan-radv-server, rocm-7.2.4-rocmfp4-server}`.
-   → Fresh installs land on the old image.
-2. **`STALE_ROCMFPX_IMAGE_REFS` omits those two toolbox refs** → `hal0 update`'s
-   retag skips slots on them. Add both (incl. `localhost/` prefixes) so existing
-   installs migrate.
-3. **No HW gate.** `DEFAULT_ROCMFPX_IMAGE` (and the retag target) is unconditional;
-   rocmfpx is a gfx1151/Strix-Halo build. Make the default *resolve* per probed
-   GPU (rocmfpx on gfx1151, generic RADV vulkan / rocm toolbox elsewhere, cuda,
-   cpu-llm) so retag + fresh-install don't force rocmfpx onto incompatible hosts.
-   Note embed/rerank need `--embedding`/`--reranking` and cpu-llm needs CPU mode —
-   verify the rocmfpx image serves those before repointing those lanes.
-4. **Versioning.** `DEFAULT_ROCMFPX_IMAGE` is a raw sha (`c077206`). Move to rolling
-   `hal0-rocmfpx:stable` + `manifest.json` digest pin via `update-toolbox-digests.sh`;
-   add `.github/workflows/toolbox.yml` build/push so `release.yml`'s null-digest gate
+   blank their `image` and defer to `resolve_default_image` (`ProfileConfig` now
+   permits an empty image = "defer").
+2. ✅ **`STALE_ROCMFPX_IMAGE_REFS` gained the two old toolbox refs** so `hal0 update`'s
+   retag migrates existing slots off them.
+3. ✅ **Universal default (no HW gate).** `resolve_default_image` maps every AMD GPU
+   lane → rocmfpx, CUDA → cuda, CPU-only → lean toolbox — deterministic, probe-free.
+   (Confirmed rocmfpx serves `--embedding`/`--reranking` and is Vulkan-portable, so
+   no gfx1151 gate.) The retag resolves its target through the same function.
+
+**Producer side — TODO (see `toolbox-repo-consolidation.md`):**
+4. **Versioning.** `DEFAULT_ROCMFPX_IMAGE` is still a raw sha (`c077206`). Move to a
+   rolling `:rocmfpx-stable` + `manifest.json` digest pin via `update-toolbox-digests.sh`;
+   publish it from `Hal0_ROCmFPX`'s inherited CI so `release.yml`'s null-digest gate
    passes. Keep prior sha refs in `STALE_ROCMFPX_IMAGE_REFS` so each bump auto-retags.
 
-## Phasing (stacked PRs)
+## Phasing
 
-1. **Resolver unification** — `resolve_slot_image`, `base.image_ref` default,
-   `llama_server` uses it, providers consolidated. No behavior change (manifest
-   still names old images). Tests: precedence + parity with current output.
-2. **Repoint to rocmfpx + HW gate** — manifest `rocmfpx` key, seed profiles by
-   key, `derive_profile` gate, `update-toolbox-digests` + CI. Fresh installs land
-   on rocmfpx on Strix-Halo.
-3. **Update propagation** — image-drift in `_fetch_slot_drift`, reconcile on
-   `hal0 update`, doctor drift flag.
+1. ✅ **HW-gated resolver** (superseded by 2 — the gate was dropped for a universal
+   default once the image was confirmed Vulkan-portable).
+2. ✅ **Universal rocmfpx default + seed-profile repoint + retag** — shipped in PR #1297.
+3. **Producer side** — rolling tag + manifest digest pin + toolbox-repo consolidation
+   (Gap 0 / Gap 3).

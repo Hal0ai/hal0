@@ -124,7 +124,8 @@ lands here. Keep third-party comfyui / cuda external.
 - `manifest.json.toolbox_images`: every entry → `amd-strix-halo-toolboxes:<flavor>`
   + digest.
 - `DEFAULT_ROCMFPX_IMAGE` → `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-stable`
-  (feeds the HW-gated resolver already built in `feat/container-image-overhaul`).
+  (feeds the universal `resolve_default_image` already built in
+  `feat/container-image-overhaul` / PR #1297).
 - `scripts/update-toolbox-digests.sh`: already iterates `toolbox_images`; no change
   beyond the retargeted tags.
 - `STALE_ROCMFPX_IMAGE_REFS`: add the old `hal0-rocmfpx:*` and per-flavor sha tags
@@ -132,9 +133,10 @@ lands here. Keep third-party comfyui / cuda external.
 
 ## Sequencing vs the image overhaul
 
-The `feat/container-image-overhaul` work (HW-gated resolver ✓, repoint seed
-profiles, retag) is the **consumer** side and can land first pointing at the
-existing `hal0-rocmfpx:c077206`. T0 (this doc) is the **producer** side —
+The `feat/container-image-overhaul` work (universal `resolve_default_image` ✓,
+seed-profile repoint ✓, retag ✓ — PR #1297) is the **consumer** side and lands
+first pointing at the existing `hal0-rocmfpx:c077206`. T0 (this doc) is the
+**producer** side —
 publishing `:rocmfpx-stable` from the unified repo — and lets us flip
 `DEFAULT_ROCMFPX_IMAGE` from a hand-built sha to a CI-published rolling tag. They
 meet at `manifest.json` + `DEFAULT_ROCMFPX_IMAGE`.
