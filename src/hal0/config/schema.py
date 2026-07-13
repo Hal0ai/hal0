@@ -877,86 +877,39 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
     }
 )
 
-#: Strix-Halo / gfx1151 identity markers. The ``hal0-rocmfpx`` runner image is
-#: built for gfx1151 (AMD Ryzen AI Max "Strix Halo" APUs); on any other GPU it
-#: is the wrong ISA, so the HW-gated default (:func:`resolve_default_image`)
-#: only selects it when one of these appears in the probed CPU model or a GPU
-#: name. Extend as new gfx1151-class SKUs ship.
-STRIX_HALO_HW_MARKERS: tuple[str, ...] = (
-    "ryzen ai max",  # CPU brand shared by every Strix Halo APU
-    "radeon 8060s",  # Strix Halo top iGPU marketing name
-    "radeon 8050s",
-    "device 1586",  # gfx1151 iGPU PCI device id, as it appears in lspci names
-    "strix halo",
-)
-
-#: Generic fallback toolbox images for hosts the rocmfpx runner does NOT target
-#: (non-Strix AMD GPUs, ROCm-less Vulkan, CPU-only). The lean
-#: ``amd-strix-halo-toolboxes`` builds — the portability lane.
+#: Lean fallback toolbox images for the two non-rocmfpx lanes. The rocmfpx
+#: runner is Vulkan-portable — its Mesa/RADV Vulkan backend runs on any AMD GPU
+#: (the gfx1151 HIP kernels are a bonus on Strix Halo, not a requirement) — so
+#: it serves every AMD GPU lane. Only a CUDA host and a CPU-only host want a
+#: different/leaner image (the 7.5 GB ROCm-based rocmfpx image is pointless for
+#: CPU-only inference).
 FALLBACK_VULKAN_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
-FALLBACK_ROCM_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
 FALLBACK_CUDA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
 
 
-def rocmfpx_capable(hw: HardwareInfo | None) -> bool:
-    """True when the host GPU is Strix-Halo-class (gfx1151) — the ISA the
-    ``hal0-rocmfpx`` runner image is built for.
+def resolve_default_image(backend: str | None, device_class: str | None = None) -> str:
+    """Default container image for a slot lane with no explicit image pin.
 
-    Conservative by design: returns ``False`` whenever the signal is absent or
-    ambiguous, so a missing/empty probe falls back to the generic toolbox image
-    rather than launching the wrong-ISA rocmfpx runner. Never raises.
-    """
-    if hw is None:
-        return False
-    haystacks = [getattr(hw, "cpu_model", "") or ""]
-    for gpu in getattr(hw, "gpus", None) or []:
-        haystacks.append(getattr(gpu, "name", "") or "")
-    blob = " ".join(haystacks).lower()
-    return any(marker in blob for marker in STRIX_HALO_HW_MARKERS)
+    Precedence is handled by the caller (slot ``image`` override → profile
+    ``image`` → *this*). ``hal0-rocmfpx`` is the universal AMD-GPU default —
+    its Vulkan/RADV backend is GPU-agnostic, so it is not gated on Strix-Halo —
+    with two carve-outs:
 
-
-def resolve_default_image(
-    backend: str | None,
-    device_class: str | None = None,
-    *,
-    hw: HardwareInfo | None = None,
-) -> str:
-    """Hardware-gated default container image for a slot with no explicit pin.
-
-    Precedence handled by the caller (slot ``image`` override → profile
-    ``image`` → *this*). Resolution here:
-
-    * Strix-Halo/gfx1151 GPU lanes → :data:`DEFAULT_ROCMFPX_IMAGE` (the unified
-      ROCmFPX runner; serves chat + ``--embedding`` + ``--reranking``).
-    * Non-Strix AMD GPU lanes → the lean toolbox for the backend (portability).
     * CUDA lanes → the upstream llama.cpp CUDA image.
-    * CPU / unknown → the Vulkan toolbox (llama-server runs CPU-only when no GPU
-      devices are passed).
+    * CPU-only lanes → the lean Vulkan toolbox (llama-server runs CPU-only when
+      no GPU devices are passed; the big rocmfpx image is wasteful for CPU).
+    * Every other (AMD GPU: ``rocm`` / ``vulkan``) lane → :data:`DEFAULT_ROCMFPX_IMAGE`
+      (the unified ROCmFPX runner; serves chat + ``--embedding`` + ``--reranking``).
 
-    ``hw`` defaults to the probed ``/etc/hal0/hardware.json``, loaded lazily to
-    avoid a schema→loader import cycle; a missing/unreadable probe yields the
-    generic fallback (``rocmfpx_capable`` → ``False``), never an exception.
+    Deterministic and probe-free — no hardware read on the hot render path.
     """
-    if hw is None:
-        try:
-            from hal0.config.loader import load_hardware_info
-
-            hw = load_hardware_info()
-        except Exception:
-            hw = None
     be = (backend or "").lower()
     dc = (device_class or "").lower()
     if be == "cuda":
         return FALLBACK_CUDA_IMAGE
     if dc == "cpu" or be == "cpu":
-        # CPU-only lane never runs the big GPU runner (lean image, CPU mode).
         return FALLBACK_VULKAN_IMAGE
-    if rocmfpx_capable(hw):
-        # Strix-Halo/gfx1151 GPU lane (chat/embed/rerank all served by rocmfpx).
-        return DEFAULT_ROCMFPX_IMAGE
-    if be == "rocm":
-        return FALLBACK_ROCM_IMAGE
-    return FALLBACK_VULKAN_IMAGE
+    return DEFAULT_ROCMFPX_IMAGE
 
 
 #: Seed profile catalog.  Slugs are backend-agnostic workload names — the
