@@ -204,9 +204,13 @@ class TestLoadProfilesConfig:
         for name in ("rocm-dense", "rocm-moe", "vulkan-dense", "vulkan-moe"):
             assert cfg.profile[name].mtp is True
 
-    def test_seed_vulkan_correct_image(self, tmp_path: Path) -> None:
+    def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
+        """The basic vulkan profile pins the universal rocmfpx runner (rocmfpx is
+        Vulkan-portable, so it is the default for every AMD GPU lane)."""
+        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert "vulkan-radv-server" in cfg.profile["vulkan"].image
+        assert cfg.profile["vulkan"].image == DEFAULT_ROCMFPX_IMAGE
 
     def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")

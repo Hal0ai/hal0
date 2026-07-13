@@ -129,10 +129,12 @@ def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
 
       1. ``slot_cfg["image"]`` (top-level string override in the slot TOML).
       2. ``slot_cfg["slot"]["image"]`` (nested under the ``[slot]`` table).
-      3. ``profile.image`` (the profile's own image — kept for back-compat
-         so existing operator-custom profiles that pin ``image`` round-trip
-         cleanly through 0.9.5; targeted for removal in 0.9.6).
-      4. ``DEFAULT_ROCMFPX_IMAGE`` (the code-pinned ROCmFPX runner tag).
+      3. ``profile.image`` (a deliberate profile/operator pin) — honored verbatim.
+         The basic seed profiles intentionally leave this empty so they fall
+         through to (4); the ROCmFPX/custom profiles pin it explicitly.
+      4. :func:`~hal0.config.schema.resolve_default_image` — the HW-gated
+         default: the rocmfpx runner on gfx1151/Strix-Halo, the lean toolbox
+         (or cuda / cpu image) elsewhere.
 
     Only STRING values are treated as image-ref overrides. The
     ``[image]`` TOML section that holds image-gen settings (#599) shares
@@ -156,12 +158,20 @@ def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
                 return c
     profile_image = getattr(profile, "image", None)
     if isinstance(profile_image, str) and profile_image:
-        return profile_image
-    # Code default — imported lazily to avoid an import cycle (schema imports
-    # from providers in some test fixtures).
-    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+        return profile_image  # deliberate profile/operator pin — honored verbatim
+    # No image pin anywhere → HW-gated default: the rocmfpx runner on
+    # gfx1151/Strix-Halo, the lean toolbox (or cuda / cpu image) elsewhere.
+    # Backend comes from the slot override when set, else the profile;
+    # device_class from the profile. Lazy import avoids a schema→providers cycle.
+    from hal0.config.schema import resolve_default_image
 
-    return DEFAULT_ROCMFPX_IMAGE
+    backend = getattr(profile, "backend", None)
+    device_class = getattr(profile, "device_class", None)
+    if isinstance(slot_cfg, Mapping):
+        sb = slot_cfg.get("backend")
+        if isinstance(sb, str) and sb:
+            backend = sb
+    return resolve_default_image(backend, device_class)
 
 
 def _profile_image_and_flags(

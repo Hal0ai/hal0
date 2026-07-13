@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, ProfileConfig
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE, ProfileConfig
 from hal0.providers.container import (
     _profile_image_and_flags,
     _resolve_image_ref,
@@ -55,10 +55,24 @@ def test_resolve_image_ref_falls_back_to_profile_image() -> None:
     assert _resolve_image_ref(None, profile) == "ghcr.io/hal0ai/hal0-rocmfpx:server"
 
 
-def test_resolve_image_ref_falls_back_to_default_when_profile_has_no_image() -> None:
-    """No slot override AND no profile.image -> DEFAULT_ROCMFPX_IMAGE."""
-    profile = SimpleNamespace(image=None)
+def test_resolve_image_ref_falls_back_to_rocmfpx_default() -> None:
+    """No slot override AND no profile.image on a GPU lane -> the universal
+    rocmfpx runner."""
+    profile = SimpleNamespace(image=None, backend="vulkan", device_class="gpu")
     assert _resolve_image_ref(None, profile) == DEFAULT_ROCMFPX_IMAGE
+
+
+def test_resolve_image_ref_cpu_lane_falls_back_to_toolbox() -> None:
+    """A CPU-only lane with no image gets the lean toolbox, not the big runner."""
+    profile = SimpleNamespace(image=None, backend=None, device_class="cpu")
+    assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
+
+
+def test_resolve_image_ref_honors_explicit_profile_pin_verbatim() -> None:
+    """An explicit profile.image is honored verbatim — never re-resolved (keeps
+    the spec.image == profile.image invariant)."""
+    profile = SimpleNamespace(image=FALLBACK_VULKAN_IMAGE, backend="vulkan", device_class="gpu")
+    assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
 
 
 def test_resolve_image_ref_ignores_image_gen_dict() -> None:
@@ -95,7 +109,7 @@ def test_profile_image_and_flags_honours_slot_override() -> None:
 
 
 def test_profile_image_and_flags_default_when_nothing_set() -> None:
-    """No slot image, profile has no image -> DEFAULT_ROCMFPX_IMAGE."""
+    """No slot image, profile has no image -> the universal rocmfpx default."""
     profile = SimpleNamespace(image=None, flags="-ngl 999", mtp=False)
     image, _flags = _profile_image_and_flags(profile)
     assert image == DEFAULT_ROCMFPX_IMAGE

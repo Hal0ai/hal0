@@ -1,10 +1,12 @@
 """Upgrade migration: retag stale former-default runner-image pins.
 
 Covers :func:`hal0.updater.updater.retag_stale_slot_images` — slot ``image``
-pins exactly equal to a KNOWN former default roll to the current
-``DEFAULT_ROCMFPX_IMAGE``; any other pin is a deliberate operator override
-and must survive untouched, as must the ``[image]`` TOML table (image-gen
-settings) that shares the key.
+pins exactly equal to a KNOWN former default roll to the current default
+(:func:`hal0.config.schema.resolve_default_image`): AMD GPU lanes migrate to the
+universal ``hal0-rocmfpx`` runner, while a CPU-only lane stays on the lean
+toolbox (a no-op). Any non-default pin is a deliberate operator override and
+must survive untouched, as must the ``[image]`` TOML table (image-gen settings)
+that shares the key.
 """
 
 from __future__ import annotations
@@ -14,7 +16,11 @@ import tomllib
 import pytest
 
 from hal0.config.paths import slots_config_dir
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, STALE_ROCMFPX_IMAGE_REFS
+from hal0.config.schema import (
+    DEFAULT_ROCMFPX_IMAGE,
+    FALLBACK_VULKAN_IMAGE,
+    STALE_ROCMFPX_IMAGE_REFS,
+)
 from hal0.updater.updater import retag_stale_slot_images
 
 STALE = "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"
@@ -54,12 +60,9 @@ def test_stale_pins_retag_and_custom_pins_survive(tmp_hal0_home: str) -> None:
 
 @pytest.mark.parametrize("ref", sorted(STALE_ROCMFPX_IMAGE_REFS))
 def test_every_stale_ref_retags(tmp_hal0_home: str, ref: str) -> None:
-    """Every known former-default ref in STALE_ROCMFPX_IMAGE_REFS rolls to the
-    current DEFAULT_ROCMFPX_IMAGE — not just the single ghcr ref the other tests
-    drive. Regression-proofs a future frozenset addition whose retag path might
-    diverge (e.g. the localhost/ prefix or the amd-strix-halo-toolboxes ref).
-    DEFAULT_ROCMFPX_IMAGE is intentionally NOT in the set, so no case is a no-op.
-    """
+    """Every known former-default ref rolls to the current default. A GPU
+    (backend-less) slot resolves to the rocmfpx runner, which is intentionally
+    NOT in the set, so no case is a no-op."""
     _write_slot("s", f'image = "{ref}"\nname = "s"\n')
     assert retag_stale_slot_images() == 1
     assert _image_of("s") == DEFAULT_ROCMFPX_IMAGE
@@ -87,3 +90,25 @@ def test_custom_profile_stale_image_retagged_flags_kept(tmp_hal0_home: str) -> N
     assert raw["profile"]["moe-tuned"]["image"] == DEFAULT_ROCMFPX_IMAGE
     assert raw["profile"]["moe-tuned"]["flags"] == "-fa off -b 2048"
     assert raw["profile"]["pinned"]["image"] == CUSTOM
+
+
+# ── lane carve-outs: GPU migrates, CPU-only is a no-op ────────────────────── #
+
+
+def test_gpu_slot_on_old_toolbox_migrates_to_rocmfpx(tmp_hal0_home: str) -> None:
+    """A GPU slot pinned to the old vulkan toolbox (now a stale former-default
+    ref) migrates to the universal rocmfpx runner."""
+    _write_slot(
+        "g",
+        f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "g"\nbackend = "vulkan"\ndevice = "gpu-vulkan"\n',
+    )
+    assert retag_stale_slot_images() == 1
+    assert _image_of("g") == DEFAULT_ROCMFPX_IMAGE
+
+
+def test_cpu_slot_on_toolbox_pin_is_noop(tmp_hal0_home: str) -> None:
+    """A CPU-only slot already on the lean vulkan toolbox resolves back to
+    itself → no rewrite, not counted (rocmfpx is wasteful for CPU)."""
+    _write_slot("c", f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "c"\ndevice = "cpu"\n')
+    assert retag_stale_slot_images() == 0
+    assert _image_of("c") == FALLBACK_VULKAN_IMAGE

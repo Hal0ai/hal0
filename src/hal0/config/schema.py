@@ -868,8 +868,49 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
         "localhost/hal0-rocmfpx:vulkan-minicpm5",
         "ghcr.io/hal0ai/hal0-rocmfpx:server",
         "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
+        # Former basic-lane seed defaults (pre HW-gated default). A slot pinned to
+        # one of these is materialised-default debris — the updater re-resolves it
+        # through the HW gate (:func:`resolve_default_image`): Strix boxes migrate
+        # to the rocmfpx runner, other hosts stay on the same toolbox (no-op).
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
     }
 )
+
+#: Lean fallback toolbox images for the two non-rocmfpx lanes. The rocmfpx
+#: runner is Vulkan-portable — its Mesa/RADV Vulkan backend runs on any AMD GPU
+#: (the gfx1151 HIP kernels are a bonus on Strix Halo, not a requirement) — so
+#: it serves every AMD GPU lane. Only a CUDA host and a CPU-only host want a
+#: different/leaner image (the 7.5 GB ROCm-based rocmfpx image is pointless for
+#: CPU-only inference).
+FALLBACK_VULKAN_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
+FALLBACK_CUDA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
+
+
+def resolve_default_image(backend: str | None, device_class: str | None = None) -> str:
+    """Default container image for a slot lane with no explicit image pin.
+
+    Precedence is handled by the caller (slot ``image`` override → profile
+    ``image`` → *this*). ``hal0-rocmfpx`` is the universal AMD-GPU default —
+    its Vulkan/RADV backend is GPU-agnostic, so it is not gated on Strix-Halo —
+    with two carve-outs:
+
+    * CUDA lanes → the upstream llama.cpp CUDA image.
+    * CPU-only lanes → the lean Vulkan toolbox (llama-server runs CPU-only when
+      no GPU devices are passed; the big rocmfpx image is wasteful for CPU).
+    * Every other (AMD GPU: ``rocm`` / ``vulkan``) lane → :data:`DEFAULT_ROCMFPX_IMAGE`
+      (the unified ROCmFPX runner; serves chat + ``--embedding`` + ``--reranking``).
+
+    Deterministic and probe-free — no hardware read on the hot render path.
+    """
+    be = (backend or "").lower()
+    dc = (device_class or "").lower()
+    if be == "cuda":
+        return FALLBACK_CUDA_IMAGE
+    if dc == "cpu" or be == "cpu":
+        return FALLBACK_VULKAN_IMAGE
+    return DEFAULT_ROCMFPX_IMAGE
+
 
 #: Seed profile catalog.  Slugs are backend-agnostic workload names — the
 #: ``backend`` field (not the slug) carries the ROCm/Vulkan choice, and the
@@ -892,7 +933,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # live in rocm-dense / rocm-moe (and the vulkan-dense / vulkan-moe
         # pair on the Vulkan backend); the old rocmfpx-rocm / vkfpx-* slugs
         # were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
@@ -1004,7 +1045,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # more context fits in the shared pool, plus `--poll` tuning for steady
         # decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
         # back to f16 KV (iSWA regresses on quantized KV). mtp False.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui",
         "mtp": False,
         "device_class": "gpu",
@@ -1017,7 +1058,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
         # is gemma-safe) — per-model KV/batch tuning lives in the model's
         # defaults.extra_args.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
@@ -1050,7 +1091,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # (Qwen3-Embedding pins --pooling last via its model defaults); no KV
         # quant — meaningless for a single-pass encoder. GPU because these
         # tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1066,7 +1107,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # combining --embedding and --reranking on one server yields all-zero
         # scores (llama.cpp #20085). For parallel scoring raise ctx via the
         # slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1082,7 +1123,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # profile, which never emits --embedding and silently serves
         # /v1/completions instead of /v1/embeddings. Same llama-server / flag
         # bundle as `embed`, just on the RADV image. See profile_derive.derive_profile.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1095,7 +1136,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # exists). MUST be a SEPARATE instance from vulkan-embed — combining
         # --embedding and --reranking on one server yields all-zero scores
         # (llama.cpp #20085).
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
         "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1142,7 +1183,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # (2026-07-04 Strix Halo consolidation, fact 6): CPU-only wants the page
         # cache (faster re-loads, no GTT involved); --no-mmap would force the
         # whole model into anonymous RAM and forfeit page-cache-backed reloads.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": FALLBACK_VULKAN_IMAGE,  # CPU-only: lean toolbox in CPU mode (rocmfpx is wasteful)
         "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja",
         "mtp": False,
         "device_class": "cpu",
