@@ -122,6 +122,41 @@ install/update slot-render reconcile seam (#1138). Changes:
 - **Custom `profiles.toml`** (hand-tuned boxes) keep overriding by design; those
   images are operator pins and out of scope for auto-reconcile.
 
+## Addendum — current-state findings (narrows scope)
+
+Investigation showed most of the machinery **already exists and is wired**, so this
+is "finish the half-done migration", not a greenfield build:
+
+- **`DEFAULT_ROCMFPX_IMAGE = ghcr.io/hal0ai/hal0-rocmfpx:c077206`** is already the
+  canonical constant (`config/schema.py:852`); FPX seed profiles already use it.
+- **`_resolve_image_ref`** (`providers/container.py:120`) already falls through
+  `slot.image → profile.image → DEFAULT_ROCMFPX_IMAGE`.
+- **`retag_stale_slot_images()`** (`updater/updater.py:1190`) already migrates slot
+  TOML + custom-profile `image` pins that match `STALE_ROCMFPX_IMAGE_REFS` →
+  `DEFAULT_ROCMFPX_IMAGE`, preserves operator pins, is idempotent, and **is already
+  called in the update apply path** (`updater.py:1684`, `:1918`). The updater also
+  mirrors the manifest `toolbox_images` block (`updater.py:224`). Tested by
+  `tests/updater/test_image_retag.py`, `tests/providers/test_image_resolution.py`.
+
+### The actual remaining gaps (surgical)
+1. **Basic seed profiles still hardcode the old toolbox.** `rocm`, `vulkan`,
+   `rocm-longctx`, `embed`, `rerank`, `vulkan-embed`, `vulkan-rerank`, `cpu-llm`
+   pin `amd-strix-halo-toolboxes:{vulkan-radv-server, rocm-7.2.4-rocmfp4-server}`.
+   → Fresh installs land on the old image.
+2. **`STALE_ROCMFPX_IMAGE_REFS` omits those two toolbox refs** → `hal0 update`'s
+   retag skips slots on them. Add both (incl. `localhost/` prefixes) so existing
+   installs migrate.
+3. **No HW gate.** `DEFAULT_ROCMFPX_IMAGE` (and the retag target) is unconditional;
+   rocmfpx is a gfx1151/Strix-Halo build. Make the default *resolve* per probed
+   GPU (rocmfpx on gfx1151, generic RADV vulkan / rocm toolbox elsewhere, cuda,
+   cpu-llm) so retag + fresh-install don't force rocmfpx onto incompatible hosts.
+   Note embed/rerank need `--embedding`/`--reranking` and cpu-llm needs CPU mode —
+   verify the rocmfpx image serves those before repointing those lanes.
+4. **Versioning.** `DEFAULT_ROCMFPX_IMAGE` is a raw sha (`c077206`). Move to rolling
+   `hal0-rocmfpx:stable` + `manifest.json` digest pin via `update-toolbox-digests.sh`;
+   add `.github/workflows/toolbox.yml` build/push so `release.yml`'s null-digest gate
+   passes. Keep prior sha refs in `STALE_ROCMFPX_IMAGE_REFS` so each bump auto-retags.
+
 ## Phasing (stacked PRs)
 
 1. **Resolver unification** — `resolve_slot_image`, `base.image_ref` default,
