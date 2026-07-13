@@ -816,7 +816,7 @@ function RDActivityCard({ swap }) {
 
 // ─── band C · services ───────────────────────────────────────────────────────
 
-const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
+const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'turnstone', 'n8n']
 
 function RDServicesCard({ swap, onGo }) {
   const svc = useServices()

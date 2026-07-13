@@ -30,7 +30,7 @@ from hal0.services import systemd as svc_systemd
 from hal0.services.registry import SERVICES, service_by_id
 
 _ROUTE = "hal0.api.routes.services"
-_EXPECTED_IDS = {"openwebui", "comfyui", "hermes", "hindsight", "honcho", "n8n"}
+_EXPECTED_IDS = {"openwebui", "comfyui", "hermes", "turnstone", "hindsight", "honcho", "n8n"}
 
 _DOWN_STATE = {
     "active_state": "inactive",
