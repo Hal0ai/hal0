@@ -57,17 +57,52 @@ for one release for back-compat, then drop).
 
 ## Work plan
 
-### T0-A — Add the rocmfpx flavor to the toolbox repo
-Add `toolboxes/Dockerfile.rocmfpx` that builds the gfx1151 ROCmFPX runner. It
-needs the ROCmFPX-patched llama.cpp (the FPX quant support lives in the
-`Hal0_ROCmFPX` fork, not stock llama.cpp), so the Dockerfile checks out a
-**pinned `Hal0_ROCmFPX` ref** and builds the `server` target
-(`ENTRYPOINT llama-server`, `CMAKE_HIP_ARCHITECTURES=gfx1151`) — reuse
-`.devops/strix-rocmfp4.Dockerfile` from that fork as the basis. The toolbox repo
-stays the single *publish* point; the fork stays the llama.cpp *source of truth*.
-(Alternative: keep the compile in `Hal0_ROCmFPX/docker.yml` but repoint its push
-to `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-*`. Decide by where the heavy
-gfx1151 build should run.)
+### ROCmFPX upstream topology (where the FPX llama.cpp comes from)
+
+The rocmfpx runner's llama.cpp is maintained in `Hal0ai/Hal0_ROCmFPX`, a **fork of
+`charlie12345/ROCmFPX`** (the root ROCmFPX-family repo, actively developed). Keep
+the FPX upstreams as git remotes *on that fork* (the integration workspace), not on
+the toolbox repo:
+
+| Remote | Role | Track |
+|---|---|---|
+| `charlie12345/ROCmFPX` | **Primary** (fork parent) | merge `main`; watch `experimental-rocmfpx-branch`, `agent/promote-experimental-to-main-*` |
+| `ciru-ai/ROCmFPX` | **Secondary** — FP3 Vulkan matvec/dequant speed path | cherry-pick speed-path commits |
+
+**Fork decision is the OPPOSITE of the toolbox repo:** `Hal0_ROCmFPX` should STAY a
+fork of `charlie12345` — hal0 is a downstream *integrator* of active upstream FPX
+llama.cpp work, not its maintainer. (Contrast: `amd-strix-halo-toolboxes` should
+detach from kyuz0 because hal0 *is* becoming that layer's maintainer.) The unified
+toolbox repo consumes `Hal0_ROCmFPX` at a pinned ref; charlie/ciru-ai syncing
+happens one layer down in the fork.
+
+### T0-A — Publish rocmfpx from the fork's existing (inherited) CI  ✅ decided
+
+**Don't rebuild the wheel or move the heavy compile.** `charlie12345/ROCmFPX`
+already ships a working `docker.yml` that builds `.devops/strix-rocmfp4.Dockerfile`
+(full/light/**server** targets, gfx1151) and pushes to
+`ghcr.io/<owner>/<repo>:strix-rocmfp4`, plus a `release.yml` that tags the source.
+`Hal0ai/Hal0_ROCmFPX` **inherited that same `docker.yml`** — it's just not
+enabled/repointed (why `c077206` was hand-pushed to a `hal0-rocmfpx` package).
+
+Plan:
+1. In `Hal0_ROCmFPX`, **enable + repoint its `docker.yml`** to push the `server`
+   target to the unified package namespace:
+   `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-<llamacpp_ver>-<ref>`
+   (a workflow can push to any package the org grants it — the image repo is just
+   a variable; overrides the inherited `ghcr.io/${owner}/${repo}` default, which
+   would otherwise be the underscore package `hal0_rocmfpx` ≠ the current
+   dash `hal0-rocmfpx`).
+2. Move the rolling `:rocmfpx-stable` alias on release.
+3. The **compile stays in `Hal0_ROCmFPX`** (it's the llama.cpp fork of charlie —
+   the natural home for a from-source gfx1151 HIP build; charlie's flow is
+   `scripts/build-strix-rocmfp4-mtp.sh`). The unified toolbox repo owns the
+   *namespace/manifest*, not this compile. This keeps "one package" without
+   duplicating charlie's build into the toolbox repo.
+
+Note the build is heavy (from-source HIP + FPX); if `ubuntu-24.04` GitHub runners
+are too slow/small, use the `build-self-hosted.yml` path already present in the
+fork.
 
 ### T0-B — Fold in the NPU/TTS/STT toolboxes
 Move `hal0/packaging/toolbox/{flm,kokoro,qwen3tts,moonshine,cpu}.Dockerfile`
@@ -123,12 +158,13 @@ Do NOT detach if the repo stays a thin kyuz0 overlay and rocmfpx/NPU live
 elsewhere — but that contradicts "one unified repo".
 
 ## Open decisions
-1. **rocmfpx build home** — build in the toolbox repo (checkout the `Hal0_ROCmFPX`
-   fork at a pinned ref) vs. keep the compile in `Hal0_ROCmFPX` and only repoint
-   its push target. Compile is heavy (gfx1151 HIP + FPX); a self-hosted/large
-   runner may be needed either way — `Hal0_ROCmFPX` already has
-   `build-self-hosted.yml`.
+1. ~~rocmfpx build home~~ — **RESOLVED (T0-A):** compile stays in `Hal0_ROCmFPX`
+   (fork of charlie); enable + repoint its inherited `docker.yml` to publish the
+   `server` target into the unified package. Runner size TBD (GitHub vs
+   self-hosted).
 2. **NPU/TTS scope** — consolidate flm/kokoro/qwen3tts/moonshine here now, or leave
    in `hal0` for a later pass (they're not llama.cpp GPU toolboxes).
-3. **Package rename** — one unified package with flavor tags (recommended) vs.
-   keeping distinct `hal0-toolbox-*` packages built from one repo.
+3. **Package name** — one unified package `amd-strix-halo-toolboxes` with flavor
+   tags (recommended; note the current `hal0-rocmfpx` dash vs inherited-CI
+   `hal0_rocmfpx` underscore mismatch to reconcile) vs. keeping distinct
+   `hal0-toolbox-*` / `hal0-rocmfpx` packages built from one repo.
