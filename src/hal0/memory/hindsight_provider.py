@@ -45,6 +45,11 @@ _AGENT_TAG_PREFIX = "agent:"
 _ANONYMOUS = "anonymous"
 _UNKNOWN_AGENT = "unknown"
 
+# Page size for the pre-delete visibility scan (unified mode). delete() lists
+# the caller's banks to resolve each target doc's owner before removing it; a
+# page big enough that a normal delete resolves in one round-trip.
+_DELETE_SCAN_PAGE = 500
+
 
 def _agent_of(tags: list[str] | tuple[str, ...] | None) -> str | None:
     """Return the ``<id>`` of the first ``agent:<id>`` tag, else None."""
@@ -383,6 +388,47 @@ class HindsightProvider(MemoryProvider):
             "type": fact.get("fact_type"),
         }
 
+    async def _deletable_ids(
+        self, ids: set[str], banks: list[str], client_id: str | None
+    ) -> set[str]:
+        """Return the subset of ``ids`` the caller is allowed to delete under
+        unified-bank visibility.
+
+        In unified mode the single ``shared`` bank holds every agent's
+        ``visibility:private`` docs, so a blind delete-by-id would let any
+        caller remove another agent's private memory (read/search/list all
+        enforce visibility; delete must too). A doc is deletable when it is
+        non-private, or private and owned by the caller — the exact predicate
+        the read paths use (:meth:`_is_visible_to`). An id we cannot resolve to
+        a doc in the caller's banks is **withheld** (fail-closed), matching the
+        fail-closed posture of the read filter.
+        """
+        if not ids:
+            return set()
+        caller = self._caller_agent(client_id)
+        wanted = set(ids)
+        out: set[str] = set()
+        for bank in banks:
+            if not wanted - out:
+                break
+            offset = 0
+            while wanted - out:
+                try:
+                    resp = await self._client.list_memories(
+                        bank_id=bank, limit=_DELETE_SCAN_PAGE, offset=offset
+                    )
+                except Exception:
+                    break  # fail-soft per bank; unresolved ids stay withheld
+                items = resp.get("items", [])
+                for fact in items:
+                    fid = fact.get("id") or fact.get("document_id")
+                    if fid in wanted and fid not in out and self._is_visible_to(fact, caller):
+                        out.add(fid)
+                if len(items) < _DELETE_SCAN_PAGE:
+                    break  # last page
+                offset += _DELETE_SCAN_PAGE
+        return out
+
     async def delete(
         self,
         ids: list[str],
@@ -400,7 +446,16 @@ class HindsightProvider(MemoryProvider):
         banks = [
             namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset or _SHARED, client_id)
         ]
+        # Unified mode: gate deletes on the same visibility:private ACL the read
+        # paths enforce, so one agent can't delete another's private doc by id.
+        # Legacy multi-bank mode needs no gate — _allowed_namespaces never
+        # yields a foreign private bank, so bank isolation already protects it.
+        deletable = (
+            await self._deletable_ids(set(ids), banks, client_id) if self._unified_bank else None
+        )
         for document_id in ids:
+            if deletable is not None and document_id not in deletable:
+                continue  # withheld: not visible to this caller (fail-closed)
             for bank in banks:
                 try:
                     res = await self._client.delete_document(bank_id=bank, document_id=document_id)
