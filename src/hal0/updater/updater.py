@@ -1291,7 +1291,30 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
 
     from hal0.config.loader import _read_toml, write_toml_atomic
     from hal0.config.paths import profiles_toml, slots_config_dir
-    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, STALE_ROCMFPX_IMAGE_REFS
+    from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, resolve_default_image
+
+    def _cfg_str(cfg: dict, key: str) -> str:
+        """Read a string field top-level or nested under ``[slot]``."""
+        v = cfg.get(key)
+        if isinstance(v, str):
+            return v
+        slot = cfg.get("slot")
+        if isinstance(slot, dict) and isinstance(slot.get(key), str):
+            return slot[key]
+        return ""
+
+    def _backend_of(cfg: dict) -> str:
+        be = _cfg_str(cfg, "backend")
+        if be:
+            return be
+        dev = _cfg_str(cfg, "device")  # "gpu-rocm" / "gpu-vulkan" / "cpu" / "npu"
+        return dev.split("-", 1)[1] if dev.startswith("gpu-") else ""
+
+    def _device_class_of(cfg: dict) -> str:
+        dev = _cfg_str(cfg, "device") or _cfg_str(cfg, "device_class")
+        if dev == "cpu":
+            return "cpu"
+        return "gpu" if dev.startswith("gpu") else dev
 
     retagged = 0
     slots_dir = slots_config_dir()
@@ -1313,7 +1336,13 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
         if holder is None or holder["image"] not in STALE_ROCMFPX_IMAGE_REFS:
             continue
         old_ref = holder["image"]
-        holder["image"] = DEFAULT_ROCMFPX_IMAGE
+        # HW-gated target: rocmfpx on a Strix GPU lane, the lean toolbox
+        # elsewhere. When the host/lane default already equals the pin (e.g. a
+        # non-Strix box on the vulkan toolbox), it's a no-op — leave it be.
+        new_ref = resolve_default_image(_backend_of(raw), _device_class_of(raw))
+        if new_ref == old_ref:
+            continue
+        holder["image"] = new_ref
         try:
             write_toml_atomic(toml_path, raw)
         except Exception as exc:
@@ -1325,10 +1354,10 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             job_id=job_id,
             slot=slot_name,
             old=old_ref,
-            new=DEFAULT_ROCMFPX_IMAGE,
+            new=new_ref,
             note=(
                 "slot image pin matched a stale former default runner; rolled to "
-                "the current default (applies on the slot's next start)"
+                "the current HW-gated default (applies on the slot's next start)"
             ),
         )
 
@@ -1347,7 +1376,10 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
                 continue
             if entry.get("image") in STALE_ROCMFPX_IMAGE_REFS:
                 old_ref = entry["image"]
-                entry["image"] = DEFAULT_ROCMFPX_IMAGE
+                new_ref = resolve_default_image(entry.get("backend"), entry.get("device_class"))
+                if new_ref == old_ref:
+                    continue
+                entry["image"] = new_ref
                 changed = True
                 retagged += 1
                 log.warning(
@@ -1355,10 +1387,10 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
                     job_id=job_id,
                     profile=name,
                     old=old_ref,
-                    new=DEFAULT_ROCMFPX_IMAGE,
+                    new=new_ref,
                     note=(
                         "custom profile image matched a stale former default "
-                        "runner; rolled to the current default (flags untouched)"
+                        "runner; rolled to the current HW-gated default (flags untouched)"
                     ),
                 )
         if changed:

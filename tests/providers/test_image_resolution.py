@@ -12,11 +12,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, ProfileConfig
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE, ProfileConfig
 from hal0.providers.container import (
     _profile_image_and_flags,
     _resolve_image_ref,
 )
+
+
+@pytest.fixture
+def strix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the gfx1151/Strix-Halo capability signal so the HW-gated default
+    resolves to the rocmfpx runner, deterministically on any host."""
+    monkeypatch.setattr("hal0.config.schema.rocmfpx_capable", lambda hw: True)
+
+
+@pytest.fixture
+def non_strix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force a non-Strix host so the HW-gated default resolves to the lean toolbox."""
+    monkeypatch.setattr("hal0.config.schema.rocmfpx_capable", lambda hw: False)
 
 
 def _profile(image: str | None = None) -> ProfileConfig:
@@ -55,10 +68,24 @@ def test_resolve_image_ref_falls_back_to_profile_image() -> None:
     assert _resolve_image_ref(None, profile) == "ghcr.io/hal0ai/hal0-rocmfpx:server"
 
 
-def test_resolve_image_ref_falls_back_to_default_when_profile_has_no_image() -> None:
-    """No slot override AND no profile.image -> DEFAULT_ROCMFPX_IMAGE."""
+def test_resolve_image_ref_falls_back_to_default_on_strix(strix: None) -> None:
+    """No slot override AND no profile.image -> HW-gated default; on Strix that
+    is the rocmfpx runner."""
     profile = SimpleNamespace(image=None)
     assert _resolve_image_ref(None, profile) == DEFAULT_ROCMFPX_IMAGE
+
+
+def test_resolve_image_ref_falls_back_to_toolbox_off_strix(non_strix: None) -> None:
+    """Same fallback on a non-Strix host resolves to the lean vulkan toolbox."""
+    profile = SimpleNamespace(image=None)
+    assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
+
+
+def test_resolve_image_ref_honors_explicit_profile_pin_verbatim(strix: None) -> None:
+    """An explicit profile.image is honored verbatim even on Strix — it is NOT
+    re-gated (that would break the spec.image == profile.image invariant)."""
+    profile = SimpleNamespace(image=FALLBACK_VULKAN_IMAGE, backend="vulkan", device_class="gpu")
+    assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
 
 
 def test_resolve_image_ref_ignores_image_gen_dict() -> None:
@@ -94,8 +121,8 @@ def test_profile_image_and_flags_honours_slot_override() -> None:
     assert image == "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"
 
 
-def test_profile_image_and_flags_default_when_nothing_set() -> None:
-    """No slot image, profile has no image -> DEFAULT_ROCMFPX_IMAGE."""
+def test_profile_image_and_flags_default_when_nothing_set(strix: None) -> None:
+    """No slot image, profile has no image -> HW-gated default (rocmfpx on Strix)."""
     profile = SimpleNamespace(image=None, flags="-ngl 999", mtp=False)
     image, _flags = _profile_image_and_flags(profile)
     assert image == DEFAULT_ROCMFPX_IMAGE

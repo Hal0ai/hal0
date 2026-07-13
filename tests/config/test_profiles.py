@@ -54,9 +54,11 @@ class TestProfileConfigValidation:
         with pytest.raises(ValidationError):
             ProfileConfig(image="x", backend="metal")
 
-    def test_empty_image_raises(self) -> None:
-        with pytest.raises(Exception, match="image"):
-            ProfileConfig(image="")
+    def test_empty_image_allowed_means_defer(self) -> None:
+        # Empty image is intentional: "defer to the HW-gated default"
+        # (resolve_default_image), used by the basic seed profiles. A
+        # whitespace-only value is still a typo (see test_whitespace_image_raises).
+        assert ProfileConfig(image="").image == ""
 
     def test_whitespace_image_raises(self) -> None:
         with pytest.raises(Exception, match="image"):
@@ -204,9 +206,12 @@ class TestLoadProfilesConfig:
         for name in ("rocm-dense", "rocm-moe", "vulkan-dense", "vulkan-moe"):
             assert cfg.profile[name].mtp is True
 
-    def test_seed_vulkan_correct_image(self, tmp_path: Path) -> None:
+    def test_seed_vulkan_defers_to_hw_gated_default(self, tmp_path: Path) -> None:
+        """The basic vulkan profile carries no hardcoded image — it defers to the
+        HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere), resolved at
+        launch by providers.container._resolve_image_ref → resolve_default_image."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert "vulkan-radv-server" in cfg.profile["vulkan"].image
+        assert cfg.profile["vulkan"].image == ""
 
     def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")

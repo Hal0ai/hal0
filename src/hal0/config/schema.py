@@ -868,6 +868,12 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
         "localhost/hal0-rocmfpx:vulkan-minicpm5",
         "ghcr.io/hal0ai/hal0-rocmfpx:server",
         "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
+        # Former basic-lane seed defaults (pre HW-gated default). A slot pinned to
+        # one of these is materialised-default debris — the updater re-resolves it
+        # through the HW gate (:func:`resolve_default_image`): Strix boxes migrate
+        # to the rocmfpx runner, other hosts stay on the same toolbox (no-op).
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
     }
 )
 
@@ -892,7 +898,7 @@ FALLBACK_ROCM_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp
 FALLBACK_CUDA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
 
 
-def rocmfpx_capable(hw: "HardwareInfo | None") -> bool:
+def rocmfpx_capable(hw: HardwareInfo | None) -> bool:
     """True when the host GPU is Strix-Halo-class (gfx1151) — the ISA the
     ``hal0-rocmfpx`` runner image is built for.
 
@@ -910,10 +916,10 @@ def rocmfpx_capable(hw: "HardwareInfo | None") -> bool:
 
 
 def resolve_default_image(
-    backend: "str | None",
-    device_class: "str | None" = None,
+    backend: str | None,
+    device_class: str | None = None,
     *,
-    hw: "HardwareInfo | None" = None,
+    hw: HardwareInfo | None = None,
 ) -> str:
     """Hardware-gated default container image for a slot with no explicit pin.
 
@@ -936,7 +942,7 @@ def resolve_default_image(
             from hal0.config.loader import load_hardware_info
 
             hw = load_hardware_info()
-        except Exception:  # noqa: BLE001 — image resolution must never hard-fail
+        except Exception:
             hw = None
     be = (backend or "").lower()
     dc = (device_class or "").lower()
@@ -974,7 +980,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # live in rocm-dense / rocm-moe (and the vulkan-dense / vulkan-moe
         # pair on the Vulkan backend); the old rocmfpx-rocm / vkfpx-* slugs
         # were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
@@ -1086,7 +1092,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # more context fits in the shared pool, plus `--poll` tuning for steady
         # decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
         # back to f16 KV (iSWA regresses on quantized KV). mtp False.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
         "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui",
         "mtp": False,
         "device_class": "gpu",
@@ -1099,7 +1105,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
         # is gemma-safe) — per-model KV/batch tuning lives in the model's
         # defaults.extra_args.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
         "flags": "-ngl 999 -fa on --jinja",
         "mtp": False,
         "device_class": "gpu",
@@ -1132,7 +1138,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # (Qwen3-Embedding pins --pooling last via its model defaults); no KV
         # quant — meaningless for a single-pass encoder. GPU because these
         # tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
         "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1148,7 +1154,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # combining --embedding and --reranking on one server yields all-zero
         # scores (llama.cpp #20085). For parallel scoring raise ctx via the
         # slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, rocm toolbox elsewhere)
         "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1164,7 +1170,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # profile, which never emits --embedding and silently serves
         # /v1/completions instead of /v1/embeddings. Same llama-server / flag
         # bundle as `embed`, just on the RADV image. See profile_derive.derive_profile.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
         "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1177,7 +1183,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # exists). MUST be a SEPARATE instance from vulkan-embed — combining
         # --embedding and --reranking on one server yields all-zero scores
         # (llama.cpp #20085).
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
         "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
@@ -1224,7 +1230,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # (2026-07-04 Strix Halo consolidation, fact 6): CPU-only wants the page
         # cache (faster re-loads, no GTT involved); --no-mmap would force the
         # whole model into anonymous RAM and forfeit page-cache-backed reloads.
-        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "image": "",  # empty → HW-gated default (rocmfpx on Strix, vulkan toolbox elsewhere)
         "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja",
         "mtp": False,
         "device_class": "cpu",
@@ -1385,9 +1391,14 @@ class ProfileConfig(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def image_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("profile image must not be empty")
+    def image_blank_or_valid(cls, v: str) -> str:
+        # An EMPTY image is intentional and means "defer to the HW-gated default"
+        # (:func:`resolve_default_image`, applied by the launch renderer via
+        # providers.container._resolve_image_ref) — the basic seed profiles leave
+        # it blank so Strix-Halo boxes land on the rocmfpx runner and other hosts
+        # on the lean toolbox. A whitespace-only value is a typo, not intent.
+        if v and not v.strip():
+            raise ValueError("profile image must not be whitespace-only")
         return v
 
 
