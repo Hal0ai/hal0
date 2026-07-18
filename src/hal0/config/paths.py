@@ -133,6 +133,19 @@ def activity_db() -> Path:
     return var_lib() / "activity.db"
 
 
+def db_path() -> Path:
+    """Return the primary hal0 SQLite database path (/var/lib/hal0/hal0.db).
+
+    The ``db/`` foundation's single embedded-DB substrate (see
+    ``hal0.db.connection``): the model registry (ML-1), and later
+    PortAuthority/metrics/runtime-state tables, all live in this one file.
+    Same Runtime tier as :func:`activity_db` — preserved across updates and
+    survives uninstall with ``--keep-data``. Under HAL0_HOME it lands in the
+    tmp tree, so tests are auto-isolated.
+    """
+    return var_lib() / "hal0.db"
+
+
 #: Conventional external model-store mount and the historic default for slot
 #: container bind-mounts. Most hal0 deployments target an NFS / fast-disk
 #: mount here; overridable per-install via ``[models].store`` or the

@@ -370,6 +370,11 @@ def test_registry_command_registered_on_main_app() -> None:
     ``--help`` any more, but direct invocation must keep working so
     existing scripts don't break.
 
+    Checks the registered command's own ``hidden`` flag rather than
+    scraping ``--help`` text: ML-1 added a genuinely-visible
+    ``import-sqlite`` verb to the same group, whose name/description
+    legitimately contain the substring "import" too.
+
     Guards against forgetting the ``app.add_typer(registry_app, ...)``
     wire-up in ``hal0.cli.main``.
     """
@@ -377,7 +382,9 @@ def test_registry_command_registered_on_main_app() -> None:
 
     help_result = runner.invoke(main_app, ["registry", "--help"])
     assert help_result.exit_code == 0, help_result.output
-    assert "import" not in help_result.output
+
+    commands_by_name = {cmd.name: cmd for cmd in registry_app.registered_commands}
+    assert commands_by_name["import"].hidden is True
 
     reach_result = runner.invoke(main_app, ["registry", "import", "--help"])
     assert reach_result.exit_code == 0, reach_result.output

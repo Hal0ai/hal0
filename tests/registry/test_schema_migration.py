@@ -18,7 +18,11 @@ from pathlib import Path
 import pytest
 
 from hal0.registry.model import Model, ModelDefaults
-from hal0.registry.store import ModelRegistry
+
+# ML-1: this file asserts on the literal on-disk TOML shape (tomllib reads
+# of registry.toml), so it exercises the concrete TOML implementation,
+# aliased to the local name `ModelRegistry`.
+from hal0.registry.store import TomlModelRegistry as ModelRegistry
 
 
 @pytest.fixture
