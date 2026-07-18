@@ -45,6 +45,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
@@ -808,6 +809,74 @@ HERMES_HOME_DEFAULT = Path("/var/lib/hal0/.hermes")
 HERMES_REQUIREMENTS = (
     REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
 )
+
+
+# ── Vetted Hermes production refs (compatibility allowlist) ──────────────────
+#
+# Production bundles pin hermes-agent to a REVIEWED upstream commit/tag — not a
+# moving branch or an open version range (design doc §"Compatibility posture" +
+# docs/rework/hermes-official-integration-research.md). A git ref carries no PEP
+# 440 version, so the broken-build floor guard (#1247: hermes-agent 0.15.2's
+# wheel imports ``hermes_cli.dashboard_auth``, a module it never ships) cannot
+# reason about a pin numerically. A pinned ref is therefore acceptable ONLY when
+# it is in this reviewed allowlist — an unreviewed VCS pin is rejected exactly
+# like a broken published version. Lifting the pin to a new upstream ref means
+# adding it here AND refreshing the contract fixtures under
+# ``tests/fixtures/hermes/contracts/`` +
+# ``tests/agents/hermes/test_contract_compatibility.py``.
+VETTED_HERMES_REFS: frozenset[str] = frozenset({"9de9c25f620ff7f1ce0fd5457d596052d5159596"})
+
+# Broken-build floor (#1247): every hermes-agent below this is off-limits to any
+# resolver, including old-Python wheel fallbacks that would otherwise land on the
+# broken 0.15.2 build.
+HERMES_MIN_VERSION: tuple[int, int, int] = (0, 16, 0)
+
+_HERMES_FLOOR_RE = re.compile(r">=\s*(\d+)\.(\d+)\.(\d+)")
+_HERMES_GIT_REF_RE = re.compile(r"git\+https?://\S+?@([0-9A-Za-z._+-]+)")
+_HERMES_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _hermes_requirement_line(text: str) -> str:
+    """The single active ``hermes-agent`` requirement line (comments skipped)."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and line.startswith("hermes-agent"):
+            return line
+    raise ValueError("no hermes-agent requirement line found")
+
+
+def hermes_requirement_floor(line: str) -> tuple[int, int, int] | None:
+    """The ``>=X.Y.Z`` version floor of a requirement line, or ``None``.
+
+    ``None`` when the line carries no floor — e.g. a bare git-commit pin, which
+    has no PEP 440 version to compare against :data:`HERMES_MIN_VERSION`.
+    """
+    m = _HERMES_FLOOR_RE.search(line)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def hermes_pinned_ref(line: str) -> str | None:
+    """The git commit/tag a requirement pins to, or ``None`` for a version spec."""
+    m = _HERMES_GIT_REF_RE.search(line)
+    return m.group(1) if m else None
+
+
+def hermes_requirement_is_vetted(text: str) -> bool:
+    """Whether the shipped requirement forecloses the broken 0.15.2 build.
+
+    Acceptable via EITHER reviewed means (never an arbitrary/unreviewed pin):
+
+      * a version floor ``>= HERMES_MIN_VERSION`` — no resolver, including
+        old-Python wheel fallbacks, can select the broken build; OR
+      * a pin to a commit/tag in :data:`VETTED_HERMES_REFS` — the ref was built
+        from vetted upstream source that passed the contract compatibility test.
+    """
+    line = _hermes_requirement_line(text)
+    floor = hermes_requirement_floor(line)
+    if floor is not None and floor >= HERMES_MIN_VERSION:
+        return True
+    ref = hermes_pinned_ref(line)
+    return ref is not None and ref in VETTED_HERMES_REFS
 
 
 def upgrade_hermes_runtime(
@@ -2713,14 +2782,34 @@ AGENTS_DATASET = "agents"
 
 
 def _hermes_version_pin() -> str:
+    """Best-effort human identifier for the pinned hermes-agent build.
+
+    Surfaced in the identity card + self-report. The requirement may be an exact
+    ``==X.Y.Z`` spec, a floored/capped range, or a pin to a reviewed upstream git
+    commit/tag (the production posture) — none of the latter is a PEP 440
+    version, so this returns whatever pin identifier is present rather than
+    crashing on a commit ref. A 40-char SHA is shortened for display; a tag ref
+    (e.g. ``v2026.7.7.2``) is returned verbatim. Falls back to ``"unknown"`` when
+    the file is unreadable or carries no recognizable hermes-agent line.
+    """
     req = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
     try:
-        for line in req.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("hermes-agent=="):
-                return line.split("==", 1)[1].split("#", 1)[0].strip()
+        text = req.read_text(encoding="utf-8")
     except OSError:
-        pass
+        return "unknown"
+    try:
+        line = _hermes_requirement_line(text)
+    except ValueError:
+        return "unknown"
+    exact = re.search(r"==\s*([0-9][^\s#,]*)", line)
+    if exact:
+        return exact.group(1)
+    ref = hermes_pinned_ref(line)
+    if ref is not None:
+        return ref[:12] if _HERMES_SHA_RE.fullmatch(ref) else ref
+    floor = hermes_requirement_floor(line)
+    if floor is not None:
+        return ">=" + ".".join(str(p) for p in floor)
     return "unknown"
 
 
