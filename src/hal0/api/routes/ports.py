@@ -21,6 +21,7 @@ async def list_ports(request: Request) -> dict[str, object]:
     from hal0.ports import port_report
 
     snapshots: list[dict] = []
+    authority_claims: list[dict] | None = None
     try:
         sm = _get_slot_manager(request)
     except Exception:
@@ -37,10 +38,21 @@ async def list_ports(request: Request) -> dict[str, object]:
             ]
         except Exception:
             snapshots = []
+        # Fifth source (rework §11.2): the PortAuthority's issued claims from
+        # the ``port_claim`` table, folded alongside the harvester's four
+        # live-truth sources. Absent (None) when no authority is wired, so the
+        # report is byte-identical to the four-source view for non-§11.2 callers.
+        authority = getattr(sm, "_port_authority", None)
+        if authority is not None:
+            try:
+                authority_claims = [c.as_dict() for c in authority.claims(live_only=True)]
+            except Exception:
+                authority_claims = None
 
     return port_report(
         slots_dir=slots_config_dir(),
         pool=_slot_port_range(),
         slot_snapshots=snapshots,
         reserved={8080: "api"},
+        authority_claims=authority_claims,
     )
