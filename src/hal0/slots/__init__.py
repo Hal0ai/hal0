@@ -17,6 +17,7 @@ Key exports:
 from __future__ import annotations
 
 from hal0.slots.manager import Slot, SlotManager
+from hal0.slots.npu import is_npu_trio_shadow
 from hal0.slots.state import SELF_MANAGED_PROVIDERS, SlotState, provider_requires_model
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "Slot",
     "SlotManager",
     "SlotState",
+    "is_npu_trio_shadow",
     "provider_requires_model",
 ]
