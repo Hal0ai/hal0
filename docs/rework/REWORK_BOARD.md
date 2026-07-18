@@ -82,7 +82,7 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | **SLOT re-key — increment B** | internal `dict[int]` re-key of 7 dicts (single `_key` chokepoint, surrogate→rebind, rename = pure relabel) + M5 one-shot name→id artefact migrator (`migrate_id_keying.py`, idempotent, ships INERT) | ✔ | SLOT | increment A✔ | merge `91b55ad0` (lane `cd5e091b`/`3a4c9011`/`69c14bfc`) | Opus-built (TDD), Fable-reviewed + independently re-run: 550 combined incl. golden-paths harness; ruff/format/import/sunset green; 3 cross-fence one-liner test touches reported | **held for deploy (halo143 migration window):** live unit `hal0-slot@<name>`→`@<id>` + podman rename, M5 on real state, runtime path/unit flip to id (`_state_file`/`_config_file` + unit rendering) — must land atomically with M5 going live; consumed by P3-runtime-db |
 | **container.py arg-quoting bug** | ExecStart emitted space-less tokens bare → systemd stripped inner double quotes → `{enable_thinking:false}` → llama JSON parse error → slot won't start | ✔ | SLOT | — | `cd5e091b` (in SLOT-B merge `91b55ad0`) | `shlex.quote` every token (safe tokens stay bare); regression test with the exact lxc105 token | unblocks no-think default for the brain (lxc105 §6) |
 | SlotManager-deepen | `inspect/apply(desired)/delete/subscribe` small interface (review #4) | ✔ | SLOT | §11.1✔ | merge `919b2f36` (lane `b47c039c`) | Opus-built, Fable-reviewed + independently re-run (466 combined); id-keyed SlotInterface facade via `SlotManager.interface`; additive-only (wide surface intact); DesiredSlotState documents FLAGS-own narrowing; 12 new interface tests | wide-surface collapse = later increment (after FLAGS-own) |
-| P3-quadlet | Podman Quadlet `.container` units; hand-rendered ExecStart chain + docker fallback DELETED; instance token templated (`slots/naming.py` — M5 id-flip = 1 parameter); privilege seam `write-quadlet`/`remove-quadlet` (validated) | ✔ | INSTALL/SLOT | P3-perms✔, §11.1✔ | merge `ad821f9d` (lane `00843bfd`) | Opus-built, Fable-reviewed + independently re-run (554 lane + 504 combined incl. golden-paths); quoting regression ported; seam.py additive-only | **DEPLOY-VERIFY FIRST on halo143: podman must generate `hal0-slot@<token>.service` from the literally-@-named `.container` file** (load-bearing; fallback = M5 rename window). Also held: quadlet-generator preflight, teardown-on-removal, live write path as hal0, OwnershipStore row. Q.3 OpenWebUI companion deferred (follow-up) |
+| P3-quadlet | Podman Quadlet `.container` units; hand-rendered ExecStart chain + docker fallback DELETED; instance token templated (`slots/naming.py` — M5 id-flip = 1 parameter); privilege seam `write-quadlet`/`remove-quadlet` (validated) | ✔ | INSTALL/SLOT | P3-perms✔, §11.1✔ | merge `ad821f9d` (lane `00843bfd`) | Opus-built, Fable-reviewed + independently re-run (554 lane + 504 combined incl. golden-paths); quoting regression ported; seam.py additive-only | **VALIDATED on halo150 (2026-07-18):** `@`-named `.container` accepted, generator converts (via podman-4.x `PodmanArgs=` compat `5adf6e0f` — AutoRemove/GroupAdd/SecurityOpt are 5.0-only keys; GPU groups preserved), container Up + health + GPU inference + clean teardown on podman 4.9.3 (= lxc105's substrate). Held: OwnershipStore row for /etc/containers/systemd. Q.3 OpenWebUI companion deferred. Podman-5 template refresh = R5 DEPLOY row (native keys + crash-path auto-remove) |
 | §20 bench | bench_run onto OBS schema | ☐ | OBS | ML-4 | spec `spec-bench.final.md` | — | needs GPU box; **note: hal0 llama.cpp forks reject newer GGUFs (e.g. Qwen3.5 UD-Q4_K_XL) on `rocmfp4-server`/`c077206`** — bench only models hal0 already serves (lxc105 §5.4) |
 
 ### R4 — Brain + Hermes
@@ -147,6 +147,22 @@ base in isolated worktrees. The Hermes suite proceeds with Stage 1 (`HP-core` an
   **Accepted (Fable plan review 2026-07-18): land the automatable subset (#9 rename, #10 delete,
   #14 api-restart, #15 no-Hermes) as CI-runnable integration tests BEFORE SLOT increment B merges;**
   halo143-only paths become a scripted runbook.
+
+## halo150 deploy-validation results (2026-07-18 — full report: `halo150-r3-deploy-issues.md`)
+- **Runbook Phases 0–5 COMPLETE.** Greens: fresh R3 git install, auth, doctor (post-O2 CLI-auth
+  fix), slot CRUD, quadlet generation via 4.x compat, GPU inference, teardown, M5 rehearsal
+  (id-keying + idempotence on copies), rename semantics (offline-gated, id/port stable), no-think
+  via the supported field+normalize path, system-info real GPU (Strix Halo 116GB).
+- **Fixed forward from box findings (all on descar):** O1 slot-list degradation `c1ea4519` ·
+  O2 CLI auth `c1ea4519` · O3 shim readiness `fc4f6d8d` · O6 lock-file perms rows + O7 legacy
+  static-unit cleanup `78c6dd1c` · O8 quadlet 4.x compat `5adf6e0f` · **O9 SECURITY: bundle leaked
+  HAL0_ADMIN/CLIENT_KEY (bare `_KEY` suffix missing from _SENSITIVE_RE) `64c956df`**.
+- **Open (low): O10** — deprecated `[server].extra_args` UX trap: bare double-quoted JSON is eaten
+  by (correct) shlex semantics; current code renders quoted input correctly (repro-verified).
+  Candidate: store-time validation warning for JSON-looking tokens.
+- **Deploy rows:** podman-5 template refresh (R5); hermes-provision lane gains: AppArmor
+  containers.conf preflight (unconfined LXC), stale agent drop-in cleanup (241/CONFIGURATION_
+  DIRECTORY class), `bootstrap --repair` correctness (O3 ownership drift).
 
 ## Fable plan-review adds (2026-07-18 — accepted "ok"; fold into waves)
 - **Migration-number allocation (protocol add):** numbers assigned at DISPATCH, on this board.
