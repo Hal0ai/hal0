@@ -1,0 +1,40 @@
+#!/bin/bash
+# hal0-podman-ro — privileged seam for READ-ONLY podman introspection (O12).
+#
+# Background: slots run ROOTFUL podman (Quadlet units under
+# /etc/containers/systemd/, root's image store — written via the
+# hal0-systemctl write-quadlet seam). hal0-api runs as the unprivileged
+# `hal0` system user, so its OWN (rootless) `podman` calls hit a DIFFERENT
+# store than the one slots actually populate: backends report "installable"
+# even when the image is present, in root's store (halo143/halo150).
+#
+# This script is the ENTIRE privileged surface, modeled exactly on
+# hal0-agentenv / hal0-benchctl / hal0-systemctl: every verb is a single
+# HARDCODED podman invocation (no operator-supplied flags ever reach podman's
+# argv), no shell is ever evaluated, no wildcards. Only read-only
+# introspection is exposed — rm/run/build/exec are never wired in. Add a new
+# verb here (never widen an existing one with caller-supplied args) the day a
+# call site needs one; see src/hal0/providers/podman_introspect.py.
+
+set -euo pipefail
+
+PODMAN=/usr/bin/podman
+
+die() { echo "hal0-podman-ro: $1" >&2; exit 64; }
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+  images)                  # local registry/repo set (root's image store)
+    exec "$PODMAN" images --format '{{.Repository}}'
+    ;;
+
+  help|"")
+    cat <<EOF
+usage: hal0-podman-ro <command>
+  images    podman images --format {{.Repository}}   (root's image store)
+EOF
+    ;;
+
+  *) die "bad cmd: $cmd" ;;
+esac

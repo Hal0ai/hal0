@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +23,8 @@ from hal0.config import paths
 from hal0.config.loader import load_hardware_info
 from hal0.hardware import gpu_view
 from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.providers import podman_introspect
+from hal0.providers.podman_introspect import PodmanImagesResult
 
 log = structlog.get_logger(__name__)
 
@@ -757,29 +757,18 @@ def _image_repo(ref: str) -> str:
     return f"{head}/{tail}" if head else tail
 
 
-def _local_image_repos() -> set[str] | None:
-    """``podman images`` → the set of local ``registry/repo`` strings.
+def _local_image_repos() -> PodmanImagesResult | None:
+    """``podman images`` → the local ``registry/repo`` set + which store it
+    came from (O12: slots run ROOTFUL podman; hal0-api runs as the
+    unprivileged ``hal0`` user, whose OWN podman calls hit a different,
+    rootless store — see :mod:`hal0.providers.podman_introspect`).
 
-    Returns ``None`` when podman is absent/unreachable so every backend
-    degrades to ``"unavailable"`` rather than a false "installable" — this
-    dev sandbox (no podman) is exactly that case, per §21.4 HARD REQUIREMENT
-    #5 (graceful degrade, never crash).
+    Returns ``None`` when podman is unreachable in EITHER context so every
+    backend degrades to ``"unavailable"`` rather than a false "installable"
+    — this dev sandbox (no podman) is exactly that case, per §21.4 HARD
+    REQUIREMENT #5 (graceful degrade, never crash).
     """
-    podman = shutil.which("podman")
-    if podman is None:
-        return None
-    try:
-        proc = subprocess.run(
-            [podman, "images", "--format", "{{.Repository}}"],
-            capture_output=True,
-            text=True,
-            timeout=10.0,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    return {line.strip() for line in proc.stdout.splitlines() if line.strip() and line != "<none>"}
+    return podman_introspect.images()
 
 
 def _backend_state(image: str, local_repos: set[str] | None) -> str:
@@ -809,13 +798,23 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     wizard has one place to ask "what can this box run right now". Never
     raises: hardware/features reuse the already-tolerant handlers above, and
     a podman-less box degrades every backend to ``"unavailable"``.
+
+    ``podman_context`` (O12) tells the caller/UI which store the backend
+    ``state`` values actually came from: ``"rootful"`` (root's store — the
+    one slots actually use, reached via the ``hal0-podman-ro`` sudo -n seam)
+    is authoritative; ``"rootless"`` means the seam wasn't usable (dev box,
+    missing grant) and the read fell back to hal0-api's OWN store, which may
+    disagree with what's actually installed for slots; ``"unavailable"``
+    means neither context could reach podman at all.
     """
     from hal0.api.routes.health import list_features
     from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
     hardware = await get_hardware(request)
     features = await list_features(request)
-    local_repos = await asyncio.to_thread(_local_image_repos)
+    images_result = await asyncio.to_thread(_local_image_repos)
+    local_repos = images_result.repos if images_result is not None else None
+    podman_context = images_result.context if images_result is not None else "unavailable"
 
     backends: dict[str, Any] = {}
     for key, runner in RUNNER_IMAGES.items():
@@ -844,4 +843,9 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "state": _backend_state(image, local_repos),
         }
 
-    return {"hardware": hardware, "features": features, "backends": backends}
+    return {
+        "hardware": hardware,
+        "features": features,
+        "backends": backends,
+        "podman_context": podman_context,
+    }

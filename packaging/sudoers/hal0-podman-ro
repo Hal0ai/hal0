@@ -1,0 +1,20 @@
+# hal0 — privileged seam grant for READ-ONLY podman introspection (O12).
+#
+# Slots run ROOTFUL podman (Quadlet units under /etc/containers/systemd/,
+# root's image store). hal0-api runs as the unprivileged `hal0` system user,
+# so its own podman calls hit hal0's ROOTLESS store — a different store from
+# the one slots actually populate, producing false "installable" backend
+# states (halo143/halo150). It delegates exactly the read-only introspection
+# ops to /usr/lib/hal0/bin/hal0-podman-ro, which is the entire privileged
+# surface: today just `images`, each a single hardcoded podman invocation —
+# no operator-supplied argv, no shell. rm/run/build/exec are never exposed.
+#
+# Install (as root):
+#   install -m 0755 -o root -g root hal0-podman-ro /usr/lib/hal0/bin/hal0-podman-ro
+#   install -m 0440 -o root -g root hal0-podman-ro /etc/sudoers.d/hal0-podman-ro
+#   visudo -cf /etc/sudoers.d/hal0-podman-ro
+#
+# Keep this grant pinned to the helper binary; a broader grant would let the
+# API run arbitrary root commands. Revoke with: rm /etc/sudoers.d/hal0-podman-ro
+
+hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-podman-ro
