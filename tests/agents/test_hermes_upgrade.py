@@ -104,12 +104,38 @@ def test_pip_failure_is_a_real_stop(tmp_path: Path) -> None:
 
 
 def test_requirements_floor_not_hard_pinned() -> None:
-    """The shipped requirements no longer hard-pin (the update-blocker)."""
+    """No accidental update-blocker: a commit-pin is allowed ONLY when it is the
+    reviewed production ref (hp.VETTED_HERMES_REFS).
+
+    A hard pin was a past update-blocker, so an *arbitrary* ``==`` pin or an
+    unreviewed VCS ref is still forbidden. The exemption is tied strictly to the
+    vetted allowlist: production intentionally pins a reviewed commit/tag, but
+    any other hard pin must be a floored+capped spec instead.
+    """
+    import re
+
+    from hal0.agents import hermes_provision as hp
     from hal0.agents.hermes_provision import HERMES_REQUIREMENTS
 
     text = HERMES_REQUIREMENTS.read_text(encoding="utf-8")
     reqs = [
         ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
     ]
-    # The single requirement line is the floored+capped spec, not a hard pin.
-    assert reqs == ["hermes-agent[web]>=0.16.0,<1.0"]
+    assert len(reqs) == 1, f"expected a single hermes requirement, got: {reqs!r}"
+    line = hp._hermes_requirement_line(text)
+    ref = hp.hermes_pinned_ref(line)
+    floor = hp.hermes_requirement_floor(line)
+
+    if ref is not None:
+        # A VCS pin is a hard pin — permitted solely because it is vetted.
+        assert ref in hp.VETTED_HERMES_REFS, (
+            f"hermes requirement hard-pins an unreviewed ref (update-blocker): {line!r}"
+        )
+    else:
+        # A version spec must be floored+capped, never a bare ``==`` hard pin.
+        assert "==" not in line, f"bare hard pin is an update-blocker: {line!r}"
+        assert floor is not None and floor >= hp.HERMES_MIN_VERSION
+        assert re.search(r"<\s*\d", line), f"requirement floor not capped: {line!r}"
+
+    # The pin still enforces the broken-build protection through the same seam.
+    assert hp.hermes_requirement_is_vetted(text)
