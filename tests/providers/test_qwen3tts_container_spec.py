@@ -139,8 +139,8 @@ def test_renderer_emits_gpu_args_cache_volume_and_miopen_env() -> None:
 
     assert "AddDevice=/dev/kfd" in lines
     assert "AddDevice=/dev/dri/renderD128" in lines
-    assert "GroupAdd=993" in lines
-    assert "GroupAdd=44" in lines
+    assert "--group-add 993" in unit
+    assert "--group-add 44" in unit
     assert "PublishPort=127.0.0.1:8095:8095" in lines
     assert "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" in lines
     assert "Volume=/var/lib/hal0/qwen3tts-cache:/cache:z" in lines

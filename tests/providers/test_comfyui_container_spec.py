@@ -158,7 +158,7 @@ def test_renderer_host_network_skips_publish_and_keeps_shm() -> None:
     # extra_args (--ipc=host) pass through the deprecated PodmanArgs= escape hatch.
     assert "PodmanArgs=--ipc=host" in lines
     assert "--shm-size" not in unit
-    assert "SecurityOpt=label=disable" in lines
+    assert "--security-opt label=disable" in unit
     assert "AddDevice=/dev/kfd" in lines
     assert (
         "Volume=/mnt/ai-models/comfyui/extra_model_paths.yaml"

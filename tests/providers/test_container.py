@@ -419,16 +419,15 @@ class TestRenderUnit:
         assert "--chat-template-kwargs" in tokens
         assert tokens[tokens.index("--chat-template-kwargs") + 1] == json_kwargs
 
-    def test_security_opts(self, monkeypatch) -> None:
-        # Pin the 5.x native-key branch; the 4.x PodmanArgs translation is
-        # covered by TestQuadletAutoRemoveGate.
-        monkeypatch.setattr(_container_mod, "_podman_major_version", lambda: 5)
+    def test_security_opts(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
-        lines = unit.splitlines()
-        assert "SecurityOpt=apparmor=unconfined" in lines
-        assert "SecurityOpt=seccomp=unconfined" in lines
+        # Uniform render (O8+O11): security opts ride PodmanArgs= on every
+        # substrate — native SecurityOpt= keys are deliberately not emitted.
+        assert "--security-opt apparmor=unconfined" in unit
+        assert "--security-opt seccomp=unconfined" in unit
+        assert "SecurityOpt=" not in unit
 
     def test_model_arg_in_exec(self) -> None:
         profile = _moe_profile()
@@ -465,18 +464,17 @@ class TestRenderUnit:
         # Quadlet owns crash recovery now (was the hand-rendered Restart=no).
         assert "Restart=always" in unit.splitlines()
 
-    def test_numeric_group_add_present(self, monkeypatch) -> None:
-        # Pin the 5.x native-key branch (see test_security_opts note).
-        monkeypatch.setattr(_container_mod, "_podman_major_version", lambda: 5)
+    def test_numeric_group_add_present(self) -> None:
         """GroupAdd= must use numeric GIDs (toolbox images lack group names)."""
         from hal0.providers._gpu import resolve_gpu_group_ids
 
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
-        lines = unit.splitlines()
+        # Uniform render: numeric GIDs ride PodmanArgs=--group-add (O8+O11).
         for gid in resolve_gpu_group_ids():
-            assert f"GroupAdd={gid}" in lines, f"GID {gid} not a GroupAdd= line: {lines}"
+            assert f"--group-add {gid}" in unit, f"GID {gid} missing: {unit}"
+        assert "GroupAdd=" not in unit
 
 
 # ── ContainerProvider.container_spec ─────────────────────────────────────────
@@ -532,10 +530,7 @@ class TestContainerSpec:
             spec = self._build_spec()
         assert spec.devices == ["/dev/kfd", "/dev/dri/renderD128"]
 
-    def test_security_opts(self, monkeypatch) -> None:
-        # Pin the 5.x native-key branch; the 4.x PodmanArgs translation is
-        # covered by TestQuadletAutoRemoveGate.
-        monkeypatch.setattr(_container_mod, "_podman_major_version", lambda: 5)
+    def test_security_opts(self) -> None:
         spec = self._build_spec()
         assert "apparmor=unconfined" in spec.security_opt
         assert "seccomp=unconfined" in spec.security_opt
@@ -1011,72 +1006,26 @@ class TestFamilyDefaults:
         assert "q8_0" not in argv  # basic seed forces no KV quant
 
 
-class TestQuadletAutoRemoveGate:
-    """halo150 O8: AutoRemove= is podman-5.0+ — 4.x generators hard-fail the
-    whole .container conversion on the unknown key and emit NO unit."""
+class TestUniformQuadletRender:
+    """halo150/143 O8+O11: ONE render for every substrate — no version branch.
 
-    def _rendered(self, monkeypatch, major: int) -> str:
-        from hal0.providers import container as c
+    Native AutoRemove=/GroupAdd=/SecurityOpt= keys are deliberately never
+    emitted: 4.x generators hard-fail the conversion on them, and the native
+    render's systemd lifecycle broke on unprivileged podman-5-in-LXC
+    (netavark /run/user/0/netns teardown race) while the PodmanArgs render
+    ran healthy on both validation boxes.
+    """
 
-        monkeypatch.setattr(c, "_podman_major_version", lambda: major)
+    def _rendered(self) -> str:
         return _render_llama("qtest", "img:latest", 18081, "/models/m.gguf", "-fa on")
 
-    def test_podman5_emits_native_keys(self, monkeypatch):
-        text = self._rendered(monkeypatch, 5)
-        assert "AutoRemove=yes" in text
-        assert "GroupAdd=" in text or "--group-add" not in text
-
-    def test_podman4_translates_to_podman_args(self, monkeypatch):
-        text = self._rendered(monkeypatch, 4)
+    def test_no_native_5x_keys_ever(self):
+        text = self._rendered()
         assert "AutoRemove" not in text
         assert "GroupAdd=" not in text
         assert "SecurityOpt=" not in text
-        # GPU groups survive as raw podman-run flags (load-bearing —
-        # stripping them would kill GPU access).
+
+    def test_gpu_groups_ride_podman_args(self):
+        text = self._rendered()
         if "--group-add" in text:
             assert "PodmanArgs=" in text
-
-    def test_unknown_version_treated_as_pre5(self, monkeypatch):
-        # Fail-soft: a unit that never generates is worse than a compat
-        # translation on a 5.x box.
-        text = self._rendered(monkeypatch, 0)
-        assert "AutoRemove" not in text
-        assert "GroupAdd=" not in text
-
-
-# Captured at import time — BEFORE the autouse _pin_podman5 fixture replaces
-# the module attribute — so the cache test exercises the real implementation.
-_REAL_PODMAN_MAJOR_VERSION = _container_mod._podman_major_version
-
-
-class TestPodmanVersionProbeCache:
-    """halo143 finding: a FAILED probe must not poison the process cache."""
-
-    def _reset(self):
-        from hal0.providers import container as c
-
-        c._podman_major_cache = None
-
-    def test_failed_probe_not_cached_success_recovers(self, monkeypatch):
-        from hal0.providers import container as c
-
-        self._reset()
-        calls = {"n": 0}
-
-        def _run(*a, **kw):
-            calls["n"] += 1
-
-            class _R:
-                stdout = "" if calls["n"] == 1 else "podman version 5.7.0"
-
-            if calls["n"] == 1:
-                raise TimeoutError("first probe slow (storage init)")
-            return _R()
-
-        monkeypatch.setattr(c.subprocess, "run", _run)
-        monkeypatch.setattr(c, "_container_runtime", lambda: "/usr/bin/podman")
-        assert _REAL_PODMAN_MAJOR_VERSION() == 0  # fails safe, NOT cached
-        assert _REAL_PODMAN_MAJOR_VERSION() == 5  # retried, now correct
-        assert _REAL_PODMAN_MAJOR_VERSION() == 5  # success IS cached
-        assert calls["n"] == 2
-        self._reset()

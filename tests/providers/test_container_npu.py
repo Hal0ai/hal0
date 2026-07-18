@@ -91,13 +91,14 @@ class TestRenderUnitFromSpec:
 
     def test_security_opts_included(self) -> None:
         unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        lines = unit.splitlines()
-        assert "SecurityOpt=apparmor=unconfined" in lines
-        assert "SecurityOpt=seccomp=unconfined" in lines
+        assert "--security-opt apparmor=unconfined" in unit
+        assert "--security-opt seccomp=unconfined" in unit
+        assert "SecurityOpt=" not in unit
 
     def test_group_add_included(self) -> None:
         unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        assert "GroupAdd=993" in unit.splitlines()
+        assert "--group-add 993" in unit
+        assert "GroupAdd=" not in unit
 
     def test_loopback_publish_derived_from_spec_port(self) -> None:
         """PublishPort is rendered declaratively from spec.port, not extra_args."""

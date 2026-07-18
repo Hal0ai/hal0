@@ -114,6 +114,27 @@ loss is a **double-tokenization** in the Exec builder. **Caveat:** `extra_args` 
 supported no-think path (the `enable_thinking` field + `:8080` normalize) works correctly — so this
 is a low-severity edge on a deprecated surface, not the core 4.2 assertion.
 
+### O11 — native quadlet render fails on unprivileged podman-5 LXC (halo143) — RESOLVED: uniform render
+Characterized on 143 (unpriv, U26.04, podman 5.7): the container runs perfectly under native
+flags via manual `podman run` (model loads, serves, clean `--rm` stop) — but the NATIVE quadlet
+systemd unit fails to stay up: exit 5 + `netavark: open /run/user/0/netns/…: No such file or
+directory` on teardown (podman under a mapped-root LXC uses rootless-netns infrastructure).
+The compat (`PodmanArgs=`) unit ran healthy on the same box. The break is the native unit's
+systemd lifecycle × unprivileged netns, not the flags.
+
+**Resolution (descar):** the renderer now emits ONE uniform render on every substrate —
+`PodmanArgs=--group-add …/--security-opt …`, AutoRemove never — and the podman-version probe
+is deleted. Rationale: compat proven on both validation boxes; native proven broken on one;
+one render = one behavior (both-boxes policy); the probe machinery (cache poisoning, ownership-
+blocked probes) ceases to exist as a failure class.
+
+### O12 — system-info backend states lie under rootful/rootless store split (halo143)
+`installed`/`installable` classification probes `podman images` as the hal0 user (rootless
+store) while slots pull/run rootful — separate image stores, so backends read `installable`
+on a box whose images are all present rootful. The `.config` chown (9e07c0d3) fixed the probe
+ERROR, not the visibility. Fix direction: probe the store slots actually use (via the
+privileged seam or `podman --root` pointed at the rootful store). Needs a lane row.
+
 ### O3 — `hal0-agent@hermes` start-timeout loop
 `HERMES_DASHBOARD_READY port=9119` logs, then `start operation timed out` (2 min) →
 `status=241/CONFIGURATION_DIRECTORY`, restart loop. Never signals systemd readiness.

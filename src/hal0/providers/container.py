@@ -467,36 +467,6 @@ def _container_runtime() -> str:
     raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
 
 
-# Successful-probe cache for _podman_major_version. NOT lru_cache: caching a
-# FAILED probe poisons the process — on halo143 a fresh unprivileged podman's
-# first invocation did storage-graph init, blew the 5s timeout, and the api
-# rendered the 4.x PodmanArgs compat on a 5.7 box for its whole lifetime.
-# Only a determinate (>0) answer is worth remembering; failures retry on the
-# next render (and each failed render still fails SAFE into the compat branch).
-_podman_major_cache: int | None = None
-
-
-def _podman_major_version() -> int:
-    """Best-effort podman major version, 0 when undeterminable (not cached)."""
-    global _podman_major_cache
-    if _podman_major_cache is not None:
-        return _podman_major_cache
-    try:
-        out = subprocess.run(
-            [_container_runtime(), "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout
-        # "podman version 4.9.3" / "podman version 5.2.1"
-        major = int(out.strip().rsplit(" ", 1)[-1].split(".", 1)[0])
-    except Exception:
-        return 0
-    if major > 0:
-        _podman_major_cache = major
-    return major
-
-
 def _slot_publish_host() -> str:
     """Live ``[slots].publish_host`` — the address slot ports publish on.
 
@@ -593,21 +563,25 @@ def _render_quadlet_from_plan(
         # would tag a second copy — the old B3 note).
         "LogDriver=none",
     ]
-    # ── podman-4.x quadlet compat (halo150 O8) ────────────────────────────
-    # ``AutoRemove=``, ``GroupAdd=`` (and generic ``SecurityOpt=``) are
-    # quadlet keys the podman 5.0 generator knows; a 4.x generator HARD-FAILS
-    # the whole conversion on any unknown key and emits NO unit at all
-    # (Ubuntu 24.04 ships 4.9.3 — and GroupAdd is load-bearing: it grants the
-    # GPU device groups). ``PodmanArgs=`` is the version-stable escape hatch
-    # (raw `podman run` flags, supported throughout 4.x): below 5.0 the
-    # affected keys are translated to their CLI-flag equivalents so the unit
-    # generates with FULL functionality; AutoRemove alone is dropped rather
-    # than translated (`--rm` races the generated unit's own cidfile
-    # ExecStopPost rm) — losing crash-path auto-remove is the only 4.x delta.
-    quadlet5 = _podman_major_version() >= 5
+    # ── ONE quadlet render for every substrate (halo150/143 O8+O11) ──────
+    # DELIBERATE: no native AutoRemove=/GroupAdd=/SecurityOpt= keys and no
+    # podman-version branch. Rationale, proven on real hardware 2026-07-18:
+    #   * 4.x generators HARD-FAIL the conversion on those keys (halo150,
+    #     podman 4.9.3 — the lxc105 live-reference substrate) → no unit.
+    #   * The native render's systemd lifecycle breaks on unprivileged
+    #     podman-5-in-LXC (halo143, 5.7): netavark teardown races
+    #     /run/user/0/netns and the unit exits 5, while the SAME container
+    #     runs clean under manual podman run — the unit shape, not the
+    #     flags, is the problem. The compat render ran healthy there.
+    #   * ``PodmanArgs=`` is the documented, version-stable escape hatch and
+    #     is semantically identical for --group-add/--security-opt.
+    # AutoRemove/--rm is dropped everywhere: stop-cleanup rides the generated
+    # unit's own cidfile ExecStopPost rm; crash-path auto-remove hid failure
+    # logs and fed the netns race. One render = one behavior to validate
+    # (both-boxes policy). If a future podman makes native keys strictly
+    # better, reintroduce them fleet-wide with hardware evidence, not a
+    # version sniff.
     compat_args: list[str] = []
-    if quadlet5:
-        lines.append("AutoRemove=yes")
     if plan.network_mode:
         lines.append(f"Network={plan.network_mode}")
     # Explicit device nodes (podman won't recurse /dev/dri, #674); CDI names
@@ -616,17 +590,11 @@ def _render_quadlet_from_plan(
         lines.append(f"AddDevice={dev}")
     # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
     for gid in plan.group_add:
-        if quadlet5:
-            lines.append(f"GroupAdd={gid}")
-        else:
-            compat_args += ["--group-add", str(gid)]
+        compat_args += ["--group-add", str(gid)]
     for cap in plan.cap_add:
         lines.append(f"AddCapability={cap}")
     for opt in plan.security_opt:
-        if quadlet5:
-            lines.append(f"SecurityOpt={opt}")
-        else:
-            compat_args += ["--security-opt", str(opt)]
+        compat_args += ["--security-opt", str(opt)]
     if compat_args:
         lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in compat_args))
     # Read-only + SELinux ``:z`` are first-class Mount flags; render_quadlet omits
