@@ -1,11 +1,15 @@
-"""``hal0 registry`` subcommands — v0.1.x backup recovery.
+"""``hal0 registry`` subcommands — v0.1.x backup recovery + SQLite export/import.
 
-This module hosts operator tooling that touches
-``/var/lib/hal0/registry/registry.toml`` directly. Today there is
-exactly one such command — ``import`` — which restores a registry
-extracted from a ``hal0-v0.1-backup-YYYY-MM-DD.tar.gz`` tarball
-produced by following the v0.1.x backup instructions in install.sh
-(see the v0.2 adoption plan §9).
+This module hosts operator tooling that touches the model registry
+directly. Three commands:
+
+* ``import`` (hidden — see the module note below) — restores a registry extracted from a
+  ``hal0-v0.1-backup-YYYY-MM-DD.tar.gz`` tarball produced by following the
+  v0.1.x backup instructions in install.sh (see the v0.2 adoption plan §9).
+* ``export`` / ``import-sqlite`` (ML-1) — the read and one-shot migration
+  paths across the TOML ⇄ SQLite boundary now that
+  ``hal0.registry.sqlite_store.SqliteModelRegistry`` is the source of
+  truth (see hal0-specs/spec-ml1-sqlite.final.md).
 
 CLI consolidation (2026-07): the standalone ``hal0 registry`` group
 collided in name with the much larger ``hal0 model`` group, which already
@@ -53,7 +57,10 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from hal0.registry.store import registry_write_lock
+from hal0.config.loader import write_toml_atomic
+from hal0.registry.import_toml import import_toml_to_sqlite
+from hal0.registry.sqlite_store import SqliteModelRegistry
+from hal0.registry.store import model_to_toml_dict, registry_write_lock
 
 console = Console()
 
@@ -305,3 +312,56 @@ def import_backup(
         err=True,
     )
     _do_import_backup(path, force, dest)
+
+
+# ── ML-1: SQLite registry export / import ─────────────────────────────────
+#
+# `registry.toml` is a derived artifact now that SQLite is the registry's
+# source of truth (hal0-specs/spec-ml1-sqlite.final.md) — these two verbs
+# are the read (export) and one-shot migration (import) paths across that
+# boundary. Named `import-sqlite` rather than plain `import`: that name is
+# already taken by the hidden v0.1.x tarball-restore alias above.
+
+
+@app.command("export")
+def export_registry(
+    out: Path = typer.Option(
+        DEFAULT_REGISTRY_PATH,
+        "--out",
+        help="Destination path for the TOML snapshot of the SQLite registry.",
+    ),
+) -> None:
+    """Export the SQLite model registry to a TOML snapshot.
+
+    For inspection / grep / git-diffable review only — the exported file
+    is never read back automatically; SQLite stays authoritative. Uses
+    the same None-stripping serialisation the TOML store always used
+    (`model_to_toml_dict`), so the shape matches pre-ML-1 registries.
+    """
+    registry = SqliteModelRegistry()
+    models = registry.list()
+    payload = {"models": {m.id: model_to_toml_dict(m) for m in models}}
+    write_toml_atomic(out, payload)
+    console.print(f"[green]exported[/green] {len(models)} model(s) to {out}")
+
+
+@app.command("import-sqlite")
+def import_sqlite(
+    registry_file: Path = typer.Option(
+        DEFAULT_REGISTRY_PATH,
+        "--registry-file",
+        help="Source registry.toml to import into the SQLite registry.",
+    ),
+) -> None:
+    """One-shot, idempotent import of registry.toml into the SQLite registry.
+
+    Uses `INSERT OR IGNORE` — safe to re-run at any time; a model id
+    already present in SQLite (including one edited after cutover) is
+    left untouched, never overwritten.
+    """
+    report = import_toml_to_sqlite(registry_file=registry_file)
+    console.print(
+        f"[green]import complete[/green]: {report.imported} imported, "
+        f"{report.skipped_existing} already present, "
+        f"{report.skipped_invalid} invalid (skipped)"
+    )

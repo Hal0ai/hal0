@@ -11,7 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from hal0.registry.model import Model
-from hal0.registry.store import ModelRegistry
+
+# ML-1: exercises `on_change` against the concrete TOML implementation
+# (aliased to the local name `ModelRegistry`) — SqliteModelRegistry's
+# identical on_change contract is covered in test_sqlite_store.py.
+from hal0.registry.store import TomlModelRegistry as ModelRegistry
 
 
 def _model(tmp_path: Path, mid: str = "m1", **kw) -> Model:
