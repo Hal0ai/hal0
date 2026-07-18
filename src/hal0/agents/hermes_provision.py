@@ -948,14 +948,28 @@ def _is_hal0_managed_wrapper(path: Path) -> bool:
 
 
 def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
-    """Copy + chmod the wrapper into ``wrapper_dst``.
+    """Copy + chmod the wrapper into ``wrapper_dst`` — euid-aware (§7.4).
 
-    Capture safety: when a pre-existing ``wrapper_dst`` is NOT a hal0-managed
-    wrapper (a hand-installed upstream ``hermes`` on PATH), copy it aside to
-    ``<dst>.pre-hal0`` before overwriting so the foreign entry point is
-    recoverable. Overwriting our own wrapper (the steady-state re-run) skips
-    the backup.
+    ``/usr/local/bin/hermes`` is root-only install infra. On a system install
+    ``install.sh``'s root prelude lays it down BEFORE dropping the provisioner to
+    the hal0 user, so:
+
+    * root (euid==0) installs it here directly (with capture backup, below);
+    * a non-root (hal0) caller finds it already present (prelude-installed) and
+      skips — it cannot write ``/usr/local/bin``. If it is somehow absent we log
+      and continue rather than aborting the whole bootstrap: the wrapper is
+      root-owned infra the prelude owns, not a hal0-writable artifact.
+
+    Capture safety (root only): when a pre-existing ``wrapper_dst`` is NOT a
+    hal0-managed wrapper (a hand-installed upstream ``hermes`` on PATH), copy it
+    aside to ``<dst>.pre-hal0`` before overwriting so the foreign entry point is
+    recoverable. Overwriting our own wrapper (the steady-state re-run) skips the
+    backup.
     """
+    if os.geteuid() != 0:
+        if not wrapper_dst.exists():
+            log.warning("hermes_provision.wrapper_absent_nonroot", dst=str(wrapper_dst))
+        return
     wrapper_dst.parent.mkdir(parents=True, exist_ok=True)
     if wrapper_dst.exists() and not _is_hal0_managed_wrapper(wrapper_dst):
         backup = wrapper_dst.with_name(wrapper_dst.name + ".pre-hal0")
@@ -971,7 +985,13 @@ def _install_backcompat_symlink(target: Path, link: Path) -> None:
     Used to make the legacy ``hal0-hermes`` entry point a symlink to the
     canonical ``hermes`` wrapper. A pre-existing regular file (an older
     install's copied wrapper) is replaced so the two never drift.
+
+    euid-aware (§7.4): both link + target live in root-only ``/usr/local/bin``,
+    so a non-root (hal0) caller skips — ``install.sh``'s root prelude lays the
+    symlink down alongside the wrapper before dropping to hal0.
     """
+    if os.geteuid() != 0:
+        return
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink():
         if os.readlink(link) == str(target):
@@ -4059,11 +4079,15 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
       the drop-in references, not in the drop-in itself).
     * daemon-reload only fires when the file actually changed.
 
-    Guards (both yield ``outcome="skipped"``, never a crash): a non-root caller
-    can't write ``/etc/systemd/system``; and under pytest with an un-sandboxed
-    (real ``/etc``) drop-in path we refuse to touch the host tree. Best-effort
-    throughout — a filesystem/systemctl failure is reported in the result, never
-    raised, so a gateway hiccup never aborts the caller.
+    Privilege-aware (§7.4 drop-to-hal0): root writes ``/etc/systemd/system``
+    directly; a non-root (hal0) caller routes the write + ``daemon-reload``
+    through the ``hal0-systemctl`` seam (``sudo -n``). The drop-in is 0644
+    world-readable, so the hash-skip read works for either caller.
+
+    Guard (``outcome="skipped"``, never a crash): under pytest with an
+    un-sandboxed (real ``/etc``) drop-in path we refuse to touch the host tree.
+    Best-effort throughout — a filesystem/systemctl failure is reported in the
+    result, never raised, so a gateway hiccup never aborts the caller.
     """
     run = run if run is not None else subprocess.run
     path = str(GATEWAY_SYSTEMD_DROPIN_FILE)
@@ -4089,18 +4113,14 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
             ),
         )
 
-    if os.geteuid() != 0:
-        return GatewayDropinResult(
-            outcome="skipped",
-            dropin_path=path,
-            reason=(
-                "not root (euid != 0) — cannot write /etc/systemd/system "
-                "or run `systemctl daemon-reload`; re-run gateway wiring as root"
-            ),
-        )
-
     body = _gateway_dropin_body()
     content_sha = content_hash(body)
+
+    # Privilege-aware write. Root writes /etc/systemd/system directly; the
+    # unprivileged hal0 provisioner (post §7.4 drop-to-hal0) cannot, so it routes
+    # the write + daemon-reload through the hal0-systemctl seam. The drop-in is
+    # 0644 world-readable, so the hash-skip read below works either way.
+    via_seam = os.geteuid() != 0
 
     # Hash-skip: an unchanged drop-in needs neither a rewrite nor a
     # daemon-reload (#437 idempotency criterion, mirroring config_write).
@@ -4118,13 +4138,18 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
             )
 
     try:
-        GATEWAY_SYSTEMD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
-        GATEWAY_SYSTEMD_DROPIN_DIR.chmod(0o755)
-        tmp = GATEWAY_SYSTEMD_DROPIN_FILE.with_suffix(".conf.tmp")
-        tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, GATEWAY_SYSTEMD_DROPIN_FILE)
-        GATEWAY_SYSTEMD_DROPIN_FILE.chmod(0o644)
-    except OSError as exc:
+        if via_seam:
+            # Root:root dir — delegate the write to the seam (fixed path, body
+            # on stdin). The seam mkdir's the .d dir and pins 0644 root:root.
+            _privileged_systemctl("write-gateway-dropin", body)
+        else:
+            GATEWAY_SYSTEMD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+            GATEWAY_SYSTEMD_DROPIN_DIR.chmod(0o755)
+            tmp = GATEWAY_SYSTEMD_DROPIN_FILE.with_suffix(".conf.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            os.replace(tmp, GATEWAY_SYSTEMD_DROPIN_FILE)
+            GATEWAY_SYSTEMD_DROPIN_FILE.chmod(0o644)
+    except (OSError, subprocess.SubprocessError) as exc:
         return GatewayDropinResult(
             outcome="failed",
             dropin_path=path,
@@ -4133,7 +4158,10 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
         )
 
     try:
-        run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
+        if via_seam:
+            _privileged_systemctl("daemon-reload")
+        else:
+            run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
     except (subprocess.SubprocessError, OSError) as exc:
         # The drop-in is on disk; the operator can daemon-reload by hand.
         # Surface as a non-fatal warning rather than failing — the wiring lands
@@ -4161,8 +4189,9 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     the write + guards + idempotency). Keeping unit generation out of this phase
     avoids the hermes_cli generator's custom-HERMES_HOME trap; the orchestrator
     runs ``hermes gateway install --system`` separately to lay the main unit.
-    A non-root or pytest-sandboxed caller SKIPs with a clear reason rather than
-    failing the whole bootstrap.
+    Non-root (hal0) callers route the write through the hal0-systemctl seam; a
+    pytest-sandboxed caller SKIPs with a clear reason rather than failing the
+    whole bootstrap.
     """
     result = write_gateway_secrets_dropin(run=ctx.io.run)
     details: dict[str, Any] = {"dropin_path": result.dropin_path}
@@ -4268,6 +4297,30 @@ _HAL0_AGENTENV = os.environ.get("HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agenten
 
 #: The agent this provisioner manages; the seam re-validates it server-side.
 _HERMES_AGENT_NAME = "hermes"
+
+#: Privileged seam for the genuinely-root systemd ops the provisioner needs when
+#: it runs unprivileged (as the hal0 user): writing the fixed hermes-gateway
+#: secrets drop-in under /etc/systemd/system and `daemon-reload`. Mirrors the
+#: hal0-agentenv seam — a non-root provisioner cannot write /etc/systemd/system
+#: or reload systemd, so it delegates to this root helper over `sudo -n`. The
+#: helper builds the (literal) drop-in path itself and takes the body on stdin.
+#: Env-overridable for tests.
+_HAL0_SYSTEMCTL = os.environ.get("HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
+
+
+def _privileged_systemctl(verb: str, body: str | None = None) -> None:
+    """Run one hal0-systemctl seam verb as root via ``sudo -n``.
+
+    ``body`` (when given) is piped on stdin — used for ``write-gateway-dropin``.
+    Raises ``subprocess.CalledProcessError`` on a non-zero seam exit so the
+    caller surfaces the failure instead of masquerading a broken gateway as up.
+    """
+    subprocess.run(  # nosec B603 — fixed argv; verb is a literal from our own code
+        ["sudo", "-n", _HAL0_SYSTEMCTL, verb],
+        input=body,
+        text=True,
+        check=True,
+    )
 
 
 def _privileged_env_write(verb: str, body: str) -> None:

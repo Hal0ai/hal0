@@ -2158,22 +2158,41 @@ def test_gateway_secrets_wire_idempotent(tmp_path: Path, monkeypatch: pytest.Mon
     assert second.details.get("unchanged") is True
 
 
-def test_gateway_secrets_wire_skips_non_root(
+def test_gateway_secrets_wire_routes_through_seam_non_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """§7.4: a non-root (hal0) provision routes the drop-in write + daemon-reload
+    through the hal0-systemctl seam instead of SKIPping."""
     dropin_file, fake, io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
     # Override the root euid the helper set — emulate a non-root provision.
     monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hp, "_HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
+
+    seam_calls: list[tuple[list[str], Any]] = []
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> Any:
+        seam_calls.append((list(argv), kwargs.get("input")))
+
+        class _C:
+            returncode = 0
+
+        return _C()
+
+    monkeypatch.setattr(hp.subprocess, "run", _fake_run)
     state = hp.BootstrapState()
 
     out = hp._phase_gateway_secrets_wire(hp.context_for("gateway_secrets_wire", state, io=io))
 
-    assert out.status == hp.PhaseStatus.SKIP
-    assert out.reason is not None
-    assert "root" in out.reason.lower() or "euid" in out.reason.lower()
-    # No write, no daemon-reload.
-    assert not dropin_file.exists()
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["daemon_reload"] is True
+    # write-gateway-dropin (body on stdin) then daemon-reload, both via the seam.
+    verbs = [argv[3] for argv, _ in seam_calls]
+    assert verbs == ["write-gateway-dropin", "daemon-reload"]
+    assert seam_calls[0][0][:3] == ["sudo", "-n", "/usr/lib/hal0/bin/hal0-systemctl"]
+    assert seam_calls[0][1] and "[Service]" in seam_calls[0][1]
+    # The injected (root-only, direct-systemctl) run was NOT used; no real write.
     assert fake.calls == []
+    assert not dropin_file.exists()
 
 
 def test_gateway_secrets_wire_refuses_real_etc_dropin_under_pytest(
@@ -2245,17 +2264,36 @@ def test_write_gateway_secrets_dropin_idempotent(
     assert fake.calls == [["systemctl", "daemon-reload"]]
 
 
-def test_write_gateway_secrets_dropin_skips_non_root(
+def test_write_gateway_secrets_dropin_routes_through_seam_non_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dropin_file, fake, _io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+    """§7.4: a non-root caller delegates the write + daemon-reload to the
+    hal0-systemctl seam (sudo -n) rather than skipping."""
+    _dropin_file, fake, _io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
     monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hp, "_HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
+
+    seam_calls: list[tuple[list[str], Any]] = []
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> Any:
+        seam_calls.append((list(argv), kwargs.get("input")))
+
+        class _C:
+            returncode = 0
+
+        return _C()
+
+    monkeypatch.setattr(hp.subprocess, "run", _fake_run)
 
     res = hp.write_gateway_secrets_dropin(run=fake.run)
 
-    assert res.outcome == "skipped"
-    assert res.reason is not None and ("root" in res.reason.lower() or "euid" in res.reason.lower())
-    assert not dropin_file.exists()
+    assert res.outcome == "written"
+    assert res.daemon_reload is True
+    assert res.content_hash
+    verbs = [argv[3] for argv, _ in seam_calls]
+    assert verbs == ["write-gateway-dropin", "daemon-reload"]
+    assert seam_calls[0][0][:3] == ["sudo", "-n", "/usr/lib/hal0/bin/hal0-systemctl"]
+    assert seam_calls[0][1] and "EnvironmentFile=" in seam_calls[0][1]
     assert fake.calls == []
 
 
