@@ -226,8 +226,10 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await expect(profileRow.locator('select')).toHaveCount(0)
   })
 
-  // C7f — Create modal: device derivation from profile backend
-  test('C7f — create modal: vulkan profile → device gpu-vulkan', async ({ page }) => {
+  // C7f — Create modal (D2): device rides the MODEL, not a slot profile.
+  // The simplified create picks a model (which carries tune/device/runner) and
+  // names it; the POST body derives `device` from the model and omits `profile`.
+  test('C7f — create modal: device derives from the model, no profile', async ({ page }) => {
     const createBodies: any[] = []
 
     await page.route('**/api/slots', async (route) => {
@@ -240,36 +242,18 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     })
 
     await page.goto('/#slots')
-
-    // Open the create modal via the "New slot" button
     await page.locator('button:has-text("New slot")').first().click()
     await expect(page.locator('.modal-shell')).toBeVisible()
 
-    // Switch to container runtime: find the select with a "container" option
-    const allSelects = page.locator('.modal-shell select')
-    const selCount = await allSelects.count()
-    for (let i = 0; i < selCount; i++) {
-      const opts = await allSelects.nth(i).locator('option').allTextContents()
-      if (opts.some(o => o.toLowerCase().includes('container'))) {
-        await allSelects.nth(i).selectOption('container')
-        break
-      }
-    }
+    // Pick a model (the model carries device); name it; create.
+    await page.getByTestId('create-slot-model').selectOption({ index: 1 })
+    await page.getByTestId('create-slot-name').fill('test-slot')
+    await page.getByTestId('create-slot-submit').click()
 
-    // Profile row appears after switching to container runtime
-    const profileRowSel = page.locator('.modal-shell .form-row', { hasText: 'Profile' }).locator('select')
-    await expect(profileRowSel).toBeVisible()
-    // Select vulkan (backend "vulkan" → device="gpu-vulkan")
-    await profileRowSel.selectOption('vulkan')
-
-    // Fill required name field
-    const nameInput = page.locator('.modal-shell input').first()
-    await nameInput.fill('test-vulkan')
-
-    await page.locator('.modal-shell button:has-text("Create slot")').click()
     await expect.poll(() => createBodies.length).toBeGreaterThan(0)
-    expect(createBodies[0].device).toBe('gpu-vulkan')
-    expect(createBodies[0].profile).toBe('vulkan')
+    // Device is derived from the model; there is no slot-level profile.
+    expect(createBodies[0].device).toBeTruthy()
+    expect(createBodies[0].profile).toBeUndefined()
   })
 
   // ─── MTP pill (Task 2) ───────────────────────────────────────────────────

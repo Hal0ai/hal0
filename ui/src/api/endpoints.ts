@@ -38,6 +38,10 @@ export const ENDPOINTS = {
   slotLoad: (name: string) => `/api/slots/${encodeURIComponent(name)}/load`,
   slotUnload: (name: string) => `/api/slots/${encodeURIComponent(name)}/unload`,
   slotSwap: (name: string) => `/api/slots/${encodeURIComponent(name)}/swap`,
+  // POST /api/slots/{name}/rename — body { new_name }. The stable slot id is
+  // untouched; the unit is still name-keyed so the slot must be OFFLINE (409
+  // while running) until the live-rename migration lands (rework §11.1).
+  slotRename: (name: string) => `/api/slots/${encodeURIComponent(name)}/rename`,
   slotStateStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/state/stream`,
   slotLogsStream: (name: string) =>

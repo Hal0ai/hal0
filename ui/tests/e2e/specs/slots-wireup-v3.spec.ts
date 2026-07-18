@@ -53,17 +53,11 @@ test.describe('Slots v3 wire-up (/slots)', () => {
 
     await page.goto('/#slots')
     await page.locator('.view .vh button:has-text("New slot")').click()
-    const nameInput = page.locator('.modal-shell .input.mono').first()
-    await expect(nameInput).toBeVisible()
-    await nameInput.fill('coder-large')
-    // Profile is required for container slots — Create stays disabled
-    // until one is picked.
-    const profileSel = page
-      .locator('.modal-shell .form-row', { hasText: 'Profile' })
-      .locator('select')
-    await expect(profileSel).toBeVisible()
-    await profileSel.selectOption('rocm')
-    const createBtn = page.locator('.modal-shell button:has-text("Create slot")')
+    // D2: a slot is a pure instance — pick a model (it carries tune/device/
+    // runner), name it, done. No profile/device pickers.
+    await page.getByTestId('create-slot-model').selectOption({ index: 1 })
+    await page.getByTestId('create-slot-name').fill('coder-large')
+    const createBtn = page.getByTestId('create-slot-submit')
     await expect(createBtn).toBeEnabled()
     const postReq = page.waitForRequest(
       (req) => req.url().endsWith('/api/slots') && req.method() === 'POST',
@@ -72,7 +66,10 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     await postReq
     await expect.poll(() => seen.length).toBeGreaterThan(0)
     expect(seen[0].name).toBe('coder-large')
-    expect(seen[0].type).toBe('llm')
+    // The create body carries the model + a device derived from it; no profile.
+    expect(seen[0].model).toBeTruthy()
+    expect(seen[0].device).toBeTruthy()
+    expect(seen[0].profile).toBeUndefined()
   })
 
   test('Edit slot — drawer PATCHes /defaults with ctx_size + PUTs /config', async ({ page }) => {
