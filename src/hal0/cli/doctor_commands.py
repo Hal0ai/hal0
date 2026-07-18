@@ -727,18 +727,28 @@ def perms(
         "-f",
         help="Skip the confirmation prompt before applying --fix.",
     ),
+    table_root: bool = typer.Option(
+        False,
+        "--table-root",
+        help=(
+            "Audit against the OLD root-era table (service_user='root') instead "
+            "of the P3-perms hal0-owned default — the emergency rollback check "
+            "if a box needs to verify/restore the pre-flip layout."
+        ),
+    ),
 ) -> None:
     """Audit ownership for the root-clobber regression (#843) + the path table.
 
     Covers three surfaces: Hermes runtime state (/var/lib/hal0/.hermes), the
     editable code checkout's group-share, and the canonical path-ownership table
-    (:mod:`hal0.install.perms`, overhaul plan §5). The audit tables above print
-    the concrete before/after (path, current owner:group:mode, wanted
-    owner:group:mode) before anything is touched. ``--fix`` then repairs the
-    group-share in place AND applies the ownership table (both need root, and
-    both prompt for confirmation unless ``--force``/``-f`` is also passed);
-    Hermes drift is still reconciled via ``sudo hal0 agent bootstrap hermes
-    --repair``.
+    (:mod:`hal0.install.perms` — P3-perms, the single ownership authority). The
+    audit tables above print the concrete before/after (path, current
+    owner:group:mode, wanted owner:group:mode) before anything is touched.
+    ``--fix`` then repairs the group-share in place AND applies the ownership
+    table (both need root, and both prompt for confirmation unless
+    ``--force``/``-f`` is also passed); Hermes drift is still reconciled via
+    ``sudo hal0 agent bootstrap hermes --repair``. This command is audit-only by
+    default — nothing is ever written without ``--fix``.
     """
 
     def _owner(p: Path) -> str | None:
@@ -787,13 +797,21 @@ def perms(
     tree_drift = has_ownership_drift(tree_rows)
 
     # 3) Canonical path-ownership table (read-only audit; --fix applies it).
-    # Phase 0: the table encodes current root-era values, so a freshly-installed
-    # box shows no drift here. Honest drift surfaces an actual ownership skew.
+    # Default table is hal0-owned (P3-perms) — a fresh, born-owned install
+    # shows no drift here; an un-migrated pre-P3-perms box genuinely drifts,
+    # which is the intended one-shot `--fix` migration. `--table-root` audits
+    # against the OLD root-era table instead (emergency rollback check).
     from hal0.install import perms as perms_mod
 
-    own_plan = perms_mod.plan()
+    own_table = perms_mod.ownership_table(service_user="root") if table_root else None
+    own_plan = perms_mod.plan(own_table)
     own_rows = perms_mod.audit_rows(own_plan)
-    _render_audit("Path ownership table (overhaul plan §5)", own_rows)
+    _table_title = (
+        "Path ownership table (P3-perms, --table-root)"
+        if table_root
+        else "Path ownership table (P3-perms)"
+    )
+    _render_audit(_table_title, own_rows)
     own_drift = has_ownership_drift(own_rows)
 
     if fix:

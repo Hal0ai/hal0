@@ -432,6 +432,9 @@ fi
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     rm_path "/etc/sudoers.d/hal0-agentenv"
     rm_path "/etc/sudoers.d/hal0-benchctl"
+    # P3-perms: hal0-systemctl (the seam that lets hal0-api, now User=hal0,
+    # write per-slot units + daemon-reload/start/stop/restart them).
+    rm_path "/etc/sudoers.d/hal0-systemctl"
     # hal0-comfyui sudoers removed in #984 (hardened-perms abandoned, ADR-0023)
     rm_path "/etc/sudoers.d/hal0-comfyui"
     # hal0.bench units (timer + scheduled session + run-queue worker). The

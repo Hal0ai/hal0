@@ -929,11 +929,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-# Group-writable umask so files the API writes into a shared editable tree stay
-# editable by the hal0 group (Hermes & in-runtime agents) — part of the #843
-# root-clobber fix. Harmless on an immutable FHS install.
-UMask=0002
+User=hal0
+Group=hal0
+# hal0-api writes /etc/hal0/* + /var/lib/hal0/* directly — those trees are
+# hal0:hal0 2775/setgid (src/hal0/install/perms.py, P3-perms). Privileged IO
+# (systemd unit writes, daemon-reload, slot start/stop/restart) routes through
+# \`sudo -n /usr/lib/hal0/bin/hal0-systemctl\` — the one narrow seam (see the
+# hal0-systemctl wrapper install below). UMask is the default 0022: no
+# group-writable kludge needed, the setgid dirs already cover group access.
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
 # Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
@@ -955,10 +958,10 @@ WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
 
-# Hardened mode removed: hal0-api now always runs as root (User=root above), so
-# updates / systemd drop-in writes / service restarts work without a privileged
-# seam. Remove any stale run-as-hal0 drop-in left by an older hardened-perms
-# install so upgrading such a box reverts the unit cleanly to User=root.
+# P3-perms: hal0-api now ships User=hal0 directly (no drop-in needed — the
+# unit above IS the hardened posture). Clean up the OLD drop-in dir a
+# pre-P3-perms hardened-perms attempt may have left behind, so upgrading such
+# a box doesn't carry stale (and now meaningless) unit fragments.
 API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
 rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
 rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
@@ -1120,8 +1123,9 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         install -m 0755 "${BENCH_SRC}/server_ab.py"             "${LIB_DIR}/bench/server_ab.py"
         install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
         install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" "${VAR_DIR}/benchmarks/server-ab"
-        chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
-        chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
+        # P3-perms: benchmarks/ (+ runs/, logs/, server-ab/) is now a declared
+        # OwnershipStore row (hal0:hal0 2775) — the `doctor perms --fix`
+        # backstop before "Service start" applies it; no explicit chown needed.
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
 
         # hal0.bench v2 (design 2026-07-05): suite seeds + politeness window are
@@ -1199,6 +1203,37 @@ PYEOF
             fi
         else
             warn "${BENCHCTL_SUDOERS_SRC} not found — benchmark sudoers grant not installed"
+        fi
+    fi
+
+    # Privileged seam #4 (P3-perms): hal0-systemctl covers the genuinely-root
+    # ops the now-unprivileged hal0-api (User=hal0 above) still needs — writing
+    # per-slot systemd units, daemon-reload, and start/stop/restart of a slot
+    # unit (+ restarting hal0-api itself on self-update). Narrow + validated
+    # (no shell, no wildcards, literal slot-id regex) — see the wrapper source.
+    SYSTEMCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-systemctl"
+    if [[ -f "${SYSTEMCTL_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${SYSTEMCTL_SRC}" "${LIB_DIR}/bin/hal0-systemctl"
+        info "wrote ${LIB_DIR}/bin/hal0-systemctl"
+    else
+        warn "${SYSTEMCTL_SRC} not found — systemctl seam helper not installed"
+    fi
+
+    # sudoers grant for the systemctl seam. Real installs only; visudo-validate
+    # before activating so a malformed drop-in can never wedge sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        SYSTEMCTL_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-systemctl"
+        SYSTEMCTL_SUDOERS_DST="/etc/sudoers.d/hal0-systemctl"
+        if [[ -f "${SYSTEMCTL_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${SYSTEMCTL_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${SYSTEMCTL_SUDOERS_SRC}" "${SYSTEMCTL_SUDOERS_DST}"
+                info "wrote ${SYSTEMCTL_SUDOERS_DST}"
+            else
+                warn "${SYSTEMCTL_SUDOERS_SRC} failed visudo check — systemctl sudoers grant not installed"
+            fi
+        else
+            warn "${SYSTEMCTL_SUDOERS_SRC} not found — systemctl sudoers grant not installed"
         fi
     fi
 else
@@ -1641,21 +1676,17 @@ else
     # Shared STATE.md (#766). The hermes agent runs as hal0 and its
     # render-context (re)writes ${VAR_DIR}/STATE.md — the live snapshot the
     # Claude session-start hook cats — via a tmp+rename that needs *directory*
-    # write on ${VAR_DIR}. Grant the hal0 group write on the top dir
-    # (setgid so new entries inherit group hal0). Ownership stays root, so
-    # root-owned slots/registry/models are untouched; this preserves the
-    # ".cache NOT the whole VAR_DIR" posture above.
+    # write on ${VAR_DIR}.
     #
-    # NOT sticky (#766 follow-up): render runs as root during provisioning
-    # (creating a root-owned STATE.md) but as hal0 at runtime — the hal0
-    # rename-over of a root-owned STATE.md needs plain directory write, which
-    # the sticky bit would deny (it'd require owning the existing file). The
-    # group-write grant is what systemd's `ReadWritePaths=/var/lib/hal0`
-    # already assumes, so this just makes the filesystem agree.
-    chgrp hal0 "${VAR_DIR}"
-    chmod 2775 "${VAR_DIR}"
+    # P3-perms: ${VAR_DIR} itself (owner hal0, setgid 2775) and STATE.md are
+    # now declared rows in src/hal0/install/perms.py's OwnershipStore — the
+    # explicit chgrp/chmod/chown dance this comment used to describe (kept
+    # ${VAR_DIR}'s OWNER at root because hal0-api used to write slot
+    # state.json/registry AS ROOT) is redundant now that hal0-api runs
+    # User=hal0 (below) and the `doctor perms --fix` backstop (before "Service
+    # start") applies the table before the daemon's first start. Just create
+    # the file; ownership lands via the table.
     touch "${VAR_DIR}/STATE.md"
-    chown hal0:hal0 "${VAR_DIR}/STATE.md"
 
     # Seed the agent config + secret dirs (root-owned; the agent driver reads
     # agents/, and systemd reads the secrets/ EnvironmentFile as root). The hermes
@@ -1689,7 +1720,11 @@ BUNDLES_DST="${VAR_DIR}/models/collections/omni"
 if [[ -d "${BUNDLES_SRC}" ]]; then
     mkdir -p "${BUNDLES_DST}"
     if cp -f "${BUNDLES_SRC}"/*.json "${BUNDLES_DST}/" 2>/dev/null; then
-        chown -R hal0:hal0 "${VAR_DIR}/models/collections" 2>/dev/null || true
+        # P3-perms: no chown needed — these manifests are READ-ONLY content
+        # (the bundle picker only reads them); root:root 0644 is world-readable,
+        # same posture as /etc/hal0/agents/ + secrets/ staying root:root
+        # elsewhere in the table (read-only surfaces don't need service
+        # ownership).
         info "installed bundle manifests → ${BUNDLES_DST}"
     else
         warn "failed to copy bundle manifests from ${BUNDLES_SRC}"
@@ -1723,13 +1758,32 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         info "no bundled skills at ${SKILLS_SRC} — drop-in dirs still created"
     fi
     # Writable drop-in (agent runs as hal0): add/edit skills at runtime here.
-    chown -R hal0:hal0 "${SKILLS_DROPIN}" 2>/dev/null || true
+    # P3-perms: skills/ is a declared OwnershipStore row (hal0:hal0 2775) —
+    # the `doctor perms --fix` backstop before "Service start" applies it.
     info "skill drop-in: ${SKILLS_DROPIN} (drop a folder here to add a skill; editable)"
 else
     info "dev mode — skipping system skill install (/usr/share/hal0/skills)"
 fi
 
 ui_step "Service start"
+
+# P3-perms migration backstop: hal0-api ships User=hal0 (above), so /etc/hal0
+# + /var/lib/hal0 must already be hal0-owned (2775/setgid) BEFORE the unit's
+# first start, or the daemon can't read/write its own config on boot. The
+# config-seed steps earlier in this script mostly write as root (see the
+# per-block P3-perms notes above); this one-shot `doctor perms --fix --force`
+# (root-gated, atomic w/ rollback — src/hal0/install/perms.py) reconciles the
+# WHOLE declared table against disk right before the daemon needs it, both on
+# a fresh install and on an upgrade of a pre-P3-perms box. Non-fatal: don't
+# let a hiccup here abort an otherwise-good install — `hal0 doctor perms`
+# surfaces any residual drift afterward.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    if "${HAL0_BIN}" doctor perms --fix --force; then
+        info "ownership table applied (P3-perms) — /etc/hal0 + /var/lib/hal0 are hal0-owned"
+    else
+        warn "'${HAL0_BIN} doctor perms --fix' reported drift/errors — re-run 'sudo ${HAL0_BIN} doctor perms --fix' after install"
+    fi
+fi
 
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
@@ -2152,6 +2206,19 @@ if not cfg.honcho.enabled:
     # provision is skipped and the block below just (re)enables the unit.
     # hal0-api is already up at this point (enabled + wait_active above), which
     # the bootstrap preflight requires.
+    #
+    # P3-perms note: this call is intentionally left running as root, NOT
+    # dropped to hal0. The bootstrap pipeline ALSO writes /usr/local/bin/hermes
+    # (+ the hal0-hermes back-compat symlink) — a genuinely root-only path
+    # (hermes_provision.py's `_phase_install`) — alongside $HERMES_HOME/config
+    # writes that a hal0-owned tree would prefer to receive born-owned. A true
+    # born-owned fix here needs hermes_provision.py itself to split "write
+    # /usr/local/bin as root" from "write $HERMES_HOME/config as hal0" (e.g. an
+    # in-process privilege drop between phases) — out of scope for this pass.
+    # hermes_provision.py's chown-back (`_chown_tree_to_hal0` /
+    # `_phase_ownership_reconcile`) is therefore still load-bearing for THIS
+    # call site and intentionally NOT removed; see the P3-perms follow-up note
+    # in hermes_provision.py's module docstring.
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"

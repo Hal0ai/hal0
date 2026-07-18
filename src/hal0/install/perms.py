@@ -14,18 +14,23 @@ deliberately: :class:`PermObservation` is the ownership analogue of
 content), :class:`OwnershipPlan` is the analogue of ``ChangeSet``, and
 :meth:`OwnershipStore.commit` rolls back exactly like ``SlotConfigStore.commit``.
 
-With ``service_user="root"`` (the default) :func:`ownership_table` encodes the
-*current* root-era values, so ``plan()`` on a freshly-installed box reports
-nothing changed and ``commit()`` writes nothing — the machinery + single table +
-``doctor perms`` audit are a pure no-op for existing installs.
+``service_user="hal0"`` is now the DEFAULT (P3-perms, the "hardened flip"
+adopted as the single ownership authority): ``/etc/hal0`` and its mutable
+contents are ``hal0``-owned (the config root setgid ``2775`` so the daemon's
+own temp-file+rename rewrites work), while ``agents/`` and ``secrets/`` stay
+``root:root`` by design (read-only-to-the-service surfaces). ``hal0-api`` runs
+``User=hal0`` (``installer/install.sh``); the born-owned contract (drop
+privileges to ``hal0`` before any config-writing step — installer's
+``run-as-hal0`` seam, §23.3) means a fresh install never produces a
+root:root file under either tree in the first place, so ``plan()`` reports no
+drift and ``commit()`` writes nothing on a fresh box. An EXISTING (pre-P3-perms)
+install, by contrast, genuinely drifts against this table — that's the intended
+one-shot migration: ``hal0 doctor perms --fix`` (root-gated, already wired to
+:func:`commit`) reconciles it once.
 
-THE HARDENED FLIP (``service_user != "root"``, gated behind the ``HAL0_USER``
-installer env) is a data-only change in :func:`ownership_table`: ``/etc/hal0``
-and its mutable contents become ``service_user``-owned (the config root setgid
-``2775`` so the daemon's temp-file+rename rewrites work), while ``agents/`` and
-``secrets/`` stay ``root:root``; ``hal0-api`` drops to ``User=hal0`` via an
-installer drop-in. The privileged seam from #943 is the prerequisite. The
-plan/commit/audit machinery here does not change.
+Passing ``service_user="root"`` explicitly reproduces the OLD root-era table
+byte-for-byte — kept as the emergency rollback path (``hal0 doctor perms
+--table-root``), not the default.
 
 Design notes:
   - ``owner``/``group`` are resolved to uid/gid at *commit* time via
@@ -82,38 +87,35 @@ class PermRow:
 
 def ownership_table(
     *,
-    service_user: str = "root",
+    service_user: str = "hal0",
     service_group: str = "hal0",
 ) -> list[PermRow]:
     """THE single source of truth for hal0 path ownership.
 
-    ``service_user="root"`` (the default) reproduces the current on-disk
-    root-era layout, so applying it is a no-op — existing installs are
-    untouched. ``service_group`` is the shared ``hal0`` group that already
-    owns ``/opt/hal0`` (setgid) and ``/var/lib/hal0``.
+    ``service_user="hal0"`` (the default, P3-perms) is the hardened flip:
+    ``/etc/hal0`` and its *mutable* contents are ``service_user``-owned so the
+    daemon can atomically rewrite them (temp-file + ``rename``, which needs
+    *directory* write — not just file write). The config root itself is
+    ``2775`` (setgid) so files the service or the ``hal0`` group create there
+    inherit the shared group. ``service_group`` is the shared ``hal0`` group
+    that already owns ``/opt/hal0`` (setgid) and ``/var/lib/hal0``.
 
-    THE HARDENED FLIP (``service_user != "root"``, gated behind ``HAL0_USER``):
-    when the API runs as an unprivileged service user, ``/etc/hal0`` and its
-    *mutable* contents become ``service_user``-owned so the daemon can atomically
-    rewrite them (temp-file + ``rename``, which needs *directory* write — not
-    just file write). The config root itself is ``2775`` (setgid) so files the
-    service or the ``hal0`` group create there inherit the shared group.
+    Passing ``service_user="root"`` reproduces the OLD root-era table
+    byte-for-byte (every row identical to the pre-P3-perms on-disk layout) —
+    the emergency rollback path (``hal0 doctor perms --table-root``), not the
+    default.
 
-    NOTE: the hardened "unprivileged service_user" install mode and its
-    ``hal0-slotctl`` privilege seam were removed — hal0-api runs as root. This
-    table is now exercised only with ``service_user="root"`` (by ``hal0 doctor``);
-    the non-root branches are retained for reference but no longer wired in.
-
-    Two subtrees stay ``root:root`` even under the flip:
+    Two subtrees stay ``root:root`` regardless of ``service_user``:
       * ``agents/`` — the dashboard-only Hermes allow-list world (#843); the API
         only reads it.
       * ``secrets/`` — systemd reads ``EnvironmentFile`` here *as root* before
         dropping to the service user, so it must not be service-writable.
+      * ``/usr/lib/hal0`` — the shipped, read-only code + wrapper-seam tree;
+        never service-writable at any point.
 
-    The root-era values below are the *current* observed values, intentionally —
-    including the warts (``api.env`` 0644, ``hal0.toml`` 0600). Those are not
-    changed by the flip either; the flip changes *ownership*, not the file modes.
-    See module docstring.
+    The mutable-config modes below (``hal0.toml`` 0600, ``api.env`` 0644, ...)
+    are unchanged by the flip either way — the flip changes *ownership*, not
+    file modes. See module docstring.
     """
     etc = paths.etc()
     var_lib = paths.var_lib()
@@ -134,6 +136,18 @@ def ownership_table(
     state_owner = service_user if flipped else "hal0"
 
     return [
+        # ── /usr/lib/hal0 — shipped, read-only tree ─────────────────────────────
+        # Code, versioned release dirs, and the wrapper-seam binaries
+        # (hal0-agentenv, hal0-benchctl, hal0-systemctl). Never service-writable
+        # — the API only executes seams here, it never rewrites its own tree.
+        PermRow(
+            paths.lib(),
+            "root",
+            "root",
+            0o755,
+            optional=False,
+            role="/usr/lib/hal0 (shipped, read-only)",
+        ),
         # ── /etc/hal0 — config seed (root-owned today; service-owned under flip) ─
         # The API atomically rewrites slots/*.toml, capabilities.toml, hal0.toml,
         # api.env and chat-templates via temp-file + rename, which needs *dir*
@@ -180,10 +194,67 @@ def ownership_table(
             0o700,
             role="HERMES_HOME",
         ),
+        # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
+        # User=hal0 unit needs to traverse INTO its own home without being able
+        # to enumerate siblings. Was repaired ad hoc by hermes_provision's late
+        # `_phase_ownership_reconcile` (now dead code, P3-perms F.7) — this row
+        # is the declarative replacement.
+        PermRow(
+            var_lib / "agents",
+            state_owner,
+            service_group,
+            0o711,
+            role="agents/ (per-agent sub-homes)",
+        ),
         # secrets/ stays root:root even under the flip: systemd reads the
         # EnvironmentFile here AS ROOT before dropping to the service user, so it
         # must not be service-writable (hardened-model decision).
         PermRow(var_lib / "secrets", "root", "root", 0o755, role="secrets/"),
+        # secrets/agents/ — per-agent secret .env files (written by the
+        # hal0-agentenv seam, never by the service directly). Pinned root:root
+        # like secrets/ itself; the dir mode is 0755 (traverse + list), the
+        # per-agent .env files are 0600 (owner-read-only tokens).
+        PermRow(
+            var_lib / "secrets" / "agents",
+            "root",
+            "root",
+            0o755,
+            glob="*.env",
+            child_mode=0o600,
+            role="secrets/agents/ (+ <id>.env)",
+        ),
+        # benchmarks/ (+ runs/, logs/, server-ab/) — GPU bench artifacts,
+        # written by the hal0-benchctl seam then read by hal0-agent/hal0-api.
+        # Mirrors the (now-redundant) install.sh chown -R at the old
+        # benchmarks install site.
+        PermRow(
+            var_lib / "benchmarks",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*",
+            child_mode=0o2775,
+            role="benchmarks/ (+ subdirs)",
+        ),
+        # skills/ — the writable drop-in skill library (context_link mirrors
+        # bundled skills alongside operator-dropped ones).
+        PermRow(
+            var_lib / "skills",
+            state_owner,
+            service_group,
+            0o2775,
+            role="skills/ (drop-in agent skills)",
+        ),
+        # STATE.md — the live session-state snapshot the Hermes session-start
+        # hook cats. Optional: absent until the first render. Replaces the old
+        # install.sh chgrp/chmod/touch/chown STATE.md dance.
+        PermRow(
+            var_lib / "STATE.md",
+            state_owner,
+            service_group,
+            0o664,
+            role="STATE.md (session-state snapshot)",
+        ),
         # ── /var/log/hal0 ─────────────────────────────────────────────────────
         PermRow(var_log, "hal0", "hal0", 0o755, role="/var/log/hal0"),
     ]
