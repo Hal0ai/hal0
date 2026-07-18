@@ -16,6 +16,18 @@ permissions:
   contents: read
 
 jobs:
+  # Rework de-scar guardrail (stdlib-only, fast): overdue HAL0-SUNSET shims +
+  # scar-marker ratchet. Every de-scar PR keeps this green (baseline only falls).
+  sunset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Sunset-shim + scar-ratchet guardrail
+        run: python scripts/check_sunset.py
+
   python:
     runs-on: ubuntu-latest
     # 3.14 is experimental until every dep ships 3.14 wheels — surface it

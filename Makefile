@@ -104,6 +104,9 @@ fmt:
 typecheck:
 	mypy src
 
+check-sunset:  ## sunset-shim + scar-ratchet guardrail (rework Phase 0)
+	python3 scripts/check_sunset.py
+
 ui-install:
 	cd ui && npm install
 
