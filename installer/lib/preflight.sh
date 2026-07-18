@@ -74,11 +74,11 @@
 #                        collision. install.sh's pre-install gate never
 #                        sets it — but even there, a port held by hal0's
 #                        OWN hal0-api/hal0-openwebui unit (the documented
-#                        `HAL0_INSTALL_HONCHO=1 sudo bash install.sh`
-#                        re-install-over-a-live-box path, #F24) is
-#                        auto-detected via _preflight_port_is_own_service
-#                        and treated as OK; a FOREIGN process holding the
-#                        port still hard-fails unconditionally.
+#                        `sudo bash install.sh` re-install-over-a-live-box
+#                        path, #F24) is auto-detected via
+#                        _preflight_port_is_own_service and treated as OK;
+#                        a FOREIGN process holding the port still
+#                        hard-fails unconditionally.
 #   HAL0_CONTAINER_REQUIRED — when "1", preflight_container_runtime
 #                        auto-installs podman (via the detected package
 #                        manager) and hard-fails (returns non-zero) when it
@@ -465,8 +465,8 @@ _resolve_container_runtime() {
 # usable, but every actual `<rt> run` fails on cgroup/mount-namespace setup it
 # can't do without nesting. That's the false-OK this closes: pre-flight
 # passes, install reports success, then every hal0-slot@ inference slot,
-# hal0-openwebui, ComfyUI, and the Honcho compose stack die at runtime with
-# cgroup/mount errors the operator never saw at install time. Bounded with
+# hal0-openwebui, and ComfyUI die at runtime with cgroup/mount errors the
+# operator never saw at install time. Bounded with
 # `timeout` so an offline host fails fast instead of hanging the install;
 # HAL0_CONTAINER_SMOKE_IMAGE overrides the pulled image for air-gapped/
 # mirrored registries.
