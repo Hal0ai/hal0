@@ -15,6 +15,21 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 
 
+@pytest.fixture(autouse=True)
+def _no_chat_template_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the lifespan's chat-template seed for this module.
+
+    ML-3 unified the model-store resolver, so chat templates now correctly
+    land under the SAME store root ``has_models``/``first_run`` probe —
+    previously the un-isolated ``/mnt/ai-models`` default meant the seed
+    escaped test isolation entirely and never touched ``models_dir()``.
+    That coupling is real, but orthogonal to what "empty models dir" means
+    here; without this, the seeded ``.jinja`` files make every
+    "empty"/"first run" fixture in this module spuriously non-empty.
+    """
+    monkeypatch.setattr("hal0.templates.seed_chat_templates", lambda: None)
+
+
 @pytest.fixture
 def isolated_client(tmp_hal0_home: str) -> Iterator[TestClient]:
     """TestClient whose lifespan resolves paths under tmp_hal0_home."""

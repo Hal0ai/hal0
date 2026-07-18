@@ -22,6 +22,7 @@ from pathlib import Path
 from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
+from hal0.registry.fileset import SHARD_RE
 from hal0.registry.model import Model
 from hal0.registry.store import ModelAlreadyExists, ModelRegistry
 
@@ -78,10 +79,18 @@ _SKIP_DIR_NAMES = frozenset(
 _HEX_BLOB_RE = re.compile(r"^[0-9a-f]{32,}$")
 
 # HF Transformers multi-file shard pattern (e.g. model-00001-of-00003.safetensors).
-# These need the transformers library to stitch back together; hal0's
-# llama-server / FLM providers expect a single-file GGUF or single
-# .safetensors checkpoint, so a lone shard isn't loadable on its own.
-_SHARD_RE = re.compile(r"^.+-\d{5}-of-\d{5}$")
+#
+# ML-2 (plan §7.1c a4 / seam S11): this used to be a LOCAL, stem-only pattern
+# (``^.+-\d{5}-of-\d{5}$``) whose only use was dropping every shard on sight
+# — a sharded model was invisible to auto-scan. ``SHARD_RE`` is now the
+# SINGLE shared definition (:mod:`hal0.registry.fileset`), matched against
+# the full filename (incl. extension). ``find_candidates`` below groups a
+# complete shard set into ONE candidate (shard-1 as the entry point) instead
+# of dropping every part; ``_is_skippable`` still recognises individual shard
+# filenames (for callers that want "is this independently interesting",
+# e.g. the scan-preview per-file listing) but no longer means every shard is
+# silently discarded from registration — that grouping happens upstream of
+# this check, in ``find_candidates``.
 
 
 # ── Candidate dataclass ───────────────────────────────────────────────────
@@ -99,6 +108,11 @@ class CandidateModel:
     # Resolved path to a multimodal projector (mmproj) GGUF sidecar that sits
     # in the same directory, or None. Associated post-walk by find_candidates.
     mmproj: Path | None = None
+    # Ordered list of sibling shard paths (INCLUDING `path` itself as
+    # shard-1/entry point) when this candidate is a multi-shard model
+    # (plan §7.1c a4 — discover groups instead of dropping). None for an
+    # ordinary single-file candidate.
+    shards: list[Path] | None = None
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -144,8 +158,35 @@ def _is_mmproj_sidecar(p: Path) -> bool:
     return "mmproj" in p.name.lower()
 
 
+def _shard_key(p: Path) -> tuple[str, str, str] | None:
+    """Return the ``(dir, stem, total)`` grouping key for a shard file, else ``None``.
+
+    Matched against ``p.name`` (the shared :data:`SHARD_RE` includes the
+    extension) — the positive twin of the skip check below: this decides
+    which files belong to the SAME shard set so ``find_candidates`` can
+    group them into one candidate instead of dropping them.
+    """
+    m = SHARD_RE.match(p.name)
+    if not m:
+        return None
+    return (str(p.parent), m.group("stem"), m.group("tot"))
+
+
+def _shard_index(p: Path) -> int | None:
+    """Return the 1-based shard index encoded in ``p``'s filename, or ``None``."""
+    m = SHARD_RE.match(p.name)
+    return int(m.group("idx")) if m else None
+
+
 def _is_skippable(p: Path) -> bool:
-    """Skip dotfiles, .tmp partials, hash-only blob names, shards, accessory dirs."""
+    """Skip dotfiles, .tmp partials, hash-only blob names, shards, accessory dirs.
+
+    A shard file is still flagged here (for callers wanting "is this
+    independently interesting", e.g. the scan-preview per-file listing) —
+    but ``find_candidates`` intercepts complete shard SETS earlier and
+    surfaces them as one grouped candidate (plan §7.1c a4); this check no
+    longer means "silently discarded forever" the way it used to.
+    """
     name = p.name
     if name.startswith("."):
         return True
@@ -155,7 +196,7 @@ def _is_skippable(p: Path) -> bool:
         return True
     if _HEX_BLOB_RE.match(p.stem):
         return True
-    if _SHARD_RE.match(p.stem):
+    if SHARD_RE.match(name):
         return True
     return any(part in _SKIP_DIR_NAMES for part in p.parts)
 
@@ -181,6 +222,12 @@ def find_candidates(
     # walk and associated with sibling candidates once the walk completes, so
     # ordering (sidecar before or after its model) doesn't matter.
     mmproj_by_dir: dict[Path, Path] = {}
+    # Shard grouping key -> {shard_index: resolved path}. Populated during
+    # the walk (plan §7.1c a4); closed out into ONE CandidateModel per
+    # complete group (shard-1 present) after the walk, instead of the old
+    # "drop every shard" behaviour. An incomplete group (no shard-1 seen)
+    # is silently dropped, same as before.
+    shard_groups: dict[tuple[str, str, str], dict[int, Path]] = {}
     started = time.monotonic()
     for root in roots:
         root_path = Path(root).expanduser()
@@ -215,6 +262,22 @@ def find_candidates(
                     mmproj_abs = candidate
                 mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
                 continue
+            # Shard grouping (plan §7.1c a4): bucket by (dir, stem, total)
+            # instead of falling into the generic skip rule below, which
+            # would drop it unconditionally. The group is closed out (or
+            # dropped, if incomplete) after the walk finishes.
+            shard_key = _shard_key(candidate)
+            if shard_key is not None:
+                if candidate.suffix.lower() not in exts:
+                    continue
+                try:
+                    shard_abs = candidate.resolve()
+                except OSError:
+                    shard_abs = candidate
+                idx = _shard_index(candidate)
+                if idx is not None:
+                    shard_groups.setdefault(shard_key, {})[idx] = shard_abs
+                continue
             if _is_skippable(candidate):
                 continue
             if candidate.suffix.lower() not in exts:
@@ -248,6 +311,38 @@ def find_candidates(
                     capability_guess=_guess_capability(naming_source.name),
                 )
             )
+    # Close out shard groups (plan §7.1c a4): a COMPLETE group (shard-1
+    # present) becomes one candidate keyed off shard-1, aggregate size, and
+    # the full ordered sibling list. An incomplete group (shard-1 missing —
+    # e.g. only shards 2-3 of a 3-part set landed) is dropped entirely, same
+    # as the old behaviour, since llama-server can't load a set missing its
+    # entry point. Already-registered groups are filtered by shard-1's path,
+    # mirroring the single-file `known_paths` check above.
+    for (_dirkey, _stem, _tot), idx_map in shard_groups.items():
+        if 1 not in idx_map:
+            continue
+        ordered = [idx_map[i] for i in sorted(idx_map)]
+        entry_path = ordered[0]
+        if str(entry_path) in known_paths or entry_path in seen:
+            continue
+        seen.add(entry_path)
+        total_size = 0
+        for shard_path in ordered:
+            try:
+                total_size += shard_path.stat().st_size
+            except OSError:
+                continue
+        naming_source = entry_path
+        out.append(
+            CandidateModel(
+                path=entry_path,
+                size_bytes=total_size,
+                suggested_id=_normalise_id(naming_source.stem),
+                curated_match=_match_curated(naming_source.name),
+                capability_guess=_guess_capability(naming_source.name),
+                shards=ordered,
+            )
+        )
     # Associate each sidecar with sibling main models in the same directory.
     for cand in out:
         sidecar = mmproj_by_dir.get(cand.path.parent)
@@ -296,6 +391,12 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
     # provider can surface it as --mmproj. None when no sidecar was found.
     if candidate.mmproj is not None:
         model.mmproj = str(candidate.mmproj)
+    # Multi-shard group (plan §7.1c a4): the shard list rides in metadata as
+    # the lossless fallback for any registry backend, plus a best-effort
+    # `model_file` row per shard/mmproj on the SQLite backend (see
+    # `_maybe_register_shard_files`).
+    if candidate.shards:
+        model.metadata = {**model.metadata, "shards": [str(p) for p in candidate.shards]}
     try:
         registry.add(model)
     except ModelAlreadyExists:
@@ -303,7 +404,61 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
         # the existing entry without raising so the caller's "added" count
         # stays meaningful.
         return registry.get(model.id)
+    _maybe_register_shard_files(registry, model, candidate)
     return model
+
+
+def _maybe_register_shard_files(
+    registry: ModelRegistry, model: Model, candidate: CandidateModel
+) -> None:
+    """Best-effort ``model_file`` rows for a discovered shard group.
+
+    Only applies when ``registry`` is SQLite-backed (duck-typed via
+    ``db_path`` — the public ``ModelRegistry`` name is bound to
+    :class:`hal0.registry.sqlite_store.SqliteModelRegistry`). The historic
+    TOML store has no such table; ``model.metadata["shards"]`` above is the
+    lossless fallback for that path. Never raises — a `model_file` write
+    failure must not undo the registry row that just committed.
+    """
+    db_path = getattr(registry, "db_path", None)
+    if db_path is None or not candidate.shards:
+        return
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+
+    total = len(candidate.shards)
+    try:
+        with connect(db_path) as conn, tx(conn):
+            for idx, shard_path in enumerate(candidate.shards, start=1):
+                try:
+                    size = shard_path.stat().st_size
+                except OSError:
+                    size = None
+                repository.insert_model_file(
+                    conn,
+                    model_id=model.id,
+                    rel=shard_path.name,
+                    dest=str(shard_path),
+                    size_bytes=size,
+                    role="shard" if total > 1 else "model",
+                    shard_index=idx if total > 1 else None,
+                )
+            if candidate.mmproj is not None:
+                try:
+                    mm_size = candidate.mmproj.stat().st_size
+                except OSError:
+                    mm_size = None
+                repository.insert_model_file(
+                    conn,
+                    model_id=model.id,
+                    rel=candidate.mmproj.name,
+                    dest=str(candidate.mmproj),
+                    size_bytes=mm_size,
+                    role="mmproj",
+                    shard_index=None,
+                )
+    except Exception:
+        log.warning("discover.shard_model_file_write_failed model_id=%s", model.id, exc_info=True)
 
 
 def backfill_coordless(registry: ModelRegistry) -> list[str]:

@@ -165,6 +165,143 @@ def model_to_row(
     }
 
 
+# ── model_file / store_blob (ML-2/ML-3 — the file-SET + refcount tables) ────
+#
+# `model_file` ships EMPTY from ML-1's `001_registry.sql`; ML-2's
+# `registry.fileset` module is its first writer, via `insert_model_file`
+# below. `INSERT OR IGNORE` (not REPLACE) is deliberate idempotency: a
+# re-run of the same fileset plan against an already-populated model must
+# not clobber `dest`/`sha256` written by a prior successful install.
+
+
+def insert_model_file(
+    conn: sqlite3.Connection,
+    *,
+    model_id: str,
+    rel: str,
+    dest: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    lfs: bool | None = None,
+    role: str | None = None,
+    shard_index: int | None = None,
+) -> None:
+    """Insert one ``model_file`` row (idempotent — first-writer semantics)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO model_file "
+        "(model_id, rel, dest, size_bytes, sha256, lfs, role, shard_index) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            model_id,
+            rel,
+            dest,
+            size_bytes,
+            sha256,
+            (1 if lfs else 0) if lfs is not None else None,
+            role,
+            shard_index,
+        ),
+    )
+
+
+def upsert_model_file(
+    conn: sqlite3.Connection,
+    *,
+    model_id: str,
+    rel: str,
+    dest: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    lfs: bool | None = None,
+    role: str | None = None,
+    shard_index: int | None = None,
+) -> None:
+    """Insert-or-replace one ``model_file`` row.
+
+    Unlike :func:`insert_model_file` (idempotent no-op on an existing
+    ``(model_id, rel)``), this is for the update-in-place path — a re-pull
+    of a model that changed dest/sha256 (new revision) needs the row to
+    actually advance.
+    """
+    conn.execute(
+        "INSERT INTO model_file (model_id, rel, dest, size_bytes, sha256, lfs, role, shard_index) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(model_id, rel) DO UPDATE SET "
+        "dest=excluded.dest, size_bytes=excluded.size_bytes, sha256=excluded.sha256, "
+        "lfs=excluded.lfs, role=excluded.role, shard_index=excluded.shard_index",
+        (
+            model_id,
+            rel,
+            dest,
+            size_bytes,
+            sha256,
+            (1 if lfs else 0) if lfs is not None else None,
+            role,
+            shard_index,
+        ),
+    )
+
+
+def list_model_files(conn: sqlite3.Connection, model_id: str) -> list[dict[str, Any]]:
+    """Return every ``model_file`` row for ``model_id``, shard-ordered.
+
+    Entry point (shard_index=1 or the lone non-shard file) sorts first;
+    non-shard rows (mmproj/tokenizer/config, ``shard_index`` NULL) sort
+    after by ``rel`` for a stable, deterministic order.
+    """
+    rows = conn.execute(
+        "SELECT * FROM model_file WHERE model_id = ? "
+        "ORDER BY (shard_index IS NULL), shard_index, rel",
+        (model_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_blob(conn: sqlite3.Connection, sha256: str) -> sqlite3.Row | None:
+    """Return the ``store_blob`` row for ``sha256``, or ``None``."""
+    return conn.execute("SELECT * FROM store_blob WHERE sha256 = ?", (sha256,)).fetchone()
+
+
+def insert_blob(
+    conn: sqlite3.Connection,
+    *,
+    sha256: str,
+    size_bytes: int,
+    blob_path: str,
+    refcount: int = 1,
+) -> None:
+    """Register a freshly-installed file as the canonical blob for its sha256."""
+    conn.execute(
+        "INSERT INTO store_blob (sha256, size_bytes, blob_path, refcount, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (sha256, size_bytes, str(blob_path), refcount, now_iso()),
+    )
+
+
+def bump_blob_ref(conn: sqlite3.Connection, sha256: str, *, by: int = 1) -> None:
+    """Increment ``store_blob.refcount`` — a new hardlink now shares this blob."""
+    conn.execute(
+        "UPDATE store_blob SET refcount = refcount + ? WHERE sha256 = ?",
+        (by, sha256),
+    )
+
+
+def drop_blob_ref(conn: sqlite3.Connection, sha256: str, *, by: int = 1) -> int:
+    """Decrement ``store_blob.refcount``; returns the new count, or -1 if absent.
+
+    Floors at 0 (never goes negative even if called more times than the
+    blob was ever referenced — a defensive clamp, not a correctness
+    assumption). The caller (:mod:`hal0.registry.gc`) treats
+    ``refcount <= 0`` as an orphan eligible for pruning.
+    """
+    row = get_blob(conn, sha256)
+    if row is None:
+        return -1
+    new_count = max(0, row["refcount"] - by)
+    conn.execute("UPDATE store_blob SET refcount = ? WHERE sha256 = ?", (new_count, sha256))
+    return new_count
+
+
 def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Model:
     """Reconstruct a ``Model`` from one `model` table row.
 

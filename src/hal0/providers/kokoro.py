@@ -37,9 +37,10 @@ from typing import Any
 
 import httpx
 
+from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
-from hal0.providers.base import ContainerSpec, Mount, Provider
+from hal0.providers.base import ContainerSpec, Provider
 
 # Default image tag (overridable via HAL0_TOOLBOX_IMAGE_KOKORO for dev/test).
 _DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
@@ -163,9 +164,10 @@ class KokoroProvider(Provider):
             image=profile.image,
             command=command,
             env={},
-            # Model store mounted read-only with an SELinux relabel — both are
-            # first-class Mount flags (no target-string smuggling).
-            mounts=[Mount(store_root, store_root, read_only=True, selinux="z")],
+            # Model store mounted read-only via the shared `mount_for`
+            # factory (ML-3) — omits the SELinux relabel on NFS instead of
+            # unconditionally appending ``:z`` (chcon ENOTSUP there).
+            mounts=[model_store_module.mount_for(store_root, read_only=True)],
             # CPU-only: no GPU devices or supplementary groups required.
             devices=[],
             cap_add=[],

@@ -27,6 +27,14 @@ def provider() -> ComfyUIProvider:
     return ComfyUIProvider()
 
 
+@pytest.fixture(autouse=True)
+def _pin_model_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module asserts on literal /mnt/ai-models/comfyui/* mount
+    sources — pin the resolver to it (ML-3's unified store.store_root()
+    default is now paths.models_dir(), not /mnt/ai-models)."""
+    monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
+
+
 @pytest.fixture
 def slot_cfg() -> dict[str, Any]:
     return {"port": 8186, "backend": "rocm", "_paths": {}}

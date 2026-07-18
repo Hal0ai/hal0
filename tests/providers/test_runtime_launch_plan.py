@@ -133,10 +133,11 @@ class TestRenderUnitFromPlan:
 # ── legacy shim folds into the single builder ──────────────────────────────────
 
 
-def test_render_unit_shim_matches_equivalent_plan() -> None:
+def test_render_unit_shim_matches_equivalent_plan(monkeypatch) -> None:
     """_render_unit (scalar shim) must produce the same unit as building the
     equivalent RuntimeLaunchPlan and rendering it — proving the legacy llama
     path is now just the spec path with a thin adapter."""
+    monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
     profile = ProfileConfig(image="ghcr.io/x:server", flags="-fa on --no-mmap", mtp=False)
     flags = resolve_profile_flags(profile)
 

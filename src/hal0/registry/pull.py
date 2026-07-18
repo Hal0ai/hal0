@@ -35,8 +35,11 @@ from typing import Any
 
 import httpx
 
-from hal0.config import paths
+from hal0.config import paths, store
+from hal0.db import repository
+from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
+from hal0.registry.fileset import FileSetEntry, FileSetPlan
 from hal0.registry.model import Model
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
 
@@ -224,20 +227,17 @@ def _sanitise_id(model_id: str) -> str:
 def _pull_root() -> Path:
     """Return the configured pull destination root.
 
-    Reads ``[models].store`` (the v0.3 single-source-of-truth setting)
-    from hal0.toml on each call so a Settings save takes effect without
-    an API restart. Falls back to the legacy ``[models].pull_root`` when
-    ``store`` is empty (PR-#313 compatibility), and to
-    :func:`paths.models_dir` if config load fails — keeps pulls working
-    during bootstrap before the config exists.
+    ML-3: thin delegator to :func:`hal0.config.store.store_root` — the ONE
+    resolver now shared, identically, by every writer (this function) AND
+    every reader (provider container mounts via
+    ``hal0.config.paths.model_store_root``). This used to have its OWN
+    precedence/fallback (``effective_store()`` else ``paths.models_dir()``)
+    that could diverge from the reader's (``[models].store`` else
+    ``/mnt/ai-models``) — the "🔴 dual-resolver store trap" (plan §7.1e
+    defect #1). Kept as a function (not inlined at call sites) purely to
+    minimise the diff across this module's many internal callers.
     """
-    try:
-        from hal0.config.loader import load_hal0_config
-
-        cfg = load_hal0_config()
-        return Path(cfg.models.effective_store())
-    except Exception:
-        return paths.models_dir()
+    return store.store_root()
 
 
 def _final_path(model_id: str, filename: str) -> Path:
@@ -666,6 +666,7 @@ async def _download_one(
     final: Path,
     base_done: int,
     base_total: int,
+    revision: str = "main",
 ) -> str:
     """Stream ONE file of a pull to ``final``; return its hex SHA-256.
 
@@ -694,7 +695,7 @@ async def _download_one(
                              of restarting from zero)
       * anything else      → discard (unknown state must not poison a resume)
     """
-    url = hf_download_url(hf_repo, rec.hf_filename)
+    url = hf_download_url(hf_repo, rec.hf_filename, revision)
     headers = dict(base_headers)
 
     tmp_dir = _tmp_dir()
@@ -935,8 +936,8 @@ async def _download_one(
 async def run_pull(
     job: PullJob,
     *,
-    hf_repo: str,
-    hf_file: str,
+    hf_repo: str = "",
+    hf_file: str = "",
     registry: ModelRegistry,
     hf_token: str | None = None,
     client: httpx.AsyncClient | None = None,
@@ -944,8 +945,15 @@ async def run_pull(
     capability: str | None = None,
     mmproj_file: str | None = None,
     dest_override: str | None = None,
+    fileset: FileSetPlan | None = None,
 ) -> None:
     """Background-task body: stream the file(s), hash, install, register.
+
+    ML-2/ML-3: when ``fileset`` is given, this delegates entirely to
+    :func:`_run_pull_fileset` — the generalised N-file loop (arbitrary
+    shard counts + tokenizer/config carry, revision-pinned, hardlink-dedup
+    aware, ``by-id`` pointer flip). The single/mmproj-pair path below is
+    UNCHANGED for every existing caller that doesn't pass ``fileset``.
 
     Mutates ``job`` in place and pulses ``job._signal()`` on every chunk
     boundary or 500ms tick (whichever is rarer) so SSE consumers see
@@ -978,6 +986,17 @@ async def run_pull(
             orphaning the previous file. When set, ``capability`` /
             ``comfyui_subdir`` routing is bypassed for the main file.
     """
+    if fileset is not None:
+        await _run_pull_fileset(
+            job, fileset=fileset, registry=registry, hf_token=hf_token, client=client
+        )
+        return
+    if not hf_repo or not hf_file:
+        raise PullInvalidSource(
+            "run_pull requires either (hf_repo, hf_file) or fileset",
+            details={"model_id": job.model_id},
+        )
+
     job.state = "running"
     job.started_at = time.time()
     # Per-file manifest — main model first, optional mmproj sidecar second.
@@ -1178,6 +1197,273 @@ def _register_pulled(
     merged_meta.update(fresh_meta)
     updates["metadata"] = merged_meta
     registry.update(model_id, updates)
+
+
+# ── file-SET pulling (ML-2/ML-3) ──────────────────────────────────────────
+
+
+def _maybe_hardlink_from_blob(sha256: str, dest: Path) -> bool:
+    """Pre-fetch dedup (plan §23.3c): hardlink ``dest`` from an existing
+    ``store_blob`` instead of streaming, when one is already registered for
+    ``sha256``. Returns ``True`` on a successful hardlink install (the
+    caller then skips the download entirely); ``False`` on any miss or
+    failure (including cross-filesystem, where a hardlink can't exist) —
+    the caller falls back to the ordinary stream-and-verify path.
+    """
+    with connect() as conn:
+        row = repository.get_blob(conn, sha256)
+        if row is None:
+            return False
+        blob_path = Path(row["blob_path"])
+        try:
+            if not blob_path.is_file():
+                return False
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if os.stat(blob_path).st_dev != os.stat(dest.parent).st_dev:
+                # Cross-filesystem — hardlinks are impossible; degrade to a
+                # normal download rather than fail the pull (plan risk:
+                # "Hardlink cross-fs ... silently degrades to copy").
+                return False
+            tmp = dest.parent / f".{dest.name}.hardlink-tmp-{os.getpid()}"
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            os.link(blob_path, tmp)
+            os.replace(tmp, dest)
+        except OSError as exc:
+            log.debug("pull.hardlink_dedup_failed sha256=%s error=%s", sha256, exc)
+            return False
+        with tx(conn):
+            repository.bump_blob_ref(conn, sha256)
+        return True
+
+
+def _register_blob_after_install(sha256: str | None, dest: Path, size_bytes: int) -> None:
+    """Post-download dedup bookkeeping: a first-seen sha256 becomes the
+    canonical ``store_blob`` (this ``dest`` IS the blob); an already-known
+    sha256 (a race with a concurrent pull of the identical file) just bumps
+    refcount rather than duplicating the row. No-op for non-LFS files
+    (``sha256`` is ``None`` — nothing to dedup)."""
+    if not sha256:
+        return
+    with connect() as conn:
+        existing = repository.get_blob(conn, sha256)
+        with tx(conn):
+            if existing is None:
+                repository.insert_blob(
+                    conn, sha256=sha256, size_bytes=size_bytes, blob_path=str(dest)
+                )
+            else:
+                repository.bump_blob_ref(conn, sha256)
+
+
+def _register_pulled_fileset(
+    registry: ModelRegistry,
+    *,
+    model_id: str,
+    fileset: FileSetPlan,
+    installed: list[tuple[FileSetEntry, Path]],
+    entry_dest: Path,
+    mmproj_dest: Path | None,
+) -> None:
+    """Upsert the ``model`` row + ``model_file`` rows after a file-set pull.
+
+    Mirrors :func:`_register_pulled`'s add-vs-update branch, plus: pins
+    ``model.revision`` to the resolved commit sha (update-detect over the
+    whole set — plan §7.1c a5), and writes one ``model_file`` row per
+    installed file (ML-2 is the first writer of that table — ML-1 imports
+    it EMPTY).
+    """
+    entry_sha = next((e.lfs_sha256 for e, dest in installed if dest == entry_dest), None)
+    total_size = sum(dest.stat().st_size for _, dest in installed if dest.exists())
+    fresh_meta: dict[str, Any] = {"pulled_at": int(time.time())}
+    if entry_sha:
+        fresh_meta["sha256"] = entry_sha
+    updates: dict[str, Any] = {
+        "path": str(entry_dest),
+        "size_bytes": total_size,
+        "hf_repo": fileset.repo,
+        "hf_filename": Path(fileset.entry_rel).name,
+    }
+    if mmproj_dest is not None:
+        updates["mmproj"] = str(mmproj_dest)
+
+    try:
+        existing = registry.get(model_id)
+    except ModelNotFound:
+        registry.add(
+            Model(
+                id=model_id,
+                name=model_id,
+                path=str(entry_dest),
+                size_bytes=total_size,
+                hf_repo=fileset.repo,
+                hf_filename=Path(fileset.entry_rel).name,
+                capabilities=["chat"],
+                mmproj=str(mmproj_dest) if mmproj_dest else None,
+                metadata=dict(fresh_meta),
+            )
+        )
+    else:
+        merged_meta = dict(existing.metadata)
+        merged_meta.update(fresh_meta)
+        updates["metadata"] = merged_meta
+        registry.update(model_id, updates)
+
+    db_path = getattr(registry, "db_path", None)
+    if db_path is None:
+        return  # non-SQLite registry (TOML escape hatch) — no model_file table
+    with connect(db_path) as conn, tx(conn):
+        for entry, dest in installed:
+            repository.upsert_model_file(
+                conn,
+                model_id=model_id,
+                rel=entry.rel,
+                dest=str(dest),
+                size_bytes=entry.size_bytes or (dest.stat().st_size if dest.exists() else None),
+                sha256=entry.lfs_sha256,
+                lfs=entry.lfs_sha256 is not None,
+                role=entry.role,
+                shard_index=entry.shard_index,
+            )
+        # `revision`/`preferred_runner` are §7.1 reserved columns with no
+        # Model field yet (ML-1's DDL comment) — written directly until
+        # that lane lands a pydantic field for them.
+        conn.execute(
+            "UPDATE model SET revision = ?, preferred_runner = COALESCE(preferred_runner, ?) WHERE id = ?",
+            (fileset.revision, fileset.runner_hint, model_id),
+        )
+
+
+async def _run_pull_fileset(
+    job: PullJob,
+    *,
+    fileset: FileSetPlan,
+    registry: ModelRegistry,
+    hf_token: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """Background-task body for a multi-file (shard-set) pull (ML-2/ML-3).
+
+    Generalises the historic hardcoded two-file (main + mmproj) loop into
+    an N-file loop over ``fileset.files`` (already shard/role ordered by
+    :func:`hal0.registry.fileset.plan_fileset`). Each file: a pre-fetch
+    dedup check (hardlink instead of stream on a ``store_blob`` hit), else
+    the unchanged per-file :func:`_download_one` core (resume/integrity/
+    atomic install all reused), pinned to ``fileset.revision`` so a
+    mid-pull upstream re-tag can't stitch mismatched shards. On full
+    success: registers the ``model`` + ``model_file`` rows and flips the
+    ``by-id/<model_id>`` pointer at the entry file.
+    """
+    job.state = "running"
+    job.started_at = time.time()
+    job.files = [PullFile(hf_filename=f.rel, kind=f.role) for f in fileset.files]
+    job._signal()
+
+    base_headers: dict[str, str] = {"User-Agent": "hal0/installer"}
+    if hf_token:
+        base_headers["Authorization"] = f"Bearer {hf_token}"
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
+            follow_redirects=True,
+        )
+
+    installed: list[tuple[FileSetEntry, Path]] = []
+    try:
+        base_done = 0
+        base_total = 0
+        for entry, rec in zip(fileset.files, job.files, strict=True):
+            dest = store.file_dest(fileset.repo, fileset.revision, entry.rel)
+            hardlinked = False
+            if entry.lfs_sha256:
+                rec.expected_sha256 = entry.lfs_sha256
+                hardlinked = await asyncio.to_thread(
+                    _maybe_hardlink_from_blob, entry.lfs_sha256, dest
+                )
+            if hardlinked:
+                size = dest.stat().st_size
+                rec.sha256 = entry.lfs_sha256
+                rec.dest = str(dest)
+                rec.bytes_done = size
+                rec.bytes_total = size
+                base_done += size
+                base_total += size
+                job.bytes_downloaded = base_done
+                job.bytes_total = base_total
+                job._signal()
+            else:
+                await _download_one(
+                    job,
+                    rec,
+                    client=client,
+                    hf_repo=fileset.repo,
+                    base_headers=base_headers,
+                    final=dest,
+                    base_done=base_done,
+                    base_total=base_total,
+                    revision=fileset.revision,
+                )
+                base_done += rec.bytes_done
+                base_total = max(base_total + rec.bytes_total, base_done)
+                await asyncio.to_thread(
+                    _register_blob_after_install, rec.sha256, dest, rec.bytes_done
+                )
+            installed.append((entry, dest))
+
+        entry_dest = next(dest for e, dest in installed if e.rel == fileset.entry_rel)
+        mmproj_dest = next((dest for e, dest in installed if e.role == "mmproj"), None)
+
+        await asyncio.to_thread(
+            _register_pulled_fileset,
+            registry,
+            model_id=job.model_id,
+            fileset=fileset,
+            installed=installed,
+            entry_dest=entry_dest,
+            mmproj_dest=mmproj_dest,
+        )
+        with contextlib.suppress(Exception):
+            store.set_entry_pointer(job.model_id, entry_dest)
+        with contextlib.suppress(Exception):
+            store.finalize_perms(entry_dest)
+
+        job.path = str(entry_dest)
+        job.sha256 = next((e.lfs_sha256 for e, dest in installed if dest == entry_dest), None) or ""
+        job.bytes_downloaded = sum(f.bytes_done for f in job.files)
+        total = sum(f.bytes_total for f in job.files)
+        job.bytes_total = total if total > 0 else job.bytes_downloaded
+        job.state = "completed"
+        job.finished_at = time.time()
+        job._signal()
+    except _PullCancelled:
+        job.state = "cancelled"
+        job.finished_at = time.time()
+        job._signal()
+    except asyncio.CancelledError:
+        job.state = "cancelled"
+        job.finished_at = time.time()
+        job._signal()
+        raise
+    except Hal0Error as exc:
+        job.state = "failed"
+        job.error = exc.message
+        job.error_code = exc.code
+        job.finished_at = time.time()
+        job._signal()
+        log.warning("model.pull_failed", extra={"model_id": job.model_id, "error": exc.message})
+    except Exception as exc:
+        job.state = "failed"
+        job.error = f"{type(exc).__name__}: {exc}"
+        job.error_code = "model.pull_failed"
+        job.finished_at = time.time()
+        job._signal()
+        log.exception("model.pull_unexpected_error", extra={"model_id": job.model_id})
+    finally:
+        persist_pull_job(job)
+        if owns_client:
+            await client.aclose()
 
 
 async def run_flm_pull(

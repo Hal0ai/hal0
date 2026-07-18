@@ -174,36 +174,28 @@ DEFAULT_MODEL_STORE = "/mnt/ai-models"
 def model_store_root() -> str:
     """Resolve the model-store directory that slot containers bind-mount.
 
-    Single source of truth shared by the registry/pull engine
-    (``[models].store``) and the provider container mounts, so the path the
-    registry hands to llama-server can never drift from what the container
-    actually mounts. Precedence:
+    THIN SHIM (ML-3 / plan §7.1e) delegating to
+    :func:`hal0.config.store.store_root` — the ONE resolver now shared,
+    identically, by every reader (this function; provider container mounts)
+    AND every writer (the pull engine). Historically this function and
+    ``registry.pull._pull_root()`` had different precedence and different
+    fallback defaults (``/mnt/ai-models`` here vs ``models_dir()`` there),
+    which let a pull land where the container's read-only mount didn't
+    reach — the "🔴 dual-resolver store trap" (plan §7.1e defect #1). That
+    divergence is gone: both now call :func:`hal0.config.store.store_root`.
 
-      1. ``HAL0_MODEL_STORE`` env var — explicit operator / CI override,
-      2. ``[models].store`` from hal0.toml — the documented single-source-of
-         -truth field (``ModelsConfig.store``),
-      3. :data:`DEFAULT_MODEL_STORE` (``/mnt/ai-models``) — the conventional
-         mount + historic default.
+    NOTE the default fallback CHANGED as part of that fix: it used to be
+    :data:`DEFAULT_MODEL_STORE` (``/mnt/ai-models``); it is now
+    ``paths.models_dir()`` (``/var/lib/hal0/models``), matching the write
+    side. :data:`DEFAULT_MODEL_STORE` is kept only as the conventional/
+    historic constant a few call sites still reference.
 
-    The mount default deliberately stays ``/mnt/ai-models`` (NOT
-    ``pull_root`` / ``models_dir()``) so existing deployments that never set
-    ``store`` keep mounting the same path; once ``store`` is set, the pull
-    engine and the slot mounts align on it. Config is read lazily so this is
-    safe to call from low-level provider code without an import cycle, and it
-    degrades to the default if the config can't be read (early bootstrap).
+    Kept as a ``str``-returning function (not repointed to return a
+    ``Path``) for signature compatibility with the ~dozen existing callers.
     """
-    env = os.environ.get("HAL0_MODEL_STORE", "").strip()
-    if env:
-        return env
-    try:
-        from hal0.config.loader import load_hal0_config
+    from hal0.config.store import store_root
 
-        store = (load_hal0_config().models.store or "").strip()
-        if store:
-            return store
-    except Exception:
-        pass
-    return DEFAULT_MODEL_STORE
+    return str(store_root())
 
 
 def default_flm_models_dir() -> str:
