@@ -79,10 +79,10 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | §11.1 | stable opaque slot-id; name = display label | ✔ | SLOT | — | merge `5d134c3b` | substrate tests merged | inert/additive on halo143 |
 | §11.2 | PortAuthority (`port_claim` SQLite) | ✔ | SLOT | SQLite | `639cfb60`, merge `5d134c3b` | migration 004 + allocator tests merged | inert/additive on halo143 |
 | **SLOT re-key (PR3–6) — increment A** | slot-id identity + PortAuthority wired live (acquire/release + TOML writeback, drop port=8081); /rename + /by-id + /by-name + /api/ports 5th source; non-destructive `fold_identity()` boot-fold | ✔ | SLOT | §11.1✔,§11.2✔ | `e0fd6d7c` (was `1f062b89`) | CI+γ green; additive/bijective (name↔id), 9 new + 668 targeted, scar 202; no exposure/migration change | — |
-| **SLOT re-key — increment B** | internal `dict[int]` re-key of 7 dicts + destructive M5 unit/file/podman rename (`hal0-slot@<id>`, `<id>.toml`) | ☐ | SLOT | increment A✔ | — | needs WIDENED fence: 11 name-keyed test files + 7 cross-fence files (container.py, backends/logs/installer/comfyui/journal, board_chat, _settings_apply) + real-hardware smoke | R3-B |
+| **SLOT re-key — increment B** | internal `dict[int]` re-key of 7 dicts (single `_key` chokepoint, surrogate→rebind, rename = pure relabel) + M5 one-shot name→id artefact migrator (`migrate_id_keying.py`, idempotent, ships INERT) | ✔ | SLOT | increment A✔ | merge `91b55ad0` (lane `cd5e091b`/`3a4c9011`/`69c14bfc`) | Opus-built (TDD), Fable-reviewed + independently re-run: 550 combined incl. golden-paths harness; ruff/format/import/sunset green; 3 cross-fence one-liner test touches reported | **held for deploy (halo143 migration window):** live unit `hal0-slot@<name>`→`@<id>` + podman rename, M5 on real state, runtime path/unit flip to id (`_state_file`/`_config_file` + unit rendering) — must land atomically with M5 going live; consumed by P3-runtime-db |
+| **container.py arg-quoting bug** | ExecStart emitted space-less tokens bare → systemd stripped inner double quotes → `{enable_thinking:false}` → llama JSON parse error → slot won't start | ✔ | SLOT | — | `cd5e091b` (in SLOT-B merge `91b55ad0`) | `shlex.quote` every token (safe tokens stay bare); regression test with the exact lxc105 token | unblocks no-think default for the brain (lxc105 §6) |
 | SlotManager-deepen | `inspect/apply(desired)/delete/subscribe` small interface (review #4) | ☐ | SLOT | §11.1 | — | — | — |
 | P3-quadlet | Podman Quadlet `.container` units; delete hand-rendered strings | ☐ | INSTALL/SLOT | P3-perms✔, §11.1 | spec `spec-p3-quadlet.md` | — | shares container.py |
-| **container.py arg-quoting bug** | `providers/container.py` shell layer strips double-quotes from any space-less token → a file `chat_template` + `--chat-template-kwargs '{"enable_thinking":false}'` emits `{enable_thinking:false}` → llama-server JSON parse error → **slot won't start**. Fix arg emission to preserve/`shlex.quote` JSON values. | ☐ | SLOT | — | — | repro (lxc105): nano crash; workaround `chat_template: auto`. Folds `hal0-105-changes-summary.md` §5.1 | fold on increment B / P3-quadlet (same file) |
 | §20 bench | bench_run onto OBS schema | ☐ | OBS | ML-4 | spec `spec-bench.final.md` | — | needs GPU box; **note: hal0 llama.cpp forks reject newer GGUFs (e.g. Qwen3.5 UD-Q4_K_XL) on `rocmfp4-server`/`c077206`** — bench only models hal0 already serves (lxc105 §5.4) |
 
 ### R4 — Brain + Hermes
@@ -164,6 +164,11 @@ base in isolated worktrees. The Hermes suite proceeds with Stage 1 (`HP-core` an
   (mirrors scar ratchet; keeps P4-docs honest).
 - **`scripts/lane_verify.sh`:** encapsulate the capped gate (ruff check + format --check, import
   smoke, sunset, named pytest targets) — shrinks dispatch prompts, kills the forgot-format class.
+- **CI env ≠ uv.lock (bit twice, 2026-07-18):** CI pip-installs a floating FastAPI (lazy
+  `_IncludedRouter` app.routes) while local venvs sync `uv.lock` (0.136.x, eager routes) — caused
+  the duplicate route-collision failure AND the gp15 route-set failure, both CI-only. Fold into
+  P4-tests: install CI from the lockfile (or add a lock-matrix job); until then, never assert on
+  `app.routes` shape — probe routes behaviorally.
 - **Proposed, needs user decision at R4 planning:** demote HP-voice + HP-automation below the R4
   exit bar (finish line = "small, optional Hermes integration"); god-module LOC burn-down tracked
   per checkpoint (today 18,836 across the seven diagnosed modules).
