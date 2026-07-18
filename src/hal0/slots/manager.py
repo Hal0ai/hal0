@@ -56,6 +56,16 @@ from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
+from hal0.slots.profile_adopt import (
+    apply_preferred_profile as _profile_adopt_apply_preferred_profile,
+)
+from hal0.slots.profile_adopt import (
+    defuse_stale_mtp_on_swap as _profile_adopt_defuse_stale_mtp_on_swap,
+)
+from hal0.slots.profile_adopt import (
+    preferred_profile_for as _profile_adopt_preferred_profile_for,
+)
+from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
 from hal0.slots.routing import (
     _VALID_SLOT_TYPES,
     NPU_SEEDED_SLOTS,
@@ -1984,145 +1994,23 @@ class SlotManager:
             self._invalidate_cfg_cache(slot_name)
 
     # ── model preferred profile (Q1: profile loads with the model) ────────────
+    #
+    # P3-slots §1g: logic lives in hal0.slots.profile_adopt; every method
+    # below is a thin delegator.
 
     async def _preferred_profile_for(self, model_id: str | None) -> str | None:
-        """The model's preferred runtime profile name (``defaults.profile``).
+        """See :func:`hal0.slots.profile_adopt.preferred_profile_for`."""
+        return await _profile_adopt_preferred_profile_for(self, model_id)
 
-        A registry model may carry ``defaults.profile`` — the runtime profile
-        it wants loaded with it. Returns the name or ``None`` (no preference /
-        model not in registry).
-        """
-        if not model_id:
-            return None
-        info = await self._resolve_model_info(model_id)
-        defaults = info.get("defaults")
-        preferred = defaults.get("profile") if isinstance(defaults, dict) else None
-        return preferred if isinstance(preferred, str) and preferred else None
-
-    @staticmethod
-    def _profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
-        """True when ``profile_name`` is safe to adopt for this slot.
-
-        A model's profile preference is honoured only when the profile exists in
-        the catalog AND matches the slot's device/type. We never flip a slot's
-        hardware (device/backend) to satisfy a preference — an image or
-        cross-backend profile on the wrong device is rejected so the caller
-        keeps the slot's current/device-default profile.
-        """
-        from hal0.errors import NotFound
-        from hal0.profiles import ProfileCatalog
-
-        try:
-            resolved = ProfileCatalog().resolve(profile_name)
-        except NotFound:
-            return False
-        slot_type = cfg_dict.get("type")
-        if slot_type and slot_type not in resolved.supported_slot_types:
-            return False
-        device = str(cfg_dict.get("device") or "")
-        if device:
-            slot_class = (
-                "gpu"
-                if device.startswith("gpu")
-                else device
-                if device in ("npu", "cpu", "img")
-                else "cpu"
-            )
-            if resolved.device_class != slot_class:
-                return False
-            if resolved.backend:
-                from hal0.model_meta import device_to_backend
-
-                slot_backend = device_to_backend(device)[1]
-                if slot_backend and slot_backend != resolved.backend:
-                    return False
-        return True
+    _profile_fits_slot = staticmethod(_profile_adopt_profile_fits_slot)
 
     async def _apply_preferred_profile(self, slot_name: str, model_id: str) -> bool:
-        """Adopt ``model_id``'s preferred profile for this slot when compatible.
-
-        Q1 (model profiles): on every model swap the slot adopts the new
-        model's ``defaults.profile`` — but only when it fits the slot (see
-        :meth:`_profile_fits_slot`); an incompatible preference is logged and
-        ignored. Writes the slot TOML BEFORE the reload so the container comes
-        up on the new profile's image. Returns True when ``profile`` changed.
-        """
-        preferred = await self._preferred_profile_for(model_id)
-        if not preferred:
-            return False
-        # Read + rewrite under the shared cross-process slot-TOML lock so a
-        # concurrent config writer isn't silently dropped.
-        with slot_write_lock():
-            cfg = await self._load_slot_config(slot_name)
-            cfg_dict = _cfg_to_dict(cfg)
-            if cfg_dict.get("profile") == preferred:
-                return False
-            if not self._profile_fits_slot(preferred, cfg_dict):
-                log.info(
-                    "slot.preferred_profile_skipped",
-                    extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
-                )
-                return False
-            cfg_dict = {**cfg_dict, "profile": preferred}
-            try:
-                write_slot_toml(self._config_file(slot_name), cfg_dict)
-            except OSError as exc:
-                raise SlotConfigError(
-                    f"failed to persist preferred profile to slot {slot_name}: {exc}",
-                    details={"slot": slot_name, "profile": preferred},
-                ) from exc
-            self._invalidate_cfg_cache(slot_name)
-        log.info(
-            "slot.preferred_profile_applied",
-            extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
-        )
-        return True
+        """See :func:`hal0.slots.profile_adopt.apply_preferred_profile`."""
+        return await _profile_adopt_apply_preferred_profile(self, slot_name, model_id)
 
     async def _defuse_stale_mtp_on_swap(self, slot_name: str, model_id: str) -> bool:
-        """Clear a forced ``mtp = true`` when swapping onto a non-MTP model.
-
-        MTP is a model property, and a force-on pointing at a model with no MTP
-        heads makes llama-server exit at load ("context type MTP requested but
-        model doesn't contain MTP layers") — the override would down the slot
-        the moment the swapped container starts. Clears the override to AUTO
-        for exactly that combination; a force-off, a force-on for an eligible
-        model, and an unresolvable model (can't judge) all pass through
-        untouched. Returns True when the override was cleared.
-        """
-        from hal0.model_meta import model_is_mtp_eligible
-
-        with slot_write_lock():
-            cfg = await self._load_slot_config(slot_name)
-            cfg_dict = _cfg_to_dict(cfg)
-            if cfg_dict.get("mtp") is not True:
-                return False
-            try:
-                from hal0.registry.store import ModelRegistry
-
-                model = ModelRegistry().get(model_id)
-                info = model.model_dump() if hasattr(model, "model_dump") else dict(model)
-            except Exception:
-                return False  # unresolvable — leave the escape hatch alone
-            info.setdefault("_model_key", model_id)
-            if model_is_mtp_eligible(info):
-                return False
-            cfg_dict = dict(cfg_dict)
-            cfg_dict.pop("mtp", None)  # absent = AUTO (TOML has no null)
-            write_slot_toml(self._config_file(slot_name), cfg_dict)
-            self._invalidate_cfg_cache(slot_name)
-        log.warning(
-            "slot.mtp_force_on_cleared_on_swap",
-            extra={
-                "slot": slot_name,
-                "model_id": model_id,
-                "note": (
-                    "forced MTP would crash llama-server for this model (no MTP "
-                    "heads); override cleared to AUTO. Tag the model 'mtp' or "
-                    "re-force in the drawer if it really ships MTP layers."
-                ),
-            },
-        )
-        return True
+        """See :func:`hal0.slots.profile_adopt.defuse_stale_mtp_on_swap`."""
+        return await _profile_adopt_defuse_stale_mtp_on_swap(self, slot_name, model_id)
 
     async def _check_npu_exclusivity(
         self,
