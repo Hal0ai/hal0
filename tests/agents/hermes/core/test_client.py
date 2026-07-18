@@ -205,3 +205,112 @@ def test_status_and_error_codes_decode_to_typed_errors(
 
     assert missing.value.error_code == "resource.missing"
     assert incompatible.value.error_code == "schema.incompatible"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["https://attacker.test/steal", "//attacker.test/steal"],
+)
+def test_rejects_non_relative_targets_before_sending_credentials(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    requests: list[httpx.Request] = []
+    client = _client(
+        monkeypatch,
+        lambda request: requests.append(request) or httpx.Response(200),
+    )
+
+    with pytest.raises(ValueError, match="API-relative"):
+        client.request_read("GET", target)
+
+    assert requests == []
+
+
+def test_relative_target_preserves_configured_base_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    transport = httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(200))
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: _HTTPX_CLIENT(transport=transport, **kwargs),
+    )
+    client = Hal0HermesClient("http://hal0.test/prefix", client_key="client-secret")
+
+    client.request_read("GET", "/api/things")
+
+    assert requests[0].url == httpx.URL("http://hal0.test/prefix/api/things")
+
+
+def test_unkeyed_mutation_does_not_retry_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def failure(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503)
+
+    client = _client(monkeypatch, failure)
+
+    with pytest.raises(Unavailable):
+        client.request_mutation("POST", "/api/things", json={})
+
+    assert attempts == 1
+
+
+def test_keyed_mutation_retries_transient_failure_three_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def failure(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError("transient", request=request)
+
+    client = _client(monkeypatch, failure)
+
+    with pytest.raises(Unavailable):
+        client.request_mutation("POST", "/api/things", idempotency_key="event-1")
+
+    assert attempts == 3
+
+
+def test_rejects_caller_auth_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    client = _client(
+        monkeypatch,
+        lambda request: requests.append(request) or httpx.Response(200),
+    )
+
+    with pytest.raises(ValueError, match="auth"):
+        client.request_read("GET", "/api/things", auth=("attacker", "secret"))
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["Authorization", "authorization", "X-Request-ID", "x-request-id", "Idempotency-Key"],
+)
+def test_rejects_transport_owned_header_overrides(
+    monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    requests: list[httpx.Request] = []
+    client = _client(
+        monkeypatch,
+        lambda request: requests.append(request) or httpx.Response(200),
+    )
+
+    with pytest.raises(ValueError, match="transport-owned"):
+        client.request_mutation(
+            "POST",
+            "/api/things",
+            idempotency_key="event-1",
+            headers={header: "caller-value"},
+        )
+
+    assert requests == []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -11,6 +12,7 @@ from .errors import IncompatibleSchema, MissingResource, Unauthorized, Unavailab
 
 _RETRYABLE_STATUS = frozenset({502, 503, 504})
 _MAX_ATTEMPTS = 3
+_OWNED_HEADERS = frozenset({"authorization", "x-request-id", "idempotency-key"})
 
 
 class Hal0HermesClient:
@@ -25,7 +27,7 @@ class Hal0HermesClient:
         self._client_key = client_key
         self._admin_key = admin_key
         self._client = httpx.Client(
-            base_url=base_url.rstrip("/"),
+            base_url=f"{base_url.rstrip('/')}/",
             timeout=httpx.Timeout(15.0, connect=2.0),
         )
 
@@ -57,6 +59,7 @@ class Hal0HermesClient:
     ) -> httpx.Response:
         """Make a mutation request using only the admin credential."""
         headers = dict(kwargs.pop("headers", {}))
+        _reject_owned_headers(headers)
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
         return self._request(
@@ -64,6 +67,8 @@ class Hal0HermesClient:
             path,
             key=self._admin_key,
             headers=headers,
+            max_attempts=_MAX_ATTEMPTS if idempotency_key is not None else 1,
+            validate_headers=False,
             **kwargs,
         )
 
@@ -74,24 +79,31 @@ class Hal0HermesClient:
         *,
         key: str | None,
         headers: dict[str, str] | None = None,
+        max_attempts: int = _MAX_ATTEMPTS,
+        validate_headers: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
+        if "auth" in kwargs:
+            raise ValueError("caller auth override is not allowed")
+        path = _relative_target(path)
         request_id = str(uuid4())
         request_headers = dict(headers or {})
+        if validate_headers:
+            _reject_owned_headers(request_headers)
         request_headers["X-Request-ID"] = request_id
         if key is not None:
             request_headers["Authorization"] = f"Bearer {key}"
 
-        for attempt in range(_MAX_ATTEMPTS):
+        for attempt in range(max_attempts):
             try:
                 response = self._client.request(method, path, headers=request_headers, **kwargs)
             except (httpx.ConnectError, httpx.TimeoutException):
-                if attempt + 1 < _MAX_ATTEMPTS:
+                if attempt + 1 < max_attempts:
                     continue
                 raise Unavailable(request_id=request_id) from None
 
             if response.status_code in _RETRYABLE_STATUS:
-                if attempt + 1 < _MAX_ATTEMPTS:
+                if attempt + 1 < max_attempts:
                     continue
                 raise Unavailable(
                     status_code=response.status_code,
@@ -101,6 +113,18 @@ class Hal0HermesClient:
             return _decode_response(response, request_id)
 
         raise AssertionError("retry loop exhausted")
+
+
+def _relative_target(target: str) -> str:
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc or target.startswith("//"):
+        raise ValueError("hal0 request target must be API-relative")
+    return target.lstrip("/")
+
+
+def _reject_owned_headers(headers: dict[str, str]) -> None:
+    if any(str(name).lower() in _OWNED_HEADERS for name in headers):
+        raise ValueError("caller cannot override transport-owned headers")
 
 
 def _decode_response(response: httpx.Response, request_id: str) -> httpx.Response:
