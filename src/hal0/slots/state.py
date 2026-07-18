@@ -223,6 +223,23 @@ class NpuExclusivityViolation(SlotError):
     status = 409
 
 
+class SlotPinned(SlotError):
+    """A pinned slot was targeted by a manual unload/delete without ``force``.
+
+    §21.10 operator-pin hardening: an anchor pinned either via the default
+    anchor set (``agent``/``utility``/``npu``) or an explicit
+    ``SlotConfig.pinned = true`` must not be unloaded or deleted by a plain
+    ``POST /{name}/unload`` / ``DELETE /{name}`` — that guards against an
+    accidental click taking down an always-warm anchor. Pass ``force=true``
+    to bypass. Automatic eviction (idle/pressure) already excludes pinned
+    slots at the candidate-selection stage, so this error is reserved for
+    the manual API surface.
+    """
+
+    code = "slot.pinned"
+    status = 409
+
+
 # ── Persistence ──────────────────────────────────────────────────────────────
 
 
@@ -357,6 +374,7 @@ __all__ = [
     "SlotHealthFailed",
     "SlotNotFound",
     "SlotNotReady",
+    "SlotPinned",
     "SlotSpawnFailed",
     "SlotState",
     "SlotStateRecord",

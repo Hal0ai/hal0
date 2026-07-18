@@ -45,6 +45,7 @@ from hal0.slot_config import (
 )
 from hal0.slots._cfg_helpers import _cfg_port, _cfg_provider, _cfg_to_dict, _model_default
 from hal0.slots.config_write import (
+    _base_profile_for_backend,
     _cfg_effective_backend,
     _reconcile_device_profile,
     check_default_uniqueness,
@@ -66,6 +67,10 @@ from hal0.slots.profile_adopt import (
     preferred_profile_for as _profile_adopt_preferred_profile_for,
 )
 from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
+from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
+from hal0.slots.reaper import is_pinned as _reaper_is_pinned
+from hal0.slots.reaper import probe_host_free_mb as _reaper_probe_host_free_mb
+from hal0.slots.reaper import probe_host_total_mb as _reaper_probe_host_total_mb
 from hal0.slots.routing import (
     _VALID_SLOT_TYPES,
     NPU_SEEDED_SLOTS,
@@ -86,6 +91,7 @@ from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
     SlotNotFound,
+    SlotPinned,
     SlotState,
     SlotStateRecord,
     is_transition_legal,
@@ -166,23 +172,9 @@ _WARMING_INACTIVE_STRIKES: int = 3
 # ceiling, comfortably clear of any real large-model load.
 _WARMING_STALE_AFTER_S: float = 900.0
 
-# Idle-monitor defaults. A READY slot whose last activity is older than
-# _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics
-# can distinguish "warm but quiet" from "warm and serving".
-_IDLE_AFTER_S: float = 300.0
-_IDLE_MONITOR_INTERVAL_S: float = 30.0
-# Hard-eviction default TTL (#902). A slot idle past this long (resolved
-# per-slot: TOML idle_timeout_s overrides, then this global default) is
-# *unloaded* — freeing host RAM — not merely relabeled IDLE. 0 disables
-# eviction; per-slot idle_timeout_s = 0 pins that slot.
-_EVICT_AFTER_S: float = 300.0
-
-# Anchor slots pinned against TTL eviction *under default config* — i.e.
-# when their TOML carries no explicit idle_timeout_s. Evicting these would
-# defeat always-warm chat, the agent loop, and the NPU trio anchor. An
-# explicit per-slot idle_timeout_s in TOML still wins (lets an operator
-# opt a named anchor back into eviction); explicit 0 keeps it pinned.
-_PINNED_BY_DEFAULT: frozenset[str] = frozenset({"agent", "utility", "npu"})
+# NOTE: idle-monitor tunables (_IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S,
+# _EVICT_AFTER_S) and _PINNED_BY_DEFAULT moved to hal0.slots.reaper
+# (P3-slots §1b) — imported + re-exported below.
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -290,6 +282,7 @@ class SlotManager:
         idle_after_s: float = _IDLE_AFTER_S,
         evict_after_s: float = _EVICT_AFTER_S,
         evict_pressure_mb: float = 8192.0,
+        evict_pressure_pct: float | None = None,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -363,8 +356,16 @@ class SlotManager:
         # this value (MiB), idle lru-eligible slots are evicted in LRU order
         # until free RAM recovers.  0 disables pressure eviction.
         self._evict_pressure_mb: float = float(evict_pressure_mb)
+        # §21.10 threshold_pct: when set, the pressure floor is instead
+        # ``evict_pressure_pct`` percent of total GTT-aware capacity,
+        # re-derived every sweep (total capacity can shift as the amdgpu
+        # GTT pool grows/shrinks). None (default) keeps the absolute
+        # ``evict_pressure_mb`` floor above — purely additive.
+        self._evict_pressure_pct: float | None = evict_pressure_pct
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
-        self._idle_monitor_task: asyncio.Task[None] | None = None
+        # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
+        # own task handle; see reaper.py.
+        self._reaper: SlotReaper = SlotReaper(self)
         # GpuArbiter (Phase D, spec §7) — constructed lazily on first
         # ``.arbiter`` access so CLI/test contexts that never touch image
         # mode pay nothing. See the ``arbiter`` property below.
@@ -1723,21 +1724,32 @@ class SlotManager:
         return await self.status(slot_name)
 
     async def delete(self, slot_name: str, *, force: bool = False) -> None:
-        """Delete a slot. Seeded slots are protected unless ``force=True``.
+        """Delete a slot. Seeded + pinned slots are protected unless ``force=True``.
 
         A seeded slot (``primary`` / ``embed`` / … + the NPU trio) is normally
         undeletable — disable it via ``capabilities.toml`` instead. ``force``
         overrides that guard so an operator can remove a seeded slot outright;
         note an install/update reconcile may re-seed it later, and the name stays
         reserved (``create`` still rejects it) until then.
+
+        §21.10 operator-pin hardening: a pinned slot (default-pinned anchor
+        or ``SlotConfig.pinned = true``) is likewise refused without
+        ``force=True`` — HTTP 409 ``slot.pinned`` — so an accidental delete
+        can't take down an always-warm anchor.
         """
         slot_name = self._resolve_alias(slot_name)
-        if slot_name in self.seeded_slots() and not force:
-            raise SlotConfigError(
-                f"cannot delete seeded slot {slot_name!r} — disable it via "
-                "capabilities.toml, or pass force to delete it anyway",
-                details={"slot": slot_name, "seeded": True},
-            )
+        if not force:
+            if slot_name in self.seeded_slots():
+                raise SlotConfigError(
+                    f"cannot delete seeded slot {slot_name!r} — disable it via "
+                    "capabilities.toml, or pass force to delete it anyway",
+                    details={"slot": slot_name, "seeded": True},
+                )
+            if await self.is_pinned(slot_name):
+                raise SlotPinned(
+                    f"slot {slot_name!r} is pinned — pass force=true to delete it anyway",
+                    details={"slot": slot_name, "pinned": True},
+                )
         self._ensure_known(slot_name)
         # Make sure it's stopped first.
         current = self._current_state(slot_name)
@@ -2451,6 +2463,10 @@ class SlotManager:
         return 60
 
     # ── IDLE monitor ─────────────────────────────────────────────────────────
+    #
+    # P3-slots §1b: logic lives in hal0.slots.reaper.SlotReaper
+    # (self._reaper, constructed in __init__). Every method below is a thin
+    # delegator so the public surface is unchanged.
 
     async def start_idle_monitor(
         self,
@@ -2458,6 +2474,7 @@ class SlotManager:
         idle_after_s: float | None = None,
         evict_after_s: float | None = None,
         evict_pressure_mb: float | None = None,
+        evict_pressure_pct: float | None = None,
         interval_s: float | None = None,
     ) -> None:
         """Start the background sweeper that demotes READY → IDLE and evicts.
@@ -2466,259 +2483,80 @@ class SlotManager:
         Callers in the API lifespan invoke this once at startup (wiring
         ``evict_after_s`` from ``slots.idle_timeout_s``); tests construct a
         SlotManager with shorter intervals and start the monitor explicitly.
+
+        ``evict_pressure_pct`` (§21.10, new): expresses the pressure floor
+        as a percentage of total GTT-aware capacity instead of an absolute
+        MiB value. ``None`` (default) leaves ``evict_pressure_mb`` in
+        charge — purely additive.
         """
-        if idle_after_s is not None:
-            self._idle_after_s = idle_after_s
-        if evict_after_s is not None:
-            self._evict_after_s = evict_after_s
-        if evict_pressure_mb is not None:
-            self._evict_pressure_mb = float(evict_pressure_mb)
-        if interval_s is not None:
-            self._idle_monitor_interval_s = interval_s
-        existing = self._idle_monitor_task
-        if existing is not None and not existing.done():
-            return
-        try:
-            self._idle_monitor_task = asyncio.create_task(
-                self._idle_monitor_loop(),
-                name="hal0-slot-idle-monitor",
-            )
-        except RuntimeError:
-            # No running loop (sync-context test).  Defer until callers
-            # are in an async context.
-            log.debug("slot.idle_monitor_no_loop")
+        await self._reaper.start(
+            idle_after_s=idle_after_s,
+            evict_after_s=evict_after_s,
+            evict_pressure_mb=evict_pressure_mb,
+            evict_pressure_pct=evict_pressure_pct,
+            interval_s=interval_s,
+        )
 
     async def stop_idle_monitor(self) -> None:
         """Cancel the idle-monitor task if running.  Idempotent."""
-        task = self._idle_monitor_task
-        self._idle_monitor_task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+        await self._reaper.stop()
 
     async def _idle_monitor_loop(self) -> None:
-        """Periodically sweep READY slots for idle-timeout and pressure."""
-        try:
-            while True:
-                await asyncio.sleep(self._idle_monitor_interval_s)
-                try:
-                    await self._sweep_idle_once()
-                except Exception as exc:  # never let the monitor die quietly
-                    log.warning("slot.idle_sweep_failed", extra={"error": str(exc)})
-                try:
-                    await self._pressure_evict_once()
-                except Exception as exc:
-                    log.warning("slot.pressure_sweep_failed", extra={"error": str(exc)})
-        except asyncio.CancelledError:
-            raise
+        """See :meth:`hal0.slots.reaper.SlotReaper._loop`."""
+        await self._reaper._loop()
 
     async def _evict_timeout_for(self, slot_name: str) -> float | None:
-        """Resolve the idle TTL after which a slot is hard-evicted (#902).
-
-        Returns ``None`` when the slot is pinned (never TTL-evicted):
-          * an explicit ``idle_timeout_s = 0`` in the slot's TOML, or
-          * a default-pinned anchor (chat / agent / npu) with no explicit
-            per-slot value, or
-          * a non-positive global default with no explicit per-slot value.
-
-        Otherwise returns the effective TTL in seconds: the per-slot TOML
-        ``idle_timeout_s`` when set (overrides the global), else the global
-        ``_evict_after_s`` default.  ``0`` consistently means "disabled" at
-        both levels, matching the config-schema contract.
-        """
-        canonical = self._resolve_alias(slot_name)
-        try:
-            cfg = await self._load_slot_config(canonical)
-        except (SlotConfigError, SlotNotFound):
-            cfg = {}
-        raw = cfg.get("idle_timeout_s")
-        if isinstance(raw, bool):  # bool is an int subclass — never a TTL
-            raw = None
-        if isinstance(raw, int):
-            return None if raw <= 0 else float(raw)
-        # No explicit per-slot value: pin the named anchors, else fall back
-        # to the global default (itself disabled when non-positive).
-        if canonical in _PINNED_BY_DEFAULT:
-            return None
-        return float(self._evict_after_s) if self._evict_after_s > 0 else None
+        """See :meth:`hal0.slots.reaper.SlotReaper.evict_timeout_for`."""
+        return await self._reaper.evict_timeout_for(slot_name)
 
     def _sweep_candidates(self) -> dict[str, float]:
-        """Slot → last-activity timestamp map for the idle/pressure sweeps.
-
-        ``_last_used`` only tracks slots that served a request (or were
-        adopted) during THIS process's lifetime. Dispatchable slots missing
-        from it — e.g. adopted before the bump-on-adoption fix, or hydrated
-        from a state.json that outlived an api restart — used to be
-        invisible to both sweeps and could squat on RAM forever. For those,
-        fall back to the state record's ``updated_at`` (the last observed
-        transition) as the activity timestamp; the sweeps' own state and
-        serving-count guards still apply on top.
-        """
-        candidates = dict(self._last_used)
-        for name, rec in list(self._states.items()):
-            if name in candidates:
-                continue
-            if rec.state not in (SlotState.READY, SlotState.IDLE):
-                continue
-            if rec.updated_at:
-                candidates[name] = float(rec.updated_at)
-        return candidates
+        """See :meth:`hal0.slots.reaper.SlotReaper.sweep_candidates`."""
+        return self._reaper.sweep_candidates()
 
     async def _sweep_idle_once(self) -> None:
-        """One idle-sweep pass over every tracked slot.
-
-        Stage 1 (soft): a READY slot idle past ``_idle_after_s`` is
-        relabeled IDLE so dashboards distinguish "warm but quiet" from
-        "warm and serving".
-
-        Stage 2 (hard, #902): a slot idle past its resolved per-slot TTL
-        (:meth:`_evict_timeout_for`) is **unloaded**, freeing host RAM —
-        the only way to reclaim it, since llama-server allocates KV
-        statically at ``ctx_size``.  ``idle_timeout_s = 0`` (or a pinned
-        anchor) is never evicted.  A slot mid-request
-        (``serving_count > 0``) is never touched; the dispatcher reloads an
-        evicted slot transparently on its next request (wake-on-request),
-        so eviction is safe.
-        """
-        now = time.time()
-        for slot_name, ts in self._sweep_candidates().items():
-            idle_for = now - ts
-            if self._serving_count.get(slot_name, 0) > 0:
-                continue
-            state = self._current_state(slot_name)
-            if state not in (SlotState.READY, SlotState.IDLE):
-                continue
-
-            # Stage 2 — hard TTL eviction.
-            evict_after = await self._evict_timeout_for(slot_name)
-            if evict_after is not None and idle_for >= evict_after:
-                try:
-                    await self.unload(slot_name)
-                    log.info(
-                        "slot.idle_evicted",
-                        extra={"slot": slot_name, "idle_s": round(idle_for)},
-                    )
-                except IllegalSlotTransition:
-                    # Raced with another transition — next sweep retries.
-                    pass
-                except Exception as exc:  # never let one slot kill the sweep
-                    log.warning(
-                        "slot.idle_evict_failed",
-                        extra={"slot": slot_name, "error": str(exc)},
-                    )
-                continue
-
-            # Stage 1 — soft demotion READY → IDLE.
-            if state == SlotState.READY and idle_for >= self._idle_after_s:
-                try:
-                    await self._transition(
-                        slot_name,
-                        SlotState.IDLE,
-                        message=f"idle for {idle_for:.0f}s",
-                    )
-                except IllegalSlotTransition:
-                    # Raced with an unload — fine; next sweep will skip it.
-                    continue
+        """See :meth:`hal0.slots.reaper.SlotReaper.sweep_idle_once`."""
+        await self._reaper.sweep_idle_once()
 
     def _probe_host_free_mb(self) -> float:
-        """Return host MemAvailable in MiB by reading /proc/meminfo (#903).
+        """Return free host memory in MiB, GTT-aware where possible (§21.10).
 
-        Reuses :func:`hal0.slots.capacity._read_meminfo` — the single
-        authoritative reader for /proc/meminfo in the slots subtree.
-        Returns ``inf`` on any probe failure so the pressure guard is
-        fail-SAFE: an unreadable probe reports "plenty of free RAM", so the
-        ``free_mb >= floor`` early-return skips eviction rather than evicting
-        blindly on a bad reading (the error is logged, not raised).
+        See :func:`hal0.slots.reaper.probe_host_free_mb`. Kept as an
+        overridable instance method (rather than calling the module
+        function directly from the reaper) so
+        ``tests/slots/test_pressure_eviction.py``'s
+        ``monkeypatch.setattr(sm, "_probe_host_free_mb", ...)`` pattern
+        keeps working unchanged — the reaper always calls back through
+        ``self._host._probe_host_free_mb()``.
         """
-        try:
-            from hal0.slots.capacity import _read_meminfo
+        return _reaper_probe_host_free_mb()
 
-            _total_mib, avail_mib = _read_meminfo()
-            return avail_mib
-        except Exception as exc:
-            log.warning("slot.pressure_probe_failed", extra={"error": str(exc)})
-            return float("inf")
+    def _probe_host_total_mb(self) -> float:
+        """Return total host memory in MiB, GTT-aware where possible (§21.10).
+
+        Only consulted when ``evict_pressure_pct`` is set. See
+        :func:`hal0.slots.reaper.probe_host_total_mb`.
+        """
+        return _reaper_probe_host_total_mb()
 
     async def _pressure_evict_once(self) -> None:
-        """One pressure-eviction pass (#903).
+        """See :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`."""
+        await self._reaper.pressure_evict_once()
 
-        Probes host free RAM. When MemAvailable < ``_evict_pressure_mb``,
-        evicts idle, ``lru``-eligible slots one at a time in
-        least-recently-used order (oldest ``last_used`` first) until free
-        RAM is back above the floor or no more eligible slots remain.
+    async def is_pinned(self, slot_name: str) -> bool:
+        """True when *slot_name* is exempt from eviction (§21.10 operator pin).
 
-        Guards:
-          - ``_evict_pressure_mb == 0`` → pressure eviction is disabled.
-          - A slot serving a request (``serving_count > 0``) is never evicted.
-          - The canonical ``agent`` slot (and other _PINNED_BY_DEFAULT names)
-            is never evicted by pressure.
-          - Only slots with ``lru = true`` in their TOML are eligible.
+        Combines the default-pinned anchor set (``agent``/``utility``/
+        ``npu``) with an explicit ``SlotConfig.pinned = true``. Resolves
+        the alias first; a missing/unreadable config is treated as "not
+        pinned" beyond the default set (same fail-open contract as
+        :meth:`hal0.slots.reaper.SlotReaper.evict_timeout_for`). Used by
+        :meth:`delete` and by ``api/routes/slots.py``'s manual-unload
+        guard (both require ``force=true`` on a pinned slot, HTTP 409
+        ``slot.pinned``).
         """
-        if self._evict_pressure_mb <= 0:
-            return
-        free_mb = self._probe_host_free_mb()
-        if free_mb >= self._evict_pressure_mb:
-            return
-
-        # Build the LRU-ordered candidate list. ``_sweep_candidates`` unions
-        # _last_used with dispatchable slots known only via state.json
-        # (adopted / restart-surviving), timestamped by their last observed
-        # transition, so pressure eviction can also reclaim those.
-        candidates: list[tuple[float, str]] = []
-        for slot_name, ts in self._sweep_candidates().items():
-            if self._serving_count.get(slot_name, 0) > 0:
-                continue
-            canonical = self._resolve_alias(slot_name)
-            if canonical in _PINNED_BY_DEFAULT:
-                continue
-            state = self._current_state(slot_name)
-            if state not in (SlotState.READY, SlotState.IDLE):
-                continue
-            # Read lru flag from slot TOML.
-            try:
-                cfg = await self._load_slot_config(slot_name)
-            except (SlotConfigError, SlotNotFound):
-                continue
-            if not cfg.get("lru", False):
-                continue
-            candidates.append((ts, slot_name))
-
-        # Evict oldest-first until pressure is relieved or list is exhausted.
-        candidates.sort(key=lambda pair: pair[0])
-        for _ts, slot_name in candidates:
-            # Re-check serving guard and state — may have changed since
-            # the list was built (another coroutine may have started a
-            # request or the TTL sweep may have evicted it already).
-            if self._serving_count.get(slot_name, 0) > 0:
-                continue
-            state = self._current_state(slot_name)
-            if state not in (SlotState.READY, SlotState.IDLE):
-                continue
-            try:
-                await self.unload(slot_name)
-                log.info(
-                    "slot.pressure_evicted",
-                    extra={
-                        "slot": slot_name,
-                        "free_mb": round(free_mb),
-                        "floor_mb": round(self._evict_pressure_mb),
-                    },
-                )
-            except IllegalSlotTransition:
-                # Raced with another transition — skip, next sweep retries.
-                pass
-            except Exception as exc:
-                log.warning(
-                    "slot.pressure_evict_failed",
-                    extra={"slot": slot_name, "error": str(exc)},
-                )
-                continue
-            # Re-probe free RAM after each eviction to avoid over-shedding.
-            free_mb = self._probe_host_free_mb()
-            if free_mb >= self._evict_pressure_mb:
-                break
+        canonical = self._resolve_alias(slot_name)
+        cfg = await self._maybe_load_config(canonical)
+        return _reaper_is_pinned(canonical, cfg)
 
     async def get_config(self, slot_name: str) -> dict[str, Any]:
         """Return the slot's TOML config as a plain dict (read-only view).
@@ -3217,6 +3055,7 @@ __all__ = [
     "Slot",
     "SlotManager",
     "_argv_values",
+    "_base_profile_for_backend",
     "_cfg_effective_backend",
     "_cfg_port",
     "_cfg_provider",

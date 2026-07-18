@@ -480,6 +480,17 @@ class SlotConfig(BaseModel):
         ge=0,
         description="Seconds idle before transitioning to 'idle' state.  0 disables.",
     )
+    pinned: bool = Field(
+        default=False,
+        description=(
+            "P3-slots §21.10 operator pin. When true, this slot is exempt from "
+            "automatic idle/pressure eviction (hal0.slots.reaper.is_pinned() ORs "
+            "this onto the built-in agent/utility/npu anchor set) AND a manual "
+            "POST /{name}/unload or DELETE /{name} refuses without ?force=true "
+            "(HTTP 409 slot.pinned). Additive field — default False preserves "
+            "existing behavior for every slot that doesn't set it."
+        ),
+    )
 
     # Typed [server] subsection.  See ServerConfig + the round-trip
     # validator/serializer below: on load we hoist the [server] table out
