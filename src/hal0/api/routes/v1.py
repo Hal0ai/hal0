@@ -694,8 +694,8 @@ async def list_models(
     * **Upstream catalog entries** — the raw model ids each
       ``advertise_models`` upstream reports, so non-chat models (embed /
       rerank / image / …) keep their direct-addressing entries. The
-      composite ``hal0`` upstream's CHAT model ids are suppressed here so
-      they don't duplicate the alias entries above — a chat slot is
+      direct-read composite catalogue's CHAT model ids are suppressed here
+      so they don't duplicate the alias entries above — a chat slot is
       represented exactly once, by its alias.
 
     PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
@@ -727,8 +727,9 @@ async def list_models(
             data.append(entry)
 
     # Chat-slot model ids are represented by their aliases above; suppress
-    # them from the raw upstream catalog so the composite ``hal0`` upstream
-    # doesn't emit duplicate ``id=<model_id>`` rows for the same chat slots.
+    # them from the raw upstream catalog so the direct-read composite
+    # catalogue doesn't emit duplicate ``id=<model_id>`` rows for the same
+    # chat slots.
     chat_model_ids: set[str] = set()
     if slot_manager is not None:
         try:
@@ -736,23 +737,37 @@ async def list_models(
         except Exception:
             chat_model_ids = set()
 
+    # Direct read of the composite model catalogue — every ready
+    # chat-capable slot's model id, aggregated straight from slot config
+    # (see hal0.api._fetch_hal0_composite_models). No pseudo-upstream is
+    # registered in the routing table for this, so there's nothing to fetch
+    # over HTTP here; ``model_cache["hal0"]`` is refreshed on startup,
+    # slot-state events, and the dispatcher passthrough path. Skipped when
+    # an operator has defined a real "hal0" upstream in upstreams.toml —
+    # that entry is picked up by the loop below like any other remote.
+    if upstreams.get("hal0") is None:
+        for mid in model_cache.get("hal0", []):
+            if mid in seen or mid in chat_model_ids:
+                continue
+            seen.add(mid)
+            data.append(
+                {
+                    "id": mid,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "hal0",
+                }
+            )
+
     for u in upstreams.list():
         if not getattr(u, "enabled", True):
             continue
         if not getattr(u, "advertise_models", True):
             continue
-        # The composite ``hal0`` upstream's URL is hal0-api itself —
-        # going over HTTP here would re-enter this handler and loop. Its
-        # model list lives in ``upstream_models["hal0"]``, refreshed by
-        # ``_fetch_hal0_composite_models`` on startup, slot-state events,
-        # and the dispatcher passthrough path.
-        if u.kind == "slot" and u.slot_name is None and u.name == "hal0":
-            advertised = list(model_cache.get("hal0", []))
-        else:
-            try:
-                advertised = await upstreams.fetch_models(u.name)
-            except Exception:
-                advertised = []
+        try:
+            advertised = await upstreams.fetch_models(u.name)
+        except Exception:
+            advertised = []
         # Per-upstream curation of the discovery catalog only — the dispatch
         # cache keeps the full list, so filtered-out ids stay addressable.
         advertised = apply_filters(advertised, getattr(u, "model_filters", None))

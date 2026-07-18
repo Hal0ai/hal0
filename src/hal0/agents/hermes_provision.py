@@ -978,8 +978,8 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
     copied into ``$HERMES_HOME/plugins/hal0-memory/``.
     The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
     hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
-    listener, and the composite ``hal0`` upstream in :mod:`hal0.api`
-    now supersedes it.
+    listener, and the direct-read composite model catalogue in
+    :mod:`hal0.api` (``_fetch_hal0_composite_models``) now supersedes it.
 
     Skips heavy work when the venv binary already exists at the
     expected version — re-runs of ``hal0 agent bootstrap hermes`` are

@@ -36,7 +36,7 @@ from hal0.config import paths
 from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
 from hal0.upstreams.integrations import get_catalog
 from hal0.upstreams.registry import (
-    COMPOSITE_UPSTREAM_NAME,
+    RESERVED_UPSTREAM_NAME,
     UpstreamAlreadyExists,
     UpstreamNotFound,
     UpstreamProtected,
@@ -93,8 +93,8 @@ def _validation_summaries(exc: ValidationError) -> list[str]:
 
 # Fields editable on any upstream (catalog visibility / routing kill-switch).
 _VISIBILITY_FIELDS = frozenset({"advertise_models", "enabled", "model_filters"})
-# Fields only editable on TOML-authored remote upstreams — the composite and
-# slot-backed entries get their structure from the slot lifecycle.
+# Fields only editable on TOML-authored remote upstreams — the reserved-name
+# and slot-backed entries get their structure from the slot lifecycle.
 _STRUCTURAL_FIELDS = frozenset(
     {"url", "auth_style", "auth_header", "auth_value_env", "timeout_seconds", "warmup_strategy"}
 )
@@ -210,7 +210,7 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
 
     Appends a row to ``upstreams.toml`` (atomic write, TOML stays canonical)
     and registers the upstream live — no API restart needed. Guards: the
-    composite name is reserved, names must be unique, and slot upstreams
+    reserved name can't be used, names must be unique, and slot upstreams
     can't be created here (they're owned by the slot lifecycle).
     """
     name = body.name.strip()
@@ -305,8 +305,8 @@ class UpstreamPatchBody(BaseModel):
     Visibility fields (``advertise_models``, ``enabled``, ``model_filters``)
     are editable on every upstream kind. Structural fields (``url``,
     ``auth_*``, ``timeout_seconds``, ``warmup_strategy``) only on
-    TOML-authored remote upstreams — the composite and slot-backed entries
-    get their structure from the slot lifecycle. ``name``/``kind``/
+    TOML-authored remote upstreams — the reserved-name and slot-backed
+    entries get their structure from the slot lifecycle. ``name``/``kind``/
     ``slot_name`` stay immutable (delete + recreate to rename).
 
     ``model_filters`` set to ``null`` or an all-empty object clears the
@@ -365,13 +365,14 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
         k: getattr(body, k) for k in body.model_fields_set if k in body.model_fields
     }
 
-    # Composite, slot-kind, and container-backed remotes (slot_name set)
-    # get their structure from the slot lifecycle.
-    protected = name == COMPOSITE_UPSTREAM_NAME or u.kind == "slot" or bool(u.slot_name)
+    # The reserved name, slot-kind, and container-backed remotes (slot_name
+    # set) get their structure from the slot lifecycle.
+    protected = name == RESERVED_UPSTREAM_NAME or u.kind == "slot" or bool(u.slot_name)
     structural_requested = sorted(set(fields) & _STRUCTURAL_FIELDS)
     if protected and structural_requested:
         raise UpstreamProtectedHTTP(
-            f"upstream {name!r} is {'the composite' if name == COMPOSITE_UPSTREAM_NAME else 'slot-backed'}; "
+            f"upstream {name!r} is "
+            f"{'reserved' if name == RESERVED_UPSTREAM_NAME else 'slot-backed'}; "
             f"structural fields are managed by the slot lifecycle",
             details={"name": name, "fields": structural_requested},
         )
@@ -397,7 +398,7 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
 
     # Punch the per-upstream model cache so the next /api/upstreams and
     # /v1/models request reflects visibility flips without an API restart.
-    # The composite ``hal0`` upstream's module-level cache lives in
+    # The direct-read composite catalogue's module-level TTL cache lives in
     # hal0.api and is unaffected by per-upstream flips.
     model_cache = getattr(request.app.state, "upstream_models", None)
     visibility_flip = {"advertise_models", "enabled"} & set(fields)
@@ -424,7 +425,7 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
 async def delete_upstream(name: str, request: Request) -> dict[str, Any]:
     """Delete a remote upstream from the registry and ``upstreams.toml``.
 
-    The composite and slot-backed upstreams are protected. Credentials in
+    The reserved-name and slot-backed upstreams are protected. Credentials in
     ``api.env`` are deliberately retained — deleting an upstream must never
     destroy a secret (remove it via ``/api/secrets`` if truly unwanted).
     """

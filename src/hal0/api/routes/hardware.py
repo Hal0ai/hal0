@@ -249,14 +249,13 @@ async def _proxy_upstream_endpoint(
 
     Only ``kind == "remote"`` upstreams are proxied. ``kind == "slot"``
     upstreams are local slots whose base URL points back at *this*
-    hal0-api host:port (e.g. the bundled ``hal0`` upstream at
-    ``http://127.0.0.1:8080/v1``). Stripping ``/v1`` and appending
-    ``suffix`` would make the endpoint call itself — under the
-    single-worker async server this recurses until every request in the
-    chain hits its timeout, hanging ``/api/stats/hardware`` and
-    ``/api/slots/metrics`` for tens of seconds and returning an empty
-    body. Slot upstreams have no separate dashboard API anyway — the
-    local probe + ``_local_slot_metrics`` already cover them — so we
+    hal0-api host:port. Stripping ``/v1`` and appending ``suffix`` would
+    make the endpoint call itself — under the single-worker async server
+    this recurses until every request in the chain hits its timeout,
+    hanging ``/api/stats/hardware`` and ``/api/slots/metrics`` for tens of
+    seconds and returning an empty body. Slot upstreams have no separate
+    dashboard API anyway — the local probe + ``_local_slot_metrics``
+    already cover them — so we
     skip them outright.
     """
     import httpx

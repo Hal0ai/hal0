@@ -641,7 +641,10 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
         "properties": {
             "name": {
                 "type": "string",
-                "description": "New upstream name — lowercase alnum plus -/_ ('hal0' reserved)",
+                "description": (
+                    "New upstream name — lowercase alnum plus -/_ ('hal0' reserved for the "
+                    "model catalogue cache)"
+                ),
             },
             "catalog_id": {
                 "type": "string",

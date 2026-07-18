@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -242,6 +243,32 @@ async def _loaded_models(request: Request) -> set[str]:
     return loaded_model_names_from_slots(slots)
 
 
+class _UpstreamsWithHal0Composite:
+    """``.list()``-only view of ``upstreams`` plus a stand-in ``hal0`` entry.
+
+    The dashboard's ``hal0`` tile represents the direct-read composite
+    model catalogue (``model_cache["hal0"]``, aggregated straight from
+    slot config by ``hal0.api._fetch_hal0_composite_models``) — no
+    pseudo-upstream is registered in the routing table for it. This thin
+    wrapper folds a stand-in descriptor into ``.list()`` purely so
+    :func:`hal0.slot_view.synthesize_upstream_entries` (a generic,
+    hal0-agnostic function) still surfaces one "local composite" entry,
+    unless an operator has defined a real ``hal0`` upstream (already
+    present in ``upstreams.list()``).
+    """
+
+    def __init__(self, upstreams: Any) -> None:
+        self._upstreams = upstreams
+
+    def list(self) -> list[Any]:
+        entries = list(self._upstreams.list())
+        if not any(u.name == "hal0" for u in entries):
+            entries.append(
+                SimpleNamespace(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1")
+            )
+        return entries
+
+
 def _synthesize_slots_from_upstreams(
     request: Request, loaded_models: set[str] | None = None
 ) -> list[dict[str, Any]]:
@@ -273,7 +300,7 @@ def _synthesize_slots_from_upstreams(
     ``routes/health.py``'s composite status payload.
     """
     return synthesize_upstream_entries(
-        request.app.state.upstreams,
+        _UpstreamsWithHal0Composite(request.app.state.upstreams),
         getattr(request.app.state, "model_cache", {}),
         getattr(request.app.state, "last_used_model", {}),
         loaded_models=loaded_models,
@@ -305,7 +332,7 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
         registry=getattr(state, "model_registry", None),
         metrics=functools.partial(slot_metrics, request),
         model_cache=getattr(state, "model_cache", {}) or {},
-        upstreams=state.upstreams,
+        upstreams=_UpstreamsWithHal0Composite(state.upstreams),
         last_used_model=getattr(state, "last_used_model", {}),
         slot_pull_jobs=getattr(state, "slot_pull_jobs", {}),
     )
