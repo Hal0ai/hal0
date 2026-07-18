@@ -52,7 +52,7 @@ from hal0.config.locking import file_lock
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Hal0Error, NotFound
 from hal0.model_fit import evaluate_model_fit
-from hal0.model_meta import canonical_device, device_to_legacy_backend
+from hal0.model_meta import canonical_device
 from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.registry.store import ModelRegistry
 from hal0.slot_config import SlotConfigStore, SlotSelection
@@ -256,7 +256,7 @@ class CapabilityOrchestrator:
     # (``_canonical_device_id`` / ``_canonical_backend_id`` /
     # ``_slot_device_for_catalog_id`` / ``_slot_backend_for_catalog_id``)
     # moved to :mod:`hal0.model_meta` (issue #695) as
-    # :func:`canonical_device` and :func:`device_to_legacy_backend`.
+    # :func:`canonical_device`.
 
     def _selection_with_defaults(
         self, cfg: CapabilityConfig, slot: str, child: str
@@ -674,16 +674,12 @@ class CapabilityOrchestrator:
             return
 
         port = self._next_free_slot_port()
-        # Emit both ``device`` (v0.2 canonical) and ``backend`` (v0.1.x
-        # alias) so downgrades remain legible. SlotConfig's
-        # ``_promote_backend_to_device`` validator keeps them in sync.
-        slot_backend = device_to_legacy_backend(selection.device)
+        # Emit ``device`` (v0.2 canonical, sole persisted truth).
         slot_device = canonical_device(selection.device)
         provider = selection.provider or "llama-server"
         cfg_dict: dict[str, Any] = {
             "name": slot_name,
             "port": port,
-            "backend": slot_backend or "vulkan",
             "device": slot_device or "gpu-rocm",
             "provider": provider,
             "enabled": True,

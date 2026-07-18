@@ -9,7 +9,6 @@ behaviour of the five prior copies before consolidation:
   * ``canonical_device``          ← ``orchestrator._canonical_device_id`` /
                                     ``_canonical_backend_id`` /
                                     ``_slot_device_for_catalog_id``
-  * ``device_to_legacy_backend``  ← ``orchestrator._slot_backend_for_catalog_id``
   * ``labels_of``                 ← ``omni_router/filter.py:_labels_of_model`` /
                                     ``SlotManager.route_for_request._labels_of``
 
@@ -27,7 +26,6 @@ from hal0.model_meta import (
     capability_from_filename,
     classify,
     device_to_backend,
-    device_to_legacy_backend,
     is_resolvable,
     labels_of,
 )
@@ -260,29 +258,6 @@ def test_canonical_device(value: str, expected: str) -> None:
     assert canonical_device(value) == expected
 
 
-# ── device_to_legacy_backend ─────────────────────────────────────────────────
-#
-# (device, expected) — catalog device id → deprecated SlotConfig.backend
-# token. NOTE(#695): unlike ``device_to_backend``, unknown values pass
-# through UNCHANGED (the orchestrator preserved hand-edited tokens for
-# downgrade legibility) — do not "unify" this onto (None, None) semantics.
-
-
-@pytest.mark.parametrize(
-    ("device", "expected"),
-    [
-        ("gpu-vulkan", "vulkan"),
-        ("gpu-rocm", "rocm"),
-        ("npu", "flm"),
-        ("cpu", "cpu"),
-        ("", ""),
-        ("weird-token", "weird-token"),
-    ],
-)
-def test_device_to_legacy_backend(device: str, expected: str) -> None:
-    assert device_to_legacy_backend(device) == expected
-
-
 # ── labels_of ────────────────────────────────────────────────────────────────
 #
 # (slot config dict, expected label set)
@@ -328,7 +303,6 @@ def test_schema_reexports_alias_the_canonical_taxonomy() -> None:
     assert schema.DEVICE_DEFAULT_PROFILES is model_meta.DEVICE_TO_DEFAULT_PROFILE
     assert schema.map_backend_to_device is model_meta.map_backend_to_device
     assert schema._VALID_DEVICES == model_meta.VALID_DEVICES
-    assert frozenset(model_meta.LEGACY_BACKENDS) == schema._VALID_BACKENDS
 
 
 def test_device_literal_matches_valid_devices() -> None:
@@ -405,18 +379,3 @@ def test_unknown_device_warns_and_returns_no_opinion(
     with caplog.at_level("WARNING", logger="hal0.model_meta"):
         assert device_to_backend("quantum-annealer") == (None, None)
     assert any("unknown_device" in r.message for r in caplog.records)
-
-
-def test_unknown_device_legacy_writeback_warns_and_passes_through(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Direction 3: unknown device on the legacy write-back path → warn +
-    UNCHANGED passthrough (load-bearing for downgrade legibility)."""
-    with caplog.at_level("WARNING", logger="hal0.model_meta"):
-        assert device_to_legacy_backend("weird-token") == "weird-token"
-    assert any("unknown_device_passthrough" in r.message for r in caplog.records)
-    # Empty input stays silent — "no opinion" is not an unknown value.
-    caplog.clear()
-    with caplog.at_level("WARNING", logger="hal0.model_meta"):
-        assert device_to_legacy_backend("") == ""
-    assert not caplog.records

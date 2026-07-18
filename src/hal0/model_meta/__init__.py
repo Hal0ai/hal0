@@ -74,12 +74,6 @@ Unknown-value policy — ONE documented rule per translation direction
   ``(None, None)``** ("no opinion"). Callers already handle ``None`` by
   applying their own defaults, so inventing a backend tag here would
   override deliberate downstream fallbacks.
-* device → legacy write-back (:func:`device_to_legacy_backend`): unknown →
-  **warn + passthrough unchanged**. Load-bearing for forward/backward
-  compat: this function feeds the deprecated ``SlotConfig.backend`` field,
-  and passing a hand-edited token through unchanged keeps the TOML legible
-  on downgrade (the orchestrator always preserved such tokens — see the
-  #695 shape audits). Do NOT unify this onto ``None``/``cpu`` semantics.
 """
 
 from __future__ import annotations
@@ -191,13 +185,13 @@ DEVICE_CLASSES: tuple[str, ...] = ("gpu", "cpu", "npu", "img")
 RUNTIME_FAMILIES: tuple[str, ...] = ("llama-server", "flm", "kokoro", "qwen3tts", "comfyui")
 
 #: Legacy ``backend`` token → canonical ``device``. Used by the SlotConfig
-#: model-validator (auto-promote on load), the capabilities v1→v2 migration,
-#: and the capabilities on-load auto-migration. Keep aligned with the
-#: canonical device enum above.
+#: and CapabilitySelection promote-then-drop shims (auto-promote a legacy
+#: on-disk ``backend`` key, then pop it, on load), and the capabilities
+#: v1→v2 migration. Keep aligned with the canonical device enum above.
 #: moonshine/kokoro map to ``cpu`` because those toolboxes were always CPU
 #: runtimes — the legacy enum overloaded ``backend`` with provider identity.
-#: Canonical device ids are included idempotently so both SlotConfig.backend
-#: and CapabilitySelection.backend can flow through the same map.
+#: Canonical device ids are included idempotently so a value already in the
+#: new namespace round-trips through this map as an identity.
 BACKEND_TO_DEVICE: dict[str, str] = {
     **{d.legacy_backend: d.id for d in CANONICAL_DEVICES},
     "moonshine": "cpu",
@@ -558,35 +552,6 @@ def canonical_device(value: str) -> str:
     return map_backend_to_device(value)
 
 
-# NOTE(#695): this is deliberately NOT expressed through
-# ``device_to_backend`` — the two directions differ on unknown input by
-# design (see the module docstring's unknown-value policy).
-# ``device_to_backend`` maps unknown devices to ``(None, None)`` ("no
-# opinion"), while this write-back path passes unknown tokens through
-# UNCHANGED so hand-edited values stay legible on downgrade. Derived from
-# :data:`CANONICAL_DEVICES` so it can never drift from the device table.
-_DEVICE_TO_LEGACY_BACKEND: dict[str, str] = {d.id: d.legacy_backend for d in CANONICAL_DEVICES}
-
-
-def device_to_legacy_backend(device: str) -> str:
-    """DEPRECATED namespace — translate a catalog ``device`` id to the legacy
-    ``backend`` token.
-
-    Still used by code paths that write the deprecated SlotConfig.backend
-    field (kept until the ``backend`` field is excised for downgrade
-    legibility). Unknown values warn and pass through unchanged
-    (unknown-value policy, direction 3 — load-bearing, see module
-    docstring).
-    """
-    if not device or device in _DEVICE_TO_LEGACY_BACKEND:
-        return _DEVICE_TO_LEGACY_BACKEND.get(device, device)
-    log.warning(
-        "model_meta.unknown_device_passthrough",
-        extra={"device": device},
-    )
-    return device
-
-
 # ── resolvability ────────────────────────────────────────────────────────────
 
 
@@ -676,7 +641,6 @@ __all__ = [
     "capability_from_filename",
     "classify",
     "device_to_backend",
-    "device_to_legacy_backend",
     "is_resolvable",
     "labels_of",
     "map_backend_to_device",

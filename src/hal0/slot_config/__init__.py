@@ -25,9 +25,9 @@ The invariant the test-suite pins: after ``commit`` disk equals
 ``cs.after``; after ``revert`` disk equals ``cs.before``; a failed
 mid-commit leaves disk at ``before`` — never half-reconciled.
 
-Device→backend translation is **imported from** :mod:`hal0.model_meta`
-(:func:`canonical_device`, :func:`device_to_legacy_backend`) — this
-module re-derives no classification logic.
+Device normalization is **imported from** :mod:`hal0.model_meta`
+(:func:`canonical_device`) — this module re-derives no classification
+logic.
 
 :func:`write_slot_toml` is the single low-level write path for
 ``slots/*.toml``; every writer (SlotManager.create/update_config, the
@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 from hal0.config import paths
 from hal0.config.loader import write_toml_atomic
 from hal0.config.locking import file_lock
-from hal0.model_meta import canonical_device, device_to_legacy_backend
+from hal0.model_meta import canonical_device
 
 if TYPE_CHECKING:
     from hal0.capabilities.config import CapabilitySelection
@@ -561,14 +561,10 @@ class SlotConfigStore:
         # the slot; an enable clears any stale ``enabled = false``.
         updates: dict[str, Any] = {"enabled": selection.enabled}
         if selection.enabled:
-            # The backend/device/provider/model/profile reconciliation only
+            # The device/provider/model/profile reconciliation only
             # applies when the slot is going to run — a pure disable never
             # rewrites the model/device siblings.
-            slot_backend = device_to_legacy_backend(selection.device)
             slot_device = canonical_device(selection.device)
-            if slot_backend:
-                # Deprecated field, kept for one release.
-                updates["backend"] = slot_backend
             if slot_device:
                 updates["device"] = slot_device
             if selection.provider:
