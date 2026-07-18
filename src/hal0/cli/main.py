@@ -89,6 +89,11 @@ app.command("bench", help=BENCH_HELP, context_settings=BENCH_CONTEXT_SETTINGS)(b
 # function registration (no sub-app: `hal0 chat` has no verbs of its own,
 # just in-REPL slash commands), mirroring the `bench` passthrough above.
 app.command("chat")(chat_command)
+# §21.3 — `hal0 system-info`: host/GPU/NPU/runtime evidence in one read-only
+# pass. Plain function registration (no verbs of its own), like `chat`/`bench`.
+from hal0.cli.system_info_command import system_info_cmd  # noqa: E402
+
+app.command("system-info")(system_info_cmd)
 
 
 # ---------------------------------------------------------------------------
