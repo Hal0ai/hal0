@@ -3,9 +3,9 @@
 Covers the registry-driven routes in ``hal0.api.routes.services`` plus the
 ``hal0.services`` package helpers:
 
-  1. GET /api/services — 200, all 5 registry ids, honest shape with every
+  1. GET /api/services — 200, all 4 registry ids, honest shape with every
      probe/systemd source stubbed down.
-  2. Registry invariants — comfyui only exposes restart; n8n exposes nothing.
+  2. Registry invariants — comfyui only exposes restart.
   3. POST action — unknown service → 404; missing/disallowed action → 400.
   4. POST action — allowed verb runs through systemd.unit_action.
   5. mDNS — status shape; advertise writes hal0-addon-*.service files into
@@ -30,7 +30,7 @@ from hal0.services import systemd as svc_systemd
 from hal0.services.registry import SERVICES, service_by_id
 
 _ROUTE = "hal0.api.routes.services"
-_EXPECTED_IDS = {"openwebui", "comfyui", "hermes", "hindsight", "n8n"}
+_EXPECTED_IDS = {"openwebui", "comfyui", "hermes", "hindsight"}
 
 _DOWN_STATE = {
     "active_state": "inactive",
@@ -66,16 +66,6 @@ def _stub_all_down() -> list:
             f"{_ROUTE}._probe_openwebui",
             new_callable=AsyncMock,
             return_value=(False, "unreachable (ConnectError)"),
-        ),
-        # honcho (and n8n, when its probe env is set) go through the generic
-        # loopback HTTP probe. Left unstubbed, this hits the REAL
-        # 127.0.0.1:8000/health on any host that happens to be running a
-        # honcho stack, silently flipping "up" to True and leaking host
-        # state into an "everything stubbed down" assertion.
-        patch(
-            f"{_ROUTE}._probe_http_env",
-            new_callable=AsyncMock,
-            return_value=(False, "unreachable"),
         ),
         patch(
             f"{_ROUTE}.svc_systemd.unit_state",
@@ -139,10 +129,6 @@ def test_list_services_200_all_ids(svc_client: TestClient) -> None:
             assert key in svc, f"{svc['id']} missing {key}"
         assert svc["up"] is False  # everything stubbed down → honest false
 
-    # n8n is unmanaged: no unit, no unit_state, no actions.
-    assert by_id["n8n"]["managed"] is False
-    assert by_id["n8n"]["unit"] is None
-    assert by_id["n8n"]["actions"] == []
     # openwebui is fully managed and carries the host:port URL fallback.
     assert by_id["openwebui"]["managed"] is True
     assert by_id["openwebui"]["url"] == "http://testserver:3001"
@@ -158,13 +144,6 @@ def test_registry_comfyui_restart_only() -> None:
     assert comfy is not None
     assert comfy.actions == ("restart",)
     assert comfy.unit == "hal0-slot@img.service"
-
-
-def test_registry_n8n_readonly() -> None:
-    n8n = service_by_id("n8n")
-    assert n8n is not None
-    assert n8n.actions == ()
-    assert n8n.unit is None
 
 
 def test_registry_units_are_valid_names() -> None:
@@ -197,8 +176,9 @@ def test_action_disallowed_verb_400(svc_client: TestClient) -> None:
     assert body["details"]["allowed"] == ["restart"]
 
 
-def test_action_unmanaged_service_400(svc_client: TestClient) -> None:
-    r = svc_client.post("/api/services/n8n/action", json={"action": "start"})
+def test_action_disallowed_action_400(svc_client: TestClient) -> None:
+    # comfyui only exposes "restart"; any other verb → action_not_allowed.
+    r = svc_client.post("/api/services/comfyui/action", json={"action": "start"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "services.action_not_allowed"
 

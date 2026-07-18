@@ -16,9 +16,6 @@ ARCHITECTURE.md and packaging/ + installer/systemd/):
   (``hindsight-api.service``, :9177) bind loopback-only: no host:port URL
   fallback exists, so a link is advertised only via their
   ``HAL0_*_PUBLIC_URL`` env override.
-* n8n has no in-repo unit — it is an *external* service the operator may
-  run themselves. It is listed (with URL/probe env hooks) but carries no
-  lifecycle actions until a unit exists.
 """
 
 from __future__ import annotations
@@ -109,15 +106,6 @@ SERVICES: tuple[ServiceDef, ...] = (
         probe="systemd",
         actions=_FULL,
         loopback_port=9177,
-    ),
-    ServiceDef(
-        id="n8n",
-        name="n8n",
-        description="Workflow automation (external — not deployed by hal0).",
-        public_url_env="HAL0_N8N_PUBLIC_URL",
-        probe="http",
-        probe_url=None,  # unmonitored unless HAL0_N8N_PROBE_URL is set
-        probe_url_env="HAL0_N8N_PROBE_URL",
     ),
 )
 

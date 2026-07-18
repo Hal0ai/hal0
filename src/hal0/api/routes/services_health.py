@@ -1,13 +1,11 @@
 """GET /api/services/health — dashboard services health aggregator.
 
-Returns a stable list of four well-known services (comfyui, hermes,
-openwebui, n8n) with honest up/down state.  Every source degrades
+Returns a stable list of three well-known services (comfyui, hermes,
+openwebui) with honest up/down state.  Every source degrades
 gracefully — a probe failure yields up=false, never a 500.
 
 Real probes: comfyui (in-process /system_stats+/queue), hermes
-(systemd unit state), openwebui (loopback GET /health — SpikeB §5.4).  n8n
-has no reachable probe from the API process (not deployed on this host) and
-reports up=false, detail="unmonitored".
+(systemd unit state), openwebui (loopback GET /health — SpikeB §5.4).
 
 HARD RULE: up=true requires a real signal.  Services with no wired probe
 report up=false, detail="unmonitored" — never a fabricated "up".
@@ -57,12 +55,6 @@ _PROBE_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=1.0, pool=1.0)
 def _openwebui_url() -> str | None:
     """Configured public URL for OpenWebUI, or None when absent."""
     public = os.environ.get("HAL0_OPENWEBUI_PUBLIC_URL", "").strip().rstrip("/")
-    return public or None
-
-
-def _n8n_url() -> str | None:
-    """Configured public URL for n8n, or None when absent."""
-    public = os.environ.get("HAL0_N8N_PUBLIC_URL", "").strip().rstrip("/")
     return public or None
 
 
@@ -130,12 +122,6 @@ async def _probe_openwebui() -> tuple[bool, str]:
     return False, f"unhealthy (HTTP {resp.status_code})"
 
 
-async def _probe_n8n() -> tuple[bool, str]:
-    # TODO(spike §5.4): real reachability probe — n8n exposes /healthz.
-    # Wire here once the spike lands.  Until then: honest unmonitored placeholder.
-    return False, "unmonitored"
-
-
 # ── route ─────────────────────────────────────────────────────────────────────
 
 
@@ -148,7 +134,7 @@ async def services_health() -> dict[str, Any]:
         {
           "services": [
             {
-              "id":     "comfyui"|"hermes"|"openwebui"|"n8n",
+              "id":     "comfyui"|"hermes"|"openwebui",
               "name":   str,
               "up":     bool,
               "detail": str,
@@ -213,24 +199,6 @@ async def services_health() -> dict[str, Any]:
             "up": ow_up,
             "detail": ow_detail,
             "url": _openwebui_url(),
-            "stat": None,
-        }
-    )
-
-    # ── n8n ──────────────────────────────────────────────────────────────────
-    try:
-        n8n_up, n8n_detail = await _probe_n8n()
-    except Exception as exc:
-        log.warning("services_health.n8n_probe_error", exc=repr(exc))
-        n8n_up, n8n_detail = False, type(exc).__name__
-
-    services.append(
-        {
-            "id": "n8n",
-            "name": "n8n",
-            "up": n8n_up,
-            "detail": n8n_detail,
-            "url": _n8n_url(),
             "stat": None,
         }
     )

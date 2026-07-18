@@ -1,7 +1,7 @@
 """Companion-service management layer.
 
 hal0 ships with (or sits next to) a set of companion services — OpenWebUI,
-Hermes, Hindsight, ComfyUI, n8n — each with its own systemd unit, port,
+Hermes, Hindsight, ComfyUI — each with its own systemd unit, port,
 probe, and browser-facing URL. This package is the single declarative
 source of truth for that set:
 
