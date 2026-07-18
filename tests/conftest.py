@@ -37,6 +37,27 @@ def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(static_seeds_mod, "seed_static_slots", lambda **_kw: [])
 
 
+@pytest.fixture(autouse=True)
+def _auth_dev_open_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the KB-1/§1 auth middleware into dev-open for the whole suite.
+
+    ``require_auth_enabled()`` derives its default from process env: it
+    enforces when the bind host is non-loopback OR a key is configured.
+    Some tests legitimately write those into ``os.environ`` (e.g.
+    ``tests/install/test_answers.py`` asserts the answers-apply path sets
+    ``HAL0_BIND_HOST=0.0.0.0``), and that value LEAKS to later tests in the
+    same pytest process — flipping the middleware on and 401-ing every
+    unrelated endpoint test that hits ``/v1`` or an ``/api`` admin route
+    anonymously. Pinning ``HAL0_REQUIRE_AUTH=0`` here makes the ~700-test
+    suite deterministically dev-open regardless of leakage; the auth tests
+    that need enforcement opt in explicitly (their own ``monkeypatch.setenv``
+    runs after this fixture and wins), and the posture-derivation tests in
+    ``tests/api/test_auth_core.py`` ``delenv`` it first to exercise the
+    bind/key-derived default.
+    """
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+
+
 @pytest.fixture(scope="function")
 def app(tmp_hal0_home: str) -> FastAPI:
     """Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.
