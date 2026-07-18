@@ -1002,6 +1002,28 @@ def _install_backcompat_symlink(target: Path, link: Path) -> None:
     os.symlink(str(target), str(link))
 
 
+def _install_cli_wrapper(wrapper_src: Path) -> dict[str, Any]:
+    """Install the root-only ``/usr/local/bin`` CLI infra — the genuinely-root
+    slice of the install phase (§7.4 privilege split).
+
+    Both entries live in root-owned ``/usr/local/bin``: the canonical
+    ``hermes`` wrapper and the ``hal0-hermes`` back-compat symlink. When the
+    provisioner runs as hal0 (§7.4 drop-to-hal0), install.sh's root prelude has
+    already laid these down, so ``_copy_wrapper`` / ``_install_backcompat_symlink``
+    detect non-root and skip. Grouping them in one helper keeps the phase body
+    a clean two-part split — root-only infra here, hal0-owned artifacts after.
+
+    Raises ``OSError`` on a genuine root-context write failure so the caller can
+    surface a sudo hint.
+    """
+    _copy_wrapper(wrapper_src, HERMES_CLI_INSTALL_PATH)
+    _install_backcompat_symlink(HERMES_CLI_INSTALL_PATH, WRAPPER_INSTALL_PATH)
+    return {
+        "hermes_cli": str(HERMES_CLI_INSTALL_PATH),
+        "wrapper": str(WRAPPER_INSTALL_PATH),
+    }
+
+
 def _copy_plugin_tree(src: Path, dst: Path) -> None:
     """Mirror a plugin directory (idempotent)."""
     if dst.exists():
@@ -1057,6 +1079,22 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
     if adopt_details is not None:
         details["adopted"] = adopt_details
 
+    # ── root-only CLI infra (§7.4 privilege split) ──────────────────────────
+    # Canonical entry point /usr/local/bin/hermes + the hal0-hermes back-compat
+    # symlink. Both live in root-owned /usr/local/bin and are euid-guarded: root
+    # installs them, a hal0-run provisioner finds them prelude-installed and
+    # skips. install.sh's §7.4 root prelude owns them for the drop-to-hal0 path.
+    try:
+        details.update(_install_cli_wrapper(hermes_wrapper_src))
+    except OSError as exc:
+        # Non-root operators without the prelude land here — surface so they can sudo.
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"wrapper install to {HERMES_CLI_INSTALL_PATH} failed: {exc}",
+            details=details,
+        )
+
+    # ── hal0-owned artifacts (born hal0:hal0 when the provisioner runs as hal0) ─
     hermes_bin = _venv_python(venv).parent / "hermes"
     if not hermes_bin.exists():
         try:
@@ -1069,23 +1107,6 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             )
     details["venv"] = str(venv)
     details["hermes_bin"] = str(hermes_bin)
-
-    try:
-        # Canonical entry point: /usr/local/bin/hermes (no HERMES_HOME pin).
-        _copy_wrapper(hermes_wrapper_src, HERMES_CLI_INSTALL_PATH)
-        details["hermes_cli"] = str(HERMES_CLI_INSTALL_PATH)
-        # Back-compat: hal0-hermes -> hermes symlink so any caller still
-        # invoking the old name resolves to the canonical wrapper. The
-        # symlink, not a stale copy, keeps the two in lockstep forever.
-        _install_backcompat_symlink(HERMES_CLI_INSTALL_PATH, WRAPPER_INSTALL_PATH)
-        details["wrapper"] = str(WRAPPER_INSTALL_PATH)
-    except OSError as exc:
-        # Non-root operators land here — surface so the user can sudo.
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"wrapper install to {HERMES_CLI_INSTALL_PATH} failed: {exc}",
-            details=details,
-        )
 
     # Plugin stubs into HERMES_HOME-shaped locations. Real bodies in #241/#242.
     # HERMES_HOME was already claimed (marker stamped) above, before any
@@ -1122,9 +1143,10 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             )
     details["plugins"] = [str(p) for p in plugin_targets.values()]
 
-    # The venv lives outside HERMES_HOME (/var/lib/hal0/venvs/hermes); hand it to
-    # hal0 too so a root install doesn't leave a root-owned venv (#843). No-op
-    # when not root.
+    # ── F.7 chown-back (deleted once born-owned lands, §7.4 inc 5) ───────────
+    # The venv lives outside HERMES_HOME (/var/lib/hal0/venvs/hermes); a root
+    # install hands it to hal0 so it isn't left root-owned (#843). No-op when the
+    # provisioner already runs as hal0 (the venv is then born hal0:hal0).
     _chown_tree_to_hal0(venv)
 
     return PhaseResult(status=PhaseStatus.OK, details=details)
@@ -4887,12 +4909,18 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
             },
         )
 
+    # ── root:root artifacts via the hal0-agentenv seam (§7.4 privilege split) ─
+    # seed TOML + driver env live in root-owned /etc/hal0/agents. Both writers
+    # are euid-aware: root writes directly (re-pinning root:root), a hal0-run
+    # provisioner delegates the write to `sudo -n hal0-agentenv`.
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
     env_path, env_wrote = _write_driver_env(state)
+    # ── hal0-owned artifact (born hal0:hal0 when the provisioner runs as hal0) ─
     runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
 
-    # runtime.json carries the embed token at 0600 — chown it to hal0 so the
-    # User=hal0 chat proxy can read it instead of falling back silently (#843).
+    # ── F.7 chown-back (deleted once born-owned lands, §7.4 inc 5) ───────────
+    # runtime.json carries the embed token at 0600 — a root install chowns it to
+    # hal0 so the User=hal0 chat proxy can read it (#843). No-op as hal0.
     _chown_tree_to_hal0(runtime_path)
 
     return PhaseResult(
