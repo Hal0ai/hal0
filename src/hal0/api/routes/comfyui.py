@@ -40,9 +40,10 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import hal0.comfyui.fetch as _fetch_module
+from hal0.api.middleware.error_codes import Conflict, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.comfyui.selection import auto_selections, variant_for
 from hal0.hardware import gpu_view
@@ -457,8 +458,22 @@ def _arbiter_unavailable() -> JSONResponse:
     )
 
 
+class SwitchoverBody(BaseModel):
+    # Fields stay optional (not a required Literal) so an empty/omitted body or
+    # a bad ``mode`` still routes to the handler's custom ``comfyui.invalid_mode``
+    # 422 rather than a generic pydantic ``validation.error`` — the wire contract
+    # (status + code) is byte-preserved. ``extra="ignore"`` matches today's
+    # silent-pass on legacy fields.
+    model_config = ConfigDict(extra="ignore")
+    mode: str | None = None
+    force: bool = False
+    pin: bool = False
+
+
 @router.post("/switchover")
-async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
+async def comfyui_switchover(
+    request: Request, background_tasks: BackgroundTasks, body: SwitchoverBody | None = None
+) -> JSONResponse:
     """Flip the iGPU between LLM inference and ComfyUI generation.
 
     Body: ``{"mode": "generation" | "inference", "force": bool, "pin": bool}``
@@ -473,33 +488,21 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
     ComfyUI prompt submission can call it as the implicit handoff before
     enqueueing a render.
     """
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
-    mode = body.get("mode") if isinstance(body, dict) else None
+    if body is None:
+        body = SwitchoverBody()
+    mode = body.mode
     if mode not in _MODES:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "comfyui.invalid_mode",
-                    "message": "body must be {'mode': 'generation' | 'inference'}",
-                }
-            },
+        raise UnprocessableEntity(
+            "body must be {'mode': 'generation' | 'inference'}",
+            code="comfyui.invalid_mode",
         )
     # One switch at a time — racing systemctl/docker pairs is never right. Checked
     # before the noop probe so a mid-flight flip is reported as in-progress, not
     # as "already there" based on a half-transitioned snapshot.
     if _switch["active"]:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": {
-                    "code": "comfyui.switch_in_progress",
-                    "message": f"a switch to {_switch['target']} is already running",
-                }
-            },
+        raise Conflict(
+            f"a switch to {_switch['target']} is already running",
+            code="comfyui.switch_in_progress",
         )
     # Idempotency: the arbiter is the source of truth for the current mode
     # (D7) — the docker-era container probe is ONLY the legacy fallback for
@@ -520,27 +523,20 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
     # memory, killing any running/pending renders (the container itself stays
     # up). Refuse unless the caller forces it — the dashboard confirm dialog
     # states the blast radius and passes force on user confirm.
-    force = bool(body.get("force")) if isinstance(body, dict) else False
+    force = body.force
     if mode == "inference" and not force:
         counts = _queue_counts(await _fetch_json("/queue"))
         busy = counts["running"] + counts["pending"]
         if busy:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "error": {
-                        "code": "comfyui.busy",
-                        "message": (
-                            f"{busy} render job(s) running or queued would be dropped; "
-                            "retry with {'force': true} to switch anyway."
-                        ),
-                        "queue": counts,
-                    }
-                },
+            raise Conflict(
+                f"{busy} render job(s) running or queued would be dropped; "
+                "retry with {'force': true} to switch anyway.",
+                code="comfyui.busy",
+                details={"queue": counts},
             )
     if arbiter is None:
         return _arbiter_unavailable()
-    pin = bool(body.get("pin")) if isinstance(body, dict) else False
+    pin = body.pin
     # Dispatch in the background and answer 202 immediately — the drain/reload
     # takes seconds to tens of seconds (slot unloads, container boot) and the
     # pane's /status poll tracks the transition via the switchover block.
@@ -549,27 +545,26 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
     return JSONResponse(status_code=202, content={"status": "switching", "mode": mode})
 
 
+class SetPinnedBody(BaseModel):
+    # ``pinned`` accepts any JSON so a missing/non-bool value routes to the
+    # handler's custom ``comfyui.invalid_pin`` 422 (byte-preserved wire contract)
+    # instead of a generic pydantic ``validation.error``.
+    model_config = ConfigDict(extra="ignore")
+    pinned: Any = None
+
+
 @router.post("/pin")
-async def comfyui_pin(request: Request) -> JSONResponse:
+async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JSONResponse:
     """Toggle the arbiter's manual pin (holds image mode against idle-restore).
 
     Body: ``{"pinned": bool}``. Pinning disables idle auto-restore while image
     mode is active.
     """
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
-    pinned = body.get("pinned") if isinstance(body, dict) else None
+    pinned = body.pinned if body is not None else None
     if not isinstance(pinned, bool):
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "comfyui.invalid_pin",
-                    "message": "body must be {'pinned': true | false}",
-                }
-            },
+        raise UnprocessableEntity(
+            "body must be {'pinned': true | false}",
+            code="comfyui.invalid_pin",
         )
     arbiter = _get_arbiter(request)
     if arbiter is None:
@@ -610,14 +605,9 @@ async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
     and this endpoint is called by the dashboard after setup completes.
     """
     if body.auto is None and not body.selections:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "comfyui.fetch.invalid_body",
-                    "message": "body must be {'auto': true} or {'selections': [...]}",
-                }
-            },
+        raise UnprocessableEntity(
+            "body must be {'auto': true} or {'selections': [...]}",
+            code="comfyui.fetch.invalid_body",
         )
 
     if body.auto:
@@ -629,15 +619,7 @@ async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
             try:
                 v = variant_for(item.capability, item.family)
             except KeyError as exc:
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "error": {
-                            "code": "comfyui.fetch.unknown_variant",
-                            "message": str(exc),
-                        }
-                    },
-                )
+                raise UnprocessableEntity(str(exc), code="comfyui.fetch.unknown_variant") from exc
             variants.append(v)
 
     job_ids = [_fetch_module.fetch_model(v) for v in variants]
