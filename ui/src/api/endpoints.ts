@@ -28,6 +28,10 @@ export const ENDPOINTS = {
   comfyuiPreview: '/api/comfyui/preview',
 
   slotMetrics: '/api/slots/metrics',
+  // GET /api/system-info (CLIENT) — hardware + features + per-RUNNER_IMAGES
+  // backend state (installed | installable | unavailable). Feeds the Runtimes
+  // settings page (D3) — the runner/image evidence axis.
+  systemInfo: '/api/system-info',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,
   slotConfig: (name: string) => `/api/slots/${encodeURIComponent(name)}/config`,
   // TTS voice-list proxy — forwards to the slot container's /v1/audio/voices;
@@ -38,6 +42,10 @@ export const ENDPOINTS = {
   slotLoad: (name: string) => `/api/slots/${encodeURIComponent(name)}/load`,
   slotUnload: (name: string) => `/api/slots/${encodeURIComponent(name)}/unload`,
   slotSwap: (name: string) => `/api/slots/${encodeURIComponent(name)}/swap`,
+  // POST /api/slots/{name}/rename — body { new_name }. The stable slot id is
+  // untouched; the unit is still name-keyed so the slot must be OFFLINE (409
+  // while running) until the live-rename migration lands (rework §11.1).
+  slotRename: (name: string) => `/api/slots/${encodeURIComponent(name)}/rename`,
   slotStateStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/state/stream`,
   slotLogsStream: (name: string) =>

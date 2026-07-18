@@ -60,7 +60,7 @@ test.describe('Recipe editor — chat-template field', () => {
 
     // ── 6. Select chatml and save ─────────────────────────────────
     await tmplSelect.selectOption('chatml')
-    await page.locator('button:has-text("Save options")').click()
+    await page.getByTestId('model-save').click()
 
     // ── 7. PUT body includes defaults.chat_template === 'chatml' ─
     await expect.poll(() => putBody?.defaults?.chat_template).toBe('chatml')
