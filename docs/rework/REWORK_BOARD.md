@@ -31,7 +31,7 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 |------|-------|-------|--------------|
 | **R1** | Secure + installable | **✅ ON MAIN** (`ecdc0950`, tag `rework-R1`) | Merged 2026-07-18. Only tail open: KB-1 hardening (WS/SSE key audit, Security UI page, login rate-limit) — non-blocking. |
 | **R2/R2.1** | Model layer + stabilization | **✅ ON MAIN** (`be4b0bba` / `6aa565b8`, tags `rework-R2` / `rework-R2.1`) | R2 model/runtime/docs/Hermes substrate plus R2.1 store-GC #8/#9 and vetted Hermes contract-pin foundation; main and descar have zero divergence. |
-| **R3** | Slot runtime | **substrate stacked on descar** | §11.1 slot-id + §11.2 PortAuthority (migration 004) landed (inert/additive). Remaining: manager.py re-key (PR3-6), P3-quadlet, GTT capacity, `inspect/apply/delete/subscribe` interface. |
+| **R3** | Slot runtime | **✅ ON MAIN** (`ab3e88f3`, tag `rework-R3`, collapsed 2026-07-18 from descar `671ca623`, CI run 29656507947 all-green) | Complete: slot-id identity + PortAuthority + dict[int] re-key + inert M5 migrator + quoting fix + Quadlet units + deep interface + GTT. Held for halo143 window: quadlet `@`-name verify, M5 live rehearsal, runtime id-flip. |
 | **R4** | Brain + Hermes | **Hermes installer substrate landed; product adapters open** | Tool-loop and §7.4 privilege-drop/F.7 done. Open: P3-brain, KB-4 board, runtime role resolution, Hermes compatibility pin, core/provider/memory/voice adapters, core-without-Hermes proof. |
 | **R5** | Surface + launch | **open** | Settings data-seam (MVP split done), §21.4 doctor, docs collapse (P4-docs), migration rehearsal, cutover plan. |
 
