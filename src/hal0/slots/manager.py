@@ -30,7 +30,6 @@ import asyncio
 import contextlib
 import copy
 import logging
-import os
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -53,6 +52,8 @@ from hal0.slots.config_write import (
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
 )
+from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
+from hal0.slots.drift import compute_config_drift as _compute_config_drift
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
 from hal0.slots.routing import (
@@ -154,11 +155,6 @@ _WARMING_INACTIVE_STRIKES: int = 3
 # load is never demoted — 900s (15 min) is ~5x the 180s per-attempt health-wait
 # ceiling, comfortably clear of any real large-model load.
 _WARMING_STALE_AFTER_S: float = 900.0
-# Config-drift comparison keys. Spelling no longer needs to match the launch
-# renderer exactly: both sides of the comparison are canonicalized through
-# slots.argv.FLAG_ALIASES (so ``--batch-size`` in a running argv matches a
-# rendered ``-b`` instead of reporting false drift).
-_CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b", "-ub")
 
 # Idle-monitor defaults. A READY slot whose last activity is older than
 # _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics
@@ -1400,50 +1396,14 @@ class SlotManager:
         cfg: dict[str, Any] | None = None,
         active: bool | None = None,
     ) -> dict[str, Any] | None:
-        """Compare live container argv to the command a restart would render.
+        """See :func:`hal0.slots.drift.compute_config_drift`.
 
-        Returns a structured payload when the comparison is meaningful, or
-        None when the slot is inactive, lacks a config, is an NPU trio shadow,
-        or the provider cannot read either side of the comparison.
+        Kept (not deleted) — P3-slots §6 investigation found a live drift
+        source (see slots/drift.py module docstring): a slot can run stale
+        argv after a TOML edit without a restart, which
+        ``test_real_drift_still_detected_across_spellings`` exercises.
         """
-        if active is None:
-            active = await self._is_active(slot_name)
-        if not active:
-            return None
-        if cfg is None:
-            cfg = await self._maybe_load_config(slot_name)
-        if not cfg or is_npu_trio_shadow(cfg):
-            return None
-
-        model_info = await self._resolve_model_info(_model_default(cfg))
-        from hal0.providers.container import container_provider
-
-        provider = container_provider()
-        loop = asyncio.get_event_loop()
-        running, rendered = await asyncio.gather(
-            loop.run_in_executor(None, provider.running_argv, slot_name),
-            loop.run_in_executor(None, provider.expected_argv, cfg, model_info),
-        )
-        if not running or not rendered:
-            return None
-
-        running_flags = _argv_values(running, _CONFIG_DRIFT_KEYS)
-        rendered_flags = _argv_values(rendered, _CONFIG_DRIFT_KEYS)
-        # #1226: the renderer resolves a registry model id to its on-disk path
-        # (``--model``) and slugifies it for the advertised ``--alias``. A raw
-        # id on either side must be run through the SAME resolution before
-        # comparison, else a slot created with a registry id permanently
-        # false-warns (running path/slug vs rendered id). Resolve both sides.
-        model_key = model_info.get("_model_key") or _model_default(cfg)
-        model_path = model_info.get("path")
-        running_flags = _resolve_drift_flags(running_flags, model_key, model_path)
-        rendered_flags = _resolve_drift_flags(rendered_flags, model_key, model_path)
-        diffs = [
-            {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
-            for key in _CONFIG_DRIFT_KEYS
-            if not _config_drift_values_equal(key, running_flags.get(key), rendered_flags.get(key))
-        ]
-        return {"drifted": bool(diffs), "diffs": diffs}
+        return await _compute_config_drift(self, slot_name, cfg=cfg, active=active)
 
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None:
         """Read the slot's TOML if it exists, swallowing parse errors.
@@ -3346,74 +3306,10 @@ def _leading_token_overlap(a: list[str], b: list[str]) -> int:
     return shared
 
 
-def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None]:
-    """Return the last value for each flag key in argv, alias-aware.
-
-    Both the requested ``keys`` and the argv tokens are canonicalized
-    through :data:`hal0.slots.argv.FLAG_ALIASES` before comparison, so a
-    running ``--batch-size 512`` matches a rendered ``-b 512`` (and vice
-    versa) instead of reporting false config drift. The result stays keyed
-    by the caller's original ``keys`` spelling (the drift payload contract).
-
-    Last value wins because slot ``[server].extra_args`` intentionally follows
-    profile flags and can override them.
-    """
-    from hal0.slots.argv import FLAG_ALIASES
-
-    canon_to_key = {FLAG_ALIASES.get(k, k): k for k in keys}
-    out: dict[str, str | None] = {}
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        flag, eq, inline = token.partition("=")
-        key = canon_to_key.get(FLAG_ALIASES.get(flag, flag))
-        if key is None:
-            i += 1
-            continue
-        if eq:
-            out[key] = inline
-            i += 1
-        else:
-            out[key] = argv[i + 1] if i + 1 < len(argv) else None
-            i += 2
-    return out
-
-
-def _resolve_drift_flags(
-    flags: dict[str, str | None],
-    model_key: str | None,
-    model_path: str | None,
-) -> dict[str, str | None]:
-    """Canonicalize the id-bearing drift flags the way the renderer does.
-
-    ``--model`` and ``--alias`` carry a model identity that the unit renderer
-    resolves (registry id → on-disk path for ``--model``; slugified id for
-    ``--alias``). A raw id surfaced on either side of the drift comparison is
-    put through the SAME resolution so a slot created with a registry id does
-    not permanently false-warn (#1226). Values already resolved (a real path,
-    an already-slugified alias) pass through unchanged.
-    """
-    from hal0.registry.discover import _normalise_id
-
-    out = dict(flags)
-    model_val = out.get("--model")
-    # Rendered/running may carry the bare registry id instead of the resolved
-    # path; substitute the known on-disk path so the realpath compare matches.
-    if model_val is not None and model_path and model_key and model_val == model_key:
-        out["--model"] = str(model_path)
-    alias_val = out.get("--alias")
-    if alias_val is not None:
-        # Slug is idempotent: slugifying an already-slugified alias is a no-op,
-        # so both a raw id and a rendered slug collapse to the same token.
-        out["--alias"] = _normalise_id(alias_val)
-    return out
-
-
-def _config_drift_values_equal(key: str, running: str | None, rendered: str | None) -> bool:
-    if key == "--model" and running is not None and rendered is not None:
-        return os.path.realpath(running) == os.path.realpath(rendered)
-    return running == rendered
-
+# NOTE: _argv_values / _resolve_drift_flags / _config_drift_values_equal /
+# _CONFIG_DRIFT_KEYS / compute_config_drift moved to hal0.slots.drift
+# (P3-slots §1c — investigated + KEPT, not deleted; see that module's
+# docstring). Imported + re-exported above.
 
 # NOTE: _cfg_effective_backend / _base_profile_for_backend /
 # _reconcile_device_profile / _read_slot_toml_dict / _iter_peer_configs /
@@ -3427,10 +3323,12 @@ __all__ = [
     "NPU_SEEDED_SLOTS",
     "SEEDED_SLOTS",
     "SLOT_ALIASES",
+    "_CONFIG_DRIFT_KEYS",
     "_VALID_SLOT_TYPES",
     "LoadedSlot",
     "Slot",
     "SlotManager",
+    "_argv_values",
     "_cfg_effective_backend",
     "_cfg_port",
     "_cfg_provider",
