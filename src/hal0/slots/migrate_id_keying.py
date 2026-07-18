@@ -9,7 +9,8 @@ name:
 
   ``/etc/hal0/slots/<name>.toml``           → ``/etc/hal0/slots/<id>.toml``
   ``/var/lib/hal0/slots/<name>/state.json`` → ``/var/lib/hal0/slots/<id>/state.json``
-  ``hal0-slot@<name>.service``              → ``hal0-slot@<id>.service``
+  ``hal0-slot@<name>.container`` (Quadlet)  → ``hal0-slot@<id>.container``
+    (regenerating ``hal0-slot@<id>.service`` on daemon-reload)
   ``hal0-slot-<name>`` (podman container)   → ``hal0-slot-<id>``
 
 Design contract (per the P3 spec §3.1 / §3.3):
@@ -79,40 +80,63 @@ class RecordingSlotArtifactOps:
 
 
 class SubprocessSlotArtifactOps:
-    """Deploy-only live ops: rename the systemd unit + podman container.
+    """Deploy-only live ops: rename the Quadlet unit + podman container.
 
     Best-effort and HELD FOR ON-HARDWARE SMOKE — no CI/unit coverage here
-    (there is no systemd/podman in the test env). Routes systemctl verbs
-    through :class:`hal0.system.seam.SystemCtlSeam` (the same seam the
-    container provider uses) so a hal0-service-user install stays unprivileged.
+    (there is no systemd/podman in the test env). Routes systemctl verbs +
+    Quadlet writes through :class:`hal0.system.seam.SystemCtlSeam` (the same
+    seam the container provider uses) so a hal0-service-user install stays
+    unprivileged.
+
+    P3-quadlet: the on-disk source a slot's unit is generated from is a Podman
+    Quadlet ``hal0-slot@<token>.container`` under ``/etc/containers/systemd/``
+    (not a hand-written ``.service`` under ``/etc/systemd/system``). Renaming a
+    slot name→id moves that ``.container`` file (rewriting its ``ContainerName=``
+    / ``SyslogIdentifier=`` tokens); ``daemon-reload`` regenerates the matching
+    ``hal0-slot@<id>.service``. No ``enable`` — the unit's
+    ``[Install] WantedBy=hal0.target`` handles boot-enable.
     """
 
     def __init__(self) -> None:  # pragma: no cover - deploy-only
         import subprocess
 
+        from hal0.slots.naming import (
+            slot_container_name,
+            slot_quadlet_name,
+            slot_unit_name,
+        )
         from hal0.system.seam import SystemCtlSeam
 
         self._subprocess = subprocess
         self._seam = SystemCtlSeam()
-        self._systemd_dir = Path("/etc/systemd/system")
+        self._quadlet_dir = Path("/etc/containers/systemd")
+        self._quadlet_name = slot_quadlet_name
+        self._unit_name = slot_unit_name
+        self._container_name = slot_container_name
 
     def rename_unit(self, old_name: str, new_id: int) -> None:  # pragma: no cover
-        old_unit = self._systemd_dir / f"hal0-slot@{old_name}.service"
-        new_unit = self._systemd_dir / f"hal0-slot@{new_id}.service"
-        # Stop + disable the old instance, then move the unit file across,
-        # rewriting the container name + SyslogIdentifier tokens inside it.
-        self._seam.systemctl("systemctl", "stop", old_unit.name, check=False)
-        self._seam.systemctl("systemctl", "disable", old_unit.name, check=False)
-        if old_unit.exists():
-            text = old_unit.read_text().replace(f"hal0-slot-{old_name}", f"hal0-slot-{new_id}")
-            self._seam.write_unit(new_unit, text)
-            self._seam.remove_unit(old_unit)
+        old_quadlet = self._quadlet_dir / self._quadlet_name(old_name)
+        new_quadlet = self._quadlet_dir / self._quadlet_name(str(new_id))
+        # Stop the old instance, then move the Quadlet source across, rewriting
+        # the container name + SyslogIdentifier tokens inside it. daemon-reload
+        # regenerates the .service from the new source (WantedBy handles enable).
+        self._seam.systemctl("systemctl", "stop", self._unit_name(old_name), check=False)
+        if old_quadlet.exists():
+            text = old_quadlet.read_text().replace(
+                self._container_name(old_name), self._container_name(str(new_id))
+            )
+            self._seam.write_quadlet(new_quadlet, text)
+            self._seam.remove_quadlet(old_quadlet)
         self._seam.systemctl("systemctl", "daemon-reload", check=False)
-        self._seam.systemctl("systemctl", "enable", new_unit.name, check=False)
 
     def rename_container(self, old_name: str, new_id: int) -> None:  # pragma: no cover
         self._subprocess.run(
-            ["podman", "rename", f"hal0-slot-{old_name}", f"hal0-slot-{new_id}"],
+            [
+                "podman",
+                "rename",
+                self._container_name(old_name),
+                self._container_name(str(new_id)),
+            ],
             check=False,
             capture_output=True,
         )

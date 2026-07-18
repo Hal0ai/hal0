@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hal0.providers.base import ContainerSpec
-from hal0.providers.container import ContainerProvider, _render_unit_from_spec
+from hal0.providers.container import ContainerProvider, _render_quadlet_from_plan
 
 _TEST_RUNTIME = "/usr/bin/docker"
 
@@ -43,109 +43,82 @@ def _flm_spec(**overrides: Any) -> ContainerSpec:
     return ContainerSpec(**base)
 
 
-def _exec_start(unit_text: str) -> list[str]:
+def _render_from_spec(
+    token: str,
+    spec: ContainerSpec,
+    *,
+    runtime_bin: str | None = None,
+    publish_host: str = "127.0.0.1",
+) -> str:
+    """Shim mirroring the deleted ``_render_unit_from_spec`` alias.
+
+    Accepts (and ignores) ``runtime_bin`` — the Quadlet renderer is podman-only,
+    so the runtime binary is no longer a render input.
+    """
+    return _render_quadlet_from_plan(token, spec, publish_host=publish_host)
+
+
+def _exec(unit_text: str) -> list[str]:
+    """Return the in-container argv from the Quadlet ``Exec=`` line."""
     for line in unit_text.splitlines():
-        if line.startswith("ExecStart="):
-            return shlex.split(line[len("ExecStart=") :])
-    raise AssertionError("ExecStart not found")
-
-
-def _contains_contiguous(haystack: list[str], needle: list[str]) -> bool:
-    """True iff ``needle`` appears as a contiguous subsequence of ``haystack``."""
-    n = len(needle)
-    return any(haystack[i : i + n] == needle for i in range(len(haystack) - n + 1))
+        if line.startswith("Exec="):
+            return shlex.split(line[len("Exec=") :])
+    raise AssertionError("Exec not found")
 
 
 class TestRenderUnitFromSpec:
     def test_devices_and_mounts_in_argv(self) -> None:
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        argv = _exec_start(unit)
-        assert "--device=/dev/accel/accel0" in argv
-        assert "--device=/dev/dri/renderD128" in argv
-        assert "--device=/dev/kfd" not in argv  # NPU != ROCm compute
-        assert "--volume=/var/lib/hal0/.config/flm/models:/var/lib/hal0/.config/flm/models" in argv
+        unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        lines = unit.splitlines()
+        assert "AddDevice=/dev/accel/accel0" in lines
+        assert "AddDevice=/dev/dri/renderD128" in lines
+        assert "AddDevice=/dev/kfd" not in lines  # NPU != ROCm compute
+        assert "Volume=/var/lib/hal0/.config/flm/models:/var/lib/hal0/.config/flm/models" in lines
 
     def test_command_env_memlock(self) -> None:
         spec = _flm_spec()
-        unit = _render_unit_from_spec("npu", spec, runtime_bin=_TEST_RUNTIME)
-        argv = _exec_start(unit)
-        # The serve argv must appear contiguously, directly after the image token.
-        image_idx = argv.index(spec.image)
-        assert argv[image_idx + 1 : image_idx + 1 + len(spec.command)] == spec.command
-        assert _contains_contiguous(argv, ["--ulimit", "memlock=-1"])
-        assert any(a.startswith("--env=LD_LIBRARY_PATH=") for a in argv)
+        unit = _render_from_spec("npu", spec, runtime_bin=_TEST_RUNTIME)
+        lines = unit.splitlines()
+        # Exec= is the in-container argv only (no image / runtime preamble).
+        assert _exec(unit) == list(spec.command)
+        # extra_args ``--ulimit memlock=-1`` passes through PodmanArgs= verbatim.
+        assert "PodmanArgs=--ulimit memlock=-1" in lines
+        assert any(line.startswith("Environment=LD_LIBRARY_PATH=") for line in lines)
 
     def test_unit_name_matches_template(self) -> None:
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        assert "--name=hal0-slot-npu" in unit
-
-    def test_replace_flag_clears_stale_container_records_podman(self) -> None:
-        """Spec-rendered podman units need ``--replace`` too — same #721 boot
-        race as the llama-server builder (stale name record after unclean
-        shutdown). docker has no --replace flag; see
-        test_docker_runtime_omits_replace_flag below."""
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin="/usr/bin/podman")
-        argv = _exec_start(unit)
-        assert "--replace" in argv, f"--replace missing from argv: {argv}"
-        assert argv.index("--replace") == argv.index("--name=hal0-slot-npu") + 1
-
-    def test_docker_runtime_omits_replace_flag(self) -> None:
-        """docker aborts outright on an unknown --replace flag, which took
-        every NPU slot down on a docker-only host. The spec-rendered path
-        must not emit --replace for a docker runtime_bin."""
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        argv = _exec_start(unit)
-        assert "--replace" not in argv, f"--replace must not render for docker: {argv}"
-
-    def test_docker_runtime_gets_execstartpre_rm_cleanup(self) -> None:
-        """docker instead relies on the tolerant ExecStartPre=-{runtime} rm -f
-        cleanup the unit skeleton emits for every runtime."""
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        assert f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-npu" in unit.splitlines()
+        unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        assert "ContainerName=hal0-slot-npu" in unit.splitlines()
 
     def test_security_opts_included(self) -> None:
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        argv = _exec_start(unit)
-        assert "--security-opt=apparmor=unconfined" in argv
-        assert "--security-opt=seccomp=unconfined" in argv
+        unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        lines = unit.splitlines()
+        assert "SecurityOpt=apparmor=unconfined" in lines
+        assert "SecurityOpt=seccomp=unconfined" in lines
 
     def test_group_add_included(self) -> None:
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        argv = _exec_start(unit)
-        assert "--group-add=993" in argv
+        unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        assert "GroupAdd=993" in unit.splitlines()
 
     def test_loopback_publish_derived_from_spec_port(self) -> None:
-        """--publish is rendered declaratively from spec.port, not extra_args."""
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        argv = _exec_start(unit)
-        assert "--publish=127.0.0.1:8088:8088" in argv
+        """PublishPort is rendered declaratively from spec.port, not extra_args."""
+        unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        assert "PublishPort=127.0.0.1:8088:8088" in unit.splitlines()
 
     def test_network_mode_host_rendered(self) -> None:
-        unit = _render_unit_from_spec(
-            "npu", _flm_spec(network_mode="host"), runtime_bin=_TEST_RUNTIME
-        )
-        argv = _exec_start(unit)
-        assert "--network=host" in argv
+        unit = _render_from_spec("npu", _flm_spec(network_mode="host"), runtime_bin=_TEST_RUNTIME)
+        lines = unit.splitlines()
+        assert "Network=host" in lines
         # publish is meaningless under host networking — must be skipped
-        assert not any(a.startswith("--publish=") for a in argv)
+        assert not any(line.startswith("PublishPort=") for line in lines)
 
     def test_cap_add_rendered(self) -> None:
-        unit = _render_unit_from_spec(
-            "npu", _flm_spec(cap_add=["SYS_NICE"]), runtime_bin=_TEST_RUNTIME
-        )
-        argv = _exec_start(unit)
-        assert "--cap-add=SYS_NICE" in argv
+        unit = _render_from_spec("npu", _flm_spec(cap_add=["SYS_NICE"]), runtime_bin=_TEST_RUNTIME)
+        assert "AddCapability=SYS_NICE" in unit.splitlines()
 
     def test_unit_has_service_section(self) -> None:
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
         assert "[Unit]" in unit
         assert "[Service]" in unit
-
-    def test_exec_stop_references_container_name(self) -> None:
-        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
-        stop_lines = [line for line in unit.splitlines() if line.startswith("ExecStop=")]
-        assert stop_lines
-        assert "hal0-slot-npu" in stop_lines[0]
 
 
 class TestLoadSyncNpuBranch:
@@ -178,11 +151,12 @@ class TestLoadSyncNpuBranch:
             provider.load_sync(slot_cfg, {"_model_key": "gemma3:4b"})
 
         unit_text = unit_file.read_text()
-        argv = _exec_start(unit_text)
-        assert "--device=/dev/accel/accel0" in argv
+        lines = unit_text.splitlines()
+        argv = _exec(unit_text)
+        assert "AddDevice=/dev/accel/accel0" in lines
         assert "--asr" in argv
         # Must NOT call _resolve_profile (NPU path bypasses profile lookup)
-        assert "--device=/dev/kfd" not in argv
+        assert "AddDevice=/dev/kfd" not in lines
 
     def test_npu_slot_calls_systemctl_restart(self, tmp_path) -> None:
         provider = ContainerProvider()
@@ -269,10 +243,10 @@ class TestLoadSyncNpuBranch:
             )
 
         unit_text = unit_file.read_text()
-        # GPU path: llama-server args present
-        assert "--model" in unit_text
+        # GPU path: llama-server args present in the in-container argv
+        assert "--model" in _exec(unit_text)
         # GPU path: /dev/kfd present, /dev/accel/accel0 absent
-        assert "--device=/dev/kfd" in unit_text
+        assert "AddDevice=/dev/kfd" in unit_text.splitlines()
         assert "/dev/accel/accel0" not in unit_text
 
 

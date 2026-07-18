@@ -9,11 +9,17 @@ from unittest.mock import MagicMock, patch
 from hal0.providers.container import ContainerProvider, _spec_provider_for
 
 
-def _exec_start(unit_text: str) -> list[str]:
+def _exec_argv(unit_text: str) -> list[str]:
+    """The in-container argv from the Quadlet ``Exec=`` key (post P3-quadlet).
+
+    Was the ``podman run …`` ExecStart string; the Quadlet renderer now emits
+    only the in-container argv on the ``Exec=`` line (podman flags became typed
+    ``[Container]`` keys — ``PublishPort=`` / ``AddDevice=`` / ``Volume=`` …).
+    """
     for line in unit_text.splitlines():
-        if line.startswith("ExecStart="):
-            return shlex.split(line[len("ExecStart=") :])
-    raise AssertionError("ExecStart not found")
+        if line.startswith("Exec="):
+            return shlex.split(line[len("Exec=") :])
+    raise AssertionError("Exec= not found")
 
 
 _TEST_RUNTIME = "/usr/bin/docker"
@@ -69,9 +75,9 @@ def test_spec_provider_vulkan_returns_none() -> None:
 
 
 def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
-    """TTS/kokoro slot: spec unit rendered with --model_path, no --device=, correct --publish.
+    """TTS/kokoro slot: spec unit rendered with --model_path, no AddDevice=, correct PublishPort=.
 
-    Isolated via ``tmp_hal0_home`` (tests/conftest.py): ``_render_unit_text``
+    Isolated via ``tmp_hal0_home`` (tests/conftest.py): ``_render_quadlet_text``
     threads the live ``[slots].publish_host`` into every render
     (``_slot_publish_host()`` -> ``load_hal0_config()``), so without this
     fixture a host with a non-default ``publish_host`` (e.g. LAN-exposed
@@ -101,14 +107,15 @@ def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
         provider.load_sync(slot_cfg, {"_model_key": "kokoro-v1"})
 
     assert unit_captured, "load_sync never called _write_and_start_unit"
-    argv = _exec_start(unit_captured[0])
+    unit_text = unit_captured[0]
+    argv = _exec_argv(unit_text)
 
-    # Kokoro spec args present
+    # Kokoro spec args present in the in-container Exec= argv
     assert "--model_path" in argv
-    # CPU: zero --device= flags
-    assert not any(a.startswith("--device=") for a in argv)
-    # Loopback publish present
-    assert "--publish=127.0.0.1:8084:8084" in argv
+    # CPU: zero device passthrough (Quadlet AddDevice= keys)
+    assert "AddDevice=" not in unit_text
+    # Loopback publish present as a typed Quadlet PublishPort= key
+    assert "PublishPort=127.0.0.1:8084:8084" in unit_text
 
 
 def test_tts_slot_by_type_only_no_profile() -> None:
@@ -135,9 +142,10 @@ def test_tts_slot_by_type_only_no_profile() -> None:
         provider.load_sync(slot_cfg, {})
 
     assert unit_captured, "load_sync never called _write_and_start_unit"
-    argv = _exec_start(unit_captured[0])
+    unit_text = unit_captured[0]
+    argv = _exec_argv(unit_text)
     assert "--model_path" in argv
-    assert not any(a.startswith("--device=") for a in argv)
+    assert "AddDevice=" not in unit_text
 
 
 def test_kokoro_path_does_not_require_registry_model_path() -> None:
@@ -175,7 +183,7 @@ def test_kokoro_path_does_not_require_registry_model_path() -> None:
 
 
 def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
-    """device=gpu-rocm, profile=rocm → llama _render_unit path.
+    """device=gpu-rocm, profile=rocm → llama container_spec / Quadlet render path.
 
     Mirrors TestLoadSyncNpuBranch.test_gpu_slot_unaffected_by_npu_branch style
     from test_container_npu.py: patches _resolve_profile + GPU helpers, then
@@ -223,12 +231,12 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
         )
 
     unit_text = unit_file.read_text()
-    argv = _exec_start(unit_text)
-    # llama-server path: --model present
+    argv = _exec_argv(unit_text)
+    # llama-server path: --model present in the in-container Exec= argv
     assert "--model" in argv
     assert "/mnt/ai-models/model.gguf" in argv
-    # GPU device present, NPU device absent
-    assert "--device=/dev/kfd" in argv
+    # GPU device present as a Quadlet AddDevice= key, NPU device absent
+    assert "AddDevice=/dev/kfd" in unit_text
     assert "/dev/accel/accel0" not in unit_text
     # No --model_path (kokoro flag) in GPU unit
     assert "--model_path" not in unit_text

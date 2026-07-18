@@ -548,7 +548,7 @@ class FLMProvider(Provider):
             # tailored profile would be tighter but Strix Halo deployments
             # under Proxmox LXC are the primary target.
             # seccomp=unconfined matches the GPU slot rendering so
-            # _render_unit_from_spec doesn't need special-casing here.
+            # the Quadlet renderer doesn't need special-casing here.
             security_opt=["apparmor=unconfined", "seccomp=unconfined"],
             group_add=[str(render_gid)] if render_gid is not None else [],
             port=port,

@@ -47,6 +47,10 @@ SEAM_BIN = "/usr/lib/hal0/bin/hal0-systemctl"
 _UNIT_VERBS = frozenset({"start", "stop", "restart", "enable", "disable", "reset-failed"})
 
 _UNIT_NAME_RE = re.compile(r"^hal0-slot@([A-Za-z0-9_-]{1,64})\.service$")
+#: P3-quadlet: the Podman Quadlet source file a slot's ``.service`` is generated
+#: from — ``hal0-slot@<token>.container`` under ``/etc/containers/systemd/``.
+#: Root-owned by design; written via ``hal0-systemctl write-quadlet <token>``.
+_QUADLET_NAME_RE = re.compile(r"^hal0-slot@([A-Za-z0-9_-]{1,64})\.container$")
 
 
 class Hal0SeamMissing(RuntimeError):
@@ -73,6 +77,12 @@ def _slot_id_from_unit(unit_name: str) -> str | None:
     """Extract ``<id>`` from ``hal0-slot@<id>.service``, or ``None`` if the
     unit name isn't one (e.g. ``hal0-api.service`` — never routed here)."""
     m = _UNIT_NAME_RE.match(unit_name)
+    return m.group(1) if m else None
+
+
+def _slot_id_from_quadlet(file_name: str) -> str | None:
+    """Extract ``<token>`` from ``hal0-slot@<token>.container``, or ``None``."""
+    m = _QUADLET_NAME_RE.match(file_name)
     return m.group(1) if m else None
 
 
@@ -127,6 +137,39 @@ class SystemCtlSeam:
         # Mirrors the direct path's tolerance of "already gone" (missing_ok):
         # the wrapper's remove-unit is idempotent (rm -f semantics).
         self._run(self._seam_argv("remove-unit", slot_id), check=False)
+
+    def write_quadlet(self, quadlet_path: Path, unit_text: str) -> None:
+        """Write a ``hal0-slot@<token>.container`` Quadlet source file (P3-quadlet).
+
+        The declarative Quadlet replacement for :meth:`write_unit`: root-owned by
+        design under ``/etc/containers/systemd/``, so a hal0-service-user install
+        routes the write through ``hal0-systemctl write-quadlet <token>`` (body on
+        stdin). Dev/CI/test (not the hal0 user) writes directly, exactly as
+        before P3-perms.
+        """
+        if not self._is_hal0_user():
+            quadlet_path.parent.mkdir(parents=True, exist_ok=True)
+            quadlet_path.write_text(unit_text)
+            return
+        token = _slot_id_from_quadlet(quadlet_path.name)
+        if token is None:
+            raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
+        self._run(
+            self._seam_argv("write-quadlet", token),
+            input=unit_text,
+            text=True,
+            check=True,
+        )
+
+    def remove_quadlet(self, quadlet_path: Path) -> None:
+        """Delete a ``hal0-slot@<token>.container`` Quadlet file (no-op if absent)."""
+        if not self._is_hal0_user():
+            quadlet_path.unlink(missing_ok=True)
+            return
+        token = _slot_id_from_quadlet(quadlet_path.name)
+        if token is None:
+            raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
+        self._run(self._seam_argv("remove-quadlet", token), check=False)
 
     def systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         """Run ``systemctl <args...>``, routing daemon-reload + hal0-slot@

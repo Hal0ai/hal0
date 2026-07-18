@@ -101,7 +101,7 @@ class Qwen3TTSProvider(Provider):
     wraps ``qwen3tts_server.py`` which implements OpenAI-compat
     ``POST /v1/audio/speech``, ``GET /v1/models``, and ``GET /health``.
 
-    Primary deployment path is ``container_spec`` → ``_render_unit_from_plan``
+    Primary deployment path is ``container_spec`` → ``_render_quadlet_from_plan``
     (same pattern as KokoroProvider / FLMProvider).  ``build_env`` /
     ``start_cmd`` are informational stubs kept for ABC compliance.
     """
@@ -227,7 +227,7 @@ class Qwen3TTSProvider(Provider):
             group_add=[str(g) for g in resolve_gpu_group_ids()],
             port=port,
             # Port-mapped (not host networking) so it can coexist with the
-            # Kokoro TTS slot. _render_unit_from_plan derives
+            # Kokoro TTS slot. the Quadlet renderer derives
             # --publish=127.0.0.1:<port>:<port> from spec.port.
             network_mode="",
             extra_args=[],
