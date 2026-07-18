@@ -116,3 +116,40 @@ class TestPackagedRegistryMigration:
         with connect(tmp_path / "t.db") as conn:
             migrate(conn)
             assert migrate(conn) == []
+
+
+class TestPackagedStoreMigration:
+    """003_store.sql (ML-3) — deliberately "003" not "002" (OBS-1 owns 002,
+    in flight on a sibling branch); must apply cleanly on top of 001 and
+    add the refcounted ``store_blob`` table without touching ``model_file``.
+    """
+
+    def test_003_store_applies_on_top_of_001(self, tmp_path: Path) -> None:
+        with connect(tmp_path / "t.db") as conn:
+            applied = migrate(conn)
+            assert 1 in applied
+            assert 3 in applied
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "store_blob" in tables
+            # model_file (ML-1, empty) is untouched by the store migration.
+            assert conn.execute("SELECT COUNT(*) FROM model_file").fetchone()[0] == 0
+
+    def test_003_store_blob_refcount_roundtrip(self, tmp_path: Path) -> None:
+        with connect(tmp_path / "t.db") as conn:
+            migrate(conn)
+            conn.execute(
+                "INSERT INTO store_blob (sha256, size_bytes, blob_path, refcount, created_at) "
+                "VALUES ('abc123', 100, '/store/blobs/abc123', 1, '2026-01-01T00:00:00')"
+            )
+            row = conn.execute("SELECT refcount FROM store_blob WHERE sha256='abc123'").fetchone()
+            assert row["refcount"] == 1
+
+    def test_migration_is_idempotent_against_the_real_package(self, tmp_path: Path) -> None:
+        with connect(tmp_path / "t.db") as conn:
+            migrate(conn)
+            assert migrate(conn) == []

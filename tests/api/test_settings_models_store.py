@@ -28,6 +28,22 @@ from hal0.api import create_app
 from hal0.config import paths as cfg_paths
 
 
+@pytest.fixture(autouse=True)
+def _no_chat_template_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the lifespan's chat-template seed for this module.
+
+    ML-3 unified the model-store resolver: chat templates now correctly
+    land under the SAME store root the pull/mount paths use (previously
+    ``model_store_root()``'s un-isolated ``/mnt/ai-models`` default meant
+    the seed silently escaped test isolation entirely). That coupling is
+    real and intentional, but it's orthogonal to what this module tests
+    (the store-move plan/migration contract) — seeding a few bundled
+    ``.jinja`` files would otherwise make every "no prior data" fixture
+    here spuriously report ``needs_migration``.
+    """
+    monkeypatch.setattr("hal0.templates.seed_chat_templates", lambda: None)
+
+
 @pytest.fixture
 def isolated_client(tmp_hal0_home: str) -> Iterator[TestClient]:
     app: FastAPI = create_app()
