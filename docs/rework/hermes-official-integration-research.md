@@ -6,6 +6,18 @@
 
 **Scope:** plugin architecture and lifecycle, providers, memory, MCP/tools/skills, gateway/platforms, voice, observability, sessions/context, security/config, and dashboard extensions. Primary sources are upstream documentation and source. Recommendations are explicitly labelled; an upstream capability is not evidence that hal0's pinned Hermes contains it.
 
+## Supported compatibility freeze
+
+hal0 supports the official Hermes tag [`v2026.7.7.2`](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.7.7.2), version `0.18.2`, released 2026-07-07. The reviewed annotated tag resolves to immutable commit [`9de9c25f620ff7f1ce0fd5457d596052d5159596`](https://github.com/NousResearch/hermes-agent/tree/9de9c25f620ff7f1ce0fd5457d596052d5159596) (tag object `b7751df34688835a108e0d630f3495fc11f3df79`). The installer pins that commit rather than a moving branch or version range.
+
+The compatibility review confirmed the three contracts needed by the first hal0 adapters:
+
+- [`ProviderProfile`](https://github.com/NousResearch/hermes-agent/blob/9de9c25f620ff7f1ce0fd5457d596052d5159596/providers/base.py) defaults `api_mode` to `chat_completions`; the official provider guide says OpenAI-compatible providers should use that mode.
+- [`MemoryProvider`](https://github.com/NousResearch/hermes-agent/blob/9de9c25f620ff7f1ce0fd5457d596052d5159596/agent/memory_provider.py) exposes `system_prompt_block(self)`, `prefetch(self, query, *, session_id="")`, and `sync_turn(self, user_content, assistant_content, *, session_id="", messages=None)`.
+- [`PluginContext`](https://github.com/NousResearch/hermes-agent/blob/9de9c25f620ff7f1ce0fd5457d596052d5159596/hermes_cli/plugins.py) exposes `register_tts_provider(self, provider)` and `register_transcription_provider(self, provider)`. These Python hooks are selected for hal0 voice because the planned adapter needs runtime slot routing; command providers remain the official recommendation when a single static command is sufficient.
+
+Minimal MIT-licensed signature fixtures are copied under `tests/fixtures/hermes/contracts/`. They are intentionally test-only: importing hal0 core remains independent of Hermes. Any upstream pin change must update these fixtures and pass the compatibility test before downstream adapter work continues.
+
 ## Executive findings
 
 1. **Do not design one giant “hal0 plugin.”** Official Hermes has deliberately separate extension systems for general tools/hooks/commands/skills, LLM providers, memory providers, context engines, gateway platforms, image/video generation, TTS/STT, MCP, gateway hooks, shell hooks, dashboard plugins, dashboard authentication, and observability. The upstream map explicitly directs each use case to a different surface ([plugin guide](https://github.com/NousResearch/hermes-agent/blob/7fd419e5e6a0ac53f934a69226262c41ba130a2c/website/docs/user-guide/features/plugins.md#pluggable-interfaces--where-to-go-for-each)).
