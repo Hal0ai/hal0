@@ -35,7 +35,14 @@ from typing import Any, Final
 # ``TOKENIZER_ID`` and ``HF_TOKEN`` alike, which is the conservative
 # (over-redact) behaviour the spec asks for.
 _SENSITIVE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT)"
+    # The trailing ``_KEY$``/``^KEY$`` alternative catches credential names
+    # that end in a bare KEY suffix — hal0's OWN auth keys
+    # (HAL0_ADMIN_KEY / HAL0_CLIENT_KEY) matched none of the older
+    # substrings and leaked VERBATIM into shareable doctor bundles
+    # (halo150 O9). Anchored as a suffix (not a bare ``KEY`` substring) so
+    # non-secret settings like KEY_ROTATION_DAYS or KEYBOARD_LAYOUT don't
+    # over-mask.
+    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|^KEY$)"
 )
 
 # Plain sentinel for masked values. Exposed via __all__ so a future
