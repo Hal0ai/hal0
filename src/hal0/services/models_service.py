@@ -983,3 +983,208 @@ async def inspect_hf_repo(body: dict[str, Any]) -> dict[str, Any]:
     result = await fetch_repo(repo)
     INSPECT_CACHE[repo] = (now, result)
     return {"repo": repo, "cached": False, **result}
+
+
+# ── O10 guard: bare double-quoted JSON eaten by shell semantics ───────────────
+#
+# spec-flags-ownership §3 "JSON-token integrity": editable flag text carrying a
+# JSON value (e.g. ``--chat-template-kwargs '{"enable_thinking":false}'``) must
+# survive shlex-splitting intact to reach the runner. A common operator mistake
+# is to omit the surrounding SINGLE quotes:
+#
+#     --chat-template-kwargs {"enable_thinking":false}     # WRONG
+#
+# ``shlex.split`` then treats the double quotes as shell quoting and strips them,
+# yielding the token ``{enable_thinking:false}`` — no longer valid JSON, and the
+# runner rejects it (or worse, silently mis-parses). This guard catches exactly
+# that shape at SAVE time (model PUT + any slot-config writer that opts in) and
+# tells the operator to single-quote the JSON value, rather than letting a tune
+# that can never load through to launch. It runs BEFORE the managed-arg denylist
+# so the more actionable quoting message wins.
+
+
+def screen_extra_args_json(raw: str, *, segment: str = "extra_args") -> None:
+    """Reject ``raw`` when a bare double-quoted JSON value was eaten by the shell.
+
+    Detection (deliberately narrow — warning-level UX, one precise cause):
+    a ``shlex``-split token that *starts with* ``{`` but is NOT valid JSON,
+    while the RAW string contains the substring ``{"`` (proof a
+    double-quoted JSON object was typed). That combination only arises when
+    shell quote-stripping removed the JSON's own double quotes — a correctly
+    single-quoted ``'{"…":…}'`` survives as a token that IS valid JSON and is
+    never flagged.
+
+    Raises :class:`~hal0.errors.BadRequest` (``model.extra_args_json_quoting``)
+    with a message telling the operator to single-quote the value. A ``raw``
+    that does not shlex-parse at all is left for the caller's own
+    unparseable-string handling (this guard only inspects a clean token
+    list).
+    """
+    import json
+    import shlex
+
+    from hal0.errors import BadRequest
+
+    if not raw or not raw.strip():
+        return
+    if '{"' not in raw:
+        # No double-quoted JSON object present at all — nothing this guard
+        # is responsible for. (A single-quoted JSON value shlex-splits to a
+        # token that still literally contains ``{"``, so the correctly
+        # quoted case is NOT short-circuited here — it is passed through and
+        # accepted below because its token parses as valid JSON.)
+        return
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        # Unparseable as a whole — the caller (model PUT) raises its own
+        # ``model.extra_args_unparseable``; don't double-report.
+        return
+    for tok in tokens:
+        if not tok.startswith("{"):
+            continue
+        try:
+            json.loads(tok)
+        except ValueError:
+            raise BadRequest(
+                f"{segment} contains a JSON value whose double quotes were "
+                f"stripped by shell parsing (got token {tok!r}). Wrap the "
+                "JSON in SINGLE quotes so it survives intact, e.g. "
+                "--chat-template-kwargs '{\"enable_thinking\":false}'",
+                code="model.extra_args_json_quoting",
+                details={"segment": segment, "token": tok},
+            ) from None
+
+
+# ── duplicate a model row (UI-API-1 item 3) ───────────────────────────────────
+#
+# Study note (spec deliverable): a model's *weights* live on disk at
+# ``Model.path``; the store's refcount lives in the ``store_blob`` table, keyed
+# by sha256, with one ``model_file`` row per (model_id, rel) referencing a blob
+# (``hal0.registry.gc`` / ``hal0.db.repository``). Duplicating therefore copies
+# METADATA only — the new row shares the SAME ``path`` (no byte copy) — and,
+# when the source carries ``model_file`` rows (pulled models do; hand-registered
+# ones do not), replicates them under the new id and bumps each blob's refcount,
+# exactly as a same-sha pull does (``pull._register_blob_after_install`` /
+# ``_maybe_hardlink_from_blob``). That keeps ``store_blob.refcount`` honest so a
+# later delete of either row never orphans bytes the other still uses.
+
+
+def _copy_model_files_refcounted(db_path: Any, *, source_id: str, new_id: str) -> int:
+    """Replicate ``source_id``'s ``model_file`` rows under ``new_id``, bumping
+    each referenced blob's refcount. Returns the number of files replicated.
+
+    No-op (returns 0) when the source has no ``model_file`` rows — the common
+    case for hand-registered single-file models, which are tracked only by
+    ``Model.path`` and have no blob accounting. Byte content is never touched:
+    the new rows point at the SAME ``dest`` as the source.
+    """
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+
+    copied = 0
+    with connect(db_path) as conn:
+        rows = repository.list_model_files(conn, source_id)
+        if not rows:
+            return 0
+        with tx(conn):
+            for row in rows:
+                sha256 = row.get("sha256")
+                repository.insert_model_file(
+                    conn,
+                    model_id=new_id,
+                    rel=row["rel"],
+                    dest=row.get("dest"),
+                    size_bytes=row.get("size_bytes"),
+                    sha256=sha256,
+                    lfs=bool(row["lfs"]) if row.get("lfs") is not None else None,
+                    role=row.get("role"),
+                    shard_index=row.get("shard_index"),
+                )
+                # Bump the shared blob's refcount so the new row is a real
+                # referent — mirrors the same-sha pull path. Only when a blob
+                # row actually exists for this sha (non-LFS rows carry none).
+                if sha256 and repository.get_blob(conn, sha256) is not None:
+                    repository.bump_blob_ref(conn, sha256)
+                copied += 1
+    return copied
+
+
+def duplicate_model(
+    registry: Any,
+    *,
+    source_id: str,
+    new_id: str,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Create a new registry row referencing the SAME weights as ``source_id``.
+
+    Copies the source's metadata/defaults/capabilities/backends into a new
+    ``Model`` keyed by ``new_id`` (same ``path`` — NO byte copy), replicates
+    its ``model_file`` rows with refcount bumps (:func:`_copy_model_files_refcounted`),
+    and — when ``profile`` is given — stamps that profile's flags into the new
+    row's ``defaults.extra_args`` (and records the pointer in
+    ``defaults.profile``), exactly as the drawer's copy-not-layer stamp does.
+
+    Raises:
+        ModelNotFound: ``source_id`` is not registered.
+        ModelAlreadyExists: ``new_id`` is already taken.
+        BadRequest: ``new_id`` empty, or equal to ``source_id``.
+        NotFound (profiles.not_found): ``profile`` given but unknown.
+    """
+    from hal0.errors import BadRequest
+    from hal0.registry.model import Model, ModelDefaults
+
+    if not new_id or not new_id.strip():
+        raise BadRequest("'new_id' must be a non-empty model id", code="validation.invalid")
+    new_id = new_id.strip()
+    if new_id == source_id:
+        raise BadRequest(
+            "'new_id' must differ from the source model id",
+            code="validation.invalid",
+            details={"model_id": source_id},
+        )
+
+    source = registry.get(source_id)  # raises ModelNotFound
+
+    dumped = source.model_dump(mode="python")
+    dumped["id"] = new_id
+
+    # Optional profile stamp: materialise the profile's flag text into the new
+    # row's editable defaults (copy-not-layer — the profile is never mutated).
+    if profile:
+        from hal0.profiles import ProfileCatalog
+
+        resolved = ProfileCatalog().resolve(profile)  # raises NotFound if unknown
+        existing_defaults = dumped.get("defaults") or {}
+        if not isinstance(existing_defaults, dict):
+            existing_defaults = {}
+        existing_defaults = dict(existing_defaults)
+        existing_defaults["profile"] = profile
+        existing_defaults["extra_args"] = resolved.flags
+        dumped["defaults"] = existing_defaults
+
+    new_model = Model.model_validate(dumped)
+    # Normalise an all-None defaults table back to None so the row matches a
+    # freshly-created one (mirrors _model_to_toml's "collapse when empty").
+    if new_model.defaults is not None and new_model.defaults == ModelDefaults():
+        new_model = new_model.model_copy(update={"defaults": None})
+
+    registry.add(new_model)  # raises ModelAlreadyExists if new_id is taken
+
+    db_path = getattr(registry, "db_path", None)
+    files_copied = 0
+    try:
+        files_copied = _copy_model_files_refcounted(db_path, source_id=source_id, new_id=new_id)
+    except Exception:  # pragma: no cover - defensive
+        # The registry row is the source of truth for "does this model exist";
+        # a blob-accounting hiccup must not leave the duplicate half-created.
+        # Roll the row back and re-raise so the caller returns a clean error.
+        with contextlib.suppress(Exception):
+            registry.remove(new_id)
+        raise
+
+    out = model_to_dict(new_model)
+    out["duplicated_from"] = source_id
+    out["files_refcounted"] = files_copied
+    return out

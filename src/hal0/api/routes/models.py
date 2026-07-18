@@ -35,6 +35,7 @@ from hal0.registry.pull import (
 from hal0.registry.pull import persist_pull_job as _persist_pull_job
 from hal0.registry.pull import pull_job_file as _pull_job_file
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
+from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
 
 # See slots.py for the writer-gate rationale.
@@ -80,6 +81,11 @@ _speed_for_entry = _svc.speed_for_entry
 _eta_for_entry = _svc.eta_for_entry
 _hf_repo_for_model = _svc.hf_repo_for_model
 _suggest_id_from_path = _svc.suggest_id_from_path
+
+# Runner-key registry (UI-API-1 item 2): the set of valid ``preferred_runner``
+# keys the model PUT validates against. Bound here so the handler reads as a
+# thin membership check.
+_RUNNER_IMAGES = _runner_images_registry
 
 # Pull-job orchestration bindings (P3-routers §J → hal0.registry.pull_jobs).
 _load_persisted_pull_job = _pull_jobs.load_persisted
@@ -543,6 +549,19 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
+    # Validate a writable ``preferred_runner`` (UI-API-1 item 2): the field is
+    # a key into hal0.runners.RUNNER_IMAGES. Reject an unknown key at SAVE time
+    # so the drawer's runner-override dropdown can never persist a value the
+    # launcher would silently skip. ``None``/"" clears the preference (valid).
+    if "preferred_runner" in body:
+        pr = body["preferred_runner"]
+        if pr is not None and (not isinstance(pr, str) or pr not in _RUNNER_IMAGES):
+            raise BadRequest(
+                f"preferred_runner {pr!r} is not a known runner key",
+                code="model.unknown_runner",
+                details={"preferred_runner": pr, "available": sorted(_RUNNER_IMAGES)},
+            )
+
     # Screen defaults.extra_args against the managed-arg denylist at SAVE
     # time. Launch already rejects loudly (slot.managed_arg_denied), so this
     # is defense-in-depth/UX for non-dashboard clients: fail the write with
@@ -552,6 +571,11 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         import shlex
 
         from hal0.slots.argv import _deny_managed_flags
+
+        # O10 guard (spec §3 JSON-token integrity): catch a bare double-quoted
+        # JSON value the shell would eat BEFORE the denylist/parse checks so
+        # the operator gets the actionable "single-quote it" message.
+        _svc.screen_extra_args_json(defaults["extra_args"], segment="model defaults.extra_args")
 
         try:
             tokens = shlex.split(defaults["extra_args"])
@@ -591,6 +615,67 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             data={"id": model.id, "changed_fields": changed},
         )
     return _model_to_dict(model)
+
+
+@router.post("/{model_id}/duplicate", status_code=201)
+async def duplicate_model(model_id: str, request: Request) -> dict[str, Any]:
+    """Duplicate a registry row so two rows reference the SAME weights.
+
+    Body::
+
+        {
+          "new_id":  "qwen3-4b-cpu",    # required — the new registry id
+          "profile": "cpu-tune"          # optional — stamp this profile's flags
+        }                                #            into the new row's defaults
+
+    The new row copies the source's metadata/defaults/capabilities/backends and
+    shares its ``path`` — NO byte copy. When the source is a pulled model with
+    ``model_file`` rows, those are replicated under the new id and each shared
+    blob's refcount is bumped, so a later delete of either row never orphans
+    bytes the other still uses (see
+    :func:`hal0.services.models_service.duplicate_model`). Optionally stamps a
+    profile's flags into the new row's ``defaults.extra_args`` (copy-not-layer;
+    the profile is never mutated — spec-flags-ownership §3).
+
+    Errors:
+      * ``404 model.not_found`` — ``model_id`` (source) not registered.
+      * ``404 profiles.not_found`` — ``profile`` given but unknown.
+      * ``409 model.already_exists`` — ``new_id`` already taken.
+      * ``400 validation.invalid`` — ``new_id`` missing / equal to the source.
+    """
+    registry = request.app.state.model_registry
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+
+    new_id = body.get("new_id")
+    if not isinstance(new_id, str):
+        raise BadRequest("'new_id' must be a string", code="validation.invalid")
+    profile = body.get("profile")
+    if profile is not None and not isinstance(profile, str):
+        raise BadRequest("'profile' must be a string when set", code="validation.invalid")
+
+    result = _svc.duplicate_model(registry, source_id=model_id, new_id=new_id, profile=profile)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.registered",
+            "info",
+            f"model:{result['id']}",
+            f"{result['id']}: registered (duplicate of {model_id})",
+            data={
+                "id": result["id"],
+                "backends": list(result.get("backends") or []),
+                "capabilities": list(result.get("capabilities") or []),
+                "source": "duplicate",
+                "duplicated_from": model_id,
+            },
+        )
+    return result
 
 
 # ── DELETE + cascade ───────────────────────────────────────────────────────

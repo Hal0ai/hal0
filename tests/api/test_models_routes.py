@@ -672,3 +672,36 @@ def test_update_model_rejects_managed_args_in_extra_args(
         json={"defaults": {"extra_args": "-fa on -b 512"}},
     )
     assert ok.status_code == 200, ok.text
+
+
+# ── O10 guard: screen_extra_args_json (pure) ──────────────────────────────────
+
+
+def test_screen_extra_args_json_rejects_shell_stripped_json() -> None:
+    """Bare double-quoted JSON whose quotes shlex strips is rejected with the
+    single-quote guidance (spec §3 JSON-token integrity)."""
+    from hal0.errors import BadRequest
+    from hal0.services.models_service import screen_extra_args_json
+
+    with pytest.raises(BadRequest) as exc:
+        screen_extra_args_json('--chat-template-kwargs {"enable_thinking":false}')
+    assert exc.value.code == "model.extra_args_json_quoting"
+    # The message points at single-quoting.
+    assert "SINGLE" in str(exc.value) or "single" in str(exc.value)
+
+
+def test_screen_extra_args_json_accepts_single_quoted_json() -> None:
+    """Correctly single-quoted JSON survives shlex-splitting and passes."""
+    from hal0.services.models_service import screen_extra_args_json
+
+    # No exception.
+    screen_extra_args_json("--chat-template-kwargs '{\"enable_thinking\":false}'")
+
+
+def test_screen_extra_args_json_ignores_non_json_flags() -> None:
+    """A tune with no JSON object is untouched by the guard."""
+    from hal0.services.models_service import screen_extra_args_json
+
+    screen_extra_args_json("-fa on -b 512 --threads 8")
+    screen_extra_args_json("")
+    screen_extra_args_json("   ")
