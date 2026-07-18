@@ -86,6 +86,18 @@ def _prefix(prefix: str) -> Matcher:
     return _match
 
 
+def _agent_role_slots(candidate: str) -> bool:
+    """Match the runtime role-slot endpoint ``/api/agents/{agent_id}/role-slots``.
+
+    Segment-exact so it matches BOTH the FastAPI path template (with the
+    literal ``{agent_id}`` segment the exposure-CI ratchet enumerates) and a
+    concrete request path — without widening to any other ``/api/agents/*``
+    route, which must stay ADMIN via the broader prefix rule.
+    """
+    segs = candidate.strip("/").split("/")
+    return len(segs) == 4 and segs[0] == "api" and segs[1] == "agents" and segs[3] == "role-slots"
+
+
 def _outside_api_v1_mcp(candidate: str) -> bool:
     """True for any path NOT under ``/api``, ``/v1``, or ``/mcp``.
 
@@ -189,6 +201,14 @@ RULES: tuple[_Rule, ...] = (
     _Rule("benchmarks", _prefix("/api/benchmarks"), AuthClass.ADMIN, None),
     _Rule("chat-templates", _prefix("/api/chat-templates"), AuthClass.ADMIN, None),
     _Rule("agent approvals", _prefix("/api/agent/approvals"), AuthClass.ADMIN, None),
+    # Runtime role-slot resolution (Hermes integration finding #2). Read-only,
+    # provider-facing: the hal0-provider plugin polls this at runtime with the
+    # SAME inference-client token it uses for /v1 + /api/models, so it's CLIENT
+    # (GET only) — NOT admin. Must precede the /api/agents ADMIN prefix rule
+    # below (first-match-wins; the map carries no secrets or config). Every
+    # OTHER /api/agents route (lifecycle/personas/restart/chat-proxy) stays
+    # ADMIN via the broader rule that follows.
+    _Rule("agent role-slots (provider read, GET)", _agent_role_slots, AuthClass.CLIENT, _GET),
     _Rule(
         "agents (lifecycle/personas/restart/chat-proxy)",
         _prefix("/api/agents"),

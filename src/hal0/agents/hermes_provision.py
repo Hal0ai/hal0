@@ -57,6 +57,8 @@ from typing import Any
 
 import structlog
 
+from hal0.agents import role_resolution
+
 log = structlog.get_logger(__name__)
 
 # Schema version embedded in every provision.json. Bump when the on-disk
@@ -3844,48 +3846,13 @@ _DELEGATION_SLOT_NAME = "agent"
 _UTILITY_SLOT_NAME = "utility"
 
 
-def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
-    """Return the ready ``type=='llm'`` slot whose name matches ``name``.
-
-    Degrade-safe: returns ``None`` when the slot is absent OR present but
-    not ready/loaded OR carries no model_id, so callers can fall back
-    gracefully (delegation omitted; aux tasks revert to provider:"main").
-    """
-    for s in slots:
-        if not isinstance(s, dict):
-            continue
-        if _slot_alias(s) != name:
-            continue
-        if (s.get("type") or "").lower() != "llm":
-            continue
-        if not _is_ready(s):
-            continue
-        if not _slot_model_id(s):
-            continue
-        return s
-    return None
-
-
-def _has_ready_npu_llm_slot(slots: list[dict[str, Any]]) -> bool:
-    """True if a ready ``type=='llm'`` slot reports ``device_class``/``device`` npu.
-
-    Used to detect the utility role living on the NPU slot (name ``npu``, not
-    ``utility``) when ``/api/slots`` doesn't expose ``role``. Callers then route
-    the utility aux group to the ``hal0/utility`` virtual.
-    """
-    for s in slots:
-        if not isinstance(s, dict):
-            continue
-        if (s.get("device_class") or s.get("device") or "").lower() != "npu":
-            continue
-        if (s.get("type") or "").lower() != "llm":
-            continue
-        if not _is_ready(s):
-            continue
-        if not _slot_model_id(s):
-            continue
-        return True
-    return False
+# The role→slot resolution primitives + policy now live in one shared module
+# (``hal0.agents.role_resolution``) so the provision-time render below and the
+# runtime ``GET /api/agents/{agent_id}/role-slots`` endpoint resolve roles
+# identically. These aliases preserve the private names this module's callers
+# and tests already use.
+_find_named_ready_slot = role_resolution.find_named_ready_slot
+_has_ready_npu_llm_slot = role_resolution.has_ready_npu_llm_slot
 
 
 def _resolve_delegation(
@@ -3899,16 +3866,10 @@ def _resolve_delegation(
     ``None`` so the template omits the block and subagents inherit the
     parent (chat) model. ``base_url`` is the hal0 /v1 endpoint already
     used for the main model — setting it makes upstream auto-resolve the
-    provider to "custom".
+    provider to "custom". Delegates to
+    :func:`hal0.agents.role_resolution.build_delegation`.
     """
-    slot = _find_named_ready_slot(slots, _DELEGATION_SLOT_NAME)
-    if slot is None:
-        return None
-    return {
-        "model": _slot_model_id(slot),
-        "base_url": hal0_base_url,
-        "provider": "custom",
-    }
+    return role_resolution.build_delegation(slots, hal0_base_url=hal0_base_url)
 
 
 def _resolve_auxiliary_tasks(
@@ -3920,40 +3881,19 @@ def _resolve_auxiliary_tasks(
 
     vision/web_extract always render as provider:"main" (no dedicated
     slot). The compaction/search/title group routes to the ``utility``
-    slot when it's live; if that slot is missing the group degrades to
-    provider:"main" so side-tasks fall back to the chat model rather than
-    breaking. Resolution keys off the slot NAME (``utility``) and sends
-    the slot's model_id — swapping the slot's model flows through on the
-    next ``--repair``.
+    slot when it's live; if that slot is missing the group falls back to
+    the NPU llm slot (``hal0/npu``) and then to provider:"main" so
+    side-tasks inherit the chat model rather than breaking. Resolution
+    keys off the slot NAME (``utility``) and sends the slot's model_id —
+    swapping the slot's model flows through on the next ``--repair``.
+    Delegates to :func:`hal0.agents.role_resolution.build_auxiliary_tasks`.
     """
-    tasks: dict[str, dict[str, Any]] = {}
-    for task in _MAIN_AUX_TASKS:
-        tasks[task] = {"provider": "main", "model": "", "base_url": ""}
-
-    utility = _find_named_ready_slot(slots, _UTILITY_SLOT_NAME)
-    # When no utility-slot named ``utility`` exists but a ready NPU llm slot
-    # does (device="npu"), route aux tasks to hal0/npu. The retired ``role``
-    # tag was removed (slot ``name`` is the routing key) so hal0/utility
-    # resolves only to a slot literally named `utility`. hal0/npu is
-    # special-cased to match by device, then falls back to the anchor.
-    npu_utility = utility is None and _has_ready_npu_llm_slot(slots)
-    for task in _UTILITY_AUX_TASKS:
-        if utility is not None:
-            tasks[task] = {
-                "provider": "custom",
-                "model": _slot_model_id(utility),
-                "base_url": hal0_base_url,
-            }
-        elif npu_utility:
-            tasks[task] = {
-                "provider": "custom",
-                "model": "hal0/npu",
-                "base_url": hal0_base_url,
-            }
-        else:
-            # Degrade safely: no utility target → inherit the chat model.
-            tasks[task] = {"provider": "main", "model": "", "base_url": ""}
-    return tasks
+    return role_resolution.build_auxiliary_tasks(
+        slots,
+        hal0_base_url=hal0_base_url,
+        main_tasks=_MAIN_AUX_TASKS,
+        utility_tasks=_UTILITY_AUX_TASKS,
+    )
 
 
 def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:

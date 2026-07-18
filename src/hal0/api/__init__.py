@@ -113,6 +113,9 @@ from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
 from hal0.api.routes import (
+    roles as roles_routes,
+)
+from hal0.api.routes import (
     secrets as secrets_routes,
 )
 from hal0.api.routes import (
@@ -1585,6 +1588,18 @@ def create_app() -> FastAPI:
         agents_routes.router,
         prefix="/api/agents",
         tags=["agents"],
+    )
+
+    # Runtime role-slot resolution (Hermes integration finding #2). Live,
+    # generation-stamped GET /api/agents/{agent_id}/role-slots the provider
+    # queries at runtime instead of freezing role assignments into profile
+    # config. Read-only; classified CLIENT in security/exposure.py (the rest
+    # of /api/agents stays ADMIN). Resolution policy is shared verbatim with
+    # the provisioner via hal0.agents.role_resolution.
+    app.include_router(
+        roles_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "roles"],
     )
 
     # Agent personas (v0.3 PR-4). Per-agent persona TOML browse + activate
