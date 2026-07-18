@@ -267,7 +267,7 @@ async def list_features(request: Request) -> dict[str, Any]:
       - ``memory``: a memory provider is wired ([memory].enabled + a
         successful init).
       - ``memory_engine``: the configured engine name (``hindsight`` |
-        ``cognee`` | ``mem0`` | …) — a string, not a bool.
+        ``pgvector`` | ``mem0`` | …) — a string, not a bool.
       - ``npu``: an NPU was detected by the (cached) hardware probe.
       - ``mcp_supervisor``: the MCP process supervisor (start/stop/
         restart) — not implemented yet, always false.

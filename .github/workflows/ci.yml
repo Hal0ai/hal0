@@ -33,11 +33,6 @@ jobs:
     # 3.14 is experimental until every dep ships 3.14 wheels — surface it
     # without reddening main. No-op on PRs, which run 3.12 only.
     continue-on-error: ${{ matrix.python-version == '3.14' }}
-    env:
-      # fastembed (cognee memory tests) honours FASTEMBED_CACHE_PATH
-      # (fastembed/common/utils.py). Pin it to a stable, cacheable dir so the
-      # warm step AND pytest share one location that actions/cache persists.
-      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     strategy:
       fail-fast: false
       matrix:
@@ -60,29 +55,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install
         run: pip install -e ".[dev]"
-      - name: Cache fastembed embedding model
-        # cognee memory tests (tests/memory/test_cognee_wrapper.py) embed via
-        # fastembed, which downloads qdrant/bge-small-en-v1.5-onnx-q (~64 MB)
-        # into FASTEMBED_CACHE_PATH on first use. That per-run download
-        # intermittently slow-fails (could-not-load-model-from-any-source) and
-        # gated unrelated PRs (#442, #445). The model id is fixed, so a static
-        # key caches once and restores forever (bump -vN to refresh).
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/.fastembed-cache
-          key: fastembed-bge-small-en-v1.5-v2
-      - name: Warm fastembed cache
-        # On a cache miss, download the model now. fastembed already retries 3x
-        # internally; we wrap each attempt in `timeout` so a stalled connection
-        # is bounded (~6 min) and retried fresh rather than hanging. Best-effort:
-        # on total failure, let pytest surface the error rather than masking it.
-        run: |
-          for attempt in 1 2 3; do
-            timeout 360 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5'); print('fastembed model warmed')" && exit 0
-            echo "::warning::fastembed warm attempt $attempt failed/timed out; retrying in 10s"
-            sleep 10
-          done
-          echo "::warning::fastembed warm-up failed after 3 attempts; cognee tests will surface it"
       - name: Lint
         run: ruff check src tests
       - name: Format check

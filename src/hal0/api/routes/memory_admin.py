@@ -17,7 +17,7 @@ Design:
   forwarded verbatim, responses returned verbatim. The allowlist (not a
   wildcard proxy) keeps the surface reviewable and the OpenAPI doc honest.
 * Gating: provider missing → 503 ``memory.unavailable`` (house seam);
-  provider without a Hindsight client (cognee/pgvector engines) → 501
+  provider without a Hindsight client (e.g. the pgvector engine) → 501
   ``memory.engine_unsupported``.
 * Upstream errors: 4xx pass through status with code ``memory.engine_error``;
   upstream 5xx → 502; transport failure → 503 ``memory.engine_unreachable``.
