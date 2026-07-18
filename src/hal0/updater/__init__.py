@@ -1,6 +1,6 @@
 """hal0.updater — Atomic self-update with cosign-verified releases.
 
-Implements `hal0 update [--channel=stable|nightly] [--check] [--rollback]`.
+Implements `hal0 update [--check] [--rollback]` on the stable channel.
 
 The updater fetches the per-channel release manifest, verifies its cosign
 signature, extracts to a versioned directory, runs any pending config

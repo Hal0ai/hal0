@@ -1,10 +1,11 @@
 """Tests for hal0.updater.Updater — apply, rollback, check semantics.
 
 These tests run entirely against ``HAL0_HOME`` tmp dirs and ``file://``
-release manifests; no network, no real cosign. Cosign verification is
-gated behind ``HAL0_UPDATE_SKIP_COSIGN=1`` for the happy-path tests so
-the swap orchestration can be exercised without a real signed artifact
-(see PLAN §17 risk #2 — the documented gap closes before v1).
+release manifests; no network, no real cosign. The ``cosign_skip`` fixture
+stubs :func:`hal0.updater.updater._verify_cosign` to a no-op for the
+happy-path tests so the swap orchestration can be exercised without a real
+signed artifact — cosign verification itself is mandatory in production and
+has no runtime bypass.
 """
 
 from __future__ import annotations
@@ -36,10 +37,8 @@ from hal0.updater import (
 )
 from hal0.updater.updater import (
     _atomic_symlink_swap,
-    _cosign_skip,
     _current_symlink,
     _is_newer,
-    _is_pre_release,
     _parse_manifest,
     _previous_record,
     _read_release_notes,
@@ -86,31 +85,24 @@ def _write_release_manifest(
     manifest_path: Path,
     tarball: Path,
     version: str,
-    scheme: str = "bundle",
-    sig: Path | None = None,
-    cert: Path | None = None,
     bundle: Path | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a full hal0.releases.v1 manifest pointing at file:// URLs.
 
-    Since #1159 the manifest prefers a ``bundle_url`` (a Sigstore bundle
-    that embeds the cert + signature + Rekor SET) over the old detached
-    ``sig_url`` + ``cert_url``. #1189's dual-emit transition window keeps
-    both schemes available on the wire so manifests still parse on clients
-    built before the bundle fix shipped (see ``ReleaseManifest.sig_url``).
-
-    ``scheme`` selects what this manifest carries: ``"bundle"`` (default —
-    what new releases publish and what fresh clients prefer), ``"legacy"``
-    (sig_url/cert_url only — simulates a pre-#1159 manifest, or exercises
-    the fallback path a #1189 client takes when bundle_url is absent), or
-    ``"both"`` (mirrors an actual dual-emit release).
+    The manifest carries a ``bundle_url`` (a Sigstore bundle that embeds the
+    cert + signature + Rekor SET, #1159) — the only signing scheme the
+    updater accepts.
     """
+    bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
+    if not bundle.exists():
+        bundle.write_bytes(b"sigstore-bundle-placeholder\n")
     payload: dict[str, Any] = {
         "_schema": "hal0.releases.v1",
         "version": version,
         "channel": "stable",
         "url": f"file://{tarball}",
+        "bundle_url": f"file://{bundle}",
         "digest_sha256": _sha256_of(tarball),
         "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         "signer_issuer": "https://token.actions.githubusercontent.com",
@@ -119,22 +111,6 @@ def _write_release_manifest(
         "notes_url": "https://example.test/notes",
         "toolbox_images": {},
     }
-    if scheme in ("bundle", "both"):
-        bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
-        if not bundle.exists():
-            bundle.write_bytes(b"sigstore-bundle-placeholder\n")
-        payload["bundle_url"] = f"file://{bundle}"
-    if scheme in ("legacy", "both"):
-        sig = sig if sig is not None else Path(f"{tarball}.sig")
-        cert = cert if cert is not None else Path(f"{tarball}.crt")
-        if not sig.exists():
-            sig.write_bytes(b"signature-placeholder\n")
-        if not cert.exists():
-            cert.write_bytes(
-                b"-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n"
-            )
-        payload["sig_url"] = f"file://{sig}"
-        payload["cert_url"] = f"file://{cert}"
     if overrides:
         payload.update(overrides)
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -143,8 +119,17 @@ def _write_release_manifest(
 
 @pytest.fixture
 def cosign_skip(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bypass cosign verification for happy-path tests."""
-    monkeypatch.setenv("HAL0_UPDATE_SKIP_COSIGN", "1")
+    """Stub out cosign verification for happy-path tests.
+
+    Cosign verification has no runtime bypass in production; tests that
+    don't care about the actual ``cosign verify-blob`` invocation stub the
+    verify step directly so the swap orchestration can be exercised without
+    a real signed artifact or a `cosign` binary on PATH.
+    """
+    monkeypatch.setattr(
+        "hal0.updater.updater._verify_cosign",
+        lambda *a, **k: None,
+    )
 
 
 @pytest.fixture
@@ -156,17 +141,10 @@ def synthetic_release(
     artifacts.mkdir()
     version = "0.0.1"
     tarball = _build_release_tarball(tmp=artifacts, version=version)
-    # Stub signature + cert files — contents don't matter when cosign is skipped.
-    sig = artifacts / f"hal0-{version}.tar.gz.sig"
-    sig.write_bytes(b"signature-placeholder\n")
-    cert = artifacts / f"hal0-{version}.tar.gz.crt"
-    cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n")
     manifest_path = artifacts / "latest.json"
     payload = _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
-        sig=sig,
-        cert=cert,
         version=version,
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
@@ -184,8 +162,6 @@ def synthetic_release(
     return {
         "version": version,
         "tarball": tarball,
-        "sig": sig,
-        "cert": cert,
         "manifest_path": manifest_path,
         "payload": payload,
     }
@@ -225,12 +201,9 @@ def test_releases_url_appends_channel_for_http_override(
 def test_manifest_schema_accepts_full_payload(tmp_path: Path) -> None:
     """A full v1 manifest validates and round-trips through ReleaseManifest."""
     tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
-    sig = tmp_path / "sig"
-    sig.write_bytes(b"x")
     payload = _write_release_manifest(
         manifest_path=tmp_path / "latest.json",
         tarball=tarball,
-        sig=sig,
         version="0.0.1",
     )
     m = ReleaseManifest.model_validate(payload)
@@ -262,12 +235,9 @@ def test_manifest_schema_rejects_malformed_digest() -> None:
 def test_manifest_schema_defaults_revoked_false(tmp_path: Path) -> None:
     """An older manifest without a ``revoked`` field parses with revoked=False."""
     tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
-    sig = tmp_path / "sig"
-    sig.write_bytes(b"x")
     payload = _write_release_manifest(
         manifest_path=tmp_path / "latest.json",
         tarball=tarball,
-        sig=sig,
         version="0.0.1",
     )
     m = _parse_manifest(payload)
@@ -275,28 +245,8 @@ def test_manifest_schema_defaults_revoked_false(tmp_path: Path) -> None:
     assert m.revoked_reason == ""
 
 
-def test_manifest_schema_accepts_legacy_only_payload(tmp_path: Path) -> None:
-    """#1189 dual-emit: a manifest with sig_url/cert_url but no bundle_url still parses.
-
-    This is the shape a client built before #1159 shipped would have
-    received (and the shape a #1189+ client falls back to when a manifest
-    predates the bundle fix).
-    """
-    tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
-    payload = _write_release_manifest(
-        manifest_path=tmp_path / "latest.json",
-        tarball=tarball,
-        version="0.0.1",
-        scheme="legacy",
-    )
-    m = _parse_manifest(payload)
-    assert m.bundle_url is None
-    assert m.sig_url is not None
-    assert m.cert_url is not None
-
-
 def test_manifest_schema_rejects_no_signing_scheme() -> None:
-    """A manifest with neither bundle_url nor a complete sig_url/cert_url pair is invalid."""
+    """A manifest without a bundle_url is invalid — it's the only signing scheme accepted."""
     payload = {
         "_schema": "hal0.releases.v1",
         "version": "0.0.1",
@@ -311,12 +261,9 @@ def test_manifest_schema_rejects_no_signing_scheme() -> None:
 def test_manifest_schema_accepts_revoked(tmp_path: Path) -> None:
     """A manifest with ``revoked: true`` + reason parses and round-trips."""
     tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
-    sig = tmp_path / "sig"
-    sig.write_bytes(b"x")
     payload = _write_release_manifest(
         manifest_path=tmp_path / "latest.json",
         tarball=tarball,
-        sig=sig,
         version="0.0.1",
         overrides={"revoked": True, "revoked_reason": "bad cosign cert"},
     )
@@ -356,16 +303,10 @@ def test_check_does_not_recommend_revoked_latest(
     artifacts.mkdir()
     version = "99.0.0"  # far ahead of __version__ so it WOULD update if not revoked
     tarball = _build_release_tarball(tmp=artifacts, version=version)
-    sig = artifacts / f"hal0-{version}.tar.gz.sig"
-    sig.write_bytes(b"sig\n")
-    cert = artifacts / f"hal0-{version}.tar.gz.crt"
-    cert.write_bytes(b"cert\n")
     manifest_path = artifacts / "latest.json"
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
-        sig=sig,
-        cert=cert,
         version=version,
         overrides={"revoked": True, "revoked_reason": "yanked: broken slot load"},
     )
@@ -386,16 +327,10 @@ def test_check_recommends_non_revoked_newer_latest(
     artifacts.mkdir()
     version = "99.0.0"
     tarball = _build_release_tarball(tmp=artifacts, version=version)
-    sig = artifacts / f"hal0-{version}.tar.gz.sig"
-    sig.write_bytes(b"sig\n")
-    cert = artifacts / f"hal0-{version}.tar.gz.crt"
-    cert.write_bytes(b"cert\n")
     manifest_path = artifacts / "latest.json"
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
-        sig=sig,
-        cert=cert,
         version=version,
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
@@ -465,7 +400,6 @@ def test_apply_happy_path_swaps_symlink(
     """End-to-end apply: download → sha verify → extract → symlink swap."""
     res = asyncio.run(Updater().apply())
     assert res["version"] == "0.0.1"
-    assert res["cosign_skipped"] is True
 
     link = _current_symlink()
     assert link.is_symlink()
@@ -493,16 +427,10 @@ def test_apply_records_previous_for_rollback(
     artifacts = tmp_path / "v2"
     artifacts.mkdir()
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
-    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
-    sig2.write_bytes(b"sig")
-    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
-    cert2.write_bytes(b"cert")
     manifest_path = Path(os.environ["HAL0_RELEASES_URL"])
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball2,
-        sig=sig2,
-        cert=cert2,
         version="0.0.2",
     )
 
@@ -569,15 +497,9 @@ def test_apply_repip_failure_rolls_back_symlink(
     artifacts = tmp_path / "v2"
     artifacts.mkdir()
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
-    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
-    sig2.write_bytes(b"sig")
-    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
-    cert2.write_bytes(b"cert")
     _write_release_manifest(
         manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
         tarball=tarball2,
-        sig=sig2,
-        cert=cert2,
         version="0.0.2",
     )
 
@@ -668,16 +590,10 @@ def test_prepare_reads_release_notes(
         "release.json": json.dumps({"highlights": ["h"], "breaking": ["b"], "migrations": ["m"]}),
     }
     tarball = _build_release_tarball(tmp=artifacts, version=version, contents=contents)
-    sig = artifacts / f"hal0-{version}.tar.gz.sig"
-    sig.write_bytes(b"sig\n")
-    cert = artifacts / f"hal0-{version}.tar.gz.crt"
-    cert.write_bytes(b"cert\n")
     manifest_path = artifacts / "latest.json"
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
-        sig=sig,
-        cert=cert,
         version=version,
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
@@ -689,35 +605,6 @@ def test_prepare_reads_release_notes(
     assert notes["highlights"] == ["h"]
     assert notes["breaking"] == ["b"]
     assert notes["migrations"] == ["m"]
-
-
-def test_prepare_falls_back_to_legacy_signing_urls(
-    tmp_hal0_home: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    cosign_skip: None,
-) -> None:
-    """prepare() downloads via sig_url/cert_url when a manifest has no bundle_url.
-
-    Covers the #1189 dual-emit fallback: an already-deployed client (or one
-    fetching a pre-#1159 manifest) still completes prepare() end-to-end.
-    """
-    artifacts = tmp_path / "artifacts"
-    artifacts.mkdir()
-    version = "0.0.1"
-    tarball = _build_release_tarball(tmp=artifacts, version=version)
-    manifest_path = artifacts / "latest.json"
-    _write_release_manifest(
-        manifest_path=manifest_path,
-        tarball=tarball,
-        version=version,
-        scheme="legacy",
-    )
-    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
-    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
-
-    res = asyncio.run(Updater().prepare())
-    assert res["version"] == version
 
 
 def test_read_release_notes_missing_is_empty(tmp_path: Path) -> None:
@@ -739,16 +626,10 @@ def test_apply_sha_mismatch_raises_typed_error(
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     tarball = _build_release_tarball(tmp=artifacts, version="0.0.1")
-    sig = artifacts / "hal0-0.0.1.tar.gz.sig"
-    sig.write_bytes(b"sig")
-    cert = artifacts / "hal0-0.0.1.tar.gz.crt"
-    cert.write_bytes(b"cert")
     manifest_path = artifacts / "latest.json"
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
-        sig=sig,
-        cert=cert,
         version="0.0.1",
         overrides={"digest_sha256": "0" * 64},
     )
@@ -829,24 +710,21 @@ def test_apply_download_failure_surfaces_typed_error(
 def test_cosign_missing_surfaces_typed_error(
     synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When cosign isn't installed and HAL0_UPDATE_SKIP_COSIGN isn't set,
-    apply raises UpdateCosignMissing with install hints rather than
-    silently falling back to unsigned acceptance."""
-    monkeypatch.delenv("HAL0_UPDATE_SKIP_COSIGN", raising=False)
+    """When cosign isn't installed, apply raises UpdateCosignMissing with
+    install hints rather than silently falling back to unsigned acceptance."""
     # Force "cosign not found" by emptying PATH.
     monkeypatch.setenv("PATH", "")
 
     with pytest.raises(UpdateCosignMissing) as exc_info:
         asyncio.run(Updater().apply())
     assert exc_info.value.code == "system.update_cosign_missing"
-    assert "skip_env" in exc_info.value.details
+    assert "install_hint_arch" in exc_info.value.details
 
 
 def test_cosign_failure_surfaces_typed_error(
     synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When cosign exists but rejects the signature, apply raises UpdateCosignFailed."""
-    monkeypatch.delenv("HAL0_UPDATE_SKIP_COSIGN", raising=False)
     # Plant a fake `cosign` on PATH that always exits non-zero.
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -886,16 +764,10 @@ def test_rollback_swaps_symlink_back(
     artifacts = tmp_path / "v2"
     artifacts.mkdir()
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
-    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
-    sig2.write_bytes(b"sig")
-    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
-    cert2.write_bytes(b"cert")
     manifest_path = Path(os.environ["HAL0_RELEASES_URL"])
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball2,
-        sig=sig2,
-        cert=cert2,
         version="0.0.2",
     )
     asyncio.run(Updater().apply())
@@ -932,15 +804,9 @@ def test_rollback_repips_prior_tree_when_not_editable(
     artifacts = tmp_path / "v2"
     artifacts.mkdir()
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
-    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
-    sig2.write_bytes(b"sig")
-    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
-    cert2.write_bytes(b"cert")
     _write_release_manifest(
         manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
         tarball=tarball2,
-        sig=sig2,
-        cert=cert2,
         version="0.0.2",
     )
     asyncio.run(Updater().apply())
@@ -984,15 +850,9 @@ def test_rollback_repip_failure_re_swaps_symlink_forward(
     artifacts = tmp_path / "v2"
     artifacts.mkdir()
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
-    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
-    sig2.write_bytes(b"sig")
-    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
-    cert2.write_bytes(b"cert")
     _write_release_manifest(
         manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
         tarball=tarball2,
-        sig=sig2,
-        cert=cert2,
         version="0.0.2",
     )
     asyncio.run(Updater().apply())
@@ -1027,59 +887,14 @@ def test_check_uses_per_channel_url(
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     tarball = _build_release_tarball(tmp=artifacts, version="0.0.1")
-    sig = artifacts / "hal0-0.0.1.tar.gz.sig"
-    sig.write_bytes(b"sig")
     manifest_path = artifacts / "latest.json"
-    _write_release_manifest(manifest_path=manifest_path, tarball=tarball, sig=sig, version="0.0.1")
+    _write_release_manifest(manifest_path=manifest_path, tarball=tarball, version="0.0.1")
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
 
     info_stable = asyncio.run(Updater(channel="stable").check())
     info_nightly = asyncio.run(Updater(channel="nightly").check())
     assert info_stable.channel == "stable"
     assert info_nightly.channel == "nightly"
-
-
-# ── HAL0_UPDATE_SKIP_COSIGN gate (pre-release only) ──────────────────────────
-
-
-@pytest.mark.parametrize(
-    "version,expected",
-    [
-        ("0.0.0", True),
-        ("0.1.0", True),
-        ("0.99.0", True),
-        ("1.0.0-rc1", True),
-        ("1.0.0-dev", True),
-        ("2.3.4-rc.5", True),
-        ("1.0.0", False),
-        ("1.2.3", False),
-        ("2.0.0", False),
-    ],
-)
-def test_is_pre_release(version: str, expected: bool) -> None:
-    """0.x and any version with a hyphen are pre-release; bare 1+ is stable."""
-    assert _is_pre_release(version) is expected
-
-
-def test_cosign_skip_honored_on_pre_release(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a pre-release build, HAL0_UPDATE_SKIP_COSIGN=1 disables verification."""
-    monkeypatch.setattr("hal0.__version__", "1.0.0-rc1")
-    monkeypatch.setenv("HAL0_UPDATE_SKIP_COSIGN", "1")
-    assert _cosign_skip() is True
-
-
-def test_cosign_skip_ignored_on_stable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On stable v1+, HAL0_UPDATE_SKIP_COSIGN=1 is silently dropped."""
-    monkeypatch.setattr("hal0.__version__", "1.0.0")
-    monkeypatch.setenv("HAL0_UPDATE_SKIP_COSIGN", "1")
-    assert _cosign_skip() is False
-
-
-def test_cosign_skip_false_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No env, no skip — regardless of build channel."""
-    monkeypatch.setattr("hal0.__version__", "1.0.0-rc1")
-    monkeypatch.delenv("HAL0_UPDATE_SKIP_COSIGN", raising=False)
-    assert _cosign_skip() is False
 
 
 # ── #510: dead-code sweep ──────────────────────────────────────────────────────
@@ -1102,7 +917,7 @@ def test_updater_pull_alias_removed() -> None:
 
 
 def test_release_manifest_channel_does_not_advertise_dev() -> None:
-    """The manifest channel description is reconciled to stable | nightly only."""
+    """The manifest channel description does not advertise a dev channel."""
     desc = ReleaseManifest.model_fields["channel"].description or ""
     assert "dev" not in desc
 
