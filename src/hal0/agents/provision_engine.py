@@ -2,8 +2,9 @@
 
 Distilled from the Hermes bootstrap pipeline
 (:mod:`hal0.agents.hermes_provision`) so multiple heavyweight bundled
-agents (turnstone today; Hermes can migrate onto it in a follow-up)
-share one phase-orchestration contract instead of each copying it.
+agents can share one phase-orchestration contract instead of each
+copying it (Hermes itself could migrate onto it in a follow-up). No
+bundled agent uses this engine yet.
 
 A provisioner supplies three things:
 

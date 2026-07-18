@@ -44,16 +44,12 @@ class _StubDriver:
         return "installed" if self._installed else "broken"
 
 
-# hal0 v0.3 ships exactly two bundled agents (hermes, turnstone) and BOTH
-# are in COEXISTING_AGENTS (ADR-0004 §2 amendment) — neither blocks the
-# other under single-pick. That leaves no REAL non-coexisting agent pair
-# to exercise AgentManager's single-pick BLOCKING / atomic --switch /
-# rollback-on-failure paths against, now that the two agents that used to
-# fill that role (pi-coder, opencode) are gone (refs P1-drivers). "widget"
-# is a synthetic, test-only bundled-agent name standing in for "some other
-# non-coexisting agent" purely so that manager logic stays under test; it
-# is never a real driver and BUNDLED_AGENTS is only ever patched inside
-# this fixture, never in production.
+# hal0 v0.3 ships exactly one bundled agent (hermes). "widget" is a
+# synthetic, test-only bundled-agent name standing in for "some other
+# bundled agent" purely so that manager logic (single-pick BLOCKING /
+# atomic --switch / rollback-on-failure) stays under test without a
+# second real driver; it is never a real driver and BUNDLED_AGENTS is
+# only ever patched inside this fixture, never in production.
 _FAKE_BUNDLED_AGENTS: tuple[str, ...] = (*BUNDLED_AGENTS, "widget")
 
 
@@ -224,75 +220,6 @@ def test_uninstall_when_not_installed_is_noop(
     # Driver's uninstall still runs (best-effort cleanup) — but no
     # disk state to remove.
     assert stub_drivers["widget"].uninstalls == 1
-
-
-# ── install: coexistence (ADR-0004 §2 amendment — hermes + turnstone) ────────
-
-
-def test_hermes_and_turnstone_coexist_without_switch(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    # Both are in COEXISTING_AGENTS — installing turnstone alongside hermes
-    # needs no --switch and must NOT tear hermes down.
-    manager.install("hermes")
-    rec = manager.install("turnstone")
-    assert rec.name == "turnstone"
-    assert stub_drivers["hermes"].uninstalls == 0
-    assert set(manager.installed_names()) == {"hermes", "turnstone"}
-
-
-def test_turnstone_over_noncoexisting_agent_requires_switch(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    # widget is NOT coexisting, so single-pick still bites.
-    manager.install("widget")
-    with pytest.raises(AgentAlreadyInstalledError) as exc:
-        manager.install("turnstone")
-    assert "widget" in str(exc.value)
-    assert "turnstone" in str(exc.value)
-    assert stub_drivers["turnstone"].installs == []
-    assert manager.installed_names() == ["widget"]
-
-
-def test_turnstone_over_noncoexisting_agent_with_switch_clears_it(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    manager.install("widget")
-    rec = manager.install("turnstone", switch=True)
-    assert rec.name == "turnstone"
-    assert stub_drivers["widget"].uninstalls == 1
-    assert manager.installed_names() == ["turnstone"]
-
-
-def test_noncoexisting_agent_over_coexisting_pair_clears_both_with_switch(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    # A non-coexisting agent installed over the hermes+turnstone pair must
-    # tear DOWN both (they both block it) under --switch.
-    manager.install("hermes")
-    manager.install("turnstone")
-    rec = manager.install("widget", switch=True)
-    assert rec.name == "widget"
-    assert stub_drivers["hermes"].uninstalls == 1
-    assert stub_drivers["turnstone"].uninstalls == 1
-    assert manager.installed_names() == ["widget"]
-
-
-def test_noncoexisting_agent_over_coexisting_pair_without_switch_raises(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    manager.install("hermes")
-    manager.install("turnstone")
-    with pytest.raises(AgentAlreadyInstalledError):
-        manager.install("widget")
-    # Neither incumbent torn down.
-    assert stub_drivers["hermes"].uninstalls == 0
-    assert stub_drivers["turnstone"].uninstalls == 0
 
 
 def test_uninstall_unknown_agent_raises(manager: AgentManager) -> None:
@@ -578,7 +505,7 @@ def test_switch_aborts_without_uninstalling_when_target_script_missing(
     any teardown. Regression for the "switching to a wheel install
     missing its bundled-agent scripts bricked the incumbent" bug.
 
-    hal0 v0.3's real bundled agents (hermes, turnstone) don't install via
+    hal0 v0.3's real bundled agent (hermes) doesn't install via
     shell script, so :data:`_SCRIPT_INSTALLED_AGENTS` is empty in
     production (the two agents that used to populate it, pi-coder and
     opencode, are gone — refs P1-drivers). "gizmo" stands in for a
@@ -679,19 +606,28 @@ def test_hermes_uninstall_refuses_unmanaged_home(
 # ── installer_script_path: FHS-aware resolution for wheel installs ───────────
 
 
-def test_installer_script_path_resolves_editable_when_present() -> None:
-    """Editable / dev checkout: this test runs against the real
-    checkout, which has ``installer/agents/turnstone.sh`` three parents
-    up from ``src/hal0/agents/manager.py`` — no monkeypatching needed,
-    this exercises the real resolution path. (turnstone's own driver
-    doesn't actually call this function — see :data:`_SCRIPT_INSTALLED_AGENTS`
-    — but the function itself is name-agnostic and turnstone.sh is the
-    only real installer script left in the tree post P1-drivers.)"""
-    resolved = mgr_mod.installer_script_path("turnstone")
+def test_installer_script_path_resolves_editable_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editable / dev checkout: ``manager.py`` under ``<repo>/src/hal0/
+    agents/manager.py`` resolves the script three parents up, at
+    ``<repo>/installer/agents/<name>.sh``. No real bundled agent installs
+    via shell script in production (:data:`_SCRIPT_INSTALLED_AGENTS` is
+    empty), so this is exercised against a synthetic repo layout rather
+    than a real installer script."""
+    fake_module_path = tmp_path / "repo" / "src" / "hal0" / "agents" / "manager.py"
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    editable_script_dir = tmp_path / "repo" / "installer" / "agents"
+    editable_script_dir.mkdir(parents=True)
+    editable_script = editable_script_dir / "widget.sh"
+    editable_script.write_text("#!/bin/sh\n")
+
+    resolved = mgr_mod.installer_script_path("widget")
     assert resolved.is_file()
-    assert resolved == (
-        Path(mgr_mod.__file__).resolve().parents[3] / "installer" / "agents" / "turnstone.sh"
-    )
+    assert resolved == editable_script
 
 
 def test_installer_script_path_falls_back_to_fhs_for_wheel_install(

@@ -102,16 +102,6 @@ SERVICES: tuple[ServiceDef, ...] = (
         loopback_port=9119,
     ),
     ServiceDef(
-        id="turnstone",
-        name="Turnstone",
-        description="Bundled agent (turnstone-server, loopback :9129).",
-        unit="hal0-agent@turnstone.service",
-        public_url_env="HAL0_TURNSTONE_PUBLIC_URL",
-        probe="systemd",
-        actions=_FULL,
-        loopback_port=9129,
-    ),
-    ServiceDef(
         id="hindsight",
         name="Hindsight",
         description="Memory engine (native daemon, loopback :9177).",
