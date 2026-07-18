@@ -95,7 +95,7 @@ Each `###` task is a reviewer-sized gate. Stages are checkpoint boundaries: do n
 
 - [ ] **Step 1: Write failing tests** proving `health()` sends no key, reads send only `HAL0_CLIENT_KEY`, mutations send only `HAL0_ADMIN_KEY`, 401 differs from connection failure, diagnostics redact keys, and retries occur only for connect/timeout/502/503/504 with a bounded attempt count.
 - [ ] **Step 2: Run** `PYTHONPATH=$PWD/src ./.venv/bin/pytest tests/agents/hermes/core/test_client.py -q`; expect import failure.
-- [ ] **Step 3: Implement** a sync `httpx.Client` wrapper with `X-API-Key`, generated `X-Request-ID`, optional idempotency key for mutations, `(2.0, 15.0)` connect/read timeouts, three attempts, and status/error-code decoding. Keep model, memory, and voice policy out of this package.
+- [ ] **Step 3: Implement** a sync `httpx.Client` wrapper with `Authorization: Bearer <HAL0_*_KEY>` (the canonical KB-1 programmatic-auth contract), generated `X-Request-ID`, optional idempotency key for mutations, `(2.0, 15.0)` connect/read timeouts, three attempts, and status/error-code decoding. Keep model, memory, and voice policy out of this package.
 - [ ] **Step 4: Run the targeted test, ruff check, and ruff format check**; expect all PASS.
 - [ ] **Step 5: Commit** with `feat(hermes): add shared hal0 adapter transport`.
 
