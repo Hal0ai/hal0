@@ -4704,10 +4704,19 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     merged["agent"] = payload["agent"]
     merged["data_dir"] = payload["data_dir"]
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_bytes(tomli_w.dumps(merged).encode("utf-8"))
-    os.replace(tmp, path)
+    body = tomli_w.dumps(merged)
+    if os.geteuid() == 0:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".toml.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            os.chown(path, 0, 0)
+    else:
+        # Seed TOML lives in root:root /etc/hal0/agents — delegate the write to
+        # the seam (it builds the path from the validated agent name). The
+        # read-merge above works unprivileged: the file is 0644 world-readable.
+        _privileged_env_write("write-seed-toml", body)
     return path, True
 
 

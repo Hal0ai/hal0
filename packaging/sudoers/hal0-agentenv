@@ -2,14 +2,15 @@
 # (D hardened-perms).
 #
 # When hal0-api runs as the `hal0` system user, it cannot write the per-agent
-# .env files that the hardened model pins root:root:
+# env/seed files that the hardened model pins root:root:
 #   * /var/lib/hal0/secrets/agents/<agent>.env  (0600 root:root secrets vault)
 #   * /etc/hal0/agents/<agent>.env              (0644 root:root driver env)
+#   * /etc/hal0/agents/<agent>.toml             (0644 root:root manager seed / MCP allow-list)
 # It delegates exactly those writes to /usr/lib/hal0/bin/hal0-agentenv, which is
 # the entire privileged surface: the helper validates the agent name, builds the
 # target path itself, takes content on stdin, and only ever touches
-# <agent>.env under those two fixed directories — no wildcards, no shell, no
-# arbitrary file writes.
+# <agent>.{env,toml} under those two fixed directories — no wildcards, no shell,
+# no arbitrary file writes.
 #
 # Install (as root):
 #   install -m 0440 packaging/sudoers/hal0-agentenv /etc/sudoers.d/hal0-agentenv
