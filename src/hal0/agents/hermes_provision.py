@@ -57,7 +57,7 @@ from typing import Any
 
 import structlog
 
-from hal0.agents.role_slots import RoleSlotCandidate, resolve_role_slots
+from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 
 log = structlog.get_logger(__name__)
 
@@ -3815,11 +3815,12 @@ def _resolve_custom_providers(
 #     auxiliary_client.py `_resolve_task_provider_model` (a base_url +
 #     non-"auto" provider routes the task to that direct endpoint).
 #
-# We resolve these from LIVE slot NAMES, not hardcoded model ids, so
-# swapping a slot's model flows through on the next `--repair`:
-#   chat       → slot `primary`      (the existing model: block)
-#   subagents  → slot `agent-hermes` (delegation: block)
-#   side-tasks → slot `utility`      (auxiliary.* compaction/search/title)
+# Runtime auxiliary policy is resolved from typed live slot candidates, not
+# hardcoded model ids, so model swaps flow through on the next `--repair`.
+# ADR-0023 makes `agent` the canonical default anchor (`chat`/`primary` are
+# compatibility aliases); delegation also targets the ready `agent` slot. Utility
+# roles use the platform role hint when supplied, allowing labels to change
+# without changing opaque slot identity or semantic assignment.
 #
 # Vision + web_extract have no dedicated slot — they stay provider:"main".
 
@@ -3840,8 +3841,8 @@ _UTILITY_AUX_TASKS: tuple[str, ...] = (
 # (no hard-coded entries left in the template).
 _MAIN_AUX_TASKS: tuple[str, ...] = ("vision", "web_extract")
 
-# Canonical role→slot names. Kept here (not in the template) so the
-# resolution stays data-driven and a future slot rename is a one-line edit.
+# Delegation retains its existing overlay adapter; auxiliary role policy lives
+# in role_slots.py and is shared with runtime consumers.
 _DELEGATION_SLOT_NAME = "agent"
 
 
@@ -3897,35 +3898,12 @@ def _resolve_auxiliary_tasks(
 ) -> dict[str, dict[str, Any]]:
     """Build the ``auxiliary_tasks`` template dict (task → {provider, model, base_url}).
 
-    vision/web_extract always render as provider:"main" (no dedicated
-    slot). The compaction/search/title group routes to the ``utility``
-    slot when it's live; if that slot is missing the group degrades to
-    provider:"main" so side-tasks fall back to the chat model rather than
-    breaking. Resolution keys off the slot NAME (``utility``) and sends
-    the slot's model_id — swapping the slot's model flows through on the
-    next ``--repair``.
+    The typed adapter preserves stable IDs and explicit role hints, then the
+    shared resolver applies utility preference, NPU virtual addressing, and
+    main fallback. This function only translates resolved roles back into the
+    existing Hermes auxiliary overlay keys.
     """
-    candidates: list[RoleSlotCandidate] = []
-    for index, slot in enumerate(slots):
-        if not isinstance(slot, dict):
-            continue
-        label = _slot_alias(slot)
-        raw_capabilities = slot.get("capabilities") or slot.get("labels") or ()
-        capabilities = tuple(str(item) for item in raw_capabilities)
-        slot_type = str(slot.get("type") or "").lower()
-        if slot_type and slot_type not in capabilities:
-            capabilities = (*capabilities, slot_type)
-        candidates.append(
-            RoleSlotCandidate(
-                slot_id=str(slot.get("slot_id") or slot.get("id") or f"{label}:{index}"),
-                label=label,
-                model=_slot_model_id(slot),
-                ready=_is_ready(slot),
-                capabilities=capabilities,
-                device_class=str(slot.get("device_class") or slot.get("device") or "") or None,
-                role_hint=str(slot.get("role") or "") or None,
-            )
-        )
+    candidates = [candidate_from_slot_mapping(slot) for slot in slots if isinstance(slot, dict)]
 
     role_map = resolve_role_slots("hermes", candidates)
     by_role = {entry.role: entry for entry in role_map.entries}
