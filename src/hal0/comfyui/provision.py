@@ -1,9 +1,10 @@
 """WS-G (#1113): drive the ComfyUI per-variant download + img-slot activation.
 
-Both entry points that opt into ``scaffold_and_download`` — the guided-setup
-variant picker (:mod:`hal0.cli.setup_ui`) and the headless answer file's
-``gen.mode: scaffold_and_download`` (:mod:`hal0.install.answers`) — funnel their
-selected ``(capability_id, family)`` picks here.
+The headless answer file's ``gen.mode: scaffold_and_download``
+(:mod:`hal0.install.answers`) funnels its selected ``(capability_id, family)``
+picks here. (The interactive guided-setup wizard no longer offers a per-variant
+picker — §17.8 collapsed it to a pick-free ``scaffold_only``/off choice; see
+:mod:`hal0.cli.setup_command`.)
 
 Each pick resolves to a :class:`~hal0.comfyui.capabilities.ModelVariant`, whose
 WORKING fetch (#1110's :func:`hal0.comfyui.fetch.fetch_model` — the non-blocking
