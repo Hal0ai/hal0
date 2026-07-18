@@ -32,16 +32,13 @@ import copy
 import logging
 import os
 import re
-import shutil
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
 from hal0.errors import Hal0Error
-from hal0.model_meta import SLOT_TYPES
 from hal0.slot_config import (
     fold_ctx_size_alias,
     slot_write_lock,
@@ -56,6 +53,21 @@ from hal0.slots.config_write import (
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
 )
+from hal0.slots.routing import (
+    _VALID_SLOT_TYPES,
+    NPU_SEEDED_SLOTS,
+    SEEDED_SLOTS,
+    SLOT_ALIASES,
+    LoadedSlot,
+    loaded_slot_from_config,
+)
+from hal0.slots.routing import add_slot as _routing_add_slot
+from hal0.slots.routing import default_slot_for as _routing_default_slot_for
+from hal0.slots.routing import loaded_slot as _routing_loaded_slot
+from hal0.slots.routing import remove_slot as _routing_remove_slot
+from hal0.slots.routing import resolve_for_request as _routing_resolve_for_request
+from hal0.slots.routing import route_for_request as _routing_route_for_request
+from hal0.slots.routing import seeded_slots as _routing_seeded_slots
 from hal0.slots.state import (
     DISPATCHABLE_STATES,
     IllegalSlotTransition,
@@ -91,66 +103,13 @@ class RegistryUnavailableError(Hal0Error):
     status = 503
 
 
-# ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
-
-#: Slots that exist on every hal0 install regardless of hardware. The
-#: dashboard creates these as empty cards at first run; the bundle
-#: picker (Phase 5) populates their ``model.default`` fields. ``agent``
-#: is the GPU MoE chat-role sibling of ``chat`` (moved here from the NPU
-#: set in #679 — it is a GPU slot, not the NPU FLM anchor).
-# ADR-0023: `utility` (cheap helper) + `agent` (capable/default anchor) are the two
-# canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
-# is unaffected; any llm slot serves it). `utility` is seeded so the memory
-# extraction target is always present on a fresh box.
-SEEDED_SLOTS: tuple[str, ...] = (
-    "utility",
-    "embed",
-    "rerank",
-    "stt",
-    "tts",
-    "img",
-    "vision",
-    "agent",
-)
-
-#: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
-#: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
-#: ride the same coresident FLM process as the NPU chat anchor — the
-#: separate ``flm`` slot, NOT listed here. ``agent`` was previously
-#: (wrongly) in this set; it is a GPU chat-role slot and moved to
-#: SEEDED_SLOTS in #679. Opt-in at Pro+ bundle tier.
-#:
-#: Named ``{anchor}-stt`` / ``{anchor}-embed`` (anchor is ``flm``) to match
-#: the occupancy-pane virtual sub-cards (:mod:`hal0.api.routes.npu` synthesises
-#: ``s.name + "-stt"``) and the ``_touch_npu_shadow_count`` activity counters
-#: (:mod:`hal0.api.routes.v1`), which both key off that convention. The legacy
-#: ``stt-npu`` / ``embed-npu`` names never matched either surface and are
-#: migrated forward by :meth:`SlotManager.reconcile_npu_trio_slots`.
-NPU_SEEDED_SLOTS: tuple[str, ...] = ("flm-stt", "flm-embed")
-
-#: Back-compat alias map: old slot names → canonical new names.
-#: Aliases resolve transparently for dispatch and config lookup but are
-#: NEVER stored on disk and NEVER appear in list() / iter_configs() /
-#: /api/slots. ``agent-hermes`` maps to ``agent`` (a GPU seed slot, #679)
-#: so no new TOML is created — the alias just redirects old references.
-#: ADR-0023 retired the `primary` and `chat` aliases. The canonical roles are
-#: `agent` (default anchor) + `utility` (helper); a lingering operator-custom `chat`
-#: slot is reachable by its own name via generalized `hal0/<slot>` resolution, not an
-#: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
-SLOT_ALIASES: dict[str, str] = {
-    "agent-hermes": "agent",
-    # Route curated NPU model IDs to the FLM trio slot.
-    "qwen3:4b": "flm",
-    "qwen3-4b": "flm",
-}
-
-#: Slot ``type`` vocabulary (plan §4.1) — sourced from the canonical
-#: taxonomy (:data:`hal0.model_meta.SLOT_TYPES`) so validation, profiles,
-#: and /api/meta/enums can never drift.
-_VALID_SLOT_TYPES: frozenset[str] = frozenset(SLOT_TYPES)
-
-#: Slot-name policy: kebab-case, max 32 chars, leading alphanumeric.
-_SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+# ── Seeded slot catalogue + routing (P3-slots §1i: moved to slots/routing.py)
+#
+# SEEDED_SLOTS / NPU_SEEDED_SLOTS / SLOT_ALIASES / LoadedSlot now live in
+# hal0.slots.routing (imported at module top); re-exported below so every
+# existing ``from hal0.slots.manager import X`` caller keeps working
+# unchanged (dispatcher._capability_resolve, api/__init__, omni_router,
+# stacks/apply, tests/slots/test_loaded_slot.py, tests/omni_router/conftest.py).
 
 
 # ── Tunables ─────────────────────────────────────────────────────────────────
@@ -288,27 +247,6 @@ class Slot:
             "metadata": self.metadata,
             "last_used_at": self.last_used_at,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class LoadedSlot:
-    """Typed routing result for an enabled slot.
-
-    Returned by :meth:`SlotManager.resolve_for_request` and
-    :meth:`SlotManager.loaded_slot` so callers do not have to route to a
-    bare name and then reopen raw slot TOML to recover the model id,
-    device, labels, or system prompt.
-    """
-
-    name: str
-    model_id: str
-    slot_type: str
-    device: str
-    enabled: bool
-    labels: frozenset[str]
-    system_prompt: str = ""
-    profile: str | None = None
-    default: bool = False
 
 
 def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
@@ -1582,109 +1520,28 @@ class SlotManager:
         return out
 
     # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
+    #
+    # P3-slots §1i: the actual logic lives in hal0.slots.routing (pure
+    # config-query, no state-machine coupling). Every method below is a
+    # thin delegator so the public surface (and every existing caller /
+    # test) is unchanged.
 
     @staticmethod
     def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
-        """Return the seeded slot list, optionally including the NPU trio.
-
-        :data:`SEEDED_SLOTS` lands on every hal0 install. The NPU trio
-        shadows (``flm-stt`` / ``flm-embed``) only seed when the
-        FastFlowLM ``.deb`` is installed (``shutil.which('flm')``
-        truthy). Per plan §10.2 + §4.2.
-
-        Args:
-            include_npu: ``None`` (default) detects FLM presence at
-                runtime; ``True`` forces inclusion (tests + the bundle
-                picker's preview mode); ``False`` forces exclusion.
-        """
-        if include_npu is None:
-            include_npu = bool(shutil.which("flm"))
-        if include_npu:
-            return SEEDED_SLOTS + NPU_SEEDED_SLOTS
-        return SEEDED_SLOTS
+        """See :func:`hal0.slots.routing.seeded_slots`."""
+        return _routing_seeded_slots(include_npu=include_npu)
 
     async def default_slot_for(self, slot_type: str) -> str | None:
-        """Return the name of the slot with ``type=slot_type`` and ``default=true``.
-
-        Plan §4.4 step 1. Exactly one ``default = true`` per type is
-        allowed; two defaults raise :class:`SlotConfigError` so the
-        misconfiguration surfaces at the routing call site instead of
-        silently picking one. Returns ``None`` when no slot of the
-        type has ``default = true`` (the caller is expected to
-        fall-through to the first enabled slot — see
-        :meth:`route_for_request`).
-        """
-        candidates: list[str] = []
-        for cfg in await self.iter_configs():
-            if cfg.get("type") != slot_type:
-                continue
-            if cfg.get("default") is True:
-                candidates.append(str(cfg.get("name", "")))
-        if len(candidates) > 1:
-            raise SlotConfigError(
-                f"slot type {slot_type!r} has multiple default=true slots: "
-                f"{candidates}; exactly one is allowed",
-                details={"type": slot_type, "candidates": candidates},
-            )
-        return candidates[0] if candidates else None
+        """See :func:`hal0.slots.routing.default_slot_for`."""
+        return await _routing_default_slot_for(self, slot_type)
 
     def _loaded_slot_from_config(self, cfg: dict[str, Any]) -> LoadedSlot | None:
-        """Convert one raw slot config dict into a :class:`LoadedSlot`.
-
-        Returns ``None`` when the config does not describe an enabled slot
-        with a model id. The raw TOML shapes are intentionally absorbed here
-        so request routers and tool dispatchers consume a typed result.
-        """
-        name = str(cfg.get("name") or "").strip()
-        slot_type = str(cfg.get("type") or "").strip()
-        if not name or not slot_type:
-            return None
-        if cfg.get("enabled") is False:
-            return None
-
-        model_section = cfg.get("model") or {}
-        model_id = ""
-        if isinstance(model_section, dict):
-            raw_model = model_section.get("default", "")
-            if isinstance(raw_model, str):
-                model_id = raw_model.strip()
-        if not model_id:
-            return None
-
-        from hal0.model_meta import labels_of
-
-        raw_prompt = cfg.get("system_prompt")
-        system_prompt = raw_prompt if isinstance(raw_prompt, str) else ""
-        if not system_prompt:
-            extra = cfg.get("extra")
-            if isinstance(extra, dict) and isinstance(extra.get("system_prompt"), str):
-                system_prompt = extra["system_prompt"]
-
-        profile = cfg.get("profile")
-        return LoadedSlot(
-            name=name,
-            model_id=model_id,
-            slot_type=slot_type,
-            device=str(cfg.get("device") or ""),
-            enabled=True,
-            labels=frozenset(labels_of(cfg)),
-            system_prompt=system_prompt,
-            profile=profile if isinstance(profile, str) and profile else None,
-            default=cfg.get("default") is True,
-        )
+        """See :func:`hal0.slots.routing.loaded_slot_from_config`."""
+        return loaded_slot_from_config(cfg)
 
     async def loaded_slot(self, name: str) -> LoadedSlot | None:
-        """Return a typed view of an enabled configured slot, or ``None``.
-
-        Resolves back-compat aliases transparently. This is a read-only
-        inventory helper; it does not probe runtime state.
-        """
-        resolved = self._resolve_alias(name)
-        try:
-            cfg = await self._load_slot_config(resolved)
-        except SlotConfigError:
-            return None
-        return self._loaded_slot_from_config(cfg)
+        """See :func:`hal0.slots.routing.loaded_slot`."""
+        return await _routing_loaded_slot(self, name)
 
     async def resolve_for_request(
         self,
@@ -1692,52 +1549,8 @@ class SlotManager:
         *,
         required_labels: tuple[str, ...] = (),
     ) -> LoadedSlot | None:
-        """Resolve a request of type ``slot_type`` to a loaded slot.
-
-        Plan §4.4 four-step routing:
-
-          1. **Type match + default.** If a slot of ``type=slot_type``
-             carries ``default = true``, prefer it.
-          2. **Label filter overlay.** When ``required_labels`` is
-             non-empty, the chosen slot's model must advertise every
-             required label (sourced from the slot's
-             ``model.labels`` list). The default is dropped if it
-             can't satisfy the overlay.
-          3. **Fall-through.** Otherwise pick the first ``enabled =
-             true`` slot of ``slot_type`` in TOML declaration order
-             (still satisfying the label overlay if any).
-          4. ``None`` when nothing matches.
-        Returning :class:`LoadedSlot` keeps callers from reopening raw slot
-        configs to discover the model id, labels, device, or system prompt.
-        """
-
-        def _satisfies(slot: LoadedSlot) -> bool:
-            if not required_labels:
-                return True
-            return set(required_labels).issubset(slot.labels)
-
-        slots = [
-            slot
-            for cfg in await self.iter_configs()
-            if cfg.get("type") == slot_type
-            for slot in [self._loaded_slot_from_config(cfg)]
-            if slot is not None
-        ]
-
-        # Step 1+2: try the default first.
-        default_name = await self.default_slot_for(slot_type)
-        if default_name is not None:
-            default_slot = next((slot for slot in slots if slot.name == default_name), None)
-            if default_slot is not None and _satisfies(default_slot):
-                return default_slot
-
-        # Step 3: fall-through to first enabled + label-matching slot.
-        for slot in slots:
-            if not _satisfies(slot):
-                continue
-            return slot
-
-        return None
+        """See :func:`hal0.slots.routing.resolve_for_request`."""
+        return await _routing_resolve_for_request(self, slot_type, required_labels=required_labels)
 
     async def route_for_request(
         self,
@@ -1745,13 +1558,8 @@ class SlotManager:
         *,
         required_labels: tuple[str, ...] = (),
     ) -> str | None:
-        """Resolve a request of type ``slot_type`` to a concrete slot name.
-
-        Compatibility wrapper for callers that have not moved to
-        :meth:`resolve_for_request` yet.
-        """
-        slot = await self.resolve_for_request(slot_type, required_labels=required_labels)
-        return slot.name if slot is not None else None
+        """See :func:`hal0.slots.routing.route_for_request`."""
+        return await _routing_route_for_request(self, slot_type, required_labels=required_labels)
 
     async def add_slot(
         self,
@@ -1762,70 +1570,12 @@ class SlotManager:
         device: str = "gpu-rocm",
         port: int = 8081,
     ) -> Slot:
-        """Programmatic ``hal0 slot add`` (plan §4.3).
-
-        Validates kebab-case name, rejects seeded-name collisions,
-        rejects unknown slot types. The SlotConfig schema requires a
-        port in the 8081-8099 range.
-
-        Args:
-            name: Kebab-case identifier; must not collide with a
-                seeded slot (``SEEDED_SLOTS`` plus ``NPU_SEEDED_SLOTS``,
-                independently of whether FLM is installed).
-            type: One of ``llm | embedding | reranking | transcription
-                | tts | image``.
-            model: Model id to load by default.
-            device: Hardware preference (``gpu-rocm | gpu-vulkan | cpu
-                | npu``); see ``map_backend_to_device``. Default
-                ``gpu-rocm`` matches Strix Halo seed semantics.
-            port: SlotConfig.port — the container's loopback port.
-        """
-        if not _SLOT_NAME_RE.match(name):
-            raise SlotConfigError(
-                f"slot name {name!r}: use lowercase alphanumeric, hyphens, underscores; "
-                f"start with alphanumeric; max 32 chars",
-                details={"slot": name},
-            )
-        # Reject collisions with ALL seeded slots (include the NPU trio
-        # regardless of FLM presence — the names are reserved).
-        reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
-        if name in reserved:
-            raise SlotConfigError(
-                f"slot {name!r} collides with a seeded slot; pick a different name",
-                details={"slot": name, "reserved": sorted(reserved)},
-            )
-        if type not in _VALID_SLOT_TYPES:
-            raise SlotConfigError(
-                f"slot type {type!r} is not one of {sorted(_VALID_SLOT_TYPES)}",
-                details={"slot": name, "type": type},
-            )
-        cfg = {
-            "name": name,
-            "port": port,
-            "type": type,
-            "device": device,
-            "provider": "llama-server",
-            "enabled": True,
-            "model": {"default": model},
-        }
-        return await self.create(name, cfg)
+        """See :func:`hal0.slots.routing.add_slot`."""
+        return await _routing_add_slot(self, name, type=type, model=model, device=device, port=port)
 
     async def remove_slot(self, name: str) -> None:
-        """Programmatic ``hal0 slot remove`` (plan §4.3).
-
-        Rejects seeded-slot names (use :meth:`unload` or
-        ``capabilities.toml`` to disable a seeded slot, not delete it).
-        No side effect on the underlying model files — they stay in
-        the registry.
-        """
-        name = self._resolve_alias(name)
-        reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
-        if name in reserved:
-            raise SlotConfigError(
-                f"slot {name!r} is seeded; cannot remove (disable it via capabilities.toml)",
-                details={"slot": name, "reserved": sorted(reserved)},
-            )
-        await self.delete(name)
+        """See :func:`hal0.slots.routing.remove_slot`."""
+        await _routing_remove_slot(self, name)
 
     # ── low-level lifecycle ──────────────────────────────────────────────────
 
@@ -3835,6 +3585,8 @@ __all__ = [
     "NPU_SEEDED_SLOTS",
     "SEEDED_SLOTS",
     "SLOT_ALIASES",
+    "_VALID_SLOT_TYPES",
+    "LoadedSlot",
     "Slot",
     "SlotManager",
     "_cfg_effective_backend",
