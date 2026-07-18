@@ -32,9 +32,20 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 
 _CONTEXT_LENGTH_KEY = "context_length"
+
+#: §7.1d fields with no dedicated column yet (``capability_flags``,
+#: ``modalities_override``) ride inside the catch-all ``extra`` JSON blob
+#: under these reserved, underscore-prefixed keys so they round-trip
+#: losslessly without a schema migration (only ``mtp``/``jinja`` have
+#: reserved *columns* today — ``tool_calling`` does not, since a new
+#: column needs a migration file and this pilot only ships ``001``).
+#: Split out of ``metadata`` on read so they never leak into
+#: ``Model.metadata``.
+_CAPABILITY_FLAGS_EXTRA_KEY = "_capability_flags"
+_MODALITIES_OVERRIDE_EXTRA_KEY = "_modalities_override"
 
 #: Columns of the `model` table, in the order INSERT/UPDATE statements bind
 #: them. Kept as a tuple (not re-derived from a dict each call) so
@@ -99,16 +110,26 @@ def model_to_row(
     ``updated_at`` advances); on an INSERT both default to "now".
 
     §7.1 columns with no ``Model`` field yet (``revision``,
-    ``preferred_runner``, ``architecture``, ``mtp``, ``jinja``) always write
-    NULL in this pilot — they exist purely as a ready-made landing spot for
-    the lane that adds those fields to ``Model`` itself.
+    ``preferred_runner``, ``mtp``, ``jinja``) always write NULL in this
+    pilot — they exist purely as a ready-made landing spot for the ML-4/
+    ML-5 lanes that add those fields to ``Model`` itself. ``architecture``
+    IS populated here — §7.1d is the lane that lands it (see
+    ``Model.architecture``). ``capability_flags``/``modalities_override``
+    have no reserved column yet, so they fold into the ``extra`` JSON blob
+    under the reserved keys above instead of a schema migration.
     """
     defaults = model.defaults or ModelDefaults()
 
-    # context_length gets its own column; everything else (including the
-    # reserved upstream_url) rides inside `extra` verbatim.
+    # context_length + the §7.1d extras get their own handling; everything
+    # else (including the reserved upstream_url) rides inside `extra`
+    # verbatim.
     metadata = dict(model.metadata or {})
     context_length = metadata.pop(_CONTEXT_LENGTH_KEY, None)
+    capability_flags = model.capability_flags.model_dump(exclude_none=True)
+    if capability_flags:
+        metadata[_CAPABILITY_FLAGS_EXTRA_KEY] = capability_flags
+    if model.modalities_override is not None:
+        metadata[_MODALITIES_OVERRIDE_EXTRA_KEY] = [m.value for m in model.modalities_override]
     extra_json = json.dumps(metadata, separators=(",", ":")) if metadata else None
 
     ts = updated_at or now_iso()
@@ -119,7 +140,7 @@ def model_to_row(
         "path": model.path,
         "preferred_runner": None,
         "mmproj": model.mmproj,
-        "architecture": None,
+        "architecture": model.architecture,
         "context_length": context_length,
         "mtp": None,
         "jinja": None,
@@ -155,6 +176,17 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     if row["context_length"] is not None:
         metadata[_CONTEXT_LENGTH_KEY] = row["context_length"]
 
+    raw_capability_flags = metadata.pop(_CAPABILITY_FLAGS_EXTRA_KEY, None)
+    capability_flags = (
+        ModelCapabilities(**raw_capability_flags)
+        if isinstance(raw_capability_flags, dict)
+        else ModelCapabilities()
+    )
+    raw_modalities_override = metadata.pop(_MODALITIES_OVERRIDE_EXTRA_KEY, None)
+    modalities_override = (
+        list(raw_modalities_override) if isinstance(raw_modalities_override, list) else None
+    )
+
     defaults_kwargs = {col: row[col] for col in _DEFAULTS_COLUMNS}
     # NOTE: `n_gpu_layers`/`context_size` can legitimately be 0, which is
     # falsy — must check `is not None`, not truthiness, or a real all-
@@ -175,6 +207,9 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         tags=json.loads(row["tags"]) if row["tags"] else [],
         backends=list(backends) if backends else [],
         mmproj=row["mmproj"],
+        architecture=row["architecture"],
+        capability_flags=capability_flags,
+        modalities_override=modalities_override,
         defaults=defaults,
         metadata=metadata,
     )

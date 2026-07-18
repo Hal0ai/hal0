@@ -6,8 +6,13 @@ the subset of tools that:
   1. Have at least one enabled slot of the tool's ``target_slot_type``.
   2. (For label-gated tools) have at least one of those slots with a
      model that carries every required label.
-  3. Are gated by the chat slot's own caller-label requirement —
-     LLMs without ``tool-calling`` receive an empty list, full stop.
+  3. Are gated by the chat slot's own caller ``tool_calling`` flag —
+     LLMs without it receive an empty list, full stop (§7.1d 🔴: this
+     reads ``LoadedSlot.tool_calling``, sourced from the registry
+     model's ``capability_flags.tool_calling`` — NOT the slot TOML's
+     ``[model].labels`` list, which used to be the sole source and
+     required a hand-authored mirror of the registry's ``tool-calling``
+     tag that nothing ever wrote automatically).
 
 The filter is recomputed per chat completion; the LLM in slot A can be
 swapped to a non-tool-calling model mid-conversation and the next
@@ -25,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Protocol
 
-from hal0.model_meta import labels_of
+from hal0.model_meta import labels_of, model_capabilities_of
 from hal0.omni_router.tools import TOOL_DEFINITIONS, ToolDefinition
 
 
@@ -49,19 +54,30 @@ class SlotManagerLike(Protocol):
     ) -> Any | None: ...
 
 
-def chat_slot_has_tool_calling(cfg: dict[str, Any]) -> bool:
-    """Return True iff the chat slot's model carries the ``tool-calling`` label.
+def chat_slot_has_tool_calling(
+    cfg: dict[str, Any], *, model_info: dict[str, Any] | None = None
+) -> bool:
+    """Return True iff the chat slot's model is allowed to see tools.
 
-    Per plan §7.3 this is the master gate — without ``tool-calling``
+    Per plan §7.3 this is the master gate — without ``tool_calling``
     on the caller's model, hal0 ships an empty tool list regardless of
     what other slots are configured. The LLM has no opinion on the
     tools because it never sees them.
 
-    Kept as the dict-shaped compatibility helper for route-to-chat peer
-    scans; normal routing uses ``LoadedSlot.labels`` via
-    ``SlotManager.resolve_for_request``.
+    Prefers the registry's typed ``capability_flags.tool_calling`` (pass
+    ``model_info``, the ``Model.model_dump()``-shaped dict, when the
+    caller has one) and falls back to the slot TOML's ``[model].labels``
+    ``"tool-calling"`` entry when that's absent — the §7.1d 🔴 fix,
+    applied here as the dict-shaped compatibility helper for route-to-chat
+    peer scans. Normal routing uses ``LoadedSlot.tool_calling`` via
+    ``SlotManager.resolve_for_request`` / ``loaded_slot``, which already
+    thread the registry lookup through.
     """
-    return "tool-calling" in labels_of(cfg)
+    flags = model_capabilities_of(model_info)
+    tool_calling = flags.get("tool_calling")
+    if tool_calling is None:
+        return "tool-calling" in labels_of(cfg)
+    return bool(tool_calling)
 
 
 async def active_tools_for(
@@ -80,14 +96,14 @@ async def active_tools_for(
 
     Returns:
         Subset of ``tools`` in declaration order. Empty when the
-        caller slot lacks ``tool-calling``, or when no other slot
+        caller slot lacks ``tool_calling``, or when no other slot
         satisfies any tool's constraints.
     """
     caller = await slot_manager.loaded_slot(chat_slot_name)
     if caller is None:
         # Caller slot vanished mid-flight — fail closed.
         return []
-    if "tool-calling" not in caller.labels:
+    if not caller.tool_calling:
         return []
 
     configs = await slot_manager.iter_configs()
@@ -95,9 +111,9 @@ async def active_tools_for(
     for tool in tools:
         if tool.name == "route_to_chat":
             # route_to_chat is included iff at least one OTHER enabled
-            # chat slot exists. The caller's own tool-calling label has
+            # chat slot exists. The caller's own tool_calling flag has
             # been validated above; the targets don't need it (a target
-            # without tool-calling simply returns a non-tool-call
+            # without tool_calling simply returns a non-tool-call
             # response, which is fine).
             has_peer = any(
                 c.get("type") == "llm"

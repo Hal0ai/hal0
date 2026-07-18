@@ -40,6 +40,17 @@ from hal0.model_meta import (
 
 router = APIRouter()
 
+#: §7.1d — the typed launch/runtime capability flags (``Model.capability_flags``
+#: / ``ModelCapabilities``). ``runner_gate`` names the future
+#: ``RunnerSupports`` attribute (ML-4) that must be true for a flag's UI
+#: toggle to be settable; ``None`` means always settable. Only
+#: ``tool_calling`` is wired up on ``ModelCapabilities`` today — ``mtp``/
+#: ``jinja`` land on that same class via §7.1a/b (ML-5), at which point
+#: they join this tuple too.
+MODEL_CAPABILITY_FLAGS: tuple[dict[str, Any], ...] = (
+    {"key": "tool_calling", "label": "Native tool calling", "runner_gate": None},
+)
+
 # The payload only changes with a code release, so the running version is a
 # sufficient cache validator. Weak ETag: byte-identity is irrelevant here.
 _ENUMS_ETAG = f'W/"hal0-enums-{__version__}"'
@@ -61,7 +72,15 @@ async def get_enums(request: Request, response: Response) -> Any:
     - ``device_classes`` / ``slot_types`` / ``runtime_families``: the
       profile + dispatcher vocabularies.
     - ``model_capabilities`` + ``capability_aliases``: canonical registry
-      capability spellings and the tolerated synonyms.
+      capability spellings and the tolerated synonyms. ``modalities`` is
+      the §7.1d enum-driven alias of ``model_capabilities`` (identical
+      values today — kept as a second key rather than a rename so
+      existing dashboard reads of ``model_capabilities`` are undisturbed;
+      new UI code should prefer ``modalities``).
+    - ``model_capability_flags``: the §7.1d typed launch/runtime bool
+      flags (``ModelCapabilities`` — currently just ``tool_calling``),
+      each with the ``RunnerSupports`` gate name that must be true for its
+      dashboard toggle to be settable.
     - ``model_backends``: valid registry ``model.backends`` values.
     - ``curated_model_tags``: the curated ``model.tags`` vocabulary (type
       tags + provenance + catalogue descriptors) the dashboard's tag
@@ -83,7 +102,9 @@ async def get_enums(request: Request, response: Response) -> Any:
         "device_classes": list(DEVICE_CLASSES),
         "slot_types": list(SLOT_TYPES),
         "model_capabilities": list(MODEL_CAPABILITIES),
+        "modalities": list(MODEL_CAPABILITIES),
         "capability_aliases": dict(CAPABILITY_ALIASES),
+        "model_capability_flags": [dict(f) for f in MODEL_CAPABILITY_FLAGS],
         "model_backends": list(MODEL_BACKENDS),
         "curated_model_tags": list(CURATED_MODEL_TAGS),
         "runtime_families": list(RUNTIME_FAMILIES),

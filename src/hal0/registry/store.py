@@ -530,20 +530,22 @@ def _model_to_toml(m: Model) -> dict[str, Any]:
 
     Drops the synthetic ``id`` (it's the table key on disk) and any
     top-level ``None`` values (TOML has no null). For the nested
-    ``defaults`` table we also strip ``None`` leaves so optional
-    ModelDefaults fields aren't written as empty entries that would
-    fail TOML serialisation.
+    ``defaults`` / ``capability_flags`` tables we also strip ``None``
+    leaves so optional fields aren't written as empty entries that would
+    fail TOML serialisation (§7.1d added ``capability_flags`` — same
+    "collapse to no key when nothing is set" rule as ``defaults``).
     """
     data = m.model_dump(mode="python", exclude_none=False)
     data.pop("id", None)
 
-    # Top-level None → drop. Nested 'defaults' table: drop None leaves
-    # too, and collapse to no key at all when nothing is set.
+    # Top-level None → drop. Nested 'defaults'/'capability_flags' tables:
+    # drop None leaves too, and collapse to no key at all when nothing is
+    # set.
     cleaned: dict[str, Any] = {}
     for k, v in data.items():
         if v is None:
             continue
-        if k == "defaults" and isinstance(v, dict):
+        if k in ("defaults", "capability_flags") and isinstance(v, dict):
             sub = {sk: sv for sk, sv in v.items() if sv is not None}
             if not sub:
                 continue

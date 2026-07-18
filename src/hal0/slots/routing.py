@@ -18,8 +18,10 @@ paths): ``SEEDED_SLOTS``, ``NPU_SEEDED_SLOTS``, ``SLOT_ALIASES``,
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -28,6 +30,8 @@ from hal0.slots.state import SlotConfigError
 
 if TYPE_CHECKING:
     from hal0.slots.manager import Slot
+
+log = logging.getLogger(__name__)
 
 # ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
 
@@ -99,6 +103,16 @@ class LoadedSlot:
     :meth:`SlotManager.loaded_slot` so callers do not have to route to a
     bare name and then reopen raw slot TOML to recover the model id,
     device, labels, or system prompt.
+
+    ``tool_calling`` is the §7.1d 🔴 routing-gate fix: the omni-router's
+    master "does this caller get any tools at all" gate reads this typed
+    bool (sourced from the registry model's ``capability_flags.tool_calling``
+    when available) instead of ``"tool-calling" in labels`` — a model
+    tagged ``tool-calling`` in the registry no longer needs a hand-authored
+    mirror in the slot TOML's ``[model].labels`` to actually ship tools.
+    ``labels`` stays for the OTHER per-tool label overlays
+    (``required_labels`` — vision/edit/image/tts/embeddings/reranking)
+    which are out of scope for this fix.
     """
 
     name: str
@@ -110,6 +124,7 @@ class LoadedSlot:
     system_prompt: str = ""
     profile: str | None = None
     default: bool = False
+    tool_calling: bool = False
 
 
 def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
@@ -132,12 +147,26 @@ def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
     return SEEDED_SLOTS
 
 
-def loaded_slot_from_config(cfg: dict[str, Any]) -> LoadedSlot | None:
+def loaded_slot_from_config(
+    cfg: dict[str, Any],
+    *,
+    model_info: Mapping[str, Any] | None = None,
+) -> LoadedSlot | None:
     """Convert one raw slot config dict into a :class:`LoadedSlot`.
 
     Returns ``None`` when the config does not describe an enabled slot
     with a model id. The raw TOML shapes are intentionally absorbed here
     so request routers and tool dispatchers consume a typed result.
+
+    ``model_info`` (optional) is the registry ``Model.model_dump()``-shaped
+    dict for ``cfg``'s bound model — pass it when the caller already has a
+    registry handle (:func:`loaded_slot` / :func:`resolve_for_request` do,
+    via ``host._resolve_model_info``) so ``tool_calling`` reflects the
+    registry's ``capability_flags.tool_calling`` rather than the slot
+    TOML's ``[model].labels`` (the §7.1d 🔴 fix). When omitted, or when the
+    resolved model has no explicit ``tool_calling`` (``None``), this falls
+    back to the pre-fix ``"tool-calling" in labels`` check so slot TOMLs
+    that predate the registry field still route tool calls.
     """
     name = str(cfg.get("name") or "").strip()
     slot_type = str(cfg.get("type") or "").strip()
@@ -155,7 +184,7 @@ def loaded_slot_from_config(cfg: dict[str, Any]) -> LoadedSlot | None:
     if not model_id:
         return None
 
-    from hal0.model_meta import labels_of
+    from hal0.model_meta import labels_of, model_capabilities_of
 
     raw_prompt = cfg.get("system_prompt")
     system_prompt = raw_prompt if isinstance(raw_prompt, str) else ""
@@ -165,16 +194,21 @@ def loaded_slot_from_config(cfg: dict[str, Any]) -> LoadedSlot | None:
             system_prompt = extra["system_prompt"]
 
     profile = cfg.get("profile")
+    labels = frozenset(labels_of(cfg))
+    tool_calling = model_capabilities_of(model_info).get("tool_calling")
+    if tool_calling is None:
+        tool_calling = "tool-calling" in labels
     return LoadedSlot(
         name=name,
         model_id=model_id,
         slot_type=slot_type,
         device=str(cfg.get("device") or ""),
         enabled=True,
-        labels=frozenset(labels_of(cfg)),
+        labels=labels,
         system_prompt=system_prompt,
         profile=profile if isinstance(profile, str) and profile else None,
         default=cfg.get("default") is True,
+        tool_calling=bool(tool_calling),
     )
 
 
@@ -187,6 +221,10 @@ class RoutingHost(Protocol):
     def _resolve_alias(name: str) -> str: ...
     async def create(self, slot_name: str, slot_cfg: dict[str, Any]) -> Slot: ...
     async def delete(self, slot_name: str, *, force: bool = False) -> None: ...
+    # Optional: registry lookup for the §7.1d tool_calling gate. Not part
+    # of the hard Protocol contract — hosts without it (e.g. test stubs)
+    # just get the label-based fall-through in loaded_slot_from_config.
+    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]: ...
 
 
 async def default_slot_for(host: RoutingHost, slot_type: str) -> str | None:
@@ -215,6 +253,27 @@ async def default_slot_for(host: RoutingHost, slot_type: str) -> str | None:
     return candidates[0] if candidates else None
 
 
+async def _model_info_for(host: RoutingHost, cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Best-effort registry lookup for ``cfg``'s bound model.
+
+    Hosts that don't implement ``_resolve_model_info`` (test stubs) get
+    ``None`` back, which sends :func:`loaded_slot_from_config` down the
+    label fall-through path instead of raising.
+    """
+    resolver = getattr(host, "_resolve_model_info", None)
+    if resolver is None:
+        return None
+    model_section = cfg.get("model") or {}
+    model_id = model_section.get("default") if isinstance(model_section, dict) else None
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    try:
+        return await resolver(model_id)
+    except Exception:  # registry outage must not break routing
+        log.warning("routing.model_info_unavailable", extra={"model_id": model_id})
+        return None
+
+
 async def loaded_slot(host: RoutingHost, name: str) -> LoadedSlot | None:
     """Return a typed view of an enabled configured slot, or ``None``.
 
@@ -226,7 +285,8 @@ async def loaded_slot(host: RoutingHost, name: str) -> LoadedSlot | None:
         cfg = await host._load_slot_config(resolved)
     except SlotConfigError:
         return None
-    return loaded_slot_from_config(cfg)
+    model_info = await _model_info_for(host, cfg)
+    return loaded_slot_from_config(cfg, model_info=model_info)
 
 
 async def resolve_for_request(
@@ -259,13 +319,14 @@ async def resolve_for_request(
             return True
         return set(required_labels).issubset(slot.labels)
 
-    slots = [
-        slot
-        for cfg in await host.iter_configs()
-        if cfg.get("type") == slot_type
-        for slot in [loaded_slot_from_config(cfg)]
-        if slot is not None
-    ]
+    slots: list[LoadedSlot] = []
+    for cfg in await host.iter_configs():
+        if cfg.get("type") != slot_type:
+            continue
+        model_info = await _model_info_for(host, cfg)
+        slot = loaded_slot_from_config(cfg, model_info=model_info)
+        if slot is not None:
+            slots.append(slot)
 
     # Step 1+2: try the default first.
     default_name = await default_slot_for(host, slot_type)
