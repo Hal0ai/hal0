@@ -177,7 +177,15 @@ def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     model_cache: dict[str, Any] | None = None
     if request is not None:
         model_cache = getattr(request.app.state, "model_cache", {}) or {}
-    return serialize_slot(slot, model_cache=model_cache)
+    out = serialize_slot(slot, model_cache=model_cache)
+    # Surface the stable opaque slot id (rework §11.1) additively: present
+    # only once the identity store has assigned one, so pre-§11.1 snapshots
+    # and exact-shape tests are unaffected. The dashboard keys on ``id`` to
+    # treat rename as a pure relabel.
+    slot_id = getattr(slot, "slot_id", None)
+    if slot_id is not None and "id" not in out:
+        out["id"] = slot_id
+    return out
 
 
 async def _config_field_enrichment(request: Request) -> dict[str, dict[str, Any]]:
