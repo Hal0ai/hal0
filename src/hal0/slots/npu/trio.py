@@ -188,7 +188,6 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                 "name": canon,
                 "port": int(anchor_port),
                 "device": "npu",
-                "backend": "flm",
                 "provider": "flm",
                 "profile": "flm",
                 "served_by": anchor_name,

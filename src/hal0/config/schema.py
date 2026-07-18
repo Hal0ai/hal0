@@ -37,9 +37,6 @@ from hal0.model_meta import (
     map_backend_to_device,
 )
 from hal0.model_meta import (
-    LEGACY_BACKENDS as _LEGACY_BACKENDS,
-)
-from hal0.model_meta import (
     VALID_DEVICES as _VALID_DEVICES,
 )
 
@@ -53,15 +50,6 @@ log = logging.getLogger(__name__)
 # table + unknown-value policy). This module re-exports them so every
 # existing ``from hal0.config.schema import …`` call site keeps working.
 # model_meta imports nothing from schema, so the dependency is one-way.
-
-# TIER1: surface-area for the backend whitelist. Typos like
-# `backend = "vukan"` must raise at load time with the field path.
-#
-# DEPRECATED v0.2: ``SlotConfig.backend`` is being retired in favour of the
-# hardware-preference field ``SlotConfig.device``. The whitelist is kept for
-# one release so legacy slot TOMLs round-trip cleanly; a warning is logged
-# whenever ``backend`` is read without an accompanying ``device``.
-_VALID_BACKENDS = frozenset(_LEGACY_BACKENDS)
 
 # v0.2 hardware-preference enum. ``device`` replaces the overloaded
 # ``backend`` field — it carries hardware intent only, not provider choice.
@@ -313,15 +301,6 @@ class SlotConfig(BaseModel):
         ge=_SLOT_PORT_MIN,
         le=_SLOT_PORT_MAX,
         description=f"Host port for this slot ({_SLOT_PORT_MIN}-{_SLOT_PORT_MAX}, 127.0.0.1 only).",
-    )
-    backend: str = Field(
-        default="vulkan",
-        description=(
-            "DEPRECATED (v0.2; removed v0.3): legacy overloaded backend enum. "
-            "Use ``device`` instead. Reading a SlotConfig that has ``backend`` "
-            "set without ``device`` logs a deprecation warning and auto-fills "
-            "``device`` via ``map_backend_to_device``."
-        ),
     )
     device: str = Field(
         default=DEFAULT_DEVICE,
@@ -647,42 +626,50 @@ class SlotConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _promote_backend_to_device(cls, data: Any) -> Any:
-        """Soft-deprecation hook: derive ``device`` from a legacy ``backend``.
+        """Read-only promotion shim: derive ``device`` from a legacy
+        on-disk ``backend`` key, then drop ``backend`` from the dict.
 
-        v0.2 renames the hardware-preference field
-        ``backend`` → ``device``. For one release we read both: if a TOML
-        file or in-memory dict carries ``backend`` but no ``device`` we
-        synthesise ``device`` via :func:`map_backend_to_device` so the
-        rest of the system can pivot to the new field without losing
-        operator data. A log warning fires per load so the deprecation
-        is visible.
+        ``SlotConfig.backend`` no longer exists as a field (P2-device:
+        ``device`` is the sole persisted truth). But there is no on-disk
+        slot-TOML migration for backend→device, so a pre-device slot TOML
+        (``backend`` set, no ``device``) still needs to resolve to the
+        right hardware on load — without this, such a slot would silently
+        regress to :data:`DEFAULT_DEVICE` (gpu-rocm). This validator is
+        the ONLY thing that keeps that promotion alive; do NOT delete it.
 
-        We deliberately do NOT *delete* ``backend`` from the dict — the
-        slot loader/dumper still round-trips it onto disk so a downgrade
-        to v0.1.x stays clean. Removal lands in v0.3.
+        Unlike the old dual-write era, ``backend`` is popped from the
+        dict rather than kept: with ``extra="allow"`` a leftover key
+        would otherwise round-trip forever via ``extra`` once the field
+        is gone, which would defeat "device sole truth". The pop always
+        runs when ``backend`` is present, even if ``device`` was already
+        supplied (e.g. a stale dual-written TOML from before this
+        change) — only the *promotion* is gated on ``device`` being
+        absent.
         """
         if not isinstance(data, dict):
             return data
-        # Skip when the caller already supplied ``device`` explicitly.
-        if data.get("device"):
-            return data
         backend_value = data.get("backend")
-        if not backend_value:
+        if backend_value is None:
             return data
-        # Tolerate already-new-namespace values (gpu-rocm etc) — those
-        # round-trip through ``map_backend_to_device`` as identities.
-        mapped = map_backend_to_device(str(backend_value))
-        if backend_value not in _VALID_DEVICES:
-            log.warning(
-                "config.slot.backend_deprecated",
-                extra={
-                    "backend": backend_value,
-                    "promoted_device": mapped,
-                    "note": "SlotConfig.backend is deprecated; set 'device' instead. See ADR-0006 §7.",
-                },
-            )
         new_data = dict(data)
-        new_data["device"] = mapped
+        new_data.pop("backend", None)
+        if not data.get("device"):
+            # Tolerate already-new-namespace values (gpu-rocm etc) — those
+            # round-trip through ``map_backend_to_device`` as identities.
+            mapped = map_backend_to_device(str(backend_value))
+            if backend_value not in _VALID_DEVICES:
+                log.warning(
+                    "config.slot.backend_deprecated",
+                    extra={
+                        "backend": backend_value,
+                        "promoted_device": mapped,
+                        "note": (
+                            "SlotConfig.backend is removed; 'device' is now the "
+                            "sole persisted truth. See ADR-0006 §7."
+                        ),
+                    },
+                )
+            new_data["device"] = mapped
         return new_data
 
     @model_serializer(mode="wrap")
@@ -746,13 +733,6 @@ class SlotConfig(BaseModel):
                 f"slot name {v!r}: use lowercase alphanumeric, hyphens, underscores; "
                 f"start with alphanumeric; max 32 chars"
             )
-        return v
-
-    @field_validator("backend")
-    @classmethod
-    def backend_valid(cls, v: str) -> str:
-        if v not in _VALID_BACKENDS:
-            raise ValueError(f"backend {v!r} is not valid; choose from {sorted(_VALID_BACKENDS)}")
         return v
 
     @field_validator("device")

@@ -129,7 +129,8 @@ def test_apply_before_matches_disk(tmp_hal0_home: str) -> None:
 
 
 def test_apply_reconciles_slot_fields_for_npu(tmp_hal0_home: str) -> None:
-    """device=npu → slot TOML backend=flm (legacy token) + device=npu."""
+    """device=npu → slot TOML device=npu (P2-device: device is the sole
+    persisted truth; the legacy ``backend`` mirror is no longer written)."""
     slot_path = _write_embed_slot(tmp_hal0_home)
     _write_caps(tmp_hal0_home)
 
@@ -137,7 +138,6 @@ def test_apply_reconciles_slot_fields_for_npu(tmp_hal0_home: str) -> None:
 
     after = {fs.path: fs.data for fs in cs.after}[slot_path]
     assert after is not None
-    assert after["backend"] == "flm"
     assert after["device"] == "npu"
     assert after["provider"] == "flm"
     assert after["model"]["default"] == "nomic-embed-text-v1.5-q8_0"
@@ -157,7 +157,6 @@ def test_apply_reconciles_slot_fields_for_gpu_rocm(tmp_hal0_home: str) -> None:
 
     after = {fs.path: fs.data for fs in cs.after}[slot_path]
     assert after is not None
-    assert after["backend"] == "rocm"
     assert after["device"] == "gpu-rocm"
     assert after["model"]["default"] == "new-model"
 

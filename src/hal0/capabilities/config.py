@@ -55,11 +55,12 @@ class CapabilitySelection(BaseModel):
     user picked, which provider runs on it, which model id they bound,
     and whether the child is currently active.
 
-    v0.2 rename: the ``backend`` field is now :attr:`device`. For one
-    release the model accepts both: a TOML carrying only
-    ``backend`` auto-promotes via :func:`map_backend_to_device` and
-    round-trips with ``backend`` re-emitted on dump so a v0.1.x downgrade
-    sees its old field. Removal in v0.3.
+    v0.2 rename: the ``backend`` field is now :attr:`device`. P2-device
+    makes ``device`` the sole persisted truth — ``backend`` is no longer a
+    model field, but a TOML carrying only a legacy ``backend`` key still
+    auto-promotes via :func:`map_backend_to_device` on load (see
+    :meth:`_promote_backend_to_device`); the key is then dropped rather
+    than round-tripped.
     """
 
     model_config = {"populate_by_name": True, "str_strip_whitespace": True}
@@ -70,16 +71,6 @@ class CapabilitySelection(BaseModel):
             "v0.2 hardware-preference id: 'gpu-rocm' | 'gpu-vulkan' | "
             "'npu' | 'cpu'. Empty == unset (matches the dashboard's "
             "blank-picker UX)."
-        ),
-    )
-    backend: str = Field(
-        default="",
-        description=(
-            "DEPRECATED v0.2 (removed v0.3): legacy alias for ``device``. "
-            "Reading a CapabilitySelection that has ``backend`` set without "
-            "``device`` auto-promotes via ``map_backend_to_device`` and "
-            "logs a deprecation warning. Round-tripped on save so v0.1.x "
-            "downgrades stay legible."
         ),
     )
     provider: str = Field(
@@ -98,28 +89,32 @@ class CapabilitySelection(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _promote_backend_to_device(cls, data: Any) -> Any:
-        """Promote a legacy ``backend`` field to ``device`` on load.
+        """Read-only promotion shim: derive ``device`` from a legacy
+        on-disk ``backend`` key, then drop ``backend`` from the dict.
 
-        The auto-migration is supposed to rewrite the file before we get
-        here, but we also defend against:
+        ``backend`` is no longer a model field (P2-device: ``device`` is
+        the sole persisted truth). The auto-migration
+        (:func:`migrate_capabilities_v1_to_v2`) is supposed to rewrite the
+        file before we get here, but this validator also defends against:
 
           1. Hand-edited TOMLs that revert to the old shape.
           2. Programmatic call sites that still pass ``backend=...``.
 
-        Symmetry note: we keep both fields populated. The migration
-        purges ``backend`` from the persisted file; this validator just
-        makes in-memory construction tolerant.
+        Without this, a legacy ``backend``-only selection would silently
+        lose its device on load. ``backend`` is always popped when
+        present (even if ``device`` was already set) so a stray key never
+        round-trips — only the *promotion* is gated on ``device`` being
+        absent.
         """
         if not isinstance(data, dict):
             return data
-        has_device = bool(data.get("device"))
-        backend_val = data.get("backend") or ""
-        if has_device:
-            return data
-        if not backend_val:
+        backend_val = data.get("backend")
+        if backend_val is None:
             return data
         new_data = dict(data)
-        new_data["device"] = map_backend_to_device(str(backend_val))
+        new_data.pop("backend", None)
+        if not data.get("device") and backend_val:
+            new_data["device"] = map_backend_to_device(str(backend_val))
         return new_data
 
 
