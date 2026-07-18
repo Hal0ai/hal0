@@ -463,7 +463,7 @@ class SwitchoverBody(BaseModel):
     # a bad ``mode`` still routes to the handler's custom ``comfyui.invalid_mode``
     # 422 rather than a generic pydantic ``validation.error`` — the wire contract
     # (status + code) is byte-preserved. ``extra="ignore"`` matches today's
-    # silent-pass on legacy fields.
+    # silent-pass on unrecognised fields.
     model_config = ConfigDict(extra="ignore")
     mode: str | None = None
     force: bool = False

@@ -36,7 +36,6 @@ from hal0.registry.pull import persist_pull_job as _persist_pull_job
 from hal0.registry.pull import pull_job_file as _pull_job_file
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.services import models_service as _svc
-from hal0.upstreams.filters import apply_filters
 
 # See slots.py for the writer-gate rationale.
 
@@ -104,190 +103,15 @@ async def list_models(request: Request) -> dict[str, Any]:
     Local registry entries (a real file on disk) win on id collision —
     the upstream might still advertise the id, but the user has the
     bytes locally and that's the truth. Each row carries ``installed``
-    so the UI can render an installed/advertised badge.
+    so the UI can render an installed/advertised badge. The three-source
+    aggregation lives in :func:`hal0.services.models_service.list_all`.
     """
-    registry = request.app.state.model_registry
-    upstreams = request.app.state.upstreams
-    cache = getattr(request.app.state, "model_cache", {})
-    now = int(time.time())
-    data: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    filtered = 0
-    # Last HF update-check snapshot (populated by /api/models/updates/check;
-    # never fetched on this hot path). The flag is recomputed against the
-    # row's CURRENT metadata.sha256 rather than replayed from the snapshot,
-    # so applying an update clears the badge on the next poll without
-    # waiting for the check TTL to expire.
-    update_checks: dict[str, Any] = {}
-    _upd_state = getattr(request.app.state, "model_update_state", None)
-    if isinstance(_upd_state, dict):
-        update_checks = _upd_state.get("models") or {}
-    for entry in registry.list():
-        dumped = _model_to_dict(entry)
-        dumped["installed"] = True
-        chk = update_checks.get(entry.id)
-        if isinstance(chk, dict):
-            remote_sha = chk.get("remote_sha256")
-            local_sha = (entry.metadata or {}).get("sha256")
-            dumped["update_available"] = bool(
-                isinstance(remote_sha, str)
-                and remote_sha
-                and isinstance(local_sha, str)
-                and local_sha
-                and remote_sha != local_sha.lower()
-            )
-        dumped.setdefault("object", "model")
-        dumped.setdefault("created", now)
-        dumped.setdefault("owned_by", "local")
-        dumped["type"] = _dispatch_type(
-            dumped.get("id", ""), capabilities=dumped.get("capabilities")
-        )
-        # ComfyUI discriminator + category for the dashboard's dedicated
-        # image-gen surface. Path-derived so it self-heals rows an older pull
-        # mis-tagged (capabilities=["chat"], backends=[]) with no migration:
-        # any model whose bytes live under the ComfyUI models tree — or that
-        # already carries the comfyui backend — is owned_by "comfyui" and
-        # advertises its subdir as ``comfyui_category``. The UI groups the
-        # image-gen surface on this, not on the (possibly stale) capability.
-        _cat = _comfyui_category(dumped.get("path"))
-        _bes = list(dumped.get("backends") or [])
-        if _cat is not None or "comfyui" in _bes:
-            dumped["owned_by"] = "comfyui"
-            if "comfyui" not in _bes:
-                _bes.append("comfyui")
-                dumped["backends"] = _bes
-            if _cat is not None:
-                dumped["comfyui_category"] = _cat
-        data.append(dumped)
-        seen.add(entry.id)
-    # "Don't surface invisible models": the composite ``hal0``/npu upstream
-    # advertises FLM slot-default tags via /v1/models even when the weights are
-    # not on disk, so they used to leak into the catalog as available-but-
-    # uninstalled rows. The dedicated FLM probe below is the authoritative
-    # source (it re-adds the INSTALLED ones with the right npu shape), so drop
-    # every FLM-servable tag from the generic upstream advertisement. The probe
-    # is module-cached, so the second call in the injector below is O(1).
-    flm_skip: set[str] = set()
-    try:
-        from hal0.providers.flm import flm_served_models as _flm_probe
-
-        for _fm in _flm_probe():
-            _tag = _fm.get("tag")
-            if isinstance(_tag, str) and _tag:
-                flm_skip.add(_tag)
-                flm_skip.add(_tag.replace(":", "-") + "-FLM")
-    except Exception:
-        # Probe unavailable (no flm binary / dev host) — nothing to skip.
-        pass
-    for u in upstreams.list():
-        # Slot-backed entries serve LOCAL models: the composite ``hal0``
-        # aggregate (kind="slot") and container slots (kind="remote" with
-        # slot_name) advertise ids that live on this host's disk — labeling
-        # them origin="upstream" put local slot models in the Models page
-        # Upstream tab whenever the advertised id differed from the registry
-        # id (raw GGUF casing vs normalized alias). Only genuine remotes
-        # contribute upstream rows here.
-        if u.kind != "remote" or u.slot_name:
-            continue
-        if not getattr(u, "enabled", True) or not getattr(u, "advertise_models", True):
-            continue
-        try:
-            ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
-            cache[u.name] = ids
-        except Exception:
-            ids = []
-        # Same operator curation as /v1/models — the Models page is a
-        # discovery surface, so per-upstream filters apply here too
-        # (dispatch stays unfiltered; hidden models remain addressable).
-        ids = apply_filters(ids, getattr(u, "model_filters", None))
-        for mid in ids:
-            if mid in seen:
-                continue
-            if _is_alias(mid):
-                filtered += 1
-                continue
-            # FLM-servable tag advertised before its weights are pulled — the
-            # dedicated probe below re-adds the installed ones. Skip here so an
-            # un-pulled FLM model never shows as an available upstream row.
-            if mid in flm_skip:
-                continue
-            seen.add(mid)
-            data.append(
-                {
-                    "id": mid,
-                    "name": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": u.name,
-                    "upstream": u.name,
-                    "installed": False,
-                    # Explicit origin (WS-13): advertised by a remote
-                    # provider's /v1/models, never on this host's disk.
-                    # Clients should prefer this over inferring from
-                    # installed+upstream.
-                    "origin": "upstream",
-                    # Upstream-only rows have no local path → "pulled"
-                    # by the path-shape rule (issue #220). The
-                    # blessed bucket is reserved for files actually
-                    # laid out under the blessed recipe tree.
-                    "ns": "pulled",
-                    # Upstream rows carry no capabilities; classify from
-                    # the id so W7 still counts embed/rerank/voice/img.
-                    "type": _dispatch_type(mid),
-                }
-            )
-    # Installed FLM/NPU models — surfaced straight from the host-flm probe so
-    # the NPU slot pickers can select any model on disk, not just the one a slot
-    # already defaults to (the composite ``hal0`` upstream advertises only slot
-    # defaults, so without this only the configured npu model appeared). The id
-    # uses the ``<tag>-FLM`` convention so the dashboard maps it to the
-    # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
-    # popover derive type/device without requiring a registry entry.
-    try:
-        from hal0.providers.flm import flm_served_models
-
-        for fm in flm_served_models():
-            if not fm.get("installed"):
-                continue
-            mid = fm["tag"].replace(":", "-") + "-FLM"
-            if mid in seen:
-                continue
-            seen.add(mid)
-            caps = list(fm.get("capabilities") or [])
-            # FLM chat tags are chat-first even when multimodal (gemma4 also
-            # advertises ``stt``); pick chat as the primary role so they land
-            # in the NPU chat picker, not under stt.
-            primary = "chat" if "chat" in caps else (caps[0] if caps else "chat")
-            # The NPU slot pickers (ui/dash/slots.jsx) gate on the FLM-seed
-            # shape: ``isFlmModel`` needs backend=="flm" / upstream=="npu", and
-            # ``modelSlotType`` needs the DISPATCHER vocabulary (chat→llm,
-            # embed→embedding, stt→transcription) — not the W7 type vocab. Match
-            # that shape exactly so probe-sourced models are selectable.
-            data.append(
-                {
-                    "id": mid,
-                    "name": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": "flm",
-                    "upstream": "npu",
-                    "backend": "flm",
-                    "installed": True,
-                    # FLM rows carry upstream="npu" for the slot pickers but
-                    # are installed host-side — explicitly local (WS-13).
-                    "origin": "local",
-                    "ns": "pulled",
-                    "type": _FLM_DISPATCH_TYPE.get(primary, "llm"),
-                    "capability": primary,
-                    "capabilities": caps,
-                    "device": "npu",
-                }
-            )
-    except Exception:
-        # Probe unavailable (no flm binary / dev host) — skip silently; the
-        # rest of the catalog still renders.
-        pass
-    return {"models": data, "count": len(data), "filtered_aliases": filtered}
+    return await _svc.list_all(
+        registry=request.app.state.model_registry,
+        upstreams=request.app.state.upstreams,
+        cache=getattr(request.app.state, "model_cache", {}),
+        update_state=getattr(request.app.state, "model_update_state", None),
+    )
 
 
 @router.get("/catalogue")
