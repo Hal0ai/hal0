@@ -101,7 +101,7 @@ def list_capabilities() -> None:
             table.add_row(
                 slot,
                 child,
-                str(sel.get("backend") or "—"),
+                str(sel.get("device") or "—"),
                 str(sel.get("provider") or "—"),
                 str(sel.get("model") or "—"),
                 "[green]yes[/green]" if enabled else "[dim]no[/dim]",
@@ -144,6 +144,10 @@ def set_capability(
     if model is not None:
         body["model"] = model
     if backend is not None:
+        # ``backend`` is kept as the wire alias here (§2d): the API route's
+        # orchestrator.apply still accepts it and forward-translates to
+        # ``device`` via ``canonical_device`` — see
+        # ``CapabilityOrchestrator.apply``'s partial-merge in orchestrator.py.
         body["backend"] = backend
     if provider is not None:
         body["provider"] = provider
@@ -248,7 +252,7 @@ def migrate(
                 capability = _CHILD_TO_CAPABILITY.get((slot, child))
                 if capability is None:
                     continue
-                verdict, legal = _classify_pair(capability, sel.model, sel.backend, registry)
+                verdict, legal = _classify_pair(capability, sel.model, sel.device, registry)
                 if verdict in {"empty", "ok"}:
                     continue
                 if verdict == "illegal_backend":
@@ -270,14 +274,14 @@ def migrate(
                             "slot": slot,
                             "child": child,
                             "model": sel.model,
-                            "before": f"{sel.backend or '—'} / {sel.provider or '—'}",
+                            "before": f"{sel.device or '—'} / {sel.provider or '—'}",
                             "after": f"{new_backend or '—'} / {new_provider or '—'}",
                             "reason": "backend cannot serve model",
                         }
                     )
                     if apply:
                         children[child] = CapabilitySelection(
-                            backend=new_backend,
+                            device=new_backend,
                             provider=new_provider,
                             model=sel.model,
                             enabled=sel.enabled,
@@ -288,14 +292,14 @@ def migrate(
                             "slot": slot,
                             "child": child,
                             "model": sel.model,
-                            "before": f"{sel.backend or '—'} / {sel.provider or '—'}",
+                            "before": f"{sel.device or '—'} / {sel.provider or '—'}",
                             "after": "(cleared)",
                             "reason": "model not in catalog",
                         }
                     )
                     if apply:
                         children[child] = CapabilitySelection(
-                            backend=sel.backend,
+                            device=sel.device,
                             provider=sel.provider,
                             model="",
                             enabled=False,

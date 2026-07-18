@@ -175,7 +175,7 @@ class TestSlotConfigRoundTrip:
         cfg = SlotConfig(
             name="primary",
             port=8081,
-            backend="vulkan",
+            device="gpu-vulkan",
             provider="llama-server",
         )
         cfg.model.default = "qwen3-4b"
@@ -184,23 +184,38 @@ class TestSlotConfigRoundTrip:
         loaded = load_slot_config("primary")
         assert loaded.name == "primary"
         assert loaded.port == 8081
-        assert loaded.backend == "vulkan"
+        assert loaded.device == "gpu-vulkan"
         assert loaded.model.default == "qwen3-4b"
 
     def test_load_missing_slot_raises(self, tmp_hal0_home: str) -> None:
         with pytest.raises(ConfigNotFound):
             load_slot_config("ghost")
 
-    def test_load_with_invalid_backend_raises_with_field_path(self, tmp_hal0_home: str) -> None:
-        """PLAN.md §5 Tier 1: backend = 'vukan' must raise with field path."""
+    def test_load_with_invalid_device_raises_with_field_path(self, tmp_hal0_home: str) -> None:
+        """PLAN.md §5 Tier 1: device = 'gpu-rcom' must raise with field path."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
         (paths.slots_config_dir() / "broken.toml").write_text(
-            '[slot]\nname = "broken"\nport = 8081\nbackend = "vukan"\n'
+            '[slot]\nname = "broken"\nport = 8081\ndevice = "gpu-rcom"\n'
         )
         with pytest.raises(ConfigParseError) as ei:
             load_slot_config("broken")
-        assert "backend" in str(ei.value)
-        assert "vukan" in str(ei.value)
+        assert "device" in str(ei.value)
+        assert "gpu-rcom" in str(ei.value)
+
+    def test_load_with_legacy_backend_only_promotes_to_device(self, tmp_hal0_home: str) -> None:
+        """A legacy on-disk ``backend``-only slot TOML (no ``device``) must
+        still resolve to the right hardware — the promote-then-drop shim
+        (``SlotConfig._promote_backend_to_device``) is the ONLY thing that
+        keeps a pre-device slot TOML from silently regressing to
+        DEFAULT_DEVICE. There is no on-disk slot-TOML migration for this."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "legacy-cpu.toml").write_text(
+            '[slot]\nname = "legacy-cpu"\nport = 8081\nbackend = "cpu"\n'
+        )
+        loaded = load_slot_config("legacy-cpu")
+        assert loaded.device == "cpu"
+        # ``backend`` is popped, not round-tripped, on the in-memory model.
+        assert "backend" not in loaded.model_dump()
 
     def test_list_slots_empty(self, tmp_hal0_home: str) -> None:
         assert list_slots() == []

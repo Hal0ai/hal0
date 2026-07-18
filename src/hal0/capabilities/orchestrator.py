@@ -523,7 +523,7 @@ class CapabilityOrchestrator:
 
         status_str = await self._slot_status_string(slot_name)
         return {
-            "backend": merged.backend,
+            "device": merged.device,
             "provider": merged.provider,
             "model": merged.model,
             "enabled": merged.enabled,
@@ -813,10 +813,10 @@ class CapabilityOrchestrator:
         """Create the device=npu, type=embedding|transcription slot RECORD.
 
         Like :meth:`_ensure_slot_exists` but forces the FLM-trio shape:
-        ``device=npu``, ``provider=flm``, ``backend=flm``, and always
-        stamps the trio ``type`` so dispatch gating activates. No-op when
-        the slot TOML already exists (its existing fields, including
-        ``type``, survive — ``update_config`` is a shallow top-level merge).
+        ``device=npu``, ``provider=flm``, and always stamps the trio
+        ``type`` so dispatch gating activates. No-op when the slot TOML
+        already exists (its existing fields, including ``type``, survive —
+        ``update_config`` is a shallow top-level merge).
         """
         cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
         if cfg_path.exists():
@@ -825,7 +825,6 @@ class CapabilityOrchestrator:
         cfg_dict: dict[str, Any] = {
             "name": slot_name,
             "port": port,
-            "backend": "flm",
             "device": "npu",
             "provider": "flm",
             "enabled": bool(selection.enabled),

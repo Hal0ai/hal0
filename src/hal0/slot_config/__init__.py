@@ -250,8 +250,11 @@ def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
 
     Tolerated beyond the declared fields:
       - documented legacy aliases: ``[model].ctx_size``, top-level
-        ``backend`` / ``provider`` / ``runtime`` (declared deprecated
-        fields), a *string* ``image`` (per-slot container-image override),
+        ``provider`` / ``runtime`` (declared deprecated fields), a
+        *string* ``image`` (per-slot container-image override). NOTE
+        (P2-device): ``backend`` is no longer a declared ``SlotConfig``
+        field nor tolerated here — a write payload carrying it is now
+        flagged as unknown; ``device`` is the sole persisted truth.
       - the actively-read extras in :data:`TOLERATED_SLOT_CONFIG_KEYS`,
       - ``extra`` tables at any level (verbatim provider passthrough by
         contract — never validated).
