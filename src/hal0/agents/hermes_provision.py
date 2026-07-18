@@ -24,6 +24,23 @@ upstream subcommands.
 See ``docs/internal/hermes-bootstrap-plan-2026-05-23.md`` §3 + §16 for
 the full design contract and ``docs/internal/adr/0012-remove-auth-and-caddy.md``
 for the agent-identity model (X-hal0-Agent header, not Bearer).
+
+P3-perms (OwnershipStore adoption) follow-up note: ``_chown_tree_to_hal0`` and
+the late ``_phase_ownership_reconcile`` phase were investigated as dead-code
+deletion candidates once ``hal0-api`` flips to ``User=hal0`` and the installer
+adopts the born-owned contract (drop privileges before config writes). They
+are NOT dead: ``installer/install.sh`` still invokes
+``hal0 agent install hermes`` as ROOT (intentionally — that same CLI
+invocation's ``_phase_install`` writes ``/usr/local/bin/hermes`` +
+``hal0-hermes``, a genuinely root-only path unrelated to this module's
+``$HERMES_HOME``/config writes), so every phase in THIS pipeline still runs
+under a root euid at install time and would otherwise leave ``config.yaml`` /
+``runtime.json`` / the venv root:root for the ``User=hal0``
+``hal0-agent@hermes.service`` unit to fail reading. A true fix needs an
+in-process privilege drop inside this module BETWEEN "write
+/usr/local/bin" (root) and "write $HERMES_HOME" (hal0) — out of scope for the
+P3-perms pass that added the ``OwnershipStore`` rows this file's HERMES_HOME
+mirrors (``agents/`` 0711, HERMES_HOME 0700). Keep both alive.
 """
 
 from __future__ import annotations
@@ -224,7 +241,7 @@ PYTHON_MIN = (3, 11)
 # when upstream ships 3.14 support (#1249).
 PYTHON_MAX_EXCLUSIVE = (3, 14)
 MIN_FREE_GIB = 4
-DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/status"
+DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/health"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
 # Canonical CLI entry point on PATH (locked decision #3). The thin
 # ``hermes`` wrapper injects HAL0_AGENT_ID and execs the venv hermes
@@ -489,8 +506,11 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
       (Ubuntu 26.04 ships 3.14 only, #1248). A host with uv passes even
       without one — the install phase provisions a managed interpreter
       (#1250).
-    * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
+    * ``hal0`` daemon reachable at ``/api/health`` — agents that can't
       reach hal0 are useless. Catch it now instead of during config_write.
+      Probes the OPEN shallow-liveness endpoint (spec-kb1-auth exposure
+      allowlist), NOT the admin-scoped ``/api/status`` which 401s even when
+      ``auth_enabled`` is false and would fail every provision (#kb1).
     * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
       phases; a real touch/unlink catches a root-owned ``$HERMES_HOME`` (or
       SELinux/ACL block) that an ``os.access`` check on ``/var/lib/hal0`` misses.
@@ -978,8 +998,8 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
     copied into ``$HERMES_HOME/plugins/hal0-memory/``.
     The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
     hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
-    listener, and the composite ``hal0`` upstream in :mod:`hal0.api`
-    now supersedes it.
+    listener, and the direct-read composite model catalogue in
+    :mod:`hal0.api` (``_fetch_hal0_composite_models``) now supersedes it.
 
     Skips heavy work when the venv binary already exists at the
     expected version — re-runs of ``hal0 agent bootstrap hermes`` are
@@ -2760,7 +2780,7 @@ def _build_identity_card(state: BootstrapState) -> dict[str, Any]:
                 "transport": "streamable-http",
             },
             "delegation": {
-                "accepts_tasks_from": ["claude-code", "pi-coder", "user"],
+                "accepts_tasks_from": ["claude-code", "user"],
                 "max_concurrent": 3,
             },
             "hal0_state": {
@@ -4687,10 +4707,19 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     merged["agent"] = payload["agent"]
     merged["data_dir"] = payload["data_dir"]
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_bytes(tomli_w.dumps(merged).encode("utf-8"))
-    os.replace(tmp, path)
+    body = tomli_w.dumps(merged)
+    if os.geteuid() == 0:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".toml.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            os.chown(path, 0, 0)
+    else:
+        # Seed TOML lives in root:root /etc/hal0/agents — delegate the write to
+        # the seam (it builds the path from the validated agent name). The
+        # read-merge above works unprivileged: the file is 0644 world-readable.
+        _privileged_env_write("write-seed-toml", body)
     return path, True
 
 

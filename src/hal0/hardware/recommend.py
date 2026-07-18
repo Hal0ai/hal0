@@ -110,16 +110,31 @@ def _pick_cpu_model() -> str:
     return _PRIMARY_TIERS[-1][0]
 
 
+#: Known MoE architecture ids (§7.1d — ``CuratedModel.architecture``, once
+#: backfilled). Matched case-insensitively against ``curated.architecture``.
+_MOE_ARCHITECTURES: frozenset[str] = frozenset({"qwen3next", "mixtral", "deepseek-moe"})
+
+
 def _resolve_primary_ctx(model_id: str) -> int:
     """Resolve the primary slot's context window from the curated arch max.
 
     MoE/MTP primaries (tiny hybrid KV) get the full window; dense models
     are capped at ``_DENSE_CTX_CAP``; unknown models fall back to
     ``_CTX_FALLBACK``. Replaces the old flat hard-coded 8192 (#513).
+
+    §7.1d: prefers ``curated.architecture`` (the typed replacement for the
+    dead ``moe`` tag) when a curated row has been backfilled with one;
+    falls back to the original ``mtp``-tag / ``a3b``-in-id heuristic for
+    every curated row that has not been backfilled yet (all of them, as of
+    this lane — the seed rewrite is a separate follow-up), so behaviour is
+    unchanged until that backfill lands.
     """
     curated = get_curated(model_id)
     arch_max = curated.context_length if (curated and curated.context_length) else _CTX_FALLBACK
-    is_moe = bool(curated) and ("mtp" in curated.tags or "a3b" in curated.id.lower())
+    if curated and curated.architecture:
+        is_moe = curated.architecture.strip().lower() in _MOE_ARCHITECTURES
+    else:
+        is_moe = bool(curated) and ("mtp" in curated.tags or "a3b" in curated.id.lower())
     if is_moe:
         return arch_max
     return min(arch_max, _DENSE_CTX_CAP)

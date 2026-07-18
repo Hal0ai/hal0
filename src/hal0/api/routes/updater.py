@@ -221,14 +221,28 @@ def _try_restart_hal0_api() -> tuple[bool, str | None]:
     Returns ``(restarted, error)``. No-ops cleanly when ``systemctl`` is
     absent (tests / dev hosts) and never raises: a restart failure must not
     tear down the just-installed tree.
+
+    P3-perms: hal0-api runs ``User=hal0`` now, which can't restart its own
+    systemd unit directly — when this process is running as the hal0 service
+    user, route through ``sudo -n hal0-systemctl restart-self``
+    (installer/wrappers/hal0-systemctl) instead of a direct
+    ``systemctl try-restart`` (dev/tests/a pre-flip install keep the direct
+    call, unchanged). See :mod:`hal0.system.seam`.
     """
     systemctl = shutil.which("systemctl")
     if not systemctl:
         log.info("updater.restart_skipped", reason="systemctl not found")
         return (False, "systemctl not found")
+    from hal0.system.seam import SEAM_BIN, is_hal0_service_user
+
+    argv = (
+        ["sudo", "-n", SEAM_BIN, "restart-self"]
+        if is_hal0_service_user()
+        else [systemctl, "try-restart", "hal0-api.service"]
+    )
     try:
         proc = subprocess.run(
-            [systemctl, "try-restart", "hal0-api.service"],
+            argv,
             capture_output=True,
             text=True,
             check=False,

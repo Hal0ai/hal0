@@ -1,13 +1,11 @@
 """GET /api/services/health — dashboard services health aggregator.
 
-Returns a stable list of five well-known services (comfyui, hermes,
-turnstone, openwebui, n8n) with honest up/down state.  Every source degrades
+Returns a stable list of three well-known services (comfyui, hermes,
+openwebui) with honest up/down state.  Every source degrades
 gracefully — a probe failure yields up=false, never a 500.
 
-Real probes: comfyui (in-process /system_stats+/queue), hermes + turnstone
-(systemd unit state), openwebui (loopback GET /health — SpikeB §5.4).  n8n
-has no reachable probe from the API process (not deployed on this host) and
-reports up=false, detail="unmonitored".
+Real probes: comfyui (in-process /system_stats+/queue), hermes
+(systemd unit state), openwebui (loopback GET /health — SpikeB §5.4).
 
 HARD RULE: up=true requires a real signal.  Services with no wired probe
 report up=false, detail="unmonitored" — never a fabricated "up".
@@ -38,11 +36,6 @@ log = structlog.get_logger(__name__)
 
 router = APIRouter()
 
-# Turnstone's systemd unit (bundled agent, loopback :9129) — probed the same
-# way as hermes. _HERMES_UNIT is imported from comfyui; turnstone has no such
-# shared constant, so name it locally.
-_TURNSTONE_UNIT = "hal0-agent@turnstone.service"
-
 # OpenWebUI binds 0.0.0.0:3001 in hal0-openwebui.service (the port is fixed
 # in the unit — see config.py _OPENWEBUI_PORT). We probe it over loopback,
 # independent of the browser-facing public URL (_openwebui_url). The probe
@@ -62,12 +55,6 @@ _PROBE_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=1.0, pool=1.0)
 def _openwebui_url() -> str | None:
     """Configured public URL for OpenWebUI, or None when absent."""
     public = os.environ.get("HAL0_OPENWEBUI_PUBLIC_URL", "").strip().rstrip("/")
-    return public or None
-
-
-def _n8n_url() -> str | None:
-    """Configured public URL for n8n, or None when absent."""
-    public = os.environ.get("HAL0_N8N_PUBLIC_URL", "").strip().rstrip("/")
     return public or None
 
 
@@ -118,18 +105,6 @@ async def _probe_hermes() -> tuple[bool, str]:
     return False, "systemd unit inactive or absent"
 
 
-async def _probe_turnstone() -> tuple[bool, str]:
-    """Probe Turnstone via systemd unit state — same mechanism as hermes.
-
-    Turnstone is a bundled agent running ``hal0-agent@turnstone.service``
-    (loopback :9129). Real signal: the unit's active state.
-    """
-    active = await _systemd_active(_TURNSTONE_UNIT)
-    if active:
-        return True, "systemd unit active"
-    return False, "systemd unit inactive or absent"
-
-
 async def _probe_openwebui() -> tuple[bool, str]:
     """Real reachability probe — GET <loopback>/health on OpenWebUI.
 
@@ -147,25 +122,19 @@ async def _probe_openwebui() -> tuple[bool, str]:
     return False, f"unhealthy (HTTP {resp.status_code})"
 
 
-async def _probe_n8n() -> tuple[bool, str]:
-    # TODO(spike §5.4): real reachability probe — n8n exposes /healthz.
-    # Wire here once the spike lands.  Until then: honest unmonitored placeholder.
-    return False, "unmonitored"
-
-
 # ── route ─────────────────────────────────────────────────────────────────────
 
 
 @router.get("/health")
 async def services_health() -> dict[str, Any]:
-    """Aggregate health of the five known hal0 companion services.
+    """Aggregate health of the four known hal0 companion services.
 
     Response shape::
 
         {
           "services": [
             {
-              "id":     "comfyui"|"hermes"|"turnstone"|"openwebui"|"n8n",
+              "id":     "comfyui"|"hermes"|"openwebui",
               "name":   str,
               "up":     bool,
               "detail": str,
@@ -216,24 +185,6 @@ async def services_health() -> dict[str, Any]:
         }
     )
 
-    # ── turnstone ────────────────────────────────────────────────────────────
-    try:
-        t_up, t_detail = await _probe_turnstone()
-    except Exception as exc:
-        log.warning("services_health.turnstone_probe_error", exc=repr(exc))
-        t_up, t_detail = False, type(exc).__name__
-
-    services.append(
-        {
-            "id": "turnstone",
-            "name": "Turnstone",
-            "up": t_up,
-            "detail": t_detail,
-            "url": None,  # loopback-only, no browser-reachable URL
-            "stat": None,
-        }
-    )
-
     # ── openwebui ─────────────────────────────────────────────────────────────
     try:
         ow_up, ow_detail = await _probe_openwebui()
@@ -248,24 +199,6 @@ async def services_health() -> dict[str, Any]:
             "up": ow_up,
             "detail": ow_detail,
             "url": _openwebui_url(),
-            "stat": None,
-        }
-    )
-
-    # ── n8n ──────────────────────────────────────────────────────────────────
-    try:
-        n8n_up, n8n_detail = await _probe_n8n()
-    except Exception as exc:
-        log.warning("services_health.n8n_probe_error", exc=repr(exc))
-        n8n_up, n8n_detail = False, type(exc).__name__
-
-    services.append(
-        {
-            "id": "n8n",
-            "name": "n8n",
-            "up": n8n_up,
-            "detail": n8n_detail,
-            "url": _n8n_url(),
             "stat": None,
         }
     )

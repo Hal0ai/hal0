@@ -1,0 +1,20 @@
+# hal0 — privileged seam grant for slot/systemd ops (P3-perms).
+#
+# hal0-api runs as the unprivileged `hal0` system user (User=hal0,
+# installer/install.sh). It delegates the genuinely-root slot-lifecycle ops —
+# writing a per-slot unit under /etc/systemd/system, daemon-reload,
+# start/stop/restart/enable/disable/reset-failed of a slot unit, and
+# restarting itself on self-update — to
+# /usr/lib/hal0/bin/hal0-systemctl, which is the entire privileged surface:
+# the helper validates every slot id (strict identifier regex), never
+# evaluates a shell, and accepts no wildcards.
+#
+# Install (as root):
+#   install -m 0755 -o root -g root hal0-systemctl /usr/lib/hal0/bin/hal0-systemctl
+#   install -m 0440 -o root -g root hal0-systemctl /etc/sudoers.d/hal0-systemctl
+#   visudo -cf /etc/sudoers.d/hal0-systemctl
+#
+# Keep this grant pinned to the helper binary; a broader grant would let the
+# API run arbitrary root commands. Revoke with: rm /etc/sudoers.d/hal0-systemctl
+
+hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-systemctl

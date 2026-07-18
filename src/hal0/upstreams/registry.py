@@ -77,15 +77,20 @@ class UpstreamAlreadyExists(UpstreamError):
 
 
 class UpstreamProtected(UpstreamError):
-    """Raised when mutating the synthetic composite or a slot-backed upstream."""
+    """Raised when mutating a slot-backed upstream or the reserved name."""
 
     code = "system.upstream_protected"
     status = 400
 
 
-# Name of the synthetic composite upstream auto-registered at startup for
-# /v1/models aggregation. Never authored in TOML, never CRUD-mutable.
-COMPOSITE_UPSTREAM_NAME = "hal0"
+# "hal0" is reserved from the reactive CRUD surface (POST/DELETE
+# /api/upstreams) — it's the cache key the /v1/models aggregator and the
+# dashboard's synthetic slot tile use for the direct-read model catalogue
+# (see hal0.api._fetch_hal0_composite_models), so a same-named upstream
+# created through the API would collide with it. Operators can still author
+# an explicit ``hal0`` row in upstreams.toml (loaded at hydrate time,
+# bypassing this CRUD-only guard) to point it at a real remote.
+RESERVED_UPSTREAM_NAME = "hal0"
 
 
 # ── Upstream dataclass ────────────────────────────────────────────────────────
@@ -325,10 +330,10 @@ class UpstreamRegistry:
         :class:`~hal0.config.schema.UpstreamModelFilters`, a plain dict, or
         ``None`` (clears filters). An empty filters object also clears.
 
-        Auto-registered upstreams (slot-backed entries and the synthetic
-        composite, which aren't authored in ``upstreams.toml``) have no
-        on-disk row to patch — for those the in-memory value is updated and
-        the on-disk config is left untouched; the value resets on restart.
+        Auto-registered upstreams (slot-backed entries, which aren't
+        authored in ``upstreams.toml``) have no on-disk row to patch — for
+        those the in-memory value is updated and the on-disk config is
+        left untouched; the value resets on restart.
 
         Args:
             name: Upstream name.
@@ -381,14 +386,14 @@ class UpstreamRegistry:
     def create_persistent(self, entry: UpstreamEntry, *, persist: bool = True) -> Upstream:
         """Append a new upstream to ``upstreams.toml`` and register it.
 
-        Guards: the composite name and ``kind="slot"`` entries are rejected —
+        Guards: the reserved name and ``kind="slot"`` entries are rejected —
         slot upstreams are owned by SlotManager, not this surface.
 
         Raises:
             UpstreamProtected: Reserved name or slot kind.
             UpstreamAlreadyExists: Name collision in registry or TOML.
         """
-        if entry.name == COMPOSITE_UPSTREAM_NAME:
+        if entry.name == RESERVED_UPSTREAM_NAME:
             raise UpstreamProtected(
                 f"upstream name {entry.name!r} is reserved", {"name": entry.name}
             )
@@ -433,14 +438,14 @@ class UpstreamRegistry:
 
         Raises:
             UpstreamNotFound: If ``name`` is not registered.
-            UpstreamProtected: Composite or slot-backed upstream.
+            UpstreamProtected: Reserved name or slot-backed upstream.
         """
         cur = self._upstreams.get(name)
         if cur is None:
             raise UpstreamNotFound(f"upstream {name!r} not found", {"name": name})
-        # Composite, slot-kind, AND container-backed remotes (kind="remote"
+        # Reserved name, slot-kind, AND container-backed remotes (kind="remote"
         # with slot_name set) are all owned by the slot lifecycle.
-        if name == COMPOSITE_UPSTREAM_NAME or cur.kind == "slot" or cur.slot_name:
+        if name == RESERVED_UPSTREAM_NAME or cur.kind == "slot" or cur.slot_name:
             raise UpstreamProtected(
                 f"upstream {name!r} is protected and cannot be deleted", {"name": name}
             )

@@ -24,7 +24,13 @@ from typing import Any
 import pytest
 
 from hal0.registry.model import Model
-from hal0.registry.store import ModelRegistry
+
+# ML-1: `ModelRegistry` now names the SQLite-backed store; this file
+# regression-tests the TOML store's cross-process sidecar flock
+# specifically, so it exercises `TomlModelRegistry` under the local name
+# `ModelRegistry`. SQLite's own `BEGIN IMMEDIATE` write-lock equivalent is
+# covered separately in tests/registry/test_sqlite_store.py.
+from hal0.registry.store import TomlModelRegistry as ModelRegistry
 
 
 def _model(model_id: str, path: str = "/models/x.gguf") -> Model:
@@ -116,7 +122,7 @@ def _child_add(hal0_home: str, model_id: str, barrier: Any, delay: float) -> Non
     os.environ["HAL0_HOME"] = hal0_home
     # Re-import inside the child so paths resolve against this env.
     from hal0.registry.model import Model as _Model
-    from hal0.registry.store import ModelRegistry as _Registry
+    from hal0.registry.store import TomlModelRegistry as _Registry
 
     reg = _Registry()
 

@@ -7,7 +7,7 @@ delete semantics, fail-open-empty foreign-private reads, and the
 
 The DEFAULT-gate parameter is the in-memory ``FakeMemoryProvider`` so this
 suite runs on every PR without dragging a heavy backend in. Real backends
-(Cognee, PgVector, Hindsight) attach as ``@pytest.mark.slow`` params, matching
+(PgVector, Hindsight) attach as ``@pytest.mark.slow`` params, matching
 the existing tests/memory/conftest.py split.
 """
 

@@ -18,7 +18,9 @@ _EXPECTED_KEYS = {
     "device_classes",
     "slot_types",
     "model_capabilities",
+    "modalities",
     "capability_aliases",
+    "model_capability_flags",
     "model_backends",
     "runtime_families",
     "backend_to_device",
@@ -53,6 +55,7 @@ def test_contract_shape(client: TestClient) -> None:
         "device_classes",
         "slot_types",
         "model_capabilities",
+        "modalities",
         "model_backends",
         "runtime_families",
     ):
@@ -92,6 +95,7 @@ def test_payload_matches_canonical_taxonomy(client: TestClient) -> None:
     assert body["device_classes"] == list(model_meta.DEVICE_CLASSES)
     assert body["slot_types"] == list(model_meta.SLOT_TYPES)
     assert body["model_capabilities"] == list(model_meta.MODEL_CAPABILITIES)
+    assert body["modalities"] == list(model_meta.MODEL_CAPABILITIES)
     assert body["capability_aliases"] == model_meta.CAPABILITY_ALIASES
     assert body["model_backends"] == list(model_meta.MODEL_BACKENDS)
     assert body["runtime_families"] == list(model_meta.RUNTIME_FAMILIES)
@@ -108,6 +112,16 @@ def test_capability_aliases_point_at_canonical_spellings(client: TestClient) -> 
     for alias, canonical in body["capability_aliases"].items():
         assert canonical in caps, (alias, canonical)
         assert alias not in caps, alias  # an alias is never also canonical
+
+
+def test_model_capability_flags_shape(client: TestClient) -> None:
+    body = _get_enums(client)
+    flags = body["model_capability_flags"]
+    assert isinstance(flags, list) and flags
+    keys = {f["key"] for f in flags}
+    assert "tool_calling" in keys
+    for f in flags:
+        assert set(f.keys()) == {"key", "label", "runner_gate"}
 
 
 def test_cache_headers_and_304_revalidation(client: TestClient) -> None:

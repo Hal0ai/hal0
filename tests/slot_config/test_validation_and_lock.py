@@ -25,7 +25,6 @@ class TestUnknownKeys:
             "port": 8081,
             "type": "llm",
             "device": "gpu-vulkan",
-            "backend": "vulkan",  # deprecated but declared field
             "provider": "llama-server",
             "runtime": "container",
             "enabled": True,

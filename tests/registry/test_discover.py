@@ -370,6 +370,64 @@ def test_backfill_coordless_no_curated_match_left_alone(registry: ModelRegistry)
     assert backfill_coordless(registry) == []
 
 
+def test_find_candidates_groups_complete_shard_set(tmp_path: Path) -> None:
+    """ML-2 behaviour flip (plan §7.1c a4): a complete shard set is now
+    GROUPED into one candidate (shard-1 as entry point, aggregate size,
+    ordered ``shards`` list) instead of being silently dropped."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "big-model-00001-of-00002.gguf").write_bytes(b"a" * 100)
+    (root / "big-model-00002-of-00002.gguf").write_bytes(b"b" * 50)
+    candidates = find_candidates(roots=[root], extensions=[".gguf"], known_paths=set())
+    names = {c.path.name for c in candidates}
+    assert "big-model-00001-of-00002.gguf" in names
+    assert "big-model-00002-of-00002.gguf" not in names  # not its own candidate
+    cand = next(c for c in candidates if c.path.name == "big-model-00001-of-00002.gguf")
+    assert cand.shards is not None
+    assert [p.name for p in cand.shards] == [
+        "big-model-00001-of-00002.gguf",
+        "big-model-00002-of-00002.gguf",
+    ]
+    assert cand.size_bytes == 150  # aggregate across the whole set
+
+
+def test_find_candidates_drops_incomplete_shard_set(tmp_path: Path) -> None:
+    """An incomplete group (no shard-1) is still dropped — llama-server
+    can't load a set missing its entry point."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "big-model-00002-of-00003.gguf").write_bytes(b"a" * 100)
+    (root / "big-model-00003-of-00003.gguf").write_bytes(b"b" * 50)
+    candidates = find_candidates(roots=[root], extensions=[".gguf"], known_paths=set())
+    assert candidates == []
+
+
+def test_register_candidate_writes_shard_model_file_rows(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """A grouped shard candidate populates `model_file` rows (ML-2 is the
+    first writer of that table) alongside the registry row itself."""
+    from hal0.db.connection import connect
+
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "shardy-00001-of-00002.gguf").write_bytes(b"a" * 100)
+    (root / "shardy-00002-of-00002.gguf").write_bytes(b"b" * 50)
+    candidates = find_candidates(roots=[root], extensions=[".gguf"], known_paths=set())
+    cand = next(c for c in candidates if c.shards is not None)
+    model = register_candidate(registry, cand)
+    assert model.metadata["shards"]
+    with connect(registry.db_path) as conn:
+        rows = conn.execute(
+            "SELECT rel, role, shard_index FROM model_file WHERE model_id = ? ORDER BY shard_index",
+            (model.id,),
+        ).fetchall()
+    assert [dict(r) for r in rows] == [
+        {"rel": "shardy-00001-of-00002.gguf", "role": "shard", "shard_index": 1},
+        {"rel": "shardy-00002-of-00002.gguf", "role": "shard", "shard_index": 2},
+    ]
+
+
 def test_scan_and_register_backfills_existing_coordless_row(
     tmp_path: Path, registry: ModelRegistry
 ) -> None:

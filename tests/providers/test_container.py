@@ -652,7 +652,8 @@ class TestContainerSpec:
         model_val = spec.command[model_idx + 1] if model_idx + 1 < len(spec.command) else ""
         assert "/mnt/ai-models/" in model_val
 
-    def test_mount_identical_path(self) -> None:
+    def test_mount_identical_path(self, monkeypatch) -> None:
+        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
         spec = self._build_spec()
         # Identical-path model-store mount, read-only via first-class Mount flag.
         store_mount = next(m for m in spec.mounts if m.source == _MODEL_STORE_MOUNT)

@@ -20,7 +20,6 @@ import os
 import subprocess
 import sys
 import time
-import tomllib
 from enum import StrEnum
 from pathlib import Path
 
@@ -30,7 +29,6 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-import hal0
 from hal0.cli._shared import (
     CliApiError,
     _api_base,
@@ -55,68 +53,6 @@ update_app = typer.Typer(
 
 class UpdateChannel(StrEnum):
     stable = "stable"
-    nightly = "nightly"
-
-
-def _editable_source_version() -> str | None:
-    """Return the version in the source-tree pyproject.toml, if this is an
-    editable/source checkout; otherwise None.
-
-    In an editable install ``importlib.metadata.version("hal0ai")`` is frozen
-    at ``pip install -e`` time and goes stale after a ``git pull``. We detect
-    the source tree by walking up from ``hal0.__file__`` for a pyproject.toml
-    whose project name is ``hal0ai`` (the distribution name; "hal0" is the
-    legacy pre-rename name) and reading its declared version.
-    """
-    mod_file = getattr(hal0, "__file__", None)
-    if not mod_file:
-        return None
-    for parent in Path(mod_file).resolve().parents:
-        pp = parent / "pyproject.toml"
-        if not pp.is_file():
-            continue
-        try:
-            data = tomllib.loads(pp.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
-            return None
-        project = data.get("project", {})
-        if project.get("name") in ("hal0ai", "hal0"):
-            ver = project.get("version")
-            return str(ver) if ver else None
-        # A pyproject that isn't hal0's - stop walking (we left the tree).
-        return None
-    return None
-
-
-def _warn_editable_version_drift() -> None:
-    """Warn if the installed metadata version lags the source pyproject.
-
-    Best-effort and silent on the common case (versions match or no source
-    tree found). Surfaces the post-``git pull`` lie so an operator isn't
-    misled by a stale ``hal0 --version``.
-    """
-    source = _editable_source_version()
-    if not source:
-        return
-    installed = hal0.__version__
-    # Compare semantically so PEP 440 normalization (0.3.2-alpha.1 vs
-    # 0.3.2a1) doesn't trip a false positive. Fall back to string equality
-    # if either side is unparseable.
-    try:
-        from packaging.version import InvalidVersion, Version
-
-        try:
-            drifted = Version(source) != Version(installed)
-        except InvalidVersion:
-            drifted = source != installed
-    except ImportError:
-        drifted = source != installed
-    if drifted:
-        console.print(
-            f"[yellow]editable install: package metadata reports "
-            f"{installed} but the source tree is {source}. "
-            f"Re-run `pip install -e .` to refresh the version.[/yellow]"
-        )
 
 
 def _print_check(body: dict) -> None:
@@ -296,53 +232,13 @@ def _restart_drifted_slots() -> None:
             console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
-def _update_via_git(check_only: bool = False) -> None:
-    """Update hal0 by cloning/fetching the git repo and pip-installing.
-
-    When *check_only* is True, only report whether an update is available
-    without applying it.
-    """
-    from hal0.updater.updater import Updater
-
-    console.print("[cyan]Checking for updates via git (local)…[/cyan]")
-    updater = Updater()
-    import asyncio
-
-    prepared = asyncio.run(updater.prepare_git())
-    version = prepared["version"]
-
-    current = hal0.__version__
-    try:
-        from packaging.version import Version
-
-        newer = Version(version) > Version(current)
-    except Exception:
-        newer = version != current
-
-    if not newer:
-        console.print(f"[dim]hal0 {current} is up to date (latest tag: {version})[/dim]")
-        return
-
-    console.print(f"[green]hal0 {current} → {version}  update available[/green]")
-    if check_only:
-        return
-
-    if _interactive() and not typer.confirm(f"Apply hal0 {version}?", default=True):
-        console.print("[dim]Staged but not applied — re-run to apply.[/dim]")
-        return
-    asyncio.run(updater.commit_git(version))
-    console.print(Panel(f"[green]Updated to {version}[/green]", border_style="green"))
-    console.print("[dim]Restart hal0-api to apply:[/dim] systemctl restart hal0-api")
-    _print_drift_banner(_fetch_slot_drift())
-
-
 @update_app.callback(invoke_without_command=True)
 def update(
     ctx: typer.Context,
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
-        help="Persist the update channel (stable | nightly), then check.",
+        help="Persist the update channel (stable), then check.",
     ),
     check: bool = typer.Option(
         False,
@@ -373,11 +269,6 @@ def update(
             "(post-update drift). Never bounces a slot unless you pass this flag."
         ),
     ),
-    source: str = typer.Option(
-        "release",
-        "--source",
-        help="Update source: 'release' (cosign-verified tarball, default) or 'git' (clone/fetch from GitHub).",
-    ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
 
@@ -394,8 +285,6 @@ def update(
     if _api_unreachable(url):
         raise typer.Exit(1)
 
-    _warn_editable_version_drift()
-
     if channel is not None:
         try:
             api_put("/api/updates/channel", json={"channel": channel.value})
@@ -403,11 +292,6 @@ def update(
             die(str(exc))
             return
         console.print(f"[green]channel set to {channel.value}[/green]")
-
-    # ── git-based update: clone/fetch → pip install → symlink swap ────────────
-    if source == "git":
-        _update_via_git(check_only=check)
-        return
 
     # Standalone action: bounce drifted slots on demand, then stop. Kept
     # separate from the check/apply flow so an operator can clear post-update

@@ -17,6 +17,14 @@ _FAKE_DEVICES = ["/dev/kfd", "/dev/dri/renderD128", "/dev/dri/amdgpu"]
 _FAKE_GIDS = [993, 44]
 
 
+@pytest.fixture(autouse=True)
+def _pin_model_store(monkeypatch) -> None:
+    """This module asserts on the literal /mnt/ai-models mount source —
+    pin the resolver to it (ML-3's unified store.store_root() default is
+    now paths.models_dir(), not /mnt/ai-models)."""
+    monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
+
+
 def _slot_cfg(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "name": "qwen3tts",

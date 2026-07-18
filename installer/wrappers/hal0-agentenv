@@ -1,6 +1,7 @@
 #!/bin/bash
 # Privileged seam for the unprivileged hal0-api / hermes provisioner: only ever
-# writes the per-agent .env files that the D hardened-perms model pins root:root.
+# writes the per-agent .env / .toml files that the D hardened-perms model pins
+# root:root under /var/lib/hal0/secrets/agents and /etc/hal0/agents.
 #
 # Background (D hardened-perms): hal0-api can run as the unprivileged `hal0`
 # system user, but the hermes provisioner still has to write two .env files
@@ -24,6 +25,7 @@ cmd="${1:-}"; agent="${2:-}"
 [[ "$agent" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || { echo "hal0-agentenv: bad agent name" >&2; exit 2; }
 secrets="/var/lib/hal0/secrets/agents/${agent}.env"
 driver="/etc/hal0/agents/${agent}.env"
+seed="/etc/hal0/agents/${agent}.toml"
 case "$cmd" in
   merge-secrets)
     # stdin = KEY=VALUE update lines. Read-merge-write AS ROOT: the unprivileged
@@ -90,6 +92,22 @@ except BaseException:
     chown root:root "$tmp"
     chmod 0644 "$tmp"
     mv -f "$tmp" "$driver"
+    trap - EXIT
+    ;;
+  write-seed-toml)
+    # stdin = full seed TOML body (the manager seed / MCP allow-list). The caller
+    # read-merged the existing file (it is 0644 world-readable, so an unprivileged
+    # caller can read it) and sends the complete result here; only the WRITE lands
+    # in root:root /etc/hal0/agents. Atomic, 0644 root:root — same dir + perms as
+    # write-driver-env.
+    install -d -m 0755 -o root -g root /etc/hal0/agents
+    umask 022
+    tmp="$(mktemp "${seed}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$seed"
     trap - EXIT
     ;;
   *)

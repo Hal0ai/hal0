@@ -157,8 +157,8 @@ async def agent_activity(
 
     Best-effort: returns ``{events: [], hint}`` on hosts without
     journalctl. ``client_id`` filter is substring-matched against the
-    agent name so e.g. ``pi-coder`` matches client_ids like
-    ``pi-coder@host``. The MCP server attributes ``client_id`` from the
+    agent name so e.g. ``hermes`` matches client_ids like
+    ``hermes@host``. The MCP server attributes ``client_id`` from the
     Bearer token so the agent identity is forensically
     grounded.
     """
@@ -262,7 +262,7 @@ async def agent_activity(
             continue
         client_id = str(payload.get("client_id") or "")
         if name not in client_id and client_id != name:
-            # client_id might be e.g. "pi-coder" or "pi-coder@host". Match
+            # client_id might be e.g. "hermes" or "hermes@host". Match
             # both with a contains check; agents installed via the MCP
             # adapter all carry their own canonical name.
             continue

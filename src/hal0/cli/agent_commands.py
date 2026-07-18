@@ -30,7 +30,7 @@ from hal0.cli._shared import (
 from hal0.cli._shared import _console as _stderr_console
 from hal0.mcp.approval_queue import _PRIMARY_TARGET_ARG
 
-app = typer.Typer(help="Manage bundled agents (Phase 8 — pi-coder / Hermes-Agent).")
+app = typer.Typer(help="Manage bundled agents (Phase 8 — Hermes-Agent).")
 console = Console()
 
 # Approvals lives as a sub-sub-app so ``hal0 agent approvals list``
@@ -57,7 +57,8 @@ app.add_typer(personas_app, name="personas")
 @app.command("install")
 def agent_install(
     name: str = typer.Argument(
-        ..., help="Bundled agent name (pi-coder | opencode | hermes | turnstone)."
+        ...,
+        help="Bundled agent name (hermes).",
     ),
     switch: bool = typer.Option(
         False,
@@ -103,10 +104,6 @@ def agent_install(
     """
     if name == "hermes":
         _install_hermes(switch=switch, gateway=gateway, adopt=adopt)
-        return
-
-    if name == "turnstone":
-        _install_turnstone(switch=switch, adopt=adopt)
         return
 
     url = _api_base()
@@ -164,7 +161,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     # "hermes" already in installed_names() and takes its idempotent
     # no-op path instead of raising AgentAlreadyInstalledError. That let
     # `hal0 agent install hermes` (no --switch) land ALONGSIDE an
-    # existing pi-coder/opencode install. Check disk truth here, up
+    # existing non-coexisting incumbent. Check disk truth here, up
     # front, so hermes gets the same guarantee the manager enforces for
     # the other bundled agents.
     _enforce_hermes_single_pick(switch=switch)
@@ -229,160 +226,6 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     )
 
 
-# ── Turnstone foreground install ─────────────────────────────────────────────
-
-_TURNSTONE_AGENT_TREES = (
-    "/var/lib/hal0/venvs/turnstone",
-    "/var/lib/hal0/.turnstone",
-    "/var/lib/hal0/agents/turnstone",
-    "/var/lib/hal0/state/agents/turnstone",
-)
-
-
-def _install_turnstone(*, switch: bool, adopt: bool = False) -> None:
-    """Foreground provision of turnstone (native Go binary + config wiring).
-
-    Mirrors :func:`_install_hermes`: turnstone pins its Go binary and renders
-    config.toml + MCP/model/memory wiring — multi-second work that can't run
-    inside a single HTTP request, so it runs locally in the foreground and only
-    consults the daemon at the end to honour ``--switch``. Turnstone COEXISTS
-    with hermes (ADR-0004 §2 amendment), so single-pick only clears incumbents
-    that can't coexist with it.
-    """
-    from hal0.agents.turnstone_provision import bootstrap_cli
-
-    _enforce_turnstone_single_pick(switch=switch)
-    _ensure_writable_or_die(_TURNSTONE_AGENT_TREES, agent="turnstone")
-
-    console.print("[bold]Provisioning turnstone[/bold] → /var/lib/hal0/.turnstone …")
-    rc = bootstrap_cli(repair=False, adopt=adopt, dry_run=False, skip_phases=(), verbose=False)
-    if rc != 0:
-        die(
-            "turnstone provisioning failed — inspect `hal0 agent status turnstone` "
-            "/ `hal0 agent log turnstone`."
-        )
-        return
-
-    _chown_trees_to_agent_user(_TURNSTONE_AGENT_TREES)
-
-    # Register + honour --switch via the daemon (binary now present → gate passes).
-    url = _api_base()
-    if not _api_unreachable(url):
-        try:
-            api_post("/api/agents/install", json={"name": "turnstone", "switch": switch})
-        except CliApiError as exc:
-            console.print(f"[yellow]Provisioned, but daemon register/switch hint:[/yellow] {exc}")
-
-    _enable_and_start_unit("turnstone")
-
-    console.print(
-        Panel(
-            "[bold green]Installed[/bold green] turnstone  "
-            "[dim](managed venv: /var/lib/hal0/venvs/turnstone, server :9129)[/dim]",
-            border_style="green",
-        )
-    )
-
-
-def _enforce_turnstone_single_pick(*, switch: bool) -> None:
-    """Clear any incumbent that can't coexist with turnstone before provisioning.
-
-    Turnstone + hermes coexist (:data:`hal0.agents.manager.COEXISTING_AGENTS`);
-    pi-coder/opencode do not, so an incumbent coder still blocks (or, with
-    ``--switch``, is uninstalled). Mirrors :func:`_enforce_hermes_single_pick`.
-    """
-    from hal0.agents.manager import COEXISTING_AGENTS
-
-    mgr = _bundled_agent_manager()
-    blocking = [
-        n
-        for n in mgr.installed_names()
-        if n != "turnstone" and not ("turnstone" in COEXISTING_AGENTS and n in COEXISTING_AGENTS)
-    ]
-    if not blocking:
-        return
-    if not switch:
-        die(
-            f"agent {blocking[0]!r} already installed; pass --switch to "
-            "atomically swap to 'turnstone' (single-pick enforced)."
-        )
-        return
-    console.print(
-        f"[bold]--switch[/bold]: uninstalling {', '.join(blocking)} before provisioning turnstone…"
-    )
-    for existing in blocking:
-        mgr.uninstall(existing)
-
-
-# ── Generic provisioning helpers (agent-agnostic; used by turnstone) ─────────
-
-
-def _ensure_writable_or_die(trees: tuple[str, ...], *, agent: str) -> None:
-    """Abort with a sudo hint when provisioning can't write its trees.
-
-    Agent-agnostic sibling of :func:`_ensure_hermes_writable_or_die`. No-op
-    when root (root writes anywhere; the post-provision chown hands the trees
-    to ``hal0``) or when the current user already owns the trees.
-    """
-    import os as _os
-
-    from hal0.agents.hermes_provision import path_is_writable
-
-    if _os.geteuid() == 0:
-        return
-    blocked = [t for t in trees if not path_is_writable(t)]
-    if not blocked:
-        return
-    die(
-        f"{agent} provisioning needs write access to "
-        + ", ".join(blocked)
-        + f", but you're running as uid={_os.getuid()} and those live under "
-        "root-owned /var/lib/hal0.\n\n"
-        f"Re-run as root:\n    sudo hal0 agent install {agent}\n\n"
-        f"(Provisioning runs as root, then hands the trees to the "
-        f"'{_AGENT_RUNTIME_USER}' agent user automatically.)"
-    )
-
-
-def _chown_trees_to_agent_user(trees: tuple[str, ...]) -> None:
-    """Recursively chown ``trees`` to the agent runtime user (root-only, best-effort)."""
-    import os as _os
-    import pwd as _pwd
-    import subprocess as _subprocess
-    from pathlib import Path as _Path
-
-    if _os.geteuid() != 0:
-        return
-    try:
-        _pwd.getpwnam(_AGENT_RUNTIME_USER)
-    except KeyError:
-        return
-    for tree in trees:
-        if _Path(tree).exists():
-            _subprocess.run(  # nosec B603 B607 — fixed argv, known paths
-                ["chown", "-R", f"{_AGENT_RUNTIME_USER}:{_AGENT_RUNTIME_USER}", tree],
-                check=False,
-            )
-
-
-def _enable_and_start_unit(agent: str) -> None:
-    """``systemctl enable --now hal0-agent@<agent>`` (no-op sans systemd)."""
-    import shutil as _shutil
-    import subprocess as _subprocess
-
-    if _shutil.which("systemctl") is None:
-        return
-    unit = f"hal0-agent@{agent}"
-    rc = _subprocess.run(  # nosec B603 B607 — fixed argv
-        ["systemctl", "enable", "--now", unit], check=False
-    ).returncode
-    if rc != 0:
-        console.print(
-            f"[yellow]{agent} provisioned, but the agent unit didn't start cleanly — "
-            f"check `systemctl status {unit}` / `hal0 agent log {agent}`.[/yellow]"
-        )
-
-
 def _bundled_agent_manager() -> Any:
     """Construct the :class:`~hal0.agents.manager.AgentManager` used for the
     hermes single-pick check. Imported lazily (mirrors the rest of this
@@ -402,8 +245,8 @@ def _enforce_hermes_single_pick(*, switch: bool) -> None:
     before hermes provisioning writes anything to disk.
 
     Mirrors the contract :meth:`hal0.agents.manager.AgentManager.install`
-    enforces for pi-coder/opencode: at most one bundled agent installed at
-    a time, ``switch=True`` required to swap. Hermes can't just call
+    enforces for every bundled agent: at most one non-coexisting agent
+    installed at a time, ``switch=True`` required to swap. Hermes can't just call
     ``AgentManager.install()`` up front (provisioning has to happen first —
     there's no venv/binary for the manager to register yet), so this checks
     the same disk-truth ``installed_names()`` the manager uses and either
@@ -1204,51 +1047,6 @@ def bootstrap_hermes(
 
     if offline:
         _os.environ["HAL0_HERMES_OFFLINE"] = "1"
-    rc = bootstrap_cli(
-        repair=repair,
-        adopt=adopt,
-        dry_run=dry_run,
-        skip_phases=tuple(skip_phase),
-        verbose=verbose,
-    )
-    raise typer.Exit(rc)
-
-
-@bootstrap_app.command(
-    "turnstone",
-    epilog=(
-        "Renders turnstone's config.toml ([api]→hal0-api /v1, [models.*]→live "
-        "slots), mcp-servers.json (hal0-memory + hal0-admin), persona, and a "
-        "SQLite DB. A populated $TURNSTONE_HOME hal0 didn't create aborts the "
-        "run; pass --adopt to claim it."
-    ),
-)
-def bootstrap_turnstone(
-    repair: bool = typer.Option(
-        False,
-        "--repair",
-        help="Re-run every phase regardless of checkpoint state (forces full rerun).",
-    ),
-    adopt: bool = typer.Option(
-        False,
-        "--adopt",
-        help="Capture an existing (foreign) $TURNSTONE_HOME rather than aborting.",
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Run phases but don't persist provision.json.",
-    ),
-    skip_phase: list[str] = typer.Option(
-        [],
-        "--skip-phase",
-        help="Skip the named phase (may be repeated).",
-    ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
-) -> None:
-    """Run the turnstone bootstrap state machine."""
-    from hal0.agents.turnstone_provision import bootstrap_cli
-
     rc = bootstrap_cli(
         repair=repair,
         adopt=adopt,

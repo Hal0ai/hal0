@@ -1,0 +1,21 @@
+# Per-family llama-server flag overrides -- the "model-architecture quirks"
+# layer, distinct from profiles (backend/hardware tuning) and slot config
+# (per-instance). Applied when a slot's model resolves to the family; each
+# string merges into the `model_defaults` argv segment, so it OVERRIDES the
+# profile's generic flags (`normalize_argv` keeps the last occurrence) but a
+# per-slot `[model].defaults.extra_args` still beats it. Virtual like
+# SEED_PROFILES -- ships to every install, never persisted to config.
+#
+# Externalized from hal0.config.schema.FAMILY_DEFAULTS (P3-schema, spec Part A).
+# The families this can key on (_KNOWN_FAMILIES) and the model_family()/
+# family_flags() derivation helpers stay in Python (config/schema.py) --
+# only the data table moves here.
+
+[family]
+# Gemma is an iSWA (interleaved sliding-window) architecture: quantized KV
+# regresses prompt-processing -- measured 2026-07-04 on gemma-4-12B @32k depth,
+# -ctk/-ctv q8_0 costs -28.5% pp on RADV / -10% tg on rocm vs f16 (the mirror
+# of qwen's +45% q8 gain) -- and SWA + cache-reuse has upstream bugs
+# (#21468/#21749). So any gemma model, on any q8 profile, is pinned back to
+# f16 KV with cache-reuse off.
+gemma = "-ctk f16 -ctv f16 --cache-reuse 0"

@@ -192,7 +192,7 @@ def _patch_httpx_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_cls(*args, **kwargs)
 
-    monkeypatch.setattr("hal0.api.routes.models.httpx.AsyncClient", factory)
+    monkeypatch.setattr("hal0.upstreams.huggingface.httpx.AsyncClient", factory)
 
 
 def test_inspect_returns_gguf_variants_sorted_by_size(

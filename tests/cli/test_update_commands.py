@@ -105,7 +105,6 @@ def test_restart_slots_bounces_only_drifted_and_skips_apply(
 ) -> None:
     """``hal0 update --restart-slots`` POSTs restart-slots and never runs apply."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     calls: dict = {"get": [], "post": []}
 
     def fake_get(path: str, **kwargs: object) -> dict:
@@ -138,7 +137,6 @@ def test_restart_slots_clean_message_when_nothing_drifted(
 ) -> None:
     """A clean box prints an explicit 'no slots need restart' and skips POST."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     posted: list[str] = []
     monkeypatch.setattr(uc, "api_get", lambda path, **k: {"count": 0, "slots": []})
     monkeypatch.setattr(uc, "api_post", lambda path, **k: posted.append(path) or {})
@@ -151,7 +149,6 @@ def test_restart_slots_clean_message_when_nothing_drifted(
 def test_post_apply_shows_drift_banner(monkeypatch: pytest.MonkeyPatch) -> None:
     """After a successful apply the 'N slots need restart' banner is surfaced."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr(uc, "_interactive", lambda: False)
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
 
@@ -193,7 +190,6 @@ def test_post_apply_shows_drift_banner(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_target_strips_leading_v(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """``--target v0.1.1`` is normalized to ``0.1.1`` before hitting /prepare."""
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     result = runner.invoke(app, ["update", "--target", "v0.1.1"])
     assert result.exit_code == 0, result.output
     assert stub_api["prepare_json"] == {"version": "0.1.1"}
@@ -201,7 +197,6 @@ def test_target_strips_leading_v(stub_api: dict, monkeypatch: pytest.MonkeyPatch
 
 def test_target_without_v_is_unchanged(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """``--target 0.1.1`` behaves identically to ``--target v0.1.1``."""
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     result = runner.invoke(app, ["update", "--target", "0.1.1"])
     assert result.exit_code == 0, result.output
     assert stub_api["prepare_json"] == {"version": "0.1.1"}
@@ -209,7 +204,6 @@ def test_target_without_v_is_unchanged(stub_api: dict, monkeypatch: pytest.Monke
 
 def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI stages via /prepare, then activates via /commit with the resolved version."""
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     result = runner.invoke(app, ["update", "--target", "0.1.1"])
     assert result.exit_code == 0, result.output
     # prepare got the (normalized) target; commit got the resolved_version from the poll.
@@ -225,7 +219,6 @@ def test_update_refuses_on_editable_install(
     The refusal names the editable tree and points at the release wheel; it
     must never reach /prepare or /commit.
     """
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
     monkeypatch.setattr("hal0.updater.updater._editable_install_path", lambda: "/opt/hal0")
     result = runner.invoke(app, ["update", "--target", "0.1.1"])
@@ -242,7 +235,6 @@ def test_yes_flag_present_and_skips_confirm(
 ) -> None:
     """``--yes`` is a real flag and drives straight to commit without prompting."""
     assert "yes" in inspect.signature(uc.update).parameters
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     # Force an interactive TTY so only --yes can suppress the prompt; if confirm
     # were reached it would flip the flag, so a clean commit proves it skipped.
     monkeypatch.setattr(uc, "_interactive", lambda: True)
@@ -258,7 +250,6 @@ def test_yes_flag_present_and_skips_confirm(
 
 def test_tty_decline_stages_without_commit(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """On a TTY without --yes, declining the prompt stages but never commits."""
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr(uc, "_interactive", lambda: True)
     monkeypatch.setattr(uc.typer, "confirm", lambda *a, **k: False)
     result = runner.invoke(app, ["update", "--target", "0.1.1"])
@@ -270,7 +261,6 @@ def test_tty_decline_stages_without_commit(stub_api: dict, monkeypatch: pytest.M
 def test_rollback_headless_proceeds_without_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Headless/piped (non-TTY) rollback proceeds unattended, like apply."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr(uc, "_interactive", lambda: False)
     posted: list[str] = []
 
@@ -288,7 +278,6 @@ def test_rollback_headless_proceeds_without_prompt(monkeypatch: pytest.MonkeyPat
 def test_rollback_yes_flag_skips_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
     """``--yes`` drives straight to the rollback POST even on a TTY."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr(uc, "_interactive", lambda: True)
     called = {"confirm": False}
     monkeypatch.setattr(
@@ -307,7 +296,6 @@ def test_rollback_yes_flag_skips_confirm(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_rollback_tty_decline_never_posts(monkeypatch: pytest.MonkeyPatch) -> None:
     """On a TTY without --yes, declining the prompt never issues the rollback POST."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
-    monkeypatch.setattr(uc, "_warn_editable_version_drift", lambda: None)
     monkeypatch.setattr(uc, "_interactive", lambda: True)
     monkeypatch.setattr(uc.typer, "confirm", lambda *a, **k: False)
     posted: list[str] = []
@@ -337,34 +325,4 @@ def test_render_notes_shows_breaking_and_migrations(capsys: pytest.CaptureFixtur
 def test_render_notes_none_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """No notes → nothing rendered (older releases without a notes payload)."""
     uc._render_notes(None)
-    assert capsys.readouterr().out == ""
-
-
-def test_editable_drift_warns_when_source_ahead(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """When the source pyproject is ahead of the metadata version, warn."""
-    import hal0
-
-    monkeypatch.setattr(hal0, "__version__", "0.3.0")
-    monkeypatch.setattr(uc, "_editable_source_version", lambda: "0.4.0")
-    uc._warn_editable_version_drift()
-    out = capsys.readouterr().out
-    assert "0.3.0" in out
-    assert "0.4.0" in out
-
-
-def test_editable_drift_silent_when_matching(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """No warning when metadata and source versions agree (or no source)."""
-    import hal0
-
-    monkeypatch.setattr(hal0, "__version__", "0.4.0")
-    monkeypatch.setattr(uc, "_editable_source_version", lambda: "0.4.0")
-    uc._warn_editable_version_drift()
-    assert capsys.readouterr().out == ""
-
-    monkeypatch.setattr(uc, "_editable_source_version", lambda: None)
-    uc._warn_editable_version_drift()
     assert capsys.readouterr().out == ""

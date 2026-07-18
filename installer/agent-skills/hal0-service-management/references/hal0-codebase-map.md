@@ -26,7 +26,7 @@ runs **as root** (the hardened/non-root mode was removed, ADR-0023).
 | `memory/` | Memory subsystem. `MemoryProvider` ABC + `HindsightProvider`/`PgVectorProvider` (Hindsight-backed; cognee removed, ADR-0023). |
 | `normalize/` | Virtual model-name resolution (`hal0/agent`, `hal0/utility`, `hal0/<slot>`) + thinking-flag normalization. |
 | `omni_router/` | Optional server-side tool-calling loop (`OmniRouter.run_loop`) invoked when a chat request opts in. |
-| `agents/` | Bundled agents (hermes + pi-coder), agent manager, MCP client, personas. |
+| `agents/` | Bundled agents (hermes), agent manager, MCP client, personas. |
 | `mcp/` | MCP servers exposed by hal0: `admin.py` (hal0-admin) and `memory.py` (hal0-memory). |
 | `cli/` | `hal0` CLI (`cli/main.py`) — slot/model/config/agent/setup/update subcommands. |
 | `capabilities/`, `comfyui/`, `hardware/`, `install/`, `stacks/`, `bundles/`, `release/`, `updater/`, `journal/`, `events/`, `activity/`, `board/`, `dashboard/`, `openwebui/`, `model_meta/`, `templates/` | Supporting subsystems (image-gen, hardware probe, installer orchestration, stacks, release channel, self-updater, audit/events, kanban board, dashboard layout, chat templates). |
@@ -82,7 +82,7 @@ There is **no** `api/routes/lemonade_proxy.py`.
 - `agents/hermes_refresh.py` — re-render/refresh of an already-provisioned Hermes.
 - `agents/hermes_templates/` — Jinja2 templates rendered into the Hermes home: `HERMES.md.j2`, `AGENTS.md.j2`, `SOUL.md.j2`, `STATE.md.j2`, `MCP-CLIENTS.md.j2`. (There is **no** `config.yaml.j2` — Hermes owns its own `config.yaml`; hal0 applies it via `hermes config set`.)
 - `agents/hermes/` — the bundled Hermes driver. The hal0-memory `MemoryProvider` plugin itself lives at `installer/agents/hermes/plugins/hal0-memory/` (canonical, shipped source — copied verbatim into `$HERMES_HOME/plugins/hal0-memory/` at provision time).
-- `agents/pi_coder.py`, `agents/manager.py`, `agents/persona.py`, `agents/personas.py`, `agents/mcp_client.py` — pi-coder agent, agent manager, persona definitions, MCP client.
+- `agents/manager.py`, `agents/persona.py`, `agents/personas.py`, `agents/mcp_client.py` — agent manager, persona definitions, MCP client.
 
 ## Memory (`memory/`)
 

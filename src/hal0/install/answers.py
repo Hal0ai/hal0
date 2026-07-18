@@ -1,6 +1,6 @@
 """Headless answer-file loader for ``hal0 setup --answers`` (issue #1115).
 
-Spec: ``handoffs/hal0-setup-answers-spec-2026-07-05.md``. This module
+Spec: ``docs/archive/handoffs/hal0-setup-answers-spec-2026-07-05.md``. This module
 implements ONLY the subset of the schema that maps to
 :class:`hal0.install.orchestrate.Selections` today (§5 "wired now" column):
 ``model_store.path``, ``slots[]``, ``apps.*.enabled`` + ``gen.mode``

@@ -5,9 +5,9 @@ ownership: hal0 owns the install scripts under ``installer/agents/*.sh``;
 this package wraps them in Python so the CLI + API speak one interface.
 
 This is NOT a first-party agent runtime — by design: "Bundle,
-don't build". The drivers in :mod:`hal0.agents.pi_coder` and
-:mod:`hal0.agents.hermes` only handle install/uninstall wiring + config
-writes. Runtime is whatever the bundled upstream does natively.
+don't build". The driver in :mod:`hal0.agents.hermes` only handles
+install/uninstall wiring + config writes. Runtime is whatever the
+bundled upstream does natively.
 """
 
 from __future__ import annotations

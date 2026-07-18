@@ -13,7 +13,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hal0.config.schema import ProfileConfig
+from hal0.errors import BadRequest
 from hal0.providers.container import (
     ContainerProvider,
     _llama_launch_plan,
@@ -87,20 +90,23 @@ def _ngl(command: list[str]) -> str | None:
     return command[command.index("-ngl") + 1] if "-ngl" in command else None
 
 
-def test_ngl_precedence_extra_args_wins() -> None:
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="-ngl 10",
-        devices=[],
-        group_ids=[],
-        model_defaults={"n_gpu_layers": 20},
-        slot_n_gpu_layers=30,
-        extra_args="-ngl 40",
-    )
-    assert _ngl(plan.command) == "40"
-    assert plan.command.count("-ngl") == 1
+def test_ngl_in_extra_args_is_denied() -> None:
+    """§21.7: ``-ngl`` is a managed flag (schema's ``[model].n_gpu_layers`` is
+    the sanctioned channel) — ``[server].extra_args`` may not smuggle it, so
+    this now raises instead of silently winning precedence."""
+    with pytest.raises(BadRequest) as exc_info:
+        _llama_launch_plan(
+            image="i:1",
+            port=8095,
+            model_path="/m.gguf",
+            flags_str="-ngl 10",
+            devices=[],
+            group_ids=[],
+            model_defaults={"n_gpu_layers": 20},
+            slot_n_gpu_layers=30,
+            extra_args="-ngl 40",
+        )
+    assert exc_info.value.code == "slot.managed_arg_denied"
 
 
 def test_ngl_precedence_slot_beats_model_default() -> None:

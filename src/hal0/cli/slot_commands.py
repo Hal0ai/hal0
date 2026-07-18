@@ -80,6 +80,18 @@ class SlotHardware(StrEnum):
     cpu = "cpu"
 
 
+#: The `device` enum (gpu-vulkan / gpu-rocm / cpu / npu) derives from the
+#: v0.1 hardware enum: vulkan/rocm -> gpu-vulkan/gpu-rocm; cpu stays cpu;
+#: npu has no v0.1 hardware equivalent. Shared by ``slot_create`` and
+#: ``slot_edit`` so both CLI paths write ``device`` (the sole persisted
+#: truth) instead of the deprecated ``backend`` mirror.
+_HARDWARE_TO_DEVICE: dict[str, str] = {
+    "vulkan": "gpu-vulkan",
+    "rocm": "gpu-rocm",
+    "cpu": "cpu",
+}
+
+
 def _detect_default_hardware() -> str:
     """Pick a sane default hardware backend from /etc/hal0/hardware.json.
 
@@ -447,20 +459,13 @@ def slot_create(
             return
 
     hw = hardware.value if hardware is not None else _detect_default_hardware()
-    # The `device` enum (gpu-vulkan / gpu-rocm / cpu / npu) derives
-    # from the v0.1 hardware enum: vulkan/rocm → gpu-vulkan/gpu-rocm; cpu
-    # stays cpu; npu has no v0.1 hardware equivalent (set --hardware via
-    # the legacy schema upgrade path).
-    device = {
-        "vulkan": "gpu-vulkan",
-        "rocm": "gpu-rocm",
-        "cpu": "cpu",
-    }.get(hw, hw)
+    # npu has no v0.1 hardware equivalent (set --hardware via the legacy
+    # schema upgrade path); unmapped tokens pass through unchanged.
+    device = _HARDWARE_TO_DEVICE.get(hw, hw)
     body: dict[str, Any] = {
         "name": name,
         "type": type_.value,
         "device": device,
-        "backend": hw,  # SlotConfig.backend = hardware target (vulkan/rocm/cpu/...)
         "provider": str(provider),
         "model": {"default": model, "context_size": ctx_size},
     }
@@ -549,7 +554,7 @@ def slot_edit(
     if provider is not None:
         payload["provider"] = str(provider)
     if hardware is not None:
-        payload["backend"] = hardware.value
+        payload["device"] = _HARDWARE_TO_DEVICE.get(hardware.value, hardware.value)
     if model is not None or ctx_size is not None:
         try:
             cfg = api_get(f"/api/slots/{name}/config")

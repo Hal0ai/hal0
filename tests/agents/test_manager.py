@@ -44,14 +44,24 @@ class _StubDriver:
         return "installed" if self._installed else "broken"
 
 
+# hal0 v0.3 ships exactly one bundled agent (hermes). "widget" is a
+# synthetic, test-only bundled-agent name standing in for "some other
+# bundled agent" purely so that manager logic (single-pick BLOCKING /
+# atomic --switch / rollback-on-failure) stays under test without a
+# second real driver; it is never a real driver and BUNDLED_AGENTS is
+# only ever patched inside this fixture, never in production.
+_FAKE_BUNDLED_AGENTS: tuple[str, ...] = (*BUNDLED_AGENTS, "widget")
+
+
 @pytest.fixture
 def stub_drivers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _StubDriver]:
     """Patch :func:`hal0.agents.manager._driver_for` to return stubs.
 
-    One stub per bundled agent name. Tests can assert on
-    ``stubs["pi-coder"].installs`` etc.
+    One stub per bundled agent name (the real ones plus the synthetic
+    "widget"). Tests can assert on ``stubs["hermes"].installs`` etc.
     """
-    stubs: dict[str, _StubDriver] = {name: _StubDriver(name) for name in BUNDLED_AGENTS}
+    monkeypatch.setattr(mgr_mod, "BUNDLED_AGENTS", _FAKE_BUNDLED_AGENTS)
+    stubs: dict[str, _StubDriver] = {name: _StubDriver(name) for name in _FAKE_BUNDLED_AGENTS}
 
     def _fake_driver_for(name: str) -> _StubDriver:
         if name not in stubs:
@@ -82,22 +92,22 @@ def test_list_empty_when_no_agents_installed(manager: AgentManager) -> None:
 # ── install: happy path ──────────────────────────────────────────────────────
 
 
-def test_install_pi_coder_writes_seed_and_data_dir(
+def test_install_generic_agent_writes_seed_and_data_dir(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    rec = manager.install("pi-coder", bearer_token="hal0_tok_abc")
-    assert rec.name == "pi-coder"
+    rec = manager.install("widget", bearer_token="hal0_tok_abc")
+    assert rec.name == "widget"
     assert rec.status == "installed"
     # Driver got the token verbatim — confirms wiring from manager →
     # driver is straight through.
-    assert stub_drivers["pi-coder"].installs == ["hal0_tok_abc"]
+    assert stub_drivers["widget"].installs == ["hal0_tok_abc"]
 
     # Seed TOML present + parseable.
     seed = Path(rec.config_path)
     assert seed.exists()
     parsed = tomllib.loads(seed.read_text())
-    assert parsed["agent"]["name"] == "pi-coder"
+    assert parsed["agent"]["name"] == "widget"
     assert parsed["agent"]["version_pin"] is False  # ADR-0004 §3
 
     # Per-agent data dir provisioned.
@@ -108,11 +118,11 @@ def test_list_after_install_returns_one_record(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    manager.install("pi-coder")
+    manager.install("widget")
     listing = manager.list()
     assert len(listing) == 1
-    assert listing[0].name == "pi-coder"
-    assert manager.installed_names() == ["pi-coder"]
+    assert listing[0].name == "widget"
+    assert manager.installed_names() == ["widget"]
 
 
 # ── install: idempotent re-install ───────────────────────────────────────────
@@ -122,12 +132,12 @@ def test_install_same_agent_twice_is_noop(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    rec1 = manager.install("pi-coder")
-    rec2 = manager.install("pi-coder")
-    assert rec1.name == rec2.name == "pi-coder"
+    rec1 = manager.install("widget")
+    rec2 = manager.install("widget")
+    assert rec1.name == rec2.name == "widget"
     # Driver invoked exactly once — second call hit the
     # already-installed short-circuit.
-    assert len(stub_drivers["pi-coder"].installs) == 1
+    assert len(stub_drivers["widget"].installs) == 1
 
 
 # ── install: single-pick enforcement ─────────────────────────────────────────
@@ -137,28 +147,28 @@ def test_install_second_agent_without_switch_raises(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    manager.install("pi-coder")
+    manager.install("widget")
     with pytest.raises(AgentAlreadyInstalledError) as exc:
         manager.install("hermes")
     # Error message should name BOTH agents so the operator sees why.
     msg = str(exc.value)
-    assert "pi-coder" in msg
+    assert "widget" in msg
     assert "hermes" in msg
     # Hermes driver was NOT invoked.
     assert stub_drivers["hermes"].installs == []
-    # pi-coder still the installed one.
-    assert manager.installed_names() == ["pi-coder"]
+    # widget still the installed one.
+    assert manager.installed_names() == ["widget"]
 
 
 def test_install_with_switch_swaps_atomically(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    manager.install("pi-coder")
+    manager.install("widget")
     rec = manager.install("hermes", switch=True)
     assert rec.name == "hermes"
-    # pi-coder uninstall fired exactly once.
-    assert stub_drivers["pi-coder"].uninstalls == 1
+    # widget uninstall fired exactly once.
+    assert stub_drivers["widget"].uninstalls == 1
     # Only hermes is now installed.
     assert manager.installed_names() == ["hermes"]
 
@@ -167,7 +177,7 @@ def test_switch_helper_equivalent_to_install_with_switch_true(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    manager.install("pi-coder")
+    manager.install("widget")
     rec = manager.switch("hermes")
     assert rec.name == "hermes"
     assert manager.installed_names() == ["hermes"]
@@ -188,16 +198,16 @@ def test_uninstall_removes_seed_and_data_dir(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
 ) -> None:
-    rec = manager.install("pi-coder")
+    rec = manager.install("widget")
     seed = Path(rec.config_path)
     data = Path(rec.data_dir)
     assert seed.exists() and data.exists()
 
-    manager.uninstall("pi-coder")
+    manager.uninstall("widget")
     assert not seed.exists()
     assert not data.exists()
     assert manager.installed_names() == []
-    assert stub_drivers["pi-coder"].uninstalls == 1
+    assert stub_drivers["widget"].uninstalls == 1
 
 
 def test_uninstall_when_not_installed_is_noop(
@@ -206,79 +216,10 @@ def test_uninstall_when_not_installed_is_noop(
 ) -> None:
     # Should not raise — idempotent posture mirrors slot-delete and
     # the /api/agents DELETE route's "not_installed" return.
-    manager.uninstall("pi-coder")
+    manager.uninstall("widget")
     # Driver's uninstall still runs (best-effort cleanup) — but no
     # disk state to remove.
-    assert stub_drivers["pi-coder"].uninstalls == 1
-
-
-# ── install: coexistence (ADR-0004 §2 amendment — hermes + turnstone) ────────
-
-
-def test_hermes_and_turnstone_coexist_without_switch(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    # Both are in COEXISTING_AGENTS — installing turnstone alongside hermes
-    # needs no --switch and must NOT tear hermes down.
-    manager.install("hermes")
-    rec = manager.install("turnstone")
-    assert rec.name == "turnstone"
-    assert stub_drivers["hermes"].uninstalls == 0
-    assert set(manager.installed_names()) == {"hermes", "turnstone"}
-
-
-def test_turnstone_over_pi_coder_requires_switch(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    # pi-coder is NOT coexisting, so single-pick still bites.
-    manager.install("pi-coder")
-    with pytest.raises(AgentAlreadyInstalledError) as exc:
-        manager.install("turnstone")
-    assert "pi-coder" in str(exc.value)
-    assert "turnstone" in str(exc.value)
-    assert stub_drivers["turnstone"].installs == []
-    assert manager.installed_names() == ["pi-coder"]
-
-
-def test_turnstone_over_pi_coder_with_switch_clears_pi_coder(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    manager.install("pi-coder")
-    rec = manager.install("turnstone", switch=True)
-    assert rec.name == "turnstone"
-    assert stub_drivers["pi-coder"].uninstalls == 1
-    assert manager.installed_names() == ["turnstone"]
-
-
-def test_pi_coder_over_coexisting_pair_clears_both_with_switch(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    # A non-coexisting agent installed over the hermes+turnstone pair must
-    # tear DOWN both (they both block it) under --switch.
-    manager.install("hermes")
-    manager.install("turnstone")
-    rec = manager.install("pi-coder", switch=True)
-    assert rec.name == "pi-coder"
-    assert stub_drivers["hermes"].uninstalls == 1
-    assert stub_drivers["turnstone"].uninstalls == 1
-    assert manager.installed_names() == ["pi-coder"]
-
-
-def test_pi_coder_over_coexisting_pair_without_switch_raises(
-    manager: AgentManager,
-    stub_drivers: dict[str, _StubDriver],
-) -> None:
-    manager.install("hermes")
-    manager.install("turnstone")
-    with pytest.raises(AgentAlreadyInstalledError):
-        manager.install("pi-coder")
-    # Neither incumbent torn down.
-    assert stub_drivers["hermes"].uninstalls == 0
-    assert stub_drivers["turnstone"].uninstalls == 0
+    assert stub_drivers["widget"].uninstalls == 1
 
 
 def test_uninstall_unknown_agent_raises(manager: AgentManager) -> None:
@@ -522,16 +463,16 @@ def test_switch_failed_install_rolls_back_incumbent(
     manager makes a best-effort attempt to reinstall the incumbent
     rather than leaving the operator with NO agent installed.
 
-    Regression test: switching pi-coder→hermes used to uninstall
-    pi-coder unconditionally, then leave the box with nothing installed
-    (and a crash-looping systemd unit) when hermes' install blew up.
-    ADR-0004 §2 promises the operator never ends up with two bundled
-    agents partially installed — it does NOT say they should end up
-    with zero.
+    Regression test: switching a non-coexisting incumbent to hermes used
+    to uninstall the incumbent unconditionally, then leave the box with
+    nothing installed (and a crash-looping systemd unit) when hermes'
+    install blew up. ADR-0004 §2 promises the operator never ends up
+    with two bundled agents partially installed — it does NOT say they
+    should end up with zero.
     """
-    manager.install("pi-coder")
+    manager.install("widget")
 
-    # Make hermes' install raise after pi-coder is uninstalled. Hermes
+    # Make hermes' install raise after widget is uninstalled. Hermes
     # has no installer script (_SCRIPT_INSTALLED_AGENTS excludes it),
     # so the pre-uninstall precondition check is a no-op here and the
     # failure surfaces from the driver itself, same as upstream really
@@ -546,11 +487,11 @@ def test_switch_failed_install_rolls_back_incumbent(
     with pytest.raises(RuntimeError, match="simulated upstream-broke"):
         manager.install("hermes", switch=True)
 
-    # pi-coder was uninstalled then rolled back; hermes never got a
+    # widget was uninstalled then rolled back; hermes never got a
     # seed written.
-    assert manager.installed_names() == ["pi-coder"]
-    assert stubs["pi-coder"].uninstalls == 1
-    assert stubs["pi-coder"].installs == [None, None]  # initial install + rollback
+    assert manager.installed_names() == ["widget"]
+    assert stubs["widget"].uninstalls == 1
+    assert stubs["widget"].installs == [None, None]  # initial install + rollback
 
 
 def test_switch_aborts_without_uninstalling_when_target_script_missing(
@@ -563,8 +504,19 @@ def test_switch_aborts_without_uninstalling_when_target_script_missing(
     uninstalling the incumbent — the precondition check runs before
     any teardown. Regression for the "switching to a wheel install
     missing its bundled-agent scripts bricked the incumbent" bug.
+
+    hal0 v0.3's real bundled agent (hermes) doesn't install via
+    shell script, so :data:`_SCRIPT_INSTALLED_AGENTS` is empty in
+    production (the two agents that used to populate it, pi-coder and
+    opencode, are gone — refs P1-drivers). "gizmo" stands in for a
+    future script-installed bundled agent so this precondition stays
+    under test.
     """
-    manager.install("pi-coder")
+    stub_drivers["gizmo"] = _StubDriver("gizmo")
+    monkeypatch.setattr(mgr_mod, "BUNDLED_AGENTS", (*mgr_mod.BUNDLED_AGENTS, "gizmo"))
+    monkeypatch.setattr(mgr_mod, "_SCRIPT_INSTALLED_AGENTS", frozenset({"gizmo"}))
+
+    manager.install("hermes")
 
     monkeypatch.setattr(
         mgr_mod,
@@ -573,12 +525,12 @@ def test_switch_aborts_without_uninstalling_when_target_script_missing(
     )
 
     with pytest.raises(mgr_mod.AgentError, match="installer script missing"):
-        manager.install("opencode", switch=True)
+        manager.install("gizmo", switch=True)
 
     # Incumbent untouched — precondition failed before any teardown.
-    assert manager.installed_names() == ["pi-coder"]
-    assert stub_drivers["pi-coder"].uninstalls == 0
-    assert stub_drivers["opencode"].installs == []
+    assert manager.installed_names() == ["hermes"]
+    assert stub_drivers["hermes"].uninstalls == 0
+    assert stub_drivers["gizmo"].installs == []
 
 
 # ── #453: converge hermes data_dir onto HERMES_HOME (.hermes) ─────────────────
@@ -593,7 +545,7 @@ def test_hermes_data_dir_is_hermes_home(manager: AgentManager, tmp_path: Path) -
     # var_root is tmp_path/"var" → var_lib is tmp_path → home is tmp_path/.hermes.
     assert manager._data_dir("hermes") == tmp_path / ".hermes"
     # Non-converged agents keep the legacy per-name layout.
-    assert manager._data_dir("pi-coder") == tmp_path / "var" / "pi-coder"
+    assert manager._data_dir("widget") == tmp_path / "var" / "widget"
 
 
 def test_hermes_install_records_hermes_home_as_data_dir(
@@ -654,16 +606,28 @@ def test_hermes_uninstall_refuses_unmanaged_home(
 # ── installer_script_path: FHS-aware resolution for wheel installs ───────────
 
 
-def test_installer_script_path_resolves_editable_when_present() -> None:
-    """Editable / dev checkout: this test runs against the real
-    checkout, which has ``installer/agents/pi-coder.sh`` three parents
-    up from ``src/hal0/agents/manager.py`` — no monkeypatching needed,
-    this exercises the real resolution path."""
-    resolved = mgr_mod.installer_script_path("pi-coder")
+def test_installer_script_path_resolves_editable_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editable / dev checkout: ``manager.py`` under ``<repo>/src/hal0/
+    agents/manager.py`` resolves the script three parents up, at
+    ``<repo>/installer/agents/<name>.sh``. No real bundled agent installs
+    via shell script in production (:data:`_SCRIPT_INSTALLED_AGENTS` is
+    empty), so this is exercised against a synthetic repo layout rather
+    than a real installer script."""
+    fake_module_path = tmp_path / "repo" / "src" / "hal0" / "agents" / "manager.py"
+    fake_module_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(mgr_mod, "__file__", str(fake_module_path))
+
+    editable_script_dir = tmp_path / "repo" / "installer" / "agents"
+    editable_script_dir.mkdir(parents=True)
+    editable_script = editable_script_dir / "widget.sh"
+    editable_script.write_text("#!/bin/sh\n")
+
+    resolved = mgr_mod.installer_script_path("widget")
     assert resolved.is_file()
-    assert resolved == (
-        Path(mgr_mod.__file__).resolve().parents[3] / "installer" / "agents" / "pi-coder.sh"
-    )
+    assert resolved == editable_script
 
 
 def test_installer_script_path_falls_back_to_fhs_for_wheel_install(
@@ -676,7 +640,7 @@ def test_installer_script_path_falls_back_to_fhs_for_wheel_install(
     ``installer/`` sibling. The function must fall back to the FHS code
     root (:func:`hal0.config.paths.usr_lib`, ``/usr/lib/hal0/current``
     in production) and find the script there — this was the root cause
-    of ``hal0 agent install pi-coder`` 500ing on a real FHS install."""
+    of ``hal0 agent install <name>`` 500ing on a real FHS install."""
     fake_module_path = (
         tmp_path
         / "venv"
@@ -693,11 +657,11 @@ def test_installer_script_path_falls_back_to_fhs_for_wheel_install(
     fhs_root = tmp_path / "usr-lib-hal0-current"
     script_dir = fhs_root / "installer" / "agents"
     script_dir.mkdir(parents=True)
-    fhs_script = script_dir / "pi-coder.sh"
+    fhs_script = script_dir / "widget.sh"
     fhs_script.write_text("#!/bin/sh\n")
     monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
 
-    resolved = mgr_mod.installer_script_path("pi-coder")
+    resolved = mgr_mod.installer_script_path("widget")
     assert resolved == fhs_script
     assert resolved.is_file()
 
@@ -714,16 +678,16 @@ def test_installer_script_path_prefers_editable_when_both_exist(
 
     editable_script_dir = tmp_path / "repo" / "installer" / "agents"
     editable_script_dir.mkdir(parents=True)
-    editable_script = editable_script_dir / "pi-coder.sh"
+    editable_script = editable_script_dir / "widget.sh"
     editable_script.write_text("#!/bin/sh\n")
 
     fhs_root = tmp_path / "fhs"
     fhs_script_dir = fhs_root / "installer" / "agents"
     fhs_script_dir.mkdir(parents=True)
-    (fhs_script_dir / "pi-coder.sh").write_text("#!/bin/sh\n")
+    (fhs_script_dir / "widget.sh").write_text("#!/bin/sh\n")
     monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
 
-    resolved = mgr_mod.installer_script_path("pi-coder")
+    resolved = mgr_mod.installer_script_path("widget")
     assert resolved == editable_script
 
 
@@ -751,6 +715,6 @@ def test_installer_script_path_missing_everywhere_returns_fhs_candidate(
     fhs_root = tmp_path / "usr-lib-hal0-current"
     monkeypatch.setattr(mgr_mod._paths, "usr_lib", lambda: fhs_root)
 
-    resolved = mgr_mod.installer_script_path("pi-coder")
-    assert resolved == fhs_root / "installer" / "agents" / "pi-coder.sh"
+    resolved = mgr_mod.installer_script_path("widget")
+    assert resolved == fhs_root / "installer" / "agents" / "widget.sh"
     assert not resolved.is_file()

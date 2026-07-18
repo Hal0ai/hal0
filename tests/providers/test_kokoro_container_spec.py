@@ -2,8 +2,18 @@
 
 from typing import Any
 
+import pytest
+
 from hal0.providers.container import _render_unit_from_spec
 from hal0.providers.kokoro import KokoroProvider
+
+
+@pytest.fixture(autouse=True)
+def _pin_model_store(monkeypatch) -> None:
+    """This whole module asserts on the literal /mnt/ai-models mount
+    source — pin the resolver to it (ML-3's unified store.store_root()
+    default is now paths.models_dir(), not /mnt/ai-models)."""
+    monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
 
 
 def _slot_cfg(**overrides: Any) -> dict[str, Any]:

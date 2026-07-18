@@ -3,7 +3,7 @@
 # timer, hal0-bench.timer, invokes). It lives alongside the suite
 # TOMLs because it's the other half of "set and forget": suites say WHAT
 # to measure, this file says WHEN it's polite to actually touch the GPU.
-# See handoffs/benchmark-system-design-2026-07-05.md §6.
+# See docs/archive/handoffs/benchmark-system-design-2026-07-05.md §6.
 #
 # Politeness policy (applies ONLY to `--scheduled`; a manual
 # `hal0 bench run --suite X` bypasses this file entirely and runs now):

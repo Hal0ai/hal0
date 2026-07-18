@@ -179,12 +179,12 @@ async def test_apply_rewrites_slot_toml_when_drift_present(
     """Re-enabling embed with the *same* selection still rewrites the slot TOML.
 
     The selection on disk already says npu/flm. A POST that flips
-    enabled false->true (without changing backend/provider) does not
+    enabled false->true (without changing device/provider) does not
     introduce a selection diff -- but the slot TOML still says vulkan.
 
-    Regression: the slot TOML on disk must end up with ``backend="flm"``
-    (the slot-toml form of catalog id "npu") so the next ``load()``
-    reads the correct backend.
+    Regression: the slot TOML on disk must end up with ``device="npu"``
+    (P2-device: device is the sole persisted truth) so the next
+    ``load()`` reads the correct backend.
     """
     orch, _fake = orchestrator
 
@@ -201,8 +201,8 @@ async def test_apply_rewrites_slot_toml_when_drift_present(
     )
 
     on_disk = _read_slot_toml(drifted_state)
-    assert on_disk.get("backend") == "flm", (
-        f"slot TOML backend was not reconciled to FLM: {on_disk!r}"
+    assert on_disk.get("device") == "npu", (
+        f"slot TOML device was not reconciled to npu: {on_disk!r}"
     )
     assert on_disk.get("provider") == "flm", (
         f"slot TOML provider was not reconciled to FLM: {on_disk!r}"
@@ -240,8 +240,8 @@ async def test_apply_reconciles_before_load(
 
     # gpu-rocm (not npu): device=npu + embed always forks to the NPU-trio
     # path which never load()s — this test pins the STANDARD lifecycle, so
-    # target a backend whose slot-toml form ("rocm") differs from the
-    # stale on-disk "vulkan" and still drives load().
+    # target a device whose slot-toml form ("gpu-rocm") differs from the
+    # stale on-disk "vulkan" [backend] fixture and still drives load().
     await orch.apply(
         "embed",
         "embed",
@@ -254,7 +254,7 @@ async def test_apply_reconciles_before_load(
     )
 
     assert fake.seen_at_load, f"no load happened: {fake.calls}"
-    assert fake.seen_at_load[0].get("backend") == "rocm", (
+    assert fake.seen_at_load[0].get("device") == "gpu-rocm", (
         "load() observed a stale slot TOML — reconciliation must be committed "
         f"to disk before the spawn: {fake.seen_at_load[0]!r}"
     )
@@ -452,7 +452,7 @@ async def test_apply_lifecycle_failure_still_persists_intent(
     sel = load_capabilities_config(caps_path).selections["embed"]["embed"]
     assert sel.enabled is True, "user intent must persist past a lifecycle failure"
     on_disk = _read_slot_toml(drifted_state)
-    assert on_disk.get("backend") == "rocm", "slot TOML must match the persisted selection"
+    assert on_disk.get("device") == "gpu-rocm", "slot TOML must match the persisted selection"
 
 
 # ── Step 1: _CHILD_TO_SLOT_TYPE + type written by _ensure_slot_exists ──────────

@@ -79,7 +79,7 @@ class TestPlanComputeOnly:
 
 
 class TestReconciliation:
-    def test_after_sets_model_device_backend_vision(self, tmp_hal0_home: str) -> None:
+    def test_after_sets_model_device_vision(self, tmp_hal0_home: str) -> None:
         slot_path = _write_agent_slot(tmp_hal0_home)
         plan = StackApplyEngine().plan("saber", _stack())
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
@@ -87,8 +87,10 @@ class TestReconciliation:
         assert after["model"]["context_size"] == 8192, (
             "sibling [model] keys must survive deep-merge"
         )
+        # P2-device: device is the sole persisted truth — the legacy
+        # ``backend`` mirror is no longer written.
         assert after["device"] == "gpu-rocm"
-        assert after["backend"] == "rocm", "legacy backend alias written via model_meta"
+        assert "backend" not in after
         assert after["vision"] is True
 
     def test_changed_true_when_model_differs(self, tmp_hal0_home: str) -> None:
@@ -180,7 +182,7 @@ class TestGuardedReconcile:
         assert plan.errors == []
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after["device"] == "gpu-rocm"
-        assert after["backend"] == "rocm"
+        assert "backend" not in after
         # Pre-fix: profile stayed "vulkan" → rocm device under a vulkan image.
         assert after["profile"] == "rocm"
 

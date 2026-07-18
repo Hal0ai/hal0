@@ -51,7 +51,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import structlog
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 import hal0
 from hal0.config import paths
@@ -102,10 +102,7 @@ class UpdateCosignMissing(UpdateError):
     """The ``cosign`` binary is not installed on this host.
 
     Surfaced as a typed error with install hints — the updater does NOT
-    fall back to unsigned acceptance. On dev (0.x) and pre-release
-    builds, ``HAL0_UPDATE_SKIP_COSIGN=1`` bypasses verification for
-    end-to-end smoke against unsigned tarballs; on stable v1+ tags the
-    env var is silently ignored (see ``docs/internal/release-manifest.md``).
+    fall back to unsigned acceptance under any circumstance.
     """
 
     code = "system.update_cosign_missing"
@@ -158,33 +155,17 @@ class ReleaseManifest(BaseModel):
 
     schema_id: str = Field(default="hal0.releases.v1", alias="_schema")
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
-    channel: str = Field(default="stable", description="stable | nightly")
+    channel: str = Field(default="stable", description="Release channel (stable).")
     url: str = Field(..., description="Tarball download URL (https or file).")
-    bundle_url: str | None = Field(
-        default=None,
+    bundle_url: str = Field(
+        ...,
         description=(
             "Sigstore bundle URL (cosign keyless OIDC). The bundle embeds the "
             "Fulcio certificate, the signature, and the Rekor transparency-log "
             "inclusion proof + Signed Entry Timestamp (SET). The SET is the "
             "trusted timestamp that lets ``cosign verify-blob --bundle`` succeed "
-            "after the short-lived Fulcio cert has expired (see #1159); a "
-            "detached .sig + .crt carried no SET and failed on every client. "
-            "Preferred over sig_url/cert_url when both are present."
+            "after the short-lived Fulcio cert has expired (see #1159)."
         ),
-    )
-    sig_url: str | None = Field(
-        default=None,
-        description=(
-            "Transition-window detached cosign signature URL. Kept alongside "
-            "bundle_url so manifests still parse on clients built before "
-            "#1159 shipped (which require sig_url/cert_url); those clients "
-            "still fail cosign verify post cert-expiry, same as before this "
-            "fix. Drop once the fleet has moved past sig_url-only clients."
-        ),
-    )
-    cert_url: str | None = Field(
-        default=None,
-        description="Fulcio-issued certificate URL paired with sig_url (see sig_url).",
     )
     digest_sha256: str = Field(..., description="Hex sha256 of the tarball bytes.")
     signer_identity: str = Field(
@@ -233,14 +214,6 @@ class ReleaseManifest(BaseModel):
         if not re.fullmatch(r"[0-9a-f]{64}", s):
             raise ValueError(f"digest_sha256 must be a 64-char hex string, got {v!r}")
         return s
-
-    @model_validator(mode="after")
-    def _has_a_signing_scheme(self) -> ReleaseManifest:
-        has_bundle = bool(self.bundle_url)
-        has_legacy = bool(self.sig_url) and bool(self.cert_url)
-        if not has_bundle and not has_legacy:
-            raise ValueError("manifest must provide bundle_url, or both sig_url and cert_url")
-        return self
 
 
 @dataclasses.dataclass(frozen=True)
@@ -506,42 +479,10 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _is_pre_release(version: str) -> bool:
-    """True for dev placeholder (0.x) or any pre-release tag (contains a hyphen).
-
-    Stable releases (e.g. ``1.0.0``, ``1.2.3``, ``2.0.0``) return False —
-    on those, the cosign skip hatch is hard-disabled.
-    """
-    return version.startswith("0.") or "-" in version
-
-
-def _cosign_skip() -> bool:
-    """Return True if ``HAL0_UPDATE_SKIP_COSIGN=1`` is honored on this build.
-
-    The env var is only respected on dev (0.x) and pre-release builds
-    (anything with a ``-rc``/``-dev`` suffix). On stable v1+ tags the env
-    var is silently ignored — verified releases are mandatory.
-    """
-    if os.environ.get("HAL0_UPDATE_SKIP_COSIGN", "").strip() != "1":
-        return False
-    from hal0 import __version__
-
-    if not _is_pre_release(__version__):
-        log.warning(
-            "updater.cosign_skip_ignored_on_stable",
-            version=__version__,
-            reason="HAL0_UPDATE_SKIP_COSIGN is not honored on stable releases",
-        )
-        return False
-    return True
-
-
 def _verify_cosign(
     tarball: Path,
-    bundle: Path | None,
+    bundle: Path,
     *,
-    signature: Path | None = None,
-    certificate: Path | None = None,
     identity_regexp: str,
     issuer: str,
     job_id: str | None = None,
@@ -551,7 +492,6 @@ def _verify_cosign(
     Raises:
         UpdateCosignMissing: ``cosign`` not on PATH.
         UpdateCosignFailed: signature invalid or identity mismatch.
-        ValueError: neither a bundle nor a signature+certificate pair was given.
 
     Keyless signing uses a short-lived (~10 min) Fulcio certificate. To
     verify a signature after that cert expires — i.e. every real install,
@@ -560,54 +500,23 @@ def _verify_cosign(
     valid. That timestamp is the Rekor Signed Entry Timestamp (SET), which
     travels inside the Sigstore ``bundle`` (fetched from ``manifest.bundle_url``).
     ``--certificate-identity-regexp`` is checked against the cert SAN carried
-    in the bundle. A detached ``.sig`` + ``.crt`` carried no SET, so client
-    verification against them fails once the cert expires — which is why
-    ``bundle`` is preferred whenever present; ``signature``/``certificate``
-    are the transition-window fallback for manifests fetched by clients
-    predating #1159 (see ``ReleaseManifest.sig_url``), and inherit that same
-    known post-expiry failure mode rather than fixing it.
-
-    The skip env-var (``HAL0_UPDATE_SKIP_COSIGN=1``) bypasses the entire
-    check with a WARN log line — documented gap, must close before v1.
+    in the bundle. Verification is always mandatory — there is no bypass.
     """
-    if _cosign_skip():
-        log.warning(
-            "updater.cosign_skipped",
-            job_id=job_id,
-            tarball=str(tarball),
-            reason="HAL0_UPDATE_SKIP_COSIGN=1",
-        )
-        return
-
     cosign = shutil.which("cosign")
     if not cosign:
-        from hal0 import __version__
-
-        skip_hint = (
-            "or set HAL0_UPDATE_SKIP_COSIGN=1 to bypass (pre-release builds only; ignored on stable)"
-            if _is_pre_release(__version__)
-            else "skip env-var is not honored on this stable build"
-        )
         raise UpdateCosignMissing(
-            f"cosign is not installed; install from https://docs.sigstore.dev/cosign/installation/ {skip_hint}",
+            "cosign is not installed; install from https://docs.sigstore.dev/cosign/installation/",
             details={
                 "install_hint_arch": "pacman -S cosign  # or: paru -S cosign-bin",
                 "install_hint_deb": "see https://docs.sigstore.dev/cosign/installation/",
-                "skip_env": ("HAL0_UPDATE_SKIP_COSIGN=1" if _is_pre_release(__version__) else None),
             },
         )
-
-    if bundle is not None:
-        verify_args = ["--bundle", str(bundle)]
-    elif signature is not None and certificate is not None:
-        verify_args = ["--signature", str(signature), "--certificate", str(certificate)]
-    else:
-        raise ValueError("_verify_cosign requires either bundle, or signature and certificate")
 
     cmd = [
         cosign,
         "verify-blob",
-        *verify_args,
+        "--bundle",
+        str(bundle),
         "--certificate-identity-regexp",
         identity_regexp,
         "--certificate-oidc-issuer",
@@ -891,7 +800,8 @@ def _is_editable_install() -> bool:
     checkout on ``sys.path``).
 
     Returns ``False`` for git-tracked installs under the FHS layout
-    (``/usr/lib/hal0/hal0-<version>/``)— those are hosted by `prepare_git()`.
+    (``/usr/lib/hal0/hal0-<version>/``) — those are a maintainer-only
+    dev layout, not a pip-managed editable install.
     """
     if _editable_install_path() is not None:
         return True
@@ -904,7 +814,7 @@ def _is_editable_install() -> bool:
     except ValueError:
         pass
     # Git-tracked FHS installs: code lives in a versioned dir under
-    # /usr/lib/hal0/ — not truly editable. Let prepare_git handle them.
+    # /usr/lib/hal0/ — not truly editable (maintainer-only dev layout).
     return not _is_git_install()
 
 
@@ -937,9 +847,8 @@ def _is_git_install() -> bool:
     """True when hal0 is installed from a git clone under the FHS layout.
 
     Detects versioned directories like ``/usr/lib/hal0/hal0-0.9.4/`` that
-    contain a ``.git`` directory (or are a git worktree). These installs
-    can be updated via ``prepare_git()`` instead of downloading release
-    tarballs.
+    contain a ``.git`` directory (or are a git worktree) — a maintainer-only
+    dev layout, distinct from a pip editable install.
     """
     import hal0
 
@@ -1474,7 +1383,7 @@ class Updater:
         """Initialise the updater.
 
         Args:
-            channel: Release channel — "stable" (default) or "nightly".
+            channel: Release channel — "stable" (default).
             job_id: Optional background-job id used to thread structured
                 log breadcrumbs through to the status endpoint.
         """
@@ -1569,7 +1478,7 @@ class Updater:
         without a re-fetch, and release notes are read from the *verified* tree
         so what the operator reviews before commit is exactly what was signed.
 
-        Returns ``{version, install_dir, cache_dir, cosign_skipped, notes}``.
+        Returns ``{version, install_dir, cache_dir, notes}``.
 
         Raises:
             UpdateError + subclasses on any step failure. Partial-state
@@ -1607,16 +1516,11 @@ class Updater:
                 manifest=manifest.version,
             )
 
-        # Step 3: download tarball + signing artifacts. Prefer the Sigstore
-        # bundle (survives cert expiry, #1159); fall back to the transition-
-        # window sig_url/cert_url pair for manifests that don't carry a
-        # bundle_url (see ReleaseManifest._has_a_signing_scheme).
+        # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
         cache = _cache_dir(target_version)
         cache.mkdir(parents=True, exist_ok=True)
         tarball_path = cache / f"hal0-{target_version}.tar.gz"
-        bundle_path: Path | None = None
-        sig_path: Path | None = None
-        cert_path: Path | None = None
+        bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
         log.info(
             "updater.download_start",
             job_id=self.job_id,
@@ -1624,24 +1528,12 @@ class Updater:
             url=manifest.url,
         )
         await _download(manifest.url, tarball_path)
-        if manifest.bundle_url:
-            bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
-            await _download(manifest.bundle_url, bundle_path)
-        else:
-            # ReleaseManifest._has_a_signing_scheme guarantees sig_url and
-            # cert_url are both set whenever bundle_url is absent.
-            assert manifest.sig_url and manifest.cert_url
-            sig_path = cache / f"hal0-{target_version}.tar.gz.sig"
-            cert_path = cache / f"hal0-{target_version}.tar.gz.crt"
-            await _download(manifest.sig_url, sig_path)
-            await _download(manifest.cert_url, cert_path)
+        await _download(manifest.bundle_url, bundle_path)
         log.info(
             "updater.download_ok",
             job_id=self.job_id,
             tarball=str(tarball_path),
-            bundle=str(bundle_path) if bundle_path else None,
-            sig=str(sig_path) if sig_path else None,
-            cert=str(cert_path) if cert_path else None,
+            bundle=str(bundle_path),
         )
 
         # Step 4: sha256 verify.
@@ -1662,8 +1554,6 @@ class Updater:
             _verify_cosign,
             tarball_path,
             bundle_path,
-            signature=sig_path,
-            certificate=cert_path,
             identity_regexp=manifest.signer_identity,
             issuer=manifest.signer_issuer,
             job_id=self.job_id,
@@ -1686,7 +1576,6 @@ class Updater:
             "version": target_version,
             "install_dir": str(install_dir),
             "cache_dir": str(cache),
-            "cosign_skipped": _cosign_skip(),
             "notes": notes,
         }
 
@@ -1873,7 +1762,6 @@ class Updater:
             "install_dir": str(install_dir),
             "cache_dir": str(cache),
             "migrations": {"from": migration_info[0], "to": migration_info[1]},
-            "cosign_skipped": _cosign_skip(),
             "installed_at": time.time(),
         }
 
@@ -1891,190 +1779,6 @@ class Updater:
         _raise_if_editable_install()
         prepared = await self.prepare(version)
         return await self.commit(str(prepared["version"]))
-
-    # ── git-based update ──────────────────────────────────────────────────────
-
-    async def prepare_git(self, remote: str = "origin", branch: str = "main") -> dict[str, Any]:
-        """Stage an update from a git remote instead of a release tarball.
-
-        Clones (first time) or fetches the remote into
-        ``/usr/lib/hal0/hal0-<latest-tag>/`` and returns the version to commit.
-        Does NOT activate — call :meth:`commit_git` to swap + pip install.
-
-        The update repo is a bare git clone at ``/var/lib/hal0/cache/repo.git``
-        that is fetch-only.  Versioned install trees are sparse checkouts of
-        the tag under ``/usr/lib/hal0/`` — the same layout the tarball path
-        uses, so ``commit_git`` can reuse the same symlink-swap logic.
-        """
-        cache = paths.var_lib() / "cache"
-        cache.mkdir(parents=True, exist_ok=True)
-        repo_dir = cache / "repo.git"
-        remote_url = "https://github.com/Hal0ai/hal0.git"
-
-        if (repo_dir / "HEAD").is_file():
-            log.info("updater.git_fetch", repo=str(repo_dir), remote=remote_url)
-            await asyncio.to_thread(
-                _git,
-                "-C",
-                str(repo_dir),
-                "fetch",
-                remote_url,
-                "+refs/tags/*:refs/tags/*",
-            )
-        else:
-            log.info("updater.git_clone_bare", repo=str(repo_dir), remote=remote_url)
-            # Remove a leftover partial clone from a prior aborted run.
-            with contextlib.suppress(OSError):
-                shutil.rmtree(repo_dir)
-            await asyncio.to_thread(
-                _git,
-                "clone",
-                "--bare",
-                remote_url,
-                str(repo_dir),
-            )
-
-        # Find the latest stable tag (highest semver, ignoring -nightly/-beta).
-        latest_tag = await asyncio.to_thread(_latest_stable_tag, repo_dir)
-        if not latest_tag:
-            raise UpdateError(
-                "no stable release tags found in the git remote",
-                details={"remote": remote_url},
-            )
-        log.info("updater.git_latest_tag", tag=latest_tag)
-
-        # Check out the tag into the versioned install dir.
-        target_version = latest_tag.lstrip("v")
-        install_dir = _versioned_install_dir(target_version)
-        if not install_dir.exists():
-            await asyncio.to_thread(
-                _git,
-                "-C",
-                str(repo_dir),
-                "--work-tree",
-                str(install_dir),
-                "checkout",
-                latest_tag,
-                "--",
-                ".",
-            )
-        log.info("updater.git_prepared", version=target_version, install_dir=str(install_dir))
-        return {"version": target_version, "install_dir": str(install_dir)}
-
-    async def commit_git(self, version: str) -> dict[str, Any]:
-        """Activate a git-prepared version: pip install + symlink swap.
-
-        Uses the same commit logic as :meth:`commit` (migrations, seed pruning,
-        MTP override cleanup, symlink swap, venv re-pip, slot unit re-render)
-        but reads ``min_data_version`` from the git tree's ``pyproject.toml``
-        instead of a release manifest.
-        """
-        target_version = (version or "").strip()
-        if not target_version:
-            raise UpdateManifestInvalid("commit_git requires a prepared version")
-        install_dir = _versioned_install_dir(target_version)
-        if not install_dir.exists():
-            raise UpdateError(
-                f"nothing staged for {target_version} — call prepare_git() before commit_git()",
-                details={"version": target_version, "install_dir": str(install_dir)},
-            )
-
-        log.info("updater.commit_git_start", job_id=self.job_id, version=target_version)
-
-        # Derive min_data_version from the tree's pyproject.toml.
-        min_data_version = _read_min_data_version(install_dir)
-
-        # Step 7: config migrations.
-        migration_info: tuple[int, int]
-        try:
-            migration_info = await asyncio.to_thread(
-                _maybe_run_config_migrations,
-                min_data_version,
-                job_id=self.job_id,
-            )
-        except Hal0Error as exc:
-            raise UpdateError(
-                f"config migration failed during update: {exc.message}",
-                details={**exc.details, "version": target_version},
-            ) from exc
-
-        # Step 7b: virtual-seed migration.
-        try:
-            await asyncio.to_thread(ensure_seed_profiles, job_id=self.job_id)
-        except Exception as exc:
-            log.warning("updater.seed_profiles_prune_failed", job_id=self.job_id, error=str(exc))
-
-        # Step 7c: stale MTP overrides.
-        try:
-            await asyncio.to_thread(clear_stale_mtp_overrides, job_id=self.job_id)
-        except Exception as exc:
-            log.warning("updater.mtp_migration_failed", job_id=self.job_id, error=str(exc))
-
-        # Step 7d: stale former-default runner-image pins → current default.
-        try:
-            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
-        except Exception as exc:
-            log.warning("updater.image_retag_failed", job_id=self.job_id, error=str(exc))
-
-        # Step 8 + 9: atomic symlink swap + record previous.
-        link = _current_symlink()
-        try:
-            prior = _atomic_symlink_swap(install_dir, link)
-        except OSError as exc:
-            raise UpdateSwapError(
-                f"atomic symlink swap failed: {exc}",
-                details={"link": str(link), "target": str(install_dir), "error": str(exc)},
-            ) from exc
-
-        # Re-pip into the shared venv.
-        try:
-            await asyncio.to_thread(_reinstall_into_venv, install_dir, job_id=self.job_id)
-        except UpdateError:
-            if prior is not None:
-                with contextlib.suppress(OSError):
-                    _atomic_symlink_swap(prior, link)
-            raise
-
-        # Re-render slot units through the new code.
-        try:
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                [
-                    sys.executable,
-                    "-c",
-                    "from hal0.updater.updater import rerender_slot_units; "
-                    "print(rerender_slot_units())",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if proc.returncode == 0:
-                log.info(
-                    "updater.unit_rerender_done",
-                    job_id=self.job_id,
-                    rewritten=(proc.stdout or "").strip(),
-                )
-            else:
-                log.warning(
-                    "updater.unit_rerender_failed",
-                    job_id=self.job_id,
-                    rc=proc.returncode,
-                    stderr=(proc.stderr or "")[-500:],
-                )
-        except Exception as exc:
-            log.warning("updater.unit_rerender_failed", job_id=self.job_id, error=str(exc))
-
-        if prior is not None:
-            _write_atomic_text(_previous_record(), str(prior))
-        log.info("updater.commit_git_ok", job_id=self.job_id, version=target_version)
-        return {
-            "version": target_version,
-            "previous": str(prior) if prior else None,
-            "install_dir": str(install_dir),
-            "migrations": {"from": migration_info[0], "to": migration_info[1]},
-            "installed_at": time.time(),
-        }
 
     # ── rollback ───────────────────────────────────────────────────────────────
 
@@ -2189,48 +1893,6 @@ class Updater:
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
         }
-
-
-def _git(*args: str) -> None:
-    """Run a git command, raising UpdateError on failure."""
-    proc = subprocess.run(["git", *args], capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise UpdateError(
-            f"git {' '.join(args[:3])}... failed (rc={proc.returncode})",
-            details={"stderr": proc.stderr[-1000:]},
-        )
-
-
-def _latest_stable_tag(repo_dir: Path) -> str | None:
-    """Return the highest semver tag (v0.x.y) skipping -nightly/-beta."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo_dir), "tag", "--sort=-version:refname"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    for line in proc.stdout.strip().splitlines():
-        tag = line.strip()
-        if re.match(r"^v\d+\.\d+\.\d+(\.\d+)?$", tag):
-            return tag
-    return None
-
-
-def _read_min_data_version(install_dir: Path) -> int:
-    """Parse min_data_version from a git tree's pyproject.toml."""
-    pp = install_dir / "pyproject.toml"
-    if not pp.is_file():
-        return 1
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib  # type: ignore[no-redef]
-    try:
-        data = tomllib.loads(pp.read_text(encoding="utf-8"))
-        return int(data.get("tool", {}).get("hal0", {}).get("min_data_version", 1) or 1)
-    except Exception:
-        return 1
 
 
 __all__ = [

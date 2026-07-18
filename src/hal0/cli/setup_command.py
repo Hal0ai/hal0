@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import httpx
 import typer
+from rich.console import Console
+from rich.prompt import Confirm, Prompt
 
 from hal0.cli._shared import _api_base
 from hal0.config import paths
@@ -21,6 +24,7 @@ from hal0.hardware.probe import HardwareProbe, HardwareProbeError
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
 from hal0.install.profile_derive import npu_healthy
+from hal0.registry.model_store import describe_store_state
 
 #: capability → (slot_name, port) for the slots first-run provisions. Mirrors
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
@@ -86,6 +90,7 @@ def build_auto_selections(
     with_extensions: bool = True,
     with_slots: bool = True,
     existing_slots: frozenset[str] = frozenset(),
+    npu_opt_in: bool | None = None,
 ) -> Selections:
     """Non-interactive defaults for ``--auto`` (install.sh path): scaffold the
     capability + NPU slot structure with **no model picks** (pick-free) plus the
@@ -113,6 +118,10 @@ def build_auto_selections(
     install does not overwrite user-customised configs.  Pass the result of
     :func:`_existing_slot_names` at the call site to keep this function pure
     and unit-testable.
+
+    *npu_opt_in* overrides the NPU-routing decision (used by the interactive
+    wizard's explicit y/n prompt). ``None`` (the ``--auto`` default) falls back
+    to :func:`~hal0.install.profile_derive.npu_healthy`.
     """
     if with_extensions:
         ext = {e.id: e.default_enabled for e in EXTENSIONS}
@@ -159,7 +168,7 @@ def build_auto_selections(
         # NPU routing on ONLY when present AND healthy (#1109): a present-but-
         # broken NPU (npu.validated False/None) must not auto-advertise a lane
         # apply_setup would skip. Same single npu_opt_in the picker + apply use.
-        npu_opt_in=npu_healthy(hw),
+        npu_opt_in=npu_healthy(hw) if npu_opt_in is None else npu_opt_in,
         comfyui_defaults=comfyui_defaults,
     )
 
@@ -288,8 +297,6 @@ def setup(
         )
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
         return
-    from hal0.cli.setup_ui import run_interactive  # Task 3.x
-
     run_interactive(hw, storage_dir=storage_dir)
 
 
@@ -300,6 +307,125 @@ async def _run_auto(sel: Selections, hw: HardwareInfo, *, no_pull: bool = False)
     from hal0.cli.setup_install import run_install
 
     await run_install(sel, hw, no_pull=no_pull)
+
+
+# ── Minimal interactive wizard (§17.8) ──────────────────────────────────────
+#
+# Five `rich.prompt` questions feed the same pick-free `build_auto_selections`
+# scaffold that `--auto` uses; there is no bespoke TUI, no raw-tty key-reading,
+# and no per-model picker. On a non-tty stdin (spec risk R8 — e.g. a test that
+# sets HAL0_FORCE_INTERACTIVE to drive the flow over a pipe) prompts fall back
+# to plain `input()` with the shown default instead of rich's terminal-aware
+# rendering.
+
+
+def _prompt(question: str, default: str, *, console: Console) -> str:
+    """Text prompt: `rich.prompt.Prompt` on a real terminal, `input()` (or the
+    default on EOF) otherwise."""
+    if console.is_terminal:
+        return Prompt.ask(question, default=default, console=console)
+    try:
+        answer = input(f"{question} [{default}]: ").strip()
+    except EOFError:
+        answer = ""
+    return answer or default
+
+
+def _confirm(question: str, default: bool, *, console: Console) -> bool:
+    """Yes/no prompt: `rich.prompt.Confirm` on a real terminal, `input()` (or
+    the default on EOF) otherwise."""
+    if console.is_terminal:
+        return Confirm.ask(question, default=default, console=console)
+    hint = "Y/n" if default else "y/N"
+    try:
+        answer = input(f"{question} [{hint}]: ").strip().lower()
+    except EOFError:
+        answer = ""
+    if not answer:
+        return default
+    return answer in ("y", "yes")
+
+
+def _validate_store(path: str) -> tuple[bool, str]:
+    """Return ``(ok, reason)``. A store is usable when it is an absolute path
+    that — if it already exists — is a writable directory. A not-yet-created
+    path is accepted (the installer / apply step own creation) as long as its
+    nearest existing ancestor is reachable (non-zero free space)."""
+    path = (path or "").strip()
+    if not path:
+        return False, "a model store path is required (nothing downloads without one)"
+    if not Path(path).is_absolute():
+        return False, f"store path {path!r} must be absolute"
+    probe = describe_store_state(path)
+    if probe.exists and not probe.is_dir:
+        return False, f"{path} exists but is not a directory"
+    if probe.exists and not probe.writable:
+        return False, f"{path} is not writable by this user"
+    if not probe.exists and probe.free_bytes == 0:
+        return False, f"cannot reach {path} — no writable parent directory exists yet"
+    return True, ""
+
+
+def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
+    """The guided setup flow (§17.8): five prompts — storage dir, NPU opt-in,
+    extensions default set, scaffold slots y/n, launch-on-completion y/n — then
+    apply runs exactly as `--auto` does (`build_auto_selections` + `_run_auto`).
+    No per-model picking, no network/HF-token step, no raw-tty widgets."""
+    console = Console()
+    console.print("[bold yellow]hal0 setup[/bold yellow] — guided install\n")
+
+    # 1. Model storage directory — mandatory, validated (gates every download).
+    current = storage_dir
+    while True:
+        chosen = _prompt("Model storage directory", current, console=console)
+        ok, reason = _validate_store(chosen)
+        if ok:
+            storage_dir = chosen
+            break
+        console.print(f"[red]✗ {reason}[/red]")
+        current = chosen
+
+    # 2. NPU opt-in — only asked when an NPU was actually detected; default
+    # mirrors `--auto`'s present-and-healthy check.
+    npu_opt_in = False
+    if hw.npu.present:
+        npu_opt_in = _confirm(
+            "Enable NPU inference (STT offload)?", npu_healthy(hw), console=console
+        )
+
+    # 3. Extensions default set.
+    with_extensions = _confirm(
+        "Install the default extension set (Apps + Agents)?", True, console=console
+    )
+
+    # 4. Scaffold capability slots now (pick-free — models chosen later).
+    with_slots = _confirm(
+        "Scaffold capability slots now (choose models later)?", True, console=console
+    )
+
+    # 5. Launch on completion — run the post-apply verification report (health
+    # checks + the URLs to open) once the apply finishes.
+    launch_on_completion = _confirm(
+        "Show the verification report when setup completes?", True, console=console
+    )
+
+    sel = build_auto_selections(
+        hw,
+        storage_dir=storage_dir,
+        with_extensions=with_extensions,
+        with_slots=with_slots,
+        existing_slots=_existing_slot_names(),
+        npu_opt_in=npu_opt_in,
+    )
+    asyncio.run(_run_auto(sel, hw, no_pull=False))
+
+    if launch_on_completion:
+        try:
+            from hal0.cli.doctor_verify import run_verify
+
+            run_verify(console=console)
+        except Exception as exc:  # pragma: no cover — defensive, never fail setup
+            console.print(f"[dim]setup verify skipped ({exc})[/dim]")
 
 
 def _build_offline_deps():

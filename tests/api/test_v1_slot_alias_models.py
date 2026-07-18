@@ -131,6 +131,63 @@ async def test_all_enabled_llm_slots_emit_alias_entries() -> None:
     assert by_id["utility"]["context_length"] == 32768
     assert by_id["primary"]["context_length"] == 65536
 
+    # §21.5: max_context_window aliases context_length (same value, for
+    # OpenAI-compat clients that probe the alternate key name).
+    for slot_id in ("primary", "agent-hermes", "utility"):
+        assert by_id[slot_id]["max_context_window"] == by_id[slot_id]["context_length"]
+
+    # §21.5: a live, enabled llm slot's model is always local.
+    for e in entries:
+        assert e["downloaded"] is True
+
+
+@pytest.mark.asyncio
+async def test_registry_detail_folds_into_alias_entries() -> None:
+    """§21.5: labels/checkpoint/recipe surface on an alias entry when the
+    slot's model id resolves in the registry, sourced from ``capabilities``/
+    ``quant``/the blessed-path recipe bucket."""
+
+    class _FakeDetailModel(_FakeModel):
+        def __init__(
+            self,
+            name: str,
+            context_size: int | None = None,
+            capabilities: list[str] | None = None,
+            quant: str | None = None,
+            path: str = "",
+        ) -> None:
+            super().__init__(name, context_size)
+            self.capabilities = capabilities or []
+            self.quant = quant
+            self.path = path
+
+    class _FakeDetailRegistry(_FakeModelRegistry):
+        def get(self, model_id: str) -> _FakeDetailModel:  # type: ignore[override]
+            if model_id != "qwen3-coder-next-reap-40b-a3b-q4kxl":
+                raise KeyError(model_id)
+            return _FakeDetailModel(
+                "Qwen3-Coder-Next",
+                65536,
+                capabilities=["chat", "vision"],
+                quant="Q4_K_M",
+                path="/var/lib/hal0/models/qwen3-coder-recipe/chat/model.gguf",
+            )
+
+    entries = await hal0_slot_alias_models(
+        _FakeSlotManager(_three_chat_slots()), _FakeDetailRegistry({}), now=1000
+    )
+    by_id = {e["id"]: e for e in entries}
+    primary = by_id["primary"]
+    assert primary["labels"] == ["chat", "vision"]
+    assert primary["checkpoint"] == "Q4_K_M"
+    assert primary["recipe"] == "qwen3-coder-recipe"
+    # utility's model isn't in the fake registry — no registry-detail keys,
+    # but it's still marked downloaded (a served slot's model is local).
+    assert "labels" not in by_id["utility"]
+    assert "checkpoint" not in by_id["utility"]
+    assert "recipe" not in by_id["utility"]
+    assert by_id["utility"]["downloaded"] is True
+
 
 @pytest.mark.asyncio
 async def test_all_enabled_llm_slots_appear_regardless_of_load_state() -> None:

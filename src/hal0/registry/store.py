@@ -1,13 +1,22 @@
-"""ModelRegistry — atomic TOML-backed model catalog.
+"""TomlModelRegistry — atomic TOML-backed model catalog, plus the
+``ModelRegistry`` public name.
 
-The registry is the single source of truth for "what models exist."
-It persists model metadata as an atomic TOML file at
-``/var/lib/hal0/registry/registry.toml`` and uses mtime polling to
-invalidate its in-memory cache when the file changes on disk.
+Historically this module's ``ModelRegistry`` class WAS the registry: an
+atomic TOML file at ``/var/lib/hal0/registry/registry.toml``, mtime-
+polled to invalidate an in-memory cache. ML-1 (the SQLite pilot,
+hal0-specs/spec-ml1-sqlite.final.md) moves the source of truth to SQLite
+behind the identical §0.2 interface — see
+:class:`hal0.registry.sqlite_store.SqliteModelRegistry` — and rebinds the
+public ``ModelRegistry`` name to it at the bottom of this module. The
+class defined here is renamed ``TomlModelRegistry`` and kept alive for
+the import/export path (``hal0 registry export`` / ``import-sqlite``)
+and as an explicit escape hatch; every call site that only uses the
+§0.2 methods (list/get/has/add/remove/update/route_for/reload/on_change)
+needs zero edits for the swap.
 
 Port target: haloai lib/registry.py.
-See PLAN.md §3 and ARCHITECTURE.md §Key boundaries ("registry is the only
-source of truth for what models exist").
+See PLAN.md §3, §7.5, §8 and ARCHITECTURE.md §Key boundaries ("registry
+is the only source of truth for what models exist").
 
 # NOTE: haloai used a single ``registry.toml`` file under the registry
 # directory.  We keep that shape — one file with all entries keyed by
@@ -142,7 +151,7 @@ def _fsync_dir(dir_path: Path) -> None:
 _DEFAULT_REGISTRY_FILENAME = "registry.toml"
 
 
-class ModelRegistry:
+class TomlModelRegistry:
     """Atomic TOML-backed model registry.
 
     Thread-safety: a per-instance ``threading.RLock`` guards all reads
@@ -443,16 +452,7 @@ class ModelRegistry:
                     f"model {model_id!r} not in registry",
                     details={"model_id": model_id},
                 )
-            existing = models[model_id].model_dump(mode="python")
-            merged = {**existing, **{k: v for k, v in updates.items() if k != "id"}}
-            merged["id"] = model_id
-            try:
-                new_model = Model.model_validate(merged)
-            except Exception as exc:
-                raise RegistryError(
-                    f"update for {model_id!r} produced an invalid Model: {exc}",
-                    details={"model_id": model_id, "reason": str(exc)},
-                ) from exc
+            new_model = merge_update(models[model_id], model_id, updates)
             models[model_id] = new_model
             self._atomic_write(models)
             self._invalidate()
@@ -489,6 +489,31 @@ class ModelRegistry:
             self._invalidate()
 
 
+def merge_update(existing: Model, model_id: str, updates: dict[str, Any]) -> Model:
+    """Flat field-level merge shared by every ``update()`` implementation.
+
+    ``updates`` overwrites matching top-level fields on ``existing``; the
+    ``id`` key in ``updates`` is always ignored (``model_id`` wins) — the
+    id is immutable through ``update()`` by design (use remove + add to
+    rename). Used by both :meth:`TomlModelRegistry.update` and
+    :meth:`hal0.registry.sqlite_store.SqliteModelRegistry.update` so the
+    two stores can never drift on merge semantics or error shape.
+
+    Raises:
+        RegistryError: If the merged fields fail ``Model`` validation.
+    """
+    existing_dict = existing.model_dump(mode="python")
+    merged = {**existing_dict, **{k: v for k, v in updates.items() if k != "id"}}
+    merged["id"] = model_id
+    try:
+        return Model.model_validate(merged)
+    except Exception as exc:
+        raise RegistryError(
+            f"update for {model_id!r} produced an invalid Model: {exc}",
+            details={"model_id": model_id, "reason": str(exc)},
+        ) from exc
+
+
 def model_to_toml_dict(m: Model) -> dict[str, Any]:
     """Public alias for :func:`_model_to_toml`.
 
@@ -505,20 +530,22 @@ def _model_to_toml(m: Model) -> dict[str, Any]:
 
     Drops the synthetic ``id`` (it's the table key on disk) and any
     top-level ``None`` values (TOML has no null). For the nested
-    ``defaults`` table we also strip ``None`` leaves so optional
-    ModelDefaults fields aren't written as empty entries that would
-    fail TOML serialisation.
+    ``defaults`` / ``capability_flags`` tables we also strip ``None``
+    leaves so optional fields aren't written as empty entries that would
+    fail TOML serialisation (§7.1d added ``capability_flags`` — same
+    "collapse to no key when nothing is set" rule as ``defaults``).
     """
     data = m.model_dump(mode="python", exclude_none=False)
     data.pop("id", None)
 
-    # Top-level None → drop. Nested 'defaults' table: drop None leaves
-    # too, and collapse to no key at all when nothing is set.
+    # Top-level None → drop. Nested 'defaults'/'capability_flags' tables:
+    # drop None leaves too, and collapse to no key at all when nothing is
+    # set.
     cleaned: dict[str, Any] = {}
     for k, v in data.items():
         if v is None:
             continue
-        if k == "defaults" and isinstance(v, dict):
+        if k in ("defaults", "capability_flags") and isinstance(v, dict):
             sub = {sk: sv for sk, sv in v.items() if sv is not None}
             if not sub:
                 continue
@@ -531,11 +558,34 @@ def _model_to_toml(m: Model) -> dict[str, Any]:
     return cleaned
 
 
+# ── ML-1 cutover: SQLite is now the source of truth ─────────────────────────
+#
+# Imported at the BOTTOM of the module, not the top: `sqlite_store` imports
+# `RegistryError`/`ModelNotFound`/`ModelAlreadyExists`/`model_to_toml_dict`/
+# `merge_update` FROM this module, so importing it any earlier would be a
+# genuine circular import. By deferring to here, everything `sqlite_store`
+# needs already exists as a module attribute by the time it runs. This is
+# safe regardless of which of the two modules an external caller imports
+# first: Python always initialises the `hal0.registry` PACKAGE (running
+# `registry/__init__.py`, which imports `store` before anything can reach
+# `sqlite_store` directly) ahead of either submodule's own body.
+from hal0.registry.sqlite_store import SqliteModelRegistry  # noqa: E402
+
+#: Public entry point. Every one of the ~60 call sites across `src/hal0`
+#: constructs `ModelRegistry()` / `ModelRegistry(registry_dir=...)` and only
+#: touches the §0.2 interface, so rebinding the name here is the entire
+#: cutover — zero caller edits. `TomlModelRegistry` (above) stays reachable
+#: under its own name for the TOML import/export path.
+ModelRegistry = SqliteModelRegistry
+
 __all__ = [
     "ModelAlreadyExists",
     "ModelNotFound",
     "ModelRegistry",
     "RegistryError",
+    "SqliteModelRegistry",
+    "TomlModelRegistry",
+    "merge_update",
     "model_to_toml_dict",
     "registry_write_lock",
 ]

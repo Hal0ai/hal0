@@ -46,7 +46,6 @@ gen:
 apps:
   openwebui: { enabled: true }
   hermes: { enabled: true }
-  pi: { enabled: false }
 """
 
 _BAD_ANSWERS = """
@@ -138,7 +137,7 @@ def test_plan_detects_port_in_use(tmp_path, _hal0_home):
               - {{ capability: chat, name: chat, port: {port}, model_id: auto }}
             npu: {{ opt_in: false }}
             gen: {{ mode: off }}
-            apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }}, pi: {{ enabled: false }} }}
+            apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }} }}
             """,
         )
         result = runner.invoke(app, ["--plan", "--answers", path])
@@ -162,7 +161,7 @@ def test_plan_strict_answers_port_in_use_is_an_error(tmp_path, _hal0_home):
               - {{ capability: chat, name: chat, port: {port}, model_id: auto }}
             npu: {{ opt_in: false }}
             gen: {{ mode: off }}
-            apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }}, pi: {{ enabled: false }} }}
+            apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }} }}
             """,
         )
         result = runner.invoke(app, ["--plan", "--answers", path])

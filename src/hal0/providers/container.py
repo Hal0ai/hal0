@@ -55,6 +55,7 @@ from typing import Any
 
 import httpx
 
+from hal0.config import store as model_store_module
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
 from hal0.config.schema import family_flags, resolve_chat_template, resolve_profile_flags
 from hal0.model_meta import model_is_mtp_eligible
@@ -68,6 +69,7 @@ from hal0.providers._gpu import (
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.slots.argv import ResolvedArgv, resolve_argv
+from hal0.system.seam import SystemCtlSeam
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -285,6 +287,13 @@ log = logging.getLogger(__name__)
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+
+# P3-perms: the seam that routes unit writes + systemctl verbs through
+# `sudo -n hal0-systemctl` once hal0-api runs as the (unprivileged) hal0
+# service user — a pure passthrough (today's exact direct behaviour)
+# everywhere else, including every existing test. See hal0.system.seam.
+_SYSTEMCTL_SEAM = SystemCtlSeam()
+
 # Back-compat alias for the historic default. The *effective* mount root is
 # resolved per-render via model_store_root() ([models].store / HAL0_MODEL_STORE
 # / this default) so a custom model directory actually reaches the container.
@@ -349,6 +358,13 @@ def _resolve_model_path(model_info: dict[str, Any]) -> str:
     Prefers ``model_info["path"]`` (populated by ModelRegistry.get);
     falls back to ``model_info["_model_key"]`` (the model-id string)
     so the container can attempt to locate the file at runtime.
+
+    ML-3: also runs a best-effort store-escape sanity check via
+    ``store.assert_under_store(..., severity="warn")`` — WARN, never
+    fail-fast, because this resolves for an already-running (or about to
+    launch) slot and a sanity check must never be the thing that kills a
+    live container (plan §23.3a's severity split; the write path in
+    ``registry/pull.py`` is where escape attempts fail fast instead).
     """
     path = model_info.get("path") or model_info.get("_model_key", "")
     if not path:
@@ -356,6 +372,8 @@ def _resolve_model_path(model_info: dict[str, Any]) -> str:
             "model_info has no 'path' — registry lookup failed; "
             "ensure the model is registered before loading a container slot."
         )
+    with contextlib.suppress(Exception):
+        model_store_module.assert_under_store(str(path), severity="warn")
     return str(path)
 
 
@@ -734,8 +752,10 @@ def _llama_launch_plan(
     command = resolve_argv(segments).argv
 
     # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
-    # default /mnt/ai-models). Mounted identical-path, read-only, with an
-    # SELinux relabel so it works on enforcing hosts (Fedora).
+    # default aligned with the write side — see hal0.config.store).
+    # Mounted identical-path, read-only, via the shared `mount_for` factory
+    # (ML-3) — which omits the SELinux relabel on NFS (chcon ENOTSUP there)
+    # instead of unconditionally appending ``:z``.
     model_store = model_store_root()
 
     return RuntimeLaunchPlan(
@@ -744,7 +764,7 @@ def _llama_launch_plan(
         # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
         # operators can tune the runtime without forking the image.
         env=dict(env) if env else {},
-        mounts=[Mount(model_store, model_store, read_only=True, selinux="z")],
+        mounts=[model_store_module.mount_for(model_store, read_only=True)],
         devices=list(devices),
         group_add=list(group_ids),
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],
@@ -1110,8 +1130,15 @@ class ContainerProvider(Provider):
         return _SYSTEMD_SYSTEM_DIR / self._unit_name(slot_name)
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        """Run a subprocess synchronously (load/unload are blocking ops anyway)."""
-        return subprocess.run(list(args), capture_output=True, text=True, check=check)
+        """Run a subprocess synchronously (load/unload are blocking ops anyway).
+
+        P3-perms: routes ``systemctl`` daemon-reload + hal0-slot@ unit verbs
+        through the hal0-systemctl seam when this process is running as the
+        hal0 service user (see :mod:`hal0.system.seam`); a direct
+        ``subprocess.run`` everywhere else — dev, CI, tests, and a
+        pre-flip/root install all behave exactly as before.
+        """
+        return _SYSTEMCTL_SEAM.systemctl(*args, check=check)
 
     async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         """Probe GET /health on the container port.
@@ -1220,7 +1247,7 @@ class ContainerProvider(Provider):
             "container.unit_write",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
         )
-        unit_path.write_text(unit_text)
+        _SYSTEMCTL_SEAM.write_unit(unit_path, unit_text)
         self._run("systemctl", "daemon-reload")
         # Enable so it survives reboots (best-effort — don't fail if already enabled).
         self._run("systemctl", "enable", self._unit_name(slot_name), check=False)
@@ -1331,7 +1358,7 @@ class ContainerProvider(Provider):
         unit_text = self._render_unit_text(slot_cfg, model_info)
         if unit_path.read_text() == unit_text:
             return False
-        unit_path.write_text(unit_text)
+        _SYSTEMCTL_SEAM.write_unit(unit_path, unit_text)
         log.info(
             "container.unit_rerendered",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
@@ -1374,7 +1401,7 @@ class ContainerProvider(Provider):
         # Remove unit file so daemon-reload leaves no stale entry.
         unit_path = self._unit_path(slot_name)
         if unit_path.exists():
-            unit_path.unlink()
+            _SYSTEMCTL_SEAM.remove_unit(unit_path)
             self._run("systemctl", "daemon-reload")
 
     def is_active(self, slot_name: str) -> bool:

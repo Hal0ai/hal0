@@ -1,8 +1,0 @@
-[Unit]
-Description=hal0 Honcho -> Hindsight graph sync (mirror new Honcho conclusions)
-After=hal0-honcho.service hindsight-api.service
-Wants=hal0-honcho.service hindsight-api.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/lib/hal0/venv/bin/hal0 memory sync-graph

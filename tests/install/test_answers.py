@@ -53,7 +53,6 @@ gen:
 apps:
   openwebui: { enabled: true }
   hermes: { enabled: true }
-  pi: { enabled: false }
 """
 
 
@@ -68,7 +67,6 @@ def test_all_auto_matches_build_auto_selections(tmp_path):
     assert {s.capability for s in sel.slots} == {"chat", "coder"}
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True
-    assert sel.extensions["pi"] is False
     assert sel.extensions["comfyui"] is True
     assert sel.npu_opt_in == auto_sel.npu_opt_in
     assert sel.npu_opt_in is True
@@ -119,7 +117,7 @@ def test_bad_slot_capability_raises_naming_value(tmp_path):
           - { capability: embed, name: embed, port: 8083, model_id: auto }
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     with pytest.raises(AnswersError, match="embed"):
@@ -151,7 +149,7 @@ def test_unknown_gen_capability_raises_naming_value(tmp_path):
         slots: []
         npu: { opt_in: false }
         gen: { mode: scaffold_only, capabilities: { bogus_cap: auto } }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     with pytest.raises(AnswersError, match="bogus_cap"):
@@ -167,7 +165,7 @@ def test_gen_mode_off_disables_comfyui(tmp_path):
         slots: []
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     sel = load_answers(path, _hw())
@@ -182,7 +180,7 @@ def test_gen_download_requested_only_for_scaffold_and_download(tmp_path):
         slots: []
         npu: {{ opt_in: false }}
         gen: {{ mode: {mode}, capabilities: {{ txt2img: auto }} }}
-        apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }}, pi: {{ enabled: false }} }}
+        apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }} }}
     """
     off = _write(tmp_path, base.format(mode="off"))
     assert gen_download_requested(off) is False
@@ -203,7 +201,7 @@ def test_scaffold_and_download_no_longer_warns_and_records_defaults(tmp_path):
         slots: []
         npu: { opt_in: false }
         gen: { mode: scaffold_and_download, capabilities: { txt2img: sdxl } }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     with warnings.catch_warnings():
@@ -223,7 +221,7 @@ def test_gen_mode_scaffold_only_enables_comfyui_and_populates_defaults(tmp_path)
         slots: []
         npu: { opt_in: false }
         gen: { mode: scaffold_only, capabilities: { txt2img: auto } }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     sel = load_answers(path, _hw())
@@ -251,7 +249,7 @@ def test_network_block_applied_huggingface_still_warns(tmp_path, monkeypatch):
         slots: []
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     with warnings.catch_warnings(record=True) as caught:
@@ -298,7 +296,7 @@ def test_unknown_top_level_key_warns_by_default(tmp_path):
         slots: []
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         totally_unknown_key: 42
         """,
     )
@@ -318,7 +316,7 @@ def test_unknown_top_level_key_raises_when_strict(tmp_path):
         slots: []
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         totally_unknown_key: 42
         """,
     )
@@ -335,7 +333,7 @@ def test_relative_storage_dir_raises(tmp_path):
         slots: []
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     with pytest.raises(AnswersError):
@@ -351,7 +349,7 @@ def test_npu_opt_in_explicit_bool_passes_through(tmp_path):
         slots: []
         npu: { opt_in: true }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     # even on a box without an NPU, explicit true passes through unchanged.
@@ -365,7 +363,7 @@ model_store: { path: /var/lib/hal0/models }
 slots: []
 npu: { opt_in: auto }
 gen: { mode: off }
-apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
 """
 
 
@@ -414,7 +412,7 @@ def test_slot_device_and_profile_pass_through(tmp_path):
             profile: vulkan
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     sel = load_answers(path, _hw())
@@ -439,7 +437,7 @@ def test_slot_device_profile_omitted_and_auto_derive(tmp_path):
           - { capability: coder, name: coder, port: 8082, model_id: null, device: auto, profile: auto }
         npu: { opt_in: false }
         gen: { mode: off }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     sel = load_answers(path, _hw())

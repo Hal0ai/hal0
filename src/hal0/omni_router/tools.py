@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hal0.toolloop.engine import openai_tool_schema
+
 _DEFINITIONS_PATH = Path(__file__).parent / "tool_definitions.json"
 
 
@@ -57,14 +59,7 @@ class ToolDefinition:
         description, parameters}}``. Upstreams follow the same shape;
         hal0 forwards the result verbatim into the body.
         """
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
+        return openai_tool_schema(self.name, self.description, self.parameters)
 
 
 def _load_tool_definitions() -> tuple[ToolDefinition, ...]:

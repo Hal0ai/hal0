@@ -612,30 +612,29 @@ async def test_forward_already_loaded_skips_load_and_forwards(
     assert json.loads(forwarded["body"]) == {"model": "chat"}
 
 
-# ── container-slot preemption over composite registry binding ──────────────────
+# ── container-slot preemption over a stale registry binding ────────────────────
 
 
 @pytest.mark.asyncio
-async def test_container_slot_preempts_composite_registry_binding() -> None:
+async def test_container_slot_preempts_stale_registry_binding() -> None:
     """A loaded container slot is authoritative for its advertised model.
 
-    The model registry binds every registered id (incl. container-served
-    models) to the synthetic composite ``hal0`` upstream, which has no
-    backing server. When a container remote (kind="remote" + slot_name)
-    advertises the same id, it MUST win at Step 0 — else requests for a
-    container-backed model dead-end on the composite binding and 404
-    (cutover #662 regression).
+    A registry binding pointed at some other/unreachable upstream must not
+    win over a live container slot advertising the same model id: when a
+    container remote (kind="remote" + slot_name) advertises the id, it MUST
+    win at Step 0 — else requests for a container-backed model dead-end on
+    the stale binding and 404 (cutover #662 regression).
     """
-    composite = Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)
+    stale = Upstream(name="stale", kind="remote", url="http://127.0.0.1:8080/v1")
     chat = Upstream(name="chat", kind="remote", url="http://127.0.0.1:8102/v1", slot_name="chat")
-    upstreams = FakeUpstreamRegistry([composite, chat])
-    # Registry binds the model to the composite (the live bug condition).
-    models = FakeModelRegistry(routes={"qwopus3.6-27b-v2": "hal0"})
+    upstreams = FakeUpstreamRegistry([stale, chat])
+    # Registry binds the model to the stale upstream (the live bug condition).
+    models = FakeModelRegistry(routes={"qwopus3.6-27b-v2": "stale"})
 
     async def online(_u: Upstream) -> bool:
         return True
 
-    cache = {"hal0": ["qwopus3.6-27b-v2"], "chat": ["qwopus3.6-27b-v2"]}
+    cache = {"stale": ["qwopus3.6-27b-v2"], "chat": ["qwopus3.6-27b-v2"]}
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
         model_registry=models,
@@ -651,35 +650,6 @@ async def test_container_slot_preempts_composite_registry_binding() -> None:
     assert call.upstream_name == "chat"
     assert call.container_slot_name == "chat"
     assert call.target_url == "http://127.0.0.1:8102/v1/chat/completions"
-
-
-@pytest.mark.asyncio
-async def test_composite_bound_model_without_live_slot_is_no_route() -> None:
-    """A registry id bound to the composite with no live serving slot must
-    NOT resolve to the composite (it has no backing server) — dispatch
-    falls through Steps 1/2/3 and surfaces NoRouteFound."""
-    composite = Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)
-    chat = Upstream(name="chat", kind="remote", url="http://127.0.0.1:8102/v1", slot_name="chat")
-    upstreams = FakeUpstreamRegistry([composite, chat])
-    models = FakeModelRegistry(routes={"gemma3-4b-FLM": "hal0"})
-
-    async def online(_u: Upstream) -> bool:
-        return True
-
-    # chat container only serves qwopus; gemma has no live slot anywhere.
-    cache = {"hal0": ["gemma3-4b-FLM", "qwopus3.6-27b-v2"], "chat": ["qwopus3.6-27b-v2"]}
-    dispatcher = Dispatcher(
-        upstream_registry=upstreams,
-        model_registry=models,
-        is_online=online,
-        cached_models=lambda name: cache.get(name, []),
-    )
-
-    with pytest.raises(NoRouteFound):
-        await dispatcher.dispatch(
-            make_request(),
-            body={"model": "gemma3-4b-FLM", "messages": []},
-        )
 
 
 # ── DR-12: capability heuristics extraction — public surface preservation ─────

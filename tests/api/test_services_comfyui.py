@@ -43,7 +43,10 @@ def test_comfyui_repair_restarts_img_slot_unit(isolated_client, monkeypatch):
     r = isolated_client.post("/api/install/services/comfyui/repair")
     assert r.status_code == 200, r.text
     assert calls, "repair made no subprocess calls"
-    assert calls[0] == [inst._SYSTEMCTL, "restart", inst._COMFYUI_SLOT_UNIT]
+    # The background GPU sampler thread also routes through the module-level
+    # subprocess.run this test monkeypatches, so assert the restart is AMONG
+    # the calls rather than positionally first (position is race-dependent).
+    assert [inst._SYSTEMCTL, "restart", inst._COMFYUI_SLOT_UNIT] in calls
 
 
 def test_comfyui_repair_not_blocked_by_unknown_unit_check(isolated_client, monkeypatch):

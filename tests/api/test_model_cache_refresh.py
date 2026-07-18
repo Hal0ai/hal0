@@ -45,6 +45,17 @@ class FakeUpstreamRegistry(UpstreamRegistry):
         return self._store.get(name)
 
 
+class FakeSlotManager:
+    """Minimal stand-in for the ``slot_manager`` arg added when the composite
+    ``model_cache["hal0"]`` prime moved into ``_refresh_model_cache_on_ready``
+    (P2-composite). ``_fetch_hal0_composite_models`` only awaits
+    ``iter_configs``; returning nothing keeps the composite bucket empty so
+    these per-slot cache assertions stay isolated."""
+
+    async def iter_configs(self) -> list:
+        return []
+
+
 def _make_slot(name: str) -> Upstream:
     return Upstream(name=name, kind="slot", url=f"http://127.0.0.1:8000/{name}/v1", slot_name=name)
 
@@ -72,7 +83,9 @@ async def test_ready_event_refreshes_stale_cache_for_that_slot() -> None:
         cache[u.name] = list(advertised[u.name])
         return cache[u.name]
 
-    task = asyncio.create_task(_refresh_model_cache_on_ready(bus, upstreams, fetch_and_cache))
+    task = asyncio.create_task(
+        _refresh_model_cache_on_ready(bus, upstreams, FakeSlotManager(), fetch_and_cache, {})
+    )
     try:
         # Wait for the subscriber to register before emitting.
         await asyncio.sleep(0)
@@ -111,7 +124,9 @@ async def test_non_ready_transitions_do_not_refresh() -> None:
         fetch_calls.append(u.name)
         return cache[u.name]
 
-    task = asyncio.create_task(_refresh_model_cache_on_ready(bus, upstreams, fetch_and_cache))
+    task = asyncio.create_task(
+        _refresh_model_cache_on_ready(bus, upstreams, FakeSlotManager(), fetch_and_cache, {})
+    )
     try:
         await asyncio.sleep(0)
         for to_state in ("starting", "idle", "error", "offline"):
@@ -143,7 +158,9 @@ async def test_event_for_unregistered_slot_is_ignored() -> None:
         fetch_calls.append(u.name)
         return []
 
-    task = asyncio.create_task(_refresh_model_cache_on_ready(bus, upstreams, fetch_and_cache))
+    task = asyncio.create_task(
+        _refresh_model_cache_on_ready(bus, upstreams, FakeSlotManager(), fetch_and_cache, {})
+    )
     try:
         await asyncio.sleep(0)
         await bus.emit(
@@ -180,7 +197,9 @@ async def test_fetch_exception_does_not_kill_refresher() -> None:
         cache[u.name] = ["primary-current.gguf"]
         return cache[u.name]
 
-    task = asyncio.create_task(_refresh_model_cache_on_ready(bus, upstreams, fetch_and_cache))
+    task = asyncio.create_task(
+        _refresh_model_cache_on_ready(bus, upstreams, FakeSlotManager(), fetch_and_cache, {})
+    )
     try:
         await asyncio.sleep(0)
         ev_data = {"slot": "primary", "from": "starting", "to": "ready"}

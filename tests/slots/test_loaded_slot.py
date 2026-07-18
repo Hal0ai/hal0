@@ -69,6 +69,11 @@ async def test_loaded_slot_returns_typed_slot(slot_root: Path) -> None:
         system_prompt="You are Chat.",
         profile="rocm",
         default=True,
+        # The model isn't in the registry in this test (no registry fixture
+        # wired), so capability_flags.tool_calling can't be resolved and
+        # loaded_slot_from_config falls back to the "tool-calling" label —
+        # present here — per the §7.1d 🔴 fix's pre-migration fall-through.
+        tool_calling=True,
     )
 
 

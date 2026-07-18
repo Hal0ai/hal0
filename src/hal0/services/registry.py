@@ -16,9 +16,6 @@ ARCHITECTURE.md and packaging/ + installer/systemd/):
   (``hindsight-api.service``, :9177) bind loopback-only: no host:port URL
   fallback exists, so a link is advertised only via their
   ``HAL0_*_PUBLIC_URL`` env override.
-* n8n has no in-repo unit — it is an *external* service the operator may
-  run themselves. It is listed (with URL/probe env hooks) but carries no
-  lifecycle actions until a unit exists.
 """
 
 from __future__ import annotations
@@ -102,16 +99,6 @@ SERVICES: tuple[ServiceDef, ...] = (
         loopback_port=9119,
     ),
     ServiceDef(
-        id="turnstone",
-        name="Turnstone",
-        description="Bundled agent (turnstone-server, loopback :9129).",
-        unit="hal0-agent@turnstone.service",
-        public_url_env="HAL0_TURNSTONE_PUBLIC_URL",
-        probe="systemd",
-        actions=_FULL,
-        loopback_port=9129,
-    ),
-    ServiceDef(
         id="hindsight",
         name="Hindsight",
         description="Memory engine (native daemon, loopback :9177).",
@@ -119,27 +106,6 @@ SERVICES: tuple[ServiceDef, ...] = (
         probe="systemd",
         actions=_FULL,
         loopback_port=9177,
-    ),
-    ServiceDef(
-        id="honcho",
-        name="Honcho",
-        description="Honcho v3 memory engine (docker compose stack, loopback :8000).",
-        unit="hal0-honcho.service",
-        public_url_env="HAL0_HONCHO_PUBLIC_URL",
-        probe="http",
-        probe_url="http://127.0.0.1:8000/health",
-        probe_url_env="HAL0_HONCHO_PROBE_URL",
-        actions=_FULL,
-        loopback_port=8000,
-    ),
-    ServiceDef(
-        id="n8n",
-        name="n8n",
-        description="Workflow automation (external — not deployed by hal0).",
-        public_url_env="HAL0_N8N_PUBLIC_URL",
-        probe="http",
-        probe_url=None,  # unmonitored unless HAL0_N8N_PROBE_URL is set
-        probe_url_env="HAL0_N8N_PROBE_URL",
     ),
 )
 

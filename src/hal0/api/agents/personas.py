@@ -6,7 +6,7 @@ shape the dashboard's persona picker (PR-8) + the ``hal0 agent persona``
 CLI (future) consume.
 
 Route shape (master-plan §2 generalization): every endpoint is
-parameterized by ``agent_id`` so v0.4 can unlock pi-coder by adding a
+parameterized by ``agent_id`` so a future release can unlock another agent by adding a
 registry entry without rewriting the route table. v0.3 only resolves
 ``"hermes"`` — any other id returns 404 at :func:`_resolve_agent`.
 
@@ -38,7 +38,7 @@ router = APIRouter()
 
 # ── agent registry ──────────────────────────────────────────────────────────
 #
-# v0.3 ships hermes only. Future agents (pi-coder in v0.4) get a row here
+# v0.3 ships hermes only. A future bundled agent gets a row here
 # pointing at their personas root and the existing /personas routes light
 # up unchanged. Keeping this as a module-level dict (vs hard-coding the
 # "hermes" string in every handler) is the v0.3-only place that knows
@@ -215,9 +215,9 @@ class PersonaApprovalUpdate(BaseModel):
 
 class PersonaUpdateBody(BaseModel):
     """Mutable persona fields. Mirrors the GET detail schema minus the
-    server-derived bits (``id``, ``active``, ``raw_toml``) and ``budget``
-    (which has its own ``/budget`` route). Every field is optional — a PUT
-    is a partial patch; only the supplied fields are overwritten.
+    server-derived bits (``id``, ``active``, ``raw_toml``). Every field is
+    optional — a PUT is a partial patch; only the supplied fields are
+    overwritten.
     """
 
     display_name: str | None = Field(default=None)
@@ -240,9 +240,7 @@ async def update_agent_persona(
 
     Backs the dashboard's ``PersonaEditModal``. The persona ``id`` is
     immutable (it's the filename) — only the fields in
-    :class:`PersonaUpdateBody` can change. ``budget`` is preserved
-    verbatim (it round-trips through the existing persona; the dedicated
-    ``/budget`` route owns spending-cap edits).
+    :class:`PersonaUpdateBody` can change.
 
     404 if the agent id or persona file is unknown; 400 if the existing
     file is malformed OR the patched persona fails validation (e.g. an
@@ -251,8 +249,8 @@ async def update_agent_persona(
     """
     root = _resolve_agent(agent_id)
 
-    # Load the existing persona so unsupplied fields (and budget) survive
-    # the patch. 404/400 handling mirrors the GET detail route.
+    # Load the existing persona so unsupplied fields survive the patch.
+    # 404/400 handling mirrors the GET detail route.
     try:
         existing = personas_mod.load_persona(persona_id, root=root)
     except FileNotFoundError as exc:
@@ -268,8 +266,8 @@ async def update_agent_persona(
             details={"agent_id": agent_id, "persona_id": persona_id},
         ) from exc
 
-    # Start from the full TOML shape (carries budget + every sub-table),
-    # overlay the supplied fields, then round-trip through from_dict so the
+    # Start from the full TOML shape (carries every sub-table), overlay
+    # the supplied fields, then round-trip through from_dict so the
     # same validation the loader applies (default_policy enum, list-of-str
     # shapes) gates the write.
     data = existing.to_dict()

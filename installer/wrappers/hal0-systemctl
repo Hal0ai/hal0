@@ -1,0 +1,75 @@
+#!/bin/bash
+# hal0-systemctl — privileged seam for hal0-api's slot/systemd ops (P3-perms).
+#
+# Background: hal0-api now runs as the unprivileged `hal0` system user
+# (installer/install.sh's hal0-api.service ships User=hal0 — the OwnershipStore
+# flip in src/hal0/install/perms.py). It still needs a handful of genuinely-root
+# operations for slot lifecycle: writing the per-slot systemd unit under
+# /etc/systemd/system, `daemon-reload`, and start/stop/restart/enable/disable/
+# reset-failed of a slot unit — plus restarting itself on self-update. This
+# script is the ENTIRE privileged surface for those ops, modeled exactly on
+# hal0-agentenv / hal0-benchctl: every argument is validated (a slot id must
+# match a strict identifier regex), no shell is ever evaluated, and no
+# wildcards are accepted.
+#
+# NOTE: the iptables FORWARD-chain repair the original P3-perms design doc
+# sketched for this seam is NOT needed — that repair already runs as its own
+# independent root oneshot unit (packaging/systemd/hal0-podman-forward.service,
+# no User= — always root), entirely unaffected by hal0-api's User=hal0 flip.
+
+set -euo pipefail
+
+UNIT_PREFIX="hal0-slot@"
+UNIT_DIR="/etc/systemd/system"
+SELF_UNIT="hal0-api.service"
+
+die() { echo "hal0-systemctl: $1" >&2; exit 64; }
+
+validate_slot_id() {   # arg: slot id (the "<id>" in hal0-slot@<id>.service)
+  local id="$1"
+  [[ -n "$id" ]] || die "missing slot id"
+  [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || die "bad slot id: $id"
+}
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+  write-unit)                 # write-unit <slot-id>   (unit body on stdin)
+    id="${1:-}"; validate_slot_id "$id"
+    path="${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
+    install -m 0644 -o root -g root /dev/stdin "$path"
+    ;;
+
+  remove-unit)                # remove-unit <slot-id>   (rm -f semantics: ok if absent)
+    id="${1:-}"; validate_slot_id "$id"
+    rm -f "${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
+    ;;
+
+  daemon-reload)
+    exec systemctl daemon-reload
+    ;;
+
+  start|stop|restart|enable|disable|reset-failed)
+    id="${1:-}"; validate_slot_id "$id"
+    exec systemctl "$cmd" "${UNIT_PREFIX}${id}.service"
+    ;;
+
+  restart-self)                # literal-only: restart hal0-api.service, never a variable name
+    exec systemctl restart "$SELF_UNIT"
+    ;;
+
+  help|"")
+    cat <<EOF
+usage: hal0-systemctl <command> [slot-id]
+  write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
+  remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
+  daemon-reload                    systemctl daemon-reload
+  start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
+  enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service
+  reset-failed <slot-id>           clear a crash-looped unit's failed sub-state
+  restart-self                     systemctl restart ${SELF_UNIT}
+EOF
+    ;;
+
+  *) die "bad cmd: $cmd" ;;
+esac

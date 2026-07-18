@@ -326,17 +326,17 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
 def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
     """Inverse of _flatten_slot_toml — produce the on-disk shape.
 
-    Round-trips both ``backend`` (deprecated) and ``device`` (v0.2) so a
-    SlotConfig promoted from a legacy TOML doesn't silently lose its
-    deprecated field. ``backend`` will be dropped in v0.3 once the
-    deprecation window closes.
+    Writes only ``device`` (P2-device: the sole persisted truth).
+    ``backend`` is no longer a ``SlotConfig`` field — a legacy on-disk
+    ``backend`` key is promoted to ``device`` and dropped on load (see
+    ``SlotConfig._promote_backend_to_device``), so it never reaches this
+    round-trip.
     """
     data = cfg.model_dump(mode="python", exclude_none=False)
     out: dict[str, Any] = {
         "slot": {
             "name": data["name"],
             "port": data["port"],
-            "backend": data["backend"],
             "device": data["device"],
             "provider": data["provider"],
             "enabled": data["enabled"],

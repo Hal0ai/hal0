@@ -134,15 +134,6 @@ export const ENDPOINTS = {
   // sidebar degrades gracefully on partial deployments.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
-  // Per-persona spending-cap primitive (Phase 0 OpenRouter prereq).
-  // GET/PUT/check/charge — the V1 OpenRouter upstream + V2 fusion MCP
-  // both call ``check`` pre-flight and ``charge`` post-response.
-  agentPersonaBudget: (id: string, pid: string) =>
-    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget`,
-  agentPersonaBudgetCheck: (id: string, pid: string) =>
-    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget/check`,
-  agentPersonaBudgetCharge: (id: string, pid: string) =>
-    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget/charge`,
   agentActivity: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/activity`,
   // Restart the systemd unit backing an agent (POST → {status, detail}).

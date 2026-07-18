@@ -50,7 +50,6 @@ def test_auto_selections_scaffolds_capability_slots_empty():
     assert all(s.model_id is None for s in sel.slots)  # every slot empty
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True
-    assert sel.extensions["pi"] is False
     # an agent extension is enabled by default → coder slot is scaffolded too
     assert "coder" in names
 

@@ -1,7 +1,7 @@
 /**
- * settings-v3 — `#settings` route renders the rail nav with all 11
- * sections (general, slots, npu, memory, voice, imagegen, storage,
- * secrets, updates, advanced, about) and swaps the right pane on click.
+ * settings-v3 — `#settings` route renders the grouped rail nav (SERVER /
+ * MODELS / INFERENCE / ROUTING / OBSERVABILITY / DATA / DIAGNOSTICS /
+ * INTEGRATIONS) and swaps the right pane on click.
  *
  * Auth section removed per ADR-0012 (PRs #254-#267). #544 pruned the
  * fully-mock OmniRouter/Agent-policy/Memory (Cognee) sections (those
@@ -11,15 +11,28 @@
  * runtime admin pane) — runtime status now lives on the sidebar rollup
  * + footer chip. #1163 reorganised settings: Memory section added,
  * Default slots→Slots, default landing is General.
+ *
+ * P3-ui split (settings.jsx → SettingsShell/ESM) regrouped the flat rail
+ * into NAV_GROUPS and added visible sections: Security + Hardware Tuning
+ * (both rendered `disabled` — gated on unbuilt backend lanes), plus
+ * Library & Downloads, Health & Stats, and Doctor. Section list below is
+ * sourced from `SettingsNav.jsx`'s NAV_GROUPS — the authoritative IA.
  */
 import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
-  'General', 'Slots', 'NPU', 'Memory', 'Agents / Brain', 'Voice', 'Image-gen', 'Storage', 'Secrets', 'Updates', 'Advanced', 'About',
+  'General', 'Security',
+  'Loaded Models', 'Library & Downloads',
+  'Hardware Tuning', 'NPU', 'Voice', 'Image-gen',
+  'Agents / Brain',
+  'Health & Stats',
+  'Storage', 'Memory',
+  'Doctor', 'Updates', 'Advanced', 'About',
+  'Secrets',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
-  test('renders rail nav with all 12 sections', async ({ page }) => {
+  test('renders rail nav with all 17 sections', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.view .vh h1')).toHaveText('Settings')
     const nav = page.locator('.settings-nav .nav-item')

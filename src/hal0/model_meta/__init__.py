@@ -74,12 +74,6 @@ Unknown-value policy — ONE documented rule per translation direction
   ``(None, None)``** ("no opinion"). Callers already handle ``None`` by
   applying their own defaults, so inventing a backend tag here would
   override deliberate downstream fallbacks.
-* device → legacy write-back (:func:`device_to_legacy_backend`): unknown →
-  **warn + passthrough unchanged**. Load-bearing for forward/backward
-  compat: this function feeds the deprecated ``SlotConfig.backend`` field,
-  and passing a hand-edited token through unchanged keeps the TOML legible
-  on downgrade (the orchestrator always preserved such tokens — see the
-  #695 shape audits). Do NOT unify this onto ``None``/``cpu`` semantics.
 """
 
 from __future__ import annotations
@@ -89,6 +83,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from hal0.model_meta.modality import MODALITY_ALIASES, Modality
 
 log = logging.getLogger(__name__)
 
@@ -191,13 +187,13 @@ DEVICE_CLASSES: tuple[str, ...] = ("gpu", "cpu", "npu", "img")
 RUNTIME_FAMILIES: tuple[str, ...] = ("llama-server", "flm", "kokoro", "qwen3tts", "comfyui")
 
 #: Legacy ``backend`` token → canonical ``device``. Used by the SlotConfig
-#: model-validator (auto-promote on load), the capabilities v1→v2 migration,
-#: and the capabilities on-load auto-migration. Keep aligned with the
-#: canonical device enum above.
+#: and CapabilitySelection promote-then-drop shims (auto-promote a legacy
+#: on-disk ``backend`` key, then pop it, on load), and the capabilities
+#: v1→v2 migration. Keep aligned with the canonical device enum above.
 #: moonshine/kokoro map to ``cpu`` because those toolboxes were always CPU
 #: runtimes — the legacy enum overloaded ``backend`` with provider identity.
-#: Canonical device ids are included idempotently so both SlotConfig.backend
-#: and CapabilitySelection.backend can flow through the same map.
+#: Canonical device ids are included idempotently so a value already in the
+#: new namespace round-trips through this map as an identity.
 BACKEND_TO_DEVICE: dict[str, str] = {
     **{d.legacy_backend: d.id for d in CANONICAL_DEVICES},
     "moonshine": "cpu",
@@ -247,35 +243,18 @@ def map_backend_to_device(backend: str | None) -> str:
 #: (Literal — kept in sync by tests/model_meta).
 SLOT_TYPES: tuple[str, ...] = ("llm", "embedding", "reranking", "transcription", "tts", "image")
 
-#: Canonical ``model.capabilities`` spellings the registry stores:
-#: registry/model.py documents chat/embed/rerank/vision/asr/tts;
-#: registry/detect.py additionally emits ``image`` (ComfyUI tree) and the
-#: shared filename table (:func:`capability_from_filename`) can yield
-#: ``video`` via registry/discover (#940 diffusion hardening).
-MODEL_CAPABILITIES: tuple[str, ...] = (
-    "chat",
-    "vision",
-    "embed",
-    "rerank",
-    "asr",
-    "tts",
-    "image",
-    "video",
-)
+#: Canonical ``model.capabilities`` spellings the registry stores — now
+#: enum-driven (§7.1d): sourced from :class:`hal0.model_meta.modality.Modality`
+#: so adding a new modality automatically updates ``/api/meta/enums``
+#: instead of needing a second hand-synced tuple.
+MODEL_CAPABILITIES: tuple[str, ...] = tuple(m.value for m in Modality)
 
-#: Tolerated capability synonyms → canonical spelling. Matches what the code
-#: actually accepts today: ``classify``'s ``_CAPABILITY_TO_TYPE`` folds
-#: stt→asr-bucket and img→image; the layout migration
-#: (cli/migrate_commands._CAPABILITY_TO_LEAF_CAP) additionally tolerates the
-#: slot-type-flavoured embedding/embeddings/reranking/transcription spellings.
-CAPABILITY_ALIASES: dict[str, str] = {
-    "embedding": "embed",
-    "embeddings": "embed",
-    "reranking": "rerank",
-    "transcription": "asr",
-    "stt": "asr",
-    "img": "image",
-}
+#: Tolerated capability synonyms → canonical spelling. Single source is
+#: :data:`hal0.model_meta.modality.MODALITY_ALIASES` (the ingest fold
+#: :func:`hal0.model_meta.modality.normalize_modality` uses); this name is
+#: kept for the existing ``/api/meta/enums`` payload + callers that have
+#: not moved to ``normalize_modality`` yet.
+CAPABILITY_ALIASES: dict[str, str] = dict(MODALITY_ALIASES)
 
 #: Valid ``model.backends`` values in the registry. The GGUF compatibility
 #: seed is registry/detect._GGUF_BACKENDS (vulkan/rocm/cuda/cpu — ``cuda`` is
@@ -304,8 +283,9 @@ MODEL_BACKENDS: tuple[str, ...] = (
 #: catalogue so a new seed tag can't silently drift out of the enums payload.
 CURATED_MODEL_TAGS: tuple[str, ...] = (
     # behaviour-driving type tags (routing / slot-feature gates)
+    # "moe" removed (§7.1d) — it was declared but never read anywhere;
+    # Model.architecture (hardware/recommend.is_moe) is the replacement.
     "mtp",
-    "moe",
     "tool-calling",
     "reasoning",
     "coder",
@@ -558,35 +538,6 @@ def canonical_device(value: str) -> str:
     return map_backend_to_device(value)
 
 
-# NOTE(#695): this is deliberately NOT expressed through
-# ``device_to_backend`` — the two directions differ on unknown input by
-# design (see the module docstring's unknown-value policy).
-# ``device_to_backend`` maps unknown devices to ``(None, None)`` ("no
-# opinion"), while this write-back path passes unknown tokens through
-# UNCHANGED so hand-edited values stay legible on downgrade. Derived from
-# :data:`CANONICAL_DEVICES` so it can never drift from the device table.
-_DEVICE_TO_LEGACY_BACKEND: dict[str, str] = {d.id: d.legacy_backend for d in CANONICAL_DEVICES}
-
-
-def device_to_legacy_backend(device: str) -> str:
-    """DEPRECATED namespace — translate a catalog ``device`` id to the legacy
-    ``backend`` token.
-
-    Still used by code paths that write the deprecated SlotConfig.backend
-    field (kept until the ``backend`` field is excised for downgrade
-    legibility). Unknown values warn and pass through unchanged
-    (unknown-value policy, direction 3 — load-bearing, see module
-    docstring).
-    """
-    if not device or device in _DEVICE_TO_LEGACY_BACKEND:
-        return _DEVICE_TO_LEGACY_BACKEND.get(device, device)
-    log.warning(
-        "model_meta.unknown_device_passthrough",
-        extra={"device": device},
-    )
-    return device
-
-
 # ── resolvability ────────────────────────────────────────────────────────────
 
 
@@ -643,10 +594,11 @@ def model_is_mtp_eligible(model_info: Mapping[str, Any]) -> bool:
 def labels_of(cfg: dict[str, Any]) -> set[str]:
     """Pull the ``model.labels`` list out of a slot config dict.
 
-    Single source for both :func:`SlotManager.route_for_request` and the
-    omni-router tool filter (``omni_router/filter.py``) so the filter's
-    decision always matches what ``route_for_request`` will pick — they
-    used to be two hand-synced copies.
+    Kept as the fallback reader for slot TOMLs written before the
+    ``capability_flags.tool_calling`` fold (registry/import_toml.py) has
+    run over them — :func:`model_capabilities_of` is the primary source
+    now; see its docstring + the 🔴 routing-gate fix in
+    ``omni_router/filter.py`` / ``slots/routing.py``.
     """
     model = cfg.get("model") or {}
     if isinstance(model, dict):
@@ -654,6 +606,30 @@ def labels_of(cfg: dict[str, Any]) -> set[str]:
         if isinstance(raw, (list, tuple)):
             return {str(x) for x in raw}
     return set()
+
+
+# ── typed capability extraction (§7.1d 🔴 routing-gate fix) ──────────────────
+
+
+def model_capabilities_of(model_info: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Extract the typed ``ModelCapabilities`` bools from a registry dump.
+
+    ``model_info`` is the shape :meth:`hal0.registry.model.Model.model_dump`
+    produces (or the ``SlotManager._resolve_model_info`` dict, which folds
+    that dump in verbatim): a ``capability_flags`` key holding
+    ``{"tool_calling": bool | None, ...}``. Returns ``{}`` when
+    ``model_info`` is ``None``/empty or carries no ``capability_flags``
+    dict — callers apply their own fallback (see
+    ``omni_router/filter.py``'s caller-gate, which falls back to
+    :func:`labels_of` when ``tool_calling`` comes back ``None``, so slot
+    TOMLs that predate this field still route tool calls).
+    """
+    if not model_info:
+        return {}
+    flags = model_info.get("capability_flags")
+    if isinstance(flags, Mapping):
+        return dict(flags)
+    return {}
 
 
 __all__ = [
@@ -676,9 +652,9 @@ __all__ = [
     "capability_from_filename",
     "classify",
     "device_to_backend",
-    "device_to_legacy_backend",
     "is_resolvable",
     "labels_of",
     "map_backend_to_device",
+    "model_capabilities_of",
     "model_is_mtp_eligible",
 ]

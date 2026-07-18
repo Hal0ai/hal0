@@ -242,43 +242,43 @@ def test_list_real_wins_on_name_collision(
 # ── lifespan auto-register ─────────────────────────────────────────────────
 
 
-def test_lifespan_autoregisters_composite_hal0_upstream(
+def test_lifespan_registers_no_pseudo_upstream_for_the_composite(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
     isolated_app: FastAPI,
 ) -> None:
-    """PR-1-bundle (R4 H2): one composite ``hal0`` upstream replaces the
-    previous per-slot autoregistration.
+    """P2-composite rebuild: no ``hal0`` Upstream is registered at startup.
 
     Chat dispatch fans out through hal0-api itself; registering one
-    Upstream per slot produced duplicate registry entries pointing at
-    the same URL, and ``/v1/models`` dedup credited whichever iterated
-    first. The composite entry points at hal0-api itself and aggregates
-    every chat-capable slot through ``_fetch_hal0_composite_models``.
+    Upstream per slot (the pre-R4-H2 layout) produced duplicate registry
+    entries pointing at the same URL, and ``/v1/models`` dedup credited
+    whichever iterated first. R4 H2 fixed this with a single composite
+    ``hal0`` Upstream — itself a fake registry entry (url pointing back at
+    hal0-api's own :8080) that forced dispatch to detect-and-skip it at
+    every resolution step. That composite has since been deleted: the
+    aggregated catalogue is primed directly into ``model_cache["hal0"]``
+    (see ``_prime_hal0_composite_cache``) with no pseudo-upstream in the
+    routing table at all.
     """
     # ``slot_root`` writes /etc/hal0/slots/chat.toml with port=8081.
-    upstream = isolated_app.state.upstreams.get("hal0")
-    assert upstream is not None, "composite ``hal0`` upstream should be auto-registered"
-    assert upstream.kind == "slot"
-    # Composite — no single slot_name.
-    assert upstream.slot_name is None
-    # Points at hal0-api's own /v1, NOT directly at the slot llama-server.
-    assert upstream.url == "http://127.0.0.1:8080/v1"
-
-    # No legacy per-slot duplicate.
+    assert isolated_app.state.upstreams.get("hal0") is None
+    # No legacy per-slot duplicate either.
     assert isolated_app.state.upstreams.get("chat") is None
+    # The direct-read catalogue is primed at startup regardless.
+    assert "hal0" in isolated_app.state.model_cache
 
 
-def test_lifespan_autoregister_skips_when_explicit_hal0_upstream_exists(
+def test_lifespan_hydrate_keeps_explicit_hal0_upstream(
     slot_root: Path,
     container_stub: dict[str, Any],
     tmp_hal0_home: str,
 ) -> None:
-    """An explicit upstreams.toml entry for ``hal0`` beats autoregister.
+    """An explicit upstreams.toml entry for ``hal0`` survives startup unchanged.
 
     Operator-supplied URLs (e.g. pointing at a reverse-proxy in front of
-    hal0-api) must survive lifespan startup unchanged.
+    hal0-api) must survive lifespan startup unchanged — and priming the
+    direct-read composite catalogue must skip rather than clobber it.
     """
     cfg_dir = Path(tmp_hal0_home) / "etc" / "hal0"
     cfg_dir.mkdir(parents=True, exist_ok=True)

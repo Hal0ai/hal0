@@ -6,12 +6,11 @@ minimal FastAPI app with the router mounted under the canonical prefix
 so the endpoint is reachable without touching the real app factory.
 
 Covers:
-  1. Endpoint returns 200 with all 5 service ids present.
-  2. n8n is up=false, detail="unmonitored" (no real probe).
-  3. With comfyui probe mocked reachable -> up=true, stat populated.
-  4. comfyui probe raising -> comfyui up=false, endpoint still 200.
-  5. openwebui /health 2xx -> up=true (SpikeB §5.4 real probe).
-  6. openwebui unreachable / non-2xx -> up=false, honest detail.
+  1. Endpoint returns 200 with all 3 service ids present.
+  2. With comfyui probe mocked reachable -> up=true, stat populated.
+  3. comfyui probe raising -> comfyui up=false, endpoint still 200.
+  4. openwebui /health 2xx -> up=true (SpikeB §5.4 real probe).
+  5. openwebui unreachable / non-2xx -> up=false, honest detail.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ from fastapi.testclient import TestClient
 from hal0.api.routes.services_health import router as services_router
 
 _BASE = "hal0.api.routes.services_health"
-_EXPECTED_IDS = {"comfyui", "hermes", "turnstone", "openwebui", "n8n"}
+_EXPECTED_IDS = {"comfyui", "hermes", "openwebui"}
 
 
 @pytest.fixture
@@ -43,7 +42,7 @@ def _services_by_id(body: dict) -> dict:
 
 
 def _stub_other_probes() -> list:
-    """Patch comfyui/hermes/turnstone/openwebui to neutral down states so a test can
+    """Patch comfyui/hermes/openwebui to neutral down states so a test can
     isolate ONE service without real network/systemd calls. Returns a list
     of started patchers the caller closes via an ExitStack, OR use as a
     context-manager group. Default: everything down/unmonitored.
@@ -60,11 +59,6 @@ def _stub_other_probes() -> list:
             return_value=(False, "systemd unit inactive or absent"),
         ),
         patch(
-            f"{_BASE}._probe_turnstone",
-            new_callable=AsyncMock,
-            return_value=(False, "systemd unit inactive or absent"),
-        ),
-        patch(
             f"{_BASE}._probe_openwebui",
             new_callable=AsyncMock,
             return_value=(False, "unreachable (ConnectError)"),
@@ -72,7 +66,7 @@ def _stub_other_probes() -> list:
     ]
 
 
-# ── 1. shape: 200 + all 5 ids ─────────────────────────────────────────────────
+# ── 1. shape: 200 + all 4 ids ─────────────────────────────────────────────────
 
 
 def test_services_health_200_all_ids(svc_client: TestClient) -> None:
@@ -84,28 +78,12 @@ def test_services_health_200_all_ids(svc_client: TestClient) -> None:
     assert r.status_code == 200, r.text
     body = r.json()
     assert "services" in body
-    assert len(body["services"]) == 5
+    assert len(body["services"]) == 3
     ids = {s["id"] for s in body["services"]}
     assert ids == _EXPECTED_IDS
 
 
-# ── 2. n8n always unmonitored (no real probe) ─────────────────────────────────
-
-
-def test_n8n_is_unmonitored(svc_client: TestClient) -> None:
-    with contextlib.ExitStack() as stack:
-        for p in _stub_other_probes():
-            stack.enter_context(p)
-        r = svc_client.get("/api/services/health")
-
-    assert r.status_code == 200
-    n8n = _services_by_id(r.json())["n8n"]
-    assert n8n["up"] is False
-    assert n8n["detail"] == "unmonitored"
-    assert n8n["stat"] is None
-
-
-# ── 3. comfyui reachable -> up=true, stat populated ───────────────────────────
+# ── 2. comfyui reachable -> up=true, stat populated ───────────────────────────
 
 
 def test_comfyui_reachable_up_true_stat_populated(svc_client: TestClient) -> None:
@@ -118,11 +96,6 @@ def test_comfyui_reachable_up_true_stat_populated(svc_client: TestClient) -> Non
         ),
         patch(
             f"{_BASE}._probe_hermes",
-            new_callable=AsyncMock,
-            return_value=(False, "systemd unit inactive or absent"),
-        ),
-        patch(
-            f"{_BASE}._probe_turnstone",
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),
@@ -155,11 +128,6 @@ def test_comfyui_probe_raises_degrades_gracefully(svc_client: TestClient) -> Non
         ),
         patch(
             f"{_BASE}._probe_hermes",
-            new_callable=AsyncMock,
-            return_value=(False, "systemd unit inactive or absent"),
-        ),
-        patch(
-            f"{_BASE}._probe_turnstone",
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),
@@ -197,11 +165,6 @@ def test_openwebui_health_2xx_up_true(svc_client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),
-        patch(
-            f"{_BASE}._probe_turnstone",
-            new_callable=AsyncMock,
-            return_value=(False, "systemd unit inactive or absent"),
-        ),
         patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=ok_resp),
     ):
         r = svc_client.get("/api/services/health")
@@ -225,11 +188,6 @@ def test_openwebui_unreachable_up_false(svc_client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),
-        patch(
-            f"{_BASE}._probe_turnstone",
-            new_callable=AsyncMock,
-            return_value=(False, "systemd unit inactive or absent"),
-        ),
         patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=conn_err),
     ):
         r = svc_client.get("/api/services/health")
@@ -250,11 +208,6 @@ def test_openwebui_non_2xx_up_false(svc_client: TestClient) -> None:
         ),
         patch(
             f"{_BASE}._probe_hermes",
-            new_callable=AsyncMock,
-            return_value=(False, "systemd unit inactive or absent"),
-        ),
-        patch(
-            f"{_BASE}._probe_turnstone",
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),

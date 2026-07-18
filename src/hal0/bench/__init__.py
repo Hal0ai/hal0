@@ -1,4 +1,4 @@
-"""hal0.bench — the in-tree benchmarking system (design: handoffs/benchmark-system-design-2026-07-05.md).
+"""hal0.bench — the in-tree benchmarking system (design: docs/archive/handoffs/benchmark-system-design-2026-07-05.md).
 
 Keeps a throughput/latency benchmark dataset *current by itself*: an operator
 (or the Hermes agent) declares suites once (§4), a pure-function planner diffs

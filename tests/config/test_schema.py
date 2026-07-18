@@ -101,19 +101,21 @@ class TestSlotConfig:
         s = SlotConfig(name="primary", port=8081)
         assert s.name == "primary"
         assert s.port == 8081
-        assert s.backend == "vulkan"
+        # ``device`` is the sole persisted hardware-preference field
+        # (P2-device); ``backend`` no longer exists on SlotConfig.
+        assert s.device == "gpu-rocm"
         # provider is a deprecated round-trip label; default "llama-server".
         assert s.provider == "llama-server"
         assert s.enabled is True
         assert isinstance(s.model, ModelConfig)
 
-    def test_invalid_backend_raises_with_field_path(self) -> None:
-        """PLAN.md §5 Tier 1: backend = 'vukan' must surface field path."""
+    def test_invalid_device_raises_with_field_path(self) -> None:
+        """PLAN.md §5 Tier 1: device = 'gpu-rcom' must surface field path."""
         with pytest.raises(ValidationError) as ei:
-            SlotConfig(name="primary", port=8081, backend="vukan")
+            SlotConfig(name="primary", port=8081, device="gpu-rcom")
         msg = str(ei.value)
-        assert "backend" in msg
-        assert "vukan" in msg
+        assert "device" in msg
+        assert "gpu-rcom" in msg
 
     def test_invalid_provider_raises(self) -> None:
         with pytest.raises(ValidationError) as ei:

@@ -605,6 +605,11 @@ def synthesize_upstream_entries(
     for this upstream (tracked in ``last_used_model``); falls back to
     the first non-alias from the catalog before any inference has
     happened.
+
+    ``upstreams`` is whatever the caller passes — real callers (see
+    ``hal0.api.routes.slots._synthesize_slots_from_upstreams``) fold the
+    direct-read composite catalogue entry into the list before calling
+    this function, so it needs no hal0-specific special-casing here.
     """
     out: list[dict[str, Any]] = []
     for u in upstreams.list():

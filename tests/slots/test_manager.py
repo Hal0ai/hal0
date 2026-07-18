@@ -76,14 +76,14 @@ def test_builtin_slots_aliases_seeded_slots() -> None:
 def test_seeded_slots_helper_excludes_npu_when_flm_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("hal0.slots.manager.shutil.which", lambda name: None)
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
     assert SlotManager.seeded_slots() == SEEDED_SLOTS
 
 
 def test_seeded_slots_helper_includes_npu_when_flm_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("hal0.slots.manager.shutil.which", lambda name: "/usr/bin/flm")
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: "/usr/bin/flm")
     assert SlotManager.seeded_slots() == SEEDED_SLOTS + NPU_SEEDED_SLOTS
 
 
@@ -230,7 +230,7 @@ async def test_agent_slot_non_deletable_without_flm(
     # #679: agent is a GPU seed slot, so it is non-deletable regardless of FLM.
     # Regression guard — while agent was NPU-seeded, delete protection vanished
     # on non-FLM boxes (seeded_slots() excludes the NPU trio without flm).
-    monkeypatch.setattr("hal0.slots.manager.shutil.which", lambda name: None)
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="seeded"):
         await sm.delete("agent")
@@ -242,7 +242,7 @@ async def test_seeded_slot_deletable_with_force(
     # force=True overrides the seeded-slot guard so an operator can remove one
     # outright. Seed the config on disk, confirm the guard still refuses without
     # force, then force-delete it.
-    monkeypatch.setattr("hal0.slots.manager.shutil.which", lambda name: None)
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
     sm = SlotManager()
     slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slots_dir.mkdir(parents=True, exist_ok=True)

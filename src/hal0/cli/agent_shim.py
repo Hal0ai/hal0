@@ -18,7 +18,7 @@ This is a deliberately tiny entry point that:
   unit can't express that.
 * The agent-id parameterisation (``%i`` in the template) needs to drive
   the resolution of which upstream binary to run. ``hermes`` today,
-  ``pi-coder`` for v0.4. Keeping that map in the shim lets us add new
+  a future bundled agent. Keeping that map in the shim lets us add new
   agent types without editing the template unit.
 * ``mcp serve`` mode in Hermes upstream is a query-only MCP server
   with NO event stream — picking it kills the chat surface on day 1
@@ -61,10 +61,10 @@ from typing import Any
 #     type       = "hermes"                    # required; selects invocation
 #     home       = "/var/lib/hal0/agents/<id>" # default: derived from id
 #     venv       = "/var/lib/hal0/venvs/<id>"  # default: derived from id (hermes)
-#     bin        = "/usr/local/bin/turnstone-server"  # default: per-type
-#     port       = 9119                        # default: per-type (hermes 9119, turnstone 9129)
+#     bin        = "/usr/local/bin/hermes"     # default: per-type
+#     port       = 9119                        # default: per-type (hermes 9119)
 #     host       = "127.0.0.1"                 # default: loopback only
-#     serve_args = ["--port", "9129", ...]     # turnstone: exact server flags,
+#     serve_args = ["--port", "9119", ...]     # exact server flags,
 #                                              #   overridable without a code change
 _AGENTS_CONF_DIR = Path(os.environ.get("HAL0_AGENTS_CONF_DIR", "/etc/hal0/agents"))
 
@@ -74,24 +74,10 @@ _AGENTS_CONF_DIR = Path(os.environ.get("HAL0_AGENTS_CONF_DIR", "/etc/hal0/agents
 # unit + enables it, then the provisioner may write the toml).
 _BUILTIN_AGENT_TYPES: dict[str, str] = {
     "hermes": "hermes",
-    "turnstone": "turnstone",
 }
 
-# Per-type default loopback port. hermes → upstream's 9119; turnstone runs
-# its server on 9129 (mirrors the convention; dodges hal0-api's :8080).
-_DEFAULT_PORTS: dict[str, int] = {"hermes": 9119, "turnstone": 9129}
-
-# Canonical turnstone-server search path. Turnstone is a PyPI package installed
-# into a managed venv (like hermes-agent), so the console script lives at
-# <venv>/bin/turnstone-server; the /usr/local/bin entry is hal0's shim.
-_TURNSTONE_SERVER_BINS: tuple[Path, ...] = (
-    Path("/var/lib/hal0/venvs/turnstone/bin/turnstone-server"),
-    Path("/usr/local/bin/turnstone-server"),
-    # Fall back to the plain CLI in server mode if the server entry point is
-    # ever folded into the single `turnstone` console script.
-    Path("/var/lib/hal0/venvs/turnstone/bin/turnstone"),
-    Path("/usr/local/bin/turnstone"),
-)
+# Per-type default loopback port. hermes → upstream's 9119.
+_DEFAULT_PORTS: dict[str, int] = {"hermes": 9119}
 
 
 @dataclass(frozen=True)
@@ -104,10 +90,10 @@ class AgentConfig:
     venv: Path
     host: str
     port: int
-    # Explicit binary override from the agent toml (turnstone). ``None`` →
+    # Explicit binary override from the agent toml. ``None`` →
     # resolve per-type via :attr:`bin`.
     bin_override: Path | None = None
-    # Exact serve-time args from the agent toml (turnstone server flags). Empty
+    # Exact serve-time args from the agent toml (server flags). Empty
     # → the shim builds a per-type default. Kept as a tuple so AgentConfig
     # stays frozen/hashable.
     serve_args: tuple[str, ...] = ()
@@ -122,18 +108,11 @@ class AgentConfig:
     def bin(self) -> Path:
         """The binary the shim launches for this agent type.
 
-        hermes → the venv console script. turnstone → the native
-        ``turnstone-server`` (first existing of :data:`_TURNSTONE_SERVER_BINS`,
-        or the first candidate so error messages name a concrete path). An
-        explicit ``bin = ...`` in the agent toml wins for either.
+        hermes → the venv console script. An explicit ``bin = ...`` in
+        the agent toml wins.
         """
         if self.bin_override is not None:
             return self.bin_override
-        if self.agent_type == "turnstone":
-            for cand in _TURNSTONE_SERVER_BINS:
-                if cand.exists():
-                    return cand
-            return _TURNSTONE_SERVER_BINS[0]
         return self.hermes_bin
 
     @property
@@ -178,7 +157,7 @@ def _load_agent_config(agent_id: str) -> AgentConfig:
     host = str(data.get("host") or "127.0.0.1")
     # tomllib parses integers as int already; coerce via str→int to satisfy
     # mypy's strict object→int handling on the dict.get fallback path. Default
-    # is per-type (hermes 9119, turnstone 9129), 9119 for anything unknown.
+    # is per-type (hermes 9119), 9119 for anything unknown.
     port_raw = data.get("port") or _DEFAULT_PORTS.get(agent_type, 9119)
     port = int(str(port_raw))
 
@@ -395,60 +374,6 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
 
 
 # ----------------------------------------------------------------------------
-# Turnstone invocation
-# ----------------------------------------------------------------------------
-
-
-def _turnstone_api_base() -> str:
-    """The hal0-api gateway base turnstone routes models through."""
-    return os.environ.get("HAL0_API_URL", "http://127.0.0.1:8080").rstrip("/")
-
-
-def _build_turnstone_argv(cfg: AgentConfig) -> list[str]:
-    """Build the argv that boots ``turnstone-server`` bound loopback.
-
-    Turnstone runs its own web/REST/SSE server; we run it on ``cfg.host``:
-    ``cfg.port`` (loopback :9129 by default) so the shim's ``Type=notify``
-    watchdog can poll ``/health`` and hal0-api fronts the surface.
-
-    The exact server flags aren't pinned by upstream docs, so they are
-    OVERRIDABLE via ``serve_args`` in ``/etc/hal0/agents/turnstone.toml`` —
-    an operator who verifies the real flags on-box can adjust them without a
-    code change. The default mirrors the documented
-    ``turnstone-server --port <p> --base-url <api>/v1`` invocation and adds a
-    loopback ``--host`` for safety; config (persona/models/mcp/db) rides
-    ``$TURNSTONE_CONFIG``.
-    """
-    if cfg.serve_args:
-        return [str(cfg.bin), *cfg.serve_args]
-    return [
-        str(cfg.bin),
-        "--host",
-        cfg.host,
-        "--port",
-        str(cfg.port),
-        "--base-url",
-        f"{_turnstone_api_base()}/v1",
-    ]
-
-
-def _build_turnstone_env(cfg: AgentConfig) -> dict[str, str]:
-    """Child env for turnstone — inherits parent + points it at hal0's config.
-
-    ``TURNSTONE_CONFIG`` / ``TURNSTONE_HOME`` are normally set by the systemd
-    override, but we default them here so a manual ``hal0-agent turnstone
-    serve`` still finds the hal0-rendered config.
-    """
-    env = dict(os.environ)
-    env["HAL0_AGENT_ID"] = cfg.agent_id
-    env.setdefault("TURNSTONE_HOME", str(cfg.home))
-    env.setdefault("TURNSTONE_CONFIG", str(cfg.home / "config.toml"))
-    # The shim owns sd_notify — don't let the child signal systemd.
-    env.pop("NOTIFY_SOCKET", None)
-    return env
-
-
-# ----------------------------------------------------------------------------
 # Subcommands
 # ----------------------------------------------------------------------------
 
@@ -482,15 +407,6 @@ def cmd_serve(cfg: AgentConfig) -> int:
         argv = _build_hermes_argv(cfg)
         env = _build_hermes_env(cfg)
         ready_status = "hermes dashboard reachable"
-    elif cfg.agent_type == "turnstone":
-        if not cfg.bin.exists():
-            _die(
-                f"turnstone binary not found at {cfg.bin} — run "
-                "'hal0 agent install turnstone' first"
-            )
-        argv = _build_turnstone_argv(cfg)
-        env = _build_turnstone_env(cfg)
-        ready_status = "turnstone server reachable"
     else:
         _die(f"agent type '{cfg.agent_type}' not supported by this shim yet")
 
@@ -678,13 +594,6 @@ def cmd_render_context(cfg: AgentConfig) -> int:
     a daemon-unreachable read leaves last-good files and still exits 0 so
     it never blocks the service from starting.
     """
-    if cfg.agent_type == "turnstone":
-        # Turnstone renders its config.toml at provision time; live model/slot
-        # drift is picked up on `hal0 agent reprovision turnstone`, not on every
-        # service start. Nothing to re-render here — succeed cheaply so the
-        # ExecStartPre hook is a no-op rather than a failure.
-        print("hal0-agent: render-context noop for turnstone")
-        return 0
     if cfg.agent_type != "hermes":
         _die(f"agent type '{cfg.agent_type}' not supported by this shim yet")
     try:

@@ -37,6 +37,43 @@ def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(static_seeds_mod, "seed_static_slots", lambda **_kw: [])
 
 
+@pytest.fixture(autouse=True)
+def _store_not_nfs_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force ``hal0.config.store.is_nfs_path`` to False for the whole suite.
+
+    ML-3's NFS-relabel-omission fix (plan §23.3d) detects the REAL host's
+    ``/proc/mounts`` — on a dev box that happens to NFS-mount
+    ``/mnt/ai-models`` (a common hal0 deployment shape), that's a true
+    positive: mount-rendering tests hardcoding ``/mnt/ai-models`` as their
+    model-store literal would otherwise pass/fail based on the CI host's
+    actual mount table, not the code under test. Force the deterministic
+    "local filesystem" default suite-wide; ``tests/config/test_store.py``
+    overrides this per-test to exercise the real NFS-detection branch.
+    """
+    monkeypatch.setattr("hal0.config.store.is_nfs_path", lambda _p: False)
+
+
+@pytest.fixture(autouse=True)
+def _auth_dev_open_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the KB-1/§1 auth middleware into dev-open for the whole suite.
+
+    ``require_auth_enabled()`` derives its default from process env: it
+    enforces when the bind host is non-loopback OR a key is configured.
+    Some tests legitimately write those into ``os.environ`` (e.g.
+    ``tests/install/test_answers.py`` asserts the answers-apply path sets
+    ``HAL0_BIND_HOST=0.0.0.0``), and that value LEAKS to later tests in the
+    same pytest process — flipping the middleware on and 401-ing every
+    unrelated endpoint test that hits ``/v1`` or an ``/api`` admin route
+    anonymously. Pinning ``HAL0_REQUIRE_AUTH=0`` here makes the ~700-test
+    suite deterministically dev-open regardless of leakage; the auth tests
+    that need enforcement opt in explicitly (their own ``monkeypatch.setenv``
+    runs after this fixture and wins), and the posture-derivation tests in
+    ``tests/api/test_auth_core.py`` ``delenv`` it first to exercise the
+    bind/key-derived default.
+    """
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+
+
 @pytest.fixture(scope="function")
 def app(tmp_hal0_home: str) -> FastAPI:
     """Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.

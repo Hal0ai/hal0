@@ -84,52 +84,11 @@ _HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
 # this logger automatically carries {request_id} on every emitted line.
 log = structlog.get_logger("hal0-dispatch")
 
-# ── Composite ``hal0`` upstream ───────────────────────────────────────────────
-#
-# ``_autoregister_slot_upstreams`` (hal0.api.__init__) registers ONE synthetic
-# upstream named ``hal0`` that aggregates every chat-capable slot's model id
-# under a single ``/v1/models`` listing (issue #422 / R4 H2). It is special in
-# two ways that the dispatch path must respect:
-#
-#   1. It is NOT a real slot. ``SlotManager`` has no ``hal0`` entry, so the
-#      readiness gate (``_check_slot_ready_for_dispatch``) and the SERVING wrap
-#      must be skipped for it — otherwise a populated model cache would route a
-#      chat request to the composite and immediately 503 with
-#      ``slot 'hal0' is offline`` (the gate calls
-#      ``SlotManager.is_ready_for_dispatch('hal0')``/``state('hal0')`` which
-#      find no slot and return OFFLINE).
-#   2. Its registered ``url`` is hal0-api's OWN ``/v1`` surface
-#      (``127.0.0.1:8080/v1``). That value is deliberate so the ``/v1/models``
-#      aggregator can short-circuit it instead of recursing over HTTP. But it
-#      is the WRONG target to *forward* a chat request to — forwarding to
-#      ``:8080`` would re-enter ``/v1/chat/completions`` and loop forever.
-#      Dispatch therefore SKIPS the composite at every resolution step:
-#      models without a live serving slot resolve via the remaining
-#      upstreams or surface a clean NoRouteFound envelope.
-_HAL0_COMPOSITE_NAME = "hal0"
-
-
-def _is_hal0_composite(upstream: Upstream) -> bool:
-    """True for the synthetic composite ``hal0`` upstream.
-
-    The composite is the single ``kind="slot"`` entry with no backing
-    ``slot_name`` whose name is ``hal0`` (see
-    ``hal0.api._autoregister_slot_upstreams``). Real per-slot upstreams
-    always carry a ``slot_name``; remote providers are ``kind="remote"``.
-    """
-    return (
-        upstream.kind == "slot"
-        and upstream.slot_name is None
-        and upstream.name == _HAL0_COMPOSITE_NAME
-    )
-
 
 def _resolve_target_url(upstream: Upstream, request_path: str) -> str:
     """Build the forward URL for ``upstream`` given the incoming request path.
 
-    Every upstream forwards to its own ``url`` via :func:`_join_url`. The
-    composite ``hal0`` upstream is never forwarded to (dispatch skips it),
-    so no special-casing is needed here.
+    Every upstream forwards to its own ``url`` via :func:`_join_url`.
     """
     return _join_url(upstream.url, request_path)
 
@@ -534,12 +493,9 @@ class Dispatcher:
 
         # ── Step 0: container-slot preemption ────────────────────────────
         # A loaded container slot (kind="remote" + slot_name) is the
-        # authoritative server for the models it advertises. The model
-        # registry binds every registered id — including container-served
-        # models — to the synthetic composite ``hal0`` upstream, which is
-        # never forwarded to. So a container slot MUST win over that
-        # binding (cutover #662). Only fires on a warm cache hit for a
-        # container remote.
+        # authoritative server for the models it advertises, and must win
+        # over a stale/generic registry binding for the same id (cutover
+        # #662). Only fires on a warm cache hit for a container remote.
         for upstream in self._upstreams_in_priority_order():
             if _container_slot_name_of(upstream) and model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
@@ -563,13 +519,6 @@ class Dispatcher:
         if registry_entry is not None:
             upstream_name, upstream_model = registry_entry
             upstream = self._upstreams.get(upstream_name)
-            if upstream is not None and _is_hal0_composite(upstream):
-                # Registry ids bind to the composite by default; it has no
-                # backing server to forward to. Fall through — a live slot
-                # already won in Step 0, so reaching here means the model
-                # isn't being served anywhere right now.
-                upstream = None
-                registry_entry = None
             if upstream is not None and not getattr(upstream, "enabled", True):
                 # Operator kill-switch: a disabled upstream behaves like an
                 # offline one — fall through rather than erroring.
@@ -643,14 +592,10 @@ class Dispatcher:
             )
 
         # ── Step 2: passthrough on warm caches ───────────────────────────
-        # The composite ``hal0`` upstream is SKIPPED: it exists only for the
-        # /v1/models aggregation and has no backing server to forward to.
         # Backend-aware loading for slot-backed models is handled at the
         # route layer before dispatch (#430), independent of which upstream
         # wins here.
         for upstream in self._upstreams_in_priority_order():
-            if _is_hal0_composite(upstream):
-                continue
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -677,8 +622,6 @@ class Dispatcher:
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
             for upstream in self._upstreams_in_priority_order():
-                if _is_hal0_composite(upstream):
-                    continue
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
@@ -1381,17 +1324,8 @@ def _slot_name_of(upstream: Upstream) -> str:
     ``upstream.name`` when ``slot_name`` is unset — autoregistered slots
     use the same value for both, but explicit upstreams.toml entries can
     override.
-
-    The composite ``hal0`` upstream is exempt: it has no backing slot, so
-    returning ``"hal0"`` here would make ``forward()`` run the readiness
-    gate against a non-existent slot (always OFFLINE → spurious 503) and
-    wrap the call in a ``SlotManager.serving("hal0")`` context that can
-    never settle. Returning ``""`` routes it through ``_forward_plain``
-    (the composite is never actually forwarded to — dispatch skips it).
     """
     if upstream.kind != "slot":
-        return ""
-    if _is_hal0_composite(upstream):
         return ""
     return upstream.slot_name or upstream.name
 

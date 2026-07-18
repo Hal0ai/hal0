@@ -249,14 +249,13 @@ async def _proxy_upstream_endpoint(
 
     Only ``kind == "remote"`` upstreams are proxied. ``kind == "slot"``
     upstreams are local slots whose base URL points back at *this*
-    hal0-api host:port (e.g. the bundled ``hal0`` upstream at
-    ``http://127.0.0.1:8080/v1``). Stripping ``/v1`` and appending
-    ``suffix`` would make the endpoint call itself — under the
-    single-worker async server this recurses until every request in the
-    chain hits its timeout, hanging ``/api/stats/hardware`` and
-    ``/api/slots/metrics`` for tens of seconds and returning an empty
-    body. Slot upstreams have no separate dashboard API anyway — the
-    local probe + ``_local_slot_metrics`` already cover them — so we
+    hal0-api host:port. Stripping ``/v1`` and appending ``suffix`` would
+    make the endpoint call itself — under the single-worker async server
+    this recurses until every request in the chain hits its timeout,
+    hanging ``/api/stats/hardware`` and ``/api/slots/metrics`` for tens of
+    seconds and returning an empty body. Slot upstreams have no separate
+    dashboard API anyway — the local probe + ``_local_slot_metrics``
+    already cover them — so we
     skip them outright.
     """
     import httpx
@@ -669,3 +668,64 @@ async def stats_slots(request: Request) -> dict[str, Any]:
                 if isinstance(m, dict):
                     merged[name] = m
     return merged
+
+
+# ── OBS-1 (§13 / §21.3) read API ──────────────────────────────────────────
+#
+# Thin reads over the metrics tables (``hal0.metrics.read``) rather than a
+# live sysfs/cgroup/httpx scrape per request — the SQLite-backed sampler
+# (T2) and request seam (T1) already did that work off the hot path. Each
+# function below degrades to an empty/zeroed shape when the metrics DB
+# hasn't been migrated yet or ``[metrics].enabled = false`` — never a 500.
+
+
+@router.get("/stats")
+async def stats_endpoint(
+    request: Request,
+    window: str = "1h",
+    model_id: str | None = None,
+    runner: str | None = None,
+) -> dict[str, Any]:
+    """``GET /api/stats`` — rollup over ``request_metric`` + bench baselines.
+
+    Query params: ``window`` (``1h``|``24h``|``7d``, default ``1h``),
+    optional ``model_id``/``runner`` filters.
+    """
+    from hal0.metrics import read as metrics_read
+
+    service = getattr(request.app.state, "metrics_service", None)
+    path = service.writer.db_path if service is not None else None
+    return await asyncio.to_thread(
+        metrics_read.stats_summary, path, window=window, model_id=model_id, runner=runner
+    )
+
+
+@router.get("/system-stats")
+async def system_stats_endpoint(request: Request) -> dict[str, Any]:
+    """``GET /api/system-stats`` — latest fleet + per-slot sample snapshot."""
+    from hal0.metrics import read as metrics_read
+
+    service = getattr(request.app.state, "metrics_service", None)
+    path = service.writer.db_path if service is not None else None
+    return await asyncio.to_thread(metrics_read.system_stats, path)
+
+
+@router.get("/models/health")
+async def models_health_endpoint(request: Request) -> dict[str, Any]:
+    """``GET /api/models/health`` — per-slot checkpoint/health snapshot.
+
+    Reads ``SlotManager.list()`` for the live slot set plus the 24h
+    TTFT/decode-tps rollup from ``request_metric``.
+    """
+    from hal0.metrics import read as metrics_read
+
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return {"models": []}
+    try:
+        slots = await sm.list()
+    except Exception:
+        return {"models": []}
+    service = getattr(request.app.state, "metrics_service", None)
+    path = service.writer.db_path if service is not None else None
+    return await asyncio.to_thread(metrics_read.models_health, slots, db_path=path)

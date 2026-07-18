@@ -22,9 +22,6 @@ from fastapi import FastAPI
 from hal0 import __version__
 from hal0.activity import AuditStore
 from hal0.api.agents import (
-    budget as agents_budget_routes,
-)
-from hal0.api.agents import (
     memory_stats as agents_memory_stats_routes,
 )
 from hal0.api.agents import (
@@ -34,6 +31,7 @@ from hal0.api.agents import (
     restart as agents_restart_routes,
 )
 from hal0.api.agents.chat_proxy import router as chat_proxy_router
+from hal0.api.auth import AuthEnforcementMiddleware
 from hal0.api.middleware import error_codes, log_scrub, request_id
 from hal0.api.openrouter import router as openrouter_auth_router
 from hal0.api.plugins import router as plugin_manifest_router
@@ -45,6 +43,9 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     approvals as approvals_routes,
+)
+from hal0.api.routes import (
+    auth as auth_routes,
 )
 from hal0.api.routes import (
     backends as backends_routes,
@@ -127,6 +128,7 @@ from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.discover import scan_and_register
+from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -134,20 +136,24 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_en
 log = structlog.get_logger(__name__)
 
 
-# Module-level cache for the composite ``hal0`` upstream's aggregated
-# /v1/models response. Keyed by the upstream name; value is a tuple of
-# (expires_monotonic, model_ids). The TTL (default 5s) keeps repeated
-# ``/v1/models`` fans-out cheap during the cold-start race window
-# (R4 H3) without making the catalogue stale enough that a freshly
+# Module-level cache for the composite model catalogue's aggregated
+# /v1/models response — a direct read over slot config, not a registered
+# Upstream. Keyed by a fixed cache key (there's only ever one composite);
+# value is a tuple of (expires_monotonic, model_ids). The TTL (default 5s)
+# keeps repeated ``/v1/models`` fans-out cheap during the cold-start race
+# window (R4 H3) without making the catalogue stale enough that a freshly
 # loaded slot stays invisible to Hermes for long. Use
 # ``time.monotonic()`` rather than ``functools.lru_cache`` because the
 # stdlib LRU has no time-based expiry.
 _HAL0_MODEL_CACHE: dict[str, tuple[float, list[str]]] = {}
 _HAL0_MODEL_CACHE_TTL_SECONDS = 5.0
+# Fixed key into ``_HAL0_MODEL_CACHE`` — matches the ``model_cache["hal0"]``
+# bucket used by /v1/models and the dashboard's synthetic slot tile.
+_HAL0_COMPOSITE_CACHE_KEY = "hal0"
 
 
 def _hal0_model_cache_clear() -> None:
-    """Punch the composite upstream's cached model list.
+    """Punch the composite catalogue's cached model list.
 
     Exposed so slot-swap / slot-restart paths can invalidate the cache
     when they know the next call will see a different model. Tests
@@ -157,24 +163,26 @@ def _hal0_model_cache_clear() -> None:
 
 
 async def _fetch_hal0_composite_models(
-    upstream: Upstream,
     slot_manager: SlotManager,
     *,
     now: Callable[[], float] = time.monotonic,
     ttl_seconds: float = _HAL0_MODEL_CACHE_TTL_SECONDS,
 ) -> list[str]:
-    """Aggregate every ready chat-capable slot's model id under one upstream.
+    """Aggregate every ready chat-capable slot's model id into one catalogue.
 
-    The composite ``hal0`` upstream replaces the previous per-slot
-    autoregistration (R4 H2) and exists for ``/v1/models`` aggregation
-    only — container slots register their own ``kind="remote"``
-    upstreams for actual dispatch.
+    Direct read over the live slot config — no pseudo-upstream is
+    registered in the routing table for this. Container slots register
+    their own ``kind="remote"`` upstreams for actual dispatch; this
+    aggregation exists purely so ``/v1/models`` and the dashboard's
+    synthetic ``hal0`` tile can list every configured chat model in one
+    place without an operator having to wire a matching upstreams.toml
+    entry per slot.
 
     The returned list is sorted + deduplicated and cached for
     ``ttl_seconds`` to keep the cold-start fan-out cheap while still
     picking up new slots within a handful of seconds.
     """
-    cached = _HAL0_MODEL_CACHE.get(upstream.name)
+    cached = _HAL0_MODEL_CACHE.get(_HAL0_COMPOSITE_CACHE_KEY)
     monotonic_now = now()
     if cached is not None and cached[0] > monotonic_now:
         return list(cached[1])
@@ -212,7 +220,7 @@ async def _fetch_hal0_composite_models(
         models.append(model_id)
 
     models.sort()
-    _HAL0_MODEL_CACHE[upstream.name] = (monotonic_now + ttl_seconds, list(models))
+    _HAL0_MODEL_CACHE[_HAL0_COMPOSITE_CACHE_KEY] = (monotonic_now + ttl_seconds, list(models))
     return models
 
 
@@ -295,6 +303,56 @@ def _slot_ctx_size(
     return None
 
 
+def _model_recipe(entry: Any) -> str | None:
+    """Return the curated "recipe" bucket name for a registry ``Model``.
+
+    Mirrors :func:`hal0.registry.model._derive_ns`'s blessed-path rule
+    (issue #220: a path is "blessed" iff it sits under
+    ``<_BLESSED_PREFIX><recipe>/<capability>/...``) without importing that
+    private helper's name-mangled internals — this only reads the same
+    published ``_BLESSED_PREFIX`` constant, so the two stay in lockstep by
+    construction. Hand-pulled ("pulled") models have no recipe → ``None``.
+    """
+    path = (getattr(entry, "path", "") or "").strip()
+    if not path or not path.startswith(_BLESSED_PREFIX):
+        return None
+    parts = path[len(_BLESSED_PREFIX) :].split("/")
+    if len(parts) < 3 or not parts[0] or not parts[1]:
+        return None
+    return parts[0]
+
+
+def hal0_apply_registry_detail(obj: dict[str, Any], entry: Any) -> None:
+    """Fold extra registry-row fields (§21.5) onto an OpenAI ``model`` object.
+
+    ``entry`` is a :class:`hal0.registry.model.Model` (or ``None`` when the
+    id doesn't resolve in the registry — a hand-staged file, a remote
+    passthrough id, …), in which case this is a no-op: the caller's base
+    object (id/object/created/owned_by/…) already stands on its own.
+
+    Adds, only when present on ``entry``:
+
+    * ``labels`` — the model's ``capabilities`` list (the same "labels"
+      vocabulary ``POST /api/models/add-from-path`` accepts, e.g.
+      ``["chat", "vision"]``).
+    * ``checkpoint`` — the quantisation label (``Model.quant``, e.g.
+      ``"Q4_K_M"``).
+    * ``recipe`` — the curated bucket name for a blessed model (see
+      :func:`_model_recipe`); omitted for hand-pulled models.
+    """
+    if entry is None:
+        return
+    capabilities = getattr(entry, "capabilities", None)
+    if capabilities:
+        obj["labels"] = list(capabilities)
+    quant = getattr(entry, "quant", None)
+    if quant:
+        obj["checkpoint"] = quant
+    recipe = _model_recipe(entry)
+    if recipe:
+        obj["recipe"] = recipe
+
+
 async def hal0_slot_alias_models(
     slot_manager: SlotManager,
     model_registry: ModelRegistry,
@@ -319,10 +377,20 @@ async def hal0_slot_alias_models(
     * ``name`` — ``"<slot> · <model display name>"``; the display name is
       pulled from the model registry when the slot's model id is
       registered, falling back to the bare model id otherwise.
-    * ``context_length`` — the slot's configured context window (reading
-      either ``ctx_size`` or ``context_size`` from the slot TOML), falling
-      back to the model registry entry's ``defaults.context_size``.
+    * ``context_length`` / ``max_context_window`` — the slot's configured
+      context window (reading either ``ctx_size`` or ``context_size`` from
+      the slot TOML), falling back to the model registry entry's
+      ``defaults.context_size``. Both keys carry the same value — some
+      OpenAI-compat clients probe ``max_context_window`` instead of the
+      canonical ``context_length``.
     * ``owned_by`` — ``"hal0"``.
+    * ``downloaded`` — always ``True``: an enabled llm slot's configured
+      model is, by construction, a real file already resident on this
+      host (§21.5).
+    * ``labels`` / ``checkpoint`` / ``recipe`` — extra registry-row detail
+      (§21.5), only present when the slot's model id resolves in the
+      model registry (a hand-staged model that isn't registered omits
+      them, same fallback as ``display`` above).
 
     Slots that are disabled or lack a configured model are omitted.
     """
@@ -347,6 +415,7 @@ async def hal0_slot_alias_models(
             continue
 
         display = model_id
+        entry: Any = None
         try:
             entry = model_registry.get(model_id)
             registry_name = getattr(entry, "name", "")
@@ -355,6 +424,7 @@ async def hal0_slot_alias_models(
         except Exception:
             # Model not in the registry (hand-staged, …) — fall back to
             # the bare model id for the display label.
+            entry = None
             display = model_id
 
         obj: dict[str, Any] = {
@@ -363,10 +433,17 @@ async def hal0_slot_alias_models(
             "created": created,
             "owned_by": "hal0",
             "name": f"{slot_name} · {display}",
+            # A live, enabled llm slot's model is always a real local file
+            # (§21.5) — unlike the raw upstream-catalog rows below, there's
+            # no "advertised but not pulled" state for a slot alias.
+            "downloaded": True,
         }
         ctx = _slot_ctx_size(cfg, model_registry, model_id)
         if ctx is not None:
             obj["context_length"] = ctx
+            # Alias some OpenAI-compat clients look for (§21.5); same value.
+            obj["max_context_window"] = ctx
+        hal0_apply_registry_detail(obj, entry)
         out.append(obj)
     return out
 
@@ -467,12 +544,12 @@ async def hal0_chat_slot_model_ids(slot_manager: SlotManager) -> set[str]:
     """Return the configured model ids of every enabled chat slot.
 
     Used by ``GET /v1/models`` to suppress raw chat model-id rows from the
-    composite ``hal0`` upstream so each chat slot is represented exactly
+    direct-read composite catalogue so each chat slot is represented exactly
     once — by its alias entry (see :func:`hal0_slot_alias_models`). Unlike
     the alias builder this does NOT filter on loaded state: a chat model
-    that the composite advertises must be deduped regardless of whether
-    it's currently warm, so the catalog never shows both an alias and a
-    bare ``id=<model_id>`` row for the same slot.
+    that the composite catalogue advertises must be deduped regardless of
+    whether it's currently warm, so the catalog never shows both an alias
+    and a bare ``id=<model_id>`` row for the same slot.
 
     Best-effort: returns an empty set on any failure so the catalog
     degrades to "no dedup" rather than 500ing.
@@ -494,56 +571,40 @@ async def hal0_chat_slot_model_ids(slot_manager: SlotManager) -> set[str]:
     return out
 
 
-async def _autoregister_slot_upstreams(
-    registry: UpstreamRegistry,
+async def _prime_hal0_composite_cache(
+    upstreams: UpstreamRegistry,
     slot_manager: SlotManager,
+    model_cache: dict[str, list[str]],
 ) -> None:
-    """Register a single composite ``hal0`` upstream.
+    """Warm the ``model_cache["hal0"]`` bucket via a direct slot-config read.
 
-    The composite exists for ``/v1/models`` aggregation (one upstream
-    advertising every registered chat-capable model id). It is never
-    forwarded to — container slots register their own ``kind="remote"``
-    upstreams for dispatch, and per-slot alias addressing is handled by
-    an alias → model-id rewrite in the dispatch path (see
-    :meth:`Dispatcher.dispatch`).
+    No pseudo-upstream is registered for this — ``/v1/models`` and the
+    dashboard's synthetic ``hal0`` tile both read ``model_cache["hal0"]``
+    directly (see :func:`_fetch_hal0_composite_models`). Priming it here
+    means the first request after startup doesn't have to pay the
+    slot-iteration cost.
 
-    The composite upstream:
-
-    * Points at hal0-api's own ``/v1`` surface (``127.0.0.1:8080/v1``)
-      so the dispatcher's prompt-cache + dispatch path stays in the
-      loop instead of every consumer talking directly to the
-      slot-local llama-server.
-    * Advertises ALL chat-capable slot models through one
-      ``/v1/models`` response (aggregated by
-      :func:`_fetch_hal0_composite_models`).
-    * Has its model cache invalidated whenever a slot swaps or
-      restarts — see ``/api/slots/{name}/{swap,restart}``.
+    Merges rather than replaces: any tag already in the bucket that the
+    fresh catalogue read doesn't reproduce (e.g. FLM multiplex tags seeded
+    by :func:`_seed_multiplex_models`) is preserved, mirroring
+    ``_fetch_and_cache``'s merge behaviour for ordinary upstreams.
 
     Skipped if an explicit ``upstreams.toml`` entry already claims the
-    name ``hal0`` so operator overrides win. Operator-defined real slot
-    upstreams (any other names) are left untouched.
+    name ``hal0`` — operator overrides win, and their entry's model cache
+    is populated the same way as any other remote upstream (dispatch
+    prefetch / ``/api/status`` hydration). Best-effort: failures are
+    already logged inside the fetch helper.
     """
-    if registry.get("hal0") is not None:
-        log.info("slots.autoregister_skipped", upstream="hal0", reason="already_registered")
+    if upstreams.get("hal0") is not None:
+        log.info("slots.hal0_composite_skipped", reason="explicit_upstream_registered")
         return
-    registry.upsert(
-        Upstream(
-            name="hal0",
-            kind="slot",
-            url="http://127.0.0.1:8080/v1",
-            slot_name=None,
-            auth_style="none",
-            warmup_strategy="none",
-            advertise_models=True,
-        )
-    )
-    log.info("slots.autoregistered_composite", upstream="hal0")
-    # Prime the model cache so the first request after startup doesn't
-    # have to pay the slot-iteration cost. Best-effort — failures are
-    # already logged inside the fetch helper.
-    upstream = registry.get("hal0")
-    if upstream is not None:
-        await _fetch_hal0_composite_models(upstream, slot_manager)
+    models = await _fetch_hal0_composite_models(slot_manager)
+    existing = model_cache.get("hal0", [])
+    merged = list(models)
+    for tag in existing:
+        if tag not in merged:
+            merged.append(tag)
+    model_cache["hal0"] = merged
 
 
 # ── FLM multiplex model seeding ────────────────────────────────────────────
@@ -561,7 +622,9 @@ _FLM_ASR_TAG = "whisper-v3:turbo"
 async def _refresh_model_cache_on_ready(
     event_bus: EventBus,
     upstreams: UpstreamRegistry,
+    slot_manager: SlotManager,
     fetch_and_cache: Callable[[Upstream], Awaitable[list[str]]],
+    model_cache: dict[str, list[str]],
 ) -> None:
     """Re-fetch ``model_cache[slot]`` whenever a slot transitions to ready.
 
@@ -583,22 +646,27 @@ async def _refresh_model_cache_on_ready(
             slot_name = data.get("slot")
             if not isinstance(slot_name, str) or not slot_name:
                 continue
-            # Per-slot upstreams used to exist; now a single composite
-            # ``hal0`` entry aggregates every chat-capable slot. When any
-            # slot flips ready, punch the composite TTL cache so the
-            # next /v1/models call rediscovers the new lineup. Fall back
-            # to a slot-named lookup for backwards compatibility (tests
-            # or operator-managed upstreams.toml that still mirror the
-            # legacy layout).
+            upstream = upstreams.get(slot_name)
+            if upstream is not None:
+                try:
+                    await fetch_and_cache(upstream)
+                except Exception as exc:  # pragma: no cover — defensive
+                    log.warning(
+                        "model_cache.refresh_failed",
+                        slot=slot_name,
+                        error=str(exc),
+                    )
+            # Every chat slot's model id also lives in the direct-read
+            # composite catalogue (no per-slot upstream needed). Punch its
+            # TTL cache and re-prime so the next /v1/models call and the
+            # dashboard's synthetic ``hal0`` tile both rediscover the new
+            # lineup right away.
             _hal0_model_cache_clear()
-            upstream = upstreams.get(slot_name) or upstreams.get("hal0")
-            if upstream is None:
-                continue
             try:
-                await fetch_and_cache(upstream)
+                await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache)
             except Exception as exc:  # pragma: no cover — defensive
                 log.warning(
-                    "model_cache.refresh_failed",
+                    "model_cache.hal0_composite_refresh_failed",
                     slot=slot_name,
                     error=str(exc),
                 )
@@ -613,10 +681,9 @@ async def _seed_multiplex_models(
     cache for slots whose config opts into the matching multiplex.
 
     Idempotent — appends only when missing. Runs after
-    ``_autoregister_slot_upstreams``. Since the composite ``hal0``
-    upstream replaces per-slot registrations (R4 H2), the multiplex
-    tags are merged into the ``hal0`` cache bucket so the dispatcher's
-    passthrough match still picks them up.
+    ``_prime_hal0_composite_cache``. The multiplex tags are merged into the
+    ``hal0`` cache bucket (the direct-read composite catalogue) so the
+    dispatcher's passthrough match still picks them up.
     """
     try:
         cfgs = await slot_manager.iter_configs()
@@ -830,15 +897,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     model_cache: dict[str, list[str]] = {}
 
     async def _fetch_and_cache(u: Upstream) -> list[str]:
-        # The composite ``hal0`` upstream aggregates its model list from
-        # the slot catalogue rather than hitting its own URL — that URL
-        # is hal0-api itself, so going over HTTP would re-enter the same
-        # /v1/models handler and infinite-recurse. The helper applies a
-        # 5s TTL keyed on the upstream name.
-        if u.kind == "slot" and u.slot_name is None and u.name == "hal0":
-            models = await _fetch_hal0_composite_models(u, slot_manager)
-        else:
-            models = await upstreams.fetch_models(u.name)
+        models = await upstreams.fetch_models(u.name)
         # Preserve multiplex tags seeded at startup (e.g. embed-gemma /
         # whisper-v3:turbo on FLM slots). Without this, the dispatcher's
         # cold-cache prefetch overwrites the seeded entries and embed /
@@ -926,21 +985,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         evict_pressure_mb=hal0_cfg.slots.evict_pressure_mb,
     )
 
-    # Auto-register one composite ``hal0`` upstream so the dispatcher can
-    # route ``model: <slot_name>`` requests without requiring the user to
-    # write both a slot TOML AND a matching upstreams.toml entry.
-    # Explicit upstreams.toml entries (hydrated above) win — autoregister
-    # skips when the ``hal0`` name is already taken.
-    await _autoregister_slot_upstreams(upstreams, slot_manager)
-    # Prime the shared model_cache for the composite upstream so the
-    # dispatcher's cold-cache prefetch and /v1/models handler can read it
-    # synchronously immediately after startup.
-    hal0_upstream = upstreams.get("hal0")
-    if hal0_upstream is not None:
-        try:
-            await _fetch_and_cache(hal0_upstream)
-        except Exception as exc:  # pragma: no cover — defensive
-            log.warning("upstream.hal0_prime_failed", error=str(exc))
+    # Prime the direct-read composite model catalogue (``model_cache["hal0"]``)
+    # so /v1/models and the dashboard's synthetic ``hal0`` tile can read it
+    # synchronously immediately after startup. Explicit upstreams.toml
+    # entries (hydrated above) win — priming skips when the ``hal0`` name
+    # is already taken by a real upstream.
+    try:
+        await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("upstream.hal0_prime_failed", error=str(exc))
     await _seed_multiplex_models(upstreams, slot_manager, model_cache)
 
     # #732: re-register per-slot remote upstreams for containers that
@@ -1148,6 +1201,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.slot_request_count: dict[str, int] = {}
     app.state.slot_last_used: dict[str, float] = {}
 
+    # OBS-1 (§13): the SQLite metrics core. Does NOT replace the deques
+    # above -- those keep feeding /api/stats/throughput/history and
+    # /api/slots/metrics unchanged -- it observes the same v1 request seam
+    # a second time and persists an exact request_metric row, plus runs
+    # the T2 per-slot sampler as a background task. Construction never
+    # touches the filesystem; ``start()`` (inside the AsyncExitStack below)
+    # applies the 001/002 migrations and launches the background tasks.
+    # ``[metrics].enabled = false`` (or HAL0_METRICS_ENABLED=0) makes every
+    # background task a no-op — never blocks startup either way.
+    from hal0.metrics.service import MetricsService
+
+    metrics_service = MetricsService(slot_manager=slot_manager, registry=model_registry)
+    app.state.metrics_service = metrics_service
+    app.state.metrics_seam = metrics_service.seam
+
     log.info(
         "hal0.api.upstreams_loaded",
         count=len(upstreams.list()),
@@ -1166,7 +1234,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     managers = getattr(app.state, "mcp_session_managers", []) or []
 
     refresh_task = asyncio.create_task(
-        _refresh_model_cache_on_ready(event_bus, upstreams, _fetch_and_cache)
+        _refresh_model_cache_on_ready(
+            event_bus, upstreams, slot_manager, _fetch_and_cache, model_cache
+        )
     )
 
     async def _stop_refresh_task() -> None:
@@ -1256,6 +1326,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(_stop_refresh_task)
             stack.push_async_callback(_stop_gpu_arbiter_idle_loop)
+            metrics_service.start()
+            stack.push_async_callback(metrics_service.stop)
             yield
     finally:
         # First — issue #1225: cancel any in-flight model pull before doing
@@ -1292,6 +1364,22 @@ def create_app() -> FastAPI:
     # in journald.
     log_scrub.install(app)
 
+    # KB-1 / §1: deny-by-default auth gate. Installed here -- right after
+    # log_scrub, before any app.include_router() call -- so every request
+    # (http incl. SSE, and websocket) passes through path classification
+    # (hal0.security.exposure, seam S9) before it can reach a route
+    # handler. Dev-open (loopback + no keys configured) bypasses this
+    # entirely, which is what keeps the pre-existing TestClient suite
+    # green without every test needing to know auth exists; see
+    # AuthEnforcementMiddleware / require_auth_enabled docstrings.
+    app.add_middleware(AuthEnforcementMiddleware)
+
+    # /api/auth: login (mints the admin-equivalent session cookie via the
+    # SAME HMAC cookie agents/_auth.py already ships) + status (posture
+    # report for the dashboard's own auth gate). Both routes are OPEN in
+    # security/exposure.py -- you can't require a cookie to obtain one.
+    app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
+
     # /v1 is split into a public probe (GET /v1/models + /v1/models/{id})
     # and a writer surface that requires auth. The split lives in v1.py
     # via v1.public_router (probes) + v1.router (inference). OpenAI
@@ -1315,6 +1403,13 @@ def create_app() -> FastAPI:
     # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
     # tab (docker + systemd + ComfyUI HTTP), plus arbiter switchover controls.
     app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
+    # hardware.router is registered BEFORE models.router: it owns the
+    # literal path GET /api/models/health (OBS-1 §21.3), which must match
+    # before models.router's GET /api/models/{model_id} catch-all — routes
+    # are tried in registration order, so the more specific literal path
+    # has to land first or every request to /api/models/health 404s as a
+    # "model 'health' not found" lookup instead.
+    app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a
@@ -1322,7 +1417,6 @@ def create_app() -> FastAPI:
     # /api/models/inspect and is a *different* flow (known coord →
     # variants) than this search proxy (free-text → coord candidates).
     app.include_router(hf.router, prefix="/api/hf", tags=["hf"])
-    app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     # Dashboard-overhaul backend endpoints (CONTRACTS.md §2):
     #   throughput.router → GET /api/stats/throughput/history (bucketed tps_events)
     #   services_health.router → GET /api/services/health
@@ -1501,17 +1595,6 @@ def create_app() -> FastAPI:
         agents_personas_routes.router,
         prefix="/api/agents",
         tags=["agents", "personas"],
-    )
-
-    # Per-persona spending-cap primitive (Phase 0 OpenRouter prereq).
-    # GET/PUT the budget block + check/charge endpoints so the V1
-    # OpenRouter provider has a gate from day 1. Same /api/agents
-    # prefix as the personas router so the dashboard's persona editor
-    # can call both without juggling base URLs.
-    app.include_router(
-        agents_budget_routes.router,
-        prefix="/api/agents",
-        tags=["agents", "personas", "budget"],
     )
 
     # Agent service restart (v0.3 PR-11). Wraps systemctl restart of the

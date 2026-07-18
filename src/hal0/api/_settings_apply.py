@@ -82,12 +82,12 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            still tags the class so the
 #                                            UI renders the right badge).
 #   * ``[memory.embedding].model``          → service-restart[hal0-api]
-#                                            (Cognee pins the dimension
-#                                            at index build; switching
-#                                            silently corrupts the
-#                                            LanceDB store — a process
-#                                            bounce + re-embed is the
-#                                            supported path).
+#                                            (the engine pins the
+#                                            embedding dimension at index
+#                                            build; switching silently
+#                                            corrupts the store — a
+#                                            process bounce + re-embed is
+#                                            the supported path).
 #   * ``[memory.embedding].{rerank_*}``     → immediate (consumed on each
 #                                            ``memory_search`` call).
 #   * ``[memory.graph].{enabled,extraction_slot}`` → immediate (ADR-0023: the
@@ -147,9 +147,6 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.engine": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [memory.embedding] — hindsight-era reranker knobs, all threaded into
     # Hal0Reranker at startup (memory/__init__.py), hence service-restart.
-    # The cognee-era keys (model, rerank_enabled, rerank_url,
-    # rerank_over_fetch_factor, rerank_max_candidates) were deleted from
-    # the schema alongside the cognee wrapper.
     "memory.embedding.rerank_gateway_url": {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],

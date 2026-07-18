@@ -147,3 +147,44 @@ def test_driver_env_root_writes_directly(tmp_path: Path, monkeypatch: pytest.Mon
     assert wrote is True
     assert path.exists()
     assert "HAL0_API_URL=" in path.read_text()
+
+
+# ── seed TOML (manager seed / MCP allow-list) ────────────────────────────────
+
+
+def test_seed_toml_nonroot_routes_through_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """euid!=0: the seed TOML write lands in root:root /etc/hal0/agents via the seam.
+
+    The read-merge itself runs unprivileged (the file is 0644 world-readable);
+    only the WRITE is delegated to `sudo -n hal0-agentenv write-seed-toml`.
+    """
+    monkeypatch.setattr(hp, "INSTALL_SEED_PATH", tmp_path / "agents" / "hermes.toml")
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hp, "_HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agentenv")
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+    with patch.object(hp.subprocess, "run") as run:
+        path, wrote = hp._write_seed_toml(state, repair=True)
+    assert wrote is True
+    run.assert_called_once()
+    args, kwargs = run.call_args
+    assert args[0][:4] == ["sudo", "-n", "/usr/lib/hal0/bin/hal0-agentenv", "write-seed-toml"]
+    assert kwargs["input"]  # non-empty serialized TOML body
+    assert kwargs["check"] is True
+    # Seam path was used — nothing written to the real (root-owned) location.
+    assert not path.exists()
+
+
+def test_seed_toml_root_writes_directly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """euid==0: write the seed TOML directly, no sudo."""
+    target = tmp_path / "agents" / "hermes.toml"
+    monkeypatch.setattr(hp, "INSTALL_SEED_PATH", target)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+    with patch.object(hp.subprocess, "run") as run:
+        path, wrote = hp._write_seed_toml(state, repair=True)
+    run.assert_not_called()
+    assert wrote is True
+    assert path.exists()
+    assert path.read_text()  # non-empty TOML

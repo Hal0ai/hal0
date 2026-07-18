@@ -30,10 +30,12 @@ performs an atomic uninstall-then-install so the operator never ends up
 with two bundled agents partially installed.
 
 The actual install work is delegated to per-agent driver modules
-(:mod:`hal0.agents.pi_coder`, :mod:`hal0.agents.hermes`) which in turn
-shell out to ``installer/agents/<name>.sh``. Drivers are looked up by
-:func:`_driver_for`. Adding a new bundled agent is: drop a shell script
-+ a driver module + add an entry to :data:`BUNDLED_AGENTS`.
+(:mod:`hal0.agents.hermes`). Drivers are looked up by :func:`_driver_for`.
+Adding a new bundled agent is: drop a driver module + add an entry to
+:data:`BUNDLED_AGENTS` (plus, if it installs by shelling out to
+``installer/agents/<name>.sh`` the way the now-removed pi-coder/opencode
+drivers did, a matching shell script and an entry in
+:data:`_SCRIPT_INSTALLED_AGENTS`).
 """
 
 from __future__ import annotations
@@ -85,18 +87,9 @@ HermesNotHal0AwareError = HermesUpstreamMissingError
 
 # ── Bundled catalog ──────────────────────────────────────────────────────────
 
-BUNDLED_AGENTS: tuple[str, ...] = ("pi-coder", "opencode", "hermes", "turnstone")
+BUNDLED_AGENTS: tuple[str, ...] = ("hermes",)
 """Canonical names for bundled agents. Adding to this list requires a
 matching driver module + ``installer/agents/<name>.sh``."""
-
-# Agents that may coexist with any other bundled agent — they run their own
-# service/binary on distinct ports and don't contend for the single-pick
-# "primary" role (ADR-0004 §2 amendment). hermes hosts the dashboard brain
-# (:9119); turnstone is an independent orchestrator on loopback :9129.
-# Anything NOT in this set still participates in single-pick (one at a time).
-# Keeping the set explicit makes adding a coexisting agent a one-line,
-# reviewable change.
-COEXISTING_AGENTS: frozenset[str] = frozenset({"hermes", "turnstone"})
 
 
 # Marker file the Hermes provisioner stamps into ``$HERMES_HOME`` to
@@ -113,14 +106,21 @@ _HAL0_MANAGED_MARKER = ".hal0-managed"
 # registry must agree or status/list report a dead path and uninstall
 # rmtree's the wrong tree (#453). Value is the home subpath under
 # ``var_lib()``. Agents not listed here keep the per-name layout.
-_AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes", "turnstone": ".turnstone"}
+_AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes"}
 
 # Agents that install by shelling out to ``installer/agents/<name>.sh``
-# (see :func:`installer_script_path`). Hermes provisions through a
-# separate bootstrap pipeline (:mod:`hal0.agents.hermes_provision`) with
-# no matching shell script, so it's excluded from the switch-safety
-# precondition in :meth:`AgentManager._verify_installable`.
-_SCRIPT_INSTALLED_AGENTS = frozenset({"pi-coder", "opencode"})
+# (see :func:`installer_script_path`) and therefore need the
+# installer-script-exists precondition in
+# :meth:`AgentManager._verify_installable` run before a ``--switch`` tears
+# down an incumbent. Empty as of P1-drivers: the two agents that used to
+# populate this set (pi-coder, opencode) were speculative bundles that
+# could never actually be installed in v0.3 and have been deleted along
+# with their drivers + installer scripts. Hermes provisions through a
+# separate bootstrap pipeline (:mod:`hal0.agents.hermes_provision`) and
+# has no matching shell script, so it doesn't belong here either. Left in
+# place (rather than removed) as the seam a future script-installed
+# bundled agent would register itself into.
+_SCRIPT_INSTALLED_AGENTS: frozenset[str] = frozenset()
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -176,23 +176,11 @@ class AgentDriver(Protocol):
 def _driver_for(name: str) -> AgentDriver:
     """Return the driver instance for ``name``. Lazy import to keep the
     manager importable in environments where one driver's dependencies
-    are missing (e.g. pi-coder dev box without Hermes credentials)."""
-    if name == "pi-coder":
-        from hal0.agents.pi_coder import PiCoderDriver
-
-        return PiCoderDriver()
-    if name == "opencode":
-        from hal0.agents.opencode import OpenCodeDriver
-
-        return OpenCodeDriver()
+    are missing (e.g. a dev box without Hermes credentials)."""
     if name == "hermes":
         from hal0.agents.hermes import HermesDriver
 
         return HermesDriver()
-    if name == "turnstone":
-        from hal0.agents.turnstone import TurnstoneDriver
-
-        return TurnstoneDriver()
     raise AgentNotFoundError(
         f"unknown bundled agent {name!r}. Known: {', '.join(BUNDLED_AGENTS)}",
     )
@@ -295,20 +283,13 @@ class AgentManager:
             # Already installed — return the existing record. Idempotent.
             return self._read_record(name)
 
-        # Single-pick, amended (ADR-0004 §2): a new agent only conflicts with
-        # an incumbent when the two can't coexist. hermes + turnstone each run
-        # their own service on a distinct loopback port and don't contend for
-        # the single "primary" role, so both may be installed at once. For
-        # every other pairing the historical one-at-a-time behaviour holds —
-        # ``blocking`` == ``current`` whenever ``name`` isn't coexisting.
-        blocking = [
-            existing
-            for existing in current
-            if not (name in COEXISTING_AGENTS and existing in COEXISTING_AGENTS)
-        ]
+        # Single-pick (ADR-0004 §2): only one bundled agent may be installed
+        # at a time. ``blocking`` == ``current`` — anything already
+        # installed conflicts with a fresh install.
+        blocking = current
 
         if not blocking:
-            # Fresh install OR a coexisting sibling join — nothing to swap.
+            # Fresh install — nothing to swap.
             return self._install_and_seed(name, bearer_token=bearer_token)
 
         if not switch:
@@ -327,8 +308,7 @@ class AgentManager:
         # Atomic swap: tear down the blocking agent(s) first. If the
         # tear-down fails we surface the error and DO NOT proceed
         # — better to leave the old one installed than land in a
-        # half-state. Coexisting siblings (not in ``blocking``) are
-        # untouched.
+        # half-state.
         for existing in blocking:
             self.uninstall(existing)
 

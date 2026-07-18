@@ -2,9 +2,8 @@
 
 Pins the persona-update contract the dashboard's ``PersonaEditModal``
 calls. Mutable fields persist to the persona TOML; ``id`` is immutable;
-``budget`` round-trips untouched; validation rejects a bad
-``default_policy``. Personas store is redirected to tmp_path so the test
-runner never writes to /var/lib/hal0.
+validation rejects a bad ``default_policy``. Personas store is
+redirected to tmp_path so the test runner never writes to /var/lib/hal0.
 """
 
 from __future__ import annotations
@@ -84,14 +83,6 @@ def test_update_cannot_change_id(client: TestClient, seeded: Path) -> None:
     assert r.json()["id"] == "hermes"
     # No stray persona file was created.
     assert {p.stem for p in seeded.glob("*.toml")} == {"hermes", "hal0-brain"}
-
-
-def test_update_preserves_budget(client: TestClient, seeded: Path) -> None:
-    """Budget round-trips untouched (it has its own /budget route)."""
-    before = personas_mod.load_persona("hermes", root=seeded)
-    client.put("/api/agents/hermes/personas/hermes", json={"summary": "s"})
-    after = personas_mod.load_persona("hermes", root=seeded)
-    assert after.budget == before.budget
 
 
 def test_update_rejects_bad_default_policy(client: TestClient, seeded: Path) -> None:

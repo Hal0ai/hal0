@@ -230,6 +230,30 @@ def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
         last_used[slot_name] = time.monotonic()
 
 
+_TRUTHY_PARAMS = frozenset({"1", "true", "yes", "on"})
+
+# §21.5: the raw-catalog modality buckets hidden from GET /v1/models by
+# default — media-generation + audio models an OpenAI *chat* client never
+# wants in its model picker. Text models (chat + embed + rerank) stay
+# visible so a client enumerating /v1/models can still discover the
+# embeddings/rerank endpoints. Vocabulary is ``hal0.model_meta.classify``'s
+# bucket names: ``img`` (image/video-gen), ``tts`` (speech synth), ``stt``
+# (ASR/transcription). ``?show_all=true`` returns everything regardless.
+_NON_TEXT_MODALITIES = frozenset({"img", "tts", "stt"})
+
+
+def _parse_bool_param(raw: str | None) -> bool:
+    """Parse a query-param string as a bool; missing/unrecognised → False.
+
+    Mirrors the plain ``request.query_params.get(...)`` style already used
+    for ``owned_by`` in :func:`list_models` rather than a typed FastAPI
+    ``Query(bool)`` — keeps ``show_all`` curl-debuggable with any of
+    ``1``/``true``/``yes``/``on`` (case-insensitive), same as the other
+    ad-hoc bool toggles across this router.
+    """
+    return bool(raw) and raw.strip().lower() in _TRUTHY_PARAMS
+
+
 async def _read_json_body(request: Request) -> dict[str, Any]:
     """Best-effort JSON parse.  Empty / malformed bodies become ``{}``.
 
@@ -645,28 +669,61 @@ async def _dispatch_and_forward(
     # embed/rerank/tts/img slot (resolved from the request PATH) so its
     # upstream is re-registered before dispatch, instead of 404ing.
     await _wake_capability_slot(request)
-    call = await dispatcher.dispatch(request, body=body)
-    # Remember the most recent model we sent to this upstream so the
-    # dashboard's synthetic slot reflects what's actually being used,
-    # not the first-non-alias from the catalog.
-    last_used = getattr(request.app.state, "last_used_model", None)
-    if last_used is not None and call.upstream_name and call.resolved_model:
-        last_used[call.upstream_name] = call.resolved_model
 
-    # Capture TTFT against the moment we actually hand off to forward()
-    # — anything before this point (auth, body parse, dispatcher
-    # routing) is local overhead, not prefill cost.
-    dispatch_started = time.monotonic()
-    response = await dispatcher.forward(call)
+    # OBS-1 (§13 / S12): the request seam. Observes the SAME call + response
+    # objects the tps_events/ttft_events deques below already do — it does
+    # not replace them (those keep /api/stats/throughput/history and
+    # /api/slots/metrics working exactly as before) — and persists an exact
+    # request_metric row asynchronously, off this hot path. `None` when the
+    # app was built without the lifespan (bare-router tests) or metrics are
+    # disabled; every seam method degrades to a no-op in that case.
+    seam = getattr(request.app.state, "metrics_seam", None)
+    t_entry = time.monotonic()
+    call = None
+    try:
+        call = await dispatcher.dispatch(request, body=body)
+        # Remember the most recent model we sent to this upstream so the
+        # dashboard's synthetic slot reflects what's actually being used,
+        # not the first-non-alias from the catalog.
+        last_used = getattr(request.app.state, "last_used_model", None)
+        if last_used is not None and call.upstream_name and call.resolved_model:
+            last_used[call.upstream_name] = call.resolved_model
+
+        # Capture TTFT against the moment we actually hand off to forward()
+        # — anything before this point (auth, body parse, dispatcher
+        # routing) is local overhead, not prefill cost.
+        dispatch_started = time.monotonic()
+        response = await dispatcher.forward(call)
+    except Exception as exc:
+        if seam is not None:
+            seam.record_error(exc, call=call, request=request, t_entry=t_entry)
+        raise
     if isinstance(response, StreamingResponse):
-        return _instrument_streaming_throughput(
+        response = _instrument_streaming_throughput(
             response,
             request.app.state,
             call.upstream_name,
             dispatch_started=dispatch_started,
         )
+        if seam is not None:
+            response = seam.wrap_streaming(
+                response,
+                call=call,
+                request=request,
+                t_entry=t_entry,
+                dispatch_started=dispatch_started,
+            )
+        return response
     if isinstance(response, Response) and getattr(response, "body", None):
         _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
+        if seam is not None:
+            seam.record_nonstreaming(
+                response.body,
+                call=call,
+                request=request,
+                t_entry=t_entry,
+                dispatch_started=dispatch_started,
+            )
     return response
 
 
@@ -688,20 +745,57 @@ async def list_models(
       surfaces as one model object whose ``id`` is the slot **alias =
       slot name** (``primary``, ``agent-hermes``, ``utility``), carrying a
       human ``name`` (``"<slot> · <model display name>"``) and the slot's
-      ``context_length``. Built by :func:`hal0.api.hal0_slot_alias_models`.
-      Unloaded / disabled slots are omitted. The alias is stable across
-      model swaps so callers can pin a co-resident slot.
-    * **Upstream catalog entries** — the raw model ids each
-      ``advertise_models`` upstream reports, so non-chat models (embed /
-      rerank / image / …) keep their direct-addressing entries. The
-      composite ``hal0`` upstream's CHAT model ids are suppressed here so
-      they don't duplicate the alias entries above — a chat slot is
-      represented exactly once, by its alias.
+      ``context_length``/``max_context_window``. Built by
+      :func:`hal0.api.hal0_slot_alias_models`. Unloaded / disabled slots
+      are omitted. The alias is stable across model swaps so callers can
+      pin a co-resident slot.
+    * **Upstream catalog entries** (incl. the direct-read composite
+      catalogue below) — the raw model ids each ``advertise_models``
+      upstream reports, so non-chat models (embed / rerank / image / …)
+      keep their direct-addressing entries. The composite catalogue's
+      CHAT model ids are suppressed here so they don't duplicate the alias
+      entries above — a chat slot is represented exactly once, by its
+      alias.
+
+    Every entry additionally carries, when the id resolves in the local
+    model registry (§21.5, :func:`hal0.api.hal0_apply_registry_detail`):
+    ``labels`` (capabilities), ``checkpoint`` (quant label), ``recipe``
+    (curated bucket name for a blessed model), and ``downloaded`` (always
+    present — ``True`` for a slot alias or a locally-registered catalog
+    id, ``False`` for an upstream-only / not-yet-pulled id).
+
+    By default, raw catalog entries whose modality (per
+    ``hal0.model_meta.classify``) is a NON-TEXT bucket
+    (``_NON_TEXT_MODALITIES`` — image/video-gen, TTS, ASR) are hidden: a
+    raw media-gen/audio passthrough id otherwise pollutes a chat client's
+    model picker. Text models (chat + embed + rerank) stay visible so a
+    client can still discover the embeddings/rerank endpoints. Pass
+    ``?show_all=true`` to see everything (slot alias entries are never
+    filtered — every enabled llm slot is a chat model by construction).
 
     PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
     catalog before sending Authorization headers continue to work.
     """
-    from hal0.api import hal0_chat_slot_model_ids, hal0_slot_alias_models
+    show_all = _parse_bool_param(request.query_params.get("show_all"))
+    data = await _aggregate_models(request, show_all=show_all)
+    return {"object": "list", "data": data}
+
+
+async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[str, Any]]:
+    """Build the ``/v1/models`` ``data`` list (see :func:`list_models`).
+
+    Split out so ``get_model`` can request the UNFILTERED aggregate
+    (``show_all=True``) for a by-id lookup — an explicit direct fetch must
+    resolve a valid id even when the LIST default would hide its modality
+    — while the list route keeps the clean default. The ``owned_by`` /
+    ``X-hal0-Model-Filter`` curation applies in both paths.
+    """
+    from hal0.api import (
+        hal0_apply_registry_detail,
+        hal0_chat_slot_model_ids,
+        hal0_slot_alias_models,
+    )
+    from hal0.model_meta import classify
 
     upstreams = request.app.state.upstreams
     model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {}) or {}
@@ -727,8 +821,9 @@ async def list_models(
             data.append(entry)
 
     # Chat-slot model ids are represented by their aliases above; suppress
-    # them from the raw upstream catalog so the composite ``hal0`` upstream
-    # doesn't emit duplicate ``id=<model_id>`` rows for the same chat slots.
+    # them from the raw upstream catalog so the direct-read composite
+    # catalogue doesn't emit duplicate ``id=<model_id>`` rows for the same
+    # chat slots.
     chat_model_ids: set[str] = set()
     if slot_manager is not None:
         try:
@@ -736,23 +831,63 @@ async def list_models(
         except Exception:
             chat_model_ids = set()
 
+    def _catalog_row(mid: str, owned_by: str) -> dict[str, Any] | None:
+        """Build one raw catalog row, or ``None`` if §21.5's default
+        modality filter hides it (see ``show_all`` in the docstring above).
+
+        Shared by both raw-catalog sources below (the direct-read
+        composite catalogue and the generic upstream loop) so the
+        registry lookup + labels/checkpoint/recipe/downloaded fold-in +
+        modality classification live in exactly one place.
+        """
+        registry_entry: Any = None
+        if model_registry is not None:
+            try:
+                if model_registry.has(mid):
+                    registry_entry = model_registry.get(mid)
+            except Exception:
+                registry_entry = None
+        if not show_all:
+            capabilities = getattr(registry_entry, "capabilities", None)
+            if classify(mid, capabilities=capabilities) in _NON_TEXT_MODALITIES:
+                return None
+        row: dict[str, Any] = {
+            "id": mid,
+            "object": "model",
+            "created": now,
+            "owned_by": owned_by,
+            "downloaded": registry_entry is not None,
+        }
+        hal0_apply_registry_detail(row, registry_entry)
+        return row
+
+    # Direct read of the composite model catalogue — every ready
+    # chat-capable slot's model id, aggregated straight from slot config
+    # (see hal0.api._fetch_hal0_composite_models). No pseudo-upstream is
+    # registered in the routing table for this, so there's nothing to fetch
+    # over HTTP here; ``model_cache["hal0"]`` is refreshed on startup,
+    # slot-state events, and the dispatcher passthrough path. Skipped when
+    # an operator has defined a real "hal0" upstream in upstreams.toml —
+    # that entry is picked up by the loop below like any other remote.
+    if upstreams.get("hal0") is None:
+        for mid in model_cache.get("hal0", []):
+            if mid in seen or mid in chat_model_ids:
+                continue
+            row = _catalog_row(mid, "hal0")
+            if row is None:
+                continue
+            seen.add(mid)
+            data.append(row)
+
     for u in upstreams.list():
         if not getattr(u, "enabled", True):
             continue
         if not getattr(u, "advertise_models", True):
             continue
-        # The composite ``hal0`` upstream's URL is hal0-api itself —
-        # going over HTTP here would re-enter this handler and loop. Its
-        # model list lives in ``upstream_models["hal0"]``, refreshed by
-        # ``_fetch_hal0_composite_models`` on startup, slot-state events,
-        # and the dispatcher passthrough path.
-        if u.kind == "slot" and u.slot_name is None and u.name == "hal0":
-            advertised = list(model_cache.get("hal0", []))
-        else:
-            try:
-                advertised = await upstreams.fetch_models(u.name)
-            except Exception:
-                advertised = []
+        try:
+            advertised = await upstreams.fetch_models(u.name)
+        except Exception:
+            advertised = []
         # Per-upstream curation of the discovery catalog only — the dispatch
         # cache keeps the full list, so filtered-out ids stay addressable.
         advertised = apply_filters(advertised, getattr(u, "model_filters", None))
@@ -763,15 +898,11 @@ async def list_models(
             # entry — don't list it twice.
             if mid in chat_model_ids:
                 continue
+            row = _catalog_row(mid, u.name)
+            if row is None:
+                continue
             seen.add(mid)
-            data.append(
-                {
-                    "id": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": u.name,
-                }
-            )
+            data.append(row)
     # Canonical virtual names (hal0/agent, hal0/utility, hal0/npu) are
     # no longer advertised here — the per-slot alias entries above already
     # cover every enabled llm slot, and dispatch resolves the canonical
@@ -795,7 +926,7 @@ async def list_models(
     if owner_filter:
         data = [d for d in data if d.get("owned_by") == owner_filter]
 
-    return {"object": "list", "data": data}
+    return data
 
 
 @public_router.get("/models/{model_id:path}")
@@ -810,9 +941,16 @@ async def get_model(
     advertise on their own ``/v1/models``). Pairs with ``list_models``
     so SDKs that resolve a model handle through ``/v1/models/{id}``
     before chatting don't need credentials to do so.
+
+    A by-id fetch is an EXPLICIT request, so it bypasses the LIST route's
+    default non-text-modality hiding (``_aggregate_models(show_all=True)``)
+    — a valid embed/rerank/image/tts/asr id resolves here even though the
+    unfiltered catalog list would omit it by default. The ``owned_by`` /
+    ``X-hal0-Model-Filter`` curation still applies (a mismatched owner
+    scopes the id out, unchanged from before).
     """
-    listing = await list_models(request, dispatcher)
-    for entry in listing.get("data", []):  # type: ignore[union-attr]
+    data = await _aggregate_models(request, show_all=True)
+    for entry in data:
         if isinstance(entry, dict) and entry.get("id") == model_id:
             return entry
     from hal0.dispatcher.router import NoRouteFound

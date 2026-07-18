@@ -44,8 +44,8 @@ production it is wired to hal0-api's ``/v1/chat/completions`` against the
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
-import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -55,6 +55,35 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
+from hal0.toolloop.engine import (
+    assistant_message as _assistant_message,
+)
+from hal0.toolloop.engine import (
+    assistant_text as _assistant_text,
+)
+from hal0.toolloop.engine import (
+    assistant_thinking as _assistant_thinking,
+)
+from hal0.toolloop.engine import (
+    extract_tool_calls as _extract_tool_calls,
+)
+from hal0.toolloop.engine import (
+    openai_tool_schema,
+    run_tool_loop,
+)
+from hal0.toolloop.engine import (
+    parse_text_tool_calls as _parse_text_tool_calls,
+)
+from hal0.toolloop.engine import (
+    split_thinking as _split_thinking,
+)
+
+# The names above are re-exported unchanged from the shared tool-loop core
+# (hal0.toolloop.engine) purely so existing test imports
+# (``from hal0.api.routes.board_chat import _extract_tool_calls, ...``)
+# keep working post-extraction — they're not called directly in this
+# module anymore (the loop now delegates to ``run_tool_loop``), which is
+# why they're listed in ``__all__`` below rather than looking unused.
 
 log = structlog.get_logger(__name__)
 
@@ -188,18 +217,9 @@ LlmFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 def _fn(name: str, desc: str, props: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {
-                "type": "object",
-                "properties": props,
-                "required": required,
-            },
-        },
-    }
+    return openai_tool_schema(
+        name, desc, {"type": "object", "properties": props, "required": required}
+    )
 
 
 def _tool_schemas() -> list[dict[str, Any]]:
@@ -289,7 +309,7 @@ def _tool_schemas() -> list[dict[str, Any]]:
         ),
         _fn(
             "list_agents",
-            "List the installed platform agents (e.g. hermes, pi-coder).",
+            "List the installed platform agents (e.g. hermes).",
             {},
             [],
         ),
@@ -901,207 +921,9 @@ def _sse(obj: dict[str, Any]) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pull + normalise tool_calls (arguments → dict) from a completion."""
-    choices = response.get("choices") or []
-    if not choices:
-        return []
-    msg = choices[0].get("message") or {}
-    out: list[dict[str, Any]] = []
-    for tc in msg.get("tool_calls") or []:
-        if not isinstance(tc, dict):
-            continue
-        fn = tc.get("function") or {}
-        raw_args = fn.get("arguments")
-        if isinstance(raw_args, str):
-            try:
-                args = json.loads(raw_args)
-                if not isinstance(args, dict):
-                    args = {}
-            except ValueError:
-                args = {}
-        elif isinstance(raw_args, dict):
-            args = raw_args
-        else:
-            args = {}
-        out.append({"id": tc.get("id", ""), "name": fn.get("name", ""), "arguments": args})
-    return out
-
-
-# Small / non-native models — e.g. a chat slot whose llama-server was started
-# WITHOUT ``--jinja``, so llama.cpp never applies the tool grammar — emit tool
-# calls as TEXT instead of the OpenAI-native ``message.tool_calls`` field. The
-# call then leaks into the chat bubble (``<tool_call>{"name": "get_board"…}``,
-# a fenced JSON block, a bare ``<function=…>`` tag, or a whole-content JSON
-# object) and never runs. As a fallback we scan the assistant text for those
-# conventions and — ONLY when the extracted name is a real surfaced tool, so
-# ordinary prose can never misfire — synthesise the call and strip its syntax
-# from the visible reply. The slot-side fix (``--jinja`` + a tool-capable
-# chat template) is still preferred; this keeps a weak model usable meanwhile.
-_TEXT_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
-_FUNCTION_TAG_RE = re.compile(
-    r"<function=([A-Za-z0-9_.\-]+)>\s*(\{.*?\})?\s*</function>", re.DOTALL | re.IGNORECASE
-)
-_FENCED_JSON_RE = re.compile(r"```(?:json|tool_call)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
-
-
-def _coerce_args(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else {}
-        except ValueError:
-            return {}
-    return {}
-
-
-def _toolcall_from_obj(obj: Any) -> tuple[str, dict[str, Any]] | None:
-    """Pull ``(name, arguments)`` from a parsed dict in the common shapes."""
-    if not isinstance(obj, dict):
-        return None
-    fn = obj.get("function") if isinstance(obj.get("function"), dict) else {}
-    name = obj.get("name") or fn.get("name")
-    if not isinstance(name, str) or not name:
-        return None
-    for key in ("arguments", "parameters", "args"):
-        if obj.get(key) is not None:
-            return name, _coerce_args(obj[key])
-    if fn.get("arguments") is not None:
-        return name, _coerce_args(fn["arguments"])
-    return name, {}
-
-
-def _parse_text_tool_calls(
-    text: str, known_names: frozenset[str]
-) -> tuple[list[dict[str, Any]], str]:
-    """Best-effort extraction of text-embedded tool calls.
-
-    Returns ``(calls, cleaned_text)``. Only calls whose name is a real
-    surfaced tool are accepted; matched spans are removed from the returned
-    text so the raw tool syntax is never shown to the operator.
-    """
-    if not text or not known_names:
-        return [], text
-    calls: list[dict[str, Any]] = []
-    spans: list[tuple[int, int]] = []
-
-    def _accept(name: str, args: dict[str, Any], span: tuple[int, int]) -> None:
-        if name in known_names:
-            calls.append({"id": f"txt-{len(calls)}-{name}", "name": name, "arguments": args})
-            spans.append(span)
-
-    # 1) <tool_call>…</tool_call> — JSON body or a nested <function=…> tag.
-    for m in _TEXT_TOOLCALL_RE.finditer(text):
-        body = m.group(1).strip()
-        fn = _FUNCTION_TAG_RE.search(body)
-        if fn:
-            _accept(fn.group(1), _coerce_args(fn.group(2) or "{}"), m.span())
-            continue
-        try:
-            parsed = _toolcall_from_obj(json.loads(body))
-        except ValueError:
-            parsed = None
-        if parsed:
-            _accept(parsed[0], parsed[1], m.span())
-
-    # 2) bare <function=NAME>{…}</function> outside a wrapper.
-    for m in _FUNCTION_TAG_RE.finditer(text):
-        if any(s <= m.start() < e for s, e in spans):
-            continue
-        _accept(m.group(1), _coerce_args(m.group(2) or "{}"), m.span())
-
-    # 3) fenced ```json {…}``` blocks.
-    for m in _FENCED_JSON_RE.finditer(text):
-        if any(s <= m.start() < e for s, e in spans):
-            continue
-        try:
-            parsed = _toolcall_from_obj(json.loads(m.group(1)))
-        except ValueError:
-            parsed = None
-        if parsed:
-            _accept(parsed[0], parsed[1], m.span())
-
-    # 4) the whole trimmed reply is a single JSON tool-call object.
-    if not calls:
-        stripped = text.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            try:
-                parsed = _toolcall_from_obj(json.loads(stripped))
-            except ValueError:
-                parsed = None
-            if parsed:
-                start = text.index(stripped)
-                _accept(parsed[0], parsed[1], (start, start + len(stripped)))
-
-    if not calls:
-        return [], text
-    cleaned = text
-    for s, e in sorted(spans, reverse=True):
-        cleaned = cleaned[:s] + cleaned[e:]
-    return calls, cleaned.strip()
-
-
 def _surfaced_tool_names(request: Request) -> frozenset[str]:
     """Names of the tools currently surfaced to the brain (for text-call gating)."""
     return frozenset(s["function"]["name"] for s in _surfaced_tool_schemas(request))
-
-
-def _assistant_text(response: dict[str, Any]) -> str:
-    choices = response.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    content = msg.get("content")
-    return content if isinstance(content, str) else ""
-
-
-# Reasoning models interleave chain-of-thought with the reply, either as a
-# separate message field (DeepSeek-style ``reasoning_content``) or inline
-# ``<think>…</think>`` tags (Qwen-style). Both are split out and streamed as
-# ``thinking`` frames so the UI can fold them away instead of rendering raw
-# think-tags in the chat bubble.
-_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-
-
-def _split_thinking(content: str) -> tuple[str, str]:
-    """Split ``<think>`` blocks out of assistant content → (thinking, visible)."""
-    if "<think>" not in content:
-        # DeepSeek-R1-style chat templates prefill the opening tag, so the
-        # completion can start mid-reasoning and carry only a closing tag.
-        if "</think>" in content:
-            reasoning, _, visible = content.partition("</think>")
-            return reasoning.strip(), visible.strip()
-        return "", content
-    thinking_parts = _THINK_RE.findall(content)
-    visible = _THINK_RE.sub("", content)
-    rest = visible.split("<think>", 1)
-    if len(rest) == 2:  # unterminated trailing <think> — all of it is reasoning
-        visible = rest[0]
-        thinking_parts.append(rest[1])
-    return "\n".join(p.strip() for p in thinking_parts if p.strip()), visible.strip()
-
-
-def _assistant_thinking(response: dict[str, Any]) -> str:
-    """Pull explicit reasoning fields off the assistant message."""
-    choices = response.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    for key in ("reasoning_content", "reasoning"):
-        value = msg.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _assistant_message(response: dict[str, Any]) -> dict[str, Any] | None:
-    choices = response.get("choices") or []
-    if not choices:
-        return None
-    msg = choices[0].get("message")
-    return msg if isinstance(msg, dict) else None
 
 
 # ── the loop ────────────────────────────────────────────────────────────────
@@ -1146,150 +968,129 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "tools": tools,
-        "stream": False,
         "max_tokens": int(payload.get("max_tokens") or _MAX_COMPLETION_TOKENS),
     }
 
+    dispatch_fn = functools.partial(_dispatch_round, request, client, board)
     try:
-        for _round in range(cfg.max_rounds):
-            response = await llm(body)
-            if isinstance(response, dict) and response.get("error"):
-                yield _sse({"type": "error", "message": str(response["error"])})
-                yield _sse({"type": "done"})
-                return
-
-            explicit_thinking = _assistant_thinking(response)
-            inline_thinking, text = _split_thinking(_assistant_text(response))
-
-            # Native tool_calls first; fall back to text-embedded calls (a slot
-            # without --jinja leaks them as content). The fallback strips the
-            # matched syntax from `text` so the raw call isn't shown as a token.
-            tool_calls = _extract_tool_calls(response)
-            if not tool_calls:
-                tool_calls, text = _parse_text_tool_calls(text, _surfaced_tool_names(request))
-
-            thinking = "\n".join(t for t in (explicit_thinking, inline_thinking) if t)
-            if thinking:
-                yield _sse({"type": "thinking", "text": thinking})
-            if text:
-                yield _sse({"type": "token", "text": text})
-
-            if not tool_calls:
-                yield _sse({"type": "done"})
-                return
-
-            assistant_msg = _assistant_message(response)
-            if assistant_msg is not None:
-                messages.append(assistant_msg)
-
-            for tc in tool_calls:
-                yield _sse(
-                    {
-                        "type": "tool_call",
-                        "id": tc["id"],
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
-                    }
-                )
-                try:
-                    result = await _dispatch_tool(
-                        request, client, tc["name"], tc["arguments"], board=board
-                    )
-                except Exception as exc:  # mutation failed — audited as error
-                    result = {"error": str(exc)}
-                yield _sse(
-                    {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
-                )
-                if isinstance(result, dict) and result.get("status") == "pending_approval":
-                    # Surface the gate in the chat thread itself — the top-bar
-                    # bell polls /api/agent/approvals, but without this frame
-                    # the thread shows a generic tool card and the operator
-                    # has no in-chat cue that the call is parked on them.
-                    approval_id = str(result.get("approval_id") or "")
-                    yield _sse(
-                        {
-                            "type": "approval_required",
-                            "id": tc["id"],
-                            "name": tc["name"],
-                            "approval_id": approval_id,
-                        }
-                    )
-                    # Pause the turn until the operator decides (or timeout).
-                    queue = getattr(request.app.state, "approval_queue", None)
-                    decided: dict[str, Any] | None = None
-                    waited = 0.0
-                    since_ping = 0.0
-                    while queue is not None and approval_id and waited < _APPROVAL_WAIT_S:
-                        entry = queue.get(approval_id)
-                        if entry is None:
-                            break
-                        if entry.state == "executed":
-                            raw = entry.result
-                            decided = (
-                                raw
-                                if isinstance(raw, dict)
-                                else {"status": "executed", "result": raw}
-                            )
-                            break
-                        if entry.state == "failed":
-                            decided = {
-                                "status": "error",
-                                "error": entry.error or "approved call failed",
-                            }
-                            break
-                        if entry.state == "denied":
-                            decided = {
-                                "status": "denied",
-                                "detail": (
-                                    "the operator denied this call — do not retry it; "
-                                    "ask what they want instead"
-                                ),
-                            }
-                            break
-                        await asyncio.sleep(_APPROVAL_POLL_S)
-                        waited += _APPROVAL_POLL_S
-                        since_ping += _APPROVAL_POLL_S
-                        if since_ping >= _APPROVAL_PING_EVERY_S:
-                            since_ping = 0.0
-                            yield _sse({"type": "ping"})
-                    if decided is not None:
-                        result = decided
-                        yield _sse(
-                            {
-                                "type": "tool_result",
-                                "id": tc["id"],
-                                "name": tc["name"],
-                                "result": result,
-                            }
-                        )
-                    else:
-                        result = {
-                            **result,
-                            "detail": (
-                                "queued for operator approval — no decision arrived while "
-                                "the turn waited. Tell the operator it is still pending "
-                                "(chat card or top-bar bell); once approved they can ask "
-                                "you to re-check the outcome."
-                            ),
-                        }
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": tc["name"],
-                        "content": json.dumps(result),
-                    }
-                )
-            body["messages"] = messages
-
-        # Budget exhausted.
-        yield _sse({"type": "error", "message": "chat loop budget exhausted"})
-        yield _sse({"type": "done"})
+        async for event in run_tool_loop(
+            llm,
+            tools,
+            dispatch_fn,
+            body=body,
+            max_rounds=cfg.max_rounds,
+            known_tool_names=_surfaced_tool_names(request),
+        ):
+            if event.get("type") == "response":
+                continue  # internal marker — never part of the documented SSE contract
+            yield _sse(event)
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.board_chat.loop_error", error=str(exc))
         yield _sse({"type": "error", "message": str(exc)})
         yield _sse({"type": "done"})
+
+
+async def _dispatch_round(
+    request: Request,
+    client: Any,
+    board: str | None,
+    tool_calls: list[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
+    """Sequentially dispatch one round's tool calls, pausing on approval gates.
+
+    An async generator (not a plain callback) — the loop core relays each
+    yielded event onward in real time, which is what lets a gated call's
+    keepalive pings reach the SSE stream while the turn is paused (see
+    :mod:`hal0.toolloop.engine` for why this must be generator delegation).
+    """
+    for tc in tool_calls:
+        yield {
+            "type": "tool_call",
+            "id": tc["id"],
+            "name": tc["name"],
+            "arguments": tc["arguments"],
+        }
+        try:
+            result = await _dispatch_tool(request, client, tc["name"], tc["arguments"], board=board)
+        except Exception as exc:  # mutation failed — audited as error
+            result = {"error": str(exc)}
+        yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
+        if isinstance(result, dict) and result.get("status") == "pending_approval":
+            # Surface the gate in the chat thread itself — the top-bar
+            # bell polls /api/agent/approvals, but without this frame
+            # the thread shows a generic tool card and the operator
+            # has no in-chat cue that the call is parked on them.
+            approval_id = str(result.get("approval_id") or "")
+            yield {
+                "type": "approval_required",
+                "id": tc["id"],
+                "name": tc["name"],
+                "approval_id": approval_id,
+            }
+            # Pause the turn until the operator decides (or timeout).
+            queue = getattr(request.app.state, "approval_queue", None)
+            decided: dict[str, Any] | None = None
+            waited = 0.0
+            since_ping = 0.0
+            while queue is not None and approval_id and waited < _APPROVAL_WAIT_S:
+                entry = queue.get(approval_id)
+                if entry is None:
+                    break
+                if entry.state == "executed":
+                    raw = entry.result
+                    decided = (
+                        raw if isinstance(raw, dict) else {"status": "executed", "result": raw}
+                    )
+                    break
+                if entry.state == "failed":
+                    decided = {
+                        "status": "error",
+                        "error": entry.error or "approved call failed",
+                    }
+                    break
+                if entry.state == "denied":
+                    decided = {
+                        "status": "denied",
+                        "detail": (
+                            "the operator denied this call — do not retry it; "
+                            "ask what they want instead"
+                        ),
+                    }
+                    break
+                await asyncio.sleep(_APPROVAL_POLL_S)
+                waited += _APPROVAL_POLL_S
+                since_ping += _APPROVAL_POLL_S
+                if since_ping >= _APPROVAL_PING_EVERY_S:
+                    since_ping = 0.0
+                    yield {"type": "ping"}
+            if decided is not None:
+                result = decided
+                yield {
+                    "type": "tool_result",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "result": result,
+                }
+            else:
+                result = {
+                    **result,
+                    "detail": (
+                        "queued for operator approval — no decision arrived while "
+                        "the turn waited. Tell the operator it is still pending "
+                        "(chat card or top-bar bell); once approved they can ask "
+                        "you to re-check the outcome."
+                    ),
+                }
+                # Not re-forwarded as its own SSE frame (matching pre-refactor
+                # behaviour) — the loop core still folds this updated
+                # ``result`` into the tool message the LLM sees next round.
+                yield {
+                    "type": "tool_result",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "result": result,
+                    "_engine_only": True,
+                }
 
 
 async def run_board_chat(request: Request) -> StreamingResponse:
@@ -1310,6 +1111,9 @@ __all__ = [
     "PRIMARY_SLOT_MODEL",
     "_admin_tool_names",
     "_admin_tool_schemas",
+    "_assistant_message",
+    "_assistant_text",
+    "_assistant_thinking",
     "_brain_chat_config",
     "_brain_tool_policy",
     "_chat_stream",
@@ -1317,10 +1121,13 @@ __all__ = [
     "_dispatch_admin_tool",
     "_dispatch_platform_tool",
     "_dispatch_tool",
+    "_extract_tool_calls",
     "_is_read_tool",
+    "_parse_text_tool_calls",
     "_resolve_platform_tool",
     "_resolve_read_tool",
     "_resolve_tool",
+    "_split_thinking",
     "_surfaced_tool_schemas",
     "_tool_schemas",
     "run_board_chat",

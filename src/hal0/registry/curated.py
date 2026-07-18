@@ -138,6 +138,16 @@ class CuratedModel(BaseModel):
             "The pull layer routes 'image' into the ComfyUI models tree."
         ),
     )
+    architecture: str | None = Field(
+        default=None,
+        description=(
+            "Model architecture id (e.g. 'qwen3next', 'mixtral'). §7.1d — "
+            "replaces reading 'mtp'/'a3b' out of tags for MoE detection "
+            "(hardware/recommend.is_moe). None for entries that have not "
+            "been backfilled yet; the is_moe check falls back to the "
+            "tags/id heuristic in that case."
+        ),
+    )
     backend: str = Field(
         default="",
         description=(

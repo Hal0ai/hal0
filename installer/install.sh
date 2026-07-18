@@ -405,7 +405,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # never touches — a box could sail through pre-flight with 20 GB free on
     # / while the actual model store is nearly full. Measure it too, but
     # non-fatal (warn only, per the Q4 posture in
-    # handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
+    # docs/archive/handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
     # yet at install time, so an undersized store shouldn't hard-block the
     # rest of the platform gate the way a genuinely full root disk should —
     # `hal0 setup` / the pull gate re-validates before any download lands.
@@ -414,7 +414,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # Container-runtime graphroot disk check: same cross-mount blind spot as
     # the model-store check above, but for image storage. The VAR_DIR probe
     # only measures VAR_DIR's own mount; multi-GB toolbox runners +
-    # OpenWebUI + ComfyUI + Honcho images land in the runtime's graphroot
+    # OpenWebUI + ComfyUI images land in the runtime's graphroot
     # (/var/lib/containers for podman, /var/lib/docker for docker), which is
     # frequently a separate mount when an operator relocates var-dir or
     # deliberately puts container storage on its own volume. Without this, a
@@ -445,7 +445,7 @@ fi
 #
 # Created here, immediately after pre-flight and BEFORE any filesystem
 # mutation (was previously created much later, after directories/units/
-# config were already written — handoffs/installer-setup-plan-2026-07-05.md
+# config were already written — docs/archive/handoffs/installer-setup-plan-2026-07-05.md
 # Q1), so the render/video group membership below is settled before any
 # later step that depends on group membership or on the user existing
 # (the FLM cache / HF cache / STATE.md ownership work further down).
@@ -661,24 +661,23 @@ fi
 
 ui_step "Node.js toolchain"
 
-# Node/npm is a hard dependency for THREE things: the dashboard UI build
-# right below, and the pi-coder + opencode bundled agents (both shell out to
-# npm; `hal0 agent install pi-coder`/`opencode` fail with a misleading
-# "upstream breaking change" message when npm is simply absent — the real
-# cause is no Node on the box). Provisioning it here, once, up front covers
-# all three instead of only warning in the Dashboard UI step below and
-# leaving the agent installs to fail later with no clue why. Best-effort:
-# resolve_node tries an already-present Node >=20 first, then auto-installs
-# via the detected package manager (NodeSource setup script on Debian/
-# Ubuntu, since their base repos ship an ancient Node; direct package
-# install elsewhere); never fatal — a Node-less box still installs, just
-# without the dashboard build / those two agents until Node is added later.
+# Node/npm is a hard dependency for the dashboard UI build right below
+# (the pi-coder + opencode bundled agents used to need it too — both shelled
+# out to npm — but those speculative drivers were deleted; hal0 v0.3 only
+# ever ships hermes, which doesn't need Node). Provisioning it here, once,
+# up front covers the dashboard build instead of only warning in the
+# Dashboard UI step below. Best-effort: resolve_node tries an
+# already-present Node >=20 first, then auto-installs via the detected
+# package manager (NodeSource setup script on Debian/Ubuntu, since their
+# base repos ship an ancient Node; direct package install elsewhere); never
+# fatal — a Node-less box still installs, just without the dashboard build
+# until Node is added later.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build / pi-coder / opencode agents)"
+    info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build)"
 elif HAL0_NODE_AUTOINSTALL=1 resolve_node; then
     info "node: $(node -v 2>/dev/null || echo present) (>= ${NODE_MIN_MAJOR} LTS)"
 else
-    warn "could not provision Node.js ${NODE_MIN_MAJOR}+ LTS — dashboard UI build will be skipped; pi-coder/opencode agent installs will fail until Node is installed"
+    warn "could not provision Node.js ${NODE_MIN_MAJOR}+ LTS — dashboard UI build will be skipped until Node is installed"
     warn "  install manually: https://nodejs.org/en/download (or your distro's nodejs/NodeSource package), then re-run install.sh"
 fi
 
@@ -930,11 +929,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-# Group-writable umask so files the API writes into a shared editable tree stay
-# editable by the hal0 group (Hermes & in-runtime agents) — part of the #843
-# root-clobber fix. Harmless on an immutable FHS install.
-UMask=0002
+User=hal0
+Group=hal0
+# hal0-api writes /etc/hal0/* + /var/lib/hal0/* directly — those trees are
+# hal0:hal0 2775/setgid (src/hal0/install/perms.py, P3-perms). Privileged IO
+# (systemd unit writes, daemon-reload, slot start/stop/restart) routes through
+# \`sudo -n /usr/lib/hal0/bin/hal0-systemctl\` — the one narrow seam (see the
+# hal0-systemctl wrapper install below). UMask is the default 0022: no
+# group-writable kludge needed, the setgid dirs already cover group access.
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
 # Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
@@ -956,10 +958,10 @@ WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
 
-# Hardened mode removed: hal0-api now always runs as root (User=root above), so
-# updates / systemd drop-in writes / service restarts work without a privileged
-# seam. Remove any stale run-as-hal0 drop-in left by an older hardened-perms
-# install so upgrading such a box reverts the unit cleanly to User=root.
+# P3-perms: hal0-api now ships User=hal0 directly (no drop-in needed — the
+# unit above IS the hardened posture). Clean up the OLD drop-in dir a
+# pre-P3-perms hardened-perms attempt may have left behind, so upgrading such
+# a box doesn't carry stale (and now meaningless) unit fragments.
 API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
 rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
 rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
@@ -1121,8 +1123,9 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         install -m 0755 "${BENCH_SRC}/server_ab.py"             "${LIB_DIR}/bench/server_ab.py"
         install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
         install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" "${VAR_DIR}/benchmarks/server-ab"
-        chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
-        chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
+        # P3-perms: benchmarks/ (+ runs/, logs/, server-ab/) is now a declared
+        # OwnershipStore row (hal0:hal0 2775) — the `doctor perms --fix`
+        # backstop before "Service start" applies it; no explicit chown needed.
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
 
         # hal0.bench v2 (design 2026-07-05): suite seeds + politeness window are
@@ -1200,6 +1203,37 @@ PYEOF
             fi
         else
             warn "${BENCHCTL_SUDOERS_SRC} not found — benchmark sudoers grant not installed"
+        fi
+    fi
+
+    # Privileged seam #4 (P3-perms): hal0-systemctl covers the genuinely-root
+    # ops the now-unprivileged hal0-api (User=hal0 above) still needs — writing
+    # per-slot systemd units, daemon-reload, and start/stop/restart of a slot
+    # unit (+ restarting hal0-api itself on self-update). Narrow + validated
+    # (no shell, no wildcards, literal slot-id regex) — see the wrapper source.
+    SYSTEMCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-systemctl"
+    if [[ -f "${SYSTEMCTL_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${SYSTEMCTL_SRC}" "${LIB_DIR}/bin/hal0-systemctl"
+        info "wrote ${LIB_DIR}/bin/hal0-systemctl"
+    else
+        warn "${SYSTEMCTL_SRC} not found — systemctl seam helper not installed"
+    fi
+
+    # sudoers grant for the systemctl seam. Real installs only; visudo-validate
+    # before activating so a malformed drop-in can never wedge sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        SYSTEMCTL_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-systemctl"
+        SYSTEMCTL_SUDOERS_DST="/etc/sudoers.d/hal0-systemctl"
+        if [[ -f "${SYSTEMCTL_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${SYSTEMCTL_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${SYSTEMCTL_SUDOERS_SRC}" "${SYSTEMCTL_SUDOERS_DST}"
+                info "wrote ${SYSTEMCTL_SUDOERS_DST}"
+            else
+                warn "${SYSTEMCTL_SUDOERS_SRC} failed visudo check — systemctl sudoers grant not installed"
+            fi
+        else
+            warn "${SYSTEMCTL_SUDOERS_SRC} not found — systemctl sudoers grant not installed"
         fi
     fi
 else
@@ -1574,16 +1608,33 @@ COMFYUI_MODELS_ROOT="/mnt/ai-models/comfyui"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping ComfyUI model-share setup (no system writes)"
+elif [[ "${HAL0_SKIP_COMFYUI:-0}" == "1" ]]; then
+    info "HAL0_SKIP_COMFYUI=1 — skipping ComfyUI model-share setup"
 else
     # Create the model-share subdirs bind-mounted by the img slot container.
+    # COMFYUI_MODELS_ROOT is frequently an NFS / shared mount (e.g.
+    # /mnt/ai-models forwarded into an LXC) whose squashed or foreign owner
+    # DENIES chmod — so `install -d`/`install -m` blow up with "Operation not
+    # permitted" and abort the whole install. ComfyUI is optional (the img
+    # slot only needs the dirs to EXIST), so use plain mkdir -p (no mode
+    # change) and treat perms/copy failures as warnings, never fatal. Operators
+    # who don't want ComfyUI at all can set HAL0_SKIP_COMFYUI=1.
+    _comfy_ok=1
     for _subdir in models output input user custom_nodes; do
-        install -d "${COMFYUI_MODELS_ROOT}/${_subdir}"
+        mkdir -p "${COMFYUI_MODELS_ROOT}/${_subdir}" 2>/dev/null || _comfy_ok=0
     done
-    info "ensured ${COMFYUI_MODELS_ROOT}/{models,output,input,user,custom_nodes}"
+    if [[ "${_comfy_ok}" -eq 1 ]]; then
+        info "ensured ${COMFYUI_MODELS_ROOT}/{models,output,input,user,custom_nodes}"
+    else
+        warn "could not create some ${COMFYUI_MODELS_ROOT} subdirs (read-only or NFS-squashed perms?) — ComfyUI img slot may be degraded; set HAL0_SKIP_COMFYUI=1 to silence"
+    fi
 
     if [[ -d "${COMFYUI_CUSTOM_NODES_SRC}" ]]; then
-        install -m0644 "${COMFYUI_CUSTOM_NODES_SRC}"/*.py "${COMFYUI_MODELS_ROOT}/custom_nodes/"
-        info "wrote ComfyUI custom nodes → ${COMFYUI_MODELS_ROOT}/custom_nodes/"
+        if cp "${COMFYUI_CUSTOM_NODES_SRC}"/*.py "${COMFYUI_MODELS_ROOT}/custom_nodes/" 2>/dev/null; then
+            info "wrote ComfyUI custom nodes → ${COMFYUI_MODELS_ROOT}/custom_nodes/"
+        else
+            warn "could not write ComfyUI custom nodes to ${COMFYUI_MODELS_ROOT}/custom_nodes/ (perms) — skipped"
+        fi
     else
         warn "${COMFYUI_CUSTOM_NODES_SRC} not found — ComfyUI custom nodes not installed"
     fi
@@ -1595,8 +1646,11 @@ else
     if [[ -f "${_EXTRA_PATHS_DST}" ]]; then
         info "${_EXTRA_PATHS_DST} exists — left alone"
     elif [[ -f "${_EXTRA_PATHS_SRC}" ]]; then
-        install -m0644 "${_EXTRA_PATHS_SRC}" "${_EXTRA_PATHS_DST}"
-        info "wrote ${_EXTRA_PATHS_DST}"
+        if cp "${_EXTRA_PATHS_SRC}" "${_EXTRA_PATHS_DST}" 2>/dev/null; then
+            info "wrote ${_EXTRA_PATHS_DST}"
+        else
+            warn "could not write ${_EXTRA_PATHS_DST} (perms) — create manually"
+        fi
     else
         warn "${_EXTRA_PATHS_SRC} not found — extra_model_paths.yaml not placed (create manually)"
     fi
@@ -1642,21 +1696,17 @@ else
     # Shared STATE.md (#766). The hermes agent runs as hal0 and its
     # render-context (re)writes ${VAR_DIR}/STATE.md — the live snapshot the
     # Claude session-start hook cats — via a tmp+rename that needs *directory*
-    # write on ${VAR_DIR}. Grant the hal0 group write on the top dir
-    # (setgid so new entries inherit group hal0). Ownership stays root, so
-    # root-owned slots/registry/models are untouched; this preserves the
-    # ".cache NOT the whole VAR_DIR" posture above.
+    # write on ${VAR_DIR}.
     #
-    # NOT sticky (#766 follow-up): render runs as root during provisioning
-    # (creating a root-owned STATE.md) but as hal0 at runtime — the hal0
-    # rename-over of a root-owned STATE.md needs plain directory write, which
-    # the sticky bit would deny (it'd require owning the existing file). The
-    # group-write grant is what systemd's `ReadWritePaths=/var/lib/hal0`
-    # already assumes, so this just makes the filesystem agree.
-    chgrp hal0 "${VAR_DIR}"
-    chmod 2775 "${VAR_DIR}"
+    # P3-perms: ${VAR_DIR} itself (owner hal0, setgid 2775) and STATE.md are
+    # now declared rows in src/hal0/install/perms.py's OwnershipStore — the
+    # explicit chgrp/chmod/chown dance this comment used to describe (kept
+    # ${VAR_DIR}'s OWNER at root because hal0-api used to write slot
+    # state.json/registry AS ROOT) is redundant now that hal0-api runs
+    # User=hal0 (below) and the `doctor perms --fix` backstop (before "Service
+    # start") applies the table before the daemon's first start. Just create
+    # the file; ownership lands via the table.
     touch "${VAR_DIR}/STATE.md"
-    chown hal0:hal0 "${VAR_DIR}/STATE.md"
 
     # Seed the agent config + secret dirs (root-owned; the agent driver reads
     # agents/, and systemd reads the secrets/ EnvironmentFile as root). The hermes
@@ -1690,7 +1740,11 @@ BUNDLES_DST="${VAR_DIR}/models/collections/omni"
 if [[ -d "${BUNDLES_SRC}" ]]; then
     mkdir -p "${BUNDLES_DST}"
     if cp -f "${BUNDLES_SRC}"/*.json "${BUNDLES_DST}/" 2>/dev/null; then
-        chown -R hal0:hal0 "${VAR_DIR}/models/collections" 2>/dev/null || true
+        # P3-perms: no chown needed — these manifests are READ-ONLY content
+        # (the bundle picker only reads them); root:root 0644 is world-readable,
+        # same posture as /etc/hal0/agents/ + secrets/ staying root:root
+        # elsewhere in the table (read-only surfaces don't need service
+        # ownership).
         info "installed bundle manifests → ${BUNDLES_DST}"
     else
         warn "failed to copy bundle manifests from ${BUNDLES_SRC}"
@@ -1724,13 +1778,32 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         info "no bundled skills at ${SKILLS_SRC} — drop-in dirs still created"
     fi
     # Writable drop-in (agent runs as hal0): add/edit skills at runtime here.
-    chown -R hal0:hal0 "${SKILLS_DROPIN}" 2>/dev/null || true
+    # P3-perms: skills/ is a declared OwnershipStore row (hal0:hal0 2775) —
+    # the `doctor perms --fix` backstop before "Service start" applies it.
     info "skill drop-in: ${SKILLS_DROPIN} (drop a folder here to add a skill; editable)"
 else
     info "dev mode — skipping system skill install (/usr/share/hal0/skills)"
 fi
 
 ui_step "Service start"
+
+# P3-perms migration backstop: hal0-api ships User=hal0 (above), so /etc/hal0
+# + /var/lib/hal0 must already be hal0-owned (2775/setgid) BEFORE the unit's
+# first start, or the daemon can't read/write its own config on boot. The
+# config-seed steps earlier in this script mostly write as root (see the
+# per-block P3-perms notes above); this one-shot `doctor perms --fix --force`
+# (root-gated, atomic w/ rollback — src/hal0/install/perms.py) reconciles the
+# WHOLE declared table against disk right before the daemon needs it, both on
+# a fresh install and on an upgrade of a pre-P3-perms box. Non-fatal: don't
+# let a hiccup here abort an otherwise-good install — `hal0 doctor perms`
+# surfaces any residual drift afterward.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    if "${HAL0_BIN}" doctor perms --fix --force; then
+        info "ownership table applied (P3-perms) — /etc/hal0 + /var/lib/hal0 are hal0-owned"
+    else
+        warn "'${HAL0_BIN} doctor perms --fix' reported drift/errors — re-run 'sudo ${HAL0_BIN} doctor perms --fix' after install"
+    fi
+fi
 
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
@@ -1836,260 +1909,6 @@ else
         fi
     fi
 
-    # ── Memory engine (Honcho) ────────────────────────────────────────────────
-    # Optional second memory pipeline: self-hosted Honcho v3 (docker compose
-    # stack — api+deriver+pgvector+redis; installer/honcho/README.md has
-    # provenance/upgrade notes). Opt-in only (unlike Hindsight, which is
-    # default-on with a skip switch): set HAL0_INSTALL_HONCHO=1 to install it.
-    # A sync unit (hal0-honcho-sync.service/.timer) mirrors new Honcho
-    # conclusions into Hindsight so graph extraction stays fresh; it ships
-    # installed but NOT enabled — the operator opts in once there's history
-    # worth syncing.
-    if [[ "${HAL0_INSTALL_HONCHO:-0}" -eq 1 ]]; then
-        HC_DIR="${VAR_DIR}/honcho"
-        HONCHO_REF="${HONCHO_REF:-73453f892d8a44e322447dfe06db969caeb200a4}"  # main pin: v3.0.9 lacks STRUCTURED_OUTPUT_MODE (needed for local llama backends)
-        HONCHO_COMPOSE_SRC="${REPO_ROOT}/installer/honcho/docker-compose.yml"
-        HONCHO_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho.service"
-        HONCHO_SYNC_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.service"
-        HONCHO_SYNC_TIMER_SRC="${REPO_ROOT}/installer/systemd/hal0-honcho-sync.timer"
-
-        info "setting up Honcho memory engine (podman compose stack) — this can take a few minutes…"
-
-        # podman-native (see hal0-honcho.service): `podman compose`
-        # delegates to a compose provider binary over podman.socket — no
-        # docker engine required.
-        #
-        # Require docker-compose-v2 (the `docker compose` CLI plugin) as
-        # that provider — NOT podman-compose. Live-reproduced on Ubuntu
-        # 24.04 (unprivileged LXC, #F30): the packaged podman-compose
-        # cannot parse hal0's honcho docker-compose.yml at all — it
-        # crashes inside its own container_to_args() ("TypeError: join()
-        # argument must be str, bytes, or os.PathLike, not 'dict'") on a
-        # perfectly valid compose file, so hal0-honcho.service crash-loops
-        # forever and Honcho never comes up. docker-compose-v2 parses the
-        # same file fine, and `podman compose`'s own provider search
-        # already prefers docker-compose over podman-compose whenever both
-        # are present (see `podman help compose`) — so installing
-        # docker-compose-v2 is enough to win the resolution, without
-        # having to uninstall any podman-compose that's already there.
-        #
-        # docker-compose-v2's package chain still drags in Docker's
-        # AppArmor integration on Debian-family hosts — "install profile
-        # containers-default apparmor: exit 243" — which broke `podman
-        # run` entirely in an unprivileged LXC (#F26), taking down the
-        # box's PRIMARY runtime while standing up an *optional* memory
-        # backend. Harden podman's own AppArmor posture FIRST via a
-        # containers.conf.d drop-in (survives package upgrades, never
-        # touches an operator-owned containers.conf) BEFORE installing
-        # docker-compose-v2, not after.
-        mkdir -p /etc/containers/containers.conf.d
-        cat > /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf <<'HC_APPARMOR_EOF'
-# Written by hal0's installer (Honcho standup, #F26/#F30): installing
-# docker-compose-v2 as the honcho stack's compose provider pulls Docker's
-# AppArmor integration, which in an unprivileged LXC can leave podman's
-# own "containers-default" profile unloadable. Pin podman to
-# apparmor_profile=unconfined so it keeps working regardless.
-[containers]
-apparmor_profile = "unconfined"
-HC_APPARMOR_EOF
-
-        case "$(pkg_mgr 2>/dev/null)" in
-            apt-get) apt-get install -y docker-compose-v2 >/dev/null 2>&1 || true ;;
-            dnf) dnf install -y docker-compose-plugin >/dev/null 2>&1 || true ;;
-            yum) yum install -y docker-compose-plugin >/dev/null 2>&1 || true ;;
-            zypper) zypper install -y docker-compose >/dev/null 2>&1 || true ;;
-            pacman) pacman -S --noconfirm docker-compose >/dev/null 2>&1 || true ;;
-        esac
-        if ! podman info >/dev/null 2>&1; then
-            warn "podman appears broken after installing docker-compose-v2 — check 'podman info' (apparmor hardening is at /etc/containers/containers.conf.d/99-hal0-honcho-apparmor.conf)"
-        fi
-
-        hc_compose_ok=0
-        if podman compose version >/dev/null 2>&1; then
-            hc_compose_ok=1
-        else
-            warn "podman compose still unavailable — Honcho will be skipped (install docker-compose-v2 — the Docker Compose v2 CLI plugin — and re-run)"
-        fi
-
-        if [[ "${hc_compose_ok}" -eq 1 ]]; then
-            mkdir -p "${HC_DIR}/pgdata" "${HC_DIR}/redis-data"
-
-            # Idempotent shallow clone: skip re-cloning if src is already
-            # checked out at HONCHO_REF.
-            hc_cur_ref=""
-            hc_cur_tag=""
-            if [[ -d "${HC_DIR}/src/.git" ]]; then
-                hc_cur_ref="$(git -C "${HC_DIR}/src" rev-parse HEAD 2>/dev/null || true)"
-                hc_cur_tag="$(git -C "${HC_DIR}/src" describe --tags --exact-match 2>/dev/null || true)"
-            fi
-            if [[ "${hc_cur_ref}" == "${HONCHO_REF}" || "${hc_cur_tag}" == "${HONCHO_REF}" ]]; then
-                info "Honcho source already at ${HONCHO_REF} — skipping clone"
-            else
-                rm -rf "${HC_DIR}/src"
-                # init+fetch instead of clone --branch: HONCHO_REF may be a
-                # commit sha (tags and branches also work with this form).
-                if git init -q "${HC_DIR}/src" \
-                    && git -C "${HC_DIR}/src" remote add origin https://github.com/plastic-labs/honcho \
-                    && git -C "${HC_DIR}/src" fetch -q --depth 1 origin "${HONCHO_REF}" \
-                    && git -C "${HC_DIR}/src" checkout -q FETCH_HEAD; then
-                    info "checked out plastic-labs/honcho @ ${HONCHO_REF}"
-                else
-                    warn "failed to fetch plastic-labs/honcho @ ${HONCHO_REF} — Honcho will be unavailable"
-                fi
-            fi
-
-            if [[ -d "${HC_DIR}/src" ]]; then
-                install -m644 "${HONCHO_COMPOSE_SRC}" "${HC_DIR}/docker-compose.yml"
-
-                # /etc/hal0/honcho.env is rendered by hal0 itself (DB/cache/
-                # provider config). Best-effort: the compose env_file entry is
-                # `required: false`, so the stack still comes up without it if
-                # the CLI verb isn't available yet at this point in a fresh
-                # install (same posture as the memory bank seeding above).
-                if [[ -x "${HAL0_BIN}" ]]; then
-                    "${HAL0_BIN}" memory honcho render-env --no-restart >/dev/null 2>&1 \
-                        || warn "honcho.env render failed — rerun '${HAL0_BIN} memory honcho render-env' later"
-                else
-                    warn "hal0 CLI not available yet — skipping honcho.env render (rerun 'hal0 memory honcho render-env' later)"
-                fi
-
-                HC_IMAGE_TAG="hal0-honcho:main-73453f8"
-                info "building Honcho image (podman build — this is slow on first run)…"
-                if ! podman image exists "${HC_IMAGE_TAG}" \
-                    && ! (cd "${HC_DIR}/src" && podman build -t "${HC_IMAGE_TAG}" .); then
-                    warn "Honcho image build failed; check the build log above"
-                fi
-
-                install -m644 "${HONCHO_UNIT_SRC}" /etc/systemd/system/hal0-honcho.service
-                install -m644 "${HONCHO_SYNC_UNIT_SRC}" /etc/systemd/system/hal0-honcho-sync.service
-                install -m644 "${HONCHO_SYNC_TIMER_SRC}" /etc/systemd/system/hal0-honcho-sync.timer
-                systemctl daemon-reload
-
-                hc_up=0
-                # Only enable the unit when the image actually exists — its
-                # ExecStart is `podman compose ... up --no-build`, so on a
-                # missing image (build failed above) it would just
-                # restart-loop until systemd's StartLimitBurst trips and
-                # then sit `failed`, instead of the honest "not installed"
-                # the rest of this block reports for a missing prerequisite
-                # (same defensive posture as the openwebui/hindsight blocks).
-                if podman image exists "${HC_IMAGE_TAG}" >/dev/null 2>&1; then
-                    # ── schema migration + pgvector dim reconciliation
-                    # (#F27/#F31, HIGH) ─────────────────────────────────────
-                    # A fresh Honcho DB has NO tables at all until Honcho's
-                    # own alembic migrations run — honcho's pgvector schema
-                    # is created (at its OWN default embedding dimension,
-                    # 1536) only as a side effect of the api/deriver
-                    # containers booting. hal0 already pinned
-                    # EMBEDDING_VECTOR_DIMENSIONS to whatever hal0's actual
-                    # embedding model produces (1024 for qwen3-embedding),
-                    # and honcho-api treats that mismatch as fatal
-                    # (StartupValidationError), crash-looping forever rather
-                    # than reconciling itself — live-reproduced on Ubuntu
-                    # 24.04 LXC. Bring up ONLY database+redis first, then
-                    # run, in order, inside the honcho image against the
-                    # compose DB: (1) `alembic upgrade head` to CREATE the
-                    # schema — on a fresh DB, configure_embeddings.py itself
-                    # errors with "required vector columns missing —
-                    # Run `alembic upgrade head` first" because there are no
-                    # tables yet; (2) scripts/configure_embeddings.py --yes
-                    # to align pgvector's dimension. THEN start the full
-                    # stack, so api/deriver boot against an already-correct
-                    # schema instead of racing it during compose's
-                    # dependency-ordered startup. Verified manually: this
-                    # exact order (alembic, then configure_embeddings, then
-                    # the api) is what gets honcho-api healthy.
-                    hc_embed_dim="$(sed -n 's/^EMBEDDING_VECTOR_DIMENSIONS=//p' /etc/hal0/honcho.env 2>/dev/null | tail -1)"
-                    hc_embed_dim="${hc_embed_dim:-1024}"
-                    hc_db_uri="postgresql+psycopg://postgres:postgres@database:5432/postgres"
-                    if podman compose --project-name hal0-honcho -f "${HC_DIR}/docker-compose.yml" \
-                        up -d --no-build database redis >/dev/null 2>&1; then
-                        hc_db_up=0
-                        for _ in $(seq 1 20); do
-                            if podman run --rm --network hal0-honcho_default pgvector/pgvector:pg15 \
-                                pg_isready -h database -U postgres >/dev/null 2>&1; then
-                                hc_db_up=1
-                                break
-                            fi
-                            sleep 3
-                        done
-                        if [[ "${hc_db_up}" -eq 1 ]]; then
-                            info "creating Honcho database schema (alembic upgrade head)…"
-                            hc_alembic_ok=0
-                            if podman run --rm --network hal0-honcho_default \
-                                -e DB_CONNECTION_URI="${hc_db_uri}" \
-                                --entrypoint /app/.venv/bin/alembic \
-                                "${HC_IMAGE_TAG}" upgrade head >/dev/null 2>&1; then
-                                hc_alembic_ok=1
-                                info "Honcho database schema created"
-                            else
-                                warn "alembic upgrade head failed — Honcho has no schema; configure_embeddings.py and honcho-api will fail"
-                                warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} --entrypoint /app/.venv/bin/alembic ${HC_IMAGE_TAG} upgrade head"
-                            fi
-
-                            if [[ "${hc_alembic_ok}" -eq 1 ]]; then
-                                info "reconciling Honcho pgvector schema to ${hc_embed_dim} dims…"
-                                if podman run --rm --network hal0-honcho_default \
-                                    -e DB_CONNECTION_URI="${hc_db_uri}" \
-                                    -e EMBEDDING_VECTOR_DIMENSIONS="${hc_embed_dim}" \
-                                    --entrypoint /app/.venv/bin/python \
-                                    "${HC_IMAGE_TAG}" scripts/configure_embeddings.py --yes >/dev/null 2>&1; then
-                                    info "Honcho pgvector schema reconciled to ${hc_embed_dim} dims"
-                                else
-                                    warn "configure_embeddings.py failed — honcho-api may crash-loop on a dimension mismatch"
-                                    warn "  rerun by hand: podman run --rm --network hal0-honcho_default -e DB_CONNECTION_URI=${hc_db_uri} -e EMBEDDING_VECTOR_DIMENSIONS=${hc_embed_dim} --entrypoint /app/.venv/bin/python ${HC_IMAGE_TAG} scripts/configure_embeddings.py --yes"
-                                fi
-                            fi
-                        else
-                            warn "Honcho database did not become reachable in time — skipping schema migration (honcho-api may crash-loop)"
-                        fi
-                    else
-                        warn "failed to start Honcho database+redis ahead of schema migration — honcho-api may crash-loop"
-                    fi
-
-                    systemctl enable --now hal0-honcho
-
-                    # Persist [honcho].enabled=true so hal0's own config
-                    # agrees with the unit it just enabled. Without this,
-                    # `hal0-honcho.service` runs but HonchoConfig.enabled
-                    # (default False) stays false — GET
-                    # /api/memory/honcho/stats reports the stack as
-                    # "disabled" while it's actually reachable, and the
-                    # dashboard Honcho card shows a running stack as off.
-                    # Best-effort: the venv/CLI are already up by this
-                    # point, but a config-write hiccup here must not abort
-                    # an otherwise-good install.
-                    if [[ -x "${VENV_DIR}/bin/python" ]]; then
-                        if "${VENV_DIR}/bin/python" -c '
-from hal0.config.loader import load_hal0_config, save_hal0_config
-cfg = load_hal0_config()
-if not cfg.honcho.enabled:
-    cfg.honcho.enabled = True
-    save_hal0_config(cfg)
-' 2>/dev/null; then
-                            info "set [honcho].enabled=true in ${ETC_DIR}/hal0.toml"
-                        else
-                            warn "could not persist [honcho].enabled=true — set it manually: hal0 config edit"
-                        fi
-                    fi
-
-                    for _ in $(seq 1 40); do
-                        if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then hc_up=1; break; fi
-                        sleep 3
-                    done
-                    if [[ "${hc_up}" -eq 1 ]]; then
-                        info "Honcho is running (memory engine on 127.0.0.1:8000)"
-                    else
-                        warn "Honcho not healthy yet; check 'journalctl -u hal0-honcho -n 40' or 'docker compose --project-name hal0-honcho -f ${HC_DIR}/docker-compose.yml ps'"
-                    fi
-                else
-                    warn "skipping 'systemctl enable --now hal0-honcho' — no local ${HC_IMAGE_TAG} image (build failed above); the unit would just restart-loop"
-                    warn "  fix the build (see the log above) then: systemctl enable --now hal0-honcho"
-                fi
-            fi
-        fi
-    fi
-
     # Escape hatch: HAL0_SKIP_OPENWEBUI=1 for operators who don't want the
     # bundled chat UI — same "skip now, install later" contract as
     # HAL0_SKIP_HERMES above. `hal0 app install openwebui` (issue #1102 / Q9)
@@ -2153,6 +1972,19 @@ if not cfg.honcho.enabled:
     # provision is skipped and the block below just (re)enables the unit.
     # hal0-api is already up at this point (enabled + wait_active above), which
     # the bootstrap preflight requires.
+    #
+    # P3-perms note: this call is intentionally left running as root, NOT
+    # dropped to hal0. The bootstrap pipeline ALSO writes /usr/local/bin/hermes
+    # (+ the hal0-hermes back-compat symlink) — a genuinely root-only path
+    # (hermes_provision.py's `_phase_install`) — alongside $HERMES_HOME/config
+    # writes that a hal0-owned tree would prefer to receive born-owned. A true
+    # born-owned fix here needs hermes_provision.py itself to split "write
+    # /usr/local/bin as root" from "write $HERMES_HOME/config as hal0" (e.g. an
+    # in-process privilege drop between phases) — out of scope for this pass.
+    # hermes_provision.py's chown-back (`_chown_tree_to_hal0` /
+    # `_phase_ownership_reconcile`) is therefore still load-bearing for THIS
+    # call site and intentionally NOT removed; see the P3-perms follow-up note
+    # in hermes_provision.py's module docstring.
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"

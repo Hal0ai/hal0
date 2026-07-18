@@ -19,12 +19,17 @@ from unittest.mock import patch
 import pytest
 
 from hal0.registry.model import Model
+
+# ML-1: `ModelRegistry` now names the SQLite-backed store. This file tests
+# the TOML-specific implementation itself (atomic write, mtime cache,
+# corrupt-file tolerance, directory fsync) under its own name,
+# `TomlModelRegistry`, aliased here so the rest of the file is unchanged.
 from hal0.registry.store import (
     ModelAlreadyExists,
     ModelNotFound,
-    ModelRegistry,
     RegistryError,
 )
+from hal0.registry.store import TomlModelRegistry as ModelRegistry
 
 
 @pytest.fixture

@@ -21,7 +21,7 @@ from typing import Any
 
 from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
-from hal0.model_meta import canonical_device, device_to_legacy_backend
+from hal0.model_meta import canonical_device
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
 from hal0.slots.manager import reconcile_and_guard_slot_config
 from hal0.slots.state import (
@@ -235,10 +235,6 @@ class StackApplyEngine:
             device = canonical_device(entry.device)
             if device:
                 updates["device"] = device
-                # Deprecated field, kept for one release.
-                legacy = device_to_legacy_backend(device)
-                if legacy:
-                    updates["backend"] = legacy
         if entry.provider:
             updates["provider"] = entry.provider
         if entry.profile is not None:

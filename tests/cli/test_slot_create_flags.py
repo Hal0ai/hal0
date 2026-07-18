@@ -84,11 +84,12 @@ def test_provider_flag_sets_provider_and_default_hardware(
     assert result.exit_code == 0, result.output
     body = captured_post["body"]
     assert body["provider"] == "llama-server"
-    assert body["backend"] == "vulkan"
+    assert body["device"] == "gpu-vulkan"
 
 
 def test_hardware_flag_overrides_default(captured_post: dict[str, Any]) -> None:
-    """``--hardware rocm`` is forwarded as SlotConfig.backend = 'rocm'."""
+    """``--hardware rocm`` is forwarded as SlotConfig.device = 'gpu-rocm'
+    (P2-device: device is the sole persisted truth)."""
     result = runner.invoke(
         slot_commands.app,
         [
@@ -103,7 +104,7 @@ def test_hardware_flag_overrides_default(captured_post: dict[str, Any]) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert captured_post["body"]["backend"] == "rocm"
+    assert captured_post["body"]["device"] == "gpu-rocm"
     assert captured_post["body"]["provider"] == "llama-server"
 
 
@@ -117,8 +118,8 @@ def test_legacy_backend_flag_translates_to_provider(
     )
     assert result.exit_code == 0, result.output
     assert captured_post["body"]["provider"] == "flm"
-    # The hardware backend must NOT be conflated with the deprecated flag.
-    assert captured_post["body"]["backend"] == "vulkan"
+    # The hardware device must NOT be conflated with the deprecated flag.
+    assert captured_post["body"]["device"] == "gpu-vulkan"
     # Deprecation warning goes to stderr so stdout stays parseable for
     # scripts piping the success line elsewhere.
     assert "deprecated" in result.stderr.lower()
@@ -268,4 +269,4 @@ def test_bare_create_on_strix_halo_resolves_to_vulkan(
     # Bare invocation → provider defaults to llama-server, hardware
     # auto-resolves to vulkan from the Strix Halo fixture.
     assert captured["body"]["provider"] == "llama-server"
-    assert captured["body"]["backend"] == "vulkan"
+    assert captured["body"]["device"] == "gpu-vulkan"

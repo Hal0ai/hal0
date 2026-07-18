@@ -199,3 +199,51 @@ debugger-replacements for design questions.
 If you're tweaking the rule that decides "should this slot count
 toward the fleet average?", start in the TUI.
 
+## Stable-patch triage
+
+Release-candidate bands change by channel count and aren't the right
+lens for triaging *one* patch. Use this decision tree for every PR
+that lands on `main` (PLAN §21.15, channel-count-independent per D8).
+Each question is yes/no; route at the first "yes" or fall through to
+**decline**.
+
+1. **Does it fix a crash, data loss, or security issue?**
+   → **Backport** to the current `stable` band. Requires the §14.1
+   surfaces checklist in `.github/PULL_REQUEST_TEMPLATE.md` to be
+   re-checked on the backport branch.
+2. **Is it low-risk and localized** (one component, no API/schema
+   change, no new dependency)?
+   → **Next release.** Lands on the next `beta` → `stable` promotion.
+3. **Is the same fix already on `main` and unreleased?**
+   → **Next release.** Close as duplicate of the mainline commit; no
+   backport branch.
+4. **Does it need a release note** (user-visible behaviour change,
+   new surface, deprecation, versioned schema bump)?
+   → **Next release, noted.** Add a bullet to `CHANGELOG.md` and link
+   it from the PR description's "Rollback" line.
+5. None of the above.
+   → **Decline.** Politely close with the reason; offer a follow-up
+   issue if the work still has value outside the stable band.
+
+The first question wins. A security fix on an unsupported channel is
+still a backport; a cosmetic tweak is never a backport.
+
+## Hardware support class
+
+hal0 classifies the hardware it can drive on a slot, separate from
+the **bench** (A/B/C) and **test tier** (α/β/γ) — both already
+overloaded. We call it **support class** and it is the verdict
+`evaluate_model_fit` in `src/hal0/model_fit.py` returns for a
+`(model, slot_type, device, profile)` tuple. The three outcomes are
+`allowed`, `degraded`, and `blocked`; a support-class table just maps
+each outcome to the operator-visible promise.
+
+| Class    | Outcome `evaluate_model_fit` | Operator promise |
+|----------|------------------------------|------------------|
+| supported | `allowed`                    | Runs as configured; no caveats in the UI or logs. |
+| partial   | `degraded`                   | Runs but with a reason chip (e.g. GPU/CPU mismatch); flagged before launch. |
+| blocked   | `blocked`                    | Refused at registration with a stable reason code; not a slot. |
+
+Don't relabel the bench tiers or test tiers as "support class" — the
+naming is intentional and the triage tree above assumes it.
+
