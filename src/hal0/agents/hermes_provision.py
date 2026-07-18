@@ -1,47 +1,40 @@
-"""Hermes-Agent bootstrap state machine (issue #238 scaffold).
+"""Hermes-Agent provisioner — one linear, convergent :func:`install_hermes` pass.
 
-Fifteen named phases run in a strict deterministic sequence. Each phase
-is a function ``(PhaseContext) -> PhaseResult`` (#702): the context
-carries a read-only :class:`BootstrapState` view, the ``--repair`` flag,
-a :class:`PhaseIO` bundle of injectable IO seams, and ``output_of()``
-for declared cross-phase checkpoint reads. Each phase writes a
-checkpoint into ``provision.json``. On re-run the orchestrator loads
-the checkpoint and skips any phase already marked ``ok`` unless
-``--repair`` forces re-execution.
+The public entry point is :func:`install_hermes`: resolve a supported Python →
+build the pinned-SDK venv → dir-drop the plugin trees → apply hal0's config keys
+(``hermes config set`` + a targeted YAML deep-merge; never a wholesale
+config.yaml rewrite) → render the Jinja context files → write the install
+artifacts → wire the gateway secrets drop-in + API key → smoke test. Each step
+converges its slice of host state and reports whether it changed anything, so a
+second run over an already-provisioned box mutates nothing (``report.converged``).
+Idempotency comes from every write being a converging write, NOT from stored
+checkpoints — the old resumable ``provision.json`` / ``PHASES`` / ``PhaseContext``
+machinery is gone.
 
-This module is the scaffold — every phase is a no-op stub that returns
-``ok``. Real provisioning lands in #240 (preflight/install/home_init),
-#241 (env_probe/config_write), #242 (mcp_wire), and the remaining
-slices in the v0.3 Hermes stream. The phase order + ``PhaseResult``
-contract is locked here so downstream slices only have to fill in the
-bodies.
+The brain/persona/memory-identity steps (persona_seed, namespace_register,
+brain_profile_seed, brain_profile_mcp_wire, self_report) still run here but are
+marked ``# RELOCATE(brain-lane):`` — a concurrent lane moves them into the
+hal0-api lifespan; they stay functioning until it lands.
 
-State file lives at ``/var/lib/hal0/state/agents/hermes/provision.json``
-— intentionally **outside** ``$HERMES_HOME`` so Hermes can't trample
-hal0's bookkeeping when the user runs ``hermes reset`` or similar
-upstream subcommands.
-
-See ``docs/internal/hermes-bootstrap-plan-2026-05-23.md`` §3 + §16 for
-the full design contract and ``docs/internal/adr/0012-remove-auth-and-caddy.md``
-for the agent-identity model (X-hal0-Agent header, not Bearer).
+A last-run report is written to ``/var/lib/hal0/state/agents/hermes/provision.json``
+(outside ``$HERMES_HOME`` so a ``hermes reset`` can't trample it) purely for
+``hal0 agent status`` / ``log`` to render — it is a snapshot, not a checkpoint.
 
 Born-owned contract (§7.4 F.7): every ``$HERMES_HOME`` write here is born
 ``hal0:hal0`` because the CLI drops provisioning to the hal0 service user before
-running this pipeline (``cli/agent_commands._provision_hermes``: a root-only
-prelude installs the ``/usr/local/bin`` wrapper + ensures the setgid hal0-owned
-skeleton, then re-execs ``hal0 agent bootstrap hermes`` as hal0). Root:root
-artifacts (seed TOML, driver env, gateway drop-in) go through the
-``hal0-agentenv`` / ``hal0-systemctl`` sudo seams. Consequently the former
-chown-back layers — ``_chown_tree_to_hal0`` and the ``ownership_reconcile``
-phase, plus the CLI's ``_chown_hermes_trees_to_agent_user`` — are removed:
-nothing is chowned after the fact.
+running this module (``cli/agent_commands._provision_hermes``: a root-only prelude
+installs the ``/usr/local/bin`` wrapper + ensures the setgid hal0-owned skeleton,
+then re-execs ``hal0 agent bootstrap hermes`` as hal0). Root:root artifacts (seed
+TOML, driver env, gateway drop-in) go through the ``hal0-agentenv`` /
+``hal0-systemctl`` sudo seams. ``--repair`` (root) additionally reconciles a
+root-clobbered tree via :func:`reconcile_ownership_on_repair` before the
+converging writes.
 """
 
 from __future__ import annotations
 
 import contextlib
 import datetime
-import glob
 import grp
 import hashlib
 import json
@@ -52,7 +45,7 @@ import shutil
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -63,24 +56,20 @@ from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slo
 
 log = structlog.get_logger(__name__)
 
-# Schema version embedded in every provision.json. Bump when the on-disk
-# shape changes in a way that can't be migrated by ignoring unknown
-# keys. Currently v1 — the layout in `BootstrapState.to_dict()`.
-SCHEMA_VERSION = 1
-
-# Canonical state-file location. Lives outside $HERMES_HOME — Hermes
-# owns its own tree, and bootstrap state must survive a `hermes reset`.
+# Canonical last-run-report location. Lives outside $HERMES_HOME — Hermes owns
+# its own tree, and the report must survive a `hermes reset`. This is no longer
+# a resumable checkpoint (the linear installer has none), just a snapshot of the
+# most recent run for `hal0 agent status` to render.
 _DEFAULT_STATE_ROOT = Path("/var/lib/hal0/state/agents/hermes")
 _STATE_FILE_NAME = "provision.json"
 
 
 class PhaseStatus(StrEnum):
-    """Per-phase outcome stored in provision.json.
+    """Per-step outcome.
 
-    ``ok``       — phase completed; downstream phases may proceed.
-    ``skip``     — phase didn't run (irrelevant for this env); not an error.
-    ``fail``     — phase ran and failed; downstream may still run unless fatal.
-    ``repair_needed`` — checkpoint hash drifted from current inputs; ``--repair`` re-runs.
+    ``ok``   — step completed.
+    ``skip`` — step didn't apply for this env (e.g. voice_wire with no slots).
+    ``fail`` — step ran and failed.
 
     String-valued so JSON round-trips cleanly without a custom encoder.
     """
@@ -88,140 +77,60 @@ class PhaseStatus(StrEnum):
     OK = "ok"
     SKIP = "skip"
     FAIL = "fail"
-    REPAIR_NEEDED = "repair_needed"
 
 
 @dataclass
 class PhaseResult:
-    """Outcome of one phase invocation.
+    """The return of one install-step body.
 
-    ``hash`` is the optional content hash a phase computes so future
-    re-runs can detect when their inputs changed — checkpoint presence
-    alone is insufficient (a phase whose inputs drifted needs re-run
-    even without ``--repair``).
-
-    ``details`` is a free-form dict each phase can stash. The
-    orchestrator never inspects its contents; it just JSON-serialises
-    them into the checkpoint.
+    ``details`` is a free-form dict the step stashes; ``install_hermes`` reads
+    ``details["changed"]`` for the convergence signal and folds the rest into
+    the :class:`InstallReport` / last-run report.
     """
 
     status: PhaseStatus
     details: dict[str, Any] = field(default_factory=dict)
     hash: str | None = None
     reason: str | None = None
-    # A fatal FAIL aborts the run: the orchestrator stops executing
-    # subsequent phases and records them as skipped. Used by the capture
-    # guards (an unclaimed foreign HERMES_HOME, a live foreign gateway) —
-    # a normal FAIL stays run-all (fallbacks keep phases independent).
-    fatal: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"status": self.status.value}
-        if self.hash is not None:
-            out["hash"] = self.hash
-        if self.reason is not None:
-            out["reason"] = self.reason
-        if self.fatal:
-            out["fatal"] = True
-        if self.details:
-            out["details"] = self.details
-        return out
 
 
 @dataclass
 class BootstrapState:
-    """In-memory mirror of ``provision.json``.
+    """The resolved install target: where the venv + HERMES_HOME live + agent id.
 
-    Persists across runs via :meth:`load` / :meth:`save`. ``phases`` is
-    keyed by phase name with values built from :meth:`PhaseResult.to_dict`
-    plus an ``at`` timestamp the orchestrator stamps at write time.
-
-    The dataclass shape is the contract; the JSON keys are the same as
-    the field names so a human inspecting the file can match it back to
-    the source code without a schema doc.
+    Formerly the in-memory mirror of the (retired) ``provision.json`` checkpoint;
+    now a plain config holder threaded through the step bodies. Kept importable
+    (``BootstrapState().agent_id``) for the CLI's memory-uninstall path.
     """
 
-    schema_version: int = SCHEMA_VERSION
-    started_at: str | None = None
-    completed_at: str | None = None
-    hal0_version: str | None = None
-    hermes_version: str | None = None
     hermes_home: str = "/var/lib/hal0/.hermes"
     venv: str = "/var/lib/hal0/venvs/hermes"
     agent_id: str = "hermes"
-    phases: dict[str, dict[str, Any]] = field(default_factory=dict)
-    errors: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BootstrapState:
-        # Ignore unknown keys so forward-compat schema bumps don't crash
-        # an older orchestrator reading a newer file.
-        valid = {f for f in cls.__dataclass_fields__}
-        kwargs = {k: v for k, v in data.items() if k in valid}
-        return cls(**kwargs)
-
-    def phase_done(self, name: str) -> bool:
-        """True iff the phase already ran to a terminal non-failure state.
-
-        Both ``ok`` and ``skip`` count as "done" — a phase that
-        legitimately skipped (no STT/TTS slots configured →
-        voice_wire SKIP) shouldn't re-run on every bootstrap
-        invocation. ``--repair`` is the explicit force-rerun knob.
-        """
-        entry = self.phases.get(name)
-        if not entry:
-            return False
-        return entry.get("status") in {PhaseStatus.OK.value, PhaseStatus.SKIP.value}
-
-    def save(self, root: Path) -> None:
-        root.mkdir(parents=True, exist_ok=True)
-        target = root / _STATE_FILE_NAME
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
-        os.replace(tmp, target)
-
-    @classmethod
-    def load(cls, root: Path) -> BootstrapState | None:
-        target = root / _STATE_FILE_NAME
-        if not target.exists():
-            return None
-        try:
-            data = json.loads(target.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        return cls.from_dict(data)
 
 
-# ── Phase implementations (no-op stubs in #238 scaffold) ─────────────────────
+def _utcnow() -> str:
+    return datetime.datetime.now(tz=datetime.UTC).isoformat().replace("+00:00", "Z")
+
+
+def content_hash(*pieces: str | bytes) -> str:
+    """Stable content hash steps use to detect "inputs unchanged".
+
+    Steps that produce on-disk outputs (config.yaml, HERMES.md) hash the rendered
+    content; a re-run computes the hash again and skips the write on a match.
+    """
+    h = hashlib.sha256()
+    for piece in pieces:
+        if isinstance(piece, str):
+            piece = piece.encode("utf-8")
+        h.update(piece)
+    return h.hexdigest()
+
+
+# ── Install-step implementations ─────────────────────────────────────────────
 #
-# Each phase signature: (ctx: PhaseContext) -> PhaseResult (#702).
-#
-# Real impls land in subsequent slices:
-#   #240 — preflight, install, home_init
-#   #241 — env_probe, config_write
-#   #242 — mcp_wire
-#   #243 — namespace_register
-#   #244 — context_link
-#   #245 — model_automap, voice_wire
-#   #246 — smoke_tests, self_report
-#
-# Until then every stub returns OK with a "stub" marker so the
-# orchestrator wires through end-to-end and the checkpoint shape stays
-# valid.
-
-
-def _stub(name: str) -> Callable[[PhaseContext], PhaseResult]:
-    def _phase(ctx: PhaseContext) -> PhaseResult:
-        return PhaseResult(status=PhaseStatus.OK, details={"stub": True})
-
-    _phase.__name__ = f"_phase_{name}"
-    _phase.__doc__ = f"Stub for {name!r} phase — real impl pending in a follow-up slice."
-    return _phase
+# Each step body has signature ``(ctx: _StepCtx) -> PhaseResult`` and converges
+# one slice of host state. :func:`install_hermes` (bottom of file) runs them in
+# order and folds each ``PhaseResult`` into an :class:`InstallReport`.
 
 
 # Pinned constants — keep these in sync with installer/agents/hermes/
@@ -360,139 +269,7 @@ def path_is_writable(target: str | Path) -> bool:
     return True
 
 
-# ── Foreign-gateway detection (capture safety) ───────────────────────────────
-#
-# hal0 installs a SINGLE SYSTEM-scope hermes-gateway.service. A second poller
-# on the same Telegram bot token — a hand-installed system unit, or (the real
-# incident) a `systemctl --user` hermes-gateway under another user — means two
-# long-polls on one token → Telegram HTTP 409 flapping. Preflight scans for
-# such foreign pollers so a capture aborts (or, under --adopt, warns loudly)
-# instead of silently starting a second one.
-
-GATEWAY_UNIT_NAME = "hermes-gateway.service"
-# User-scope systemd dirs to scan for a hermes-gateway unit file. hal0 never
-# installs user-scope units, so any hit here is foreign by construction.
-_USER_SYSTEMD_SCAN_GLOBS: tuple[str, ...] = (
-    "/root/.config/systemd/user",
-    "/home/*/.config/systemd/user",
-)
-
-
-def _user_from_systemd_dir(path: Path) -> str:
-    """Best-effort owner name from a ``…/.config/systemd/user`` path."""
-    parts = path.parts
-    if "home" in parts:
-        i = parts.index("home")
-        if i + 1 < len(parts):
-            return parts[i + 1]
-    if "root" in parts:
-        return "root"
-    return ""
-
-
-def _systemctl_is_active(unit: str, *, run: Callable[..., Any]) -> bool:
-    """``systemctl is-active <unit>`` — True iff active. Best-effort (False on error)."""
-    try:
-        proc = run(
-            ["systemctl", "is-active", unit],
-            capture_output=True,
-            text=True,
-            check=False,
-        )  # nosec B603 B607 — fixed argv
-    except (OSError, subprocess.SubprocessError):
-        return False
-    rc = getattr(proc, "returncode", 1)
-    out = (getattr(proc, "stdout", "") or "").strip()
-    return rc == 0 or out == "active"
-
-
-def _pgrep_hermes_gateway(*, run: Callable[..., Any]) -> list[str]:
-    """``pgrep -af 'hermes.*gateway'`` matched command lines. Best-effort ([] on error)."""
-    try:
-        proc = run(
-            ["pgrep", "-af", "hermes.*gateway"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )  # nosec B603 B607 — fixed argv
-    except (OSError, subprocess.SubprocessError):
-        return []
-    out = getattr(proc, "stdout", "") or ""
-    return [ln.strip() for ln in out.splitlines() if ln.strip()]
-
-
-def _detect_foreign_gateways(
-    *,
-    run: Callable[..., Any] | None = None,
-    scan_globs: tuple[str, ...] | None = None,
-    dropin_file: Path | None = None,
-) -> list[dict[str, str]]:
-    """Scan for hermes-gateway pollers hal0 didn't install.
-
-    Findings (each a dict with ``scope`` / ``detail`` / ``stop_cmd``):
-
-      * ``scope="user"`` — a ``hermes-gateway.service`` file under any scanned
-        user systemd dir. hal0 only ever installs SYSTEM units, so these are
-        foreign by construction. ``stop_cmd`` is a ``systemctl --user`` line;
-        hal0 does NOT auto-stop another user's unit.
-      * ``scope="system"`` — the SYSTEM unit is active but hal0's own secrets
-        drop-in is absent, i.e. it isn't the unit hal0 manages here.
-
-    ``pgrep`` output is attached as corroborating evidence to the first
-    finding (never a finding on its own, so hal0's own running gateway isn't
-    mistaken for foreign). All probes are best-effort — a detection error
-    never raises. ``run`` / ``scan_globs`` / ``dropin_file`` are injectable;
-    each defaults are resolved at CALL time (not def time) so a test's
-    monkeypatch of the module-level constants + the subprocess seam takes hold.
-    """
-    run = run if run is not None else subprocess.run
-    globs = scan_globs if scan_globs is not None else _USER_SYSTEMD_SCAN_GLOBS
-    findings: list[dict[str, str]] = []
-
-    for pattern in globs:
-        for d in glob.glob(pattern):
-            unit = Path(d) / GATEWAY_UNIT_NAME
-            if not unit.exists():
-                continue
-            user = _user_from_systemd_dir(Path(d))
-            stop = f"systemctl --user disable --now {GATEWAY_UNIT_NAME}"
-            if user:
-                stop = (
-                    f"sudo -u {user} XDG_RUNTIME_DIR=/run/user/$(id -u {user}) "
-                    f"systemctl --user disable --now {GATEWAY_UNIT_NAME}"
-                )
-            findings.append(
-                {
-                    "scope": "user",
-                    "unit": str(unit),
-                    "detail": f"user-scope {GATEWAY_UNIT_NAME} at {unit}"
-                    + (f" (user {user})" if user else ""),
-                    "stop_cmd": stop,
-                }
-            )
-
-    dropin = dropin_file if dropin_file is not None else GATEWAY_SYSTEMD_DROPIN_FILE
-    if not dropin.exists() and _systemctl_is_active(GATEWAY_UNIT_NAME, run=run):
-        findings.append(
-            {
-                "scope": "system",
-                "unit": GATEWAY_UNIT_NAME,
-                "detail": (
-                    f"system-scope {GATEWAY_UNIT_NAME} is active but hal0's secrets "
-                    f"drop-in ({dropin}) is absent — not the unit hal0 manages"
-                ),
-                "stop_cmd": f"systemctl disable --now {GATEWAY_UNIT_NAME}",
-            }
-        )
-
-    if findings:
-        procs = _pgrep_hermes_gateway(run=run)
-        if procs:
-            findings[0]["processes"] = "; ".join(procs)
-    return findings
-
-
-def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
+def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
     """Hard-fail when the host can't host Hermes.
 
     Documented blockers (plan §4):
@@ -576,41 +353,11 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
                 f"{var_lib} has {free_gib:.1f} GiB free; need >= {MIN_FREE_GIB} — clear space",
             )
 
-    # Foreign-gateway scan (capture safety). Best-effort — a detection error
-    # must never crash preflight. A live foreign poller is a FATAL abort
-    # without --adopt (two pollers on one Telegram token → 409 flapping);
-    # with --adopt it's a loud warning (hal0 won't auto-stop another user's
-    # unit) recorded for the CLI to surface.
-    try:
-        foreign = _detect_foreign_gateways(run=ctx.io.run)
-    except Exception as exc:  # detection is strictly best-effort
-        foreign = []
-        details["foreign_gateway_probe_error"] = str(exc)
-    details["foreign_gateways"] = foreign
-    fatal = False
-    if foreign:
-        what = "; ".join(f["detail"] for f in foreign)
-        cmds = " && ".join(f["stop_cmd"] for f in foreign)
-        if ctx.adopt:
-            details["foreign_gateway_warning"] = (
-                f"foreign hermes gateway(s) detected: {what}. hal0 will NOT auto-stop "
-                f"another user's unit — stop it yourself before the bot starts: {cmds}"
-            )
-        else:
-            fatal = True
-            failures.append(
-                f"foreign hermes gateway(s) detected: {what} — a second poller on the "
-                "same Telegram token means HTTP 409 flapping. Stop it: "
-                f"{cmds} — then re-run, or re-run with --adopt (backs up the existing "
-                f"install + imports its tokens). Operator overrides: {OVERRIDES_PATH}"
-            )
-
     if failures:
         return PhaseResult(
             status=PhaseStatus.FAIL,
             details=details,
             reason="; ".join(failures),
-            fatal=fatal,
         )
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
@@ -937,134 +684,86 @@ def upgrade_hermes_runtime(
     return True, f"hermes-agent upgraded → {target}{suffix}"
 
 
-# Content marker that identifies the hal0-managed wrapper. The managed
-# wrapper (installer/wrappers/hermes) always injects HAL0_AGENT_ID; a
-# hand-installed upstream ``hermes`` (a real binary, or a different shim)
-# never does. Used to decide whether a pre-existing /usr/local/bin/hermes
-# is ours (overwrite freely) or foreign (back it up before clobbering).
-_MANAGED_WRAPPER_MARKER = "HAL0_AGENT_ID"
-
-
-def _is_hal0_managed_wrapper(path: Path) -> bool:
-    """Whether ``path`` is a hal0-managed wrapper (contains the marker).
-
-    Reads with ``errors="ignore"`` so a real ELF ``hermes`` binary doesn't
-    raise — it simply won't contain the marker and is treated as foreign.
-    """
-    try:
-        return _MANAGED_WRAPPER_MARKER in path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-
-
 def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
     """Copy + chmod the wrapper into ``wrapper_dst`` — euid-aware (§7.4).
 
     ``/usr/local/bin/hermes`` is root-only install infra. On a system install
     ``install.sh``'s root prelude lays it down BEFORE dropping the provisioner to
-    the hal0 user, so:
-
-    * root (euid==0) installs it here directly (with capture backup, below);
-    * a non-root (hal0) caller finds it already present (prelude-installed) and
-      skips — it cannot write ``/usr/local/bin``. If it is somehow absent we log
-      and continue rather than aborting the whole bootstrap: the wrapper is
-      root-owned infra the prelude owns, not a hal0-writable artifact.
-
-    Capture safety (root only): when a pre-existing ``wrapper_dst`` is NOT a
-    hal0-managed wrapper (a hand-installed upstream ``hermes`` on PATH), copy it
-    aside to ``<dst>.pre-hal0`` before overwriting so the foreign entry point is
-    recoverable. Overwriting our own wrapper (the steady-state re-run) skips the
-    backup.
+    the hal0 user, so root (euid==0) installs it here directly; a non-root (hal0)
+    caller finds it already present (prelude-installed) and skips — it cannot
+    write ``/usr/local/bin``. A plain overwrite (no foreign backup — the
+    adopt/capture path is retired).
     """
     if os.geteuid() != 0:
         if not wrapper_dst.exists():
             log.warning("hermes_provision.wrapper_absent_nonroot", dst=str(wrapper_dst))
         return
     wrapper_dst.parent.mkdir(parents=True, exist_ok=True)
-    if wrapper_dst.exists() and not _is_hal0_managed_wrapper(wrapper_dst):
-        backup = wrapper_dst.with_name(wrapper_dst.name + ".pre-hal0")
-        with contextlib.suppress(OSError):
-            shutil.copy2(wrapper_dst, backup)
     shutil.copy2(wrapper_src, wrapper_dst)
     wrapper_dst.chmod(0o755)
 
 
-def _install_backcompat_symlink(target: Path, link: Path) -> None:
-    """Point ``link`` -> ``target`` (idempotent), replacing any prior file.
-
-    Used to make the legacy ``hal0-hermes`` entry point a symlink to the
-    canonical ``hermes`` wrapper. A pre-existing regular file (an older
-    install's copied wrapper) is replaced so the two never drift.
-
-    euid-aware (§7.4): both link + target live in root-only ``/usr/local/bin``,
-    so a non-root (hal0) caller skips — ``install.sh``'s root prelude lays the
-    symlink down alongside the wrapper before dropping to hal0.
-    """
-    if os.geteuid() != 0:
-        return
-    link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink():
-        if os.readlink(link) == str(target):
-            return
-        link.unlink()
-    elif link.exists():
-        link.unlink()
-    os.symlink(str(target), str(link))
-
-
 def _install_cli_wrapper(wrapper_src: Path) -> dict[str, Any]:
-    """Install the root-only ``/usr/local/bin`` CLI infra — the genuinely-root
-    slice of the install phase (§7.4 privilege split).
+    """Install the root-only ``/usr/local/bin/hermes`` wrapper (§7.4 split).
 
-    Both entries live in root-owned ``/usr/local/bin``: the canonical
-    ``hermes`` wrapper and the ``hal0-hermes`` back-compat symlink. When the
+    The canonical entry point lives in root-owned ``/usr/local/bin``. When the
     provisioner runs as hal0 (§7.4 drop-to-hal0), install.sh's root prelude has
-    already laid these down, so ``_copy_wrapper`` / ``_install_backcompat_symlink``
-    detect non-root and skip. Grouping them in one helper keeps the phase body
-    a clean two-part split — root-only infra here, hal0-owned artifacts after.
+    already laid it down, so ``_copy_wrapper`` detects non-root and skips.
 
     Raises ``OSError`` on a genuine root-context write failure so the caller can
     surface a sudo hint.
     """
     _copy_wrapper(wrapper_src, HERMES_CLI_INSTALL_PATH)
-    _install_backcompat_symlink(HERMES_CLI_INSTALL_PATH, WRAPPER_INSTALL_PATH)
-    return {
-        "hermes_cli": str(HERMES_CLI_INSTALL_PATH),
-        "wrapper": str(WRAPPER_INSTALL_PATH),
-    }
+    return {"hermes_cli": str(HERMES_CLI_INSTALL_PATH)}
 
 
-def _copy_plugin_tree(src: Path, dst: Path) -> None:
-    """Mirror a plugin directory (idempotent)."""
+def _copy_plugin_tree(src: Path, dst: Path) -> bool:
+    """Mirror a plugin directory; convergent (skips when already identical).
+
+    Returns True iff ``dst`` was (re)written. A byte-identical existing tree is
+    left untouched so a converged re-run reports no change.
+    """
+    if dst.exists() and _dirs_identical(src, dst):
+        return False
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    return True
 
 
-def _phase_install(ctx: PhaseContext) -> PhaseResult:
-    """Provision the managed Hermes venv + wrapper + plugin stubs.
+def _dirs_identical(a: Path, b: Path) -> bool:
+    """Shallow-recursive content compare of two directory trees."""
+    import filecmp
+
+    cmp = filecmp.dircmp(a, b)
+    if cmp.left_only or cmp.right_only or cmp.diff_files or cmp.funny_files:
+        return False
+    return all(_dirs_identical(a / sub, b / sub) for sub in cmp.common_dirs)
+
+
+def _phase_install(ctx: _StepCtx) -> PhaseResult:
+    """Provision the managed Hermes venv + ``/usr/local/bin/hermes`` + plugins.
 
     The plugin package at ``installer/agents/hermes/plugins/hal0-memory/`` (the
     canonical, shipped ``MemoryProvider`` source — see
     ``tests/agents/test_hal0_memory_client.py`` for its contract tests) is
-    copied into ``$HERMES_HOME/plugins/hal0-memory/``.
-    The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
-    hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
-    listener, and the direct-read composite model catalogue in
-    :mod:`hal0.api` (``_fetch_hal0_composite_models``) now supersedes it.
+    copied into ``$HERMES_HOME/plugins/hal0-memory/``. A concurrent lane ships
+    the ``hal0-provider`` model-provider tree, dir-dropped alongside it into
+    ``$HERMES_HOME/plugins/model-providers/hal0/`` — the copy tolerates a missing
+    source dir (skipped-step report line) until that lane lands.
 
-    Skips heavy work when the venv binary already exists at the
-    expected version — re-runs of ``hal0 agent bootstrap hermes`` are
-    cheap unless ``--repair`` forces re-install.
+    Converges: skips the venv build when ``bin/hermes`` already exists (unless
+    ``--repair``), and each plugin tree copy hash-skips when already identical.
+    ``details["changed"]`` is the convergence signal.
     """
     state = ctx.state
     details: dict[str, Any] = {}
+    changed = False
     venv = Path(state.venv)
     requirements = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
-    # Canonical CLI source is ``installer/wrappers/hermes`` (no HERMES_HOME
-    # pin); ``hal0-hermes`` becomes a back-compat symlink to it.
     hermes_wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     plugin_src_root = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
+    hermes_home = Path(state.hermes_home)
 
     if not requirements.is_file():
         return PhaseResult(
@@ -1077,27 +776,12 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             reason=f"wrapper source missing at {hermes_wrapper_src}",
         )
 
-    # Claim HERMES_HOME BEFORE any mutation (venv build, wrapper swap, plugin
-    # copy). An unclaimed foreign home without --adopt is a true no-op abort —
-    # we must NOT build the venv or swap /usr/local/bin/hermes and only then
-    # bail. On --adopt this also runs the backup + token import up front, so the
-    # marker is stamped before install populates the tree with plugin dirs.
-    hermes_home = Path(state.hermes_home)
-    claimed, reason, adopt_details = _claim_hermes_home(hermes_home, adopt=ctx.adopt)
-    if not claimed:
-        return PhaseResult(status=PhaseStatus.FAIL, reason=reason, fatal=True)
-    if adopt_details is not None:
-        details["adopted"] = adopt_details
-
     # ── root-only CLI infra (§7.4 privilege split) ──────────────────────────
-    # Canonical entry point /usr/local/bin/hermes + the hal0-hermes back-compat
-    # symlink. Both live in root-owned /usr/local/bin and are euid-guarded: root
-    # installs them, a hal0-run provisioner finds them prelude-installed and
-    # skips. install.sh's §7.4 root prelude owns them for the drop-to-hal0 path.
+    # /usr/local/bin/hermes lives in root-owned /usr/local/bin and is euid-guarded:
+    # root installs it, a hal0-run provisioner finds it prelude-installed + skips.
     try:
         details.update(_install_cli_wrapper(hermes_wrapper_src))
     except OSError as exc:
-        # Non-root operators without the prelude land here — surface so they can sudo.
         return PhaseResult(
             status=PhaseStatus.FAIL,
             reason=f"wrapper install to {HERMES_CLI_INSTALL_PATH} failed: {exc}",
@@ -1106,9 +790,10 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
 
     # ── hal0-owned artifacts (born hal0:hal0 when the provisioner runs as hal0) ─
     hermes_bin = _venv_python(venv).parent / "hermes"
-    if not hermes_bin.exists():
+    if not hermes_bin.exists() or ctx.repair:
         try:
             ctx.io.install_venv(venv, requirements)
+            changed = True
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             return PhaseResult(
                 status=PhaseStatus.FAIL,
@@ -1118,228 +803,70 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
     details["venv"] = str(venv)
     details["hermes_bin"] = str(hermes_bin)
 
-    # Plugin stubs into HERMES_HOME-shaped locations. Real bodies in #241/#242.
-    # HERMES_HOME was already claimed (marker stamped) above, before any
-    # mutation — install populates it with plugin dirs below.
+    # Plugin dir-drops into $HERMES_HOME/plugins. hal0-memory is the shipped
+    # MemoryProvider tree; hal0-provider is the model-provider tree a concurrent
+    # lane ships (its source may be absent in this worktree — a missing source
+    # is a skipped-step report line, not a failure).
     plugin_targets = {
         "hal0-memory": hermes_home / "plugins" / "hal0-memory",
+        "hal0-provider": hermes_home / "plugins" / "model-providers" / "hal0",
     }
-    # Remove the legacy broken ``hal0`` model-provider plugin if a
-    # previous bootstrap left it behind. Idempotent — silently no-op if
-    # already gone.
-    legacy_hal0_plugin = hermes_home / "plugins" / "model-providers" / "hal0"
-    if legacy_hal0_plugin.exists():
-        try:
-            shutil.rmtree(legacy_hal0_plugin)
-        except OSError as exc:
-            log.warning(
-                "hermes_provision.legacy_plugin_cleanup_failed",
-                path=str(legacy_hal0_plugin),
-                error=str(exc),
-            )
+    # The shipped hal0-memory tree is required; hal0-provider (concurrent lane)
+    # is optional and its absent source is a skipped-step report line.
+    optional_plugins = {"hal0-provider"}
+    plugins_written: list[str] = []
+    plugins_skipped: list[str] = []
     for src_name, dst in plugin_targets.items():
         src = plugin_src_root / src_name
         if not src.exists():
-            return PhaseResult(
-                status=PhaseStatus.FAIL,
-                reason=f"plugin source missing at {src}",
-            )
+            if src_name not in optional_plugins:
+                return PhaseResult(
+                    status=PhaseStatus.FAIL,
+                    reason=f"plugin source missing at {src}",
+                )
+            plugins_skipped.append(f"{src_name}: source dir {src} absent")
+            continue
         try:
-            _copy_plugin_tree(src, dst)
+            if _copy_plugin_tree(src, dst):
+                changed = True
+            plugins_written.append(str(dst))
         except OSError as exc:
             return PhaseResult(
                 status=PhaseStatus.FAIL,
                 reason=f"plugin copy {src} -> {dst} failed: {exc}",
             )
-    details["plugins"] = [str(p) for p in plugin_targets.values()]
+    details["plugins"] = plugins_written
+    if plugins_skipped:
+        details["plugins_skipped"] = plugins_skipped
+    details["changed"] = changed
 
-    # No chown-back (§7.4 F.7): provisioning runs as hal0 (cli/_provision_hermes
-    # drops before this pipeline), so the venv under /var/lib/hal0/venvs is born
-    # hal0:hal0.
+    # No chown-back (§7.4 F.7): provisioning runs as hal0, so the venv under
+    # /var/lib/hal0/venvs is born hal0:hal0.
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
 # ── Phase D: home_init ──────────────────────────────────────────────────────
 
 
-_HAL0_MANAGED_MARKER = ".hal0-managed"
-
-# Secret-key prefixes lifted from a foreign HERMES_HOME/.env into hal0's
-# outbound vault on ``--adopt`` (prefix match). Everything else in the old
-# .env stays put — we only import the platform/provider credentials the
-# captured bot needs to keep polling.
-_ADOPT_SECRET_PREFIXES: tuple[str, ...] = (
-    "TELEGRAM_",
-    "DISCORD_",
-    "OPENROUTER_",
-    "OPENAI_",
-    "ANTHROPIC_",
-    "FAL_",
-    "HERMES_",
-)
-
-
-def _home_is_foreign(hermes_home: Path) -> bool:
-    """True when HERMES_HOME is populated but not yet hal0-managed.
-
-    That's the "capture an existing hermes install" case — a tree an
-    operator (or older tooling) created by hand, lacking the
-    ``.hal0-managed`` marker.
-    """
-    marker = hermes_home / _HAL0_MANAGED_MARKER
-    return hermes_home.exists() and not marker.exists() and any(hermes_home.iterdir())
-
-
-def _parse_env_secrets(env_file: Path) -> dict[str, str]:
-    """Parse ``KEY=VALUE`` lines from ``env_file``, keeping recognized secrets.
-
-    Only keys whose name prefix-matches :data:`_ADOPT_SECRET_PREFIXES` are
-    returned. Tolerates ``export KEY=…`` and blank/comment lines; a missing
-    or unreadable file yields ``{}``.
-    """
-    if not env_file.is_file():
-        return {}
-    try:
-        lines = env_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    out: dict[str, str] = {}
-    for line in lines:
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, val = s.split("=", 1)
-        key = key.strip()
-        if key.startswith("export "):
-            key = key[len("export ") :].strip()
-        if any(key.startswith(p) for p in _ADOPT_SECRET_PREFIXES):
-            out[key] = val.strip()
-    return out
-
-
-def _adopt_foreign_home(hermes_home: Path) -> dict[str, Any]:
-    """Back up a foreign HERMES_HOME + import its tokens before hal0 claims it.
-
-    Three things, in order (the marker is stamped by the caller afterwards):
-
-      1. Copy the whole tree to ``<home>.pre-hal0-<UTC>`` (perms preserved) so
-         the operator's original install is fully recoverable.
-      2. Snapshot ``config.yaml`` → ``config.yaml.pre-hal0`` and ``SOUL.md`` →
-         ``SOUL.md.pre-hal0`` inside the home for a quick side-by-side diff.
-      3. Import recognized secret keys from the old ``.env`` into hal0's
-         outbound vault (:data:`HERMES_SECRETS_ENV`) via :func:`_merge_env_file`
-         so the captured bot keeps its Telegram/Discord/provider tokens. The
-         original ``.env`` is left untouched.
-
-    Returns a details dict for the phase checkpoint.
-    """
-    ts = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d%H%M%S")
-    backup_dir = hermes_home.parent / f"{hermes_home.name}.pre-hal0-{ts}"
-    details: dict[str, Any] = {"backup_dir": str(backup_dir)}
-    with contextlib.suppress(FileExistsError):
-        shutil.copytree(hermes_home, backup_dir, symlinks=True)
-
-    config = hermes_home / "config.yaml"
-    if config.is_file():
-        snap = hermes_home / "config.yaml.pre-hal0"
-        with contextlib.suppress(OSError):
-            shutil.copy2(config, snap)
-        details["config_snapshot"] = str(snap)
-    soul = hermes_home / "SOUL.md"
-    if soul.is_file():
-        snap = hermes_home / "SOUL.md.pre-hal0"
-        with contextlib.suppress(OSError):
-            shutil.copy2(soul, snap)
-        details["soul_snapshot"] = str(snap)
-
-    tokens = _parse_env_secrets(hermes_home / ".env")
-    if tokens:
-        _merge_env_file(HERMES_SECRETS_ENV, tokens)
-        if os.geteuid() == 0:
-            with contextlib.suppress(OSError):
-                os.chown(HERMES_SECRETS_ENV, 0, 0)
-    details["tokens_imported"] = sorted(tokens)
-    return details
-
-
-def _unclaimed_home_reason(hermes_home: Path) -> str:
-    """The refusal message when a foreign HERMES_HOME is captured without --adopt."""
-    return (
-        f"{hermes_home} exists and is not hal0-managed (missing {_HAL0_MANAGED_MARKER}). "
-        "Re-run with --adopt to back it up + import its tokens into the vault, or move "
-        f"it aside before re-running. Operator overrides live at {OVERRIDES_PATH}."
-    )
-
-
-def _claim_hermes_home(
-    hermes_home: Path, *, adopt: bool = False
-) -> tuple[bool, str | None, dict[str, Any] | None]:
-    """Stamp the ``.hal0-managed`` marker — refuse (or adopt) a foreign tree.
-
-    Returns ``(claimed, reason, adopt_details)``:
-
-      * empty / already-managed home → ``(True, None, None)`` (stamp + go).
-      * populated + unmarked home without ``adopt`` → ``(False, reason, None)``;
-        the caller turns this into a FATAL abort.
-      * populated + unmarked home with ``adopt`` → back it up + import tokens,
-        stamp the marker, ``(True, None, details)``.
-
-    Used by both install (which writes plugins into the tree) and home_init
-    (which makes the layout canonical).
-    """
-    marker = hermes_home / _HAL0_MANAGED_MARKER
-    adopt_details: dict[str, Any] | None = None
-    if _home_is_foreign(hermes_home):
-        if not adopt:
-            return (False, _unclaimed_home_reason(hermes_home), None)
-        adopt_details = _adopt_foreign_home(hermes_home)
-    hermes_home.mkdir(parents=True, exist_ok=True)
-    if not marker.exists():
-        marker.write_text(
-            "hal0 — this HERMES_HOME is managed by hal0 (issue #240). Edits may be overwritten.\n",
-            encoding="utf-8",
-        )
-    return (True, None, adopt_details)
-
-
 def mark_home_managed_if_owned(hermes_home: Path) -> bool:
-    """Stamp ``.hal0-managed`` on a HERMES_HOME hal0 itself owns.
+    """Ensure ``hermes_home`` exists and report it claimable (retired shim).
 
-    The hal0-api lifespan seeds default personas into HERMES_HOME on every
-    start (fresh install + post-update convergence). On a FRESH box that seed
-    populates ``/var/lib/hal0/.hermes`` BEFORE ``hal0 agent install hermes``
-    ever runs — so the bootstrap's home-claim guard (:func:`_home_is_foreign`)
-    would then mistake hal0's OWN seeded personas for a pre-existing foreign
-    tree and fatal-abort every phase with "unclaimed HERMES_HOME". Stamping the
-    marker at seed time (BEFORE the personas land) makes the home unambiguously
-    hal0-managed so provisioning proceeds without ``--adopt``.
-
-    A genuinely foreign tree (populated + unmarked already at call time — an
-    operator's hand-made install) is deliberately left untouched so capture
-    still routes through ``--adopt`` + its backup/token-import. Returns ``True``
-    when the marker is present afterwards (freshly stamped or already there),
-    ``False`` when the home was foreign and was intentionally not claimed.
-
-    MUST be called before any content is seeded into the home — once personas
-    land, a not-yet-marked home is indistinguishable from a foreign one.
+    The adopt/capture path is gone (hal0 owns HERMES_HOME by construction), so
+    this no longer distinguishes a "foreign" tree — it just makes the directory
+    and returns ``True``. Kept as an importable seam for the hal0-api lifespan,
+    which calls it before seeding default personas.
     """
-    claimed, _reason, _adopt_details = _claim_hermes_home(hermes_home, adopt=False)
-    return claimed
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    return True
 
 
-def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
-    """Make the ``$HERMES_HOME`` layout canonical.
+def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
+    """Make the ``$HERMES_HOME`` layout canonical — ``mkdir`` the standard tree.
 
-    Install (#240's first phase) already claimed the marker; home_init
-    is responsible for the wider directory tree Hermes expects.
-    Re-claiming via :func:`_claim_hermes_home` is harmless when install
-    already did so, and necessary when home_init runs first
-    (``--skip-phase install``).
+    Convergent: ``mkdir(exist_ok=True)`` for each subdir; ``details["changed"]``
+    is True only when a directory was actually created.
     """
     hermes_home = Path(ctx.state.hermes_home)
-    claimed, reason, adopt_details = _claim_hermes_home(hermes_home, adopt=ctx.adopt)
-    if not claimed:
-        return PhaseResult(status=PhaseStatus.FAIL, reason=reason, fatal=True)
 
     standard_subdirs = (
         "memories",
@@ -1356,19 +883,20 @@ def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
         # secret-bearing /etc/hal0. Born hal0:hal0 under the setgid state root.
         "scratch",
     )
+    created = False
     for sub in standard_subdirs:
-        (hermes_home / sub).mkdir(parents=True, exist_ok=True)
+        d = hermes_home / sub
+        if not d.exists():
+            created = True
+        d.mkdir(parents=True, exist_ok=True)
 
     # No chown-back (§7.4 F.7): the tree is created as hal0 (the CLI drops
     # provisioning to hal0 before this pipeline) under the setgid /var/lib/hal0,
     # so the whole $HERMES_HOME layout is born hal0:hal0.
-    details: dict[str, Any] = {
-        "hermes_home": str(hermes_home),
-        "marker": str(hermes_home / _HAL0_MANAGED_MARKER),
-    }
-    if adopt_details is not None:
-        details["adopted"] = adopt_details
-    return PhaseResult(status=PhaseStatus.OK, details=details)
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={"hermes_home": str(hermes_home), "changed": created},
+    )
 
 
 # ── Phase C: env_probe ──────────────────────────────────────────────────────
@@ -1393,23 +921,34 @@ def _read_env_probe() -> dict[str, Any]:
     }
 
 
-def _phase_env_probe(ctx: PhaseContext) -> PhaseResult:
-    """Capture a host-environment snapshot for downstream phases.
+ENV_SNAPSHOT_NAME = "env.json"
 
-    Writes the snapshot to ``$HERMES_HOME/env-<ts>.json`` AND keeps a
-    pointer in ``provision.json``. Snapshot is overwritten on every
-    re-run because it's a point-in-time view, not a checkpoint.
+
+def _phase_env_probe(ctx: _StepCtx) -> PhaseResult:
+    """Capture a host-environment snapshot for context_link to render from.
+
+    Writes a STABLE ``$HERMES_HOME/env.json`` (content-gated: a byte-identical
+    snapshot is left untouched) so a converged re-run reports no change — the
+    old ``env-<ts>.json`` timestamped writes mutated the tree on every run.
     """
     snapshot = ctx.io.read_env_probe()
-    ts = _utcnow().replace(":", "").replace("-", "")
     hermes_home = Path(ctx.state.hermes_home)
     hermes_home.mkdir(parents=True, exist_ok=True)
-    snapshot_path = hermes_home / f"env-{ts}.json"
-    snapshot_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+    snapshot_path = hermes_home / ENV_SNAPSHOT_NAME
+    body = json.dumps(snapshot, indent=2, sort_keys=True)
+    changed = True
+    if snapshot_path.exists():
+        try:
+            changed = snapshot_path.read_text(encoding="utf-8") != body
+        except OSError:
+            changed = True
+    if changed:
+        snapshot_path.write_text(body, encoding="utf-8")
     return PhaseResult(
         status=PhaseStatus.OK,
         details={
             "snapshot_path": str(snapshot_path),
+            "changed": changed,
             "strix_halo": snapshot["env_report"].get("cpu", {}).get("strix_halo"),
             "gfx": snapshot["gpu_target_version"].get("gfx"),
             "npu_present": snapshot["npu_status"].get("present"),
@@ -2035,7 +1574,7 @@ def _active_persona_render(
     return (prompt, persona.display_name)
 
 
-def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
+def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     """Apply hal0's integration overlay onto the hermes-owned ``config.yaml``.
 
     Config-set redesign (replaces the old whole-file Jinja render that forced
@@ -2063,11 +1602,13 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     memory_provider = _resolve_memory_provider(state.agent_id, cfg)
 
     hermes_home.mkdir(parents=True, exist_ok=True)
-    # Snapshot an EXISTING config.yaml to a single rolling ``config.yaml.bak``
-    # BEFORE the first mutation (migrate + the config-set overlay), so a
-    # repair-revert of hand-edits is recoverable. Distinct from the one-shot
-    # ``config.yaml.pre-hal0`` an --adopt capture writes.
+    # Content snapshot BEFORE any mutation, so we can report whether the overlay
+    # actually changed the file (the convergence signal). Also rolled to a single
+    # ``config.yaml.bak`` so a repair-revert of hand-edits is recoverable.
+    config_before = None
     if config_path.is_file():
+        with contextlib.suppress(OSError):
+            config_before = config_path.read_text(encoding="utf-8")
         with contextlib.suppress(OSError):
             shutil.copy2(config_path, config_path.with_name("config.yaml.bak"))
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
@@ -2088,13 +1629,13 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     hal0_v1_base = primary["backend_url"]
     delegation = _resolve_delegation(slots_all, hal0_base_url=hal0_v1_base)
     auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
-    # Probe-driven mcp_servers (needs_previous: mcp_wire runs AFTER us, so this
-    # only ever sees a persisted prior-run checkpoint). Fall back to the
-    # builtin inventory on the very first pass — re-applied idempotently next run.
-    cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
-    have_probed = isinstance(cached_servers, list) and bool(cached_servers)
-    mcp_servers = cached_servers if have_probed else _default_mcp_servers()
-    # #702: silent fallbacks stay observable.
+    # Probe-driven mcp_servers: mcp_wire runs immediately BEFORE us in the linear
+    # pipeline, so its live probe result is available via output_of. Fall back to
+    # the builtin inventory when the probe found nothing (degraded MCP layer).
+    probed_servers = ctx.output_of("mcp_wire").get("rendered_servers")
+    have_probed = isinstance(probed_servers, list) and bool(probed_servers)
+    mcp_servers = probed_servers if have_probed else _default_mcp_servers()
+    # Silent fallbacks stay observable.
     fallbacks: list[dict[str, str]] = []
     if primary_raw.get("placeholder"):
         fallbacks.append(
@@ -2151,9 +1692,11 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     else:
         honcho_json_changed = _disable_honcho_hermes_host(hermes_home)
 
-    new_hash = (
-        content_hash(config_path.read_text(encoding="utf-8")) if config_path.exists() else None
-    )
+    config_after = config_path.read_text(encoding="utf-8") if config_path.exists() else None
+    new_hash = content_hash(config_after) if config_after is not None else None
+    # Convergence signal: the overlay changed the file content, a list key was
+    # merged, or honcho.json was (dis)abled. A no-drift re-run is byte-identical.
+    changed = bool((config_before != config_after) or list_merge_changed or honcho_json_changed)
     # Non-fatal posture (run-all): a partial set still leaves a usable config.
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
     # that's a real, actionable stop the operator must see.
@@ -2164,6 +1707,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
         reason=("; ".join(errors[:3]) if status == PhaseStatus.FAIL else None),
         details={
             "config_path": str(config_path),
+            "changed": changed,
             "keys_applied": applied,
             "keys_total": len(pairs),
             "list_merge_changed": list_merge_changed,
@@ -2350,7 +1894,7 @@ def _probe_mcp_server(
     return {"ok": True, "tools": tools, "error": None}
 
 
-def _phase_mcp_wire(ctx: PhaseContext) -> PhaseResult:
+def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     """Verify the two hal0-bundled MCP servers respond + record their tool list.
 
     When an allow-list exists at
@@ -2428,7 +1972,7 @@ def _phase_mcp_wire(ctx: PhaseContext) -> PhaseResult:
 # active persona survives re-seed.
 
 
-def _phase_persona_seed(ctx: PhaseContext) -> PhaseResult:
+def _phase_persona_seed(ctx: _StepCtx) -> PhaseResult:
     """Seed the default personas + ``active.txt`` pointer.
 
     Phase 8 (PR-3): idempotent persona file write. The next config_write
@@ -2498,12 +2042,14 @@ RUNTIME_SNAPSHOT_DIR = Path("/var/lib/hal0")
 
 
 def _latest_env_snapshot(hermes_home: Path) -> dict[str, Any]:
-    """Load the most recent env-<ts>.json snapshot env_probe wrote.
+    """Load the env snapshot env_probe wrote (stable ``env.json``, or a legacy
+    ``env-<ts>.json`` from an older install).
 
     Falls back to empty dict when no snapshot exists — templates use
     Jinja2 ``default`` filters so partial data is OK.
     """
-    candidates = sorted(hermes_home.glob("env-*.json"))
+    stable = hermes_home / ENV_SNAPSHOT_NAME
+    candidates = [stable] if stable.exists() else sorted(hermes_home.glob("env-*.json"))
     if not candidates:
         return {}
     try:
@@ -2531,6 +2077,21 @@ def _atomic_write(path: Path, content: str) -> str:
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)
     return content_hash(content)
+
+
+def _atomic_write_if_changed(path: Path, content: str) -> tuple[str, bool]:
+    """Atomic write that skips a byte-identical file. Returns ``(sha256, wrote)``.
+
+    The convergence signal for the rendered context files: a re-render that
+    produces the same bytes leaves the file (and its mtime) untouched.
+    """
+    if path.exists():
+        try:
+            if path.read_text(encoding="utf-8") == content:
+                return content_hash(content), False
+        except OSError:
+            pass
+    return _atomic_write(path, content), True
 
 
 def _safe_symlink(target: Path, link: Path) -> bool:
@@ -2600,7 +2161,7 @@ def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], l
     return linked, warnings
 
 
-def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
+def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
     """Render persona + context files; mirror bundled skills.
 
     Files rendered (atomically):
@@ -2703,8 +2264,10 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
         "fallbacks": fallbacks,
     }
 
+    changed = False
     soul_path = hermes_home / "SOUL.md"
-    h = _atomic_write(soul_path, rendered["SOUL.md"])
+    h, wrote = _atomic_write_if_changed(soul_path, rendered["SOUL.md"])
+    changed = changed or wrote
     details["rendered"]["SOUL.md"] = {"path": str(soul_path), "sha256": h}
 
     # STATE.md + HERMES.md are the live files — render via the one shared
@@ -2720,6 +2283,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
             contexts_fetcher=ctx.io.fetch_model_contexts,
             health_probe=ctx.io.http_get,
         )
+        changed = changed or bool(live.get("state_written") or live.get("hermes_written"))
         details["rendered"]["STATE.md"] = {"path": live["state_path"]}
         # render_live_context writes the REAL HERMES.md under the hal0-owned
         # RUNTIME_SNAPSHOT_DIR (so the User=hal0 runtime re-render isn't blocked
@@ -2763,7 +2327,8 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
         try:
             ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
             apath = ETC_HAL0_DIR / "AGENTS.md"
-            h = _atomic_write(apath, rendered["AGENTS.md"])
+            h, wrote = _atomic_write_if_changed(apath, rendered["AGENTS.md"])
+            changed = changed or wrote
             details["rendered"]["AGENTS.md"] = {"path": str(apath), "sha256": h}
         except OSError as exc:
             warnings.append(f"AGENTS.md write to /etc/hal0: {exc}")
@@ -2772,7 +2337,8 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
         try:
             ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
             mcppath = ETC_HAL0_DIR / "MCP-CLIENTS.md"
-            h = _atomic_write(mcppath, rendered["MCP-CLIENTS.md"])
+            h, wrote = _atomic_write_if_changed(mcppath, rendered["MCP-CLIENTS.md"])
+            changed = changed or wrote
             details["rendered"]["MCP-CLIENTS.md"] = {"path": str(mcppath), "sha256": h}
         except OSError as exc:
             warnings.append(f"MCP-CLIENTS.md write to /etc/hal0: {exc}")
@@ -2782,6 +2348,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
     details["bundled_skills_linked"] = linked
     warnings.extend(skill_warnings)
     details["warnings"] = warnings
+    details["changed"] = changed or bool(details["links"]) or bool(linked)
 
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
@@ -2953,7 +2520,7 @@ def _mcp_memory_call(
     return {"ok": True, "result": data}
 
 
-def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
+def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
     """Write the Hermes identity card to the `agents` memory dataset.
 
     Idempotency: search for an existing card by ``agent_id`` first;
@@ -3147,7 +2714,7 @@ def _build_brain_identity_card() -> dict[str, Any]:
     }
 
 
-def _phase_brain_profile_seed(ctx: PhaseContext) -> PhaseResult:
+def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
     """Register the hal0-brain profile as a first-class agent identity.
 
     Writes the brain identity card to the ``agents`` dataset (search → delete
@@ -3310,7 +2877,7 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
     }
 
 
-def _phase_brain_profile_mcp_wire(ctx: PhaseContext) -> PhaseResult:
+def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     """Reproducibly write hal0's brain-profile keys: MCP servers + memory provider.
 
     Deep-merges the hal0-owned keys (hal0-admin + hal0-memory MCP servers, and
@@ -3373,12 +2940,12 @@ def _phase_brain_profile_mcp_wire(ctx: PhaseContext) -> PhaseResult:
     )
 
 
-# ── Phase I: model_automap ──────────────────────────────────────────────────
+# ── Live slot/model resolution ──────────────────────────────────────────────
 #
-# Walks the live slot/model surface and rewrites the [model_aliases]
-# block of $HERMES_HOME/config.yaml so /model <alias> inside Hermes
-# picks the right backend. Embed/rerank/img stay UNWIRED per grilling
-# Q6 (no top-level embed surface in Hermes; memory MCP handles it).
+# The slot fetchers + resolvers config_write uses to build the [model_aliases],
+# delegation, and auxiliary blocks. (The old post-bootstrap model_automap phase
+# is gone — config_write already sets model.* + model_aliases.*, and the runtime
+# slot refresh is render_live_context's job, not an install step.)
 
 
 HAL0_API_URL = "http://127.0.0.1:8080"
@@ -3945,69 +3512,6 @@ def _resolve_auxiliary_tasks(
     return tasks
 
 
-def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
-    """Refresh ``model.*`` + ``model_aliases.*`` via ``hermes config set``.
-
-    Re-applies the model wiring + per-slot aliases so a post-bootstrap slot
-    change (churn, a newly-loaded slot) lands in the hermes-owned config
-    without a full re-render. ``config set`` is idempotent, so a no-drift run
-    just re-writes the same values.
-
-    Embed/rerank/img slots are deliberately NOT mapped
-    (Hermes has no top-level embed abstraction; memory MCP handles it).
-    """
-    state = ctx.state
-    hermes_home = Path(state.hermes_home)
-    config_path = hermes_home / "config.yaml"
-    if not config_path.exists():
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"{config_path} missing — config_write must run first",
-        )
-
-    hermes_bin = _hermes_bin(Path(state.venv))
-    slots = ctx.io.fetch_slots()
-    chat_slots = _collect_chat_slots(slots, contexts=ctx.io.fetch_model_contexts())
-    primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots)
-    live_resolve_enabled = _live_resolve_enabled()
-    base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary_raw["base_url"]
-
-    pairs: list[tuple[str, Any]] = [
-        # ADR-0023: canonical default virtual is hal0/agent (was hal0/chat).
-        ("model.default", "hal0/agent" if live_resolve_enabled else primary_raw["model"]),
-        ("model.provider", "custom"),
-        ("model.base_url", base_url),
-    ]
-    for slot in chat_slots:
-        alias = slot["alias"]
-        pairs += [
-            (f"model_aliases.{alias}.model", slot["model_id"]),
-            (f"model_aliases.{alias}.provider", "custom"),
-            (f"model_aliases.{alias}.base_url", slot["backend_url"]),
-        ]
-    applied, errors = _apply_config_set(
-        pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=ctx.io.run
-    )
-
-    skipped = [_slot_alias(s) for s in slots if _slot_kind(s) in {"embed", "rerank", "img"}]
-    aliases_written = [s["alias"] for s in chat_slots]
-    status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
-    return PhaseResult(
-        status=status,
-        hash=content_hash(config_path.read_text(encoding="utf-8")),
-        reason=("; ".join(errors[:3]) if status == PhaseStatus.FAIL else None),
-        details={
-            "config_path": str(config_path),
-            "aliases_written": aliases_written,
-            "skipped": skipped,
-            "chat_slot_count": len(chat_slots),
-            "slots_total": len(slots),
-            "keys_applied": applied,
-            "config_set_errors": errors,
-        },
-    )
-
-
 # ── Phase J: voice_wire ─────────────────────────────────────────────────────
 #
 # Conditional. Emits STT/TTS provider config + writes
@@ -4214,7 +3718,7 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
     )
 
 
-def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
+def _phase_gateway_secrets_wire(ctx: _StepCtx) -> PhaseResult:
     """Idempotently write the gateway secrets drop-in + daemon-reload (#437).
 
     Thin phase adapter over :func:`write_gateway_secrets_dropin` (which owns
@@ -4235,8 +3739,10 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     # api_server refuses to start without it; a placeholder would be a shared
     # secret. Idempotent — a rerun keeps an existing strong key. Log-safe: we
     # record only the outcome + key length, never the value.
+    key_generated = False
     try:
         key_result = ensure_gateway_api_server_key()
+        key_generated = key_result.outcome == "generated"
         details["api_server_key"] = {
             "outcome": key_result.outcome,
             "key_len": key_result.key_len,
@@ -4249,9 +3755,11 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     if result.outcome == "failed":
         return PhaseResult(status=PhaseStatus.FAIL, reason=result.reason, details=details)
 
-    # "written" | "unchanged" → OK. Preserve the checkpoint's detail shape:
-    # daemon_reload flag always present; `unchanged` only on the hash-skip path.
+    # "written" | "unchanged" → OK. Convergence signal: the drop-in was
+    # (re)written or a fresh API key was generated. A converged box is "unchanged"
+    # + an already-present key → changed False.
     details["daemon_reload"] = result.daemon_reload
+    details["changed"] = (result.outcome == "written") or key_generated
     if result.outcome == "unchanged":
         details["unchanged"] = True
     return PhaseResult(
@@ -4674,7 +4182,7 @@ def reconcile_ownership_on_repair(
     return OwnershipReconcileResult(reconciled=reconciled)
 
 
-def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
+def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
     """Emit STT/TTS provider config + secrets env when both slots are ready.
 
     Skip semantics: when neither STT nor TTS is configured + ready,
@@ -4741,6 +4249,10 @@ def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
             "config_path": str(config_path),
             "keys_applied": applied,
             "config_set_errors": errors,
+            # A wired voice slot writes the secrets vault + config keys. Boxes
+            # without stt/tts SKIP above (never reach here) — so this only fires
+            # when there is genuinely voice wiring to apply.
+            "changed": bool(updates),
         },
     )
 
@@ -4757,10 +4269,11 @@ def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
 
 
 def _wrapper_bin() -> Path:
-    return WRAPPER_INSTALL_PATH
+    # The canonical entry point (the hal0-hermes back-compat symlink is retired).
+    return HERMES_CLI_INSTALL_PATH
 
 
-def _smoke_chat_completions(state: BootstrapState, _io: PhaseIO) -> tuple[bool, str]:
+def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool, str]:
     """POST against model.base_url/chat/completions; assert 'ready' in reply.
 
     Reads the live config.yaml so we hit whatever model_automap left
@@ -4822,7 +4335,7 @@ def _smoke_chat_completions(state: BootstrapState, _io: PhaseIO) -> tuple[bool, 
     return ("ready" in haystack, detail)
 
 
-def _smoke_memory_roundtrip(state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
+def _smoke_memory_roundtrip(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     add = io.mcp_memory_call(
         "tools/call",
         {
@@ -4860,7 +4373,7 @@ def _smoke_memory_roundtrip(state: BootstrapState, io: PhaseIO) -> tuple[bool, s
     return (False, "memory_search returned no items for just-written marker")
 
 
-def _smoke_admin_tools_list(state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
+def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     probe = io.probe_mcp_server(
         "http://127.0.0.1:8080/mcp/admin",
         agent_id=state.agent_id,
@@ -4872,7 +4385,7 @@ def _smoke_admin_tools_list(state: BootstrapState, io: PhaseIO) -> tuple[bool, s
     return (n >= 5, f"{n} tools advertised")
 
 
-def _smoke_hermes_md_contains_primary(state: BootstrapState, _io: PhaseIO) -> tuple[bool, str]:
+def _smoke_hermes_md_contains_primary(state: BootstrapState, _io: InstallIO) -> tuple[bool, str]:
     hermes_md = ETC_HAL0_DIR / "HERMES.md"
     if not hermes_md.exists():
         return (False, f"{hermes_md} not present")
@@ -4895,7 +4408,7 @@ def _smoke_hermes_md_contains_primary(state: BootstrapState, _io: PhaseIO) -> tu
     )
 
 
-def _smoke_wrapper_ready(_state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
+def _smoke_wrapper_ready(_state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     wrapper = _wrapper_bin()
     if not wrapper.exists():
         return (False, f"wrapper missing at {wrapper}")
@@ -4911,7 +4424,7 @@ def _smoke_wrapper_ready(_state: BootstrapState, io: PhaseIO) -> tuple[bool, str
     return (result.returncode == 0, f"--hal0-ready rc={result.returncode}")
 
 
-def _smoke_hermes_doctor(_state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
+def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     venv_hermes = _venv_python(Path(_state.venv)).parent / "hermes"
     if not venv_hermes.exists():
         return (False, f"hermes binary missing at {venv_hermes}")
@@ -4928,7 +4441,7 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: PhaseIO) -> tuple[bool, str
     return (result.returncode == 0, f"rc={result.returncode}")
 
 
-def _phase_smoke_tests(ctx: PhaseContext) -> PhaseResult:
+def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     """Run six diagnostic probes; collect results into the checkpoint."""
     state = ctx.state
     probes = [
@@ -4962,7 +4475,7 @@ def _phase_smoke_tests(ctx: PhaseContext) -> PhaseResult:
 # rollup so a degraded install surfaces in chat.
 
 
-def _phase_self_report(ctx: PhaseContext) -> PhaseResult:
+def _phase_self_report(ctx: _StepCtx) -> PhaseResult:
     """Write a bootstrap-completion summary into the agent's private namespace.
 
     Failure of the memory write is non-fatal — same posture as
@@ -5166,7 +4679,7 @@ def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, b
     return path, True
 
 
-def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
+def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     """Write the seed TOML, driver env file, and runtime.json (issue #432).
 
     These three artifacts were previously only written by
@@ -5227,54 +4740,29 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     )
 
 
-# ── ownership_reconcile phase removed (§7.4 F.7) ─────────────────────────────
+# ── Linear convergent installer ──────────────────────────────────────────────
 #
-# The late always-run phase re-chowned HERMES_HOME to hal0 and repaired 0711 on
-# /var/lib/hal0/agents. It existed solely to undo the root:root config.yaml that
-# the root-context config_write wrote AFTER home_init's chown. Provisioning now
-# runs as hal0 (cli/_provision_hermes drops before this pipeline), so config.yaml
-# and the whole home are born hal0:hal0 — there is nothing to reconcile. The
-# 0711 traversal mode on /var/lib/hal0/agents is an OwnershipStore row applied by
-# `doctor perms --fix`, not this phase.
-
-
-# ── Phase pipeline plumbing (issue #702) ────────────────────────────────────
+# The resumable-checkpoint pipeline (PHASES / Phase / PhaseContext / run /
+# provision.json) was replaced by ONE linear pass: :func:`install_hermes`. Each
+# step converges its slice of host state and reports whether it changed anything,
+# so re-running is cheap and a second run over an already-provisioned box mutates
+# nothing (the convergence contract). Idempotency comes from every write being a
+# converging write (``hermes config set`` re-applies the same value; file writes
+# hash-skip), not from stored checkpoints.
 #
-# The pipeline's IO seams + cross-phase reads, made explicit:
-#
-#   * ``PhaseIO`` bundles every external touchpoint a phase may use
-#     (HTTP, subprocess, the slot/MCP/memory fetchers). Defaults are the
-#     real module functions, so ``PhaseIO()`` IS production behaviour;
-#     tests construct ``PhaseIO(fetch_slots=fake, ...)`` instead of
-#     monkeypatching module globals.
-#   * ``PhaseContext`` is what a phase receives: read-only state, the
-#     ``--repair`` flag (formerly the ``_repair_flag`` sentinel smuggled
-#     through ``state.phases``), the IO bundle, and ``output_of(name)``
-#     — the ONLY sanctioned way to read another phase's checkpoint.
-#   * ``Phase`` entries in ``PHASES`` declare their cross-phase reads via
-#     ``needs`` (same-run: target precedes reader) or ``needs_previous``
-#     (previous-run checkpoint: target follows reader in the list, so the
-#     value can only come from a persisted prior run). ``output_of``
-#     raises ``PhaseNeedError`` for any undeclared read;
-#     ``_validate_phase_graph`` rejects a mis-ordered PHASES list at
-#     import time.
-#
-# Path constants intentionally stay module-level (tests redirect them
-# with monkeypatch) — only behavioural IO lives in PhaseIO.
-
-
-class PhaseNeedError(RuntimeError):
-    """A phase read another phase's output without declaring the need."""
+# The brain/persona/memory-identity steps (persona_seed, namespace_register,
+# brain_profile_seed, brain_profile_mcp_wire, self_report) still run here for now
+# but are marked ``# RELOCATE(brain-lane):`` — a concurrent lane moves them into
+# the hal0-api lifespan; leave them functioning until it lands.
 
 
 @dataclass(frozen=True)
-class PhaseIO:
-    """The IO seams a phase may touch — the monkeypatch tax, typed.
+class InstallIO:
+    """Injectable IO seams :func:`install_hermes` touches.
 
-    Defaults bind the real implementations, so a default-constructed
-    ``PhaseIO`` changes nothing in production. ``run`` is
-    :func:`subprocess.run` (gateway_secrets_wire's daemon-reload + the
-    smoke-test exec path).
+    Defaults bind the real implementations, so ``InstallIO()`` is production
+    behaviour; tests construct ``InstallIO(fetch_slots=fake, run=recorder, …)``
+    to run hermetically and record the mutating calls a step makes.
     """
 
     http_get: Callable[..., int] = _http_get
@@ -5289,262 +4777,171 @@ class PhaseIO:
 
 
 @dataclass(frozen=True)
-class PhaseContext:
-    """Everything a phase body is allowed to see.
+class _StepCtx:
+    """What one install step body sees: the resolved target, the IO seams, the
+    ``--repair`` flag, and read access to the details of already-run steps.
 
-    ``state`` is a read-only view by convention (phases return a
-    :class:`PhaseResult`; only the orchestrator writes checkpoints).
-    ``output_of(name)`` returns the named phase's checkpoint ``details``
-    dict — empty when the phase has no checkpoint yet (e.g. the
-    cross-run ``config_write → mcp_wire`` read on a fresh install) —
-    and raises :class:`PhaseNeedError` unless ``name`` was declared in
-    the calling phase's ``needs`` / ``needs_previous``.
+    Replaces the old ``PhaseContext``/``PhaseIO`` pair. ``output_of(name)``
+    returns an earlier step's ``details`` (empty when it hasn't run) — no
+    needs-graph enforcement, because linear order makes the reads self-evident.
     """
 
     state: BootstrapState
+    io: InstallIO = field(default_factory=InstallIO)
     repair: bool = False
-    io: PhaseIO = field(default_factory=PhaseIO)
-    phase_name: str = "<anonymous>"
-    allowed_needs: frozenset[str] = frozenset()
-    # Capture mode: back up + import + claim a foreign HERMES_HOME (and
-    # downgrade a foreign-gateway abort to a warning) rather than refusing.
-    adopt: bool = False
+    _prior: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def output_of(self, name: str) -> dict[str, Any]:
-        if name not in self.allowed_needs:
-            raise PhaseNeedError(
-                f"phase {self.phase_name!r} read output of {name!r} without "
-                f"declaring it (declared needs: {sorted(self.allowed_needs)})"
-            )
-        entry = self.state.phases.get(name) or {}
-        details = entry.get("details") or {}
-        return details if isinstance(details, dict) else {}
-
-
-@dataclass(frozen=True)
-class Phase:
-    """One PHASES entry: name, body, and declared cross-phase reads.
-
-    ``needs``          — same-run reads; the target MUST precede this
-                         phase in the list (validated at import).
-    ``needs_previous`` — previous-run checkpoint reads; the target MUST
-                         follow this phase in the list (if it preceded,
-                         it would be a plain same-run need). The only
-                         such edge today is ``config_write → mcp_wire``:
-                         mcp_wire probes AFTER the first render and the
-                         probed server list feeds the NEXT run's render.
-    """
-
-    name: str
-    fn: Callable[[PhaseContext], PhaseResult]
-    needs: tuple[str, ...] = ()
-    needs_previous: tuple[str, ...] = ()
-    # When True the orchestrator runs this phase on every invocation, even
-    # when its checkpoint is already ok (no --repair). For phases whose work
-    # reconciles state that drifts independently of checkpoints (ownership).
-    always_run: bool = False
-
-    @property
-    def allowed_needs(self) -> frozenset[str]:
-        return frozenset(self.needs) | frozenset(self.needs_previous)
-
-
-def _validate_phase_graph(phases: list[Phase]) -> None:
-    """Fail fast (import time) when PHASES violates a declared need."""
-    index: dict[str, int] = {}
-    for i, phase in enumerate(phases):
-        if phase.name in index:
-            raise ValueError(f"PHASES: duplicate phase name {phase.name!r}")
-        index[phase.name] = i
-    for i, phase in enumerate(phases):
-        for need in phase.needs:
-            if need not in index:
-                raise ValueError(f"PHASES: {phase.name!r} needs unknown phase {need!r}")
-            if index[need] >= i:
-                raise ValueError(
-                    f"PHASES: {phase.name!r} needs {need!r} which does not precede it "
-                    f"(reader at {i}, target at {index[need]})"
-                )
-        for need in phase.needs_previous:
-            if need not in index:
-                raise ValueError(f"PHASES: {phase.name!r} needs_previous unknown phase {need!r}")
-            if index[need] < i:
-                raise ValueError(
-                    f"PHASES: {phase.name!r} declares needs_previous on {need!r}, "
-                    f"but {need!r} precedes it — declare it as a plain same-run need"
-                )
-
-
-PHASES: list[Phase] = [
-    Phase("preflight", _phase_preflight),
-    Phase("install", _phase_install),
-    Phase("env_probe", _phase_env_probe),
-    Phase("home_init", _phase_home_init),
-    # #432: write the manager seed + driver env + runtime.json embed token
-    # right after $HERMES_HOME exists and before mcp_wire reads the seed's
-    # allow-list, so a single `bootstrap hermes` run leaves the artifacts the
-    # manager + chat_proxy key off (previously only AgentManager.install wrote
-    # them, so the bootstrap path left the agent reporting `broken`).
-    Phase("install_artifacts", _phase_install_artifacts),
-    # PR-3 Phase 8: seed personas BEFORE config_write so the first
-    # config render gets the active persona's system_prompt prelude.
-    # mcp_wire runs after config_write to probe the live MCP surface;
-    # the probe results feed Phase 9 (model_automap)'s re-render so a
-    # post-bootstrap config still picks up the validated server list —
-    # hence config_write's needs_previous (cross-run) edge on mcp_wire.
-    Phase("persona_seed", _phase_persona_seed),
-    Phase("config_write", _phase_config_write, needs_previous=("mcp_wire",)),
-    Phase("mcp_wire", _phase_mcp_wire),
-    Phase("context_link", _phase_context_link),
-    Phase("namespace_register", _phase_namespace_register),
-    # Register the hal0-brain profile identity right after the default agent's
-    # card, once the memory layer is up. Warn-as-OK like namespace_register.
-    Phase("brain_profile_seed", _phase_brain_profile_seed),
-    # Wire the hal0-owned MCP servers (admin + memory) into the hal0-brain
-    # profile config so the steward can control the box. Warn-as-OK.
-    Phase("brain_profile_mcp_wire", _phase_brain_profile_mcp_wire),
-    # Both re-apply their slice of the overlay via `hermes config set` (no
-    # full re-render), so neither reads mcp_wire's probed-server checkpoint
-    # any more — only config_write still does (needs_previous above).
-    Phase("model_automap", _phase_model_automap),
-    Phase("voice_wire", _phase_voice_wire),
-    # (ownership_reconcile phase removed — §7.4 F.7: provisioning runs as hal0,
-    # so config.yaml / the home are born hal0:hal0 with nothing to reconcile.)
-    # #437 (SYSTEM scope): wire the gateway secrets drop-in so fresh
-    # provisions/reinstalls come up with Telegram + Discord connected,
-    # surviving hermes_cli main-unit regeneration. Runs after voice_wire
-    # (which may write the secrets vault this drop-in references) and
-    # before smoke_tests. The orchestrator runs `hermes gateway install`
-    # separately to lay down the main unit; this phase only owns the
-    # drop-in + daemon-reload.
-    Phase("gateway_secrets_wire", _phase_gateway_secrets_wire),
-    Phase("smoke_tests", _phase_smoke_tests),
-    Phase("self_report", _phase_self_report, needs=("smoke_tests",)),
-]
-
-_validate_phase_graph(PHASES)
-
-PHASE_NAMES: tuple[str, ...] = tuple(p.name for p in PHASES)
-
-
-def context_for(
-    phase_name: str,
-    state: BootstrapState,
-    *,
-    repair: bool = False,
-    adopt: bool = False,
-    io: PhaseIO | None = None,
-) -> PhaseContext:
-    """Build the :class:`PhaseContext` the orchestrator would hand ``phase_name``.
-
-    Looks the phase up in :data:`PHASES` so the context carries the
-    declared needs — the canonical way for per-phase unit tests to call
-    a phase body directly without re-stating the needs graph.
-    """
-    phase = next((p for p in PHASES if p.name == phase_name), None)
-    if phase is None:
-        raise KeyError(f"unknown phase {phase_name!r} (known: {', '.join(PHASE_NAMES)})")
-    return PhaseContext(
-        state=state,
-        repair=repair,
-        adopt=adopt,
-        io=io if io is not None else PhaseIO(),
-        phase_name=phase.name,
-        allowed_needs=phase.allowed_needs,
-    )
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-
-def _utcnow() -> str:
-    return datetime.datetime.now(tz=datetime.UTC).isoformat().replace("+00:00", "Z")
-
-
-def content_hash(*pieces: str | bytes) -> str:
-    """Stable content hash phases use to detect "inputs unchanged".
-
-    Phases that produce on-disk outputs (config.yaml, HERMES.md) hash
-    the rendered content and stash it in ``PhaseResult.hash``. A
-    re-run computes the hash again; mismatch → ``repair_needed``.
-    """
-    h = hashlib.sha256()
-    for piece in pieces:
-        if isinstance(piece, str):
-            piece = piece.encode("utf-8")
-        h.update(piece)
-    return h.hexdigest()
-
-
-# ── Orchestrator ─────────────────────────────────────────────────────────────
+        got = self._prior.get(name) or {}
+        return got if isinstance(got, dict) else {}
 
 
 @dataclass
-class RunResult:
-    """Aggregate result of one :func:`run` invocation.
+class InstallStep:
+    """One step's outcome in an :class:`InstallReport`.
 
-    ``phases`` mirrors ``BootstrapState.phases`` post-run for
-    test-side assertions; ``state`` is the persisted dataclass.
+    ``changed`` is the convergence signal: ``True`` iff the step altered
+    persistent host state on this run. A converged re-run leaves every
+    host-mutating step ``changed=False`` — that is what the double-run
+    convergence test asserts.
     """
 
-    state: BootstrapState
-    phases: dict[str, dict[str, Any]]
-    skipped: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-    # Set when a phase returned a FATAL failure and the run stopped early
-    # (unclaimed foreign HERMES_HOME, or a live foreign gateway). The CLI
-    # surfaces ``abort_reason`` + the --adopt pointer and exits non-zero.
-    aborted: bool = False
-    abort_reason: str | None = None
+    name: str
+    status: str  # "ok" | "skip" | "fail"
+    changed: bool = False
+    reason: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
 
-def run(
+@dataclass
+class InstallReport:
+    """Aggregate outcome of one :func:`install_hermes` pass."""
+
+    hermes_home: str
+    venv: str
+    agent_id: str
+    repair: bool = False
+    steps: list[InstallStep] = field(default_factory=list)
+
+    def step(self, name: str) -> InstallStep | None:
+        return next((s for s in self.steps if s.name == name), None)
+
+    @property
+    def failed(self) -> list[str]:
+        return [s.name for s in self.steps if s.status == "fail"]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed
+
+    @property
+    def mutated(self) -> list[str]:
+        """Names of the host-mutating steps that changed state this run.
+
+        The brain-lane memory/persona publishes are external (memory store)
+        side effects, not local install mutations, so they never appear here —
+        the convergence contract is about the on-disk install surface.
+        """
+        return [s.name for s in self.steps if s.changed]
+
+    @property
+    def converged(self) -> bool:
+        """True when no host-mutating step changed anything (a no-op re-run)."""
+        return not self.mutated
+
+
+# Host-mutating steps whose ``changed`` flag feeds the convergence contract.
+# The brain-lane steps (persona/memory publishes) are deliberately excluded —
+# they touch the memory store, not the local install surface. They still run
+# (marked ``# RELOCATE(brain-lane):``) but never count as an install mutation.
+_BRAIN_LANE_STEPS: frozenset[str] = frozenset(
+    {
+        "persona_seed",
+        "namespace_register",
+        "brain_profile_seed",
+        "brain_profile_mcp_wire",
+        "self_report",
+    }
+)
+
+
+def _step_changed(name: str, result: PhaseResult) -> bool:
+    """Derive a step's convergence signal from its :class:`PhaseResult`."""
+    if name in _BRAIN_LANE_STEPS:
+        return False  # external memory-store publishes are not install mutations
+    if result.status != PhaseStatus.OK:
+        return False
+    d = result.details or {}
+    if name == "install_artifacts":
+        return bool(d.get("seed_wrote") or d.get("env_wrote") or d.get("token_wrote"))
+    return bool(d.get("changed"))
+
+
+# The ordered pipeline. ``mcp_wire`` runs BEFORE ``config_write`` (was a
+# cross-run checkpoint edge under the old machinery) so the render sees the live
+# probe result directly. ``model_automap`` is gone — config_write already sets
+# ``model.*`` + ``model_aliases.*`` (the post-bootstrap slot refresh is a runtime
+# concern of ``render_live_context``). ``ownership_reconcile`` is gone (§7.4 F.7).
+_INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
+    ("preflight", _phase_preflight),
+    ("install", _phase_install),
+    ("env_probe", _phase_env_probe),
+    ("home_init", _phase_home_init),
+    ("install_artifacts", _phase_install_artifacts),
+    # RELOCATE(brain-lane): persona seeding moves to the hal0-api lifespan.
+    ("persona_seed", _phase_persona_seed),
+    ("mcp_wire", _phase_mcp_wire),
+    ("config_write", _phase_config_write),
+    ("context_link", _phase_context_link),
+    # RELOCATE(brain-lane): identity-card publish moves to the lifespan.
+    ("namespace_register", _phase_namespace_register),
+    # RELOCATE(brain-lane): brain profile identity publish.
+    ("brain_profile_seed", _phase_brain_profile_seed),
+    # RELOCATE(brain-lane): brain profile MCP wiring.
+    ("brain_profile_mcp_wire", _phase_brain_profile_mcp_wire),
+    ("voice_wire", _phase_voice_wire),
+    ("gateway_secrets_wire", _phase_gateway_secrets_wire),
+    ("smoke_tests", _phase_smoke_tests),
+    # RELOCATE(brain-lane): self-report memory write.
+    ("self_report", _phase_self_report),
+)
+
+
+def install_hermes(
     *,
     repair: bool = False,
-    adopt: bool = False,
-    dry_run: bool = False,
-    skip_phases: tuple[str, ...] = (),
+    hermes_home: Path | str = HERMES_HOME_DEFAULT,
+    venv: Path | str = HERMES_VENV_DEFAULT,
+    agent_id: str = "hermes",
+    io: InstallIO | None = None,
     state_root: Path | None = None,
+    write_report: bool = True,
     verbose: bool = False,
-    initial_state: BootstrapState | None = None,
-    io: PhaseIO | None = None,
-) -> RunResult:
-    """Run every phase in order, persisting checkpoints to ``state_root``.
+) -> InstallReport:
+    """Provision Hermes in one linear, convergent pass.
 
-    * ``repair`` — re-run every phase regardless of checkpoint state.
-      Surfaced to phase bodies as ``ctx.repair`` (persona_seed +
-      install_artifacts change behaviour under it).
-    * ``dry_run`` — execute each phase but don't persist the state file.
-    * ``skip_phases`` — skip the named phases (logged as ``skip``).
-    * ``state_root`` — overrides the default ``provision.json`` location;
-      tests pass a ``tmp_path``.
-    * ``initial_state`` — seed state when no checkpoint exists; tests
-      pass one with `hermes_home` + `venv` pointed at `tmp_path` so the
-      real install/home_init phases don't need write access to /var/lib.
-    * ``io`` — the :class:`PhaseIO` seam bundle every phase receives;
-      ``None`` means the production wiring (``PhaseIO()``).
+    resolve python → pinned SDK venv → plugin trees → apply the hal0 config keys
+    (``hermes config set`` + targeted deep-merge, never a wholesale config.yaml
+    rewrite) → render context files → install artifacts → wire the gateway
+    secrets drop-in + API key → smoke test. Each step converges its slice and
+    reports whether it changed anything; a second run over an already-provisioned
+    box mutates nothing (``report.converged``).
 
-    FAIL policy is run-all: a failing phase never halts the loop or
-    skips dependents (fallbacks keep phases independent; convergence
-    comes via ``--repair``). ``completed_at`` is only stamped when no
-    phase failed — unchanged from the pre-#702 contract.
+    ``repair`` re-runs every step and, as root, first reconciles ownership drift
+    (:func:`reconcile_ownership_on_repair`) so a root-clobbered tree is fixed
+    before the converging writes rather than re-written on top of ``root:root``.
 
-    Returns a :class:`RunResult` capturing the post-run state + the
-    per-phase outcomes the CLI surface pretty-prints.
+    The injectable knobs (``hermes_home``/``venv``/``agent_id``/``io``/
+    ``state_root``) carry production defaults, so ``install_hermes(repair=...)``
+    is the whole public contract; tests point them at a tmp tree.
     """
-    root = state_root if state_root is not None else _DEFAULT_STATE_ROOT
-    state = BootstrapState.load(root) or initial_state or BootstrapState()
-    if state.started_at is None or repair:
-        state.started_at = _utcnow()
-        state.completed_at = None
+    io = io if io is not None else InstallIO()
+    state = BootstrapState(hermes_home=str(hermes_home), venv=str(venv), agent_id=agent_id)
 
-    # RATIFIED 2026-07-18 (deliverable 6): `--repair` reconciles ownership drift
-    # BEFORE the converging writes, so a root-clobbered HERMES_HOME/venv/config
-    # (halo150 O3, what `doctor perms` flags) is actually fixed — not just
-    # re-written on top of root:root. No-op unless repair AND running as root.
+    # RATIFIED 2026-07-18 (inc-1 deliverable 6): `--repair` reconciles ownership
+    # drift BEFORE the converging writes, so a root-clobbered HERMES_HOME/venv is
+    # actually fixed — not re-written on top of root:root. No-op unless root.
     if repair:
-        # Best-effort: a reconcile hiccup (e.g. the hal0 user not yet created)
-        # must never abort the repair run — the converging writes still follow.
         try:
             recon = reconcile_ownership_on_repair(enabled=os.geteuid() == 0, venv=Path(state.venv))
             if recon.reconciled and verbose:
@@ -5552,10 +4949,9 @@ def run(
         except (OSError, KeyError, subprocess.SubprocessError) as exc:
             log.warning("hermes_provision.repair_reconcile_failed", error=str(exc))
 
-    # RATIFIED 2026-07-18 (deliverable 5): scrub stale hal0-agent@ drop-in
-    # debris (the 241/CONFIGURATION_DIRECTORY brick-loop class) BEFORE the unit
-    # is (re)enabled, on every install. Root-only (writes /etc/systemd);
-    # convergent + reported; a clean box removes nothing. Best-effort.
+    # RATIFIED 2026-07-18 (inc-1 deliverable 5): scrub stale hal0-agent@ drop-in
+    # debris (the 241/CONFIGURATION_DIRECTORY brick-loop class) BEFORE the unit is
+    # (re)enabled, on every install. Root-only, convergent, best-effort.
     if os.geteuid() == 0:
         try:
             cleanup = cleanup_stale_agent_dropins()
@@ -5564,89 +4960,65 @@ def run(
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("hermes_provision.stale_dropin_cleanup_failed", error=str(exc))
 
-    phase_io = io if io is not None else PhaseIO()
-    skipped: list[str] = []
-    failed: list[str] = []
-    aborted = False
-    abort_reason: str | None = None
-
-    for phase in PHASES:
-        name = phase.name
-
-        # A prior FATAL phase aborts the run: record every remaining phase as
-        # skipped (so provision.json shows why it stopped) and run nothing more.
-        if aborted:
-            state.phases[name] = {
-                "status": PhaseStatus.SKIP.value,
-                "at": _utcnow(),
-                "reason": "aborted: unclaimed HERMES_HOME",
-            }
-            skipped.append(name)
-            if verbose:
-                print(f"[skip] {name} (aborted)")
-            continue
-
-        if name in skip_phases:
-            entry = {
-                "status": PhaseStatus.SKIP.value,
-                "at": _utcnow(),
-                "reason": "--skip-phase",
-            }
-            state.phases[name] = entry
-            skipped.append(name)
-            if verbose:
-                print(f"[skip] {name} (--skip-phase)")
-            continue
-
-        # always_run phases never phase_done-skip — their work reconciles state
-        # that drifts independently of checkpoints. (No phase currently sets
-        # always_run since the ownership_reconcile removal, §7.4 F.7; the
-        # machinery stays for future phases.)
-        if not repair and not phase.always_run and state.phase_done(name):
-            if verbose:
-                print(f"[skip] {name} (already ok)")
-            skipped.append(name)
-            continue
-
+    report = InstallReport(
+        hermes_home=state.hermes_home, venv=state.venv, agent_id=agent_id, repair=repair
+    )
+    prior: dict[str, dict[str, Any]] = {}
+    for name, fn in _INSTALL_STEPS:
         if verbose:
             print(f"[run ] {name}")
-
-        ctx = PhaseContext(
-            state=state,
-            repair=repair,
-            adopt=adopt,
-            io=phase_io,
-            phase_name=name,
-            allowed_needs=phase.allowed_needs,
+        ctx = _StepCtx(state=state, io=io, repair=repair, _prior=prior)
+        result = fn(ctx)
+        prior[name] = result.details
+        step = InstallStep(
+            name=name,
+            status=result.status.value,
+            changed=_step_changed(name, result),
+            reason=result.reason,
+            details=result.details,
         )
-        result = phase.fn(ctx)
-        entry = result.to_dict()
-        entry["at"] = _utcnow()
-        state.phases[name] = entry
+        report.steps.append(step)
+        if verbose and result.reason:
+            print(f"       {result.status.value}: {result.reason}")
 
-        if result.status == PhaseStatus.FAIL:
-            failed.append(name)
-            state.errors.append(f"{name}: {result.reason or 'unspecified failure'}")
-            if result.fatal:
-                aborted = True
-                abort_reason = result.reason
-                if verbose:
-                    print(f"[abort] {name}: {result.reason}")
+    if write_report:
+        try:
+            _write_run_report(report, state_root)
+        except OSError as exc:
+            log.warning("hermes_provision.run_report_write_failed", error=str(exc))
+    return report
 
-    if not failed:
-        state.completed_at = _utcnow()
 
-    if not dry_run:
-        state.save(root)
+def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
+    """Persist a flat last-run report for ``hal0 agent status`` to render.
 
-    return RunResult(
-        state=state,
-        phases=dict(state.phases),
-        skipped=skipped,
-        failed=failed,
-        aborted=aborted,
-        abort_reason=abort_reason,
-    )
+    This is NOT a resumable checkpoint (the linear installer has none) — just a
+    snapshot of the most recent run keyed by step name, so ``agent status`` /
+    ``agent log`` keep working without the retired provision.json machinery.
+    """
+    root = state_root if state_root is not None else _DEFAULT_STATE_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    now = _utcnow()
+    data = {
+        "hal0_version": _hal0_version_string(),
+        "hermes_version": _hermes_version_pin(),
+        "completed_at": now if report.ok else None,
+        "repair": report.repair,
+        "phases": {
+            s.name: {
+                "status": s.status,
+                "at": now,
+                "changed": s.changed,
+                **({"reason": s.reason} if s.reason else {}),
+                **({"details": s.details} if s.details else {}),
+            }
+            for s in report.steps
+        },
+    }
+    target = root / _STATE_FILE_NAME
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
 
 
 # ── CLI surface ──────────────────────────────────────────────────────────────
@@ -5656,41 +5028,38 @@ def bootstrap_cli(
     *,
     repair: bool,
     adopt: bool = False,
-    dry_run: bool,
-    skip_phases: tuple[str, ...],
-    verbose: bool,
+    dry_run: bool = False,
+    skip_phases: tuple[str, ...] = (),
+    verbose: bool = False,
     state_root: Path | None = None,
 ) -> int:
-    """CLI entry point. Returns a POSIX exit code (0 = success, 1 = any fail)."""
-    result = run(
+    """CLI entry point — thin delegator to :func:`install_hermes`.
+
+    Returns a POSIX exit code (0 = success, 1 = any step failed). ``adopt`` and
+    ``skip_phases`` are retired no-ops kept in the signature so the existing
+    ``hal0 agent bootstrap`` flags keep parsing; ``dry_run`` suppresses the
+    last-run report write.
+    """
+    report = install_hermes(
         repair=repair,
-        adopt=adopt,
-        dry_run=dry_run,
-        skip_phases=skip_phases,
-        verbose=verbose,
         state_root=state_root,
+        write_report=not dry_run,
+        verbose=verbose,
     )
     if verbose:
         target = (state_root or _DEFAULT_STATE_ROOT) / _STATE_FILE_NAME
         print(f"state: {target}")
-
-    # Surface a foreign-gateway warning even on an otherwise-successful --adopt
-    # run — hal0 won't auto-stop another user's poller, so the operator must.
-    preflight = result.state.phases.get("preflight") or {}
-    warn = (preflight.get("details") or {}).get("foreign_gateway_warning")
-    if warn:
-        print(f"WARNING: {warn}")
-
-    if result.aborted:
-        print(f"bootstrap aborted: {result.abort_reason or 'unclaimed HERMES_HOME'}")
-        if not adopt:
-            print(
-                "Re-run with --adopt to safely capture the existing install "
-                "(backs it up + imports its tokens), or move it aside."
-            )
-        print(f"Operator overrides live at {OVERRIDES_PATH}.")
-        return 1
-    if result.failed:
-        print(f"bootstrap failed in phases: {', '.join(result.failed)}")
+    if report.failed:
+        print(f"bootstrap failed in steps: {', '.join(report.failed)}")
         return 1
     return 0
+
+
+def _detect_foreign_gateways(**_kwargs: Any) -> list[dict[str, str]]:
+    """Retired foreign-gateway scan — now a no-op shim.
+
+    hal0's single-managed-gateway model dropped the capture/adopt path; the
+    detector stays as an empty-returning shim only so the CLI gateway-install
+    site (which best-effort-imports it) keeps working without an edit.
+    """
+    return []
