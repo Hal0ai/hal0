@@ -118,6 +118,7 @@ from hal0.slots.watchdog import (
 if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
     from hal0.slots.arbiter import GpuArbiter
+    from hal0.slots.interface import SlotInterface
 
 log = logging.getLogger(__name__)
 
@@ -394,6 +395,11 @@ class SlotManager:
         # ``.arbiter`` access so CLI/test contexts that never touch image
         # mode pay nothing. See the ``arbiter`` property below.
         self._arbiter: GpuArbiter | None = None
+        # Deep intent interface (REWORK.md §E) — the narrow inspect/apply/
+        # delete/subscribe surface, constructed lazily on first ``.interface``
+        # access. Additive: delegates to the wide surface above, never replaces
+        # it. See the ``interface`` property below and hal0.slots.interface.
+        self._interface: SlotInterface | None = None
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2450,6 +2456,21 @@ class SlotManager:
             self._dispatch_tickets.pop(key, None)
 
     # ── GpuArbiter (Phase D, spec §7) ────────────────────────────────────────
+
+    @property
+    def interface(self) -> SlotInterface:
+        """The deep intent surface (REWORK.md §E), lazily constructed.
+
+        ``inspect`` / ``apply`` / ``delete`` / ``subscribe`` keyed by stable
+        slot id — the narrow counterpart to this class's wide verb surface.
+        Additive: it delegates to the existing methods, so both surfaces stay
+        live during the migration (principle 6). See :mod:`hal0.slots.interface`.
+        """
+        if self._interface is None:
+            from hal0.slots.interface import SlotInterface
+
+            self._interface = SlotInterface(self)
+        return self._interface
 
     @property
     def arbiter(self) -> GpuArbiter:
