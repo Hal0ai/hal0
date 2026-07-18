@@ -254,6 +254,31 @@ export const ENDPOINTS = {
   activityStream: '/api/activity/stream',
   activityExport: '/api/activity/export',
 
+  // ── Auth posture (D4 Security page) ──────────────────────────────
+  // GET /api/auth/status (OPEN) → { auth_required, has_admin_key, tier }.
+  // Status only — never key values. Client-key status, admin-key fingerprint,
+  // last-rotated, and login-throttle counters are NOT reported by this route
+  // (D4 flags them as API-lane requests); the page shows disabled-with-reason
+  // rather than fabricating them. There is no key-rotation route either.
+  authStatus: '/api/auth/status',
+
+  // ── Flag-migration report (D5 migration-resolve) ─────────────────
+  // GET /api/migrations/flag-report — MISSING today (API-lane request). The
+  // typed client (useMigrationReport) returns an empty report by default and
+  // fails soft to empty on 404/network, so the banner + resolution view stay
+  // dormant until the migration lane ships the endpoint. Shape is documented
+  // in useMigrationReport.ts.
+  migrationFlagReport: '/api/migrations/flag-report',
+
+  // ── Doctor diagnoses (D6 diagnostics panel) ──────────────────────
+  // GET /api/doctor — MISSING today (API-lane request): `hal0 doctor` emits
+  // typed Diagnosis objects (HAL0-* id / severity / evidence / next_steps —
+  // src/hal0/diagnostics.py) but only over the CLI/--json path; there is no
+  // HTTP route yet. The DiagnosisPanel renders the generic shape and, until
+  // the route lands, synthesises one informational Diagnosis from the live
+  // GET /api/system-info hardware evidence (see useDiagnoses.ts).
+  doctor: '/api/doctor',
+
   // ── System health (honest degraded probe) ───────────────────────
   // {status:"ok"|"degraded", checks:{...}} — drives the runtime chip
   // colour + a tooltip listing failing checks (B12).

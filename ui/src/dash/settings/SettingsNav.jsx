@@ -17,7 +17,11 @@ export const NAV_GROUPS = [
     title: "SERVER",
     items: [
       { id: "general", label: "General" },
-      { id: "security", label: "Security", disabled: true, disabledReason: "coming with the auth lane (spec §1)" },
+      // D4 (post-R3 surface rework): un-disabled — the auth surface landed
+      // (GET /api/auth/status). The page is status-only and flags every
+      // missing affordance (rotation, client-key set, throttle counts,
+      // per-route exposure table) as an API-lane request in-place.
+      { id: "security", label: "Security" },
     ],
   },
   {
