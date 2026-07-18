@@ -192,8 +192,15 @@ class Slot:
         backend: str | None = None,
         metadata: dict[str, Any] | None = None,
         last_used_at: float | None = None,
+        slot_id: int | None = None,
     ) -> None:
         self.name = name
+        # Stable opaque slot identity (rework §11.1). ``None`` until the
+        # identity store (hal0.slots.identity.SlotIdentityStore) has assigned
+        # one; surfaced additively in ``as_dict`` so the dashboard can key on
+        # id (and treat rename as a pure relabel) while pre-§11.1 snapshots
+        # still render unchanged.
+        self.slot_id: int | None = slot_id
         self.state = state
         self.port = port
         self.model_id = model_id
@@ -211,7 +218,7 @@ class Slot:
 
     def as_dict(self) -> dict[str, Any]:
         """Serialise to a JSON-safe dict for API responses."""
-        return {
+        out: dict[str, Any] = {
             "name": self.name,
             "state": self.state.value,
             "port": self.port,
@@ -220,6 +227,12 @@ class Slot:
             "metadata": self.metadata,
             "last_used_at": self.last_used_at,
         }
+        # Additive: only present once an id has been assigned, so existing
+        # consumers and exact-shape tests over the pre-§11.1 keys are
+        # unaffected.
+        if self.slot_id is not None:
+            out["id"] = self.slot_id
+        return out
 
 
 # ── Manager ──────────────────────────────────────────────────────────────────

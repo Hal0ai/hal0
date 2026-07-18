@@ -295,7 +295,22 @@ class SlotConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
 
     # [slot] section
-    name: str = Field(..., description="Slot name, e.g. 'primary'.")
+    #
+    # ``id`` is the stable opaque slot identity (rework §11.1): assigned by
+    # the ``slot`` table (hal0.slots.identity.SlotIdentityStore) and mirrored
+    # into the TOML so on-disk reads resolve it without the DB. Units, ports,
+    # state and routes key off ``id``; ``name`` is a mutable display label, so
+    # a rename is a pure relabel with no reference churn. Optional so a TOML
+    # written before this field existed still validates — the identity store
+    # assigns the id on first sight.
+    id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Stable opaque slot id (assigned by the slot identity store; mirror of the DB row).",
+    )
+    name: str = Field(
+        ..., description="Slot display label, e.g. 'primary' (mutable; id is the stable key)."
+    )
     port: int = Field(
         ...,
         ge=_SLOT_PORT_MIN,
