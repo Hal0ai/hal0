@@ -361,31 +361,48 @@ class TestRefcountSafeDelete:
         assert dest_b.exists()
         assert dest_b.read_bytes() == shared
 
-        # ── KNOWN LATENT WART (see report) ────────────────────────────────
-        # store_blob.blob_path still points at dest_a — the CANONICAL referent
-        # we just unlinked — even though the live bytes now survive only via
-        # dest_b's hardlink. delete_model_files decrements the shared refcount
-        # and unlinks the model's own dest, but does NOT re-point the blob's
-        # canonical path to a surviving referent. Not a byte leak (bytes are
-        # safe, last-delete below reclaims them via the model's own dest), but
-        # it (a) leaves a dangling store_blob.blob_path and (b) makes a THIRD
-        # model's pull of the same sha miss the hardlink-dedup fast path
-        # (_maybe_hardlink_from_blob checks blob_path.is_file() → False).
-        # Encoded here as current reality, flagged for a follow-up fix.
-        assert Path(_blob(registry, digest)["blob_path"]) == dest_a  # dangling
-        assert not Path(_blob(registry, digest)["blob_path"]).exists()
+        # ── #8 FIX: canonical blob_path re-pointed to a surviving referent ──
+        # delete_model_files unlinked keep-a's dest — which WAS the blob's
+        # canonical blob_path — but the blob is still referenced (refcount 1),
+        # so it re-points blob_path at keep-b's live hardlink instead of
+        # leaving it dangling at the deleted dest_a. blob_path now always
+        # points at a live file while refcount > 0.
+        assert Path(_blob(registry, digest)["blob_path"]) == dest_b  # re-pointed
+        assert Path(_blob(registry, digest)["blob_path"]).exists()
+
+        # ── #8 FIX: a THIRD same-sha pull now hits hardlink-dedup ──────────
+        # With blob_path live again, _maybe_hardlink_from_blob's
+        # blob_path.is_file() probe succeeds, so keep-c hardlinks off the
+        # existing blob (refcount++ , SAME inode) instead of re-downloading.
+        dest_c = await _pull_fileset(
+            "keep-c", "org/c-gguf", "rev-c", {"shared.gguf": shared}, registry=registry
+        )
+        assert _blob(registry, digest)["refcount"] == 2
+        # Same physical inode as the surviving referent — proof of a hardlink,
+        # not a fresh download (a re-download would allocate a new inode).
+        assert os.stat(dest_c).st_ino == os.stat(dest_b).st_ino
+        assert dest_c.read_bytes() == shared
+
+        # Delete keep-c: refcount back to 1. blob_path is dest_b (still live,
+        # keep-b holds it), NOT dest_c, so no re-point is needed here.
+        with connect(registry.db_path) as conn:
+            gc.delete_model_files(conn, "keep-c")
+        assert _blob(registry, digest)["refcount"] == 1
+        assert not dest_c.exists()
+        assert dest_b.exists()  # keep-b still references the shared bytes
+        assert Path(_blob(registry, digest)["blob_path"]) == dest_b
 
         # Delete the LAST referent: refcount hits 0 and the bytes are unlinked
-        # immediately (the model's OWN dest hardlink is unlinked — this is why
-        # bytes are still reclaimed despite the dangling canonical path).
+        # immediately (the model's OWN dest hardlink — now also the canonical
+        # blob_path — is unlinked). Last-delete reclaims the bytes.
         with connect(registry.db_path) as conn:
             gc.delete_model_files(conn, "keep-b")
         assert _blob(registry, digest)["refcount"] == 0
         assert not dest_b.exists()  # bytes reclaimed on last delete
 
         # The refcount=0 store_blob ROW persists for a subsequent prune sweep
-        # to reap. Its blob_path is the (already-unlinked) dangling canonical
-        # path, so the sweep just tolerates the absence + drops the row.
+        # to reap. Its blob_path is the (now-unlinked) dest_b, so the sweep
+        # tolerates the absence + drops the row.
         with connect(registry.db_path) as conn:
             stale_path = _blob(registry, digest)["blob_path"]
             assert gc.collect_orphans(conn) == [stale_path]

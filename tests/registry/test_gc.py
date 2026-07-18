@@ -7,6 +7,7 @@ assert_under_store-before-unlink guard.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -210,3 +211,51 @@ class TestDeleteModelFiles:
             assert blob_row["refcount"] == 1
         # model-b's dest is untouched; the blob still has one referent.
         assert dest_b.exists()
+
+    def test_delete_repoints_canonical_blob_path_to_surviving_referent(
+        self, db_path: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#8: deleting the model that owns a shared blob's CANONICAL
+        blob_path must re-point blob_path at a surviving referent's live
+        hardlink — never leave it dangling at the just-unlinked dest."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
+        # model-a is canonical (blob_path == its dest); model-b hardlinks it.
+        dest_a = tmp_path / "models--org--a" / "snapshots" / "rev" / "shared.gguf"
+        dest_a.parent.mkdir(parents=True)
+        dest_a.write_bytes(b"x" * 5)
+        dest_b = tmp_path / "models--org--b" / "snapshots" / "rev" / "shared.gguf"
+        dest_b.parent.mkdir(parents=True)
+        os.link(dest_a, dest_b)  # real hardlink: same inode, live via either path
+        with connect(db_path) as conn:
+            _seed_model(conn, "model-a", str(dest_a))
+            with tx(conn):
+                conn.execute(
+                    "INSERT INTO model (id, path, name) VALUES (?, ?, ?)",
+                    ("model-b", str(dest_b), "model-b"),
+                )
+                repository.insert_blob(
+                    conn, sha256="sha-shared", size_bytes=5, blob_path=str(dest_a), refcount=2
+                )
+                repository.insert_model_file(
+                    conn,
+                    model_id="model-a",
+                    rel="shared.gguf",
+                    dest=str(dest_a),
+                    sha256="sha-shared",
+                    role="model",
+                )
+                repository.insert_model_file(
+                    conn,
+                    model_id="model-b",
+                    rel="shared.gguf",
+                    dest=str(dest_b),
+                    sha256="sha-shared",
+                    role="model",
+                )
+            gc.delete_model_files(conn, "model-a")
+            blob = repository.get_blob(conn, "sha-shared")
+            assert blob["refcount"] == 1
+            # blob_path re-pointed off the deleted dest_a onto the live dest_b.
+            assert Path(blob["blob_path"]) == dest_b
+        assert not dest_a.exists()  # canonical hardlink unlinked
+        assert dest_b.exists()  # surviving referent (and the bytes) live on

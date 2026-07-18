@@ -10,7 +10,11 @@ existed to reclaim them. This module adds the two pieces plan §7.1e /
   ``model_file`` row is gone).
 * :func:`delete_model_files` — the guarded, opt-in "actually remove the
   bytes" path a caller (route handler) invokes explicitly; it is never
-  implicit in a registry row delete.
+  implicit in a registry row delete. When a delete drops a shared blob's
+  refcount but leaves it referenced (refcount > 0), it re-points the blob's
+  canonical ``blob_path`` to a surviving referent so ``blob_path`` never
+  dangles at a just-unlinked file (which would defeat hardlink-dedup for a
+  later same-sha pull).
 
 Every unlink in this module goes through
 :func:`hal0.config.store.assert_under_store` FIRST (fail-fast severity —
@@ -24,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from hal0.config.store import assert_under_store
 from hal0.db import repository
@@ -118,6 +123,15 @@ def delete_model_files(conn, model_id: str) -> int:
                     with contextlib.suppress(Exception):
                         resolved = assert_under_store(blob["blob_path"], severity="fail")
                         resolved.unlink(missing_ok=True)
+            elif new_count > 0:
+                # The blob is still referenced by another model, but the dest
+                # we are about to unlink below may BE the blob's canonical
+                # referent (blob_path). If so, re-point blob_path at a
+                # surviving referent's live hardlink so it never dangles at a
+                # deleted path — a dangling blob_path breaks hardlink-dedup for
+                # a later same-sha pull (_maybe_hardlink_from_blob probes
+                # blob_path.is_file()). #8.
+                _repoint_shared_blob(conn, sha256, dest, exclude_model_id=model_id)
         if dest:
             try:
                 resolved_dest = assert_under_store(dest, severity="fail")
@@ -136,6 +150,51 @@ def delete_model_files(conn, model_id: str) -> int:
                 continue
         removed += 1
     return removed
+
+
+def _same_path(a: str | None, b: str | None) -> bool:
+    """Best-effort equality of two on-disk paths (resolve, fall back to raw)."""
+    if not a or not b:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return str(a) == str(b)
+
+
+def _repoint_shared_blob(
+    conn, sha256: str, deleted_dest: str | None, *, exclude_model_id: str
+) -> None:
+    """Re-point a still-referenced blob's canonical ``blob_path`` off a
+    just-to-be-deleted dest onto a surviving referent's live hardlink (#8).
+
+    A no-op unless the blob's current ``blob_path`` IS ``deleted_dest`` (the
+    only case that would leave it dangling). Picks the first surviving
+    ``model_file`` referent — excluding the model being deleted — whose
+    ``dest`` is still a real file on disk. If none is (all referents already
+    gone from disk, an unexpected state), ``blob_path`` is left unchanged and
+    the ordinary refcount→0 sweep still reclaims the row later.
+    """
+    blob = repository.get_blob(conn, sha256)
+    if blob is None:
+        return
+    if not _same_path(blob["blob_path"], deleted_dest):
+        return  # canonical referent is elsewhere — nothing dangles
+    for ref in repository.blob_referents(conn, sha256, exclude_model_id=exclude_model_id):
+        ref_dest = ref.get("dest")
+        if ref_dest and _same_path(ref_dest, deleted_dest):
+            # A different model whose row happens to record the SAME dest
+            # string — not a distinct surviving hardlink; skip it.
+            continue
+        if ref_dest and Path(ref_dest).is_file():
+            repository.set_blob_path(conn, sha256, ref_dest)
+            log.info(
+                "gc.blob_path_repointed sha256=%s from=%s to=%s",
+                sha256,
+                deleted_dest,
+                ref_dest,
+            )
+            return
 
 
 __all__ = [
