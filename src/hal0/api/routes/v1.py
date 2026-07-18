@@ -669,28 +669,61 @@ async def _dispatch_and_forward(
     # embed/rerank/tts/img slot (resolved from the request PATH) so its
     # upstream is re-registered before dispatch, instead of 404ing.
     await _wake_capability_slot(request)
-    call = await dispatcher.dispatch(request, body=body)
-    # Remember the most recent model we sent to this upstream so the
-    # dashboard's synthetic slot reflects what's actually being used,
-    # not the first-non-alias from the catalog.
-    last_used = getattr(request.app.state, "last_used_model", None)
-    if last_used is not None and call.upstream_name and call.resolved_model:
-        last_used[call.upstream_name] = call.resolved_model
 
-    # Capture TTFT against the moment we actually hand off to forward()
-    # — anything before this point (auth, body parse, dispatcher
-    # routing) is local overhead, not prefill cost.
-    dispatch_started = time.monotonic()
-    response = await dispatcher.forward(call)
+    # OBS-1 (§13 / S12): the request seam. Observes the SAME call + response
+    # objects the tps_events/ttft_events deques below already do — it does
+    # not replace them (those keep /api/stats/throughput/history and
+    # /api/slots/metrics working exactly as before) — and persists an exact
+    # request_metric row asynchronously, off this hot path. `None` when the
+    # app was built without the lifespan (bare-router tests) or metrics are
+    # disabled; every seam method degrades to a no-op in that case.
+    seam = getattr(request.app.state, "metrics_seam", None)
+    t_entry = time.monotonic()
+    call = None
+    try:
+        call = await dispatcher.dispatch(request, body=body)
+        # Remember the most recent model we sent to this upstream so the
+        # dashboard's synthetic slot reflects what's actually being used,
+        # not the first-non-alias from the catalog.
+        last_used = getattr(request.app.state, "last_used_model", None)
+        if last_used is not None and call.upstream_name and call.resolved_model:
+            last_used[call.upstream_name] = call.resolved_model
+
+        # Capture TTFT against the moment we actually hand off to forward()
+        # — anything before this point (auth, body parse, dispatcher
+        # routing) is local overhead, not prefill cost.
+        dispatch_started = time.monotonic()
+        response = await dispatcher.forward(call)
+    except Exception as exc:
+        if seam is not None:
+            seam.record_error(exc, call=call, request=request, t_entry=t_entry)
+        raise
     if isinstance(response, StreamingResponse):
-        return _instrument_streaming_throughput(
+        response = _instrument_streaming_throughput(
             response,
             request.app.state,
             call.upstream_name,
             dispatch_started=dispatch_started,
         )
+        if seam is not None:
+            response = seam.wrap_streaming(
+                response,
+                call=call,
+                request=request,
+                t_entry=t_entry,
+                dispatch_started=dispatch_started,
+            )
+        return response
     if isinstance(response, Response) and getattr(response, "body", None):
         _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
+        if seam is not None:
+            seam.record_nonstreaming(
+                response.body,
+                call=call,
+                request=request,
+                t_entry=t_entry,
+                dispatch_started=dispatch_started,
+            )
     return response
 
 
