@@ -68,6 +68,7 @@ from hal0.providers._gpu import (
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.slots.argv import ResolvedArgv, resolve_argv
+from hal0.system.seam import SystemCtlSeam
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -285,6 +286,13 @@ log = logging.getLogger(__name__)
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+
+# P3-perms: the seam that routes unit writes + systemctl verbs through
+# `sudo -n hal0-systemctl` once hal0-api runs as the (unprivileged) hal0
+# service user — a pure passthrough (today's exact direct behaviour)
+# everywhere else, including every existing test. See hal0.system.seam.
+_SYSTEMCTL_SEAM = SystemCtlSeam()
+
 # Back-compat alias for the historic default. The *effective* mount root is
 # resolved per-render via model_store_root() ([models].store / HAL0_MODEL_STORE
 # / this default) so a custom model directory actually reaches the container.
@@ -1110,8 +1118,15 @@ class ContainerProvider(Provider):
         return _SYSTEMD_SYSTEM_DIR / self._unit_name(slot_name)
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        """Run a subprocess synchronously (load/unload are blocking ops anyway)."""
-        return subprocess.run(list(args), capture_output=True, text=True, check=check)
+        """Run a subprocess synchronously (load/unload are blocking ops anyway).
+
+        P3-perms: routes ``systemctl`` daemon-reload + hal0-slot@ unit verbs
+        through the hal0-systemctl seam when this process is running as the
+        hal0 service user (see :mod:`hal0.system.seam`); a direct
+        ``subprocess.run`` everywhere else — dev, CI, tests, and a
+        pre-flip/root install all behave exactly as before.
+        """
+        return _SYSTEMCTL_SEAM.systemctl(*args, check=check)
 
     async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         """Probe GET /health on the container port.
@@ -1220,7 +1235,7 @@ class ContainerProvider(Provider):
             "container.unit_write",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
         )
-        unit_path.write_text(unit_text)
+        _SYSTEMCTL_SEAM.write_unit(unit_path, unit_text)
         self._run("systemctl", "daemon-reload")
         # Enable so it survives reboots (best-effort — don't fail if already enabled).
         self._run("systemctl", "enable", self._unit_name(slot_name), check=False)
@@ -1331,7 +1346,7 @@ class ContainerProvider(Provider):
         unit_text = self._render_unit_text(slot_cfg, model_info)
         if unit_path.read_text() == unit_text:
             return False
-        unit_path.write_text(unit_text)
+        _SYSTEMCTL_SEAM.write_unit(unit_path, unit_text)
         log.info(
             "container.unit_rerendered",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
@@ -1374,7 +1389,7 @@ class ContainerProvider(Provider):
         # Remove unit file so daemon-reload leaves no stale entry.
         unit_path = self._unit_path(slot_name)
         if unit_path.exists():
-            unit_path.unlink()
+            _SYSTEMCTL_SEAM.remove_unit(unit_path)
             self._run("systemctl", "daemon-reload")
 
     def is_active(self, slot_name: str) -> bool:

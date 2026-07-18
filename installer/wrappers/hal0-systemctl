@@ -40,6 +40,11 @@ case "$cmd" in
     install -m 0644 -o root -g root /dev/stdin "$path"
     ;;
 
+  remove-unit)                # remove-unit <slot-id>   (rm -f semantics: ok if absent)
+    id="${1:-}"; validate_slot_id "$id"
+    rm -f "${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
+    ;;
+
   daemon-reload)
     exec systemctl daemon-reload
     ;;
@@ -57,6 +62,7 @@ case "$cmd" in
     cat <<EOF
 usage: hal0-systemctl <command> [slot-id]
   write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
+  remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service
