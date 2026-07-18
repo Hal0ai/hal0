@@ -248,13 +248,6 @@ def classify(method: str, path: str) -> AuthClass:
 # which concrete id gets substituted at request time). Kept here, next to
 # RULES, so a widening PR has to touch both the rule and this allowlist in
 # the same diff.
-#
-# NOTE (step 1 of the KB-1 shippable sequence): ``/api/auth/login`` and
-# ``/api/auth/status`` are classified OPEN above already (the RULES table
-# is written once, in full) but aren't mounted yet -- that lands in step 3
-# with the enforcement middleware + ``api/routes/auth.py``. This allowlist
-# only asserts what's actually reachable in the *current* app, so those two
-# are added here in that same step-3 commit.
 OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/v1/models"),
@@ -263,6 +256,8 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/health"),
         ("GET", "/api/health/system"),
         ("GET", "/api/config/urls"),
+        ("POST", "/api/auth/login"),
+        ("GET", "/api/auth/status"),
         # Hermes dashboard-plugin static asset proxy (kanban plugin JS/CSS
         # bundles) -- not under /api or /v1, so it hits the same
         # not-api/v1/mcp catch-all the SPA shell itself uses. No secrets:

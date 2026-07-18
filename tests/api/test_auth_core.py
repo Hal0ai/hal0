@@ -1,12 +1,13 @@
 """Unit tests for hal0.api.auth (KB-1 / §1): principal resolution + posture.
 
-Covers ``resolve_principal`` (cookie -> bearer -> api_key priority),
+Covers the pieces the exposure-CI + login/status routes lean on:
+``resolve_principal`` (cookie -> bearer -> api_key priority),
 ``require_auth_enabled`` (the dev-open-by-default posture derivation),
 ``verify_admin_key``, and ``_decide`` (the OPEN/BOOTSTRAP/CLIENT/ADMIN
-enforcement table) -- all pure functions, no app/middleware wiring needed
-yet (that lands in the next commit, along with the
-``POST /api/auth/login`` / ``GET /api/auth/status`` route-level tests and
-``tests/security/test_exposure.py::test_enforcement_wired``).
+enforcement table). End-to-end middleware behaviour through a real app is
+covered by ``tests/security/test_exposure.py::test_enforcement_wired`` plus
+the route-level ``TestClient`` tests at the bottom of this file (login /
+status + the dev-open bypass).
 """
 
 from __future__ import annotations
@@ -259,3 +260,77 @@ def test_decide_admin_requires_admin_tier() -> None:
 
     allowed, _, _ = auth_mod._decide(AuthClass.ADMIN, admin)
     assert allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Route-level: POST /api/auth/login + GET /api/auth/status, and the
+# dev-open bypass end-to-end through a real TestClient app.
+
+
+@pytest.fixture
+def auth_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A fresh app with an isolated secret + HAL0_HOME (own fixture, not the
+    project-wide ``client``, so each test controls HAL0_ADMIN_KEY /
+    HAL0_REQUIRE_AUTH before the app -- and its middleware's per-request env
+    reads -- come into play).
+    """
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from hal0.api import create_app
+
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "hal0_home"))
+    os.makedirs(tmp_path / "hal0_home" / "etc" / "hal0", exist_ok=True)
+
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
+
+
+def test_status_route_reports_posture(auth_client) -> None:
+    resp = auth_client.get("/api/auth/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"auth_required": False, "has_admin_key": False, "tier": "anon"}
+
+
+def test_status_route_never_leaks_the_key(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "super-secret-value")
+    resp = auth_client.get("/api/auth/status")
+    assert resp.status_code == 200
+    assert "super-secret-value" not in resp.text
+    assert resp.json()["has_admin_key"] is True
+
+
+def test_login_rejects_when_no_admin_key_configured(auth_client) -> None:
+    resp = auth_client.post("/api/auth/login", json={"key": "anything"})
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "auth.invalid_key"
+
+
+def test_login_rejects_wrong_key(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post("/api/auth/login", json={"key": "wrong"})
+    assert resp.status_code == 401
+
+
+def test_login_success_sets_session_cookie(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post("/api/auth/login", json={"key": "the-real-key"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "tier": "admin"}
+    assert agents_auth.SESSION_COOKIE_NAME in resp.cookies
+
+
+def test_dev_open_bypass_reaches_admin_route_with_no_creds(auth_client) -> None:
+    """Loopback + no keys configured: the pre-existing suite's world.
+
+    An ADMIN-classified route (``GET /api/settings``) must still be
+    reachable with zero credentials -- this is the whole point of the
+    dev-open posture default, and what keeps the other ~700 existing
+    tests green without modification.
+    """
+    resp = auth_client.get("/api/settings")
+    assert resp.status_code not in (401, 403), resp.text

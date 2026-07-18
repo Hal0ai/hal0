@@ -214,8 +214,38 @@ def test_unclassified_new_route_denies_by_default() -> None:
     assert classify("GET", "/api/totally-new-router-nobody-classified-yet") is AuthClass.ADMIN
 
 
-# NOTE (step 1 of the KB-1 shippable sequence): this module intentionally
-# asserts CLASSIFICATION only -- no request is denied or allowed yet
-# (the enforcement middleware doesn't exist until step 3). See
-# ``test_enforcement_wired`` added in that step for the end-to-end proof
-# that create_app() actually gates a request using this table.
+# ---------------------------------------------------------------------------
+# Enforcement wiring (step 3): the classification table is only as good as
+# the middleware that actually reads it. This proves the middleware is
+# installed in create_app() and gates a real request end-to-end.
+
+
+def test_enforcement_wired(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """With auth forced on, an ADMIN route 401s with no creds and 200s with the key."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    os.makedirs(str(tmp_path) + "/etc/hal0", exist_ok=True)
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "test-admin-key-123")
+
+    app = create_app()
+    with TestClient(app) as client:
+        # OPEN route: always reachable, no creds.
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+
+        # ADMIN route, no creds: denied.
+        resp = client.get("/api/settings")
+        assert resp.status_code in (401, 403), resp.text
+
+        # ADMIN route, correct bearer key: allowed through the gate (the
+        # route itself may still fail for unrelated reasons in this bare
+        # sandbox, but it must not be an auth 401/403).
+        resp = client.get(
+            "/api/settings",
+            headers={"Authorization": "Bearer test-admin-key-123"},
+        )
+        assert resp.status_code not in (401, 403), resp.text
