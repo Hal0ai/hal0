@@ -347,12 +347,24 @@ def gather_payloads(base: str | None = None) -> dict[str, dict[str, Any] | None]
     }
 
 
-def run_verify(*, console: Console | None = None, base: str | None = None) -> int:
+def run_verify(
+    *,
+    console: Console | None = None,
+    base: str | None = None,
+    json_output: bool = False,
+) -> int:
     """Fetch → classify → render. Returns an exit code; NEVER raises.
 
     Exit-code contract (for standalone scripting; the setup auto-run ignores it):
       0 — ok or warn (non-blocking)
       2 — critical (no reachable URL or zero healthy runners)
+
+    ``json_output=True`` (§21.4 retrofit) skips the rich report card and
+    prints ``{"verdict": ..., "diagnoses": [...]}`` instead — the
+    ``doctor_verify.Check`` rows adapted to ``Diagnosis`` via
+    :func:`hal0.cli.doctor_diagnosis.to_diagnosis` (§1.3). The exit-code
+    contract above is unchanged either way (§4.3 — ``doctor verify`` keeps
+    its 0/2 boundary under ``--json``).
     """
     con = console or Console()
     payloads = gather_payloads(base)
@@ -364,8 +376,22 @@ def run_verify(*, console: Console | None = None, base: str | None = None) -> in
         memory=payloads["memory"],
         services=payloads["services"],
     )
-    render_report(con, checks, payloads["urls"])
-    return 2 if overall_status(checks) == "critical" else 0
+    verdict = overall_status(checks)
+    if json_output:
+        import json as jsonlib
+
+        from hal0.cli.doctor_diagnosis import to_diagnosis
+
+        diagnoses = [to_diagnosis(c) for c in checks]
+        con.print_json(
+            jsonlib.dumps(
+                {"verdict": verdict, "diagnoses": [d.to_dict() for d in diagnoses]},
+                indent=2,
+            )
+        )
+    else:
+        render_report(con, checks, payloads["urls"])
+    return 2 if verdict == "critical" else 0
 
 
 __all__ = [

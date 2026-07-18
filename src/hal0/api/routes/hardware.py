@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -729,3 +731,104 @@ async def models_health_endpoint(request: Request) -> dict[str, Any]:
     service = getattr(request.app.state, "metrics_service", None)
     path = service.writer.db_path if service is not None else None
     return await asyncio.to_thread(metrics_read.models_health, slots, db_path=path)
+
+
+# ── GET /api/system-info (§21.3) ────────────────────────────────────────────
+#
+# One consolidated read surface folding /api/hardware + /api/features +
+# per-runner local backend-lifecycle state, per hal0-rework-plan.md §21.3:
+# "one consolidated endpoint ... rather than three overlapping surfaces.
+# Feeds a future setup-wizard 'install this backend' action." ADMIN-vs-CLIENT
+# exposure: classified CLIENT in security/exposure.py (pre-existing rule,
+# landed with the OBS-1 /api/system-stats classification — this route just
+# fills in the handler the rule was already anticipating).
+
+
+def _image_repo(ref: str) -> str:
+    """Strip the tag/digest → the bare ``registry/repo`` of an image ref.
+
+    Mirrors ``hal0.cli.doctor_commands._image_repo`` — kept as a tiny local
+    copy rather than an api->cli import (wrong dependency direction for a
+    two-line helper).
+    """
+    body = ref.split("@", 1)[0]
+    head, _, tail = body.rpartition("/")
+    tail = tail.split(":", 1)[0]
+    return f"{head}/{tail}" if head else tail
+
+
+def _local_image_repos() -> set[str] | None:
+    """``podman images`` → the set of local ``registry/repo`` strings.
+
+    Returns ``None`` when podman is absent/unreachable so every backend
+    degrades to ``"unavailable"`` rather than a false "installable" — this
+    dev sandbox (no podman) is exactly that case, per §21.4 HARD REQUIREMENT
+    #5 (graceful degrade, never crash).
+    """
+    podman = shutil.which("podman")
+    if podman is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [podman, "images", "--format", "{{.Repository}}"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip() and line != "<none>"}
+
+
+def _backend_state(image: str, local_repos: set[str] | None) -> str:
+    """``"installed"`` / ``"installable"`` / ``"unavailable"`` for one runner.
+
+    Local-only: this endpoint reports what's already on disk, not remote
+    reachability or digest drift — ``hal0 doctor toolbox-pull`` already owns
+    the ghcr.io reachability + pinned-digest-drift check (§21.4
+    ``HAL0-TOOLBOX-IMAGE-*``); duplicating a remote registry probe on every
+    dashboard poll would be needless network chatter. ``update_available``/
+    ``update_required`` (the plan's §21.6 SHOULD-tier states) are therefore
+    NOT surfaced here — a deliberate, documented scope trim.
+    """
+    if local_repos is None:
+        return "unavailable"
+    return "installed" if _image_repo(image) in local_repos else "installable"
+
+
+@router.get("/system-info")
+async def system_info_endpoint(request: Request) -> dict[str, Any]:
+    """``GET /api/system-info`` — hardware + feature flags + backend state.
+
+    Consolidates ``GET /api/hardware`` + ``GET /api/features`` + one
+    ``installed``/``installable``/``unavailable`` state per
+    ``hal0.runners.RUNNER_IMAGES`` entry (computed from local ``podman
+    images`` presence only — see :func:`_backend_state`), so a future setup
+    wizard has one place to ask "what can this box run right now". Never
+    raises: hardware/features reuse the already-tolerant handlers above, and
+    a podman-less box degrades every backend to ``"unavailable"``.
+    """
+    from hal0.api.routes.health import list_features
+    from hal0.runners import RUNNER_IMAGES, resolve_runner_image
+
+    hardware = await get_hardware(request)
+    features = await list_features(request)
+    local_repos = await asyncio.to_thread(_local_image_repos)
+
+    backends: dict[str, Any] = {}
+    for key, runner in RUNNER_IMAGES.items():
+        try:
+            image = resolve_runner_image(runner)
+        except Exception:
+            image = runner.image
+        backends[key] = {
+            "image": image,
+            "runtime_family": runner.runtime_family,
+            "device_class": runner.device_class,
+            "backend": runner.backend,
+            "state": _backend_state(image, local_repos),
+        }
+
+    return {"hardware": hardware, "features": features, "backends": backends}
