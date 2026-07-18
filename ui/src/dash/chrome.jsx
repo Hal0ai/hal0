@@ -93,7 +93,10 @@ const Icon = ({ name, d, size = 16, fill = "none", stroke = "currentColor", sw =
     {name ? (GLYPHS[name] || GLYPHS.dot) : (d ? <path d={d} /> : children)}
   </svg>
 );
-const Icons = {
+// Exported for real ESM consumers (P3-ui split, settings/ pages) in addition
+// to the window-globals publish below, which the not-yet-migrated dash/*.jsx
+// files still rely on.
+export const Icons = {
   dashboard: <Icon><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="9" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="13" width="5" height="0.01"/></Icon>,
   slots:     <Icon><rect x="2" y="3" width="12" height="3" rx="0.5"/><rect x="2" y="7" width="12" height="3" rx="0.5"/><rect x="2" y="11" width="12" height="3" rx="0.5"/><circle cx="4" cy="4.5" r="0.6" fill="currentColor" stroke="none"/><circle cx="4" cy="8.5" r="0.6" fill="currentColor" stroke="none"/><circle cx="4" cy="12.5" r="0.6" fill="currentColor" stroke="none"/></Icon>,
   models:    <Icon><path d="M2 4l6-2 6 2-6 2-6-2z"/><path d="M2 8l6 2 6-2"/><path d="M2 12l6 2 6-2"/></Icon>,

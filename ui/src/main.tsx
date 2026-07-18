@@ -91,7 +91,10 @@ import './dash/stacks.jsx'
 // services-card.jsx (reuses its ComfyJobQueue window global).
 import './dash/services.css'
 import './dash/services.jsx'
-import './dash/settings.jsx'
+// Settings (#settings): P3-ui split (phase 1) replaced the window-globals
+// settings.jsx monolith with settings/SettingsShell.jsx, a real ES module —
+// main.jsx imports it directly instead of reading window.SettingsView, so
+// there's no side-effect import to list here anymore.
 
 import './dash/extras.jsx'
 

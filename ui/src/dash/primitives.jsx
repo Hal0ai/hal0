@@ -203,7 +203,10 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
 }
 
 // ─── ConfirmDialog (recoverable + destructive) ───────────────────────────
-function ConfirmDialog({ open, onCancel, onConfirm, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false, typeToConfirm = null }) {
+// Exported for real ESM consumers (P3-ui split, settings/ pages) in addition
+// to the window-globals publish below, which the not-yet-migrated dash/*.jsx
+// files still rely on.
+export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false, typeToConfirm = null }) {
   const [typed, setTyped] = useStateP("");
   useEffectP(() => { if (open) setTyped(""); }, [open]);
   const canConfirm = !typeToConfirm || typed === typeToConfirm;

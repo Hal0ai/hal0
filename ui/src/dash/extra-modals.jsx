@@ -19,7 +19,10 @@ export const SECRET_PRESETS = [
   { id: "CUSTOM",             desc: "Custom — name it yourself",                                       prefix: "",          prefixLen: 0 },
 ];
 
-function AddSecretModal({ open, onClose, initialName }) {
+// Exported for real ESM consumers (P3-ui split, settings/ pages) in addition
+// to the window-globals publish below, which the not-yet-migrated dash/*.jsx
+// files still rely on.
+export function AddSecretModal({ open, onClose, initialName }) {
   const [picked, setPicked] = useStateAS("HF_TOKEN");
   const [customName, setCustomName] = useStateAS("");
   const [value, setValue] = useStateAS("");

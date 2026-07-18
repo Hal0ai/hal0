@@ -1,4 +1,12 @@
 // hal0 dashboard — root App, hash routing, tweaks panel, keyboard shortcuts
+//
+// P3-ui split (phase 1): SettingsView (the old settings.jsx window-global)
+// was replaced by SettingsShell, a real ES module — imported directly
+// instead of read off `window`. Every other dash/*.jsx component here is
+// still part of the window-globals shim (see ui/src/main.tsx); this is the
+// first real import in this file.
+import { SettingsShell } from './settings/SettingsShell.jsx'
+
 const { useState: useStateA, useEffect: useEffectA } = React;
 
 // ApprovalEntry.as_dict() emits ``enqueued_at`` as epoch seconds (a float),
@@ -323,7 +331,7 @@ function App() {
         return typeof BenchmarksView === "function"
           ? <BenchmarksView />
           : <div className="view">Benchmarks unavailable — bundle stale.</div>;
-      case "settings": return <SettingsView param={param} />;
+      case "settings": return <SettingsShell param={param} />;
       default:         return <div className="view">Not found.</div>;
     }
   };
