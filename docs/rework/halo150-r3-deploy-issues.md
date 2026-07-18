@@ -81,6 +81,29 @@ box then restored to pristine R3 renderer (no local patch left).
 
 **Decision needed** — substrate change (podman 5.x base) vs renderer rework.
 
+### O9 — doctor bundle leaks `HAL0_ADMIN_KEY`/`HAL0_CLIENT_KEY` (unmasked)  *(SECURITY — Phase 4.3 RED)*
+`hal0 doctor bundle` writes `config/api.env` with the operator credentials in **plaintext**:
+```
+HAL0_ADMIN_KEY=<raw>
+HAL0_CLIENT_KEY=<raw>
+```
+Grep-verified both keys present verbatim in the bundle. The bundle is meant to be shared for
+support, so this leaks the admin/client auth keys.
+
+**Root cause (precise):** `doctor_bundle._write_redacted_env` *is* invoked for api.env and uses
+`hal0.api._redact.is_sensitive_key`, but the matcher is:
+```
+_SENSITIVE_RE = (?i)(?:SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT)
+```
+It matches `API_KEY` but **not a bare `_KEY` suffix** → `is_sensitive_key('HAL0_ADMIN_KEY')` and
+`('HAL0_CLIENT_KEY')` return **False**. `HF_TOKEN`/`API_KEY`/`PASSWORD` mask correctly; hal0's own
+auth keys slip through. **Fix:** add `KEY` (or `ADMIN_KEY|CLIENT_KEY`) to `_SENSITIVE_RE` — one line.
+Same masker feeds config dumps elsewhere, so the gap is broader than the bundle.
+
+*(Other bundle notes: `rocminfo.txt`/`rocm-smi.txt` = 1 line each — rocm userspace not installed on
+this vulkan box, expected; `podman-images` 106 lines ✓; journalctl captured as `logs/hal0-api.log` /
+`logs/hal0-agent.log` rather than `logs/journalctl.txt`.)*
+
 ### O3 — `hal0-agent@hermes` start-timeout loop
 `HERMES_DASHBOARD_READY port=9119` logs, then `start operation timed out` (2 min) →
 `status=241/CONFIGURATION_DIRECTORY`, restart loop. Never signals systemd readiness.
@@ -98,8 +121,11 @@ Expected; deferred by choice.
 - **Phase 0** (snapshot/baseline): done — `/root/halo150-pre-r3-*.tgz`, podman 4.9.3.
 - **Phase 1** (deploy + health): deploy ✔, API 200 ✔, `doctor all` clean ✔, golden-path load + GPU inference ✔ (after O8 compat).
 - **Phase 2** (quadlet `@`-name verify): **GREEN via O8 compat** — `@`-name accepted, generator converts (`PodmanArgs=`), container Up, health ok, teardown clean (file+unit+container gone).
-- **Phase 3** (M5 rehearsal on copy): pending.
-- **Phase 4** (live smoke): pending (rename semantics, `enable_thinking=false` quoting fix, doctor bundle, system-info, `/api/ports`).
+- **Phase 3** (M5 rehearsal on copy): **GREEN** — 9 slots id-keyed (`<id>.toml`, `<id>/state.json`, `slot_id`+`name`), recorded renames match `hal0-slot@<id>`, idempotent 2nd pass (no-op).
+- **Phase 4** (live smoke): in progress.
+  - 4.3 doctor bundle: **RED — O9** (admin/client keys leak unmasked).
+  - 4.4 system-info: **GREEN** — real GPU (AMD Strix Halo, 116GB VRAM, amdgpu/vulkan), backends `rocmfpx`/`vulkanfpx`.
+  - 4.1 rename semantics / 4.2 `enable_thinking=false` quoting: pending.
 
 ## Environment notes (accepted, not issues)
 - Privileged + `apparmor unconfined` ⇒ container root ≈ host root (requested).
