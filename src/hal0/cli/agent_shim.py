@@ -372,6 +372,7 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
     env.pop("NOTIFY_SOCKET", None)
     return env
 
+
 # ----------------------------------------------------------------------------
 # Subcommands
 # ----------------------------------------------------------------------------
