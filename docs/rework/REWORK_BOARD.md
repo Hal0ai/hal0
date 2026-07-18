@@ -77,12 +77,13 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | **SLOT re-key — increment B** | internal `dict[int]` re-key of 7 dicts + destructive M5 unit/file/podman rename (`hal0-slot@<id>`, `<id>.toml`) | ☐ | SLOT | increment A✔ | — | needs WIDENED fence: 11 name-keyed test files + 7 cross-fence files (container.py, backends/logs/installer/comfyui/journal, board_chat, _settings_apply) + real-hardware smoke | R3-B |
 | SlotManager-deepen | `inspect/apply(desired)/delete/subscribe` small interface (review #4) | ☐ | SLOT | §11.1 | — | — | — |
 | P3-quadlet | Podman Quadlet `.container` units; delete hand-rendered strings | ☐ | INSTALL/SLOT | P3-perms✔, §11.1 | spec `spec-p3-quadlet.md` | — | shares container.py |
-| §20 bench | bench_run onto OBS schema | ☐ | OBS | ML-4 | spec `spec-bench.final.md` | — | needs GPU box |
+| **container.py arg-quoting bug** | `providers/container.py` shell layer strips double-quotes from any space-less token → a file `chat_template` + `--chat-template-kwargs '{"enable_thinking":false}'` emits `{enable_thinking:false}` → llama-server JSON parse error → **slot won't start**. Fix arg emission to preserve/`shlex.quote` JSON values. | ☐ | SLOT | — | — | repro (lxc105): nano crash; workaround `chat_template: auto`. Folds `hal0-105-changes-summary.md` §5.1 | fold on increment B / P3-quadlet (same file) |
+| §20 bench | bench_run onto OBS schema | ☐ | OBS | ML-4 | spec `spec-bench.final.md` | — | needs GPU box; **note: hal0 llama.cpp forks reject newer GGUFs (e.g. Qwen3.5 UD-Q4_K_XL) on `rocmfp4-server`/`c077206`** — bench only models hal0 already serves (lxc105 §5.4) |
 
 ### R4 — Brain + Hermes
 | id | lane | status | class | deps | commit / branch | verify | deploy_state |
 |----|------|:--:|--|--|--|--|--|
-| P3-brain | first-class `src/hal0/brain/`, zero-Hermes-dep, `/api/brain/chat` primary + `/api/board/chat` alias | ⏸ | HERMES | P2-toolloop✔ | banked `rework/p3-brain` @ `b66b5e1e` | built+verified (67 tests green); NOT merged — handed to primary Hermes orchestrator per two-session split | — |
+| P3-brain | first-class `src/hal0/brain/`, zero-Hermes-dep, `/api/brain/chat` primary + `/api/board/chat` alias | ⏸ | HERMES | P2-toolloop✔ | banked `rework/p3-brain` @ `b66b5e1e` (pushed to origin) | built+verified (67 tests green); NOT merged — handed to primary Hermes orchestrator per two-session split | **brain model assets exist** (lxc105): `hal0-brain-sft` f16 + `-fpx4`(609MB)/`-fpx8`(1.1GB) ROCmFP4 quants registered, profile `brain-agent-fpx` — see `hal0-105-changes-summary.md`. No-think default needs the container.py quoting fix OR a `minicpm5-nothink.jinja` (internal `enable_thinking=false`). Brain identity correct only with hal0-brain system prompt (Hermes supplies persona) |
 | §7.4 hermes-slim | privilege-drop (born-owned) → F.7 chown deletion; convergent installer slimming continues separately | ✔ | HERMES/INSTALL | P3-perms✔ | merge `86283e94` | incs 1-5 + F.7 reviewed; born-owned halo143 validation | deployed/validated on halo143 |
 | HP-compat | select and test reviewed official Hermes tag/commit against the three plugin contracts | ✔ | HERMES | §7.4✔ | `f3e4e3e6`, guard fix `6f844901`, checkpoint `6aa565b8` | independent review; 79 targeted tests; full CI + Playwright green after vetted-ref guard reconciliation | R2.1 on main; Stage 0 accepted |
 | HP-core | shared Hermes adapter core: auth, discovery, typed errors, retry policy, correlation IDs | ✔ | HERMES | HP-compat✔, KB-1✔ | merge `b1115b9d` | independent review + security re-review approved; 61 combined tests; exact-head full CI + Playwright green | merged on descar; Stage 1 core accepted |
@@ -131,3 +132,24 @@ base in isolated worktrees. The Hermes suite proceeds with Stage 1 (`HP-core` an
   `hal0-metrics.db` if nontrivial (plan-copy L479 already sanctions).
 - **golden-path harness earlier** — pull §21.11 ahead of remaining structural waves (review #7);
   live installer already found 2 bugs (NFS chmod, self-port) the capped suite missed.
+
+## Folded from lxc105 live session (`/home/mint/hal0-105-changes-summary.md` — reference, NOT deploy state)
+lxc105 (10.0.1.142) is the untouched live reference — never deploy there. These are the durable
+code/requirement findings from that session; the live model-swaps/host fixes are context only.
+- **container.py arg-quoting bug** — now a SLOT lane row in R3 (space-less JSON token loses quotes →
+  slot crash). Real correctness bug; fix during increment B / P3-quadlet (both own container.py).
+- **Reasoning-channel / no-think default** (SLOT + templates) — MiniCPM5/saber are reasoning models;
+  under `--jinja` + default reasoning-format the answer lands in `reasoning_content` and `content` is
+  empty unless `chat_template_kwargs:{enable_thinking:false}` is sent (currently only via the broken
+  flag). Fix = the container.py quoting bug OR ship a `*-nothink.jinja` that defaults it internally
+  (froggeric Qwen template already does this). Also consider `--reasoning-format` to strip the cosmetic
+  empty `<think></think>` prefix. Fold into P3-brain + any chat-template lane.
+- **Hermes API-server hardening** (HERMES/SEC) — the live Hermes API server was enabled on lxc105 with
+  `API_SERVER_HOST=0.0.0.0`, a placeholder `API_SERVER_KEY=change-me-local-dev`, and terminal backend
+  `local` (unsandboxed). The Hermes integration lanes (HP-*, §7.4 slimming) and the installer MUST:
+  bind narrow / gate by real key (no placeholder), and never expose an unsandboxed local executor by
+  default. Add to the Hermes suite security checklist + `security/exposure.py`/installer review.
+- **Brain model assets** — trained `hal0-brain-sft` (f16) + `-fpx4`/`-fpx8` ROCmFP4 quants + profile
+  `brain-agent-fpx` exist (registered on lxc105); noted on the P3-brain row. Serving image for ROCmFP4
+  STRIX quants: `hal0-rocmfpx:c077206`. Deploy-to-halo143 decision is a live/migration step, not a
+  code lane.
