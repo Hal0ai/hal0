@@ -105,6 +105,7 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | KB-2/3 | brain read-only default + approval-gate; resilience | ☐ | HERMES | — | — | — | — |
 | KB-4/5/6 | hal0-owned board in SQLite (migration 005); Hermes proxy DELETED; local WS events; additive ETag/If-Match → 409; KB-5 executor seam (Protocol + no-op registry) | ✔ | HERMES | SQLite✔ | merge `516965d9` (lane 3 commits) | Opus-built, Fable-reviewed + independently re-run (240 lane + 283 combined); frozen wire contract; one-time tolerant import; board serves with hermes_kanban=None (core-without-Hermes) | HP-executor now unblocked (attach at the KB-5 seam) |
 | HP-legacy-suite | superseded image/TTS/context/dashboard plugin bundle | ⏸ | HERMES | — | history/specs banked | superseded by focused HP-* lanes | post-core unless explicitly promoted |
+| O12-store | rootful/rootless store split: hal0-api podman introspection now via `sudo -n hal0-podman-ro` seam (privileged seam #5, `images` verb only, hardcoded argv); honest rootless fallback + `podman_context` field on system-info; 9e07c0d3 `.config`/`.local` chown rows RETIRED (lock rows kept) | ✔ | DEPLOY/INSTALL | halo143/150 finding | merge `252e860c` (lane `cbc8e94d`) | Sonnet-built, Fable-reviewed; 116 lane + 56 combined green; visudo/bash -n clean; mcp.py had no podman site (brief assumption corrected) | live validation at next both-boxes deploy (seam installed → context flips rootful) |
 
 ### R5 — Surface + launch
 | id | lane | status | class | deps | commit / branch | verify | deploy_state |
