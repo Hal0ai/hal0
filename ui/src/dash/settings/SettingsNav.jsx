@@ -25,17 +25,17 @@ export const NAV_GROUPS = [
     items: [
       { id: "slots", label: "Loaded Models" },
       { id: "library", label: "Library & Downloads" },
-      // TODO(session3 ML-4): Model Defaults page slots in here once the
-      // model-config taxonomy split (spec §7.1d) lands — waits on the
-      // parallel session's ML-4/taxonomy lane per this pass's scope.
+      // ML-4 landed the runner-image registry + model-config taxonomy, so the
+      // per-model launch-defaults page is now buildable (spec §7.1a/d).
+      { id: "modeldefaults", label: "Model Defaults" },
     ],
   },
   {
     title: "INFERENCE",
     items: [
-      // TODO(session3 ML-4): Backend & GPU controls page slots in here once
-      // spec §7.1b lands — waits on the parallel session's ML-4/taxonomy
-      // lane per this pass's scope.
+      // ML-4 landed the runner-image registry, unblocking the Backend & GPU
+      // introspection surface (spec §7.1b, detected hw via /api/hardware).
+      { id: "backend", label: "Backend & GPU" },
       { id: "hwtuning", label: "Hardware Tuning", disabled: true, disabledReason: "coming with the tuning lane (spec §2/§21.1)" },
       { id: "npu", label: "NPU" },
       { id: "voice", label: "Voice" },

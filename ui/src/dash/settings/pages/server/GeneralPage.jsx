@@ -1,15 +1,13 @@
 // SERVER ▸ General — platform identity + privacy (telemetry opt-in).
 // Extracted verbatim from settings.jsx GeneralSection (P3-ui split phase 1).
 import { useState, useEffect } from 'react'
-import { useSettings, useSettingsUpdate, useApplyPlan } from '@/api/hooks/useSettings'
+import { useSettingsClient } from '../../data/settingsClient.js'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 
 export function GeneralPage() {
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const applyPlanQuery = useApplyPlan();
-  const registry = applyPlanQuery.data?.registry || {};
+  // R5 data seam: one typed client instead of four ad-hoc hooks.
+  const { settings, update, registry } = useSettingsClient();
   const liveTelemetry = settings.data?.telemetry;
 
   const [telemetry, setTelemetry] = useState(false);
