@@ -42,9 +42,11 @@ from __future__ import annotations
 import contextlib
 import datetime
 import glob
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
@@ -1349,6 +1351,10 @@ def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
         "sessions",
         "profiles",
         "mcp-tokens",
+        # scratch/: terminal.cwd target (RATIFIED 2026-07-18). Hermes' local
+        # terminal backend spawns shells here instead of the read-only,
+        # secret-bearing /etc/hal0. Born hal0:hal0 under the setgid state root.
+        "scratch",
     )
     for sub in standard_subdirs:
         (hermes_home / sub).mkdir(parents=True, exist_ok=True)
@@ -1588,6 +1594,7 @@ def _build_config_overlay(
     personality_name: str,
     live_resolve_enabled: bool,
     memory_provider: str = "hal0-memory",
+    hermes_home: Path | str = HERMES_HOME_DEFAULT,
 ) -> list[tuple[str, Any]]:
     """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
 
@@ -1684,7 +1691,16 @@ def _build_config_overlay(
             pairs.append((f"mcp_servers.{name}.headers.X-hal0-Private", "1"))
 
     pairs.append(("skills.creation_nudge_interval", 15))
-    pairs += [("terminal.backend", "local"), ("terminal.cwd", "/etc/hal0")]
+    # terminal.cwd is the working directory Hermes' built-in `local` terminal
+    # backend spawns shells in (RATIFIED 2026-07-18: moved off /etc/hal0). Under
+    # the User=hal0 ProtectSystem=strict unit /etc/hal0 is a read-only, secret-
+    # bearing tree — dropping an interactive shell there both fails writes and
+    # sits the operator on top of tokens.toml/auth.toml. Point it at a scratch
+    # dir under HERMES_HOME (a ReadWritePath, born hal0:hal0, created by
+    # home_init) so shells land in a writable, secret-free sandbox. The backend
+    # stays `local` (decided) — only the cwd moves.
+    terminal_scratch = str(Path(hermes_home) / "scratch")
+    pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
     if system_prompt:
         pairs.append(("agent.system_prompt_prelude", system_prompt))
@@ -2114,6 +2130,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
         personality_name=personality_name,
         live_resolve_enabled=live_resolve_enabled,
         memory_provider=memory_provider,
+        hermes_home=hermes_home,
     )
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
@@ -4213,6 +4230,20 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     if result.content_hash is not None:
         details["content_hash"] = result.content_hash
 
+    # RATIFIED 2026-07-18: ensure the gateway's API_SERVER_KEY is a strong
+    # random secret in the vault the drop-in above references. Hermes' gateway
+    # api_server refuses to start without it; a placeholder would be a shared
+    # secret. Idempotent — a rerun keeps an existing strong key. Log-safe: we
+    # record only the outcome + key length, never the value.
+    try:
+        key_result = ensure_gateway_api_server_key()
+        details["api_server_key"] = {
+            "outcome": key_result.outcome,
+            "key_len": key_result.key_len,
+        }
+    except (OSError, subprocess.SubprocessError) as exc:
+        details["api_server_key"] = {"outcome": "failed", "error": str(exc)}
+
     if result.outcome == "skipped":
         return PhaseResult(status=PhaseStatus.SKIP, reason=result.reason, details=details)
     if result.outcome == "failed":
@@ -4323,6 +4354,93 @@ _HERMES_AGENT_NAME = "hermes"
 _HAL0_SYSTEMCTL = os.environ.get("HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
 
 
+# ── Stale agent drop-in cleanup (RATIFIED 2026-07-18, deliverable 5) ─────────
+#
+# systemd merges EVERY *.conf under hal0-agent@<id>.service.d/, so a drop-in an
+# OLD installer left behind still applies even after the current template
+# overwrites override.conf. halo150 O3: a stale `ConfigurationDirectory=`
+# drop-in brick-loops the unit with status=241/CONFIGURATION_DIRECTORY (the
+# current template ships no such directive). Convergent cleanup — mirrors the
+# stale static slot-unit removal already in install.sh: scan the drop-in dirs,
+# remove any NON-shipped fragment carrying a directive the template doesn't
+# ship, report what was removed, no-op otherwise.
+
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+
+#: Drop-in filenames the CURRENT template legitimately ships (never removed).
+_SHIPPED_AGENT_DROPINS: frozenset[str] = frozenset({"override.conf"})
+
+#: Directives the current hal0-agent@ template does NOT set; a drop-in that
+#: carries one is stale debris from an old install and is removed. The 241
+#: brick-loop class is ConfigurationDirectory= (halo150 O3).
+_STALE_AGENT_DIRECTIVES: tuple[str, ...] = ("ConfigurationDirectory=",)
+
+
+@dataclass
+class StaleDropinCleanupResult:
+    """Outcome of :func:`cleanup_stale_agent_dropins`."""
+
+    removed: list[str] = field(default_factory=list)
+    daemon_reloaded: bool = False
+
+
+def cleanup_stale_agent_dropins(
+    *,
+    systemd_dir: Path = SYSTEMD_SYSTEM_DIR,
+    shipped: frozenset[str] = _SHIPPED_AGENT_DROPINS,
+    stale_directives: tuple[str, ...] = _STALE_AGENT_DIRECTIVES,
+    unlink: Callable[[Path], None] | None = None,
+    run: Callable[..., Any] = subprocess.run,
+) -> StaleDropinCleanupResult:
+    """Remove stale hal0-agent@ drop-in fragments the template doesn't ship.
+
+    Scans every ``hal0-agent@*.service.d/`` under ``systemd_dir`` and deletes
+    any ``*.conf`` that is (a) NOT a shipped drop-in name and (b) carries a
+    ``stale_directives`` directive (the 241/CONFIGURATION_DIRECTORY class).
+    Runs ``daemon-reload`` only if something was removed. Idempotent: a clean
+    box removes nothing and never reloads. Every seam is injectable for tests.
+    """
+    # Host-safety guard (mirrors write_gateway_secrets_dropin): under pytest with
+    # the real /etc/systemd path, refuse to touch the host tree — a test that
+    # genuinely exercises the cleanup passes systemd_dir=tmp_path.
+    if os.environ.get("PYTEST_CURRENT_TEST") and str(systemd_dir).startswith("/etc/"):
+        return StaleDropinCleanupResult()
+
+    do_unlink = unlink if unlink is not None else (lambda p: p.unlink())
+    removed: list[str] = []
+    for dropin_dir in sorted(systemd_dir.glob("hal0-agent@*.service.d")):
+        if not dropin_dir.is_dir():
+            continue
+        for conf in sorted(dropin_dir.glob("*.conf")):
+            if conf.name in shipped:
+                continue
+            try:
+                text = conf.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if any(directive in text for directive in stale_directives):
+                try:
+                    do_unlink(conf)
+                except OSError as exc:
+                    log.warning(
+                        "hermes_provision.stale_dropin_unlink_failed",
+                        path=str(conf),
+                        error=str(exc),
+                    )
+                    continue
+                removed.append(str(conf))
+                log.info("hermes_provision.removed_stale_agent_dropin", path=str(conf))
+
+    reloaded = False
+    if removed:
+        try:
+            run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
+            reloaded = True
+        except (subprocess.SubprocessError, OSError) as exc:
+            log.warning("hermes_provision.stale_dropin_daemon_reload_failed", error=str(exc))
+    return StaleDropinCleanupResult(removed=removed, daemon_reloaded=reloaded)
+
+
 def _privileged_systemctl(verb: str, body: str | None = None) -> None:
     """Run one hal0-systemctl seam verb as root via ``sudo -n``.
 
@@ -4370,6 +4488,190 @@ def _write_secrets_env(updates: dict[str, str]) -> None:
     else:
         body = "".join(f"{k}={v}\n" for k, v in updates.items())
         _privileged_env_write("merge-secrets", body)
+
+
+# ── Gateway API_SERVER_KEY (RATIFIED 2026-07-18, security) ───────────────────
+#
+# Hermes' gateway HTTP API (``gateway/platforms/api_server.py``) REFUSES to
+# start without ``API_SERVER_KEY`` and rejects placeholder / <16-char keys
+# (contract: tests/fixtures/hermes/contracts/api_surface.py). The installer
+# must therefore provision a STRONG random key into the secrets vault — never a
+# hardcoded placeholder (which would be a shared secret across every hal0 box).
+# Idempotent: an already-strong key is left untouched so reruns don't rotate it.
+
+#: Minimum length for a provisioned gateway API key. We generate 43-char
+#: (token_urlsafe(32) = 256-bit) keys; the floor is 32 (double Hermes' own 16).
+API_SERVER_KEY_MIN_LENGTH = 32
+
+#: Values we must NEVER accept as a real key — the placeholder/weak set. A key
+#: matching any of these (case-insensitive) is treated as absent → regenerated.
+_WEAK_API_SERVER_KEYS: frozenset[str] = frozenset(
+    {"", "changeme", "change-me", "placeholder", "dummy", "hal0-local", "secret", "test", "none"}
+)
+
+
+def _is_strong_api_server_key(value: str | None) -> bool:
+    """True iff ``value`` is a real, cryptographically-strong gateway key."""
+    if not value:
+        return False
+    if value.strip().lower() in _WEAK_API_SERVER_KEYS:
+        return False
+    return len(value) >= API_SERVER_KEY_MIN_LENGTH
+
+
+def _generate_api_server_key() -> str:
+    """Return a fresh 256-bit URL-safe key (43 chars). Never a placeholder."""
+    import secrets as _secrets
+
+    return _secrets.token_urlsafe(32)
+
+
+def _read_secrets_env(path: Path | None = None) -> dict[str, str]:
+    """Parse ``KEY=VALUE`` lines from the secrets vault (best-effort read)."""
+    target = path if path is not None else HERMES_SECRETS_ENV
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+@dataclass
+class ApiServerKeyResult:
+    """Outcome of :func:`ensure_gateway_api_server_key`.
+
+    ``outcome`` is ``"generated"`` (a new strong key was written),
+    ``"present"`` (an existing strong key was kept — the idempotent rerun
+    path), or ``"unreadable"`` (a non-root caller could not read the 0600
+    vault, so the install-time root key is assumed and left alone). ``key_len``
+    never carries the key VALUE — only its length, so results are log-safe.
+    """
+
+    outcome: str
+    key_len: int = 0
+
+
+def ensure_gateway_api_server_key(
+    *,
+    existing: dict[str, str] | None = None,
+    generate: Callable[[], str] = _generate_api_server_key,
+    write: Callable[[dict[str, str]], None] = _write_secrets_env,
+) -> ApiServerKeyResult:
+    """Idempotently ensure a strong ``API_SERVER_KEY`` in the gateway vault.
+
+    Reads the current vault (``existing`` overrides for tests); if it already
+    holds a strong key, returns ``present`` and writes nothing (so reruns never
+    rotate the key). Otherwise generates a 256-bit random key and merges it into
+    the root:root secrets vault. There is deliberately NO hardcoded fallback: a
+    placeholder key would let Hermes' gateway start with a shared, guessable
+    secret across every hal0 box.
+    """
+    if existing is not None:
+        env = existing
+    else:
+        vault_exists = HERMES_SECRETS_ENV.exists()
+        env = _read_secrets_env()
+        # A vault that exists but reads empty for a non-root caller is the
+        # 0600-root-owned case: install-time root already provisioned the key.
+        # Don't clobber it (we couldn't verify it, but we also can't read it —
+        # regenerating every runtime rerun would rotate a working key).
+        if vault_exists and not env and os.geteuid() != 0:
+            return ApiServerKeyResult(outcome="unreadable")
+
+    current = env.get("API_SERVER_KEY")
+    if _is_strong_api_server_key(current):
+        return ApiServerKeyResult(outcome="present", key_len=len(current or ""))
+
+    new_key = generate()
+    write({"API_SERVER_KEY": new_key})
+    return ApiServerKeyResult(outcome="generated", key_len=len(new_key))
+
+
+# ── Repair-only ownership reconcile (RATIFIED 2026-07-18, deliverable 6) ──────
+#
+# The always-run ownership_reconcile phase is DEAD (§7.4 F.7): a normal install
+# drops to hal0 so files are born hal0:hal0 with nothing to reconcile. But a box
+# provisioned by an OLD root-clobbering installer can still have HERMES_HOME /
+# venv / config owned root:root — `hal0 doctor perms` flags this as "Hermes
+# ownership drift" (halo150 O3). `hal0 agent bootstrap hermes --repair` must
+# ACTUALLY FIX what that audit reports, not just re-run the converging writes.
+# So repair (root only) reconciles the exact perms.py rows the audit checks.
+
+
+@dataclass
+class OwnershipReconcileResult:
+    """Outcome of :func:`reconcile_ownership_on_repair`."""
+
+    reconciled: list[str] = field(default_factory=list)
+    skipped_reason: str | None = None
+
+
+#: perms.py roles the Hermes provision lane owns — the drift `doctor perms`
+#: reports and `--repair` must fix. Kept in lockstep with perms.ownership_table.
+_HERMES_OWNERSHIP_ROLES: frozenset[str] = frozenset(
+    {"HERMES_HOME", "agents/ (per-agent sub-homes)"}
+)
+
+
+def reconcile_ownership_on_repair(
+    *,
+    enabled: bool,
+    venv: Path | str = HERMES_VENV_DEFAULT,
+    observe_fn: Callable[..., Any] | None = None,
+    chown: Callable[[str, int, int], None] = os.chown,
+    chmod: Callable[[str, int], None] = os.chmod,
+    walk: Callable[[str], Any] = os.walk,
+) -> OwnershipReconcileResult:
+    """Reconcile HERMES_HOME/agents + the venv to hal0:hal0 (repair path only).
+
+    ``enabled`` is ``repair and euid == 0`` — the caller computes it so this is
+    a pure, fakes-testable function. When disabled, returns a no-op result with
+    a reason. When enabled, it drives :mod:`hal0.install.perms` (the single
+    declarative ownership truth) for the Hermes rows the audit checks, then
+    recursively chowns the venv tree (which perms has no per-file row for).
+    Every seam (observe/chown/chmod/walk) is injectable so tests exercise the
+    drift→fix path without a real filesystem.
+    """
+    if not enabled:
+        return OwnershipReconcileResult(
+            skipped_reason="repair reconcile is root-only (`--repair` as root)"
+        )
+
+    from hal0.install import perms as _perms
+
+    reconciled: list[str] = []
+
+    # 1. Declarative rows (HERMES_HOME + agents/): plan against disk, commit the
+    #    drift. perms.commit resolves hal0:hal0 and applies chown+chmod.
+    rows = [r for r in _perms.ownership_table() if r.role in _HERMES_OWNERSHIP_ROLES]
+    plan_kwargs: dict[str, Any] = {}
+    if observe_fn is not None:
+        plan_kwargs["observe_fn"] = observe_fn
+    plan_ = _perms.plan(rows, **plan_kwargs)
+    changed = _perms.commit(plan_, chown=chown, chmod=chmod)
+    reconciled.extend(str(p) for p in changed)
+
+    # 2. The venv tree has no per-file perms row — recursively chown it to hal0
+    #    so a root-installed venv the User=hal0 unit can't exec is repaired.
+    venv_path = Path(venv)
+    if venv_path.exists():
+        uid = pwd.getpwnam("hal0").pw_uid
+        gid = grp.getgrnam("hal0").gr_gid
+        chown(str(venv_path), uid, gid)
+        for root, dirs, files in walk(str(venv_path)):
+            for name in list(dirs) + list(files):
+                with contextlib.suppress(OSError):
+                    chown(str(Path(root) / name), uid, gid)
+        reconciled.append(str(venv_path))
+
+    return OwnershipReconcileResult(reconciled=reconciled)
 
 
 def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
@@ -5235,6 +5537,32 @@ def run(
     if state.started_at is None or repair:
         state.started_at = _utcnow()
         state.completed_at = None
+
+    # RATIFIED 2026-07-18 (deliverable 6): `--repair` reconciles ownership drift
+    # BEFORE the converging writes, so a root-clobbered HERMES_HOME/venv/config
+    # (halo150 O3, what `doctor perms` flags) is actually fixed — not just
+    # re-written on top of root:root. No-op unless repair AND running as root.
+    if repair:
+        # Best-effort: a reconcile hiccup (e.g. the hal0 user not yet created)
+        # must never abort the repair run — the converging writes still follow.
+        try:
+            recon = reconcile_ownership_on_repair(enabled=os.geteuid() == 0, venv=Path(state.venv))
+            if recon.reconciled and verbose:
+                print(f"[repair] reconciled ownership: {', '.join(recon.reconciled)}")
+        except (OSError, KeyError, subprocess.SubprocessError) as exc:
+            log.warning("hermes_provision.repair_reconcile_failed", error=str(exc))
+
+    # RATIFIED 2026-07-18 (deliverable 5): scrub stale hal0-agent@ drop-in
+    # debris (the 241/CONFIGURATION_DIRECTORY brick-loop class) BEFORE the unit
+    # is (re)enabled, on every install. Root-only (writes /etc/systemd);
+    # convergent + reported; a clean box removes nothing. Best-effort.
+    if os.geteuid() == 0:
+        try:
+            cleanup = cleanup_stale_agent_dropins()
+            if cleanup.removed and verbose:
+                print(f"[cleanup] removed stale agent drop-ins: {', '.join(cleanup.removed)}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("hermes_provision.stale_dropin_cleanup_failed", error=str(exc))
 
     phase_io = io if io is not None else PhaseIO()
     skipped: list[str] = []

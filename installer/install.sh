@@ -1016,6 +1016,26 @@ for LEGACY_SLOT_DROPIN in "${UNIT_DIR}"/hal0-slot@*.service.d; do
     fi
 done
 
+# Stale hal0-agent@ drop-in cleanup (RATIFIED 2026-07-18, halo150 O3). systemd
+# merges EVERY *.conf under hal0-agent@<id>.service.d/, so a drop-in an OLD
+# installer left behind still applies after the current template overwrites
+# override.conf. A stale `ConfigurationDirectory=` fragment brick-loops the unit
+# with status=241/CONFIGURATION_DIRECTORY (the current template ships no such
+# directive). Convergent: remove non-shipped fragments carrying that directive,
+# report each, no-op on a clean box. `override.conf` (the shipped drop-in) is
+# rewritten from the template below and never removed here.
+for AGENT_DROPIN_DIR in "${UNIT_DIR}"/hal0-agent@*.service.d; do
+    [[ -d "${AGENT_DROPIN_DIR}" ]] || continue
+    for AGENT_DROPIN in "${AGENT_DROPIN_DIR}"/*.conf; do
+        [[ -f "${AGENT_DROPIN}" ]] || continue
+        [[ "$(basename "${AGENT_DROPIN}")" == "override.conf" ]] && continue
+        if grep -q "ConfigurationDirectory=" "${AGENT_DROPIN}" 2>/dev/null; then
+            rm -f "${AGENT_DROPIN}"
+            info "removed stale agent drop-in ${AGENT_DROPIN} (241/CONFIGURATION_DIRECTORY class)"
+        fi
+    done
+done
+
 # hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
 # generic per-agent runner; the drop-in pins hermes-specific env.
 # Lay them down whether or not bootstrap has been run — the shim's
@@ -1262,6 +1282,24 @@ fi
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload"
+fi
+
+# AppArmor preflight for podman on unconfined LXC (RATIFIED 2026-07-18,
+# halo150 R4). A privileged LXC with `apparmor.profile: unconfined` cannot load
+# podman's default AppArmor profile, so `podman run` dies with exit 243
+# ("install profile containers-default apparmor") and NO slot ever starts. The
+# convergent fix writes `[containers] apparmor_profile="unconfined"` to
+# /etc/containers/containers.conf and retries — detected from the podman SMOKE
+# FAILURE (not OS/LXC sniffing), idempotent, unit-tested against recorded fakes
+# (see src/hal0/agents/containers_apparmor.py). Runs the shared, tested Python
+# module via the FHS venv so bash and Python never diverge.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1 \
+    && [[ -x "${VENV_DIR}/bin/python" ]]; then
+    if "${VENV_DIR}/bin/python" -m hal0.agents.containers_apparmor; then
+        :
+    else
+        warn "podman apparmor preflight could not resolve the profile-load failure — slots may not start; see the detail above"
+    fi
 fi
 
 # Kick off a background pull of the OpenWebUI image so the unit start
