@@ -36,25 +36,38 @@ podman 4.9.3 (Ubuntu 24.04) does not support → no slot unit is generated → n
 
 ## Open
 
-### O8 — `AutoRemove` quadlet key unsupported on podman 4.9.3  *(PHASE-2 BLOCKER)*
+### O8 — R3 quadlet renderer requires podman ≥5.0; box has 4.9.3  *(PHASE-2 BLOCKER)*
 Removing the O7 debris revealed the real quadlet outcome. The `@`-filename itself is fine
-(generator loads it); conversion then fails on an unsupported key:
+(generator loads it); conversion then fails on **podman-5.0-only keys**:
 ```
 quadlet-generator: Loading source unit file /etc/containers/systemd/hal0-slot@qtest.container
-quadlet-generator: converting "hal0-slot@qtest.container": unsupported key 'AutoRemove'
-  in group 'Container' in /etc/containers/systemd/hal0-slot@qtest.container
+quadlet-generator: converting "hal0-slot@qtest.container": unsupported key 'AutoRemove' ...
+  (after stripping AutoRemove:)                          unsupported key 'GroupAdd' ...
 ```
 → generator produces **no** unit (`/run/systemd/generator*` empty). Slot can't start;
 `hal0-systemctl restart` → exit 5 → API 500.
-- Quadlet `AutoRemove=` support landed in **podman 5.0**; Ubuntu 24.04 ships **4.9.3**.
+
+- Confirmed 5.0-only keys the renderer emits and 4.9.3 rejects: **`AutoRemove`, `GroupAdd`**
+  (rejection is one-at-a-time; likely more behind them).
+- **`GroupAdd` is load-bearing** — it grants the GPU device groups (gid 993 render / 44 video).
+  It cannot be stripped without killing GPU access, and 4.9.3 quadlet has **no** equivalent key.
+  → **Option 3 (strip keys) is dead.**
+- The runbook assumed podman **≥4.4** (quadlet exists), but the renderer needs **≥5.0**.
+  Ubuntu 24.04 (the `hal0-rc` template base) ships **4.9.3** → fundamental substrate mismatch.
 - **Correction to first Phase-2 read:** the "generated service active" seen initially was
   the O7 static template masquerading, not the quadlet.
 
-**Fallback options (undecided):**
-1. R3 renderer: drop / version-gate `AutoRemove=yes` in the quadlet writer (one-param;
-   `AutoRemove` is a no-op below podman 5.0 anyway). Keeps 24.04.
-2. Upgrade podman to 5.x on the box (needs a backport repo; 24.04 main = 4.9.3).
-3. Tonight-only: strip `AutoRemove` from the rendered `.container`, cleanup handled elsewhere.
+**Verified:** stripping keys in the venv renderer confirmed the chain (AutoRemove→GroupAdd);
+box then restored to pristine R3 renderer (no local patch left).
+
+**Remaining fallback options:**
+1. **R3 renderer targets 4.9.3 quadlet** — major: `GroupAdd`/`AutoRemove` have no 4.9.3
+   quadlet equivalent, so GPU slots would need a non-quadlet path. Effectively a rewrite.
+2. **Base R3 boxes on podman ≥5.0** (recommended) — Debian 13 / Ubuntu 24.10+ ship podman 5.x,
+   or add a podman-5 repo. Implies the `hal0-rc` (Ubuntu 24.04 + docker) template is stale
+   for R3. Check what the live reference (lxc105) runs to confirm the intended substrate.
+
+**Decision needed** — substrate change (podman 5.x base) vs renderer rework.
 
 ### O3 — `hal0-agent@hermes` start-timeout loop
 `HERMES_DASHBOARD_READY port=9119` logs, then `start operation timed out` (2 min) →
@@ -88,5 +101,5 @@ Expected; deferred by choice.
 - R4: AppArmor `containers.conf` unconfined fix is load-bearing on unconfined LXC — add to installer convergent preflight.
 - O6: installer must own/repair `/etc/hal0/*.lock`; `doctor perms` should audit lock files.
 - O7: installer must remove legacy static `hal0-slot@.service` + drop-ins on upgrade (they shadow quadlet units).
-- O8: quadlet renderer should not emit `AutoRemove` below podman 5.0 (version-gate).
+- O8: R3 quadlet renderer requires podman ≥5.0 (`AutoRemove`, `GroupAdd` are 5.0 keys; `GroupAdd` is load-bearing for GPU). Either base R3 boxes on podman 5.x, or the renderer needs a 4.9.3-compatible / non-quadlet GPU path. The `hal0-rc` Ubuntu-24.04 template (podman 4.9.3) is the wrong substrate for R3.
 </content>
