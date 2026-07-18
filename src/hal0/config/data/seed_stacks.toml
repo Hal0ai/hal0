@@ -1,0 +1,86 @@
+# Built-in seed stacks (immutable, clone-only) -- the day-one catalog the
+# Stacks page ships with (spec §10). Returned by `load_stacks_config` when no
+# stacks.toml exists yet, and consulted by `StacksCatalog` for the
+# seed-immutability guard. Grounded in the live Strix-Halo model roster and the
+# canonical `agent`/`utility` slots (ADR-0023; the spec's pre-ADR `chat`/
+# `primary`/`util` slot names are mapped onto these). Each carries embed +
+# rerank capability rows so memory recall works out of the box. Model metadata
+# (`models{}`) is intentionally left empty -- `export_envelope` fills it from
+# the live registry at export time, keeping the in-code seed lean.
+#
+# These reference this host's real registry ids; cloned-and-edited is the
+# intended path, and apply's dry-run surfaces any model that isn't local.
+#
+# Externalized from hal0.config.schema.SEED_STACKS (P3-schema, spec Part A).
+# `capabilities = "@embed_rerank"` is a marker resolved by
+# hal0.config.seeds.seed_stacks(), which expands it to the shared embed+rerank
+# StackCapabilityRow pair via the `_embed_rerank_rows(device)` helper (kept in
+# Python per spec §A.2(a) -- the two hardcoded capability model ids
+# (qwen3-embedding-0-6b-q8-0, bge-reranker-v2-m3-q4_k_m) live in one place).
+
+# saber -- max-throughput agentic MoE. Decode-per-GB leader on the board.
+[stack.saber]
+name = "Saber"
+description = "High-speed agentic MoE: a 35B-A3B agent on ROCm with a fast Vulkan utility helper, plus memory recall."
+author = "hal0"
+icon = "⚡"
+tags = ["agentic", "moe", "fast"]
+
+[[stack.saber.slots]]
+slot = "agent"
+model = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+device = "gpu-rocm"
+profile = "rocm"
+mtp = true
+capabilities = "@embed_rerank"
+
+[[stack.saber.slots]]
+slot = "utility"
+model = "gemma-4-12b-it-ud-q4-k-xl"
+device = "gpu-vulkan"
+profile = "vulkan"
+
+# forge -- coding-first developer loadout: a coder agent + a fast draft coder.
+[stack.forge]
+name = "Forge"
+description = "Coding-first: a 27B coder agent on ROCm with a small fast draft coder as the utility, plus codebase retrieval."
+author = "hal0"
+icon = "🛠️"
+tags = ["coding", "developer"]
+
+[[stack.forge.slots]]
+slot = "agent"
+model = "qwopus3-6-27b-coder-mtp-q6-k"
+device = "gpu-rocm"
+profile = "rocm"
+mtp = true
+capabilities = "@embed_rerank"
+
+[[stack.forge.slots]]
+slot = "utility"
+model = "qwopus3-5-4b-coder-mtp-q6-k"
+device = "gpu-vulkan"
+profile = "vulkan"
+mtp = true
+
+# pi -- always-on support: faithful compaction, memory recall (quality > speed).
+[stack.pi]
+name = "Pi"
+description = "Always-on support: a q-rich 27B utility for faithful compaction and recall, with a light Vulkan agent."
+author = "hal0"
+icon = "🥧"
+tags = ["support", "memory", "compaction"]
+
+[[stack.pi.slots]]
+slot = "utility"
+model = "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean"
+device = "gpu-rocm"
+profile = "rocm"
+mtp = true
+capabilities = "@embed_rerank"
+
+[[stack.pi.slots]]
+slot = "agent"
+model = "gemma-4-12b-it-ud-q4-k-xl"
+device = "gpu-vulkan"
+profile = "vulkan"

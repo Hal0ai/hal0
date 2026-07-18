@@ -1,0 +1,29 @@
+# Static bench numbers for seed profiles, surfaced as the card hero metric.
+# `tps` = tokens/sec (LLM throughput); `rtf` = real-time factor (synth,
+# e.g. TTS). Grounded in hal0-container-bench-2026-06-08.md. Custom
+# profiles have no entry -> the card shows "-" until benched.
+#
+# Externalized from hal0.config.schema.PROFILE_BENCH (P3-schema, spec Part A).
+# The FP4 2x2 grid (rocm/vulkan x dense/moe) was tuned by the 2026-07-05
+# ROCmFPX matrix (27B dense -b 512 -ub 512 ~29 t/s; 35B-A3B MoE -b 2048 -ub 512
+# ~76 t/s -- handoffs/rocmfpx-bench-results-2026-07-05.md), and the SMT-oversub
+# `--threads-batch 32` / `--poll` debris carried over from the pre-consolidation
+# Q-quant profiles was dropped per the 2026-07-04 consolidation. The four grid
+# cards intentionally carry no hero entry (they render "-"); their decode
+# numbers live on the per-model roster.
+
+[bench.rocm]
+tps = 52.8
+
+[bench.vulkan]
+tps = 41.0
+
+[bench.flm]
+tps = 38.6
+
+[bench.tts]
+rtf = 0.18
+
+[bench.tts-qwen3]
+# Native gfx1151 ~2.1x realtime -> rtf ~= 1/2.1 (memory qwen3tts-voice-ct105).
+rtf = 0.48
