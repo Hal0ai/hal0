@@ -1124,6 +1124,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from hal0.board import HermesKanbanClient
 
     app.state.hermes_kanban = HermesKanbanClient.from_env()
+    # KB-5 executor bridge (HP-executor): register the concrete Hermes
+    # BoardExecutor ONLY when Hermes is configured (env presence — no network
+    # call at startup). Inert otherwise: the KB-5 registry stays empty and the
+    # board runs fully with no executor (the seam's shipped state).
+    try:
+        from hal0.board.hermes_executor import register as _register_hermes_executor
+
+        if _register_hermes_executor(app):
+            log.info("board.hermes_executor_registered")
+    except Exception as exc:  # optional bridge must never block startup
+        log.warning("board.hermes_executor_register_failed", error=str(exc))
     await event_bus.emit(
         "system.restart",
         "info",
