@@ -23,10 +23,14 @@ def test_repair_unknown_unit_400(isolated_client):
 def test_repair_known_unit_restarts(isolated_client, monkeypatch):
     import hal0.api.routes.installer as inst
 
-    calls = {}
+    # Record EVERY call: monkeypatching inst.subprocess.run patches the
+    # shared subprocess module process-wide, and in-app background samplers
+    # (GPU probe: nvidia-smi --query-gpu=name) can fire during the request
+    # window — a last-call-only record races (CI flake on a18b9b05).
+    calls = []
 
     def _fake_run(cmd, **kw):
-        calls["cmd"] = cmd
+        calls.append(list(cmd))
 
         class _R:
             returncode = 0
@@ -39,4 +43,4 @@ def test_repair_known_unit_restarts(isolated_client, monkeypatch):
     r = isolated_client.post("/api/install/services/hal0-openwebui.service/repair")
     assert r.status_code == 200, r.text
     assert r.json()["active"] is True
-    assert calls["cmd"][:2] == ["systemctl", "restart"]
+    assert any(c[:2] == ["systemctl", "restart"] for c in calls), calls
