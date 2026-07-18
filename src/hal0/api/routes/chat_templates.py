@@ -20,10 +20,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from pydantic import BaseModel
 
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.paths import model_store_root
 
 router = APIRouter()
@@ -126,14 +127,16 @@ async def create_chat_template(body: _TemplateBody) -> dict[str, Any]:
     attempt or uppercase character is rejected with HTTP 400.
     """
     if not _VALID_ID_RE.fullmatch(body.id):
-        raise HTTPException(status_code=400, detail=f"Invalid template id: {body.id!r}")
+        raise BadRequest(f"Invalid template id: {body.id!r}", code="chat_template.invalid_id")
 
     store = _templates_dir()
     try:
         store.mkdir(parents=True, exist_ok=True)
         (store / f"{body.id}.jinja").write_text(body.content)
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write template: {exc}") from exc
+        raise Hal0Error(
+            f"Could not write template: {exc}", code="chat_template.write_failed"
+        ) from exc
 
     # Write succeeds regardless of lint result (mirrors the filesystem-drop
     # path, which never runs through here) — but report the lint so a caller
