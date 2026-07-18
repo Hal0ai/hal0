@@ -97,6 +97,32 @@ class ModelDefaults(BaseModel):
             "preference (slot keeps the device default)."
         ),
     )
+    mtp: bool | None = Field(
+        default=None,
+        description=(
+            "§7.1a / ML-5: tri-state MTP speculative-decoding capability. "
+            "True/False is an explicit, unconditional curator override — it "
+            "wins in EITHER direction over the registry 'mtp' tag (see "
+            "hal0.model_meta.model_is_mtp_eligible / "
+            "providers.container._effective_mtp). None = no explicit "
+            "opinion; eligibility falls back to the registry 'mtp' tag, "
+            "auto-gated by whether the launching runner supports MTP "
+            "drafting (hal0.runners.RunnerSupports.mtp). Replaces the old "
+            "filename/GGUF-name 'MTP' marker sniff, which is removed."
+        ),
+    )
+    jinja: bool | None = Field(
+        default=None,
+        description=(
+            "§7.1a / ML-5: tri-state --jinja capability. False explicitly "
+            "suppresses --jinja (there is no --no-jinja negation flag, so "
+            "this must be evaluated BEFORE argv assembly, not stripped "
+            "after). None/True both mean 'use --jinja' when the launching "
+            "runner supports it (hal0.runners.RunnerSupports.jinja is True "
+            "for every current llama-server runner) — see "
+            "providers.container._resolve_llama_scalars."
+        ),
+    )
 
 
 class Model(BaseModel):
