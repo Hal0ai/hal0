@@ -230,6 +230,21 @@ def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
         last_used[slot_name] = time.monotonic()
 
 
+_TRUTHY_PARAMS = frozenset({"1", "true", "yes", "on"})
+
+
+def _parse_bool_param(raw: str | None) -> bool:
+    """Parse a query-param string as a bool; missing/unrecognised → False.
+
+    Mirrors the plain ``request.query_params.get(...)`` style already used
+    for ``owned_by`` in :func:`list_models` rather than a typed FastAPI
+    ``Query(bool)`` — keeps ``show_all`` curl-debuggable with any of
+    ``1``/``true``/``yes``/``on`` (case-insensitive), same as the other
+    ad-hoc bool toggles across this router.
+    """
+    return bool(raw) and raw.strip().lower() in _TRUTHY_PARAMS
+
+
 async def _read_json_body(request: Request) -> dict[str, Any]:
     """Best-effort JSON parse.  Empty / malformed bodies become ``{}``.
 
@@ -688,21 +703,43 @@ async def list_models(
       surfaces as one model object whose ``id`` is the slot **alias =
       slot name** (``primary``, ``agent-hermes``, ``utility``), carrying a
       human ``name`` (``"<slot> · <model display name>"``) and the slot's
-      ``context_length``. Built by :func:`hal0.api.hal0_slot_alias_models`.
-      Unloaded / disabled slots are omitted. The alias is stable across
-      model swaps so callers can pin a co-resident slot.
-    * **Upstream catalog entries** — the raw model ids each
-      ``advertise_models`` upstream reports, so non-chat models (embed /
-      rerank / image / …) keep their direct-addressing entries. The
-      direct-read composite catalogue's CHAT model ids are suppressed here
-      so they don't duplicate the alias entries above — a chat slot is
-      represented exactly once, by its alias.
+      ``context_length``/``max_context_window``. Built by
+      :func:`hal0.api.hal0_slot_alias_models`. Unloaded / disabled slots
+      are omitted. The alias is stable across model swaps so callers can
+      pin a co-resident slot.
+    * **Upstream catalog entries** (incl. the direct-read composite
+      catalogue below) — the raw model ids each ``advertise_models``
+      upstream reports, so non-chat models (embed / rerank / image / …)
+      keep their direct-addressing entries. The composite catalogue's
+      CHAT model ids are suppressed here so they don't duplicate the alias
+      entries above — a chat slot is represented exactly once, by its
+      alias.
+
+    Every entry additionally carries, when the id resolves in the local
+    model registry (§21.5, :func:`hal0.api.hal0_apply_registry_detail`):
+    ``labels`` (capabilities), ``checkpoint`` (quant label), ``recipe``
+    (curated bucket name for a blessed model), and ``downloaded`` (always
+    present — ``True`` for a slot alias or a locally-registered catalog
+    id, ``False`` for an upstream-only / not-yet-pulled id).
+
+    By default, raw catalog entries whose modality (per
+    ``hal0.model_meta.classify``) isn't ``"chat"`` are hidden — a raw
+    image-gen/embed/rerank/tts/asr passthrough id otherwise pollutes a
+    chat-client's model picker. Pass ``?show_all=true`` to see everything
+    (slot alias entries are never filtered — every enabled llm slot is a
+    chat model by construction).
 
     PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
     catalog before sending Authorization headers continue to work.
     """
-    from hal0.api import hal0_chat_slot_model_ids, hal0_slot_alias_models
+    from hal0.api import (
+        hal0_apply_registry_detail,
+        hal0_chat_slot_model_ids,
+        hal0_slot_alias_models,
+    )
+    from hal0.model_meta import classify
 
+    show_all = _parse_bool_param(request.query_params.get("show_all"))
     upstreams = request.app.state.upstreams
     model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {}) or {}
     seen: set[str] = set()
@@ -737,6 +774,36 @@ async def list_models(
         except Exception:
             chat_model_ids = set()
 
+    def _catalog_row(mid: str, owned_by: str) -> dict[str, Any] | None:
+        """Build one raw catalog row, or ``None`` if §21.5's default
+        modality filter hides it (see ``show_all`` in the docstring above).
+
+        Shared by both raw-catalog sources below (the direct-read
+        composite catalogue and the generic upstream loop) so the
+        registry lookup + labels/checkpoint/recipe/downloaded fold-in +
+        modality classification live in exactly one place.
+        """
+        registry_entry: Any = None
+        if model_registry is not None:
+            try:
+                if model_registry.has(mid):
+                    registry_entry = model_registry.get(mid)
+            except Exception:
+                registry_entry = None
+        if not show_all:
+            capabilities = getattr(registry_entry, "capabilities", None)
+            if classify(mid, capabilities=capabilities) != "chat":
+                return None
+        row: dict[str, Any] = {
+            "id": mid,
+            "object": "model",
+            "created": now,
+            "owned_by": owned_by,
+            "downloaded": registry_entry is not None,
+        }
+        hal0_apply_registry_detail(row, registry_entry)
+        return row
+
     # Direct read of the composite model catalogue — every ready
     # chat-capable slot's model id, aggregated straight from slot config
     # (see hal0.api._fetch_hal0_composite_models). No pseudo-upstream is
@@ -749,15 +816,11 @@ async def list_models(
         for mid in model_cache.get("hal0", []):
             if mid in seen or mid in chat_model_ids:
                 continue
+            row = _catalog_row(mid, "hal0")
+            if row is None:
+                continue
             seen.add(mid)
-            data.append(
-                {
-                    "id": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": "hal0",
-                }
-            )
+            data.append(row)
 
     for u in upstreams.list():
         if not getattr(u, "enabled", True):
@@ -778,15 +841,11 @@ async def list_models(
             # entry — don't list it twice.
             if mid in chat_model_ids:
                 continue
+            row = _catalog_row(mid, u.name)
+            if row is None:
+                continue
             seen.add(mid)
-            data.append(
-                {
-                    "id": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": u.name,
-                }
-            )
+            data.append(row)
     # Canonical virtual names (hal0/agent, hal0/utility, hal0/npu) are
     # no longer advertised here — the per-slot alias entries above already
     # cover every enabled llm slot, and dispatch resolves the canonical
@@ -825,6 +884,11 @@ async def get_model(
     advertise on their own ``/v1/models``). Pairs with ``list_models``
     so SDKs that resolve a model handle through ``/v1/models/{id}``
     before chatting don't need credentials to do so.
+
+    Delegates to :func:`list_models` against the SAME request, so its
+    ``owned_by``/``show_all`` query params apply here too — a non-chat
+    id (embed/rerank/tts/image) 404s unless the caller passes
+    ``?show_all=true``, same as it would from the aggregate list.
     """
     listing = await list_models(request, dispatcher)
     for entry in listing.get("data", []):  # type: ignore[union-attr]

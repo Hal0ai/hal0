@@ -128,6 +128,7 @@ from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.discover import scan_and_register
+from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -302,6 +303,56 @@ def _slot_ctx_size(
     return None
 
 
+def _model_recipe(entry: Any) -> str | None:
+    """Return the curated "recipe" bucket name for a registry ``Model``.
+
+    Mirrors :func:`hal0.registry.model._derive_ns`'s blessed-path rule
+    (issue #220: a path is "blessed" iff it sits under
+    ``<_BLESSED_PREFIX><recipe>/<capability>/...``) without importing that
+    private helper's name-mangled internals — this only reads the same
+    published ``_BLESSED_PREFIX`` constant, so the two stay in lockstep by
+    construction. Hand-pulled ("pulled") models have no recipe → ``None``.
+    """
+    path = (getattr(entry, "path", "") or "").strip()
+    if not path or not path.startswith(_BLESSED_PREFIX):
+        return None
+    parts = path[len(_BLESSED_PREFIX) :].split("/")
+    if len(parts) < 3 or not parts[0] or not parts[1]:
+        return None
+    return parts[0]
+
+
+def hal0_apply_registry_detail(obj: dict[str, Any], entry: Any) -> None:
+    """Fold extra registry-row fields (§21.5) onto an OpenAI ``model`` object.
+
+    ``entry`` is a :class:`hal0.registry.model.Model` (or ``None`` when the
+    id doesn't resolve in the registry — a hand-staged file, a remote
+    passthrough id, …), in which case this is a no-op: the caller's base
+    object (id/object/created/owned_by/…) already stands on its own.
+
+    Adds, only when present on ``entry``:
+
+    * ``labels`` — the model's ``capabilities`` list (the same "labels"
+      vocabulary ``POST /api/models/add-from-path`` accepts, e.g.
+      ``["chat", "vision"]``).
+    * ``checkpoint`` — the quantisation label (``Model.quant``, e.g.
+      ``"Q4_K_M"``).
+    * ``recipe`` — the curated bucket name for a blessed model (see
+      :func:`_model_recipe`); omitted for hand-pulled models.
+    """
+    if entry is None:
+        return
+    capabilities = getattr(entry, "capabilities", None)
+    if capabilities:
+        obj["labels"] = list(capabilities)
+    quant = getattr(entry, "quant", None)
+    if quant:
+        obj["checkpoint"] = quant
+    recipe = _model_recipe(entry)
+    if recipe:
+        obj["recipe"] = recipe
+
+
 async def hal0_slot_alias_models(
     slot_manager: SlotManager,
     model_registry: ModelRegistry,
@@ -326,10 +377,20 @@ async def hal0_slot_alias_models(
     * ``name`` — ``"<slot> · <model display name>"``; the display name is
       pulled from the model registry when the slot's model id is
       registered, falling back to the bare model id otherwise.
-    * ``context_length`` — the slot's configured context window (reading
-      either ``ctx_size`` or ``context_size`` from the slot TOML), falling
-      back to the model registry entry's ``defaults.context_size``.
+    * ``context_length`` / ``max_context_window`` — the slot's configured
+      context window (reading either ``ctx_size`` or ``context_size`` from
+      the slot TOML), falling back to the model registry entry's
+      ``defaults.context_size``. Both keys carry the same value — some
+      OpenAI-compat clients probe ``max_context_window`` instead of the
+      canonical ``context_length``.
     * ``owned_by`` — ``"hal0"``.
+    * ``downloaded`` — always ``True``: an enabled llm slot's configured
+      model is, by construction, a real file already resident on this
+      host (§21.5).
+    * ``labels`` / ``checkpoint`` / ``recipe`` — extra registry-row detail
+      (§21.5), only present when the slot's model id resolves in the
+      model registry (a hand-staged model that isn't registered omits
+      them, same fallback as ``display`` above).
 
     Slots that are disabled or lack a configured model are omitted.
     """
@@ -354,6 +415,7 @@ async def hal0_slot_alias_models(
             continue
 
         display = model_id
+        entry: Any = None
         try:
             entry = model_registry.get(model_id)
             registry_name = getattr(entry, "name", "")
@@ -362,6 +424,7 @@ async def hal0_slot_alias_models(
         except Exception:
             # Model not in the registry (hand-staged, …) — fall back to
             # the bare model id for the display label.
+            entry = None
             display = model_id
 
         obj: dict[str, Any] = {
@@ -370,10 +433,17 @@ async def hal0_slot_alias_models(
             "created": created,
             "owned_by": "hal0",
             "name": f"{slot_name} · {display}",
+            # A live, enabled llm slot's model is always a real local file
+            # (§21.5) — unlike the raw upstream-catalog rows below, there's
+            # no "advertised but not pulled" state for a slot alias.
+            "downloaded": True,
         }
         ctx = _slot_ctx_size(cfg, model_registry, model_id)
         if ctx is not None:
             obj["context_length"] = ctx
+            # Alias some OpenAI-compat clients look for (§21.5); same value.
+            obj["max_context_window"] = ctx
+        hal0_apply_registry_detail(obj, entry)
         out.append(obj)
     return out
 
