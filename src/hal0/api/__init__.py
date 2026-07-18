@@ -57,6 +57,9 @@ from hal0.api.routes import (
     board as board_routes,
 )
 from hal0.api.routes import (
+    brain as brain_routes,
+)
+from hal0.api.routes import (
     capabilities as capabilities_routes,
 )
 from hal0.api.routes import (
@@ -1475,6 +1478,13 @@ def create_app() -> FastAPI:
     # Mounted PRE-dashboard so /api/board/* (incl. the /events WS + /chat SSE)
     # is not shadowed by the SPA fallback.
     app.include_router(board_routes.router, prefix="/api/board", tags=["board"])
+
+    # hal0-brain steward chat (SPEC §G / R4) — PRIMARY route. First-class
+    # brain engine (hal0.brain.chat) with zero Hermes/board import dependency;
+    # /api/board/chat is a thin alias into the same engine. Mounted PRE-dashboard
+    # so /api/brain/chat (SSE) is not shadowed by the SPA fallback. ADMIN-gated
+    # (deny-by-default) via hal0.security.exposure's /api/brain rule.
+    app.include_router(brain_routes.router, prefix="/api/brain", tags=["brain"])
 
     app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(
