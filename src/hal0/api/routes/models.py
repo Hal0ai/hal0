@@ -543,6 +543,25 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
+    # Screen defaults.extra_args against the managed-arg denylist at SAVE
+    # time. Launch already rejects loudly (slot.managed_arg_denied), so this
+    # is defense-in-depth/UX for non-dashboard clients: fail the write with
+    # the same envelope instead of persisting a tune that can never load.
+    defaults = body.get("defaults")
+    if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
+        import shlex
+
+        from hal0.slots.argv import _deny_managed_flags
+
+        try:
+            tokens = shlex.split(defaults["extra_args"])
+        except ValueError as exc:
+            raise BadRequest(
+                f"defaults.extra_args is not parseable as a flag string: {exc}",
+                code="model.extra_args_unparseable",
+            ) from exc
+        _deny_managed_flags(tokens, segment="model defaults.extra_args")
+
     # Snapshot the pre-update model so we can diff the field set the
     # client actually changed (vs the wire-format keys, which may include
     # unchanged values). Without this the footer's "changed X, Y" toast

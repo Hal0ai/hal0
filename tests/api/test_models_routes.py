@@ -647,3 +647,28 @@ def test_disabled_or_filtered_remote_curates_api_models(
     assert "anthropic/claude-haiku:free" not in rows  # exclude wins
     assert "nvidia/nemotron-70b" not in rows  # not included
     assert "mistral/mistral-large" not in rows  # disabled upstream
+
+
+def test_update_model_rejects_managed_args_in_extra_args(
+    inspect_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Save-time §21.7 screen: a managed flag in defaults.extra_args fails the
+    PUT with the same envelope launch would raise, instead of persisting a
+    tune that can never load."""
+    fp = Path(tmp_hal0_home) / "screened.gguf"
+    fp.write_bytes(b"\x00" * 8)
+    inspect_client.post("/api/models", json={"id": "screened", "path": str(fp)})
+
+    r = inspect_client.put(
+        "/api/models/screened",
+        json={"defaults": {"extra_args": "--port 9999 -fa on"}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+
+    # Clean tune still saves.
+    ok = inspect_client.put(
+        "/api/models/screened",
+        json={"defaults": {"extra_args": "-fa on -b 512"}},
+    )
+    assert ok.status_code == 200, ok.text
