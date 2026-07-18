@@ -1973,18 +1973,41 @@ else
     # hal0-api is already up at this point (enabled + wait_active above), which
     # the bootstrap preflight requires.
     #
-    # P3-perms note: this call is intentionally left running as root, NOT
-    # dropped to hal0. The bootstrap pipeline ALSO writes /usr/local/bin/hermes
-    # (+ the hal0-hermes back-compat symlink) — a genuinely root-only path
-    # (hermes_provision.py's `_phase_install`) — alongside $HERMES_HOME/config
-    # writes that a hal0-owned tree would prefer to receive born-owned. A true
-    # born-owned fix here needs hermes_provision.py itself to split "write
-    # /usr/local/bin as root" from "write $HERMES_HOME/config as hal0" (e.g. an
-    # in-process privilege drop between phases) — out of scope for this pass.
-    # hermes_provision.py's chown-back (`_chown_tree_to_hal0` /
-    # `_phase_ownership_reconcile`) is therefore still load-bearing for THIS
-    # call site and intentionally NOT removed; see the P3-perms follow-up note
-    # in hermes_provision.py's module docstring.
+    # §7.4 privilege drop: `agent install hermes` runs here as root, but the CLI
+    # itself drops the BOOTSTRAP step to the hal0 user (cli/_provision_hermes) —
+    # a root-only prelude installs the /usr/local/bin wrapper + ensures the
+    # setgid hal0-owned skeleton, then it re-execs `agent bootstrap hermes` as
+    # hal0 so config.yaml / personas / runtime.json / provision.json are all born
+    # hal0:hal0. Root:root artifacts (seed TOML, driver env, gateway drop-in) go
+    # through the hal0-agentenv / hal0-systemctl sudo seams. The remaining root
+    # orchestration here (toolchain prereqs, unit enable, gateway install) stays
+    # as root. The setgid /var/lib/hal0 + /etc/hal0 skeleton is also applied by
+    # `doctor perms --fix` above, before this block.
+
+    # §7.4 root prelude — /usr/local/bin/hermes (+ the hal0-hermes back-compat
+    # symlink) is genuinely root-only install infra. Lay it down HERE, in the
+    # installer's root context, BEFORE `agent install hermes` runs, so that once
+    # that call drops to the unprivileged hal0 user (§7.4) the provisioner finds
+    # the wrapper already present and skips it (hermes_provision._copy_wrapper is
+    # euid-aware). Installing it in the prelude keeps the sudo seam from ever
+    # needing to widen to /usr/local/bin. Capture safety (mirrors _copy_wrapper):
+    # a pre-existing FOREIGN hermes (no HAL0_AGENT_ID marker) is backed up to
+    # .pre-hal0 before overwrite. Real installs only — dev installs run non-root
+    # and the provisioner's euid branch handles the skip.
+    if [[ "${DEV_MODE}" -eq 0 && -f "${AGENT_UNIT_DST}" ]]; then
+        HERMES_WRAPPER_SRC="${REPO_ROOT}/installer/wrappers/hermes"
+        if [[ -f "${HERMES_WRAPPER_SRC}" ]]; then
+            if [[ -e /usr/local/bin/hermes ]] && ! grep -q "HAL0_AGENT_ID" /usr/local/bin/hermes 2>/dev/null; then
+                cp -p /usr/local/bin/hermes /usr/local/bin/hermes.pre-hal0 2>/dev/null || true
+            fi
+            install -m 0755 -o root -g root "${HERMES_WRAPPER_SRC}" /usr/local/bin/hermes
+            ln -sfn /usr/local/bin/hermes /usr/local/bin/hal0-hermes
+            info "wrote /usr/local/bin/hermes (+ hal0-hermes symlink) — §7.4 root prelude"
+        else
+            warn "${HERMES_WRAPPER_SRC} not found — hermes wrapper not pre-installed"
+        fi
+    fi
+
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"

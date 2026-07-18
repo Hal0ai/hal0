@@ -151,7 +151,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     """
     import subprocess as _subprocess
 
-    from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER, bootstrap_cli
+    from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER
 
     # Enforce single-pick BEFORE any provisioning side effect. Hermes
     # provisions locally (this function) and only calls the daemon's
@@ -186,17 +186,18 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
         )
 
     console.print("[bold]Provisioning Hermes[/bold] → /var/lib/hal0/venvs/hermes …")
-    rc = bootstrap_cli(repair=False, adopt=adopt, dry_run=False, skip_phases=(), verbose=False)
+    # §7.4: when invoked as root this drops to the hal0 user so every HERMES_HOME
+    # write is born hal0:hal0 (root-only prelude + re-exec). Non-root runs the
+    # pipeline in-process. See _provision_hermes.
+    rc = _provision_hermes(adopt=adopt)
     if rc != 0:
         die(
             "Hermes provisioning failed — inspect `hal0 agent status hermes` / `hal0 agent log hermes`."
         )
         return
 
-    # Bootstrap ran as the installing user (root on a system install) but the
-    # agent unit runs as `hal0` and must WRITE $HERMES_HOME at runtime — hand
-    # the provisioned trees to the agent user. No-op off-root / no such user.
-    _chown_hermes_trees_to_agent_user()
+    # §7.4 F.7: no chown-back — provisioning drops to hal0 (see _provision_hermes)
+    # so the trees are born hal0:hal0.
 
     # Register + honour --switch via the daemon (venv now present → gate passes).
     url = _api_base()
@@ -286,16 +287,16 @@ def _ensure_hermes_writable_or_die() -> None:
     """Abort with a sudo hint when provisioning can't write its trees.
 
     ``hal0 agent install hermes`` provisions into root-owned ``/var/lib/hal0``
-    and is built to run as root on a system install — it chowns the result to
-    the ``hal0`` agent user afterwards (:func:`_chown_hermes_trees_to_agent_user`).
-    Run as a normal login user it used to crash several phases into the
-    bootstrap with a raw ``PermissionError`` and leave half-owned trees behind
-    (observed on a Fedora install). Catch the privilege mismatch up front, before
-    the toolchain shell-out, so we abort cleanly with no side effects.
+    and is built to run as root on a system install — it then drops the
+    provisioning pipeline to the ``hal0`` user so the trees are born hal0:hal0
+    (:func:`_provision_hermes`). Run as a normal login user it used to crash
+    several phases into the bootstrap with a raw ``PermissionError`` and leave
+    half-owned trees behind (observed on a Fedora install). Catch the privilege
+    mismatch up front, before the toolchain shell-out, so we abort cleanly with
+    no side effects.
 
-    No-op when we're root (root writes anywhere; the post-provision chown hands
-    the trees to ``hal0``) or on a dev / rootless install that already owns the
-    trees (the probe passes).
+    No-op when we're root (root provisions, dropping to hal0 for the writes) or
+    on a dev / rootless install that already owns the trees (the probe passes).
     """
     import os as _os
 
@@ -312,39 +313,162 @@ def _ensure_hermes_writable_or_die() -> None:
         + f", but you're running as uid={_os.getuid()} and those live under "
         "root-owned /var/lib/hal0.\n\n"
         "Re-run as root:\n    sudo hal0 agent install hermes\n\n"
-        f"(Provisioning runs as root, then hands the trees to the "
-        f"'{_AGENT_RUNTIME_USER}' agent user automatically.)"
+        f"(Provisioning runs as root, then drops to the "
+        f"'{_AGENT_RUNTIME_USER}' agent user to write the trees born-owned.)"
     )
 
 
-def _chown_hermes_trees_to_agent_user() -> None:
-    """Recursively chown the provisioned trees to the agent runtime user.
+# _chown_hermes_trees_to_agent_user removed (§7.4 F.7): provisioning drops to
+# hal0 (see _provision_hermes below), so the trees are born hal0:hal0 with no
+# chown-back needed.
 
-    Only acts when we're root AND the agent user exists — off-root installs
-    (dev / `--dev`) already own everything, and a missing user means a
-    non-standard layout we shouldn't second-guess. Skipping is silent and safe.
+
+# ── §7.4 privilege drop: provision as the hal0 service user ──────────────────
+#
+# The Hermes bootstrap pipeline writes $HERMES_HOME (config.yaml, personas,
+# context, runtime.json, provision.json) plus — through the sudo seams —
+# root:root artifacts. To make those HERMES_HOME writes born hal0:hal0 (instead
+# of root-then-chown), the provisioning step drops to the hal0 user whenever it
+# is invoked as root: run the root-only prelude (install the /usr/local/bin
+# wrapper + ensure the setgid hal0-owned parent dirs), then re-exec `hal0 agent
+# bootstrap hermes` as hal0. This single choke point covers every caller
+# (install.sh's `agent install hermes`, a standalone `sudo hal0 agent install
+# hermes`, `bootstrap`/`reprovision`/`upgrade`) so F.7 can delete the chown-back
+# without stranding any path on root:root files. A non-root (dev / already-hal0)
+# caller runs the pipeline in-process unchanged.
+
+
+def _hermes_root_prelude() -> None:
+    """Root-only prep run before dropping provisioning to hal0 (§7.4).
+
+    Installs the ``/usr/local/bin`` CLI wrapper (which ``_phase_install`` skips
+    when it runs as hal0) and ensures the hal0-owned parent directories the
+    provisioner writes into exist + are ``hal0:hal0`` setgid, so hal0's writes
+    land born-owned. Idempotent; the caller only invokes it when ``euid == 0``.
     """
     import os as _os
     import pwd as _pwd
-    import subprocess as _subprocess
     from pathlib import Path as _Path
 
-    if _os.geteuid() != 0:
-        return
+    from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER, _install_cli_wrapper
+
+    wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
+    if wrapper_src.is_file():
+        try:
+            _install_cli_wrapper(wrapper_src)
+        except OSError as exc:
+            console.print(f"[yellow]hermes wrapper pre-install hint:[/yellow] {exc}")
+
     try:
-        _pwd.getpwnam(_AGENT_RUNTIME_USER)
+        ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
     except KeyError:
-        console.print(
-            f"[yellow]agent user '{_AGENT_RUNTIME_USER}' not found — skipping chown; "
-            "the agent unit may not be able to write $HERMES_HOME.[/yellow]"
-        )
+        # No hal0 user (dev/rootless layout) — nothing to pre-own.
         return
-    for tree in _HERMES_AGENT_TREES:
-        if _Path(tree).exists():
-            _subprocess.run(  # nosec B603 B607 — fixed argv, known paths
-                ["chown", "-R", f"{_AGENT_RUNTIME_USER}:{_AGENT_RUNTIME_USER}", tree],
-                check=False,
-            )
+    # The hal0-owned parents; the provisioner creates its leaves (.hermes,
+    # venvs/hermes, state/agents/hermes) under these as hal0 → born hal0:hal0.
+    for d in (
+        "/var/lib/hal0",
+        "/var/lib/hal0/venvs",
+        "/var/lib/hal0/state",
+        "/var/lib/hal0/state/agents",
+    ):
+        p = _Path(d)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            _os.chown(p, ent.pw_uid, ent.pw_gid)
+            p.chmod(0o2775)
+        except OSError as exc:
+            # Best-effort: `doctor perms --fix` (install.sh) is the authority for
+            # this skeleton, so a gap here usually surfaces downstream as a loud
+            # "venv install failed". Surface a hint for diagnosability rather than
+            # failing the whole install on a single dir.
+            console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
+
+
+def _run_as_hal0(argv: list[str]) -> int:
+    """Run ``argv`` as the hal0 service user, returning its exit code.
+
+    Sanitizes the env (strips ``HERMES_HOME``, sets ``HOME`` to hal0's home) and
+    picks a privilege-drop tool (``runuser`` → ``setpriv`` → ``sudo``), mirroring
+    ``installer/lib/run-as-hal0.sh`` but as a subprocess (that guard ``exec``s).
+    All three tools wrap the command in the same ``env_argv`` so HOME/HERMES_HOME
+    are set identically regardless of which tool is available. The caller
+    guarantees ``euid == 0``.
+    """
+    import pwd as _pwd
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    try:
+        home = _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_dir or "/var/lib/hal0"
+    except KeyError:
+        home = "/var/lib/hal0"
+    env_argv = ["env", "-u", "HERMES_HOME", f"HOME={home}", *argv]
+    if _shutil.which("runuser"):
+        cmd = ["runuser", "-u", _AGENT_RUNTIME_USER, "--", *env_argv]
+    elif _shutil.which("setpriv"):
+        cmd = [
+            "setpriv",
+            "--reuid",
+            _AGENT_RUNTIME_USER,
+            "--regid",
+            _AGENT_RUNTIME_USER,
+            "--init-groups",
+            "--",
+            *env_argv,
+        ]
+    else:
+        # env_argv already sets HOME explicitly, so no -H needed (and HOME is
+        # consistent with the runuser/setpriv paths).
+        cmd = ["sudo", "-u", _AGENT_RUNTIME_USER, "--", *env_argv]
+    return _subprocess.run(cmd, check=False).returncode  # nosec B603 — fixed argv
+
+
+def _provision_hermes(
+    *,
+    repair: bool = False,
+    adopt: bool = False,
+    dry_run: bool = False,
+    skip_phases: tuple[str, ...] = (),
+    offline: bool = False,
+    verbose: bool = False,
+) -> int:
+    """Run the Hermes bootstrap pipeline, dropping to hal0 first when root (§7.4).
+
+    Non-root (dev / already-hal0): call ``bootstrap_cli`` in-process. Root: run
+    the root-only prelude, then re-exec ``hal0 agent bootstrap hermes`` as hal0
+    so every provisioning write is born ``hal0:hal0``.
+    """
+    import os as _os
+    import shutil as _shutil
+
+    from hal0.agents.hermes_provision import bootstrap_cli
+
+    if _os.geteuid() != 0:
+        return bootstrap_cli(
+            repair=repair,
+            adopt=adopt,
+            dry_run=dry_run,
+            skip_phases=tuple(skip_phases),
+            verbose=verbose,
+        )
+
+    _hermes_root_prelude()
+    hal0_bin = _shutil.which("hal0") or "hal0"
+    argv = [hal0_bin, "agent", "bootstrap", "hermes"]
+    if repair:
+        argv.append("--repair")
+    if adopt:
+        argv.append("--adopt")
+    if dry_run:
+        argv.append("--dry-run")
+    for phase in skip_phases:
+        argv += ["--skip-phase", phase]
+    if offline:
+        argv.append("--offline")
+    if verbose:
+        argv.append("--verbose")
+    return _run_as_hal0(argv)
 
 
 def _enable_and_start_hermes_unit() -> None:
@@ -1043,15 +1167,16 @@ def bootstrap_hermes(
     # hermes_provision module's downstream slices grow heavier deps.
     import os as _os
 
-    from hal0.agents.hermes_provision import bootstrap_cli
-
     if offline:
         _os.environ["HAL0_HERMES_OFFLINE"] = "1"
-    rc = bootstrap_cli(
+    # §7.4: drops to hal0 first when invoked as root (re-execs this same command
+    # as hal0), else runs the pipeline in-process. See _provision_hermes.
+    rc = _provision_hermes(
         repair=repair,
         adopt=adopt,
         dry_run=dry_run,
         skip_phases=tuple(skip_phase),
+        offline=offline,
         verbose=verbose,
     )
     raise typer.Exit(rc)
@@ -1183,14 +1308,9 @@ def agent_reprovision(
     if name != "hermes":
         die(f"reprovision currently only supports `hermes`; got {name!r}.")
         return
-    from hal0.agents.hermes_provision import bootstrap_cli
-
-    rc = bootstrap_cli(
-        repair=repair,
-        dry_run=False,
-        skip_phases=(),
-        verbose=verbose,
-    )
+    # §7.4: drops to hal0 when root (see _provision_hermes) so a re-converge run
+    # re-renders config.yaml born hal0:hal0, matching first install.
+    rc = _provision_hermes(repair=repair, verbose=verbose)
     raise typer.Exit(rc)
 
 

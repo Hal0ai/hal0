@@ -64,9 +64,6 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
     # so a run on a real host (which may have a live system hermes-gateway)
     # stays hermetic; the hermetic_io `run` seam stubs systemctl is-active/pgrep.
     monkeypatch.setattr(hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),))
-    # ownership_reconcile chmods /var/lib/hal0/agents to 0711 — redirect under
-    # tmp so a root test runner never touches the live agents dir.
-    monkeypatch.setattr(hp, "AGENTS_DIR", var_lib / "agents-dir")
     # Personas land under $HERMES_HOME/personas via _personas_root_for —
     # the fixture's hermes_home is already in tmp_path so no further
     # monkey-patching is needed for the persona phase.
