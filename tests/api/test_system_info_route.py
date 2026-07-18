@@ -42,7 +42,16 @@ def test_system_info_matches_hardware_and_features_endpoints(
     info = isolated_client.get("/api/system-info").json()
     hardware = isolated_client.get("/api/hardware").json()
     features = isolated_client.get("/api/features").json()
-    assert info["hardware"] == hardware
+
+    # The two calls are separate live probes — free-memory/uptime/disk move
+    # between them (CI flaked on a 5 MB ram_available_mb delta). Compare the
+    # stable shape; volatile gauges only need to exist.
+    volatile = {"ram_available_mb", "uptime_s", "disk_free_mb", "probed_at"}
+    for key in volatile:
+        assert key in info["hardware"]
+    stable_info = {k: v for k, v in info["hardware"].items() if k not in volatile}
+    stable_hw = {k: v for k, v in hardware.items() if k not in volatile}
+    assert stable_info == stable_hw
     assert info["features"] == features
 
 

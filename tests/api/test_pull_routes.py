@@ -58,14 +58,15 @@ def fake_run_pull(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         job._signal()
 
     monkeypatch.setattr(pull_module, "run_pull", fake)
-    # The models route imports run_pull at module load — also patch its
-    # binding so the fake reaches the BackgroundTasks invocation. (The
+    # The pull-job orchestration (P3-routers inc 1) lives in
+    # hal0.registry.pull_jobs, which binds run_pull at module load — patch
+    # its binding so the fake reaches the BackgroundTasks invocation. (The
     # installer route no longer binds run_pull directly: WS-E / #1108 moved
     # it behind run_pull_and_activate, which imports run_pull lazily from
     # hal0.registry.pull — already patched above via pull_module.)
-    from hal0.api.routes import models as model_routes
+    from hal0.registry import pull_jobs
 
-    monkeypatch.setattr(model_routes, "run_pull", fake)
+    monkeypatch.setattr(pull_jobs, "run_pull", fake)
     return calls
 
 
@@ -374,7 +375,7 @@ def test_pull_curated_mmproj_file_is_wired(
 ) -> None:
     """A curated entry that carries ``mmproj_file`` gets a two-file pull
     without the caller sending anything in the body."""
-    from hal0.api.routes import models as model_routes
+    from hal0.registry import pull_jobs
     from hal0.registry.curated import CuratedModel
 
     curated = CuratedModel(
@@ -391,7 +392,7 @@ def test_pull_curated_mmproj_file_is_wired(
         mmproj_file="mmproj-F16.gguf",
     )
     monkeypatch.setattr(
-        model_routes, "get_curated", lambda mid: curated if mid == "vision-pick" else None
+        pull_jobs, "get_curated", lambda mid: curated if mid == "vision-pick" else None
     )
 
     r = client_isolated.post("/api/models/vision-pick/pull")

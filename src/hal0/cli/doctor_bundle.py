@@ -294,7 +294,17 @@ def _write_diagnostics_section(out: Path, *, base: str | None = None) -> None:
             return None
         return (proc.stdout.strip() or None) if proc.returncode == 0 else None
 
-    hermes_rows = check_hermes_ownership(owner_of=_owner, exists=lambda p: p.exists())
+    def _exists_quiet(p: Path) -> bool:
+        # Path.exists() propagates EACCES (only ENOENT/ENOTDIR-class errnos
+        # are swallowed) — stat'ing under mode-700 /root as a non-root user
+        # raises instead of returning False. An unreadable path can't be
+        # audited from here; degrade to absent like every other probe.
+        try:
+            return p.exists()
+        except OSError:
+            return False
+
+    hermes_rows = check_hermes_ownership(owner_of=_owner, exists=_exists_quiet)
     root = detect_editable_root(Path(hal0.__file__).resolve())
     tree_rows = check_tree_group_share(
         root, group_of=_group, mode_of=_mode, git_shared_of=_git_shared
