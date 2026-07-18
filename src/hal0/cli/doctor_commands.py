@@ -1436,3 +1436,13 @@ def doctor_profiles() -> None:
         raise typer.Exit(1)
     console.print("\n[green]✓[/green]  every slot resolves to a real profile.")
     raise typer.Exit(0)
+
+
+# ── hal0 doctor all — read-only evidence roll-up (§21.4) ──────────────────────
+#
+# Registered here (not decorated in doctor_all.py) so the aggregate module stays
+# import-cycle-free: it pulls `pending_layout_migration` from this module lazily,
+# inside its orchestration function, rather than at import time.
+from hal0.cli.doctor_all import doctor_all_cmd as _doctor_all_cmd  # noqa: E402
+
+app.command("all")(_doctor_all_cmd)
