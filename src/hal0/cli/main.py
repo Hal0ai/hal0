@@ -30,6 +30,7 @@ from hal0.cli.app_commands import app as app_ext_app
 from hal0.cli.bench_commands import BENCH_CONTEXT_SETTINGS, BENCH_HELP
 from hal0.cli.bench_commands import bench as bench_command
 from hal0.cli.capabilities_commands import app as capabilities_app
+from hal0.cli.chat_commands import chat_command
 from hal0.cli.comfyui_commands import app as comfyui_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
@@ -84,6 +85,10 @@ app.add_typer(setup_app, name="setup", help="First-run setup")
 # bench CLI is argparse-based (design §5), so the raw argv forwards to
 # hal0.bench.cli.main. See bench_commands.py for why the context settings.
 app.command("bench", help=BENCH_HELP, context_settings=BENCH_CONTEXT_SETTINGS)(bench_command)
+# §21.14 — terminal chat REPL over the local /v1/chat/completions. Plain
+# function registration (no sub-app: `hal0 chat` has no verbs of its own,
+# just in-REPL slash commands), mirroring the `bench` passthrough above.
+app.command("chat")(chat_command)
 
 
 # ---------------------------------------------------------------------------
