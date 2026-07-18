@@ -1201,6 +1201,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.slot_request_count: dict[str, int] = {}
     app.state.slot_last_used: dict[str, float] = {}
 
+    # OBS-1 (§13): the SQLite metrics core. Does NOT replace the deques
+    # above -- those keep feeding /api/stats/throughput/history and
+    # /api/slots/metrics unchanged -- it observes the same v1 request seam
+    # a second time and persists an exact request_metric row, plus runs
+    # the T2 per-slot sampler as a background task. Construction never
+    # touches the filesystem; ``start()`` (inside the AsyncExitStack below)
+    # applies the 001/002 migrations and launches the background tasks.
+    # ``[metrics].enabled = false`` (or HAL0_METRICS_ENABLED=0) makes every
+    # background task a no-op — never blocks startup either way.
+    from hal0.metrics.service import MetricsService
+
+    metrics_service = MetricsService(slot_manager=slot_manager, registry=model_registry)
+    app.state.metrics_service = metrics_service
+    app.state.metrics_seam = metrics_service.seam
+
     log.info(
         "hal0.api.upstreams_loaded",
         count=len(upstreams.list()),
@@ -1311,6 +1326,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(_stop_refresh_task)
             stack.push_async_callback(_stop_gpu_arbiter_idle_loop)
+            metrics_service.start()
+            stack.push_async_callback(metrics_service.stop)
             yield
     finally:
         # First — issue #1225: cancel any in-flight model pull before doing
@@ -1386,6 +1403,13 @@ def create_app() -> FastAPI:
     # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
     # tab (docker + systemd + ComfyUI HTTP), plus arbiter switchover controls.
     app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
+    # hardware.router is registered BEFORE models.router: it owns the
+    # literal path GET /api/models/health (OBS-1 §21.3), which must match
+    # before models.router's GET /api/models/{model_id} catch-all — routes
+    # are tried in registration order, so the more specific literal path
+    # has to land first or every request to /api/models/health 404s as a
+    # "model 'health' not found" lookup instead.
+    app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a
@@ -1393,7 +1417,6 @@ def create_app() -> FastAPI:
     # /api/models/inspect and is a *different* flow (known coord →
     # variants) than this search proxy (free-text → coord candidates).
     app.include_router(hf.router, prefix="/api/hf", tags=["hf"])
-    app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     # Dashboard-overhaul backend endpoints (CONTRACTS.md §2):
     #   throughput.router → GET /api/stats/throughput/history (bucketed tps_events)
     #   services_health.router → GET /api/services/health
