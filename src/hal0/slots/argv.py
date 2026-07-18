@@ -38,6 +38,8 @@ import logging
 import shlex
 from dataclasses import dataclass
 
+from hal0.errors import BadRequest
+
 log = logging.getLogger(__name__)
 
 # Short→long canonicalisation. Used ONLY to compute the dedup key; the emitted
@@ -72,6 +74,37 @@ APPEND_FLAGS: frozenset[str] = frozenset(
         "--override-kv",
     }
 )
+
+# ── Managed-args denylist (§21.7) ─────────────────────────────────────────────
+#
+# Flags hal0 itself computes and owns for every slot — the structural prefix
+# (``--host``/``--port``/``--model``/``--alias``/``--ctx-size`` in
+# ``container._llama_argv_segments``' ``base`` segment) plus the schema-driven
+# ``[model].n_gpu_layers`` override (its ``slot_overrides`` segment). A slot's
+# free-form ``[server].extra_args`` — or a future request-level
+# ``llamacpp_args`` — must never be able to silently clobber these: doing so
+# can redirect the model file, rebind the listen address/port, or desync the
+# advertised alias from the OpenAI-shim's dispatch table. Keyed by canonical
+# (long) spelling; ``_canon()`` maps short spellings (``-c``, ``-ngl``) onto
+# the same keys, so both forms are caught.
+MANAGED_ARGS_DENYLIST: frozenset[str] = frozenset(
+    {
+        "--model",
+        "--ctx-size",
+        "--host",
+        "--port",
+        "--n-gpu-layers",
+        "--alias",
+    }
+)
+
+# Segment labels whose tokens are free-form / caller-supplied rather than
+# hal0-computed, and therefore must be screened against
+# ``MANAGED_ARGS_DENYLIST`` before they're merged in. Currently just
+# ``[server].extra_args`` (``container._llama_argv_segments``' last segment);
+# a future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
+# rewrite) adds its own label here so it rides the same guard.
+UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset({"extra_args"})
 
 
 @dataclass(frozen=True)
@@ -140,6 +173,31 @@ def _split_pairs(tokens: list[str], sources: list[str] | None = None) -> list[_P
             pairs.append(_Pair(None, None, (tok,), src))
             i += 1
     return pairs
+
+
+def _deny_managed_flags(tokens: list[str], *, segment: str) -> None:
+    """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set a managed flag.
+
+    Called on an untrusted segment's raw tokens (e.g. ``[server].extra_args``)
+    before they're merged into the argv, so a slot config that tries to
+    override ``--model``/``--host``/``--port``/``--ctx-size``/``-ngl``/
+    ``--alias`` fails loudly at load time instead of quietly launching with a
+    clobbered structural flag.
+    """
+    offenders: list[str] = []
+    for pair in _split_pairs(tokens):
+        if pair.canon is not None and pair.canon in MANAGED_ARGS_DENYLIST:
+            assert pair.flag is not None
+            offenders.append(pair.flag)
+    if offenders:
+        flags = ", ".join(repr(f) for f in offenders)
+        raise BadRequest(
+            f"{segment} may not set managed flag(s) {flags}; hal0 computes "
+            "these from the slot/model configuration and they cannot be "
+            "overridden via extra_args",
+            code="slot.managed_arg_denied",
+            details={"segment": segment, "flags": offenders},
+        )
 
 
 def _dedup(pairs: list[_Pair]) -> tuple[list[str], int, dict[str, _Pair]]:
@@ -220,10 +278,23 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     final value (e.g. ``-b`` from ``profile`` vs ``--jinja`` from
     ``extra_args``). Segments are concatenated in order before dedup, so a later
     segment overrides an earlier one — pass them lowest-precedence first.
+
+    Before merging, any segment labelled in :data:`UNTRUSTED_SEGMENT_LABELS`
+    (i.e. ``extra_args``) is screened against :data:`MANAGED_ARGS_DENYLIST`
+    (§21.7) — this is the one path free-form ``[server].extra_args`` actually
+    takes into the launched command (``container._llama_launch_plan``), so
+    it's where a slot config trying to clobber ``--model``/``--host``/
+    ``--port``/``--ctx-size``/``-ngl``/``--alias`` must fail loudly instead of
+    launching a silently-redirected slot.
+
+    Raises:
+        hal0.errors.BadRequest: an untrusted segment sets a managed flag.
     """
     tokens: list[str] = []
     sources: list[str] = []
     for label, seg in segments:
+        if label in UNTRUSTED_SEGMENT_LABELS:
+            _deny_managed_flags(seg, segment=label)
         for tok in seg:
             tokens.append(tok)
             sources.append(label)
@@ -269,6 +340,20 @@ def merge_flags(model_defaults: str | None, slot_extra: str | None) -> str:
         On malformed input (unbalanced quotes that ``shlex.split`` rejects)
         this falls back to a whitespace concat with a structured warning, so
         the launcher still gets *something* runnable instead of crashing.
+
+    Note:
+        This does **not** screen against :data:`MANAGED_ARGS_DENYLIST`. Its
+        one live caller (``config.schema.resolve_profile_flags``) merges the
+        MTP flag bundle with a profile's own ``flags`` — and every seed
+        profile's ``flags`` hardcodes ``-ngl 999`` on the ``slot_extra``
+        (winning) side, which would trip the denylist despite ``-ngl`` there
+        being an ordinary bench tune, not a slot's ``[server].extra_args``
+        escape hatch. The actual ``[server].extra_args`` path is
+        :func:`resolve_argv`'s ``extra_args``-labelled segment (see
+        :data:`UNTRUSTED_SEGMENT_LABELS`), which does enforce the denylist.
+        A future caller merging real request-level free-form args through
+        this function should screen the untrusted side with
+        :func:`_deny_managed_flags` itself before calling in.
     """
     left = model_defaults if (model_defaults and model_defaults.strip()) else ""
     right = slot_extra if (slot_extra and slot_extra.strip()) else ""
@@ -295,6 +380,8 @@ def merge_flags(model_defaults: str | None, slot_extra: str | None) -> str:
 __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
+    "MANAGED_ARGS_DENYLIST",
+    "UNTRUSTED_SEGMENT_LABELS",
     "FlagProvenance",
     "NormalizedArgv",
     "ResolvedArgv",
