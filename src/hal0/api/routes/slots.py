@@ -43,6 +43,8 @@ from hal0.slot_view import (
     serialize_slot,
     synthesize_upstream_entries,
 )
+from hal0.slots import image_pull as _image_pull
+from hal0.slots import metrics_collect as _metrics_collect
 from hal0.slots.manager import Slot, SlotManager
 
 # Auth was removed by design. All routes are open on the local network.
@@ -643,370 +645,35 @@ async def rename_slot(name: str, request: Request) -> dict[str, object]:
 # ── metrics / capacity ─────────────────────────────────────────────────────
 
 
-def _tps_from_events(events: Any, window_s: float = 5.0) -> float:
-    """Compute current tokens/sec from a rolling (ts, tokens) deque.
-
-    Rate is ``tokens / (last_event_ts - first_event_ts_in_window)`` rather
-    than ``tokens / window_s`` so short bursts read at their real rate
-    instead of being smeared across the full lookback. Decays to 0 once
-    all events age out.
-    """
-    import time
-
-    if not events:
-        return 0.0
-    now = time.monotonic()
-    in_window = [(ts, tok) for ts, tok in events if now - ts <= window_s]
-    if len(in_window) < 2:
-        return 0.0
-    total_tokens = sum(tok for _, tok in in_window)
-    span = in_window[-1][0] - in_window[0][0]
-    # Bias slightly toward the window so a stale-but-recent burst still
-    # decays instead of pegging at peak forever.
-    effective_span = max(span, (now - in_window[-1][0]))
-    if effective_span <= 0:
-        return 0.0
-    return total_tokens / effective_span
+# The per-slot metric collectors moved to ``hal0.slots.metrics_collect``
+# (P3-routers §J): the systemctl/cgroup/llama-server IO adapters, the fan-out,
+# and the rolling tok/s + TTFT views. The route layer keeps thin re-export
+# bindings + request adapters so ``slot_metrics`` reads as a service call,
+# external callers keep resolving ``routes.slots._scrape_llama_metrics``
+# (``hal0.metrics.sampler``), and the monkeypatch/import seams the test-suite
+# uses still resolve. New callers import from ``hal0.slots.metrics_collect``.
+_tps_from_events = _metrics_collect.tps_from_events
+_systemd_show = _metrics_collect.systemd_props
+_scrape_llama_metrics = _metrics_collect.llama_metrics
+_docker_container_mem_bytes = _metrics_collect.container_mem_bytes
 
 
 def _per_slot_local_tps(request: Request, window_s: float = 5.0) -> dict[str, float]:
-    """Per-slot/upstream tok/s measured on this process's streaming path.
-
-    Reads the per-name deques populated by v1._instrument_streaming_throughput.
-    Empty/missing store returns an empty dict so callers can union without
-    a None check.
-    """
-    store = getattr(request.app.state, "tps_events", None)
-    if not store:
-        return {}
-    return {name: _tps_from_events(events, window_s) for name, events in store.items()}
+    """Per-slot/upstream tok/s on this process's streaming path (see
+    ``metrics_collect.local_tps``)."""
+    return _metrics_collect.local_tps(request.app.state, window_s)
 
 
 def _per_slot_ttft(request: Request) -> dict[str, dict[str, float]]:
-    """Per-slot TTFT view — latest sample + windowed mean.
-
-    Reads the per-name ttft_events deque populated by
-    `v1._instrument_streaming_throughput` and returns a dict of
-    ``{slot_name: {"ttft_seconds": latest, "ttft_avg_seconds": mean}}``.
-    Slots without any in-window sample are simply absent from the
-    result so the UI can render '—' rather than a misleading zero.
-    """
-    store = getattr(request.app.state, "ttft_events", None)
-    if not store:
-        return {}
-    from hal0.slots.ttft_samples import samples_from_events
-
-    out: dict[str, dict[str, float]] = {}
-    for name, events in store.items():
-        view = samples_from_events(events)
-        cur = view.current_ttft()
-        avg = view.avg_ttft()
-        if cur is None and avg is None:
-            continue
-        row: dict[str, float] = {}
-        if cur is not None:
-            row["ttft_seconds"] = cur
-        if avg is not None:
-            row["ttft_avg_seconds"] = avg
-        out[name] = row
-    return out
-
-
-async def _systemd_show(unit: str, *props: str) -> dict[str, str]:
-    """Return ``systemctl show -p <prop>...`` parsed into a dict.
-
-    Empty / missing values are returned as empty strings; the caller
-    decides how to interpret. Falls back to an empty dict on any error
-    (no systemd, unit missing) so the metrics path can degrade silently
-    rather than 500 the dashboard.
-    """
-    if not props:
-        return {}
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl",
-            "show",
-            unit,
-            *(f"--property={p}" for p in props),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-    except (TimeoutError, FileNotFoundError, OSError):
-        return {}
-    if proc.returncode != 0:
-        return {}
-    result: dict[str, str] = {}
-    for raw in out.decode("utf-8", errors="replace").splitlines():
-        if "=" not in raw:
-            continue
-        k, _, v = raw.partition("=")
-        result[k.strip()] = v.strip()
-    return result
-
-
-async def _scrape_llama_metrics(port: int) -> dict[str, Any]:
-    """Scrape llama.cpp's /metrics + /slots endpoints on loopback.
-
-    /metrics is parsed for ``requests_processing`` / ``requests_deferred``
-    (still emitted by current llama-server master). The KV-cache ratio
-    gauge upstream used to emit (``llamacpp:kv_cache_usage_ratio``) was
-    removed in the post-refactor server, so we synthesise it from
-    /slots: ``max(n_prompt_tokens) / n_ctx`` across the slot's parallel
-    sub-slots. This matches what the gauge used to represent — the
-    fullest cache slot — and is provider-agnostic (any llama-server
-    with a busy parallel slot reports n_prompt_tokens).
-
-    Returns an empty dict on any failure (slot not running, port
-    unbound, llama-server built without ``--metrics``, parse error) so
-    callers can merge unconditionally.
-    """
-    if port <= 0:
-        return {}
-    import httpx
-
-    metrics_url = f"http://127.0.0.1:{port}/metrics"
-    slots_url = f"http://127.0.0.1:{port}/slots"
-    timeout = httpx.Timeout(0.5)
-    out: dict[str, Any] = {}
-
-    # Fan the two scrapes out in parallel; either may 404 (older builds,
-    # --no-slots, --no-metrics) and we degrade silently per-endpoint.
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            metrics_resp, slots_resp = await asyncio.gather(
-                client.get(metrics_url),
-                client.get(slots_url),
-                return_exceptions=True,
-            )
-        except (httpx.HTTPError, OSError):
-            return out
-
-    # --- /metrics: still the source of truth for queue depth gauges. ---
-    #
-    # We intentionally DO NOT scrape `llamacpp:predicted_tokens_seconds`
-    # here. That gauge is the lifetime average since llama-server start,
-    # not the current rate — surfacing it as tokens_per_sec made the
-    # SlotCard's T/S indicator stick at a non-zero average forever.
-    # Live tok/s is computed from the dispatcher's rolling window in
-    # `_per_slot_local_tps`, which correctly decays to 0 at idle.
-    wanted: dict[str, tuple[str, type]] = {
-        "llamacpp:requests_processing": ("requests_processing", int),
-        "llamacpp:requests_deferred": ("requests_deferred", int),
-        # Kept for completeness in case a future llama.cpp reintroduces it;
-        # current master (b9279) does not emit this gauge.
-        "llamacpp:kv_cache_usage_ratio": ("kv_cache_usage", float),
-    }
-    # Duck-typed: any object with a status_code + text attr (real httpx
-    # Response or a test stub) passes; exceptions returned by gather()
-    # fall through to the synthesis branch below.
-    if (
-        not isinstance(metrics_resp, BaseException)
-        and getattr(metrics_resp, "status_code", 0) == 200
-    ):
-        for line in metrics_resp.text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            entry = wanted.get(parts[0])
-            if entry is None:
-                continue
-            key, caster = entry
-            try:
-                out[key] = int(float(parts[1])) if caster is int else float(parts[1])
-            except (ValueError, TypeError):
-                continue
-
-    # --- /slots: KV-cache % via max(n_prompt_tokens)/n_ctx. -------------
-    #
-    # Newer llama-server (post-server.cpp refactor, b9000-ish onward)
-    # exposes ``n_prompt_tokens`` per parallel sub-slot when busy, plus
-    # ``n_ctx`` always. Older builds only return id/n_ctx/is_processing,
-    # in which case the max is 0 and we skip the synthesised gauge so
-    # the UI renders '—' rather than a misleading 0%.
-    if (
-        "kv_cache_usage" not in out
-        and not isinstance(slots_resp, BaseException)
-        and getattr(slots_resp, "status_code", 0) == 200
-    ):
-        try:
-            payload = slots_resp.json()
-        except (ValueError, TypeError):
-            payload = None
-        if isinstance(payload, list) and payload:
-            max_used = 0
-            n_ctx = 0
-            for slot in payload:
-                if not isinstance(slot, dict):
-                    continue
-                try:
-                    ctx = int(slot.get("n_ctx", 0) or 0)
-                except (ValueError, TypeError):
-                    ctx = 0
-                if ctx > n_ctx:
-                    n_ctx = ctx
-                # Prefer n_prompt_tokens (current prompt+cache occupancy)
-                # if it's there; cache_tokens / n_past are legacy fallbacks
-                # used by even-older builds.
-                used = 0
-                for key in ("n_prompt_tokens", "cache_tokens", "n_past"):
-                    v = slot.get(key)
-                    if v is None:
-                        continue
-                    try:
-                        iv = int(v)
-                    except (ValueError, TypeError):
-                        continue
-                    if iv > used:
-                        used = iv
-                if used > max_used:
-                    max_used = used
-            if n_ctx > 0 and max_used > 0:
-                ratio = max_used / float(n_ctx)
-                # Clamp — n_prompt_tokens can briefly exceed n_ctx during
-                # shift; surfacing >1.0 would look broken in the UI.
-                out["kv_cache_usage"] = min(max(ratio, 0.0), 1.0)
-    return out
-
-
-async def _docker_container_mem_bytes(container_name: str) -> int:
-    """Cgroup-wide memory.current for a named docker container.
-
-    Walks: ``docker inspect`` → container init pid → ``/proc/<pid>/cgroup``
-    (cgroupv2 unified line) → ``/sys/fs/cgroup<path>/memory.current``.
-    Returns 0 on any error so the caller can fall back to the systemd
-    unit's MemoryCurrent (which under docker only covers the ``docker
-    run`` client process, not the workload).
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            "inspect",
-            "-f",
-            "{{.State.Pid}}",
-            container_name,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=1.5)
-    except (TimeoutError, FileNotFoundError, OSError):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    try:
-        pid = int(out.decode("utf-8", errors="replace").strip() or 0)
-    except ValueError:
-        pid = 0
-    if pid <= 0:
-        return 0
-    try:
-        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as f:
-            cg_line = f.readline().strip()
-    except OSError:
-        return 0
-    # cgroupv2 unified: "0::/system.slice/docker-<id>.scope"
-    if "::" not in cg_line:
-        return 0
-    cg_rel = cg_line.split("::", 1)[1].lstrip("/")
-    try:
-        with open(f"/sys/fs/cgroup/{cg_rel}/memory.current", encoding="utf-8") as f:
-            return int(f.read().strip() or 0)
-    except (OSError, ValueError):
-        return 0
+    """Per-slot TTFT view — latest + windowed mean (see
+    ``metrics_collect.local_ttft``)."""
+    return _metrics_collect.local_ttft(request.app.state)
 
 
 async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
-    """Build per-slot live metrics from cgroup + systemd activation time.
-
-    MEM: docker slots run their workload in dockerd-managed cgroups
-    that the systemd unit doesn't own (the unit's MainPID is the docker
-    CLI itself, ~10 MB). We resolve the container by the predictable
-    name ``hal0-slot-<slot>``, walk to its cgroup, and read
-    memory.current. For non-docker slots we fall back to the unit's
-    own MemoryCurrent.
-
-    UP: ``ActiveEnterTimestampMonotonic`` is on the host's
-    CLOCK_MONOTONIC; lxcfs rewrites /proc/uptime to a container-local
-    view, so we read CLOCK_MONOTONIC via clock_gettime directly to keep
-    the deltas non-negative inside an LXC.
-    """
-    sm = getattr(request.app.state, "slot_manager", None)
-    if sm is None:
-        return {}
-    try:
-        slots = await sm.list()
-    except Exception:
-        return {}
-
-    import time
-
-    monotonic_now_us = int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1_000_000)
-
-    async def _one(slot: Slot) -> tuple[str, dict[str, Any]]:
-        scrape_port = slot.port
-        unit = f"hal0-slot@{slot.name}.service"
-        # Fan systemd properties + docker cgroup + llama metrics out in
-        # parallel — three independent IO waits, no point serialising.
-        props_task = asyncio.create_task(
-            _systemd_show(
-                unit,
-                "MemoryCurrent",
-                "ActiveEnterTimestampMonotonic",
-                "ActiveState",
-            )
-        )
-        mem_task = asyncio.create_task(_docker_container_mem_bytes(f"hal0-slot-{slot.name}"))
-        metrics_task = asyncio.create_task(_scrape_llama_metrics(scrape_port))
-        props, mem_bytes, llm_metrics = await asyncio.gather(
-            props_task, mem_task, metrics_task, return_exceptions=False
-        )
-
-        out: dict[str, Any] = {
-            "name": slot.name,
-            "mem_rss_mb": 0.0,
-            "uptime_seconds": 0,
-            "requests_processing": 0,
-        }
-        # Prefer docker container cgroup (the workload); fall back to
-        # the systemd unit cgroup for native-host slots.
-        if mem_bytes <= 0:
-            try:
-                mem_bytes = int(props.get("MemoryCurrent", "") or 0)
-            except (TypeError, ValueError):
-                mem_bytes = 0
-        if mem_bytes > 0:
-            out["mem_rss_mb"] = mem_bytes / (1024.0 * 1024.0)
-        try:
-            active_us = int(props.get("ActiveEnterTimestampMonotonic", "0") or 0)
-        except ValueError:
-            active_us = 0
-        if active_us > 0 and monotonic_now_us > active_us:
-            out["uptime_seconds"] = int((monotonic_now_us - active_us) / 1_000_000)
-        # Layer in live request counts + kv-cache + tok/s scraped from
-        # llama-server's /metrics. Non-llama backends (NPU FLM, kokoro,
-        # etc.) return an empty dict and we leave requests_processing
-        # at its 0 default.
-        if llm_metrics:
-            out["requests_processing"] = int(llm_metrics.get("requests_processing", 0))
-            if "requests_deferred" in llm_metrics:
-                out["requests_deferred"] = int(llm_metrics["requests_deferred"])
-            if "kv_cache_usage" in llm_metrics:
-                out["kv_cache_usage"] = float(llm_metrics["kv_cache_usage"])
-        return slot.name, out
-
-    pairs = await asyncio.gather(*(_one(s) for s in slots), return_exceptions=True)
-    result: dict[str, dict[str, Any]] = {}
-    for item in pairs:
-        if isinstance(item, BaseException):
-            continue
-        name, payload = item
-        result[name] = payload
-    return result
+    """Per-slot mem/uptime/request-count fan-out (see
+    ``metrics_collect.collect_local``)."""
+    return await _metrics_collect.collect_local(getattr(request.app.state, "slot_manager", None))
 
 
 @router.get("/metrics")
@@ -1707,61 +1374,13 @@ async def slot_state_stream(name: str, request: Request) -> StreamingResponse:
 
 
 # ── container image pull ───────────────────────────────────────────────────────
-
-
-class _ImagePullJob:
-    """Lightweight job object for a container-image pull.
-
-    Tracks state (pulling | completed | failed), layer progress, and an
-    asyncio.Event used to wake SSE subscribers on each line of output.
-
-    Unlike the HF-model PullJob (byte-oriented), this job is layer-oriented:
-    layer = layers finished, total_layers = layers discovered.
-    """
-
-    __slots__ = ("error", "image", "layer", "slot_name", "state", "total_layers")
-
-    def __init__(self, slot_name: str, image: str) -> None:
-        self.slot_name = slot_name
-        self.image = image
-        self.state: str = "pulling"
-        self.layer: int = 0
-        self.total_layers: int = 0
-        self.error: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "slot_name": self.slot_name,
-            "image": self.image,
-            "state": self.state,
-            "layer": self.layer,
-            "total_layers": self.total_layers,
-            "error": self.error,
-        }
-
-
-async def _run_image_pull(job: _ImagePullJob, request: Request) -> None:
-    """Run the container pull in background, updating ``job`` per line.
-
-    Writes progress into ``job`` so the 0.5-s polling SSE loop picks it up.
-    ``request`` is accepted for future use (event bus, slot invalidation)
-    but not read currently — marked ARG001 to suppress the linter.
-    """
-    from hal0.providers.container import container_provider
-
-    cp = container_provider()
-    try:
-        async for chunk in cp.pull_image_stream(job.image):
-            job.state = chunk.get("state", "pulling")
-            job.layer = int(chunk.get("layer", job.layer))
-            job.total_layers = int(chunk.get("total_layers", job.total_layers))
-            if chunk.get("error"):
-                job.error = str(chunk["error"])
-            if job.state in ("completed", "failed"):
-                break
-    except Exception as exc:
-        job.state = "failed"
-        job.error = str(exc)
+#
+# The job object, background pull runner, profile→image resolver and
+# present|missing inspection moved to ``hal0.slots.image_pull`` (P3-routers §J).
+# The re-export bindings preserve the test-suite's ``routes.slots._ImagePullJob``
+# import + ``routes.slots._run_image_pull`` patch seam.
+_ImagePullJob = _image_pull.ImagePullJob
+_run_image_pull = _image_pull.run_image_pull
 
 
 @router.post("/{name}/pull", status_code=202)
@@ -1792,23 +1411,7 @@ async def pull_slot_image(
         return {"resumed": True, **existing.as_dict()}
 
     # Resolve image from profile.
-    image: str | None = None
-    try:
-        configs = await sm.iter_configs()
-        for cfg in configs:
-            if str(cfg.get("name", "")) == name:
-                profile_name = str(cfg.get("profile") or "")
-                if profile_name:
-                    from hal0.config.loader import load_profiles_config
-
-                    catalog = load_profiles_config()
-                    prof = catalog.profile.get(profile_name)
-                    if prof:
-                        image = prof.image
-                break
-    except Exception:
-        pass
-
+    image = await _image_pull.resolve_slot_image(sm, name)
     if not image:
         raise BadRequest(
             f"slot {name!r} has no container profile / image — cannot pull",
@@ -1846,37 +1449,9 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
 
         if job is None:
             # No active pull — inspect the image to surface present|missing.
-            image: str | None = None
-            try:
-                sm = _get_slot_manager(request)
-                configs = await sm.iter_configs()
-                for cfg in configs:
-                    if str(cfg.get("name", "")) == name:
-                        profile_name = str(cfg.get("profile") or "")
-                        if profile_name:
-                            from hal0.config.loader import load_profiles_config
-
-                            catalog = load_profiles_config()
-                            prof = catalog.profile.get(profile_name)
-                            if prof:
-                                image = prof.image
-                        break
-            except Exception:
-                pass
-
-            if image:
-                try:
-                    from hal0.providers.container import container_provider
-
-                    present = await asyncio.get_event_loop().run_in_executor(
-                        None, container_provider().image_present, image
-                    )
-                    state = "present" if present else "missing"
-                except Exception:
-                    state = "missing"
-            else:
-                state = "missing"
-
+            sm = _get_slot_manager(request)
+            image = await _image_pull.resolve_slot_image(sm, name)
+            state = await _image_pull.inspect_image_state(image)
             yield f"data: {json.dumps({'slot_name': name, 'image': image, 'state': state, 'layer': 0, 'total_layers': 0})}\n\n"
             return
 
@@ -1924,35 +1499,9 @@ async def pull_slot_image_status(name: str, request: Request) -> dict[str, objec
 
     # No active pull — resolve the slot's image + inspect presence so the
     # poller gets the same present|missing terminal the SSE stream emits.
-    image: str | None = None
-    try:
-        sm = _get_slot_manager(request)
-        configs = await sm.iter_configs()
-        for cfg in configs:
-            if str(cfg.get("name", "")) == name:
-                profile_name = str(cfg.get("profile") or "")
-                if profile_name:
-                    from hal0.config.loader import load_profiles_config
-
-                    catalog = load_profiles_config()
-                    prof = catalog.profile.get(profile_name)
-                    if prof:
-                        image = prof.image
-                break
-    except Exception:
-        pass
-
-    state = "missing"
-    if image:
-        try:
-            from hal0.providers.container import container_provider
-
-            present = await asyncio.get_event_loop().run_in_executor(
-                None, container_provider().image_present, image
-            )
-            state = "present" if present else "missing"
-        except Exception:
-            state = "missing"
+    sm = _get_slot_manager(request)
+    image = await _image_pull.resolve_slot_image(sm, name)
+    state = await _image_pull.inspect_image_state(image)
 
     return {
         "slot_name": name,
