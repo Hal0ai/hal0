@@ -222,6 +222,31 @@ def ownership_table(
             0o664,
             role=".first-run.lock",
         ),
+        # Rootless-podman state under the service user's HOME. A root-run
+        # install that invokes podman with HOME=/var/lib/hal0 leaves
+        # root-owned ~/.config — after which EVERY podman call as hal0
+        # hard-fails ('path "/var/lib/hal0/.config" exists and it is not
+        # owned by the current user'): version probe → compat branch
+        # mis-fire, image inspection → degraded system-info (halo143).
+        # Optional: absent on boxes where the api never ran podman rootless.
+        PermRow(
+            var_lib / ".config",
+            state_owner,
+            service_group,
+            0o755,
+            glob="*",
+            child_mode=0o755,
+            role=".config (rootless podman)",
+        ),
+        PermRow(
+            var_lib / ".local",
+            state_owner,
+            service_group,
+            0o755,
+            glob="*",
+            child_mode=0o755,
+            role=".local (rootless podman storage root)",
+        ),
         PermRow(
             paths.var_lib() / ".hermes",
             state_owner,
