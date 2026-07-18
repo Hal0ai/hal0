@@ -259,3 +259,89 @@ class TestDeleteModelFiles:
             assert Path(blob["blob_path"]) == dest_b
         assert not dest_a.exists()  # canonical hardlink unlinked
         assert dest_b.exists()  # surviving referent (and the bytes) live on
+
+
+class TestReconcileStoreTree:
+    """#9: fs-walk reconcile — reap bare bytes (on disk, tracked by NO
+    store_blob AND no model_file row) while retaining every tracked file and
+    skipping in-flight ``.tmp`` partials."""
+
+    def test_reaps_bare_bytes_retains_tracked_skips_partial(
+        self, db_path: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
+        snap = tmp_path / "models--org--repo" / "snapshots" / "rev"
+        snap.mkdir(parents=True)
+        # (1) blob-tracked live file (store_blob.blob_path, refcount 1).
+        blob_file = snap / "model.gguf"
+        blob_file.write_bytes(b"x" * 8)
+        # (2) model_file-only live file (non-LFS tokenizer: dest row, NO blob).
+        tok = snap / "tokenizer.json"
+        tok.write_bytes(b"{}")
+        # (3) bare bytes: on disk, tracked by neither table.
+        bare = snap / "leftover.gguf"
+        bare.write_bytes(b"orphaned")
+        # (4) in-flight partial under .tmp — must be skipped.
+        tmp_stage = tmp_path / ".tmp"
+        tmp_stage.mkdir()
+        partial = tmp_stage / "job--model.gguf.part"
+        partial.write_bytes(b"partial")
+
+        with connect(db_path) as conn:
+            _seed_model(conn, "m", str(blob_file))
+            with tx(conn):
+                repository.insert_blob(
+                    conn, sha256="sha-live", size_bytes=8, blob_path=str(blob_file), refcount=1
+                )
+                repository.insert_model_file(
+                    conn,
+                    model_id="m",
+                    rel="model.gguf",
+                    dest=str(blob_file),
+                    sha256="sha-live",
+                    role="model",
+                )
+                repository.insert_model_file(
+                    conn,
+                    model_id="m",
+                    rel="tokenizer.json",
+                    dest=str(tok),
+                    sha256=None,
+                    role="tokenizer",
+                )
+            report = gc.reconcile_store_tree(conn, dry_run=False)
+
+        assert report.orphans_found == 1
+        assert report.orphans_deleted == 1
+        assert report.bytes_reclaimed == len(b"orphaned")
+        assert report.errors == []
+        assert not bare.exists()  # only the bare file reaped
+        assert blob_file.exists()  # store_blob-tracked retained
+        assert tok.exists()  # model_file-only (non-LFS) retained
+        assert partial.exists()  # in-flight .tmp partial skipped
+
+    def test_dry_run_reports_without_unlinking(
+        self, db_path: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
+        snap = tmp_path / "models--org--repo" / "snapshots" / "rev"
+        snap.mkdir(parents=True)
+        bare = snap / "leftover.gguf"
+        bare.write_bytes(b"orphaned")
+        with connect(db_path) as conn:
+            migrate(conn)
+            report = gc.reconcile_store_tree(conn, dry_run=True)
+        assert report.orphans_found == 1
+        assert report.orphans_deleted == 0
+        assert bare.exists()
+
+    def test_max_files_bounds_the_walk(self, db_path: Path, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
+        snap = tmp_path / "models--org--repo" / "snapshots" / "rev"
+        snap.mkdir(parents=True)
+        for i in range(5):
+            (snap / f"f{i}.bin").write_bytes(b"z")
+        with connect(db_path) as conn:
+            migrate(conn)
+            report = gc.reconcile_store_tree(conn, dry_run=True, max_files=2)
+        assert report.errors  # truncation recorded, walk stopped at the cap

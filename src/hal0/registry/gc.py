@@ -8,6 +8,12 @@ existed to reclaim them. This module adds the two pieces plan §7.1e /
 * :func:`collect_orphans` / :func:`prune_orphans` — refcount-driven
   ``store_blob`` cleanup (a hardlinked-dedup blob whose last referencing
   ``model_file`` row is gone).
+* :func:`reconcile_store_tree` — filesystem-driven cleanup (REWORK.md §B:
+  "GC reconciles db rows AND filesystem state"). Walks the store root and
+  reaps *bare bytes* — a file physically on disk under the store root that
+  NO ``store_blob`` row AND NO ``model_file`` row tracks (a crashed pull, an
+  interrupted write, a manual copy). This is the fs-walk half the
+  refcount-row-driven prune above cannot see.
 * :func:`delete_model_files` — the guarded, opt-in "actually remove the
   bytes" path a caller (route handler) invokes explicitly; it is never
   implicit in a registry row delete. When a delete drops a shared blob's
@@ -27,9 +33,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hal0.config import store
 from hal0.config.store import assert_under_store
 from hal0.db import repository
 from hal0.db.connection import connect, tx
@@ -197,9 +205,140 @@ def _repoint_shared_blob(
             return
 
 
+# ── filesystem reconcile (bare-bytes fs-walk — REWORK.md §B) ────────────────
+
+#: The pull engine stages in-flight downloads under ``<store_root>/.tmp``
+#: (``hal0.registry.pull._tmp_dir``); the reconcile walk never descends into
+#: it (nor any other dot-directory) so a growing ``*.part`` is never reaped.
+_STAGING_DIRNAME = ".tmp"
+
+
+def _norm_path(p: str | None) -> str | None:
+    """Normalise a stored path for set-membership comparison against the walk."""
+    if not p:
+        return None
+    try:
+        return str(Path(p).resolve())
+    except OSError:
+        return str(Path(p))
+
+
+def _sqlite_files(conn) -> set[str]:
+    """The active SQLite database's own on-disk files (main db + ``-wal`` /
+    ``-shm`` sidecars). Added to the tracked set so a store root that happens
+    to contain the hal0 DB (e.g. a test's ``HAL0_MODEL_STORE`` pointed at the
+    same dir, or a misconfigured deployment) can never have its DB reaped as
+    "bare bytes". In-memory DBs report an empty filename and are skipped."""
+    files: set[str] = set()
+    with contextlib.suppress(Exception):
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            db_file = row["file"]
+            if not db_file:
+                continue
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                norm = _norm_path(db_file + suffix)
+                if norm:
+                    files.add(norm)
+    return files
+
+
+def _tracked_store_paths(conn) -> set[str]:
+    """Every on-disk path the DB knows about: ``store_blob.blob_path`` (LFS
+    dedup blobs) together with ``model_file.dest`` (installed files, incl.
+    non-LFS tokenizer/config rows that carry NO blob), plus the SQLite DB's own files.
+    A file under the store root in none of these is *bare bytes* — untracked,
+    reap-eligible."""
+    tracked: set[str] = _sqlite_files(conn)
+    for row in conn.execute("SELECT blob_path FROM store_blob").fetchall():
+        norm = _norm_path(row["blob_path"])
+        if norm:
+            tracked.add(norm)
+    for row in conn.execute("SELECT dest FROM model_file WHERE dest IS NOT NULL").fetchall():
+        norm = _norm_path(row["dest"])
+        if norm:
+            tracked.add(norm)
+    return tracked
+
+
+def reconcile_store_tree(conn=None, *, dry_run: bool = True, max_files: int = 100_000) -> GCReport:
+    """Reap *bare bytes* — files under the store root tracked by NEITHER a
+    ``store_blob`` row NOR a ``model_file`` row (REWORK.md §B fs-walk half).
+
+    A crashed pull, an interrupted write, or a manual copy can leave a real
+    file physically under the store root with no DB row referencing it. The
+    refcount-driven :func:`prune_orphans` cannot see those (it is row-driven,
+    and there is no row); this walk reconciles the filesystem against the DB.
+
+    Safety contract:
+      * ``dry_run=True`` (the default) only *counts* — a caller must opt into
+        ``dry_run=False`` to actually unlink, exactly like :func:`prune_orphans`.
+      * Live-referenced bytes are never touched: any path recorded as a
+        ``store_blob.blob_path`` or a ``model_file.dest`` is tracked and skipped.
+      * In-flight partials are never touched: the ``.tmp`` staging dir (and
+        every other dot-directory) is pruned from the walk, and dot-files
+        (``.part``/``.part.json``, hardlink-/pointer-tmp) are skipped.
+      * Symlinks (the ``by-id`` pointer tree) are never followed or reaped.
+      * Every unlink still passes through :func:`assert_under_store` (fail-fast).
+      * The walk is bounded by ``max_files``; hitting the cap logs + records an
+        error and stops rather than scanning an unbounded tree.
+
+    Accepts an existing connection or opens its own when ``conn`` is ``None``.
+    """
+    if conn is None:
+        with connect() as owned:
+            return reconcile_store_tree(owned, dry_run=dry_run, max_files=max_files)
+
+    report = GCReport()
+    root = store.store_root().resolve()
+    if not root.is_dir():
+        return report
+
+    tracked = _tracked_store_paths(conn)
+    by_id = store.by_id_dir().resolve()
+    scanned = 0
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        here = Path(dirpath)
+        # Prune dot-dirs (``.tmp`` staging + any hidden dir) and the by-id
+        # pointer dir so the walk never visits in-flight partials or symlinks.
+        dirnames[:] = [
+            d for d in dirnames if not d.startswith(".") and (here / d).resolve() != by_id
+        ]
+        for name in filenames:
+            if name.startswith("."):
+                continue  # .part / .part.json / .*-tmp-<pid> — transient staging
+            scanned += 1
+            if scanned > max_files:
+                msg = f"reconcile walk truncated at max_files={max_files} under {root}"
+                report.errors.append(msg)
+                log.warning("gc.reconcile_walk_truncated root=%s max_files=%d", root, max_files)
+                return report
+            p = here / name
+            if p.is_symlink():
+                continue
+            if _norm_path(str(p)) in tracked:
+                continue
+            report.orphans_found += 1
+            if dry_run:
+                continue
+            try:
+                resolved = assert_under_store(p, severity="fail")
+                size = resolved.stat().st_size
+                resolved.unlink(missing_ok=True)
+            except Exception as exc:
+                report.errors.append(f"{p}: {exc}")
+                log.warning("gc.reconcile_unlink_failed path=%s error=%s", p, exc)
+                continue
+            report.orphans_deleted += 1
+            report.bytes_reclaimed += size
+            log.info("gc.reconcile_reaped path=%s size=%d", p, size)
+    return report
+
+
 __all__ = [
     "GCReport",
     "collect_orphans",
     "delete_model_files",
     "prune_orphans",
+    "reconcile_store_tree",
 ]
