@@ -722,10 +722,64 @@ class BoardStore:
 
     # ── executor seam (KB-5) — contract-shaped no-ops without an executor ─
 
+    #: Target name the board dispatches ready cards to (KB-5 seam key).
+    DISPATCH_TARGET: ClassVar[str] = "hermes"
+
     def dispatch_nudge(self, *, max_dispatch: int | None = None) -> dict[str, Any]:
-        """One-shot dispatcher nudge. Routes through the KB-5 dispatch seam;
-        with no executor wired, honestly reports zero dispatched."""
-        return {"dispatched": 0}
+        """One-shot dispatcher nudge — dispatch ready cards through the KB-5 seam.
+
+        Consults :func:`hal0.board.dispatch.dispatch` for each ``ready`` card. An
+        empty executor registry (the default / Hermes-absent case) dispatches
+        nothing and this honestly reports ``{"dispatched": 0}``; when a future
+        executor is registered, each successful dispatch writes back an attempt
+        run/event via :meth:`_dispatch_writeback`.
+        """
+        from hal0.board.dispatch import dispatch as _seam_dispatch
+
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id FROM card WHERE status = 'ready' ORDER BY priority DESC, created_at ASC"
+            ).fetchall()
+        ids = [r["id"] for r in rows]
+        if max_dispatch is not None and max_dispatch > 0:
+            ids = ids[:max_dispatch]
+        dispatched = 0
+        for cid in ids:
+            result = _seam_dispatch(cid, self.DISPATCH_TARGET, writeback=self._dispatch_writeback)
+            if result.dispatched:
+                dispatched += 1
+        return {"dispatched": dispatched}
+
+    def _dispatch_writeback(self, handle: Any) -> None:
+        """Record an executor attempt as a hal0 run + event (KB-5 status sink).
+
+        Appends to the card's OWN run ledger + event feed only — the executor
+        never reshapes canonical board state (lane/deps/approval), per the
+        design's "Hermes may report an outcome but may not directly change hal0
+        …" rule.
+        """
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT board_slug FROM card WHERE id = ?", (handle.card_id,)
+            ).fetchone()
+            if row is None:
+                return
+            conn.execute(
+                "INSERT INTO card_run (card_id, state, profile, msg) VALUES (?, ?, ?, ?)",
+                (handle.card_id, handle.status, handle.executor, handle.run_id),
+            )
+            self._append_event(
+                conn,
+                row["board_slug"],
+                handle.card_id,
+                "dispatched",
+                {
+                    "target": handle.target,
+                    "attempt_id": handle.attempt_id,
+                    "run_id": handle.run_id,
+                    "status": handle.status,
+                },
+            )
 
     def specify(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """Refine a card into a spec — an executor/agent action (KB-5 seam)."""

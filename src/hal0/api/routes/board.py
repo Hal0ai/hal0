@@ -35,13 +35,45 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Request, WebSocket
+from fastapi import APIRouter, Request, Response, WebSocket
 
 from hal0.api._audit import record_action
 from hal0.board.store import BoardStore
 from hal0.errors import BadRequest
 
 router = APIRouter()
+
+
+# ── ETag / optimistic concurrency (KB-6) ────────────────────────────────────
+#
+# Per-card ``revision`` is the ETag validator. Reads emit ``ETag: "<revision>"``;
+# a mutating request MAY send ``If-Match: "<revision>"`` to make the write
+# conditional. A stale validator raises Conflict (409) in the store — hal0 uses
+# 409, not 412, because the error-envelope stack already ships a Conflict(409)
+# class and no 412 machinery, and a stale board write is exactly the
+# "edit-vs-edit race" that class documents. If-Match is OPTIONAL, so a client
+# that omits it behaves exactly as before (the frozen contract is unbroken;
+# ETag + If-Match are purely additive).
+
+
+def _etag(revision: Any) -> str | None:
+    return f'"{revision}"' if revision is not None else None
+
+
+def _if_match(request: Request) -> int | None:
+    """Parse an ``If-Match`` header into a revision int, or ``None``.
+
+    Tolerates weak (``W/"5"``) and quoted (``"5"``) forms. ``*`` (match-any) and
+    any unparseable value disable the check (``None``) rather than erroring.
+    """
+    raw = request.headers.get("If-Match")
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw == "*":
+        return None
+    raw = raw.removeprefix("W/").strip().strip('"')
+    return int(raw) if raw.isdigit() else None
 
 
 # ── store resolution + request helpers ──────────────────────────────────────
@@ -107,24 +139,29 @@ async def create_task(request: Request) -> Any:
 
 
 @router.patch("/tasks/{task_id}")
-async def update_task(request: Request, task_id: str) -> Any:
+async def update_task(request: Request, task_id: str, response: Response) -> Any:
     body = await _read_body(request)
     store = await _store(request)
+    if_revision = _if_match(request)
     async with record_action(
         request, category="board", action="board.task.update", target=task_id
     ) as rec:
-        result = store.update_task(task_id, body or {})
+        result = store.update_task(task_id, body or {}, if_revision=if_revision)
         rec.after = result
+    etag = _etag(result.get("revision")) if isinstance(result, dict) else None
+    if etag:
+        response.headers["ETag"] = etag
     return result
 
 
 @router.delete("/tasks/{task_id}")
 async def delete_task(request: Request, task_id: str) -> Any:
     store = await _store(request)
+    if_revision = _if_match(request)
     async with record_action(
         request, category="board", action="board.task.delete", target=task_id
     ) as rec:
-        result = store.delete_task(task_id)
+        result = store.delete_task(task_id, if_revision=if_revision)
         rec.after = result
     return result
 
@@ -331,9 +368,13 @@ async def get_board(request: Request) -> Any:
 
 
 @router.get("/tasks/{task_id}")
-async def get_task(request: Request, task_id: str) -> Any:
+async def get_task(request: Request, task_id: str, response: Response) -> Any:
     store = await _store(request)
-    return store.get_task(task_id)
+    task = store.get_task(task_id)
+    etag = _etag(task.get("revision")) if isinstance(task, dict) else None
+    if etag:
+        response.headers["ETag"] = etag
+    return task
 
 
 @router.get("/tasks/{task_id}/log")
