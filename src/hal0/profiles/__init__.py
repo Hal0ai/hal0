@@ -36,6 +36,7 @@ from hal0.config.schema import (
     resolve_profile_flags,
 )
 from hal0.errors import Conflict, NotFound
+from hal0.runners import RUNNER_IMAGES
 
 log = logging.getLogger(__name__)
 
@@ -104,9 +105,26 @@ class ProfilePatch:
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
+    """Classify a profile's runtime family.
+
+    §7.1b / ML-4: prefers a runner-registry lookup when ``profile.image``
+    exactly matches a known runner's image — an exact hit means we KNOW
+    which runtime that image boots (``RUNNER_IMAGES[key].runtime_family``)
+    rather than guessing from name/image substrings.
+    ``ProfileConfig`` has no dedicated ``runner`` key yet (profiles losing
+    ``image`` entirely in favor of a runner key is ML-5/P3-schema scope),
+    so this is index-by-image rather than a direct field read. Falls back
+    to the string-sniff below — kept as-is, unchanged — for any profile
+    whose image doesn't match a registry entry verbatim (custom profiles,
+    dev overrides, a stale/renamed image).
+    """
+    image = profile.image.lower()
+    for runner in RUNNER_IMAGES.values():
+        if runner.image.lower() == image:
+            return runner.runtime_family
+
     # Classify by device_class/image (robust to slug renames); the legacy
     # name literals are kept as a belt-and-suspenders hint.
-    image = profile.image.lower()
     if name == "flm" or profile.device_class == "npu" or "flm" in image:
         return "flm"
     # Qwen3-TTS (GPU) is checked before Kokoro and the llama-server fallback:

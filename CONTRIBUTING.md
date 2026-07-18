@@ -18,6 +18,66 @@ When the model opens up, the shape will be:
   tests (Tier-1 reliability is non-negotiable)
 - UI changes need Playwright coverage for any new critical path
 
+## Anti-scar rules
+
+hal0's architecture is sound, but rapid iteration leaves *scars*: dead
+abstractions, duplicate sources of truth, oversized modules, divergent
+implementations, stale docs, and shims that outlive their purpose. These
+rules keep new work from adding scars. They apply to every PR — CI
+enforces the ones marked **(gated)**.
+
+1. **One owner per fact.** Every fact — a config value, a slot roster, a
+   model-store path, a port claim — has exactly one authoritative home.
+   Any other place that needs it derives a view; it never keeps a second
+   copy to sync. If you find yourself writing the same truth twice, make
+   one the owner and the other a projection.
+
+2. **Delete before refactoring.** If code is unused, remove it — don't
+   restructure around it. A smaller surface is worth more than a tidier
+   dead one. Land the deletion first, then build on the clearing.
+
+3. **No speculative generality.** One adapter does not justify a public
+   seam. Introduce an interface, a provider ABC, or a plugin point only
+   when a *second* working implementation ships — not in anticipation of
+   one.
+
+4. **Shims are temporary and expire (gated).** Any intentional
+   compatibility shim carries a `# HAL0-SUNSET: v<major>.<minor>[.<patch>]`
+   marker naming the release by which it must be gone. `make check-sunset`
+   (`scripts/check_sunset.py`, run in CI) fails once the project version
+   reaches that sunset, forcing removal. Do not add a compat path without
+   a sunset.
+
+5. **The scar baseline only goes down (gated).** The count of scar
+   markers (`removed in #`, `DEPRECATED`, `legacy`, `backward-compat`,
+   `compat shim`) in `src/` is frozen in `scripts/scar_baseline.txt`. CI
+   fails if the live count exceeds it. A de-scar PR *lowers* the baseline
+   (`python scripts/check_sunset.py --update-baseline`, then commit the
+   drop); new work must not raise it — a genuinely new shim carries a
+   `HAL0-SUNSET` marker instead (rule 4).
+
+6. **Deep modules, small interfaces.** Splitting a big file is only the
+   first step. Each resulting module must expose a narrow, intent-oriented
+   interface that hides substantial behavior — moving code into more files
+   without shrinking the interface is not a fix.
+
+7. **TOML for human config, SQLite for machine state.** Operator-authored
+   configuration stays in TOML (`/etc/hal0/*.toml`). Machine-owned runtime
+   state and model metadata belong in SQLite. Don't store hand-edited
+   config in a database or machine state in a TOML file.
+
+8. **Deny-by-default exposure.** New routes are classified in the one
+   exposure table; anything unclassified defaults to admin-only.
+   Non-loopback binding requires authentication, and the OPEN set must not
+   grow. Never widen exposure as a side effect of another change.
+
+9. **No ghost-doc citations.** A decision is either recorded in a real,
+   tracked document or explained inline where it takes effect. Do not cite
+   a doc, ADR, or design note that does not exist in the tree. hal0 keeps
+   no separate ADR tree: rationale lives next to the code or in
+   [`ARCHITECTURE.md`](./ARCHITECTURE.md). Touched documentation must match
+   the code it describes.
+
 ## Developer Certificate of Origin (DCO)
 
 hal0 uses the [Developer Certificate of Origin](https://developercertificate.org/)
@@ -189,7 +249,8 @@ debugger-replacements for design questions.
 
 - `scripts/prototype_ttft/` — TTFT + KV-cache aggregation model that
   feeds the dashboard's per-slot tiles and fleet-avg throughput card.
-  See `docs/internal/metrics-prototype.md`.
+  The prototype's own `README.md` in that directory documents the data
+  model it exercises.
 
   ```sh
   ssh -t hal0 'cd /opt/hal0 && make proto-ttft'        # logic TUI

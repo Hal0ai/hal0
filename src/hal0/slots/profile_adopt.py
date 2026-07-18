@@ -88,6 +88,111 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
     return True
 
 
+async def preferred_runner_for(host: ProfileAdoptHost, model_id: str | None) -> str | None:
+    """The model's preferred runner key (``Model.preferred_runner``, §7.1b / ML-4).
+
+    A registry model may carry ``preferred_runner`` — a key into
+    ``hal0.runners.RUNNER_IMAGES`` naming the runtime it wants to launch
+    under. Returns the key or ``None`` (no preference / model not in
+    registry). Sibling of :func:`preferred_profile_for`; note the model
+    dict's ``preferred_runner`` sits at the top level (mirrors
+    ``Model.preferred_runner``), NOT nested under ``defaults`` like
+    ``profile``.
+    """
+    if not model_id:
+        return None
+    info = await host._resolve_model_info(model_id)
+    preferred = info.get("preferred_runner")
+    return preferred if isinstance(preferred, str) and preferred else None
+
+
+def runner_fits_slot(runner_key: str, cfg_dict: dict[str, Any]) -> bool:
+    """True when ``RUNNER_IMAGES[runner_key]`` is safe to adopt for this slot.
+
+    Mirrors :func:`profile_fits_slot`'s device/backend coherence derivation
+    but delegates the actual match to :func:`hal0.runners.runner_matches`
+    so the two "does this runner fit here" checks (this one, and
+    ``providers.container._resolve_image_ref``'s ``model.preferred_runner``
+    tier) can never drift. An unknown key, or one whose device_class/
+    backend doesn't match the slot, is rejected so the caller keeps the
+    slot's current/device-default image.
+    """
+    from hal0.errors import NotFound
+    from hal0.runners import get_runner, runner_matches
+
+    try:
+        runner = get_runner(runner_key)
+    except NotFound:
+        return False
+    device = str(cfg_dict.get("device") or "")
+    if not device:
+        return True  # no device pinned yet — nothing to conflict with
+    slot_class = (
+        "gpu" if device.startswith("gpu") else device if device in ("npu", "cpu", "img") else "cpu"
+    )
+    from hal0.model_meta import device_to_backend
+
+    slot_backend = device_to_backend(device)[1]
+    return runner_matches(runner, device_class=slot_class, backend=slot_backend)
+
+
+async def apply_preferred_runner(host: ProfileAdoptHost, slot_name: str, model_id: str) -> bool:
+    """Adopt ``model_id``'s preferred runner's image for this slot when compatible.
+
+    Mirrors :func:`apply_preferred_profile`'s swap-time contract: on every
+    model swap the slot's persisted ``image`` override advances to the new
+    model's preferred runner (:func:`hal0.runners.resolve_runner_image`) —
+    but only when it fits (:func:`runner_fits_slot`); an incompatible or
+    unknown preference is logged and ignored. Writes the slot TOML BEFORE
+    the reload so the container comes up on the new runner's image.
+
+    This is a persistence/visibility convenience, not the only place the
+    preference takes effect: ``providers.container._resolve_image_ref``
+    already consults ``model_info["preferred_runner"]`` dynamically at
+    every launch (ahead of ``profile.image``), so a slot with no persisted
+    ``image`` override still launches under the right runner even if this
+    hook is skipped (e.g. on a soft-fail). Persisting it here just makes
+    the choice visible in the on-disk TOML and stable for read paths that
+    don't thread ``model_info`` through. Returns True when ``image`` changed.
+    """
+    preferred = await preferred_runner_for(host, model_id)
+    if not preferred:
+        return False
+    with slot_write_lock():
+        cfg = await host._load_slot_config(slot_name)
+        cfg_dict = _cfg_to_dict(cfg)
+        if not runner_fits_slot(preferred, cfg_dict):
+            log.info(
+                "slot.preferred_runner_skipped",
+                extra={"slot": slot_name, "model_id": model_id, "runner": preferred},
+            )
+            return False
+        from hal0.runners import get_runner, resolve_runner_image
+
+        resolved_image = resolve_runner_image(get_runner(preferred))
+        if cfg_dict.get("image") == resolved_image:
+            return False
+        cfg_dict = {**cfg_dict, "image": resolved_image}
+        try:
+            write_slot_toml(host._config_file(slot_name), cfg_dict)
+        except OSError as exc:
+            raise SlotConfigError(
+                f"failed to persist preferred runner image to slot {slot_name}: {exc}",
+                details={"slot": slot_name, "runner": preferred},
+            ) from exc
+        host._invalidate_cfg_cache(slot_name)
+    log.info(
+        "slot.preferred_runner_applied",
+        extra={
+            "slot": slot_name,
+            "model_id": model_id,
+            "runner": preferred,
+            "image": resolved_image,
+        },
+    )
+    return True
+
+
 async def apply_preferred_profile(host: ProfileAdoptHost, slot_name: str, model_id: str) -> bool:
     """Adopt ``model_id``'s preferred profile for this slot when compatible.
 
@@ -179,7 +284,10 @@ async def defuse_stale_mtp_on_swap(host: ProfileAdoptHost, slot_name: str, model
 __all__ = [
     "ProfileAdoptHost",
     "apply_preferred_profile",
+    "apply_preferred_runner",
     "defuse_stale_mtp_on_swap",
     "preferred_profile_for",
+    "preferred_runner_for",
     "profile_fits_slot",
+    "runner_fits_slot",
 ]

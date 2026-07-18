@@ -25,22 +25,16 @@ See ``docs/internal/hermes-bootstrap-plan-2026-05-23.md`` §3 + §16 for
 the full design contract and ``docs/internal/adr/0012-remove-auth-and-caddy.md``
 for the agent-identity model (X-hal0-Agent header, not Bearer).
 
-P3-perms (OwnershipStore adoption) follow-up note: ``_chown_tree_to_hal0`` and
-the late ``_phase_ownership_reconcile`` phase were investigated as dead-code
-deletion candidates once ``hal0-api`` flips to ``User=hal0`` and the installer
-adopts the born-owned contract (drop privileges before config writes). They
-are NOT dead: ``installer/install.sh`` still invokes
-``hal0 agent install hermes`` as ROOT (intentionally — that same CLI
-invocation's ``_phase_install`` writes ``/usr/local/bin/hermes`` +
-``hal0-hermes``, a genuinely root-only path unrelated to this module's
-``$HERMES_HOME``/config writes), so every phase in THIS pipeline still runs
-under a root euid at install time and would otherwise leave ``config.yaml`` /
-``runtime.json`` / the venv root:root for the ``User=hal0``
-``hal0-agent@hermes.service`` unit to fail reading. A true fix needs an
-in-process privilege drop inside this module BETWEEN "write
-/usr/local/bin" (root) and "write $HERMES_HOME" (hal0) — out of scope for the
-P3-perms pass that added the ``OwnershipStore`` rows this file's HERMES_HOME
-mirrors (``agents/`` 0711, HERMES_HOME 0700). Keep both alive.
+Born-owned contract (§7.4 F.7): every ``$HERMES_HOME`` write here is born
+``hal0:hal0`` because the CLI drops provisioning to the hal0 service user before
+running this pipeline (``cli/agent_commands._provision_hermes``: a root-only
+prelude installs the ``/usr/local/bin`` wrapper + ensures the setgid hal0-owned
+skeleton, then re-execs ``hal0 agent bootstrap hermes`` as hal0). Root:root
+artifacts (seed TOML, driver env, gateway drop-in) go through the
+``hal0-agentenv`` / ``hal0-systemctl`` sudo seams. Consequently the former
+chown-back layers — ``_chown_tree_to_hal0`` and the ``ownership_reconcile``
+phase, plus the CLI's ``_chown_hermes_trees_to_agent_user`` — are removed:
+nothing is chowned after the fact.
 """
 
 from __future__ import annotations
@@ -51,9 +45,7 @@ import glob
 import hashlib
 import json
 import os
-import pwd
 import shutil
-import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 from collections.abc import Callable
@@ -675,8 +667,8 @@ def _provision_python_via_uv(
     # base interpreter — silently reproducing the very "gateway venv python
     # won't start" failure this /var/lib/hal0 move was meant to fix. chmod the
     # leaf to 0o755 to guarantee traversal; idempotent under --repair, and
-    # mirrors the other hal0-reachable dirs (gateway drop-in .chmod(0o755),
-    # AGENTS_DIR.chmod(0o711)). Best-effort: a perms hiccup (e.g. unprivileged
+    # mirrors the other hal0-reachable dirs (gateway drop-in .chmod(0o755)).
+    # Best-effort: a perms hiccup (e.g. unprivileged
     # caller) must not abort an otherwise-working provision, so log and
     # continue rather than fall through to the None/range-error path.
     try:
@@ -872,61 +864,6 @@ def upgrade_hermes_runtime(
     return True, f"hermes-agent upgraded → {target}{suffix}"
 
 
-_HAL0_SERVICE_USER = "hal0"
-
-
-def _resolve_user_ids(user: str) -> tuple[int, int] | None:
-    """Return ``(uid, gid)`` for ``user``, or ``None`` if the user is absent."""
-    try:
-        ent = pwd.getpwnam(user)
-    except KeyError:
-        return None
-    return (ent.pw_uid, ent.pw_gid)
-
-
-def _chown_tree_to_hal0(
-    path: Path,
-    *,
-    user: str = _HAL0_SERVICE_USER,
-    geteuid: Callable[[], int] = os.geteuid,
-    resolve_ids: Callable[[str], tuple[int, int] | None] = _resolve_user_ids,
-    chown: Callable[[str, int, int], None] = os.lchown,
-) -> int:
-    """Recursively chown ``path`` to the hal0 service user, returning the count.
-
-    Hands ownership of root-created artifacts (venv, ``$HERMES_HOME`` tree,
-    ``runtime.json``) to the unprivileged ``hal0`` user so the ``User=hal0``
-    systemd unit can read/write them instead of hitting EACCES or silently
-    falling back to the default provider — the root-clobber regression (#843).
-
-    Uses :func:`os.lchown` (NOT :func:`os.chown`) so a symlink entry chowns the
-    LINK itself, never the file it points at. As root, following a symlink would
-    hand ownership of an arbitrary out-of-tree target to the hal0 service user —
-    a real hazard now that ``--adopt`` runs this over a foreign home of uncertain
-    provenance (a planted ``evil -> /outside/secret`` symlink). For a regular
-    file ``lchown`` is identical to ``chown``, so nothing else changes.
-
-    A no-op (returns 0) when not root, when ``user`` doesn't exist, or when
-    ``path`` is missing, so it's safe in dev/non-root installs and idempotent
-    under ``bootstrap --repair``.
-    """
-    if geteuid() != 0:
-        return 0
-    ids = resolve_ids(user)
-    if ids is None:
-        return 0
-    if not path.exists():
-        return 0
-    uid, gid = ids
-    count = 0
-    chown(str(path), uid, gid)
-    count += 1
-    for sub in path.rglob("*"):
-        chown(str(sub), uid, gid)
-        count += 1
-    return count
-
-
 # Content marker that identifies the hal0-managed wrapper. The managed
 # wrapper (installer/wrappers/hermes) always injects HAL0_AGENT_ID; a
 # hand-installed upstream ``hermes`` (a real binary, or a different shim)
@@ -948,14 +885,28 @@ def _is_hal0_managed_wrapper(path: Path) -> bool:
 
 
 def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
-    """Copy + chmod the wrapper into ``wrapper_dst``.
+    """Copy + chmod the wrapper into ``wrapper_dst`` — euid-aware (§7.4).
 
-    Capture safety: when a pre-existing ``wrapper_dst`` is NOT a hal0-managed
-    wrapper (a hand-installed upstream ``hermes`` on PATH), copy it aside to
-    ``<dst>.pre-hal0`` before overwriting so the foreign entry point is
-    recoverable. Overwriting our own wrapper (the steady-state re-run) skips
-    the backup.
+    ``/usr/local/bin/hermes`` is root-only install infra. On a system install
+    ``install.sh``'s root prelude lays it down BEFORE dropping the provisioner to
+    the hal0 user, so:
+
+    * root (euid==0) installs it here directly (with capture backup, below);
+    * a non-root (hal0) caller finds it already present (prelude-installed) and
+      skips — it cannot write ``/usr/local/bin``. If it is somehow absent we log
+      and continue rather than aborting the whole bootstrap: the wrapper is
+      root-owned infra the prelude owns, not a hal0-writable artifact.
+
+    Capture safety (root only): when a pre-existing ``wrapper_dst`` is NOT a
+    hal0-managed wrapper (a hand-installed upstream ``hermes`` on PATH), copy it
+    aside to ``<dst>.pre-hal0`` before overwriting so the foreign entry point is
+    recoverable. Overwriting our own wrapper (the steady-state re-run) skips the
+    backup.
     """
+    if os.geteuid() != 0:
+        if not wrapper_dst.exists():
+            log.warning("hermes_provision.wrapper_absent_nonroot", dst=str(wrapper_dst))
+        return
     wrapper_dst.parent.mkdir(parents=True, exist_ok=True)
     if wrapper_dst.exists() and not _is_hal0_managed_wrapper(wrapper_dst):
         backup = wrapper_dst.with_name(wrapper_dst.name + ".pre-hal0")
@@ -971,7 +922,13 @@ def _install_backcompat_symlink(target: Path, link: Path) -> None:
     Used to make the legacy ``hal0-hermes`` entry point a symlink to the
     canonical ``hermes`` wrapper. A pre-existing regular file (an older
     install's copied wrapper) is replaced so the two never drift.
+
+    euid-aware (§7.4): both link + target live in root-only ``/usr/local/bin``,
+    so a non-root (hal0) caller skips — ``install.sh``'s root prelude lays the
+    symlink down alongside the wrapper before dropping to hal0.
     """
+    if os.geteuid() != 0:
+        return
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink():
         if os.readlink(link) == str(target):
@@ -980,6 +937,28 @@ def _install_backcompat_symlink(target: Path, link: Path) -> None:
     elif link.exists():
         link.unlink()
     os.symlink(str(target), str(link))
+
+
+def _install_cli_wrapper(wrapper_src: Path) -> dict[str, Any]:
+    """Install the root-only ``/usr/local/bin`` CLI infra — the genuinely-root
+    slice of the install phase (§7.4 privilege split).
+
+    Both entries live in root-owned ``/usr/local/bin``: the canonical
+    ``hermes`` wrapper and the ``hal0-hermes`` back-compat symlink. When the
+    provisioner runs as hal0 (§7.4 drop-to-hal0), install.sh's root prelude has
+    already laid these down, so ``_copy_wrapper`` / ``_install_backcompat_symlink``
+    detect non-root and skip. Grouping them in one helper keeps the phase body
+    a clean two-part split — root-only infra here, hal0-owned artifacts after.
+
+    Raises ``OSError`` on a genuine root-context write failure so the caller can
+    surface a sudo hint.
+    """
+    _copy_wrapper(wrapper_src, HERMES_CLI_INSTALL_PATH)
+    _install_backcompat_symlink(HERMES_CLI_INSTALL_PATH, WRAPPER_INSTALL_PATH)
+    return {
+        "hermes_cli": str(HERMES_CLI_INSTALL_PATH),
+        "wrapper": str(WRAPPER_INSTALL_PATH),
+    }
 
 
 def _copy_plugin_tree(src: Path, dst: Path) -> None:
@@ -1037,6 +1016,22 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
     if adopt_details is not None:
         details["adopted"] = adopt_details
 
+    # ── root-only CLI infra (§7.4 privilege split) ──────────────────────────
+    # Canonical entry point /usr/local/bin/hermes + the hal0-hermes back-compat
+    # symlink. Both live in root-owned /usr/local/bin and are euid-guarded: root
+    # installs them, a hal0-run provisioner finds them prelude-installed and
+    # skips. install.sh's §7.4 root prelude owns them for the drop-to-hal0 path.
+    try:
+        details.update(_install_cli_wrapper(hermes_wrapper_src))
+    except OSError as exc:
+        # Non-root operators without the prelude land here — surface so they can sudo.
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"wrapper install to {HERMES_CLI_INSTALL_PATH} failed: {exc}",
+            details=details,
+        )
+
+    # ── hal0-owned artifacts (born hal0:hal0 when the provisioner runs as hal0) ─
     hermes_bin = _venv_python(venv).parent / "hermes"
     if not hermes_bin.exists():
         try:
@@ -1049,23 +1044,6 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             )
     details["venv"] = str(venv)
     details["hermes_bin"] = str(hermes_bin)
-
-    try:
-        # Canonical entry point: /usr/local/bin/hermes (no HERMES_HOME pin).
-        _copy_wrapper(hermes_wrapper_src, HERMES_CLI_INSTALL_PATH)
-        details["hermes_cli"] = str(HERMES_CLI_INSTALL_PATH)
-        # Back-compat: hal0-hermes -> hermes symlink so any caller still
-        # invoking the old name resolves to the canonical wrapper. The
-        # symlink, not a stale copy, keeps the two in lockstep forever.
-        _install_backcompat_symlink(HERMES_CLI_INSTALL_PATH, WRAPPER_INSTALL_PATH)
-        details["wrapper"] = str(WRAPPER_INSTALL_PATH)
-    except OSError as exc:
-        # Non-root operators land here — surface so the user can sudo.
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"wrapper install to {HERMES_CLI_INSTALL_PATH} failed: {exc}",
-            details=details,
-        )
 
     # Plugin stubs into HERMES_HOME-shaped locations. Real bodies in #241/#242.
     # HERMES_HOME was already claimed (marker stamped) above, before any
@@ -1102,11 +1080,9 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             )
     details["plugins"] = [str(p) for p in plugin_targets.values()]
 
-    # The venv lives outside HERMES_HOME (/var/lib/hal0/venvs/hermes); hand it to
-    # hal0 too so a root install doesn't leave a root-owned venv (#843). No-op
-    # when not root.
-    _chown_tree_to_hal0(venv)
-
+    # No chown-back (§7.4 F.7): provisioning runs as hal0 (cli/_provision_hermes
+    # drops before this pipeline), so the venv under /var/lib/hal0/venvs is born
+    # hal0:hal0.
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
@@ -1306,11 +1282,9 @@ def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
     for sub in standard_subdirs:
         (hermes_home / sub).mkdir(parents=True, exist_ok=True)
 
-    # Hand the whole tree to the hal0 service user so a root-context bootstrap
-    # never leaves root:root files the User=hal0 unit can't read (#843).
-    # No-op when not root; also reconciles ownership under --repair.
-    _chown_tree_to_hal0(hermes_home)
-
+    # No chown-back (§7.4 F.7): the tree is created as hal0 (the CLI drops
+    # provisioning to hal0 before this pipeline) under the setgid /var/lib/hal0,
+    # so the whole $HERMES_HOME layout is born hal0:hal0.
     details: dict[str, Any] = {
         "hermes_home": str(hermes_home),
         "marker": str(hermes_home / _HAL0_MANAGED_MARKER),
@@ -4059,11 +4033,15 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
       the drop-in references, not in the drop-in itself).
     * daemon-reload only fires when the file actually changed.
 
-    Guards (both yield ``outcome="skipped"``, never a crash): a non-root caller
-    can't write ``/etc/systemd/system``; and under pytest with an un-sandboxed
-    (real ``/etc``) drop-in path we refuse to touch the host tree. Best-effort
-    throughout — a filesystem/systemctl failure is reported in the result, never
-    raised, so a gateway hiccup never aborts the caller.
+    Privilege-aware (§7.4 drop-to-hal0): root writes ``/etc/systemd/system``
+    directly; a non-root (hal0) caller routes the write + ``daemon-reload``
+    through the ``hal0-systemctl`` seam (``sudo -n``). The drop-in is 0644
+    world-readable, so the hash-skip read works for either caller.
+
+    Guard (``outcome="skipped"``, never a crash): under pytest with an
+    un-sandboxed (real ``/etc``) drop-in path we refuse to touch the host tree.
+    Best-effort throughout — a filesystem/systemctl failure is reported in the
+    result, never raised, so a gateway hiccup never aborts the caller.
     """
     run = run if run is not None else subprocess.run
     path = str(GATEWAY_SYSTEMD_DROPIN_FILE)
@@ -4089,18 +4067,14 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
             ),
         )
 
-    if os.geteuid() != 0:
-        return GatewayDropinResult(
-            outcome="skipped",
-            dropin_path=path,
-            reason=(
-                "not root (euid != 0) — cannot write /etc/systemd/system "
-                "or run `systemctl daemon-reload`; re-run gateway wiring as root"
-            ),
-        )
-
     body = _gateway_dropin_body()
     content_sha = content_hash(body)
+
+    # Privilege-aware write. Root writes /etc/systemd/system directly; the
+    # unprivileged hal0 provisioner (post §7.4 drop-to-hal0) cannot, so it routes
+    # the write + daemon-reload through the hal0-systemctl seam. The drop-in is
+    # 0644 world-readable, so the hash-skip read below works either way.
+    via_seam = os.geteuid() != 0
 
     # Hash-skip: an unchanged drop-in needs neither a rewrite nor a
     # daemon-reload (#437 idempotency criterion, mirroring config_write).
@@ -4118,13 +4092,18 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
             )
 
     try:
-        GATEWAY_SYSTEMD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
-        GATEWAY_SYSTEMD_DROPIN_DIR.chmod(0o755)
-        tmp = GATEWAY_SYSTEMD_DROPIN_FILE.with_suffix(".conf.tmp")
-        tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, GATEWAY_SYSTEMD_DROPIN_FILE)
-        GATEWAY_SYSTEMD_DROPIN_FILE.chmod(0o644)
-    except OSError as exc:
+        if via_seam:
+            # Root:root dir — delegate the write to the seam (fixed path, body
+            # on stdin). The seam mkdir's the .d dir and pins 0644 root:root.
+            _privileged_systemctl("write-gateway-dropin", body)
+        else:
+            GATEWAY_SYSTEMD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+            GATEWAY_SYSTEMD_DROPIN_DIR.chmod(0o755)
+            tmp = GATEWAY_SYSTEMD_DROPIN_FILE.with_suffix(".conf.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            os.replace(tmp, GATEWAY_SYSTEMD_DROPIN_FILE)
+            GATEWAY_SYSTEMD_DROPIN_FILE.chmod(0o644)
+    except (OSError, subprocess.SubprocessError) as exc:
         return GatewayDropinResult(
             outcome="failed",
             dropin_path=path,
@@ -4133,7 +4112,10 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
         )
 
     try:
-        run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
+        if via_seam:
+            _privileged_systemctl("daemon-reload")
+        else:
+            run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
     except (subprocess.SubprocessError, OSError) as exc:
         # The drop-in is on disk; the operator can daemon-reload by hand.
         # Surface as a non-fatal warning rather than failing — the wiring lands
@@ -4161,8 +4143,9 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     the write + guards + idempotency). Keeping unit generation out of this phase
     avoids the hermes_cli generator's custom-HERMES_HOME trap; the orchestrator
     runs ``hermes gateway install --system`` separately to lay the main unit.
-    A non-root or pytest-sandboxed caller SKIPs with a clear reason rather than
-    failing the whole bootstrap.
+    Non-root (hal0) callers route the write through the hal0-systemctl seam; a
+    pytest-sandboxed caller SKIPs with a clear reason rather than failing the
+    whole bootstrap.
     """
     result = write_gateway_secrets_dropin(run=ctx.io.run)
     details: dict[str, Any] = {"dropin_path": result.dropin_path}
@@ -4268,6 +4251,30 @@ _HAL0_AGENTENV = os.environ.get("HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agenten
 
 #: The agent this provisioner manages; the seam re-validates it server-side.
 _HERMES_AGENT_NAME = "hermes"
+
+#: Privileged seam for the genuinely-root systemd ops the provisioner needs when
+#: it runs unprivileged (as the hal0 user): writing the fixed hermes-gateway
+#: secrets drop-in under /etc/systemd/system and `daemon-reload`. Mirrors the
+#: hal0-agentenv seam — a non-root provisioner cannot write /etc/systemd/system
+#: or reload systemd, so it delegates to this root helper over `sudo -n`. The
+#: helper builds the (literal) drop-in path itself and takes the body on stdin.
+#: Env-overridable for tests.
+_HAL0_SYSTEMCTL = os.environ.get("HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
+
+
+def _privileged_systemctl(verb: str, body: str | None = None) -> None:
+    """Run one hal0-systemctl seam verb as root via ``sudo -n``.
+
+    ``body`` (when given) is piped on stdin — used for ``write-gateway-dropin``.
+    Raises ``subprocess.CalledProcessError`` on a non-zero seam exit so the
+    caller surfaces the failure instead of masquerading a broken gateway as up.
+    """
+    subprocess.run(  # nosec B603 — fixed argv; verb is a literal from our own code
+        ["sudo", "-n", _HAL0_SYSTEMCTL, verb],
+        input=body,
+        text=True,
+        check=True,
+    )
 
 
 def _privileged_env_write(verb: str, body: str) -> None:
@@ -4834,13 +4841,15 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
             },
         )
 
+    # ── root:root artifacts via the hal0-agentenv seam (§7.4 privilege split) ─
+    # seed TOML + driver env live in root-owned /etc/hal0/agents. Both writers
+    # are euid-aware: root writes directly (re-pinning root:root), a hal0-run
+    # provisioner delegates the write to `sudo -n hal0-agentenv`.
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
     env_path, env_wrote = _write_driver_env(state)
+    # ── hal0-owned artifact — runtime.json (0600) is born hal0:hal0 (§7.4 F.7:
+    #    provisioning runs as hal0, so the chat proxy can read it directly) ─────
     runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
-
-    # runtime.json carries the embed token at 0600 — chown it to hal0 so the
-    # User=hal0 chat proxy can read it instead of falling back silently (#843).
-    _chown_tree_to_hal0(runtime_path)
 
     return PhaseResult(
         status=PhaseStatus.OK,
@@ -4855,58 +4864,15 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     )
 
 
-# ── Phase: ownership_reconcile ───────────────────────────────────────────────
+# ── ownership_reconcile phase removed (§7.4 F.7) ─────────────────────────────
 #
-# Late always-run phase that re-hands HERMES_HOME to the hal0 service user and
-# repairs the 711 mode on /var/lib/hal0/agents. It fixes an ORDERING bug: the
-# home tree is chowned in home_init (phase 4) but config_write (phase 7) writes
-# config.yaml as root AFTER that, so config.yaml lands root:root on the happy
-# path and the User=hal0 unit can't read it (falls back to defaults / offline).
-# Running the chown after every home-writing phase closes that gap. It must run
-# on plain re-runs and --repair (ownership drifts independently of checkpoints),
-# so the Phase is marked always_run and the orchestrator never phase_done-skips
-# it.
-
-# Where agent homes live; the User=hal0 unit needs 0711 to traverse to its own
-# home without being able to enumerate siblings. Module-level so tests redirect
-# it under tmp_path (same posture as the other path constants).
-AGENTS_DIR = Path("/var/lib/hal0/agents")
-
-
-def _phase_ownership_reconcile(ctx: PhaseContext) -> PhaseResult:
-    """Re-chown HERMES_HOME to hal0 + repair 0711 on the agents dir.
-
-    Idempotent and privilege-aware: :func:`_chown_tree_to_hal0` no-ops when
-    not root / the hal0 user is absent / the path is missing, so this is safe
-    on dev + non-root installs. Runs on every invocation (``always_run``) so a
-    root-owned artifact written by a later phase (config.yaml — bug F) gets
-    reconciled even when no checkpoint drifted.
-    """
-    hermes_home = Path(ctx.state.hermes_home)
-    chowned = _chown_tree_to_hal0(hermes_home)
-
-    mode_fixed = False
-    agents_mode: str | None = None
-    if AGENTS_DIR.exists():
-        try:
-            current = stat.S_IMODE(AGENTS_DIR.stat().st_mode)
-            if current != 0o711:
-                AGENTS_DIR.chmod(0o711)
-                mode_fixed = True
-            agents_mode = oct(stat.S_IMODE(AGENTS_DIR.stat().st_mode))
-        except OSError as exc:
-            agents_mode = f"error: {exc}"
-
-    return PhaseResult(
-        status=PhaseStatus.OK,
-        details={
-            "hermes_home": str(hermes_home),
-            "chowned": chowned,
-            "agents_dir": str(AGENTS_DIR),
-            "agents_dir_mode": agents_mode,
-            "agents_dir_mode_fixed": mode_fixed,
-        },
-    )
+# The late always-run phase re-chowned HERMES_HOME to hal0 and repaired 0711 on
+# /var/lib/hal0/agents. It existed solely to undo the root:root config.yaml that
+# the root-context config_write wrote AFTER home_init's chown. Provisioning now
+# runs as hal0 (cli/_provision_hermes drops before this pipeline), so config.yaml
+# and the whole home are born hal0:hal0 — there is nothing to reconcile. The
+# 0711 traversal mode on /var/lib/hal0/agents is an OwnershipStore row applied by
+# `doctor perms --fix`, not this phase.
 
 
 # ── Phase pipeline plumbing (issue #702) ────────────────────────────────────
@@ -5079,12 +5045,8 @@ PHASES: list[Phase] = [
     # any more — only config_write still does (needs_previous above).
     Phase("model_automap", _phase_model_automap),
     Phase("voice_wire", _phase_voice_wire),
-    # Late ownership reconcile (always-run): re-chown HERMES_HOME to hal0 +
-    # repair 0711 on /var/lib/hal0/agents AFTER config_write/context_link/
-    # install_artifacts wrote root-owned files into the home (fixes the
-    # config.yaml root:root ordering bug). always_run so a plain re-run still
-    # reconciles ownership even with every checkpoint already ok.
-    Phase("ownership_reconcile", _phase_ownership_reconcile, always_run=True),
+    # (ownership_reconcile phase removed — §7.4 F.7: provisioning runs as hal0,
+    # so config.yaml / the home are born hal0:hal0 with nothing to reconcile.)
     # #437 (SYSTEM scope): wire the gateway secrets drop-in so fresh
     # provisions/reinstalls come up with Telegram + Discord connected,
     # surviving hermes_cli main-unit regeneration. Runs after voice_wire
@@ -5247,8 +5209,10 @@ def run(
                 print(f"[skip] {name} (--skip-phase)")
             continue
 
-        # always_run phases (ownership_reconcile) never phase_done-skip — their
-        # work reconciles state that drifts independently of checkpoints.
+        # always_run phases never phase_done-skip — their work reconciles state
+        # that drifts independently of checkpoints. (No phase currently sets
+        # always_run since the ownership_reconcile removal, §7.4 F.7; the
+        # machinery stays for future phases.)
         if not repair and not phase.always_run and state.phase_done(name):
             if verbose:
                 print(f"[skip] {name} (already ok)")

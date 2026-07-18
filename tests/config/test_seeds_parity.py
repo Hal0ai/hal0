@@ -15,6 +15,12 @@ Do NOT "fix" this file by updating the golden dicts to match a code change
 to seeds.py/the TOML -- that defeats the point. A deliberate seed-data change
 (new bench numbers, a re-tuned flag) should update the TOML AND get this
 fixture reviewed as a real behavior change, not silently rubber-stamped.
+
+§7.1a / ML-5 (deliberate, reviewed seed-data change — see the handback):
+removed rocm-dense-nojinja / vulkan-dense-nojinja / rocm-dense-small (jinja
+is now a runner capability, not a profile tune, so the nojinja clones are
+redundant) and stripped the now-meaningless `--jinja` token from every
+remaining profile's `flags` string.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from hal0.config.schema import (
 _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     "rocm": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on --jinja",
+        "flags": "-ngl 999 -fa on",
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
@@ -42,7 +48,7 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "rocm-dense": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -51,7 +57,7 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "rocm-moe": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
@@ -60,7 +66,7 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "vulkan-dense": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
@@ -69,43 +75,16 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "vulkan-moe": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui",
         "mtp": True,
         "device_class": "gpu",
         "backend": "vulkan",
         "intent": "VULKFPX · MOE · MTP (best decode t/s)",
         "quant": "ROCmFPX",
     },
-    "rocm-dense-nojinja": {
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCmFPX · DENSE · no-jinja (baked chat template)",
-        "quant": "ROCmFP4",
-    },
-    "vulkan-dense-nojinja": {
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "VULKFPX · DENSE · no-jinja (baked chat template)",
-        "quant": "ROCmFP4",
-    },
-    "rocm-dense-small": {
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCmFPX · DENSE · small (no MTP draft head)",
-        "quant": "ROCmFP4",
-    },
     "rocm-longctx": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui",
+        "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui",
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
@@ -114,7 +93,7 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "vulkan": {
         "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on --jinja",
+        "flags": "-ngl 999 -fa on",
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
@@ -123,7 +102,7 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "cuda": {
         "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
-        "flags": "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
+        "flags": "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
         "backend": "cuda",
@@ -196,7 +175,7 @@ _GOLDEN_SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "cpu-llm": {
         "image": FALLBACK_VULKAN_IMAGE,
-        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja",
+        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1",
         "mtp": False,
         "device_class": "cpu",
         "intent": "CPU",

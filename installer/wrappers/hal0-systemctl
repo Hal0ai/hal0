@@ -23,6 +23,13 @@ UNIT_PREFIX="hal0-slot@"
 UNIT_DIR="/etc/systemd/system"
 SELF_UNIT="hal0-api.service"
 
+# Fixed, literal drop-in path for the hermes gateway secrets fragment. Written
+# by the hermes provisioner when it runs unprivileged (as the hal0 user) and so
+# cannot write /etc/systemd/system itself. LITERAL — no variable, no traversal:
+# the caller supplies only the body on stdin, never the path.
+GATEWAY_DROPIN_DIR="/etc/systemd/system/hermes-gateway.service.d"
+GATEWAY_DROPIN_FILE="${GATEWAY_DROPIN_DIR}/10-hal0-secrets.conf"
+
 die() { echo "hal0-systemctl: $1" >&2; exit 64; }
 
 validate_slot_id() {   # arg: slot id (the "<id>" in hal0-slot@<id>.service)
@@ -45,6 +52,23 @@ case "$cmd" in
     rm -f "${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
     ;;
 
+  write-gateway-dropin)       # write the hermes-gateway secrets drop-in (body on stdin)
+    # Literal fixed path — the caller never supplies it. 0644 root:root so
+    # systemd can read the unit fragment; the referenced secrets live in the
+    # 0600 vault, not here. Atomic (tmp + mv), mirroring hal0-agentenv's
+    # write-driver-env — `install /dev/stdin` misbehaves overwriting an
+    # existing target when the source is a pipe.
+    install -d -m 0755 -o root -g root "$GATEWAY_DROPIN_DIR"
+    umask 022
+    tmp="$(mktemp "${GATEWAY_DROPIN_FILE}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$GATEWAY_DROPIN_FILE"
+    trap - EXIT
+    ;;
+
   daemon-reload)
     exec systemctl daemon-reload
     ;;
@@ -63,6 +87,7 @@ case "$cmd" in
 usage: hal0-systemctl <command> [slot-id]
   write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
   remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
+  write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service

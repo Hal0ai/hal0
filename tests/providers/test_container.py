@@ -98,12 +98,23 @@ class TestResolveProfileFlags:
         assert "--spec-type" not in flags
 
     def test_mtp_profile_expands_bundle(self) -> None:
+        """§7.1a / ML-5: profile.mtp is informational only now — the caller
+        must pass an explicit mtp_override=True (the real decision lives in
+        providers.container._effective_mtp, driven by the model + runner,
+        not the profile)."""
         profile = _mtp_profile()
-        flags = resolve_profile_flags(profile)
+        flags = resolve_profile_flags(profile, mtp_override=True)
         assert "--spec-type draft-mtp" in flags
         assert "--spec-draft-device ROCm0" in flags
         # Base flags are also present
         assert "-fa on" in flags
+
+    def test_mtp_profile_no_override_no_longer_expands(self) -> None:
+        """profile.mtp=True with NO explicit override no longer expands the
+        bundle — MTP moved to a model capability (see the handback)."""
+        profile = _mtp_profile()
+        flags = resolve_profile_flags(profile)
+        assert "--spec-type" not in flags
 
     def test_mtp_flag_bundle_constant_nonempty(self) -> None:
         assert "--spec-type draft-mtp" in MTP_FLAG_BUNDLE
@@ -556,7 +567,7 @@ class TestRenderUnit:
 
     def test_mtp_flags_in_exec_start_when_mtp_true(self) -> None:
         profile = _mtp_profile()
-        flags = resolve_profile_flags(profile)
+        flags = resolve_profile_flags(profile, mtp_override=True)
         unit = _render_unit(
             "test-slot",
             profile.image,

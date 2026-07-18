@@ -42,15 +42,18 @@ from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Mount, Provider
 from hal0.providers.comfyui_workflows import build_workflow
+from hal0.runners import RUNNER_IMAGES
 
 log = logging.getLogger(__name__)
 
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────
-# Last-resort fallback only — the manifest.json digest pin is the primary
-# path (see image_ref). Points at the kyuz0 Strix Halo build that the live
-# CT105 deployment validated.
-_HAL0_COMFYUI_IMAGE = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
+# Last-resort fallback only — the runner registry's manifest digest pin is
+# the primary path (see image_ref / hal0.runners.resolve_runner_image).
+# Sourced from RUNNER_IMAGES["comfyui"].image (§7.1b / ML-4) so the literal
+# tag lives in exactly one place. Points at the kyuz0 Strix Halo build that
+# the live CT105 deployment validated.
+_HAL0_COMFYUI_IMAGE = RUNNER_IMAGES["comfyui"].image
 
 # In-container app + working-data layout. The kyuz0 image has ComfyUI
 # checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
@@ -159,11 +162,19 @@ class ComfyUIProvider(Provider):
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
         """Resolve the ComfyUI toolbox image.
 
-        Resolution order (matches ``llama_server.image_ref``):
+        Resolution order (§7.1b / ML-4 — now shared with every other
+        provider via the runner registry):
           1. ``slot_cfg["image"]`` — explicit override from slot TOML.
-          2. ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var.
-          3. ``manifest.json`` digest pin (primary path).
-          4. The fallback tag ``docker.io/kyuz0/amd-strix-halo-comfyui:latest``.
+          2. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
+             runner: ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var →
+             ``manifest.json`` digest pin → the fallback tag
+             ``docker.io/kyuz0/amd-strix-halo-comfyui:latest``.
+
+        ComfyUI was previously the ONE provider that read the manifest at
+        all; that behaviour is now unified into the registry resolver
+        every runner shares, so this method's error-swallowing story moves
+        into :func:`~hal0.runners.resolve_runner_image` (best-effort — a
+        missing/stale manifest never breaks the provider).
         """
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
         # Only a STRING is an image-ref override. In raw slot dicts the
@@ -172,21 +183,10 @@ class ComfyUIProvider(Provider):
         # podman fails with 'invalid reference format' (live CT105, Phase D).
         if isinstance(override, str) and override:
             return override
-        env_override = os.environ.get("HAL0_TOOLBOX_IMAGE_COMFYUI", "").strip()
-        if env_override:
-            return env_override
-        # Manifest pin — best-effort. Loader is wrapped to swallow any
-        # IO/parse errors so a missing or stale manifest never breaks the
-        # provider.
-        try:
-            from hal0.config.loader import manifest_image_ref
 
-            pinned = manifest_image_ref("comfyui")
-            if pinned:
-                return pinned
-        except Exception:
-            pass
-        return _HAL0_COMFYUI_IMAGE
+        from hal0.runners import get_runner, resolve_runner_image
+
+        return resolve_runner_image(get_runner("comfyui"))
 
     def _profile_flags(self, slot_cfg: dict[str, Any]) -> str:
         """Resolve the slot's profile to its flag bundle.

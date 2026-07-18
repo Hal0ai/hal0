@@ -200,17 +200,30 @@ def port_report(
     pool: tuple[int, int],
     slot_snapshots: list[dict[str, Any]] | None = None,
     reserved: dict[int, str] | None = None,
+    authority_claims: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The full picture: pool, per-port claims, conflicts, next free."""
+    """The full picture: pool, per-port claims, conflicts, next free.
+
+    ``authority_claims`` (rework §11.2) is the fifth source: the
+    ``port_claim`` rows written by :class:`hal0.ports.authority.PortAuthority`.
+    The harvester keeps recomputing its four live-truth sources unchanged;
+    the authority rows ride alongside so callers can compare issued claims
+    against observed reality. Omitted (``None``) → the key is absent and the
+    report is identical to the four-source view, so no existing consumer
+    changes.
+    """
     claims = collect_claims(
         slots_dir=slots_dir,
         pool=pool,
         slot_snapshots=slot_snapshots,
         reserved=reserved,
     )
-    return {
+    report: dict[str, Any] = {
         "pool": {"start": pool[0], "end": pool[1]},
         "claims": [c.as_dict() for c in claims],
         "conflicts": conflicts(claims),
         "next_free": next_free(claims, *pool),
     }
+    if authority_claims is not None:
+        report["authority_claims"] = authority_claims
+    return report

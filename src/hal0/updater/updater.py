@@ -1176,7 +1176,7 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
     ``[slot]``). Those pins freeze the default at creation time, so a release
     that bumps :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` never reaches
     existing slots. For every slot whose pin is in
-    :data:`~hal0.config.schema.STALE_ROCMFPX_IMAGE_REFS` — exactly equal to a
+    :data:`~hal0.runners.STALE_RUNNER_IMAGE_REFS` — exactly equal to a
     known former default, so demonstrably NOT a deliberate operator pin —
     rewrite it to the current default and log loudly. Any other value is an
     intentional per-slot override (debug build, A/B test) and is never
@@ -1200,7 +1200,11 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
 
     from hal0.config.loader import _read_toml, write_toml_atomic
     from hal0.config.paths import profiles_toml, slots_config_dir
-    from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, resolve_default_image
+    from hal0.runners import STALE_RUNNER_IMAGE_REFS, resolve_runner_image, runner_for_backend
+
+    def resolve_default_image(backend: str | None, device_class: str | None = None) -> str:
+        """Local alias — §7.1b / ML-4 HW-gated default via the runner registry."""
+        return resolve_runner_image(runner_for_backend(backend, device_class))
 
     def _cfg_str(cfg: dict, key: str) -> str:
         """Read a string field top-level or nested under ``[slot]``."""
@@ -1242,7 +1246,7 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             holder = raw
         elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
             holder = raw["slot"]
-        if holder is None or holder["image"] not in STALE_ROCMFPX_IMAGE_REFS:
+        if holder is None or holder["image"] not in STALE_RUNNER_IMAGE_REFS:
             continue
         old_ref = holder["image"]
         # HW-gated target: rocmfpx on a Strix GPU lane, the lean toolbox
@@ -1283,7 +1287,7 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
         for name, entry in (raw.get("profile") or {}).items():
             if not isinstance(entry, dict):
                 continue
-            if entry.get("image") in STALE_ROCMFPX_IMAGE_REFS:
+            if entry.get("image") in STALE_RUNNER_IMAGE_REFS:
                 old_ref = entry["image"]
                 new_ref = resolve_default_image(entry.get("backend"), entry.get("device_class"))
                 if new_ref == old_ref:

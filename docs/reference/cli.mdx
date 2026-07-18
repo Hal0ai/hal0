@@ -31,6 +31,7 @@ directly so they work without a running daemon.
 |---|---|---|
 | `hal0 --version` / `-V` | Print the version and exit. | — |
 | `hal0 status` | System + slot summary (name, version, slot/upstream counts, slot table). | — |
+| `hal0 system-info` | Read-only host/GPU/NPU/runtime evidence in one pass (hostname, kernel, distro, CPU, memory, every detected GPU, NPU, plus hal0/python/podman versions and the detected platform). Runs the local hardware probe directly, so it works offline before the API is up. Always exits 0. | `--json` |
 | `hal0 probe` | **[Deprecated]** hidden alias for `hal0 config hardware --refresh` — re-runs hardware detection (`POST /api/hardware/probe`) and updates `hardware.json`. | — |
 | `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
@@ -376,6 +377,7 @@ useful when validate reports an error in one of them. The config path honours
 | `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability, env-vs-TOML store divergence, and an unmounted external store path. | `--fix` (repair FLM store ownership/mode; needs root + confirmation, `--force`/`-f` skips the prompt) |
 | `doctor migrations` | Surface a pending v0.1→v0.2 model-layout migration (dry-run of the symlink planner; points at `hal0 migrate model-layout --apply`). | — |
 | `doctor profiles` | Audit the slot↔profile layer: slots referencing a missing profile (fails), and in-use profile images not pulled locally (advisory). | — |
+| `doctor all` | One read-only evidence roll-up: the `doctor verify` report card (API, runners, DNS, capability slots, memory, OpenWebUI, Hermes) plus auth posture, model-store integrity, pending migrations, and bound slot ports. Read-only (no `--fix`). | `--json` |
 
 `hal0 doctor` shells out to `installer/lib/preflight.sh` and preserves its exit
 code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
@@ -383,6 +385,9 @@ drift is reported but does not fail), `1` if any image is unreachable, and `2`
 when the manifest has no toolbox images. `doctor models` exits `1` on any
 actionable finding; `doctor migrations` exits `1` when links are pending;
 `doctor profiles` exits `1` only when a slot references a missing profile.
+`doctor all` exits `0` when clean, `1` on an actionable fail, and `2` on a
+critical failure (API unreachable or zero healthy runners); advisory `warn`
+rows never change the exit code.
 
 ## `hal0 capabilities` — capability-slot list/set + repair
 

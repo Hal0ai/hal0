@@ -82,7 +82,9 @@ MODEL_COLUMNS: tuple[str, ...] = (
 )
 
 #: ModelDefaults columns folded onto the `model` row. `defaults` reconstructs
-#: iff at least one of these is non-NULL.
+#: iff at least one of these is non-NULL. ``mtp``/``jinja`` (§7.1a / ML-5)
+#: are tri-state (NULL/0/1 -> None/False/True) — pydantic's lax bool
+#: validator coerces the raw sqlite int back to bool on reconstruction.
 _DEFAULTS_COLUMNS: tuple[str, ...] = (
     "profile",
     "extra_args",
@@ -90,6 +92,8 @@ _DEFAULTS_COLUMNS: tuple[str, ...] = (
     "chat_template",
     "context_size",
     "rope_freq_base",
+    "mtp",
+    "jinja",
 )
 
 
@@ -109,14 +113,18 @@ def model_to_row(
     ``created_at`` should be passed through unchanged on an UPDATE (only
     ``updated_at`` advances); on an INSERT both default to "now".
 
-    §7.1 columns with no ``Model`` field yet (``revision``,
-    ``preferred_runner``, ``mtp``, ``jinja``) always write NULL in this
-    pilot — they exist purely as a ready-made landing spot for the ML-4/
-    ML-5 lanes that add those fields to ``Model`` itself. ``architecture``
-    IS populated here — §7.1d is the lane that lands it (see
-    ``Model.architecture``). ``capability_flags``/``modalities_override``
-    have no reserved column yet, so they fold into the ``extra`` JSON blob
-    under the reserved keys above instead of a schema migration.
+    §7.1 ``revision`` has no ``Model`` field yet — always writes NULL, a
+    ready-made landing spot for a future lane. ``architecture``,
+    ``preferred_runner``, and ``mtp``/``jinja`` (folded from
+    ``ModelDefaults``) ARE populated here — §7.1d lands ``architecture``,
+    ML-4 lands ``preferred_runner``, ML-5 lands ``mtp``/``jinja`` (see
+    ``ModelDefaults.mtp``/``.jinja`` — tri-state, sqlite stores them as
+    NULL/0/1 in the INTEGER columns; ``defaults.mtp``/``.jinja`` pass
+    straight through since sqlite3 adapts a Python ``bool`` to 0/1
+    natively, same as any other int).
+    ``capability_flags``/``modalities_override`` have no reserved column
+    yet, so they fold into the ``extra`` JSON blob under the reserved keys
+    above instead of a schema migration.
     """
     defaults = model.defaults or ModelDefaults()
 
@@ -138,12 +146,12 @@ def model_to_row(
         "source_repo": model.hf_repo or None,
         "revision": None,
         "path": model.path,
-        "preferred_runner": None,
+        "preferred_runner": model.preferred_runner,
         "mmproj": model.mmproj,
         "architecture": model.architecture,
         "context_length": context_length,
-        "mtp": None,
-        "jinja": None,
+        "mtp": defaults.mtp,
+        "jinja": defaults.jinja,
         "name": model.name,
         "size_bytes": model.size_bytes,
         "quant": model.quant,
@@ -345,6 +353,7 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         backends=list(backends) if backends else [],
         mmproj=row["mmproj"],
         architecture=row["architecture"],
+        preferred_runner=row["preferred_runner"],
         capability_flags=capability_flags,
         modalities_override=modalities_override,
         defaults=defaults,

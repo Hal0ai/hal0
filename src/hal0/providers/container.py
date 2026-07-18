@@ -124,19 +124,132 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
         return _resolve_profile(base)
 
 
-def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
+def _effective_backend_and_device_class(
+    slot_cfg: Mapping[str, Any] | None, profile: Any
+) -> tuple[str | None, str | None]:
+    """``(backend, device_class)`` for this lane — slot override beats profile."""
+    backend = getattr(profile, "backend", None)
+    device_class = getattr(profile, "device_class", None)
+    if isinstance(slot_cfg, Mapping):
+        sb = slot_cfg.get("backend")
+        if isinstance(sb, str) and sb:
+            backend = sb
+    return backend, device_class
+
+
+def _preferred_runner_if_fits(
+    model_info: Mapping[str, Any] | None,
+    *,
+    backend: str | None,
+    device_class: str | None,
+) -> Any | None:
+    """``model_info["preferred_runner"]`` resolved to a ``Runner``, or ``None``.
+
+    Only returns a runner when the key names a real ``llama-server``-family
+    runner AND it fits this lane's device_class/backend
+    (:func:`hal0.runners.runner_matches`) — an FLM/kokoro/qwen3tts/comfyui
+    key, a stale/unknown key, or a cross-backend key returns ``None`` rather
+    than launching the wrong runtime. Shared by :func:`_effective_runner`
+    and :func:`_resolve_image_ref`'s tier 3 so the two never drift.
+    """
+    if not isinstance(model_info, Mapping):
+        return None
+    preferred = model_info.get("preferred_runner")
+    if not (isinstance(preferred, str) and preferred):
+        return None
+    from hal0.errors import NotFound
+    from hal0.runners import get_runner, runner_matches
+
+    try:
+        preferred_runner = get_runner(preferred)
+    except NotFound:
+        return None
+    if preferred_runner.runtime_family == "llama-server" and runner_matches(
+        preferred_runner, device_class=device_class, backend=backend
+    ):
+        return preferred_runner
+    return None
+
+
+def _effective_runner(
+    slot_cfg: Mapping[str, Any] | None,
+    profile: Any,
+    model_info: Mapping[str, Any] | None = None,
+) -> Any:
+    """The :class:`~hal0.runners.Runner` that actually applies to this launch.
+
+    §7.1a / ML-5: SINGLE SOURCE for "which runner's capabilities gate this
+    slot" — shared by :func:`_resolve_image_ref` (tiers 3 + 5, the
+    runner-derived image tiers) and the mtp/jinja capability gates in
+    :func:`_effective_mtp` / :func:`_resolve_llama_scalars`, so the image
+    that launches and the capabilities that gate its flags can never drift
+    onto two different runners.
+
+    Deliberately independent of ``slot.image`` / ``profile.image`` STRING
+    overrides (tiers 1/2/4 of :func:`_resolve_image_ref`) — those only pin
+    which literal image ref pulls, they carry no capability information of
+    their own. A capability (does this launch support ``--jinja``, can it
+    draft MTP) is a property of the *backend/device_class lane* (or an
+    explicit ``model.preferred_runner``), not of an opaque image string, so
+    this resolver always returns a real ``Runner`` regardless of whether an
+    image string override is in play.
+
+    Resolution: ``model_info["preferred_runner"]`` when it names a real
+    ``llama-server``-family runner that fits this lane's device_class/
+    backend (:func:`hal0.runners.runner_matches`) — else
+    :func:`hal0.runners.runner_for_backend`, the HW-gated default.
+    """
+    backend, device_class = _effective_backend_and_device_class(slot_cfg, profile)
+    preferred_runner = _preferred_runner_if_fits(
+        model_info, backend=backend, device_class=device_class
+    )
+    if preferred_runner is not None:
+        return preferred_runner
+
+    from hal0.runners import runner_for_backend
+
+    return runner_for_backend(backend, device_class)
+
+
+def _resolve_image_ref(
+    slot_cfg: Mapping[str, Any] | None,
+    profile: Any,
+    *,
+    model_info: Mapping[str, Any] | None = None,
+) -> str:
     """Resolve the container image ref for a slot launch.
 
-    Resolution order (matches :meth:`ComfyUIProvider.image_ref`):
+    Resolution order (§7.1b / ML-4 — the runner-image registry):
 
       1. ``slot_cfg["image"]`` (top-level string override in the slot TOML).
       2. ``slot_cfg["slot"]["image"]`` (nested under the ``[slot]`` table).
-      3. ``profile.image`` (a deliberate profile/operator pin) — honored verbatim.
-         The basic seed profiles intentionally leave this empty so they fall
-         through to (4); the ROCmFPX/custom profiles pin it explicitly.
-      4. :func:`~hal0.config.schema.resolve_default_image` — the HW-gated
-         default: the rocmfpx runner on gfx1151/Strix-Halo, the lean toolbox
-         (or cuda / cpu image) elsewhere.
+      3. ``model_info["preferred_runner"]`` — a per-model runner-key
+         preference (``registry.model.Model.preferred_runner``), resolved
+         through :func:`hal0.runners.resolve_runner_image`. Only honored
+         when it names a real ``llama-server``-family runner AND fits this
+         lane's device_class/backend (:func:`hal0.runners.runner_matches`)
+         — an FLM/kokoro/qwen3tts/comfyui key, a stale/unknown key (e.g.
+         the fileset auto-detector's ``"llama-server"`` family-only hint,
+         which is not itself a ``RUNNER_IMAGES`` key), or a cross-backend
+         key is silently skipped rather than launching the wrong runtime.
+      4. ``profile.image`` (a deliberate profile/operator pin) — honored
+         verbatim, unresolved. NOTE (spec deviation, see handback):
+         ProfileConfig.image is NOT removed by ML-4 (that's ML-5/P3-schema
+         scope), so it stays in the chain here rather than being dropped —
+         dropping it now would silently break every custom profile's image
+         pin (the updater's stale-pin escape hatch depends on this exact
+         "honored verbatim" contract) a full lane before ML-5 removes the
+         field.
+      5. :func:`hal0.runners.runner_for_backend` (+
+         :func:`hal0.runners.resolve_runner_image`) — the HW-gated default:
+         the rocmfpx runner on an AMD GPU lane, the lean toolbox (or cuda /
+         cpu image) elsewhere. Replaces the old direct
+         :func:`~hal0.config.schema.resolve_default_image` call — same
+         values, now also honoring an env-var override per runner.
+
+    Tiers 3 + 5 both resolve through :func:`_effective_runner` (the same
+    runner :func:`_resolve_llama_scalars` uses to gate mtp/jinja
+    capabilities), then :func:`hal0.runners.resolve_runner_image`.
 
     Only STRING values are treated as image-ref overrides. The
     ``[image]`` TOML section that holds image-gen settings (#599) shares
@@ -158,33 +271,38 @@ def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
         for c in candidates:
             if isinstance(c, str) and c:
                 return c
+
+    backend, device_class = _effective_backend_and_device_class(slot_cfg, profile)
+    preferred_runner = _preferred_runner_if_fits(
+        model_info, backend=backend, device_class=device_class
+    )
+    if preferred_runner is not None:
+        from hal0.runners import resolve_runner_image
+
+        return resolve_runner_image(preferred_runner)
+
     profile_image = getattr(profile, "image", None)
     if isinstance(profile_image, str) and profile_image:
         return profile_image  # deliberate profile/operator pin — honored verbatim
-    # No image pin anywhere → HW-gated default: the rocmfpx runner on
-    # gfx1151/Strix-Halo, the lean toolbox (or cuda / cpu image) elsewhere.
-    # Backend comes from the slot override when set, else the profile;
-    # device_class from the profile. Lazy import avoids a schema→providers cycle.
-    from hal0.config.schema import resolve_default_image
 
-    backend = getattr(profile, "backend", None)
-    device_class = getattr(profile, "device_class", None)
-    if isinstance(slot_cfg, Mapping):
-        sb = slot_cfg.get("backend")
-        if isinstance(sb, str) and sb:
-            backend = sb
-    return resolve_default_image(backend, device_class)
+    # No image pin anywhere → HW-gated default via the runner registry.
+    from hal0.runners import resolve_runner_image
+
+    return resolve_runner_image(_effective_runner(slot_cfg, profile, model_info))
 
 
 def _profile_image_and_flags(
     profile: Any,
     mtp_override: bool | None = None,
     slot_cfg: Mapping[str, Any] | None = None,
+    *,
+    model_info: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Extract ``(image, resolved_flags)`` for a slot launch.
 
     Image resolution walks the priority chain in :func:`_resolve_image_ref`:
-    slot-level override → profile.image → ``DEFAULT_ROCMFPX_IMAGE``.
+    slot-level override → model.preferred_runner → profile.image → the
+    runner-registry HW-gated default.
 
     Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
     ``resolved_flags`` is already MTP-expanded) and a plain ``ProfileConfig``
@@ -198,6 +316,11 @@ def _profile_image_and_flags(
     baked into a :class:`~hal0.profiles.ResolvedProfile`.  Both
     ``ResolvedProfile`` and ``ProfileConfig`` expose ``.flags`` and ``.mtp``,
     so this path works for both types.
+
+    ``model_info`` is optional (defaults to ``None``, matching every
+    existing call site) — it's the registry model dict, threaded through
+    from :func:`_resolve_llama_scalars` so :func:`_resolve_image_ref` can
+    read ``model_info["preferred_runner"]``.
     """
     if mtp_override is not None:
         # Slot override wins over any pre-expanded resolved_flags: recompute
@@ -208,56 +331,68 @@ def _profile_image_and_flags(
         flags = getattr(profile, "resolved_flags", None)
         if flags is None:
             flags = resolve_profile_flags(profile)
-    return _resolve_image_ref(slot_cfg, profile), str(flags)
+    return _resolve_image_ref(slot_cfg, profile, model_info=model_info), str(flags)
 
 
 def _effective_mtp(
     slot_mtp: bool | None,
-    profile: Any,
     model_info: Mapping[str, Any],
+    runner: Any,
     *,
     log_ineligible: bool = False,
 ) -> bool:
     """Resolve whether MTP speculative decoding is on for this slot launch.
 
-    The three concerns are separated (design: MTP is a model property, not a
-    flag-template one):
+    §7.1a / ML-5: MTP is a MODEL property, not a profile-template one —
+    ``profile.mtp`` is no longer consulted at all. Precedence:
 
     * **slot** decides first — an explicit :attr:`SlotConfig.mtp` (``True`` /
-      ``False``) always wins, so an operator can force MTP on for an untagged
-      model or off for a tagged one.
-    * **AUTO** (``slot_mtp is None``) enables MTP only when the **profile**
-      opts in (``profile.mtp``) AND the **model** actually ships MTP heads
-      (:func:`hal0.model_meta.model_is_mtp_eligible`).
+      ``False``) always wins, an unconditional operator escape hatch (even
+      for a runner that can't actually draft — the operator asked for it).
+    * **model** decides next — an explicit ``ModelDefaults.mtp`` tri-state
+      (``True``/``False``) wins in EITHER direction over the registry
+      ``mtp`` tag, same unconditional-escape-hatch contract as slot.mtp (a
+      curator who explicitly tagged the model's launcher defaults knows
+      what they're doing).
+    * **AUTO** (both above are ``None``) enables MTP only when the model
+      carries the registry ``mtp`` tag (:func:`hal0.model_meta.
+      model_is_mtp_eligible` — no filename/GGUF-name sniffing anymore)
+      AND the resolved :class:`~hal0.runners.Runner` actually supports MTP
+      drafting (``runner.supports.mtp`` — off for the cuda/cpu llama-server
+      lanes).
 
-    This is what stops a non-MTP model on an MTP profile (e.g. a plain chat
-    GGUF pinned to ``rocm-moe``) from launching with dead ``--spec-draft-*``
-    flags, without any per-slot wiring for the common case.
+    This is what stops a non-MTP model / a non-drafting runner lane from
+    launching with dead ``--spec-draft-*`` flags, without any per-slot
+    wiring for the common case.
 
     ``log_ineligible`` gates the auto-off breadcrumb to the LAUNCH path only.
     This function sits inside the shared launch/preview scalar resolver
     (:func:`_resolve_llama_scalars`), and the preview path is hit by every
     dashboard ``GET /api/slots`` poll — logging unconditionally here turned a
     once-per-launch hint into a ~0.4/s stream per polling client for every
-    AUTO slot pairing an MTP profile with a non-MTP model.
+    AUTO slot on an untagged model.
     """
     if slot_mtp is not None:
         return bool(slot_mtp)
-    profile_opts_in = bool(getattr(profile, "mtp", False))
+    defaults = model_info.get("defaults")
+    model_mtp = defaults.get("mtp") if isinstance(defaults, Mapping) else None
+    if model_mtp is not None:
+        return bool(model_mtp)
     eligible = model_is_mtp_eligible(model_info)
-    if log_ineligible and profile_opts_in and not eligible:
-        # Visible breadcrumb for the silent-auto-off case: an MTP-capable model
-        # that carries neither the registry tag nor a name marker stops
-        # speculating under auto. The fix is tagging the model (or slot
-        # mtp=true); this log is how an operator finds that out.
+    if log_ineligible and not eligible:
+        # Visible breadcrumb for the silent-auto-off case: a model tagged
+        # neither via defaults.mtp nor the registry 'mtp' tag stops
+        # speculating under auto. The fix is tagging the model (or an
+        # explicit slot/model mtp=true); this log is how an operator finds
+        # that out.
         log.info(
             "mtp.auto_off_model_ineligible",
             extra={
                 "model": str(model_info.get("_model_key") or model_info.get("path") or ""),
-                "hint": "tag the model 'mtp' or set slot mtp=true to speculate",
+                "hint": "tag the model 'mtp' (or set defaults.mtp / slot mtp=true) to speculate",
             },
         )
-    return profile_opts_in and eligible
+    return eligible and bool(getattr(getattr(runner, "supports", None), "mtp", False))
 
 
 def _effective_parallel(slot_cfg: Mapping[str, Any]) -> int | None:
@@ -898,10 +1033,17 @@ def _resolve_llama_scalars(
     it only gates side-effects like the MTP auto-off breadcrumb; the RESOLVED
     VALUES are identical on both paths, preserving launch/preview parity.
     """
+    # SINGLE SOURCE for "which runner's capabilities gate this launch" — the
+    # same runner backs the image resolution inside _profile_image_and_flags
+    # (via _resolve_image_ref) and the mtp/jinja capability gates below, so
+    # they can never drift onto two different runners (§7.1a / ML-5).
+    runner = _effective_runner(slot_cfg, profile, model_info)
     effective_mtp = _effective_mtp(
-        slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch
+        slot_cfg.get("mtp"), model_info, runner, log_ineligible=for_launch
     )
-    image, flags_str = _profile_image_and_flags(profile, effective_mtp, slot_cfg=slot_cfg)
+    image, flags_str = _profile_image_and_flags(
+        profile, effective_mtp, slot_cfg=slot_cfg, model_info=model_info
+    )
 
     slot_parallel = _effective_parallel(slot_cfg)
     if for_launch:
@@ -967,15 +1109,49 @@ def _resolve_llama_scalars(
     # between the profile's generic flags and the slot's own [model].defaults.
     # Prepended INSIDE the model_defaults segment so it beats the profile
     # (later segment, normalize_argv last-wins) but a per-slot extra_args in
-    # [model].defaults still wins over the family default.
+    # [model].defaults still wins over the family default. §7.1a / ML-5:
+    # re-keyed off the registry's authoritative Model.architecture first
+    # (model_family/family_flags fall back to the filename/id token scan
+    # only when architecture is unset — see hal0.config.schema.model_family).
     fam = family_flags(
-        model_info.get("_model_key"), model_table.get("default"), model_info.get("path")
+        model_info.get("_model_key"),
+        model_table.get("default"),
+        model_info.get("path"),
+        architecture=model_info.get("architecture"),
     )
     if fam:
         if model_defaults is None:
             model_defaults = {}
         existing = model_defaults.get("extra_args") or ""
         model_defaults["extra_args"] = f"{fam} {existing}".strip()
+
+    # --jinja capability injection (§7.1a / ML-5): jinja is a RUNNER
+    # capability, not a profile tune anymore (seed profiles no longer carry
+    # --jinja in their flags — there is no --no-jinja negation, so this must
+    # be injected conditionally, never removed post-hoc). Default true for
+    # a runner that supports it, suppressible per-model via
+    # defaults.jinja=false; landed in the model_defaults segment (beats the
+    # profile segment, still loses to a hand-authored [model].defaults
+    # extra_args or [server].extra_args later in the precedence chain).
+    #
+    # Never injected for an --embedding/--reranking profile: jinja chat-
+    # template rendering is meaningless there (llama-server's --jinja is a
+    # chat-completions feature) — every embed/rerank seed profile
+    # deliberately omitted --jinja even before this lane, so this mirrors
+    # that intentional exclusion instead of regressing it.
+    profile_tokens_for_mode = set(shlex.split(flags_str)) if flags_str.strip() else set()
+    is_embed_or_rerank_mode = bool(profile_tokens_for_mode & {"--embedding", "--reranking"})
+    model_jinja = defaults.get("jinja") if isinstance(defaults, dict) else None
+    effective_jinja = (
+        bool(getattr(runner.supports, "jinja", False))
+        and model_jinja is not False
+        and not is_embed_or_rerank_mode
+    )
+    if effective_jinja:
+        if model_defaults is None:
+            model_defaults = {}
+        existing = model_defaults.get("extra_args") or ""
+        model_defaults["extra_args"] = f"{existing} --jinja".strip()
 
     slot_n_gpu_layers = model_table.get("n_gpu_layers")
 

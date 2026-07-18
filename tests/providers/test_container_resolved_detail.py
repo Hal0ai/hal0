@@ -14,7 +14,10 @@ from hal0.providers.container import resolved_argv_detail_for_slot
 
 
 def _profile() -> ProfileConfig:
-    return ProfileConfig(image="img:1", flags="-b 512 --jinja", mtp=False)
+    # §7.1a / ML-5: seed/real profiles no longer carry --jinja literally —
+    # it's injected as a runner capability (model_defaults segment) by
+    # _resolve_llama_scalars, not a profile tune.
+    return ProfileConfig(image="img:1", flags="-b 512", mtp=False)
 
 
 def test_detail_dedups_and_attributes_provenance() -> None:
@@ -36,7 +39,9 @@ def test_detail_dedups_and_attributes_provenance() -> None:
     prov = {p["flag"]: p for p in detail["provenance"]}
     assert prov["-b"]["source"] == "extra_args"
     assert prov["-b"]["value"] == "8192"
-    assert prov["--jinja"]["source"] == "profile"
+    # --jinja is the default-on runner capability injection (§7.1a / ML-5) —
+    # it lands in the model_defaults segment now, not the profile segment.
+    assert prov["--jinja"]["source"] == "model_defaults"
     assert prov["--jinja"]["value"] is None
     # base-segment structural flags are credited to "base"
     assert prov["--model"]["source"] == "base"

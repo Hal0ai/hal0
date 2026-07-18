@@ -42,36 +42,41 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (20: the basic rocm profile, the
-        rocm-dense/rocm-moe/vulkan-dense/vulkan-moe ROCmFPX 2x2 grid, the
-        dense-family variants (rocm-dense-nojinja/vulkan-dense-nojinja/
-        rocm-dense-small/rocm-longctx), vulkan, the experimental NVIDIA cuda
-        profile, the dedicated embed and rerank ROCm GPU lanes plus the
+        """One entry per seed profile (17: the basic rocm profile, the
+        rocm-dense/rocm-moe/vulkan-dense/vulkan-moe ROCmFPX 2x2 grid,
+        rocm-longctx, vulkan, the experimental NVIDIA cuda profile, the
+        dedicated embed and rerank ROCm GPU lanes plus the
         vulkan-embed/vulkan-rerank Vulkan lanes, flm NPU, the tts/tts-qwen3
-        pair, the cpu-llm CPU profile #834, and Phase D comfyui)."""
+        pair, the cpu-llm CPU profile #834, and Phase D comfyui).
+
+        §7.1a / ML-5: rocm-dense-nojinja / vulkan-dense-nojinja /
+        rocm-dense-small were deleted — jinja is now a runner capability
+        (default-on, suppressible per-model), not a profile tune, so the
+        nojinja clones (and the small-model MTP-off variant that existed
+        only to pair with them) are redundant. Seed count drops 20 -> 17.
+        """
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 20
+        assert len(data) == 17
+
+    def test_no_jinja_flag_in_any_seed_profile(self, client: TestClient) -> None:
+        """§7.1a / ML-5: --jinja is injected as a runner capability at launch
+        time (providers.container._resolve_llama_scalars) — no seed profile
+        carries it in `flags` anymore (there is no --no-jinja negation, so
+        it must never be a static profile tune)."""
+        data = client.get("/api/profiles").json()
+        for item in data:
+            assert "--jinja" not in item["flags"], item["name"]
 
     def test_dense_family_variant_seeds_present(self, client: TestClient) -> None:
-        """The dense-family variants (no-jinja pair, small, long-context) ship
-        as seeds: gpu, mtp False, backend-coherent, and the no-jinja lanes omit
-        `--jinja` while the long-context lane pins q8_0 KV."""
+        """rocm-longctx (the surviving dense-family variant) ships as a
+        seed: gpu, mtp False (informational — see test_seeds_parity), q8_0
+        KV pinned."""
         by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
-        for name in (
-            "rocm-dense-nojinja",
-            "vulkan-dense-nojinja",
-            "rocm-dense-small",
-            "rocm-longctx",
-        ):
-            assert name in by_name, f"missing seed: {name}"
-            assert by_name[name]["seed"] is True
-            assert by_name[name]["mtp"] is False
-            assert by_name[name]["device_class"] == "gpu"
-        assert by_name["rocm-dense-nojinja"]["backend"] == "rocm"
-        assert by_name["vulkan-dense-nojinja"]["backend"] == "vulkan"
-        assert "--jinja" not in by_name["rocm-dense-nojinja"]["flags"]
-        assert "--jinja" not in by_name["vulkan-dense-nojinja"]["flags"]
+        assert by_name["rocm-longctx"]["seed"] is True
+        assert by_name["rocm-longctx"]["mtp"] is False
+        assert by_name["rocm-longctx"]["device_class"] == "gpu"
+        assert by_name["rocm-longctx"]["backend"] == "rocm"
         assert "-ctk q8_0" in by_name["rocm-longctx"]["flags"]
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
@@ -151,26 +156,32 @@ class TestListProfiles:
         vulkan = next(item for item in data if item["name"] == "vulkan")
         assert vulkan["image"] == DEFAULT_ROCMFPX_IMAGE
 
-    def test_mtp_true_resolved_flags_contains_spec_type(self, client: TestClient) -> None:
+    def test_mtp_true_seed_resolved_flags_no_longer_bundle_expanded(
+        self, client: TestClient
+    ) -> None:
+        """§7.1a / ML-5: profile.mtp is informational only now (MTP moved to
+        a MODEL capability, gated by the launching runner) — the
+        profile-catalog's resolved_flags (no model bound at this level)
+        never carries the --spec-draft-* bundle, even for an mtp=true seed
+        like rocm-dense. See providers.container._effective_mtp for where
+        the real, model-aware decision now lives."""
         data = client.get("/api/profiles").json()
         dense = next(item for item in data if item["name"] == "rocm-dense")
-        assert "--spec-type draft-mtp" in dense["resolved_flags"]
-
-    def test_mtp_true_resolved_flags_contains_bundle(self, client: TestClient) -> None:
-        data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-dense")
-        assert MTP_FLAG_BUNDLE in dense["resolved_flags"]
+        assert dense["mtp"] is True  # informational field, unchanged
+        assert "--spec-type" not in dense["resolved_flags"]
+        assert MTP_FLAG_BUNDLE not in dense["resolved_flags"]
 
     def test_mtp_false_resolved_flags_no_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
         moe = next(item for item in data if item["name"] == "rocm")
         assert "--spec-type" not in moe["resolved_flags"]
 
-    def test_mtp_false_resolved_flags_equals_flags(self, client: TestClient) -> None:
+    def test_resolved_flags_equals_flags_for_every_seed(self, client: TestClient) -> None:
+        """No profile-catalog entry (mtp true or false) MTP-expands anymore —
+        resolved_flags is just flags.strip() for every seed."""
         data = client.get("/api/profiles").json()
         for item in data:
-            if not item["mtp"]:
-                assert item["resolved_flags"] == item["flags"].strip()
+            assert item["resolved_flags"] == item["flags"].strip(), item["name"]
 
     def test_custom_profiles_file_used_when_present(self, tmp_hal0_home: str) -> None:
         """A custom profiles.toml is preserved AND missing seed profiles are
