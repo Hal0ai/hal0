@@ -40,11 +40,14 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
+from hal0.runners import RUNNER_IMAGES
 
 # ── Toolbox image ─────────────────────────────────────────────────────────────
-# Default tag. Override via HAL0_TOOLBOX_IMAGE_FLM in api.env when running
-# on hal0-test before the GHCR org is provisioned (PLAN §17).
-_DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
+# Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
+# lives in exactly one place (hal0.runners.RUNNER_IMAGES["flm"].image).
+# Kept as a module attribute for back-compat: api/routes/updater.py and
+# tests/providers/test_flm.py both import this name directly.
+_DEFAULT_FLM_IMAGE = RUNNER_IMAGES["flm"].image
 
 # ── On-disk layout ────────────────────────────────────────────────────────────
 # The toolbox image is self-contained: it bundles FLM at /opt/fastflowlm/
@@ -427,13 +430,28 @@ class FLMProvider(Provider):
 
     # ── Image / container spec ─────────────────────────────────────────────────
 
-    def image_ref(self, _slot_cfg: dict[str, Any]) -> str:
+    def image_ref(self, slot_cfg: dict[str, Any]) -> str:
         """Return the FLM toolbox image reference.
 
-        Allows pre-GHCR-org deploys to override via env var (matches the
-        Vulkan/ROCm toolbox pattern).
+        Resolution (§7.1b / ML-4): ``slot_cfg["image"]`` (top-level or
+        ``[slot]``-nested string override) → the runner registry
+        (``HAL0_TOOLBOX_IMAGE_FLM`` env override → the manifest digest pin →
+        the bundled default) — see :func:`hal0.runners.resolve_runner_image`.
+        Previously this ignored ``slot.image`` entirely (the pre-ML-4 "FLM
+        ignores slot.image" gap the spec calls out).
         """
-        return os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
+        override: Any = None
+        if isinstance(slot_cfg, dict):
+            override = slot_cfg.get("image")
+            if not (isinstance(override, str) and override):
+                nested = slot_cfg.get("slot")
+                override = nested.get("image") if isinstance(nested, dict) else None
+        if isinstance(override, str) and override:
+            return override
+
+        from hal0.runners import get_runner, resolve_runner_image
+
+        return resolve_runner_image(get_runner("flm"))
 
     def container_spec(
         self,

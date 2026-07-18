@@ -41,9 +41,12 @@ from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
+from hal0.runners import RUNNER_IMAGES
 
-# Default image tag (overridable via HAL0_TOOLBOX_IMAGE_KOKORO for dev/test).
-_DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+# Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
+# lives in exactly one place (hal0.runners.RUNNER_IMAGES["kokoro"].image).
+# Kept as a module attribute for back-compat imports.
+_DEFAULT_KOKORO_IMAGE = RUNNER_IMAGES["kokoro"].image
 
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "tts"
@@ -111,10 +114,29 @@ class KokoroProvider(Provider):
     # ── Image / container spec ─────────────────────────────────────────────────
 
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
-        """Return the Kokoro toolbox image reference."""
-        import os
+        """Return the Kokoro toolbox image reference.
 
-        return os.environ.get("HAL0_TOOLBOX_IMAGE_KOKORO", _DEFAULT_KOKORO_IMAGE)
+        Resolution (§7.1b / ML-4): ``slot_cfg["image"]`` (top-level or
+        ``[slot]``-nested string override) → the runner registry
+        (``HAL0_TOOLBOX_IMAGE_KOKORO`` env override → the manifest digest
+        pin → the bundled default) — see
+        :func:`hal0.runners.resolve_runner_image`. Previously this was
+        env-only; :meth:`container_spec` (the actual call site — this
+        method has no live caller today) used ``profile.image`` directly
+        and never consulted this method or ``slot.image`` at all.
+        """
+        override: Any = None
+        if isinstance(slot_cfg, dict):
+            override = slot_cfg.get("image")
+            if not (isinstance(override, str) and override):
+                nested = slot_cfg.get("slot")
+                override = nested.get("image") if isinstance(nested, dict) else None
+        if isinstance(override, str) and override:
+            return override
+
+        from hal0.runners import get_runner, resolve_runner_image
+
+        return resolve_runner_image(get_runner("kokoro"))
 
     def container_spec(
         self,
@@ -161,7 +183,7 @@ class KokoroProvider(Provider):
         store_root = model_store_root()
 
         return ContainerSpec(
-            image=profile.image,
+            image=self.image_ref(slot_cfg),
             command=command,
             env={},
             # Model store mounted read-only via the shared `mount_for`

@@ -111,13 +111,24 @@ class TestResolveProfileFlags:
         assert "--spec-type" not in result
 
     def test_mtp_true_appends_bundle(self) -> None:
+        """§7.1a / ML-5: profile.mtp is informational only — resolve_profile_flags
+        needs an explicit mtp_override=True now (the real decision lives in
+        providers.container._effective_mtp, driven by the model + runner)."""
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on -b 512", mtp=True)
-        result = resolve_profile_flags(p)
+        result = resolve_profile_flags(p, mtp_override=True)
         # base flags are preserved verbatim and the MTP bundle is present. The
         # bundle now leads (it supplies defaults the profile's explicit flags
         # override); a profile with no --spec flags keeps the bundle intact.
         assert "-fa on -b 512" in result
         assert "--spec-type draft-mtp" in result
+
+    def test_mtp_true_profile_but_no_override_no_longer_expands(self) -> None:
+        """profile.mtp=True alone (no explicit mtp_override) no longer
+        expands the bundle — MTP moved off the profile entirely."""
+        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on -b 512", mtp=True)
+        result = resolve_profile_flags(p)
+        assert result == "-fa on -b 512"
+        assert "--spec-type" not in result
 
     def test_explicit_profile_spec_flags_win_over_bundle(self) -> None:
         """A profile that pins its own --spec-draft-* values keeps them; the MTP
@@ -128,7 +139,7 @@ class TestResolveProfileFlags:
             flags="-fa on --spec-draft-type-k f16 --spec-draft-type-v f16 --spec-draft-p-min 0.25",
             mtp=True,
         )
-        result = resolve_profile_flags(p)
+        result = resolve_profile_flags(p, mtp_override=True)
         # explicit values survive, exactly once, with no clobber/duplication
         assert "--spec-draft-type-k f16" in result
         assert "--spec-draft-p-min 0.25" in result
@@ -142,7 +153,7 @@ class TestResolveProfileFlags:
 
     def test_mtp_true_contains_all_key_flags(self) -> None:
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on", mtp=True)
-        result = resolve_profile_flags(p)
+        result = resolve_profile_flags(p, mtp_override=True)
         assert "--spec-draft-device ROCm0" in result
         assert "--spec-draft-ngl all" in result
         assert "--spec-draft-n-max 4" in result
@@ -154,7 +165,7 @@ class TestResolveProfileFlags:
     def test_mtp_bundle_literal_match(self) -> None:
         """MTP_FLAG_BUNDLE constant is verbatim in the resolved string."""
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on", mtp=True)
-        result = resolve_profile_flags(p)
+        result = resolve_profile_flags(p, mtp_override=True)
         assert MTP_FLAG_BUNDLE in result
 
     def test_empty_flags_mtp_false_returns_empty(self) -> None:
@@ -163,7 +174,7 @@ class TestResolveProfileFlags:
 
     def test_empty_flags_mtp_true_returns_bundle(self) -> None:
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="", mtp=True)
-        result = resolve_profile_flags(p)
+        result = resolve_profile_flags(p, mtp_override=True)
         assert result == MTP_FLAG_BUNDLE
 
     def test_flags_stripped(self) -> None:

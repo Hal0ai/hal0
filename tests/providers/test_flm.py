@@ -97,9 +97,25 @@ def test_start_cmd_uses_flm_serve(
 # ─── image_ref / container_spec ───────────────────────────────────────────────
 
 
-def test_image_ref_is_hal0ai_flm(provider: FLMProvider) -> None:
+def test_image_ref_is_hal0ai_flm(provider: FLMProvider, tmp_hal0_home: str) -> None:
+    """Bundled default when no slot override / env / manifest pin applies.
+
+    §7.1b / ML-4: image_ref now routes through the shared runner registry
+    (env override -> manifest digest pin -> this bundled default), so this
+    needs a manifest-isolated home — without it, ``resolve_runner_image``
+    picks up this checkout's real ``manifest.json`` digest pin (by design,
+    see ``hal0.config.loader._find_manifest_path``'s repo-root fallback for
+    ad-hoc/no-HAL0_HOME runs), which is exactly the fix (FLM honoring the
+    manifest at all is new — see ``tests/runners/test_resolve_image.py``
+    for the digest-pin-wins case).
+    """
     assert provider.image_ref({}) == _HAL0_FLM_IMAGE
     assert _HAL0_FLM_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-flm")
+
+
+def test_image_ref_honors_slot_override(provider: FLMProvider, tmp_hal0_home: str) -> None:
+    """§7.1b / ML-4 fix: FLM previously ignored slot.image entirely."""
+    assert provider.image_ref({"image": "ghcr.io/dev/flm-pin:test"}) == "ghcr.io/dev/flm-pin:test"
 
 
 def test_container_spec_passes_through_accel_device(

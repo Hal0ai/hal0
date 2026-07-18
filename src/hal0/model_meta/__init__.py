@@ -79,7 +79,6 @@ Unknown-value policy — ONE documented rule per translation direction
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -562,30 +561,34 @@ def is_resolvable(model_id: str, registry: Any) -> bool:
 
 # ── MTP eligibility ───────────────────────────────────────────────────────────
 
-#: Matches an ``MTP`` marker delimited by a separator (or string edge) so it
-#: fires on ``…-MTP-…`` / ``…_mtp`` / ``….MTP`` filenames but not on an
-#: incidental ``mtp`` inside a longer word.
-_MTP_NAME_RE = re.compile(r"(?:^|[-_. ])mtp(?:[-_. ]|$)", re.IGNORECASE)
-
 
 def model_is_mtp_eligible(model_info: Mapping[str, Any]) -> bool:
-    """True when a model ships MTP / NextN speculative-decoding heads.
+    """True when a model should speculate with MTP / NextN draft heads.
 
-    Gates **auto** MTP (``SlotConfig.mtp is None``): an MTP-opting profile only
-    speculates for an eligible model, so a non-MTP model on an MTP profile no
-    longer launches with dead ``--spec-draft-*`` flags — and an explicit slot
-    ``mtp=true`` still forces it regardless.  Eligibility is the registry
-    ``mtp`` tag, or (for uncurated local pulls that carry no tags) an ``MTP``
-    marker in the model id / GGUF name.  ``model_info`` is the registry
-    ``model_dump`` dict the container provider already resolves per launch.
+    §7.1a / ML-5: eligibility is purely MODEL-driven data now — an explicit
+    ``ModelDefaults.mtp`` tri-state wins in EITHER direction over the
+    registry ``mtp`` tag; when unset, the tag decides. The old filename/
+    GGUF-name ``MTP`` marker sniff (``_MTP_NAME_RE``) is REMOVED — an
+    uncurated local pull with no tag and no explicit ``defaults.mtp`` is
+    simply not eligible; tag the model (or set ``defaults.mtp = true``)
+    instead.
+
+    Gates **auto** MTP in :func:`hal0.providers.container._effective_mtp`
+    (``SlotConfig.mtp is None`` AND ``ModelDefaults.mtp is None``) and the
+    swap-time / upgrade-migration MTP-defuse helpers
+    (:mod:`hal0.slots.profile_adopt`, :mod:`hal0.updater.updater`), which
+    both call this directly. ``model_info`` is the registry ``model_dump``
+    dict (or the ``SlotManager._resolve_model_info`` fold of it) the
+    caller already resolves per launch/swap.
     """
+    defaults = model_info.get("defaults")
+    explicit = defaults.get("mtp") if isinstance(defaults, Mapping) else None
+    if explicit is not None:
+        return bool(explicit)
     tags = model_info.get("tags") or ()
-    if isinstance(tags, (list, tuple, set)) and any(
+    return isinstance(tags, (list, tuple, set)) and any(
         str(tag).strip().lower() == "mtp" for tag in tags
-    ):
-        return True
-    name = str(model_info.get("_model_key") or model_info.get("path") or "")
-    return bool(_MTP_NAME_RE.search(name))
+    )
 
 
 # ── label extraction ─────────────────────────────────────────────────────────

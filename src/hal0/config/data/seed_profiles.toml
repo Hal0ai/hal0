@@ -21,17 +21,25 @@
 # slug) carries the ROCm/Vulkan choice, and the card chip renders the backend
 # as colour, so the slug no longer repeats it. GPU profiles set `backend`;
 # non-GPU profiles (npu/cpu/img) omit it and let `device_class` drive display.
+#
+# §7.1a / ML-5: `mtp` on every profile below is INFORMATIONAL ONLY — it is
+# no longer read by resolve_profile_flags()/the launch path. MTP is a MODEL
+# capability now (ModelDefaults.mtp / the registry 'mtp' tag), gated by the
+# launching runner's supports.mtp. `--jinja` is likewise no longer a profile
+# flag — it's injected as a runner capability at launch time (default-on
+# for every llama-server runner, suppressible via ModelDefaults.jinja =
+# false), which is why it no longer appears in any flags string below.
 
 [profile.rocm]
 # Basic general-purpose ROCm GPU LLM profile (Strix Halo toolbox image).
-# Intentionally minimal: -ngl 999 (offload all), -fa on (flash attn),
-# --jinja (chat templating). Per-model KV/batch/MTP tuning lives in the
-# model's defaults.extra_args. mtp stays False — the ROCmFPX MTP lanes
-# live in rocm-dense / rocm-moe (and the vulkan-dense / vulkan-moe
-# pair on the Vulkan backend); the old rocmfpx-rocm / vkfpx-* slugs
+# Intentionally minimal: -ngl 999 (offload all), -fa on (flash attn).
+# --jinja is injected as a runner capability at launch (see the module
+# header). Per-model KV/batch/MTP tuning lives in the model's
+# defaults.extra_args. mtp stays False (informational) — the ROCmFPX MTP
+# capability is model-driven now; the old rocmfpx-rocm / vkfpx-* slugs
 # were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
 image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "-ngl 999 -fa on --jinja"
+flags = "-ngl 999 -fa on"
 mtp = false
 device_class = "gpu"
 backend = "rocm"
@@ -49,7 +57,7 @@ quant = "FP4"
 # workload's preferred memory pattern; per-model KV + spec-draft
 # tuning come from the model's defaults.extra_args.
 image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1"
+flags = "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1"
 mtp = true
 device_class = "gpu"
 backend = "rocm"
@@ -63,7 +71,7 @@ quant = "ROCmFP4"
 # backend lane across all their ROCmFPX slots. -sm none (single GPU)
 # and --no-context-shift per the validated Tool-Eval card.
 image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui"
+flags = "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
 mtp = true
 device_class = "gpu"
 backend = "rocm"
@@ -76,7 +84,7 @@ quant = "ROCmFPX"
 # cache miss). Small ubatch wins on gfx1151; per-model KV + spec-draft
 # tuning come from the model's defaults.extra_args.
 image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui"
+flags = "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
 mtp = true
 device_class = "gpu"
 backend = "vulkan"
@@ -89,55 +97,12 @@ quant = "ROCmFP4"
 # templates (e.g. Froggeric Qwen fixed) are set per-slot via
 # [server].extra_args.
 image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui"
+flags = "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
 mtp = true
 device_class = "gpu"
 backend = "vulkan"
 intent = "VULKFPX · MOE · MTP (best decode t/s)"
 quant = "ROCmFPX"
-
-# ── Dense-family variants (no-jinja / small / long-context) ──────────────
-# Reusable workload templates that sit alongside the 2x2 dense/moe grid.
-# They stay lean — model-specific KV/sampler tuning still belongs in the
-# model's defaults.extra_args, not here. Contributed from the operator
-# catalog after the 2026-07-05 ROCmFPX tuning (same -b/-ub/threads shape as
-# the retuned dense seeds, no SMT-oversub `--threads-batch 32`).
-
-[profile.rocm-dense-nojinja]
-# rocm-dense minus `--jinja`: for base models / GGUFs that carry a
-# baked-in chat template, where llama.cpp's jinja layer would
-# double-wrap the prompt. mtp False — no draft head assumed.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1"
-mtp = false
-device_class = "gpu"
-backend = "rocm"
-intent = "ROCmFPX · DENSE · no-jinja (baked chat template)"
-quant = "ROCmFP4"
-
-[profile.vulkan-dense-nojinja]
-# Vulkan sibling of rocm-dense-nojinja (see it for the no-jinja
-# rationale). Mirrors vulkan-dense minus `--jinja`.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
-mtp = false
-device_class = "gpu"
-backend = "vulkan"
-intent = "VULKFPX · DENSE · no-jinja (baked chat template)"
-quant = "ROCmFP4"
-
-[profile.rocm-dense-small]
-# The dense batch/mmap tuning without MTP — for small dense chat models
-# (≤~2B) that have no self-speculative draft head, where the spec-draft
-# bundle would be inert. Keeps `--jinja`. Operators on a Vulkan-only box
-# clone this to Vulkan0.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1"
-mtp = false
-device_class = "gpu"
-backend = "rocm"
-intent = "ROCmFPX · DENSE · small (no MTP draft head)"
-quant = "ROCmFP4"
 
 [profile.rocm-longctx]
 # Dense long-context template: q8_0 KV halves the KV-cache footprint so
@@ -145,7 +110,7 @@ quant = "ROCmFP4"
 # decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
 # back to f16 KV (iSWA regresses on quantized KV). mtp False.
 image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui"
+flags = "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui"
 mtp = false
 device_class = "gpu"
 backend = "rocm"
@@ -154,11 +119,12 @@ quant = "FP4"
 
 [profile.vulkan]
 # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
-# minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
+# minimal: -ngl 999, -fa on (--jinja is injected as a runner capability at
+# launch — see the module header). No KV quant (defaults to f16, which
 # is gemma-safe) — per-model KV/batch tuning lives in the model's
 # defaults.extra_args.
 image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "-ngl 999 -fa on --jinja"
+flags = "-ngl 999 -fa on"
 mtp = false
 device_class = "gpu"
 backend = "vulkan"
@@ -175,7 +141,7 @@ quant = "Q4_K_M"
 # NOTE: literal (not a sentinel) — this is the upstream llama.cpp image,
 # not a ROCmFPX/Vulkan-fallback pin the ML-runner registry is absorbing.
 image = "ghcr.io/ggml-org/llama.cpp:server-cuda"
-flags = "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja"
+flags = "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp = false
 device_class = "gpu"
 backend = "cuda"
@@ -282,7 +248,7 @@ quant = "BF16"
 # cache (faster re-loads, no GTT involved); --no-mmap would force the
 # whole model into anonymous RAM and forfeit page-cache-backed reloads.
 image = "@FALLBACK_VULKAN_IMAGE" # CPU-only: lean toolbox in CPU mode (rocmfpx is wasteful)
-flags = "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja"
+flags = "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1"
 mtp = false
 device_class = "cpu"
 intent = "CPU"
