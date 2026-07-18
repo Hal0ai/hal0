@@ -1540,7 +1540,27 @@ class SlotManager:
                 names.append(n)
         if not names:
             return []
-        return list(await asyncio.gather(*(self.status(n) for n in names)))
+
+        async def _status_or_error(n: str) -> Slot:
+            # One unreadable slot (e.g. a root-owned state.json left behind
+            # by an old install — halo150 O1) must not fail the whole
+            # collection: surface THAT slot as ERROR with the reason and let
+            # the rest enumerate. Real per-slot reads still raise on the
+            # single-slot endpoints, so the typed envelope is not lost.
+            try:
+                return await self.status(n)
+            except SlotConfigError as exc:
+                log.warning(
+                    "slot.status_degraded",
+                    extra={"slot": n, "error": str(exc)},
+                )
+                return Slot(
+                    name=n,
+                    state=SlotState.ERROR,
+                    metadata={"config_error": str(exc)},
+                )
+
+        return list(await asyncio.gather(*(_status_or_error(n) for n in names)))
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         """Return raw slot config dicts for every configured slot.

@@ -19,6 +19,44 @@ def _api_base() -> str:
     return os.environ.get("HAL0_API_URL", "http://127.0.0.1:8080").rstrip("/")
 
 
+def _key_from_api_env() -> str | None:
+    """Best-effort read of an API key from /etc/hal0/api.env.
+
+    The CLI usually runs on the box itself (often as root), where api.env is
+    readable even though the keys aren't in the caller's environment. Admin
+    key preferred (doctor probes admin surfaces); silent None on any failure —
+    auth then simply isn't attached, same as before this seam existed.
+    """
+    try:
+        from hal0.config import paths as cfg_paths
+
+        text = (cfg_paths.etc() / "api.env").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k in ("HAL0_ADMIN_KEY", "HAL0_CLIENT_KEY") and v:
+            found[k] = v.strip().strip('"').strip("'")
+    return found.get("HAL0_ADMIN_KEY") or found.get("HAL0_CLIENT_KEY")
+
+
+def _auth_headers() -> dict[str, str]:
+    """Bearer header for CLI→API calls on an auth-enabled box (halo150 O2).
+
+    Precedence: HAL0_ADMIN_KEY env → HAL0_CLIENT_KEY env → api.env on disk.
+    Empty when no key is discoverable — loopback dev boxes stay keyless and
+    the API's development-open posture handles them.
+    """
+    key = os.environ.get("HAL0_ADMIN_KEY") or os.environ.get("HAL0_CLIENT_KEY")
+    if not key:
+        key = _key_from_api_env()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def _api_unreachable(url: str) -> bool:
     """Return True (and print an error) if the API is not reachable on ``url``.
 
@@ -86,6 +124,11 @@ def api_get_bytes(
     other ``api_*`` helpers.
     """
     url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
+    headers = dict(kwargs.pop("headers", None) or {})
+    if "Authorization" not in headers:
+        headers.update(_auth_headers())
+    if headers:
+        kwargs["headers"] = headers
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.get(url, **kwargs)
@@ -106,6 +149,14 @@ def _api_request(
 ) -> Any:
     """Issue a single HTTP request and decode JSON or raise CliApiError."""
     url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
+    # Attach discovered credentials unless the caller set their own
+    # Authorization header. Fixes anonymous CLI probes on auth-on boxes
+    # (halo150 O2: doctor reported every gated endpoint "unreachable").
+    headers = dict(kwargs.pop("headers", None) or {})
+    if "Authorization" not in headers:
+        headers.update(_auth_headers())
+    if headers:
+        kwargs["headers"] = headers
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.request(method, url, **kwargs)

@@ -1086,3 +1086,32 @@ async def test_update_config_non_image_edit_leaves_arbiter_untouched(slot_root: 
     await sm._transition("img", _S.OFFLINE, force=True)
     await sm.update_config("img", {"model": {"default": "sd-1.5"}})
     assert sm.arbiter.idle_restore_minutes == 45
+
+
+class TestListDegradesOnUnreadableSlot:
+    """halo150 O1 cascade: one unreadable slot must not fail the collection."""
+
+    async def test_list_surfaces_error_slot_instead_of_raising(
+        self, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sm = SlotManager()
+        await sm.add_slot("goodslot", type="llm", model="m1", port=18081)
+        await sm.add_slot("badslot", type="llm", model="m2", port=18082)
+
+        # Break ONLY badslot's status the way a root-owned state.json does:
+        # its state file read raises OSError → SlotConfigError.
+        bad_state = sm._state_file("badslot")
+        bad_state.parent.mkdir(parents=True, exist_ok=True)
+        if bad_state.exists():
+            bad_state.unlink()
+        bad_state.mkdir()  # reading a directory raises IsADirectoryError
+
+        # Fresh manager = fresh process (empty in-memory caches), which is
+        # exactly the halo150 situation: the API restarted and hit the
+        # unreadable file on first enumeration.
+        sm = SlotManager()
+        slots = await sm.list()
+        by_name = {s.name: s for s in slots}
+        assert "goodslot" in by_name
+        assert by_name["badslot"].state == SlotState.ERROR
+        assert "config_error" in by_name["badslot"].metadata
