@@ -1409,6 +1409,14 @@ def create_app() -> FastAPI:
     # AuthEnforcementMiddleware / require_auth_enabled docstrings.
     app.add_middleware(AuthEnforcementMiddleware)
 
+    # KB-1 hardening: per-IP brute-force throttle for POST /api/auth/login.
+    # One limiter per app instance (fresh per create_app() so tests stay
+    # isolated); the login route reads it off app.state and meters every
+    # attempt before the key compare. Budget tunes via HAL0_LOGIN_RATELIMIT_*.
+    from hal0.security.ratelimit import login_limiter_from_env
+
+    app.state.login_limiter = login_limiter_from_env()
+
     # /api/auth: login (mints the admin-equivalent session cookie via the
     # SAME HMAC cookie agents/_auth.py already ships) + status (posture
     # report for the dashboard's own auth gate). Both routes are OPEN in

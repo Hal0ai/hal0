@@ -149,6 +149,26 @@ class Conflict(Hal0Error):
     status = 409
 
 
+class TooManyRequests(Hal0Error):
+    """429 — the caller has exceeded a rate budget and should back off.
+
+    Use for brute-force / abuse throttles (e.g. the login endpoint's
+    per-IP attempt limiter). Carry a ``retry_after_s`` hint in ``details``
+    so a client can pace its next attempt.
+
+    Example::
+
+        raise TooManyRequests(
+            "too many login attempts",
+            code="auth.rate_limited",
+            details={"retry_after_s": 42},
+        )
+    """
+
+    code = "system.rate_limited"
+    status = 429
+
+
 class UnsupportedMediaType(Hal0Error):
     """415 — the request body's media type is not one the route can handle.
 
@@ -201,6 +221,7 @@ __all__ = [
     "Forbidden",
     "Hal0Error",
     "NotFound",
+    "TooManyRequests",
     "Unauthorized",
     "UnprocessableEntity",
     "UnsupportedMediaType",
