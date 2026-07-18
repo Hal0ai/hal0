@@ -78,7 +78,7 @@ def _patch_httpx_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_cls(*args, **kwargs)
 
-    monkeypatch.setattr("hal0.api.routes.hf.httpx.AsyncClient", factory)
+    monkeypatch.setattr("hal0.upstreams.huggingface.httpx.AsyncClient", factory)
 
 
 # ── App + client fixtures (cold search cache between cases) ────────────────

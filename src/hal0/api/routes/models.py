@@ -18,14 +18,12 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
-from hal0.errors import Hal0Error
 from hal0.model_meta import classify
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.detect import DetectionResult, detect
@@ -44,6 +42,8 @@ from hal0.registry.pull import persist_pull_job as _persist_pull_job
 from hal0.registry.pull import pull_job_file as _pull_job_file
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.upstreams.filters import apply_filters
+from hal0.upstreams.huggingface import fetch_repo as _fetch_hf_repo
+from hal0.upstreams.huggingface import normalise_repo_slug as _normalise_hf_repo
 
 # See slots.py for the writer-gate rationale.
 
@@ -2184,249 +2184,7 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
 # on the same modal session free; the 5 minute TTL is short enough that
 # a freshly-uploaded quant lands within one render.
 _INSPECT_TTL_SECONDS = 300
-_INSPECT_TIMEOUT_SECONDS = 8.0
 _INSPECT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_INSPECT_GGUF_SUFFIX = ".gguf"
-# mmproj sidecars are often uploaded with a bare ``.mmproj`` extension
-# (e.g. ``mmproj-Foo-F32.mmproj``) rather than ``…mmproj….gguf``.  The local
-# directory scanner (:func:`hal0.registry.discover._is_mmproj_sidecar`) matches
-# those by name regardless of extension, so the HF inspect path has to admit
-# them too — otherwise the Add-by-HF modal's vision picker shows "no mmproj
-# files in repo" and a vision pull silently ships without a projector.
-_INSPECT_MMPROJ_SUFFIX = ".mmproj"
-
-_INSPECT_FLM_TOKENIZERS = ("tokenizer.json", "tokenizer.model")
-
-
-def _looks_like_flm_repo(rel_basenames: set[str]) -> bool:
-    """True when an HF repo tree has the FastFlowLM (NPU) model shape.
-
-    FLM models aren't a single GGUF — they're a HF-Transformers-shaped
-    directory (``config.json`` + a tokenizer + NPU-quant weights, e.g.
-    ``model.q4nx``), so the ``.gguf``/``.mmproj`` variant filter skips every
-    file and the repo inspects as "no variants".
-
-    Detected by dir shape rather than a brittle weight-extension allowlist:
-    ``config.json`` + tokenizer + at least one NPU-quant weight blob matched
-    by the FastFlowLM ``…nx`` quant family (``model.q4nx`` and future levels).
-    Requiring the ``nx`` blob is what keeps a plain GGUF/safetensors repo —
-    which shares ``config.json``/``tokenizer`` — from being misread as FLM.
-    """
-    has_config = "config.json" in rel_basenames
-    has_tokenizer = any(t in rel_basenames for t in _INSPECT_FLM_TOKENIZERS)
-    has_npu_weight = any("." in n and n.endswith("nx") for n in rel_basenames)
-    return has_config and has_tokenizer and has_npu_weight
-
-
-class _HFUpstreamError(Hal0Error):
-    """502 — fetching huggingface.co failed (network, 5xx, or unparseable)."""
-
-    code = "hf.unreachable"
-    status = 502
-
-
-def _normalise_hf_repo(value: str) -> str:
-    """Reduce a HF repo input to ``org/name``.
-
-    Accepts the canonical ``org/name`` slug and a full
-    ``https://huggingface.co/org/name[/...]`` URL — both are surfaced
-    in the dashboard's Add-by-HF modal. Trims trailing slashes and
-    drops the ``/tree/<rev>`` / ``/blob/<rev>/...`` suffixes that the
-    HF UI tends to copy along with the slug.
-    """
-    raw = (value or "").strip()
-    if not raw:
-        return ""
-    # Strip protocol + host so we can normalise URL + slug uniformly.
-    for prefix in ("https://huggingface.co/", "http://huggingface.co/", "huggingface.co/"):
-        if raw.startswith(prefix):
-            raw = raw[len(prefix) :]
-            break
-    raw = raw.strip("/")
-    # Drop /tree/<rev> or /blob/<rev>/<path> if the user pasted a deep link.
-    parts = raw.split("/")
-    repo = f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else raw
-    return repo
-
-
-def _extract_readme_excerpt(card_data: Any, limit: int = 400) -> str:
-    """Pull a short README excerpt from the HF model API payload.
-
-    HF returns the model card body under different shapes depending on
-    the endpoint. ``cardData`` carries YAML frontmatter; the actual
-    README body comes back under ``description`` or ``card``. Use
-    whatever is present and truncate hard so the modal stays light.
-    """
-    candidates: list[str] = []
-    if isinstance(card_data, dict):
-        for key in ("description", "card", "readme"):
-            v = card_data.get(key)
-            if isinstance(v, str) and v.strip():
-                candidates.append(v.strip())
-    if not candidates:
-        return ""
-    text = candidates[0]
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "…"
-
-
-def _format_size(size_bytes: int | None) -> str:
-    """Format bytes as a short human label used in the variant dropdown."""
-    if not isinstance(size_bytes, int) or size_bytes <= 0:
-        return "—"
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    if size_bytes < 1024**2:
-        return f"{size_bytes / 1024:.1f} KB"
-    if size_bytes < 1024**3:
-        return f"{size_bytes / 1024**2:.1f} MB"
-    return f"{size_bytes / 1024**3:.2f} GB"
-
-
-async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
-    """Fetch HF model metadata + tree listing for ``repo``.
-
-    Returns the shape consumed by :func:`inspect_model`. Raises a
-    typed :class:`hal0.errors.Hal0Error` subclass on transport failure
-    or 404 so the route maps it to the dashboard envelope.
-    """
-    headers = {"Accept": "application/json"}
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
-
-    meta_url = f"https://huggingface.co/api/models/{repo}"
-    tree_url = f"https://huggingface.co/api/models/{repo}/tree/main"
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS),
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            meta_res, tree_res = await asyncio.gather(
-                client.get(meta_url),
-                client.get(tree_url),
-            )
-    except (httpx.TimeoutException, httpx.HTTPError) as exc:
-        raise _HFUpstreamError(
-            f"failed to reach huggingface.co for {repo!r}: {exc.__class__.__name__}",
-            code="hf.unreachable",
-            details={"repo": repo, "error": str(exc)},
-        ) from exc
-
-    if meta_res.status_code == 404:
-        raise NotFound(
-            f"hugging face repo {repo!r} not found",
-            code="hf.repo_not_found",
-            details={"repo": repo},
-        )
-    if meta_res.status_code >= 400:
-        raise _HFUpstreamError(
-            f"hugging face metadata fetch returned {meta_res.status_code}",
-            code="hf.upstream_error",
-            details={"repo": repo, "status": meta_res.status_code},
-        )
-    if tree_res.status_code >= 400:
-        # A missing tree (private repo, gated, etc.) is recoverable —
-        # we still surface tags + metadata, just with no variants.
-        tree_payload: list[Any] = []
-    else:
-        try:
-            tree_payload = tree_res.json() or []
-        except ValueError:
-            tree_payload = []
-
-    try:
-        meta_payload = meta_res.json() or {}
-    except ValueError:
-        meta_payload = {}
-
-    variants: list[dict[str, Any]] = []
-    rel_basenames: set[str] = set()
-    flm_total_bytes = 0
-    for entry in tree_payload:
-        if not isinstance(entry, dict):
-            continue
-        rel = entry.get("path") or entry.get("rfilename")
-        if not isinstance(rel, str):
-            continue
-        rel_low = rel.lower()
-        rel_basenames.add(rel_low.rsplit("/", 1)[-1])
-        # HF's tree API reports the *pointer file* size in ``size`` for
-        # LFS objects; the real bytes live under ``lfs.size``. Prefer
-        # the LFS size when present so the modal shows the real
-        # download size, not the 100-byte pointer.
-        size_raw: Any = None
-        lfs = entry.get("lfs")
-        if isinstance(lfs, dict):
-            size_raw = lfs.get("size")
-        if size_raw is None:
-            size_raw = entry.get("size")
-        try:
-            size_bytes = int(size_raw) if size_raw is not None else 0
-        except (TypeError, ValueError):
-            size_bytes = 0
-        flm_total_bytes += size_bytes
-        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
-        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
-        # the modal filters it out of the main variant dropdown (by the
-        # "mmproj" token) and into the vision picker. Guard on the token too so
-        # an unrelated ``.mmproj`` never slips into the main list.
-        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
-        if not (is_gguf or is_mmproj):
-            continue
-        # Use the GGUF filename as the canonical variant id — that's
-        # also what the pull endpoint resolves against (hf_filename).
-        kind_label = "mmproj sidecar" if (is_mmproj and not is_gguf) else "single file"
-        variants.append(
-            {
-                "id": rel,
-                "size_bytes": size_bytes,
-                "size": _format_size(size_bytes),
-                "info": _format_size(size_bytes) + " · " + kind_label,
-            }
-        )
-    variants.sort(key=lambda v: v.get("size_bytes") or 0)
-    # FLM/NPU repos carry no GGUF variant but a config.json + tokenizer +
-    # ``…nx`` NPU-weight shape. Surface one whole-repo variant flagged
-    # ``flm`` so the dashboard routes the pull through the FLM path
-    # (``flm pull``) instead of the GGUF hf-download path, rather than
-    # showing the repo as having nothing to pull.
-    if not variants and _looks_like_flm_repo(rel_basenames):
-        variants.append(
-            {
-                "id": repo,
-                "size_bytes": flm_total_bytes,
-                "size": _format_size(flm_total_bytes),
-                "info": _format_size(flm_total_bytes) + " · FLM (NPU) — served via `flm pull`",
-                "flm": True,
-            }
-        )
-
-    tags_raw = meta_payload.get("tags") or []
-    tags = [t for t in tags_raw if isinstance(t, str)]
-
-    license_label = ""
-    card = meta_payload.get("cardData")
-    if isinstance(card, dict):
-        lic = card.get("license")
-        if isinstance(lic, str):
-            license_label = lic
-    if not license_label:
-        # Fallback: HF exposes the top-level "license" sometimes.
-        lic = meta_payload.get("license")
-        if isinstance(lic, str):
-            license_label = lic
-
-    return {
-        "variants": variants,
-        "tags": tags,
-        "metadata": {
-            "license": license_label,
-            "readme_excerpt": _extract_readme_excerpt(card),
-        },
-    }
 
 
 @router.post("/inspect")
