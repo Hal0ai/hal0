@@ -31,6 +31,7 @@ from hal0.api.agents import (
     restart as agents_restart_routes,
 )
 from hal0.api.agents.chat_proxy import router as chat_proxy_router
+from hal0.api.auth import AuthEnforcementMiddleware
 from hal0.api.middleware import error_codes, log_scrub, request_id
 from hal0.api.openrouter import router as openrouter_auth_router
 from hal0.api.plugins import router as plugin_manifest_router
@@ -42,6 +43,9 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     approvals as approvals_routes,
+)
+from hal0.api.routes import (
+    auth as auth_routes,
 )
 from hal0.api.routes import (
     backends as backends_routes,
@@ -1272,6 +1276,22 @@ def create_app() -> FastAPI:
     # uvicorn access log so a future sensitive parameter never lands
     # in journald.
     log_scrub.install(app)
+
+    # KB-1 / §1: deny-by-default auth gate. Installed here -- right after
+    # log_scrub, before any app.include_router() call -- so every request
+    # (http incl. SSE, and websocket) passes through path classification
+    # (hal0.security.exposure, seam S9) before it can reach a route
+    # handler. Dev-open (loopback + no keys configured) bypasses this
+    # entirely, which is what keeps the pre-existing TestClient suite
+    # green without every test needing to know auth exists; see
+    # AuthEnforcementMiddleware / require_auth_enabled docstrings.
+    app.add_middleware(AuthEnforcementMiddleware)
+
+    # /api/auth: login (mints the admin-equivalent session cookie via the
+    # SAME HMAC cookie agents/_auth.py already ships) + status (posture
+    # report for the dashboard's own auth gate). Both routes are OPEN in
+    # security/exposure.py -- you can't require a cookie to obtain one.
+    app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
 
     # /v1 is split into a public probe (GET /v1/models + /v1/models/{id})
     # and a writer surface that requires auth. The split lives in v1.py
