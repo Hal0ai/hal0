@@ -12,7 +12,9 @@ class TestMetricsMigration:
     def test_002_applies_after_001_creates_expected_tables(self, tmp_path: Path) -> None:
         with connect(tmp_path / "t.db") as conn:
             applied = migrate(conn)
-            assert applied == [1, 2]
+            # 002 applies after 001, in order. Later migrations (003_store, ...)
+            # tack on after; assert the 001->002 prefix rather than an exact set.
+            assert applied[:2] == [1, 2]
             tables = {
                 row[0]
                 for row in conn.execute(
@@ -64,7 +66,10 @@ class TestMetricsMigration:
 
         with connect(db) as conn:
             applied = migrate(conn)
-            assert applied == [2]
+            # 001 already applied -> resumes at 002. Later migrations follow;
+            # assert 001 is skipped and 002 leads, not an exact set.
+            assert 1 not in applied
+            assert applied[0] == 2
 
     def test_request_metric_row_round_trips(self, tmp_path: Path) -> None:
         with connect(tmp_path / "t.db") as conn:
