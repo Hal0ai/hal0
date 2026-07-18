@@ -488,17 +488,6 @@ def _podman_major_version() -> int:
         return 0
 
 
-def _quadlet_supports_autoremove() -> bool:
-    """``AutoRemove=`` is a quadlet key only since podman 5.0.
-
-    4.x generators hard-fail the whole ``.container`` conversion on the
-    unknown key (halo150 O8) — so when the version can't be determined we
-    OMIT the key: losing crash-path auto-remove is recoverable, a unit that
-    never generates is not.
-    """
-    return _podman_major_version() >= 5
-
-
 def _slot_publish_host() -> str:
     """Live ``[slots].publish_host`` — the address slot ports publish on.
 
@@ -595,13 +584,20 @@ def _render_quadlet_from_plan(
         # would tag a second copy — the old B3 note).
         "LogDriver=none",
     ]
-    # ``AutoRemove=`` (the old ``--rm``) is a quadlet key only since podman
-    # 5.0 — 4.x generators HARD-FAIL the whole conversion on it ("unsupported
-    # key 'AutoRemove'") and emit NO unit at all (halo150 O8, podman 4.9.3 on
-    # Ubuntu 24.04). Emit only when the generator supports it; below 5.0 the
-    # generated unit's own ExecStopPost `podman rm` handles stop-cleanup, we
-    # only lose the crash-path auto-remove.
-    if _quadlet_supports_autoremove():
+    # ── podman-4.x quadlet compat (halo150 O8) ────────────────────────────
+    # ``AutoRemove=``, ``GroupAdd=`` (and generic ``SecurityOpt=``) are
+    # quadlet keys the podman 5.0 generator knows; a 4.x generator HARD-FAILS
+    # the whole conversion on any unknown key and emits NO unit at all
+    # (Ubuntu 24.04 ships 4.9.3 — and GroupAdd is load-bearing: it grants the
+    # GPU device groups). ``PodmanArgs=`` is the version-stable escape hatch
+    # (raw `podman run` flags, supported throughout 4.x): below 5.0 the
+    # affected keys are translated to their CLI-flag equivalents so the unit
+    # generates with FULL functionality; AutoRemove alone is dropped rather
+    # than translated (`--rm` races the generated unit's own cidfile
+    # ExecStopPost rm) — losing crash-path auto-remove is the only 4.x delta.
+    quadlet5 = _podman_major_version() >= 5
+    compat_args: list[str] = []
+    if quadlet5:
         lines.append("AutoRemove=yes")
     if plan.network_mode:
         lines.append(f"Network={plan.network_mode}")
@@ -611,11 +607,19 @@ def _render_quadlet_from_plan(
         lines.append(f"AddDevice={dev}")
     # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
     for gid in plan.group_add:
-        lines.append(f"GroupAdd={gid}")
+        if quadlet5:
+            lines.append(f"GroupAdd={gid}")
+        else:
+            compat_args += ["--group-add", str(gid)]
     for cap in plan.cap_add:
         lines.append(f"AddCapability={cap}")
     for opt in plan.security_opt:
-        lines.append(f"SecurityOpt={opt}")
+        if quadlet5:
+            lines.append(f"SecurityOpt={opt}")
+        else:
+            compat_args += ["--security-opt", str(opt)]
+    if compat_args:
+        lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in compat_args))
     # Read-only + SELinux ``:z`` are first-class Mount flags; render_quadlet omits
     # the relabel on NFS sources (chcon ENOTSUP there).
     for mount in plan.mounts:

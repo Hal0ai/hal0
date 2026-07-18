@@ -419,7 +419,10 @@ class TestRenderUnit:
         assert "--chat-template-kwargs" in tokens
         assert tokens[tokens.index("--chat-template-kwargs") + 1] == json_kwargs
 
-    def test_security_opts(self) -> None:
+    def test_security_opts(self, monkeypatch) -> None:
+        # Pin the 5.x native-key branch; the 4.x PodmanArgs translation is
+        # covered by TestQuadletAutoRemoveGate.
+        monkeypatch.setattr(_container_mod, "_podman_major_version", lambda: 5)
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
@@ -462,7 +465,9 @@ class TestRenderUnit:
         # Quadlet owns crash recovery now (was the hand-rendered Restart=no).
         assert "Restart=always" in unit.splitlines()
 
-    def test_numeric_group_add_present(self) -> None:
+    def test_numeric_group_add_present(self, monkeypatch) -> None:
+        # Pin the 5.x native-key branch (see test_security_opts note).
+        monkeypatch.setattr(_container_mod, "_podman_major_version", lambda: 5)
         """GroupAdd= must use numeric GIDs (toolbox images lack group names)."""
         from hal0.providers._gpu import resolve_gpu_group_ids
 
@@ -527,7 +532,10 @@ class TestContainerSpec:
             spec = self._build_spec()
         assert spec.devices == ["/dev/kfd", "/dev/dri/renderD128"]
 
-    def test_security_opts(self) -> None:
+    def test_security_opts(self, monkeypatch) -> None:
+        # Pin the 5.x native-key branch; the 4.x PodmanArgs translation is
+        # covered by TestQuadletAutoRemoveGate.
+        monkeypatch.setattr(_container_mod, "_podman_major_version", lambda: 5)
         spec = self._build_spec()
         assert "apparmor=unconfined" in spec.security_opt
         assert "seccomp=unconfined" in spec.security_opt
@@ -1013,13 +1021,24 @@ class TestQuadletAutoRemoveGate:
         monkeypatch.setattr(c, "_podman_major_version", lambda: major)
         return _render_llama("qtest", "img:latest", 18081, "/models/m.gguf", "-fa on")
 
-    def test_podman5_emits_autoremove(self, monkeypatch):
-        assert "AutoRemove=yes" in self._rendered(monkeypatch, 5)
+    def test_podman5_emits_native_keys(self, monkeypatch):
+        text = self._rendered(monkeypatch, 5)
+        assert "AutoRemove=yes" in text
+        assert "GroupAdd=" in text or "--group-add" not in text
 
-    def test_podman4_omits_autoremove(self, monkeypatch):
-        assert "AutoRemove" not in self._rendered(monkeypatch, 4)
+    def test_podman4_translates_to_podman_args(self, monkeypatch):
+        text = self._rendered(monkeypatch, 4)
+        assert "AutoRemove" not in text
+        assert "GroupAdd=" not in text
+        assert "SecurityOpt=" not in text
+        # GPU groups survive as raw podman-run flags (load-bearing —
+        # stripping them would kill GPU access).
+        if "--group-add" in text:
+            assert "PodmanArgs=" in text
 
-    def test_unknown_version_omits_autoremove(self, monkeypatch):
-        # Fail-soft: a unit that never generates is worse than losing
-        # crash-path auto-remove.
-        assert "AutoRemove" not in self._rendered(monkeypatch, 0)
+    def test_unknown_version_treated_as_pre5(self, monkeypatch):
+        # Fail-soft: a unit that never generates is worse than a compat
+        # translation on a 5.x box.
+        text = self._rendered(monkeypatch, 0)
+        assert "AutoRemove" not in text
+        assert "GroupAdd=" not in text
