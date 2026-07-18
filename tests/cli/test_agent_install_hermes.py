@@ -576,7 +576,9 @@ def test_provision_hermes_non_root_runs_in_process(monkeypatch) -> None:
         raise AssertionError("root prelude must not run when non-root")
 
     monkeypatch.setattr(ac, "_hermes_root_prelude", _boom)
-    monkeypatch.setattr(ac, "_run_as_hal0", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(
+        ac, "_run_as_hal0", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError())
+    )
 
     rc = ac._provision_hermes(adopt=True, repair=True)
 
