@@ -104,6 +104,16 @@ Same masker feeds config dumps elsewhere, so the gap is broader than the bundle.
 this vulkan box, expected; `podman-images` 106 lines ✓; journalctl captured as `logs/hal0-api.log` /
 `logs/hal0-agent.log` rather than `logs/journalctl.txt`.)*
 
+### O10 — deprecated `[server].extra_args` mangles JSON in the Exec render  *(minor / deprecated surface)*
+Setting `[server].extra_args = "--chat-template-kwargs '{\"enable_thinking\":false}'"` (the exact
+runbook 4.2 form, quotes verified intact in the toml) renders into the quadlet `Exec=` as
+`--chat-template-kwargs '{enable_thinking:false}'` — **inner double-quotes stripped** → invalid JSON
+→ llama-server crashes (slot `error`/exit-code). `shlex` in isolation preserves the quotes, so the
+loss is a **double-tokenization** in the Exec builder. **Caveat:** `extra_args` is explicitly
+**deprecated** (`container.extra_args_deprecated` warning: "move these to a profile"), and the
+supported no-think path (the `enable_thinking` field + `:8080` normalize) works correctly — so this
+is a low-severity edge on a deprecated surface, not the core 4.2 assertion.
+
 ### O3 — `hal0-agent@hermes` start-timeout loop
 `HERMES_DASHBOARD_READY port=9119` logs, then `start operation timed out` (2 min) →
 `status=241/CONFIGURATION_DIRECTORY`, restart loop. Never signals systemd readiness.
@@ -122,10 +132,30 @@ Expected; deferred by choice.
 - **Phase 1** (deploy + health): deploy ✔, API 200 ✔, `doctor all` clean ✔, golden-path load + GPU inference ✔ (after O8 compat).
 - **Phase 2** (quadlet `@`-name verify): **GREEN via O8 compat** — `@`-name accepted, generator converts (`PodmanArgs=`), container Up, health ok, teardown clean (file+unit+container gone).
 - **Phase 3** (M5 rehearsal on copy): **GREEN** — 9 slots id-keyed (`<id>.toml`, `<id>/state.json`, `slot_id`+`name`), recorded renames match `hal0-slot@<id>`, idempotent 2nd pass (no-op).
-- **Phase 4** (live smoke): in progress.
+- **Phase 4** (live smoke): complete.
+  - 4.1 rename: **GREEN** — running slot refused with reason ("must be offline… unit still name-keyed"); offline rename succeeds, `by-id` shows id+port stable, name changed.
+  - 4.2 no-think: **GREEN (supported path)** — `enable_thinking` field + `:8080` normalize → `content:'HELLO_HALO'`, `finish:stop`. Secondary: deprecated `extra_args` raw-flag path mangles JSON quotes (O10).
   - 4.3 doctor bundle: **RED — O9** (admin/client keys leak unmasked).
   - 4.4 system-info: **GREEN** — real GPU (AMD Strix Halo, 116GB VRAM, amdgpu/vulkan), backends `rocmfpx`/`vulkanfpx`.
-  - 4.1 rename semantics / 4.2 `enable_thinking=false` quoting: pending.
+  - 4.5 doctor vs baseline: **GREEN** — nothing newly red (only known WARNs: Hermes O3, migration O4).
+
+## Phase 5 — report
+
+**Greens (flip held-for-deploy):** clone→privileged, GPU passthrough, podman-run (apparmor fix),
+fresh R3 git install, auth, doctor (post O2), slot CRUD, **quadlet `@`-name generation on podman
+4.9.3 via compat (O8)**, container run + health + GPU inference, teardown, M5 id-keying rehearsal
+(+ idempotence), rename semantics, no-think via supported path, system-info real GPU.
+
+**Reds / fix-forward lanes:** O9 (bundle secret leak — security, one-line regex fix), O3 (hermes
+start-timeout), and installer-hygiene lane R4/O6/O7 (apparmor preflight, lock ownership, legacy
+static-unit removal). O10 (deprecated extra_args quoting) low-priority. O4 migration on-demand.
+
+**Substrate settled:** live reference lxc105 = podman 4.9.3 / Ubuntu 24.04 → R3 compat path is
+correct; podman-5 template refresh is an R5 DEPLOY-row item, not a blocker.
+
+**Box left:** on descar tip `8cbc9902` + local `container.py@a2e04193` compat swap (matches descar
+`5adf6e0f`); test slots removed; pristine seeded slots offline. For durability, redeploy from descar
+tip (which carries the compat) so the swap isn't a one-off.
 
 ## Environment notes (accepted, not issues)
 - Privileged + `apparmor unconfined` ⇒ container root ≈ host root (requested).
