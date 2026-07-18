@@ -148,17 +148,23 @@ def test_create_mtp_false_resolved_flags_equals_flags(client: TestClient) -> Non
     assert "--spec-type" not in body["resolved_flags"]
 
 
-def test_create_mtp_true_resolved_flags_contains_bundle(client: TestClient) -> None:
-    """Custom profile with mtp=True: resolved_flags carries the MTP bundle."""
+def test_create_mtp_true_resolved_flags_no_longer_injects_bundle(client: TestClient) -> None:
+    """Custom profile with mtp=True: since ML-5, ``profile.mtp`` is informational
+    only — MTP is a per-MODEL capability gated by ``runner.supports.mtp`` and
+    injected at launch (in ``_resolve_llama_scalars``), NOT by
+    ``resolve_profile_flags`` from the profile. So the profile-CRUD preview's
+    ``resolved_flags`` no longer carries the bundle purely from ``profile.mtp``
+    (showing it here would mislead — launch won't add it unless the model+runner
+    support it)."""
     r = client.post(
         "/api/profiles",
         json={"name": "with-mtp", "image": "ghcr.io/x/y:z", "flags": "-fa on", "mtp": True},
     )
     assert r.status_code == 201
     body = r.json()
-    assert MTP_FLAG_BUNDLE in body["resolved_flags"]
-    # base flags are preserved (the bundle leads as defaults; the profile's own
-    # flags follow and win on any conflict).
+    assert MTP_FLAG_BUNDLE not in body["resolved_flags"]
+    # the profile's own flags are still resolved verbatim.
+    assert body["resolved_flags"] == body["flags"].strip()
     assert "-fa on" in body["resolved_flags"]
 
 
