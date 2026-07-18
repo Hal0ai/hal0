@@ -43,8 +43,12 @@ from hal0.slot_view import (
     serialize_slot,
     synthesize_upstream_entries,
 )
+from hal0.slots import flm_catalog as _flm_catalog
 from hal0.slots import image_pull as _image_pull
+from hal0.slots import logs as _logs
 from hal0.slots import metrics_collect as _metrics_collect
+from hal0.slots import port_alloc as _port_alloc
+from hal0.slots import voices as _voices
 from hal0.slots.manager import Slot, SlotManager
 
 # Auth was removed by design. All routes are open on the local network.
@@ -77,64 +81,10 @@ async def list_flm_models(request: Request):
 
     Shape: ``{"models": [{"model": tag, "installed": bool,
     "capabilities": [...], "family": str}]}`` — ``model``/``installed`` keep the
-    dashboard filter contract.
+    dashboard filter contract. The container-exec + host-probe fan-out lives in
+    :func:`hal0.slots.flm_catalog.list_models`.
     """
-    import json as _json
-    import subprocess
-
-    from hal0.providers.flm import _classify_flm_model, flm_served_models
-
-    def _from_container() -> list[dict[str, Any]] | None:
-        # Container name convention: hal0-slot-<name>; the NPU anchor is "flm".
-        try:
-            raw = subprocess.run(
-                ["podman", "exec", "hal0-slot-flm", "/opt/fastflowlm/bin/flm", "list", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            raw.check_returncode()
-            data = _json.loads(raw.stdout)
-        except Exception:
-            return None
-        entries = data if isinstance(data, list) else data.get("models", [])
-        out: list[dict[str, Any]] = []
-        for e in entries:
-            if not isinstance(e, dict):
-                continue
-            tag = e.get("model") or e.get("name")
-            if not tag:
-                continue
-            details = e.get("details") if isinstance(e.get("details"), dict) else {}
-            out.append(
-                {
-                    "model": tag,
-                    "installed": bool(e.get("installed")),
-                    "capabilities": _classify_flm_model(e),
-                    "family": str(details.get("family") or ""),
-                }
-            )
-        return out or None
-
-    models = _from_container()
-    if models is None:
-        # Cold-slot fallback — host probe knows every tag; installed may be
-        # understated on relocated-store boxes (see docstring).
-        try:
-            catalog = flm_served_models()
-        except Exception:
-            catalog = []
-        models = [
-            {
-                "model": e.get("tag"),
-                "installed": bool(e.get("installed")),
-                "capabilities": e.get("capabilities", []),
-                "family": e.get("family", ""),
-            }
-            for e in catalog
-            if e.get("tag")
-        ]
-    return {"models": models}
+    return {"models": _flm_catalog.list_models()}
 
 
 class NotImplementedYet(Hal0Error):
@@ -349,92 +299,15 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     return [view.to_dict() for view in await aggregator.snapshot()]
 
 
-def _slot_port_range() -> tuple[int, int]:
-    """Resolve the slot port pool: hal0.toml ``[slots]`` or the schema pool.
-
-    ``SlotsConfig.port_range_start/end`` default to ``_SLOT_PORT_MIN`` ..
-    ``_SLOT_PORT_POOL_END`` (8081..8099) — the AUTO-ALLOCATION pool, kept
-    deliberately below ComfyUI's 8188 so fresh slots never squat on it.
-    Per-slot ``port`` validation still allows up to ``_SLOT_PORT_MAX``
-    (8200) for explicit operator choices. An operator ``[slots]``
-    ``port_range_start/end`` in hal0.toml narrows/moves/widens the pool.
-    Falls back to the pool constants when hal0.toml is unreadable.
-    """
-    from hal0.config.schema import _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
-
-    try:
-        from hal0.config.loader import load_hal0_config
-
-        slots_cfg = load_hal0_config().slots
-        return int(slots_cfg.port_range_start), int(slots_cfg.port_range_end)
-    except Exception:
-        return _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
-
-
-def _collect_port_claims(start: int, end: int, slot_snapshots: list[dict] | None = None):
-    """Every known claim in the pool via the central registry (hal0.ports).
-
-    Config TOMLs alone are NOT the truth — runtime rows can claim ports no
-    TOML mentions (FLM-trio virtual ports), and something else may already
-    be listening. See :mod:`hal0.ports` for the full source list.
-    """
-    from hal0.config.paths import slots_config_dir
-    from hal0.ports import collect_claims
-
-    return collect_claims(
-        slots_dir=slots_config_dir(),
-        pool=(start, end),
-        slot_snapshots=slot_snapshots,
-        reserved={8080: "api"},
-    )
-
-
-def _next_free_slot_port(
-    start: int | None = None,
-    end: int | None = None,
-    slot_snapshots: list[dict] | None = None,
-) -> int:
-    """Return the next free port in the configured slot range (#275 bug 2).
-
-    Free = unclaimed by ANY registry source: slot configs (incl. disabled
-    slots), runtime slot rows, reserved ports, and live listeners — see
-    :mod:`hal0.ports`. The bounds default to the configured pool
-    (hal0.toml ``[slots] port_range_start/end``); callers with the live
-    config in hand may thread the bounds explicitly to avoid a disk read.
-    """
-    from hal0.ports import next_free
-
-    if start is None or end is None:
-        cfg_start, cfg_end = _slot_port_range()
-        start = cfg_start if start is None else start
-        end = cfg_end if end is None else end
-
-    port = next_free(_collect_port_claims(start, end, slot_snapshots), start, end)
-    if port is not None:
-        return port
-    raise BadRequest(
-        f"no free port in {start}-{end} (all slots occupied)",
-        code="slot.no_free_port",
-    )
-
-
-def _reject_port_conflict(
-    port: int, owner_slot: str, slot_snapshots: list[dict] | None = None
-) -> None:
-    """409-style 400 when an explicitly requested port is already owned."""
-    from hal0.ports import claimed_by_other
-
-    start, end = _slot_port_range()
-    lo, hi = min(start, port), max(end, port)
-    claims = _collect_port_claims(lo, hi, slot_snapshots)
-    others = claimed_by_other(claims, port, f"slot:{owner_slot}")
-    if others:
-        raise BadRequest(
-            f"port {port} is already claimed by {', '.join(sorted(others))} — "
-            "omit 'port' to auto-assign a free one (see GET /api/ports)",
-            code="slot.port_conflict",
-            details={"port": port, "owners": sorted(others)},
-        )
+# The slot port allocator (pool resolution, claim collection, next-free,
+# conflict rejection) moved to ``hal0.slots.port_alloc`` (P3-routers §J;
+# MERGE TARGET rework §11.2 PortAuthority). The route layer keeps underscore
+# re-export bindings so ``routes/ports``, ``capabilities/orchestrator`` and the
+# test-suite keep resolving ``routes.slots._next_free_slot_port`` &c.
+_slot_port_range = _port_alloc.slot_port_range
+_collect_port_claims = _port_alloc.collect_port_claims
+_next_free_slot_port = _port_alloc.next_free_slot_port
+_reject_port_conflict = _port_alloc.reject_port_conflict
 
 
 def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
@@ -880,30 +753,13 @@ async def get_slot_voices(name: str, request: Request) -> dict[str, object]:
     instead of hardcoding the pack. Fail-soft: a cold/unreachable slot (or
     an engine without the route) returns ``{"voices": [], "source":
     "offline"}`` rather than an error — the UI falls back to a seed list.
-    Unknown slot names still 404 via ``SlotManager.get_config``.
+    Unknown slot names still 404 via ``SlotManager.get_config``. The httpx
+    proxy + fail-soft shaping live in
+    :func:`hal0.slots.voices.fetch_for_slot`.
     """
-    import httpx
-
     sm = _get_slot_manager(request)
     cfg = await sm.get_config(name)
-    port = cfg.get("port")
-    if not isinstance(port, int) or port <= 0:
-        return {"name": name, "voices": [], "source": "offline"}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
-            resp = await client.get(f"http://127.0.0.1:{port}/v1/audio/voices")
-            resp.raise_for_status()
-            payload = resp.json()
-    except Exception:
-        return {"name": name, "voices": [], "source": "offline"}
-    voices = payload.get("voices") if isinstance(payload, dict) else None
-    if not isinstance(voices, list):
-        voices = []
-    return {
-        "name": name,
-        "voices": [str(v) for v in voices if isinstance(v, str | int)],
-        "source": "live",
-    }
+    return await _voices.fetch_for_slot(name, cfg.get("port"))
 
 
 @router.get("/{name}/resolved")
@@ -1143,22 +999,10 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
 # ``hal0-slot@<name>.service`` template unit (podman ``--log-driver=none``
 # so conmon→journal is the single sink), so the container's llama-server /
 # ComfyUI stdout — including the one-shot model-loading lines — lands in
-# journald and is reachable here.
-
-# Heartbeat lines llama-server prints every few seconds while idle. Left
-# unfiltered they flood the last-N tail window within minutes and push the
-# (one-shot, at-startup) model-loading lines out of view — which is why the
-# UI "stopped" showing detailed load logs. The ``quiet`` param drops them.
-_LOG_NOISE_MARKERS: tuple[str, ...] = (
-    "update_slots: all slots are idle",
-    "prompt processing progress",
-    "kv cache rm",
-)
-
-
-def _is_log_noise(line: str) -> bool:
-    """True for high-frequency heartbeat lines with no diagnostic value."""
-    return any(marker in line for marker in _LOG_NOISE_MARKERS)
+# journald and is reachable here. The journalctl subprocess (one-shot tail +
+# follow generator) and heartbeat-noise filter moved to ``hal0.slots.logs``
+# (P3-routers §J); the SSE wrapper below stays in the route because it holds
+# the ``StreamingResponse``.
 
 
 @router.get("/{name}/logs")
@@ -1172,55 +1016,17 @@ async def slot_logs(
     repeats. Best-effort: on hosts without systemd or where the slot has
     never started, returns an empty string with a hint. The UI tolerates
     that (renders "No logs available") rather than treating it as an error.
+    The journalctl tail lives in :func:`hal0.slots.logs.read_tail`.
     """
-    import asyncio as _asyncio
-    import shutil
-
     sm = _get_slot_manager(request)
     # Validate slot exists so unknown names get the typed slot.not_found
     # envelope instead of an empty 200.
     await sm.status(name)
 
-    if shutil.which("journalctl") is None:
-        return {"name": name, "logs": "", "hint": "journalctl not available on this host"}
-
-    want = max(1, min(int(lines or 200), 5000))
-    # When filtering noise, over-fetch so the post-filter result still holds
-    # ~``want`` meaningful lines even if most of the raw tail is heartbeat.
-    fetch = min(want * 8, 20000) if quiet else want
-    cmd = [
-        "journalctl",
-        "-u",
-        f"hal0-slot@{name}.service",
-        "-n",
-        str(fetch),
-        "--no-pager",
-        "-o",
-        "short-iso",
-    ]
-    proc = await _asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=_asyncio.subprocess.PIPE,
-        stderr=_asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=8.0)
-    except TimeoutError:
-        with contextlib_suppress():
-            proc.kill()
-        return {"name": name, "logs": "", "hint": "journalctl timed out"}
-    text = stdout.decode("utf-8", errors="replace")
-    if quiet:
-        kept = [ln for ln in text.splitlines() if ln and not _is_log_noise(ln)]
-        text = "\n".join(kept[-want:])
+    text, hint = await _logs.read_tail(f"hal0-slot@{name}.service", lines, quiet)
+    if hint is not None:
+        return {"name": name, "logs": text, "hint": hint}
     return {"name": name, "logs": text}
-
-
-def contextlib_suppress():
-    """Local helper so the import isn't pulled in just for one suppress."""
-    import contextlib
-
-    return contextlib.suppress(ProcessLookupError, OSError)
 
 
 @router.get("/{name}/logs/stream")
@@ -1237,14 +1043,13 @@ async def slot_logs_stream(
 
     Best-effort: gracefully exits when journalctl is missing or the slot
     has no journal entries yet. Client disconnects close the subprocess.
+    The journalctl follow generator lives in
+    :func:`hal0.slots.logs.tail_journal`.
     """
-    import asyncio as _asyncio
     import shutil
 
     sm = _get_slot_manager(request)
     await sm.status(name)  # 404 fast if unknown
-
-    backfill_n = max(0, min(int(backfill or 0), 5000))
 
     async def event_source() -> Any:
         if shutil.which("journalctl") is None:
@@ -1254,37 +1059,8 @@ async def slot_logs_stream(
             # "waiting for log lines…". The client listens for 'degraded'.
             yield 'event: degraded\ndata: {"message":"journalctl unavailable"}\n\n'
             return
-        cmd = [
-            "journalctl",
-            "-u",
-            f"hal0-slot@{name}.service",
-            "-f",
-            "-n",
-            str(backfill_n),
-            "--output=cat",
-            "--no-pager",
-        ]
-        proc = await _asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=_asyncio.subprocess.PIPE,
-            stderr=_asyncio.subprocess.DEVNULL,
-        )
-        try:
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                line = raw.decode("utf-8", errors="replace").rstrip("\n")
-                if not line:
-                    continue
-                if quiet and _is_log_noise(line):
-                    continue
-                yield f"data: {json.dumps(line)}\n\n"
-        except asyncio.CancelledError:
-            raise
-        finally:
-            with contextlib_suppress():
-                proc.kill()
-            with contextlib_suppress():
-                await proc.wait()
+        async for line in _logs.tail_journal(f"hal0-slot@{name}.service", backfill, quiet):
+            yield f"data: {json.dumps(line)}\n\n"
 
     return StreamingResponse(
         event_source(),
