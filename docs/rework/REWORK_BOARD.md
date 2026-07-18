@@ -120,7 +120,9 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | P4-docs | collapse ARCHITECTURE/CONTEXT/AGENTS → one; ADR-or-inline | ☐ | DOCS | — | — | — | Stream D (MiniMax) |
 | P4-tests | integration markers + CI fast/box/real-podman tiers | ☐ | DOCS | — | — | — | — |
 | P4-rules | anti-scar rules in CONTRIBUTING | ☐ | DOCS | — | — | — | — |
-| §21.11 golden-paths | the 15 deployment-shaped scenarios (plan-copy L602) | ☐ | DEPLOY | — | — | — | **pull earlier (review #7)** |
+| UI-D1-D3 | design-canvas implementation: ModelDrawer (copy-on-stamp flags editor + divergence + reset + managed-arg pre-check + duplicate flow), slot purity surfaces (create/rename/delete dialogs, slot-modals −337 lines), Runtimes page | ✔ | UI | FLAGS-own spec (ratified), design canvas | merge `2cfec5e1` (lane 3 phase commits) | Opus-built, Fable-reviewed + independently re-run (lint/typecheck/build 0; 23-spec targeted γ re-run incl. rewritten slot-drawer-profile-v3; agent full run 127 γ green); client managed-arg mirror carries keep-in-sync note vs argv.py | D4-D6 (Security/migration-UX/diagnostics panel) = follow-up UI lane |
+| UI-API-1 | backend affordances the D1-D3 surfaces flagged: (1) model-save managed-arg screen or POST /api/models/{id}/validate — UNVERIFIED whether model PUT screens extra_args vs §21.7 denylist (AUDIT FIRST, possible live gap); (2) RUNNER_IMAGES exposure w/ format/arch compat + writable preferred_runner for the override dropdown; (3) POST /api/models/{id}/duplicate (refcounted weights + template stamp); (4) per-runner digest-drift + pull route (ADMIN, SSE) for Runtimes actions | ☐ | API/MODEL | UI-D1-D3✔ | — | item 1 is the priority: a model whose extra_args smuggles --port would fail only at launch today | — |
+| §21.11 golden-paths | the 15 deployment-shaped scenarios (plan-copy L602) | ☐ | DEPLOY | — | — | — | **pull earlier (review #7)** — subset #9/#10/#14/#15 landed CI-side (golden-paths-early row) |
 
 ### Migration-window lanes (orchestrator-run live steps, NOT agents — plan-copy §migration)
 | id | lane | status | class | deps | notes |
