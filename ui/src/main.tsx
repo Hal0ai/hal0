@@ -75,6 +75,10 @@ import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 import './dash/models.jsx'
 import './dash/model-modals.jsx'
+// D1 (post-R3 surface rework): the model editor drawer — "the model is the
+// launchable thing". Publishes window.ModelDrawer, which models.jsx renders in
+// place of RecipeEditorModal. Loads after model-modals.jsx (reuses its hooks).
+import './dash/model-drawer.jsx'
 // Connections surface: local OpenAI endpoints + folded-in MCP servers
 // (connections-overhaul). The old standalone MCP page is removed; #mcp aliases
 // to this view.

@@ -175,7 +175,7 @@ test.describe('Models v3 (/models)', () => {
     await page.locator('button:has-text("Edit options")').click()
     const ctx = page.locator('input[placeholder*="8192"]')
     await ctx.fill('16384')
-    await page.locator('button:has-text("Save options")').click()
+    await page.getByTestId('model-save').click()
     await expect.poll(() => putBody?.defaults?.context_size).toBe(16384)
   })
 

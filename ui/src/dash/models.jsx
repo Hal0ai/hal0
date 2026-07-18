@@ -422,7 +422,7 @@ function ModelsView() {
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
-      <RecipeEditorModal open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
+      <ModelDrawer open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
 
       {searchOpen && (

@@ -81,7 +81,7 @@ test.describe('Model edit — display name + type toggles', () => {
 
     await page.getByTestId('model-name-input').fill('My Renamed Qwen')
     await page.getByTestId('type-toggle-mtp').click()
-    await page.locator('button:has-text("Save options")').click()
+    await page.getByTestId('model-save').click()
 
     await expect.poll(() => putBody?.name).toBe('My Renamed Qwen')
     await expect.poll(() => putBody?.tags).toContain('mtp')
