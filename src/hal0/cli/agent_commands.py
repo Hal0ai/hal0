@@ -377,17 +377,23 @@ def _hermes_root_prelude() -> None:
             p.mkdir(parents=True, exist_ok=True)
             _os.chown(p, ent.pw_uid, ent.pw_gid)
             p.chmod(0o2775)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Best-effort: `doctor perms --fix` (install.sh) is the authority for
+            # this skeleton, so a gap here usually surfaces downstream as a loud
+            # "venv install failed". Surface a hint for diagnosability rather than
+            # failing the whole install on a single dir.
+            console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
 def _run_as_hal0(argv: list[str]) -> int:
     """Run ``argv`` as the hal0 service user, returning its exit code.
 
     Sanitizes the env (strips ``HERMES_HOME``, sets ``HOME`` to hal0's home) and
-    picks a privilege-drop tool (``runuser`` → ``setpriv`` → ``sudo -H``),
-    mirroring ``installer/lib/run-as-hal0.sh`` but as a subprocess (that guard
-    ``exec``s). The caller guarantees ``euid == 0``.
+    picks a privilege-drop tool (``runuser`` → ``setpriv`` → ``sudo``), mirroring
+    ``installer/lib/run-as-hal0.sh`` but as a subprocess (that guard ``exec``s).
+    All three tools wrap the command in the same ``env_argv`` so HOME/HERMES_HOME
+    are set identically regardless of which tool is available. The caller
+    guarantees ``euid == 0``.
     """
     import pwd as _pwd
     import shutil as _shutil
@@ -412,7 +418,9 @@ def _run_as_hal0(argv: list[str]) -> int:
             *env_argv,
         ]
     else:
-        cmd = ["sudo", "-H", "-u", _AGENT_RUNTIME_USER, "--", "env", "-u", "HERMES_HOME", *argv]
+        # env_argv already sets HOME explicitly, so no -H needed (and HOME is
+        # consistent with the runuser/setpriv paths).
+        cmd = ["sudo", "-u", _AGENT_RUNTIME_USER, "--", *env_argv]
     return _subprocess.run(cmd, check=False).returncode  # nosec B603 — fixed argv
 
 
