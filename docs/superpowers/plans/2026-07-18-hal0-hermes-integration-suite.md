@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship independently operable Hermes adapters for live hal0 model/role discovery, Hindsight memory, and existing hal0 voice slots, with deterministic compatibility, installation, migration, and halo143 acceptance.
+**Goal:** Ship independently operable Hermes adapters for live hal0 model/role discovery, Hindsight memory, existing hal0 voice slots, board execution, and scheduled agent automation, with deterministic compatibility, installation, migration, and halo143 acceptance.
 
-**Architecture:** Four independent R4 lanes share a small `hal0_hermes_core` transport package but retain separate Hermes registration, configuration, health, and degradation boundaries. hal0 owns runtime role resolution and emits invalidations; provider clients always refetch complete generation-stamped state. Memory enforces visibility server-side, while voice reuses the existing OpenAI-compatible audio routes.
+**Architecture:** Focused R4 lanes share a small `hal0_hermes_core` transport package but retain separate registration, configuration, health, and degradation boundaries. hal0 owns runtime role resolution, canonical board state, and appliance scheduling; Hermes supplies optional worker execution and scheduled agent sessions. Memory enforces visibility server-side, while voice reuses the existing OpenAI-compatible audio routes.
 
 **Tech Stack:** Python 3.12+, FastAPI, Pydantic, httpx, Hermes Agent provider/memory/voice contracts, Hindsight through hal0 REST, SSE, pytest, Podman/systemd on halo143.
 
@@ -23,6 +23,9 @@
 - Never mutate or push to LXC105; validate on halo143 and keep LXC105 as read-only reference/rollback evidence.
 - Every new route must be classified in `src/hal0/security/exposure.py`.
 - Local verification is capped and targeted; GitHub CI through the open PR is the full-suite gate.
+- hal0's SQLite board is canonical; Hermes Kanban is an optional executor ledger, never a synchronized second board.
+- Hermes cron is only for scheduled agent work; systemd/hal0 retains all appliance maintenance scheduling.
+- Use supported Hermes Kanban/Jobs APIs; never read or write `~/.hermes/kanban.db`, `~/.hermes/cron/jobs.json`, or Hermes internal state.
 
 ---
 
@@ -31,6 +34,8 @@
 ```text
 HP-compat ──> HP-core ──┬──> HP-memory ──> P2-memory rehearsal
                         ├──> HP-voice
+                        ├──> HP-executor <── KB-4 hal0 board
+                        └──> HP-automation <── HP-provider role aliases
 §11.1/2 + KB-1 ─> HP-role-api ─> HP-provider
                                   └────────> halo143 suite acceptance
 ```
@@ -242,7 +247,43 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 4: Run provision, CLI, seed parity, import smoke, ruff, format, and sunset checks**; expect PASS.
 - [ ] **Step 5: Commit** with `feat(hermes): install hal0 integration suite`.
 
-### Task 13: Prove independent degradation and core-without-Hermes
+### Task 13: Add the hal0-board Hermes executor bridge
+
+**Files:**
+- Create: `src/hal0/agents/hermes/core/executor.py`
+- Create: `tests/agents/hermes/core/test_executor.py`
+- Modify: the KB-4 board dispatch seam selected when that lane lands
+
+**Interfaces:**
+- Consumes: authenticated Hermes Kanban/worker API; canonical hal0 task and immutable attempt IDs.
+- Produces: `HermesExecutor.dispatch(task) -> ExternalRun`, `inspect(run_id)`, `cancel(run_id)`, and `reconcile(cursor)`.
+
+- [ ] **Step 1: Write failing contract tests** mapping hal0 ready/attempt state to Hermes dispatch, heartbeat, dependency block, needs-input block, completion handoff, failure, cancellation, retry as a new attempt, and reconnect reconciliation.
+- [ ] **Step 2: Run** `PYTHONPATH=$PWD/src ./.venv/bin/pytest tests/agents/hermes/core/test_executor.py -q`; expect missing executor.
+- [ ] **Step 3: Implement the narrow adapter** using supported authenticated APIs. Carry hal0 task/attempt and Hermes board/task/run/session correlation IDs; persist only summaries, verification metadata, and pointers in hal0. Never let Hermes mutate canonical dependencies, owner, approval, or completion directly.
+- [ ] **Step 4: Run executor, board concurrency/ETag, approval, and event tests**; expect duplicate callbacks to be idempotent and Hermes outage to leave a reconcilable hal0 attempt.
+- [ ] **Step 5: Commit** with `feat(hermes): add optional board executor bridge`.
+
+### Task 14: Add scheduled agent automation through Hermes Jobs
+
+**Files:**
+- Create: `src/hal0/agents/hermes/core/automation.py`
+- Create: `tests/agents/hermes/core/test_automation.py`
+- Modify: provider role-alias code from Tasks 9–10
+- Modify: memory policy tests from Task 5
+
+**Interfaces:**
+- Consumes: authenticated Hermes Jobs API and stable provider models such as `provider=hal0`, `model=role:main`.
+- Produces: `HermesAutomation.list/create/update/pause/resume/run/remove`; normalized run events and optional approval-aware board-task creation.
+
+- [ ] **Step 1: Write failing tests** for CRUD/lifecycle, stable role alias pinning, restricted cron toolsets, no recursive scheduling, job/run correlation, delivery failure, and API reconciliation without touching `jobs.json`.
+- [ ] **Step 2: Write memory tests** proving cron raw turns use a dedicated private namespace, never primary raw memory, while extracted durable facts default shared with job/run provenance.
+- [ ] **Step 3: Run automation and memory tests**; expect missing adapter/policy behavior.
+- [ ] **Step 4: Implement Jobs API calls and normalized events** `hermes.cron.fired`, `skipped`, `completed`, `failed`, and `delivery_failed`. Permit board creation/advancement only through authenticated approval-aware hal0 APIs. Reject appliance-maintenance job kinds in this adapter.
+- [ ] **Step 5: Run automation, provider alias, memory, exposure, and degradation tests**; expect fail-closed behavior when a pinned provider/role disappears and no implicit cloud fallback.
+- [ ] **Step 6: Commit** with `feat(hermes): add scheduled agent automation`.
+
+### Task 15: Prove independent degradation and core-without-Hermes
 
 **Files:**
 - Create: `tests/agents/hermes/test_suite_degradation.py`
@@ -257,7 +298,7 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 4: Run the capped lane gate**: ruff check, ruff format check, import smoke, sunset, and all targeted Hermes plugin/API/memory tests under 90 seconds per group.
 - [ ] **Step 5: Commit** with `test(hermes): prove adapter isolation and optionality`.
 
-### Task 14: Rehearse and accept on halo143
+### Task 16: Rehearse and accept on halo143
 
 **Files:**
 - Create: `docs/rework/hermes-suite-halo143-acceptance.md`
@@ -271,14 +312,15 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 3: Exercise provider acceptance**: create/rename/delete a slot, swap its model, change readiness/capability, and verify Hermes inventory/role aliases update without restart; disconnect SSE and verify REST backfill; inject `events.gap` and verify full reconciliation.
 - [ ] **Step 4: Exercise memory acceptance** with seeded Honcho fixtures: dry-run, migrate, compare counts, recall shared plus caller-private, verify another identity cannot read private raw turns, verify explicit private durable memory, and verify prompt-injection text remains fenced historical context.
 - [ ] **Step 5: Exercise voice acceptance**: TTS then STT roundtrip through active slots, swap each slot/model, repeat without Hermes restart, interrupt an in-flight operation, and prove no cloud request occurs.
-- [ ] **Step 6: Exercise rollback** to the prior plugin bundle/config and verify unrelated Hermes settings remain unchanged.
-- [ ] **Step 7: Update board rows** with exact commit, commands/results, CI URL, halo143 deploy state, and any discovered follow-up as a separate lane; mark `✔` only where CI and deployment evidence both satisfy the lane DoD.
-- [ ] **Step 8: Commit the acceptance record** with `docs(hermes): record halo143 suite acceptance`.
+- [ ] **Step 6: Exercise executor acceptance**: dispatch one hal0 attempt, observe heartbeat, needs-input, completion and cancellation, restart Hermes mid-attempt, reconcile without duplicate completion, and verify hal0 remains canonical.
+- [ ] **Step 7: Exercise automation acceptance**: create/pause/resume/run/remove an agent job pinned to `hal0/role:main`, swap the backing model without editing the job, verify cron-private raw memory and shared durable provenance, and prove appliance maintenance cannot be scheduled through this adapter.
+- [ ] **Step 8: Exercise rollback** to the prior plugin bundle/config and verify unrelated Hermes settings remain unchanged.
+- [ ] **Step 9: Update board rows** with exact commit, commands/results, CI URL, halo143 deploy state, and any discovered follow-up as a separate lane; mark `✔` only where CI and deployment evidence both satisfy the lane DoD.
+- [ ] **Step 10: Commit the acceptance record** with `docs(hermes): record halo143 suite acceptance`.
 
 ## Self-review record
 
-- Spec coverage: compatibility, core, runtime role resolution, provider refresh/failure/diagnostics, memory identity/visibility/capture/recall/migration, voice, install/upgrade/rollback, independent degradation, and halo143 acceptance each map to an explicit task.
+- Spec coverage: compatibility, core, runtime role resolution, provider refresh/failure/diagnostics, memory identity/visibility/capture/recall/migration, voice, board execution, scheduled agent automation, install/upgrade/rollback, independent degradation, and halo143 acceptance each map to an explicit task.
 - Deliberate deferral: `HP-context` remains a separate post-core board lane; it is not smuggled into memory.
 - Type consistency: Tasks 2, 3, 6, and 10 define the shared names consumed by later tasks.
 - Placeholder scan: implementation choices left to workers are bounded by named contracts and concrete assertions; no open-ended feature placeholders are present.
-

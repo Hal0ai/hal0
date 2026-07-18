@@ -52,6 +52,8 @@ After delivery:
 - Building a new hal0 voice stack or adding voice models/runtimes. Initial `hal0-voice` only routes Hermes through existing hal0 STT/TTS slots.
 - A generic Hermes ecosystem bundle unrelated to hal0.
 - A dashboard extension, observability plugin, streaming voice provider, or custom context engine in the initial suite.
+- Bidirectional synchronization between the hal0 board and Hermes Kanban, or direct access to Hermes's Kanban/cron storage.
+- Moving appliance maintenance, reconciliation, backup, update, migration, or security-critical scheduling from systemd/hal0 into Hermes cron.
 - Silent cloud fallback for models, memory, STT, or TTS.
 
 ## Architecture
@@ -71,6 +73,8 @@ approvals, gateways, tool loop              visibility, backends, policy
 
 The adapters may share packaging and release metadata, but each has an independent Hermes registration point, health result, failure policy, and enable/disable control. There is no monolithic `hal0` plugin.
 
+Two control-plane adapters build on the same core without becoming plugins: `hal0-hermes-executor` dispatches selected hal0-board attempts to Hermes workers, and `hal0-hermes-automation` manages scheduled agent work through Hermes's authenticated Jobs API. hal0 remains authoritative for board state and appliance scheduling.
+
 ### `hal0-hermes-core`
 
 This internal library owns behavior that must not drift between adapters:
@@ -87,6 +91,20 @@ This internal library owns behavior that must not drift between adapters:
 - redacted diagnostic output.
 
 It does not own model selection, memory policy, voice fallback, Hermes registration, or user-facing tools.
+
+## Kanban executor bridge
+
+The hal0 SQLite board remains canonical and must operate with Hermes absent. Hermes Kanban is a replaceable execution backend and detailed worker ledger, not a mirrored board. A narrow `HermesExecutor` interface dispatches one immutable hal0 attempt, inspects or cancels its external run, reconciles after disconnects, and translates Hermes heartbeats, blocked states, structured handoffs, completion, and failure into hal0 attempt events. Hermes may report an outcome but may not directly change hal0 dependencies, ownership, approval state, or canonical completion.
+
+Every dispatch carries hal0 task/attempt IDs plus Hermes board/task/run/session IDs as correlation fields. hal0 stores summaries, verification metadata, and pointers; raw prompts, transcripts, credentials, and unrestricted tool output remain in their owning system. The optional Hermes Kanban UI may be linked as an executor-detail view. There is no bidirectional database synchronization and no access to `~/.hermes/kanban.db`.
+
+## Scheduled agent automation
+
+Hermes cron owns scheduled work that benefits from an agent, attached skills, restricted toolsets, or platform delivery. systemd and hal0 continue to own backups, GC, updates, health repair, slot reconciliation, migrations, and other appliance maintenance. Integration uses the authenticated Hermes Jobs API or supported CLI/tool contracts, never `jobs.json` or internal state.
+
+Unattended model jobs pin `provider=hal0` and a stable role alias such as `role:main`. Hermes therefore retains fail-closed provider protection while hal0 may change the local slot/model behind that alias at runtime. A cron firing may create or advance a hal0 board task only through authenticated, approval-aware APIs. Recursive cron creation remains disabled.
+
+Cron sessions read shared durable knowledge plus a dedicated private cron namespace. Synthetic cron turns never enter a primary raw-conversation bank. Durable facts extracted from cron default shared and carry job ID, run ID, provenance, and observation time; recall continues to fence them as untrusted historical context.
 
 ## `hal0-provider`
 
