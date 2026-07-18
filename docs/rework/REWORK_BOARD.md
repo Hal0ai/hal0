@@ -14,6 +14,11 @@
 > Reconciled 2026-07-18 from both trackers + live session state. Base:
 > `main` = `rework/descar` = `6aa565b8` (`rework-R2.1`); clean single checkout, zero divergence,
 > no active agents. Scar 202 / baseline 202.
+>
+> **LIVE BOARD (2026-07-18, R4-primary remote session): this in-repo copy is now the live canonical
+> board.** Sole orchestrator = the remote R4-primary session (single-writer rule applies to it);
+> board updates ride merge pushes on `rework/descar`. Host-side `/home/mint/REWORK_BOARD.md` and
+> `/tmp` handoffs are retired as authority — handoffs live in `docs/rework/`.
 
 ## Legend
 `status`: ✔ done+CI-green · ▶ in-flight · ☐ todo · ⏸ deferred (safe, non-breaking) · ⛔ blocked
@@ -83,7 +88,7 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 ### R4 — Brain + Hermes
 | id | lane | status | class | deps | commit / branch | verify | deploy_state |
 |----|------|:--:|--|--|--|--|--|
-| P3-brain | first-class `src/hal0/brain/`, zero-Hermes-dep, `/api/brain/chat` primary + `/api/board/chat` alias | ⏸ | HERMES | P2-toolloop✔ | banked `rework/p3-brain` @ `b66b5e1e` (pushed to origin) | built+verified (67 tests green); NOT merged — handed to primary Hermes orchestrator per two-session split | **brain model assets exist** (lxc105): `hal0-brain-sft` f16 + `-fpx4`(609MB)/`-fpx8`(1.1GB) ROCmFP4 quants registered, profile `brain-agent-fpx` — see `hal0-105-changes-summary.md`. No-think default needs the container.py quoting fix OR a `minicpm5-nothink.jinja` (internal `enable_thinking=false`). Brain identity correct only with hal0-brain system prompt (Hermes supplies persona) |
+| P3-brain | first-class `src/hal0/brain/`, zero-Hermes-dep, `/api/brain/chat` primary + `/api/board/chat` alias | ✔ | HERMES | P2-toolloop✔ | merge `24502baa` (was banked `b66b5e1e`, rebased onto `eede41c1`) | rebased+re-verified by orchestrator: 172 targeted (brain/board/exposure/route-collision combined), ruff+format, import smoke, scar 202; independent Fable review approved (sys.modules alias, ADMIN exposure rule, zero-Hermes-import verified); CI pending on merged tip | **brain model assets exist** (lxc105): `hal0-brain-sft` f16 + `-fpx4`(609MB)/`-fpx8`(1.1GB) ROCmFP4 quants registered, profile `brain-agent-fpx` — see `hal0-105-changes-summary.md`. No-think default needs the container.py quoting fix OR a `minicpm5-nothink.jinja` (internal `enable_thinking=false`). Brain identity correct only with hal0-brain system prompt (Hermes supplies persona) |
 | §7.4 hermes-slim | privilege-drop (born-owned) → F.7 chown deletion; convergent installer slimming continues separately | ✔ | HERMES/INSTALL | P3-perms✔ | merge `86283e94` | incs 1-5 + F.7 reviewed; born-owned halo143 validation | deployed/validated on halo143 |
 | HP-compat | select and test reviewed official Hermes tag/commit against the three plugin contracts | ✔ | HERMES | §7.4✔ | `f3e4e3e6`, guard fix `6f844901`, checkpoint `6aa565b8` | independent review; 79 targeted tests; full CI + Playwright green after vetted-ref guard reconciliation | R2.1 on main; Stage 0 accepted |
 | HP-core | shared Hermes adapter core: auth, discovery, typed errors, retry policy, correlation IDs | ✔ | HERMES | HP-compat✔, KB-1✔ | merge `b1115b9d` | independent review + security re-review approved; 61 combined tests; exact-head full CI + Playwright green | merged on descar; Stage 1 core accepted |
@@ -105,7 +110,7 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | P3-ui-dataseam | one typed settings client + schema + reload-class source (review #8/§K) + land Backend + Model-Defaults pages | ✔ | UI | ML-4✔ | `0c93a1f3` (was `41018109`) | CI+γ green (C7d flake cleared on re-run; local full γ 422/0); settingsClient façade + reloadClass source (ApplyBadge amber-chip fix) + useSettingsForm; Backend/GPU + Model-Defaults pages; scar 202 | — |
 | §21.4 | doctor command + §21.3 system-info | ☐ | CLI | — | spec `spec-21-4-doctor.md` | — | — |
 | P3-routers | thin models.py/slots.py → service modules (review #5/§J) | ☐ | API | — | spec `spec-p3-routers.final.md` | — | keep exposure classes valid |
-| route-collision-test | reject literal shadowed by param routes (review #5/§J) | ☐ | API | — | — | — | cheap, high-value |
+| route-collision-test | reject literal shadowed by param routes (review #5/§J) | ✔ | API | — | merge `0b93a48b` | detector uses starlette compiled `path_regex` (handles `:path`/`:int`); zero collisions on 314-route table; self-policing empty allowlist (stale entries fail); 2 tests; Sonnet-built, Fable-reviewed (base-drift caught: agent measured off R2.1 base — rebased + re-run on descar tip before accept) | CI pending on merged tip |
 | P4-docs | collapse ARCHITECTURE/CONTEXT/AGENTS → one; ADR-or-inline | ☐ | DOCS | — | — | — | Stream D (MiniMax) |
 | P4-tests | integration markers + CI fast/box/real-podman tiers | ☐ | DOCS | — | — | — | — |
 | P4-rules | anti-scar rules in CONTRIBUTING | ☐ | DOCS | — | — | — | — |
@@ -127,11 +132,37 @@ base in isolated worktrees. The Hermes suite proceeds with Stage 1 (`HP-core` an
 `HP-executor` remains gated on KB-4/5/6. No lane may recreate divergence by building on a pre-R2.1 base.
 
 ## Open review-driven adds (not yet lanes anywhere)
-- **route-collision test** (R5, cheap) — steal now.
 - **metrics-db split** — measure write-lock latency under concurrent pull+registry+metrics; split
   `hal0-metrics.db` if nontrivial (plan-copy L479 already sanctions).
 - **golden-path harness earlier** — pull §21.11 ahead of remaining structural waves (review #7);
   live installer already found 2 bugs (NFS chmod, self-port) the capped suite missed.
+  **Accepted (Fable plan review 2026-07-18): land the automatable subset (#9 rename, #10 delete,
+  #14 api-restart, #15 no-Hermes) as CI-runnable integration tests BEFORE SLOT increment B merges;**
+  halo143-only paths become a scripted runbook.
+
+## Fable plan-review adds (2026-07-18 — accepted "ok"; fold into waves)
+- **Migration-number allocation (protocol add):** numbers assigned at DISPATCH, on this board.
+  Allocated: **005 = KB-4/5/6 board · 006 = P3-runtime-db slot-state · 007 = metrics split (if
+  triggered)**. Two files at one version = broken migrate.
+- **state.json double-touch:** increment B's M5 renames `state.json` that P3-runtime-db later moves
+  to SQLite — either fold the slot-state table into the SLOT wave or scope M5 so runtime-db never
+  re-migrates. Decide at SLOT-B dispatch.
+- **KB-2/3 needs a spec before HP-executor/HP-automation:** tool-tier classification (read/mutating/
+  destructive), approval-gate, injection-resistance tests for tool-output→model→destructive-tool
+  chains (same bar as HP-memory row).
+- **§I hermes-provision convergent rewrite = explicit lane** (spec `spec-hermes-provision.final.md`;
+  file still 5,368 lines) — not implied under "slim installer"; give it a row at R4 dispatch.
+- **Core-without-Hermes proof goes continuous:** CI job/marker tier running core suite with Hermes
+  extras absent (golden path #15 as a gate, not a one-off).
+- **P4-tests markers pulled forward:** tag podman/systemd-dependent tests now → local capped verify
+  can run `tests/api -m "not podman"`; natural home of the C7d flake fix.
+- **Docs-reference ratchet:** CI grep resolving every doc/spec path referenced in tracked markdown
+  (mirrors scar ratchet; keeps P4-docs honest).
+- **`scripts/lane_verify.sh`:** encapsulate the capped gate (ruff check + format --check, import
+  smoke, sunset, named pytest targets) — shrinks dispatch prompts, kills the forgot-format class.
+- **Proposed, needs user decision at R4 planning:** demote HP-voice + HP-automation below the R4
+  exit bar (finish line = "small, optional Hermes integration"); god-module LOC burn-down tracked
+  per checkpoint (today 18,836 across the seven diagnosed modules).
 
 ## Folded from lxc105 live session (`/home/mint/hal0-105-changes-summary.md` — reference, NOT deploy state)
 lxc105 (10.0.1.142) is the untouched live reference — never deploy there. These are the durable
