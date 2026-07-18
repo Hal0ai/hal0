@@ -45,6 +45,7 @@ from typing import Any
 
 import httpx
 
+from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
@@ -186,8 +187,10 @@ class Qwen3TTSProvider(Provider):
                 "MIOPEN_FIND_MODE": "FAST",
             },
             mounts=[
-                # Model store: read-only, SELinux relabel for enforcing hosts.
-                Mount(store_root, store_root, read_only=True, selinux="z"),
+                # Model store via the shared `mount_for` factory (ML-3) —
+                # omits the SELinux relabel on NFS instead of unconditionally
+                # appending ``:z`` (chcon ENOTSUP there).
+                model_store_module.mount_for(store_root, read_only=True),
                 # Writable cache: MIOpen DB + HF codec/tokenizer cache.
                 Mount(cache_dir, "/cache", read_only=False, selinux="z"),
             ],
