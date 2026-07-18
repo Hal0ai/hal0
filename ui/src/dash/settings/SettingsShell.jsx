@@ -59,6 +59,7 @@ export function SettingsShell({ param }) {
       case "updates": return <UpdatesPage />;
       case "advanced": return <AdvancedPage />;
       case "about": return <AboutPage />;
+      case "secrets": return <SecretsPage />;
       default: return <GeneralPage />;
     }
   };
