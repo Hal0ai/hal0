@@ -168,6 +168,9 @@ RULES: tuple[_Rule, ...] = (
     # ── judgment calls: not named in either explicit spec bucket -------
     # (analogy-classified; see module docstring + KB-1 report UNSURE list)
     _Rule("status summary (GET)", _exact("/api/status"), AuthClass.CLIENT, _GET),
+    # OBS-1 (§13/§21.3): read-only fleet metrics over the SQLite tables.
+    _Rule("system stats (GET)", _exact("/api/system-stats"), AuthClass.CLIENT, _GET),
+    _Rule("system info (GET)", _exact("/api/system-info"), AuthClass.CLIENT, _GET),
     _Rule("metrics json (GET)", _exact("/api/metrics"), AuthClass.CLIENT, _GET),
     _Rule("features (GET)", _exact("/api/features"), AuthClass.CLIENT, _GET),
     _Rule("features (mutations)", _prefix("/api/features"), AuthClass.ADMIN, None),
