@@ -825,6 +825,18 @@ _preflight_port_is_own_service() {
             return 0
         fi
     done
+    # cgroup fallback — containerised / port-forwarded services. OpenWebUI on
+    # :3001 runs as a podman container under hal0-openwebui.service; the LISTEN
+    # socket is held by conmon (a child), NOT the unit MainPID, so the check
+    # above misses it and a healthy re-install used to hard-fail on :3001.
+    # systemd places the container's processes under the owning unit's cgroup
+    # slice, so resolve the holder's cgroup to a hal0 unit instead.
+    if [[ -r "/proc/${pid}/cgroup" ]]; then
+        case "$(cat "/proc/${pid}/cgroup" 2>/dev/null)" in
+            *hal0-api.service*|*hal0-openwebui.service*|*hal0-slot@*|*hal0-agent@*)
+                return 0 ;;
+        esac
+    fi
     return 1
 }
 
