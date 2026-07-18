@@ -572,6 +572,74 @@ async def create_slot(request: Request) -> dict[str, object]:
     return _slot_to_dict(snap, request)
 
 
+# ── id-keyed lookups + rename (rework §11.1) ─────────────────────────────────
+#
+# These literal-prefix routes (``by-name`` / ``by-id``) are registered before
+# the ``/{name}`` catch-alls below; FastAPI matches them first because their
+# first path segment is a literal, not a wildcard.
+
+
+@router.get("/by-name/{name}")
+async def get_slot_by_name(name: str, request: Request) -> dict[str, object]:
+    """Canonical name-keyed lookup (rework §11.1).
+
+    The documented go-forward name path — identical payload to the existing
+    ``GET /api/slots/{name}`` (kept for one release). Resolves through the
+    SlotManager so aliases + drift reconcile apply.
+    """
+    sm = _get_slot_manager(request)
+    snap = await sm.status(name, include_config_drift=True)
+    return _slot_to_dict(snap, request)
+
+
+@router.get("/by-id/{slot_id}")
+async def get_slot_by_id(slot_id: int, request: Request) -> dict[str, object]:
+    """Stable-id lookup (rework §11.1): opaque id → current name → snapshot."""
+    sm = _get_slot_manager(request)
+    name = sm.slot_id_to_name(slot_id)
+    snap = await sm.status(name, include_config_drift=True)
+    return _slot_to_dict(snap, request)
+
+
+@router.post("/{name}/rename")
+async def rename_slot(name: str, request: Request) -> dict[str, object]:
+    """Rename a slot's display label. Body: ``{"new_name": "..."}``.
+
+    The identity ``id`` is stable, so a rename never touches the slot's
+    port or state semantics. The slot must be OFFLINE (the systemd unit is
+    still name-keyed until the id-migration lands). A name collision surfaces
+    as the typed ``slot.config_error`` envelope.
+    """
+    sm = _get_slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+            code="request.invalid_json",
+        ) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+    new_name = body.get("new_name") or body.get("name")
+    if not isinstance(new_name, str) or not new_name.strip():
+        raise BadRequest(
+            "rename requires a non-empty 'new_name' in the request body",
+            code="slot.name_required",
+            details={"slot": name},
+        )
+    async with record_action(
+        request,
+        category="slot",
+        action="slot.rename",
+        target=name,
+        message=f"rename → {new_name}",
+    ) as _rec:
+        snap = await sm.rename(name, new_name)
+        _rec.after = {"new_name": new_name}
+    return _slot_to_dict(snap, request)
+
+
 # ── metrics / capacity ─────────────────────────────────────────────────────
 
 

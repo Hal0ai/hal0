@@ -279,7 +279,19 @@ class SlotManager:
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
+        identity_store: Any | None = None,
+        port_authority: Any | None = None,
     ) -> None:
+        # Stable-id identity bridge + single port allocator (rework §11.1/§11.2).
+        # Both are OPT-IN (default None): a bare ``SlotManager()`` — every unit
+        # test — keeps the existing name-keyed, TOML-port behaviour untouched.
+        # The API lifespan injects live stores (:class:`hal0.slots.identity.
+        # SlotIdentityStore` + :class:`hal0.ports.authority.PortAuthority`) so
+        # slots gain an opaque ``id``, ports flow through one authority, and
+        # rename becomes a pure relabel. Every use below is guarded + best-
+        # effort so an identity/DB hiccup can never break slot lifecycle.
+        self._identity: Any | None = identity_store
+        self._port_authority: Any | None = port_authority
         # Optional EventBus for footer/dashboard observability. Not part
         # of the slot state machine — purely a side-channel so the
         # dashboard footer can render transitions without polling. None
@@ -502,6 +514,227 @@ class SlotManager:
         if not cfg_dir.exists():
             return []
         return sorted(p.stem for p in cfg_dir.glob("*.toml") if not p.name.startswith("."))
+
+    # ── slot-id identity + port authority bridge (rework §11.1/§11.2) ────────
+    #
+    # All best-effort + guarded: when no store is injected (unit tests) these
+    # are no-ops and the existing name-keyed/TOML-port paths run unchanged.
+
+    def _derive_identity_fields(
+        self, name: str, cfg: dict[str, Any]
+    ) -> tuple[str, str, str | None, bool]:
+        """(slot_type, device, coresident_group, is_seed) from a slot cfg."""
+        slot_type = str(cfg.get("type") or "llm")
+        device = str(cfg.get("device") or "")
+        # device=npu slots co-reside in one FLM process and share its port —
+        # same derivation as the harvester's coresident marker (hal0.ports).
+        coresident_group = "npu-flm-trio" if device == "npu" else None
+        try:
+            is_seed = name in self.seeded_slots()
+        except Exception:
+            is_seed = False
+        return slot_type, device, coresident_group, is_seed
+
+    def _identity_row(self, name: str) -> Any | None:
+        """Best-effort identity row for *name*, or None (no store / miss)."""
+        if self._identity is None:
+            return None
+        try:
+            return self._identity.get_by_name(self._resolve_alias(name))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("slot.identity_lookup_failed", extra={"slot": name, "error": str(exc)})
+            return None
+
+    def _ensure_identity(self, name: str, cfg: dict[str, Any]) -> Any | None:
+        """Get-or-create the identity row for *name* (the on-demand fold)."""
+        if self._identity is None:
+            return None
+        canonical = self._resolve_alias(name)
+        try:
+            row = self._identity.get_by_name(canonical)
+            if row is not None:
+                return row
+            st, dev, grp, seed = self._derive_identity_fields(canonical, cfg)
+            return self._identity.create(
+                name=canonical,
+                slot_type=st,
+                device=dev,
+                coresident_group=grp,
+                is_seed=seed,
+            )
+        except Exception as exc:
+            # A UNIQUE(name) race resolves to the existing row; anything else
+            # is logged and degrades to "no id" (slot_id stays None).
+            row = None
+            with contextlib.suppress(Exception):
+                row = self._identity.get_by_name(canonical)
+            if row is None:
+                log.warning(
+                    "slot.identity_ensure_failed",
+                    extra={"slot": canonical, "error": str(exc)},
+                )
+            return row
+
+    def _stamp_id(self, slot: Slot) -> Slot:
+        """Populate ``slot.slot_id`` from the identity store, best-effort."""
+        if self._identity is not None and slot.slot_id is None:
+            row = self._identity_row(slot.name)
+            if row is not None:
+                slot.slot_id = row.id
+        return slot
+
+    def slot_id_to_name(self, slot_id: int) -> str:
+        """Resolve an opaque slot id to its current name (raises SlotNotFound)."""
+        if self._identity is None:
+            raise SlotNotFound(
+                "slot id lookup unavailable (no identity store)",
+                details={"id": slot_id},
+            )
+        try:
+            return self._identity.get(slot_id).name
+        except Exception as exc:
+            raise SlotNotFound(
+                f"no slot with id={slot_id}",
+                details={"id": slot_id},
+            ) from exc
+
+    async def fold_identity(self) -> int:
+        """One-shot boot fold: ensure an identity row + a seeded port_claim for
+        every configured slot (rework §3.1/§3.2, non-destructive variant).
+
+        Idempotent + additive: it populates the ``slot`` table and stamps the
+        ``port_claim`` authority from each slot's current TOML ``port`` without
+        renaming any on-disk artefact or systemd unit (the destructive file/
+        unit id-migration is deferred — see the handback). A TOML port already
+        live-claimed by another slot (the documented duplicate-8081 bug) is
+        logged and left for the operator, never auto-reassigned.
+
+        Returns the number of identity rows present after the fold.
+        """
+        if self._identity is None:
+            return 0
+        count = 0
+        for name in self._all_configured_slot_names():
+            try:
+                cfg = await self._load_slot_config(name)
+            except SlotConfigError:
+                continue
+            row = self._ensure_identity(name, cfg)
+            if row is None:
+                continue
+            count += 1
+            if self._port_authority is None:
+                continue
+            port = _cfg_port(cfg)
+            if not port:
+                continue
+            try:
+                if self._port_authority.held_by(row.id) is not None:
+                    continue
+                _, _, grp, _ = self._derive_identity_fields(name, cfg)
+                # include_listeners=False: the slot's own server socket must
+                # not block seeding its own claim.
+                if not self._port_authority.is_free(port, include_listeners=False):
+                    log.warning(
+                        "slot.port_seed_conflict",
+                        extra={"slot": name, "port": port},
+                    )
+                    continue
+                self._port_authority.acquire(
+                    row.id,
+                    preferred=port,
+                    coresident_group=grp,
+                    owner_label=f"slot:{name}",
+                    include_listeners=False,
+                )
+            except Exception as exc:
+                log.warning(
+                    "slot.port_seed_failed",
+                    extra={"slot": name, "port": port, "error": str(exc)},
+                )
+        log.info("slot.identity_folded", extra={"rows": count})
+        return count
+
+    async def rename(self, slot_name: str, new_name: str) -> Slot:
+        """Rename a slot's display label (rework §11.1).
+
+        The identity ``id`` is stable, so the label change itself is a pure
+        ``UPDATE`` — but until the destructive id-keyed file/unit migration
+        lands, the on-disk TOML + state.json are still name-keyed, so this
+        also moves those two artefacts and re-keys the in-memory caches. To
+        avoid orphaning a live ``hal0-slot@<oldname>`` unit, rename is refused
+        unless the slot is OFFLINE.
+        """
+        if self._identity is None:
+            raise SlotConfigError(
+                "rename requires the identity store (not wired in this context)",
+                details={"slot": slot_name},
+            )
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise SlotConfigError("new name must be a non-empty string")
+        new_name = new_name.strip()
+        canonical = self._resolve_alias(slot_name)
+        self._ensure_known(canonical)
+        if canonical == new_name:
+            return await self.status(canonical)
+        if self._current_state(canonical) != SlotState.OFFLINE:
+            raise SlotConfigError(
+                f"slot {canonical!r} must be offline to rename "
+                "(unload it first — the systemd unit is still name-keyed)",
+                details={"slot": canonical, "state": self._current_state(canonical).value},
+            )
+        cfg = await self._maybe_load_config(canonical)
+        row = self._ensure_identity(canonical, cfg or {"name": canonical})
+        if row is None:
+            raise SlotConfigError(
+                f"could not resolve identity for slot {canonical!r}",
+                details={"slot": canonical},
+            )
+        async with self._lock(canonical):
+            with slot_write_lock():
+                # 1. The label move (raises SlotAlreadyExists on a name clash).
+                from hal0.slots.identity import SlotAlreadyExists
+
+                try:
+                    self._identity.rename(row.id, new_name)
+                except SlotAlreadyExists as exc:
+                    raise SlotConfigError(
+                        f"slot name {new_name!r} already exists",
+                        details={"slot": new_name},
+                    ) from exc
+                # 2. Move the (still name-keyed) TOML, rewriting its name field.
+                old_cfg_path = self._config_file(canonical)
+                new_cfg_path = self._config_file(new_name)
+                if old_cfg_path.exists():
+                    cfg_dict = _cfg_to_dict(cfg) if cfg else {"name": new_name}
+                    cfg_dict["name"] = new_name
+                    write_slot_toml(new_cfg_path, cfg_dict)
+                    with contextlib.suppress(FileNotFoundError):
+                        old_cfg_path.unlink()
+                # 3. Move the state dir + rewrite the persisted name.
+                rec = self._states.get(canonical) or read_state(self._state_file(canonical))
+                if rec is not None:
+                    moved = SlotStateRecord(
+                        name=new_name,
+                        state=rec.state,
+                        model_id=rec.model_id,
+                        port=rec.port,
+                        updated_at=time.time(),
+                        message=rec.message,
+                        extra=dict(rec.extra),
+                    )
+                    write_state_atomic(self._state_file(new_name), moved)
+                    self._states[new_name] = moved
+                    with contextlib.suppress(FileNotFoundError):
+                        self._state_file(canonical).unlink()
+                # 4. Re-key the name-keyed in-memory caches.
+                self._states.pop(canonical, None)
+                for cache in (self._last_used,):
+                    if canonical in cache:
+                        cache[new_name] = cache.pop(canonical)
+                self._invalidate_cfg_cache(canonical)
+                self._invalidate_cfg_cache(new_name)
+        return await self.status(new_name)
 
     def _ensure_known(self, name: str) -> None:
         """Raise SlotNotFound if no config and no state for this slot."""
@@ -1053,17 +1286,19 @@ class SlotManager:
             # not the stale legacy ``backend`` TOML field — see
             # ``_cfg_effective_backend``.
             eff_backend = _cfg_effective_backend(cfg) if cfg else None
-            return Slot(
-                name=slot_name,
-                state=SlotState.OFFLINE,
-                port=int(cfg.get("port") or 0) if cfg else 0,
-                backend=eff_backend,
-                metadata={
-                    "provider": cfg.get("provider"),
-                    "backend": eff_backend,
-                }
-                if cfg
-                else {},
+            return self._stamp_id(
+                Slot(
+                    name=slot_name,
+                    state=SlotState.OFFLINE,
+                    port=int(cfg.get("port") or 0) if cfg else 0,
+                    backend=eff_backend,
+                    metadata={
+                        "provider": cfg.get("provider"),
+                        "backend": eff_backend,
+                    }
+                    if cfg
+                    else {},
+                )
             )
         # Reconcile with unit reality.
         observed = rec.state
@@ -1118,14 +1353,16 @@ class SlotManager:
             config_drift = await self.compute_config_drift(slot_name, cfg=cfg, active=active)
             if config_drift is not None:
                 meta["config_drift"] = config_drift
-        return Slot(
-            name=slot_name,
-            state=observed,
-            port=rec.port,
-            model_id=rec.model_id,
-            backend=backend,
-            metadata=meta,
-            last_used_at=self._last_used.get(slot_name),
+        return self._stamp_id(
+            Slot(
+                name=slot_name,
+                state=observed,
+                port=rec.port,
+                model_id=rec.model_id,
+                backend=backend,
+                metadata=meta,
+                last_used_at=self._last_used.get(slot_name),
+            )
         )
 
     async def compute_config_drift(
@@ -1443,6 +1680,33 @@ class SlotManager:
                     ) from exc
                 self._invalidate_cfg_cache(slot_name)
 
+                # §11.1/§11.2: assign the opaque id + route the port through the
+                # single authority. The granted port is written back into the
+                # TOML (the field becomes the read-only mirror of the claim).
+                # Best-effort: an authority hiccup falls back to the TOML port.
+                ident = self._ensure_identity(slot_name, cfg_dict)
+                if ident is not None and self._port_authority is not None:
+                    _, _, grp, _ = self._derive_identity_fields(slot_name, cfg_dict)
+                    preferred = _cfg_port(cfg_dict) or None
+                    try:
+                        granted = self._port_authority.acquire(
+                            ident.id,
+                            preferred=preferred,
+                            coresident_group=grp,
+                            owner_label=f"slot:{slot_name}",
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "slot.port_acquire_failed",
+                            extra={"slot": slot_name, "error": str(exc)},
+                        )
+                        granted = None
+                    if granted is not None and granted != _cfg_port(cfg_dict):
+                        cfg_dict["port"] = granted
+                        with contextlib.suppress(OSError):
+                            write_slot_toml(cfg_path, cfg_dict)
+                            self._invalidate_cfg_cache(slot_name)
+
             # Initialise state.
             await self._transition(
                 slot_name,
@@ -1494,6 +1758,17 @@ class SlotManager:
         current = self._current_state(slot_name)
         if current != SlotState.OFFLINE:
             await self.unload(slot_name)
+
+        # §11.2/§11.1: release the port claim (audit trail preserved via
+        # released_at) and drop the identity row before the on-disk artefacts.
+        # Best-effort — a store hiccup must not block the delete.
+        ident = self._identity_row(slot_name)
+        if ident is not None:
+            if self._port_authority is not None:
+                with contextlib.suppress(Exception):
+                    self._port_authority.release(ident.id)
+            with contextlib.suppress(Exception):
+                self._identity.delete(ident.id)
 
         # Remove state.json and the slot config.
         for path in (
@@ -2535,17 +2810,19 @@ class SlotManager:
         )
         # Build the Slot snapshot directly from the just-written record.
         rec = self._states[slot_name]
-        return Slot(
-            name=slot_name,
-            state=resolved,
-            port=rec.port,
-            model_id=rec.model_id,
-            backend=rec.extra.get("backend"),
-            metadata={
-                "updated_at": rec.updated_at,
-                "message": rec.message,
-                **rec.extra,
-            },
+        return self._stamp_id(
+            Slot(
+                name=slot_name,
+                state=resolved,
+                port=rec.port,
+                model_id=rec.model_id,
+                backend=rec.extra.get("backend"),
+                metadata={
+                    "updated_at": rec.updated_at,
+                    "message": rec.message,
+                    **rec.extra,
+                },
+            )
         )
 
 

@@ -944,7 +944,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Construct the event bus first so the SlotManager can side-channel
     # every transition through it — the footer subscribes to /api/events.
     event_bus = EventBus(sink=_audit_sink if audit_store is not None else None)
-    slot_manager = SlotManager(event_bus=event_bus, upstreams_registry=upstreams)
+    # rework §11.1/§11.2: wire the stable-id identity bridge + the single port
+    # authority into the manager. Best-effort — a DB/init hiccup degrades to the
+    # existing name-keyed/TOML-port behaviour rather than blocking boot.
+    _identity_store: object | None = None
+    _port_authority: object | None = None
+    try:
+        from hal0.config.schema import _SLOT_PORT_MAX, _SLOT_PORT_MIN
+        from hal0.ports.authority import PortAuthority
+        from hal0.slots.identity import SlotIdentityStore
+
+        _identity_store = SlotIdentityStore()
+        _port_authority = PortAuthority(
+            pool=(_SLOT_PORT_MIN, _SLOT_PORT_MAX),
+            reserved={8080: "api"},
+        )
+        with contextlib.suppress(Exception):
+            _port_authority.reserve(8080, label="api")
+    except Exception as _exc:  # pragma: no cover - defensive boot guard
+        log.warning("slot.identity_store_init_failed", extra={"error": str(_exc)})
+        _identity_store = None
+        _port_authority = None
+    slot_manager = SlotManager(
+        event_bus=event_bus,
+        upstreams_registry=upstreams,
+        identity_store=_identity_store,
+        port_authority=_port_authority,
+    )
 
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
@@ -973,6 +999,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await slot_manager.reconcile_npu_trio_slots()
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("slot.reconcile_trio_failed", error=str(exc))
+
+    # rework §11.1/§11.2 boot fold: ensure a stable-id ``slot`` row + a seeded
+    # ``port_claim`` for every configured slot (incl. the trio shadows just
+    # reconciled above). Idempotent + additive — no artefact/unit rename. No-op
+    # when the identity store isn't wired. Best-effort so it never blocks boot.
+    try:
+        await slot_manager.fold_identity()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.identity_fold_failed", error=str(exc))
 
     # Idle monitor — demotes READY → IDLE after the configured timeout
     # (so the dashboard distinguishes "warm but quiet" from "warm and
