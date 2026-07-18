@@ -197,6 +197,22 @@ Add `hal0-context` and hal0 dashboard auth only after core integrations are stab
 5. **Keep scheduler ownership separate.** Hermes cron and hal0 board/cron unification are control-plane concerns, not a memory-provider responsibility. Integrate through tools/MCP/gateway dispatch and stable session APIs.
 6. **Resolve duplicate memory API descriptions.** `ARCHITECTURE.md` says both MCP `/mcp/memory` and REST `/api/memory/*` in adjacent glossary entries. Select one native provider API and document MCP as an optional cross-agent facade.
 
+## Review notes (2026-07-18, orchestrator) — reconcile with landed rework
+
+This research is sound and well-sourced. Six reconciliations against work that landed since it was written (see `REWORK.md` / `REWORK_BOARD.md`):
+
+1. **"`hal0-memory` top-level path is a compatibility bug" (§5.3) vs `REWORK.md` §I "two byte-identical copies is intentional."** These are *not* in conflict, but the doc reads as if they are. `REWORK.md` keeps **two copies for packaging** (importable source + installable hyphenated seed) — orthogonal to *which subdirectory* Hermes discovers them in. The real defect is the **discovery subdir** (`plugins/<name>/` vs official `plugins/memory/<name>/`), not the dual copy. State this explicitly so the reader doesn't "fix" the dual-copy or ignore the subdir. Both copies, if kept, must sit under the official `plugins/memory/` layout.
+
+2. **"Keep plugin source root-owned/read-only" (§3) now needs the §7.4 born-owned split.** §7.4 (privilege-drop, F.7) LANDED: `$HERMES_HOME` trees (`config.yaml` 644, `runtime.json` 600, `venvs/hermes`, `provision.json`) are now **born `hal0:hal0`** (no chown-back), while `/usr/local/bin/hermes` (755) and `/etc/hal0/agents/hermes.toml` (644) stay **root:root**. So "root-owned/read-only" applies to the **plugin bundle + wrapper + seed TOML**, NOT to `$HERMES_HOME`. Root residue is written through the audited `hal0-systemctl write-gateway-dropin` + `hal0-agentenv write-seed-toml` seams (literal paths, body-on-stdin, regex-validated). Update §3 to name these seams and draw the ownership line at the tree level.
+
+3. **`hal0-provider` auth must use KB-1 credential classes + the OPEN-liveness lesson.** §A/§3 mention "auth resolution" generically. Be concrete: hal0-hermes-core uses `HAL0_CLIENT_KEY` for inference/read and `HAL0_ADMIN_KEY` for mutations (§A deny-by-default), and **liveness/preflight probes MUST hit an OPEN endpoint (`/api/health`), never an admin-gated one (`/api/status`)** — the latter returned 401 on every install until fixed this session (the `#5` blocker). Bake the OPEN-liveness rule into the provider/doctor reachability check.
+
+4. **Alias→slot resolution should consume the now-landed stable slot-id + PortAuthority.** §A4/§2 correctly say "never hard-code `:8080`/`:8081`." §11.1 (opaque stable slot-id; name = mutable label) + §11.2 (`port_claim` PortAuthority) are now MERGED — the provider's "owning slot identifier" should be the **opaque slot-id**, and any port it surfaces comes from PortAuthority, not a slot's config. This makes the alias contract concrete against real primitives.
+
+5. **The pin migration is a prerequisite lane that isn't tracked yet.** Finding #2 (hal0 pinned to stale `earendil-works@0554ef1` vs official `NousResearch@7fd419e`) + Phase-0 gate every downstream item. This belongs on `REWORK_BOARD.md` as an explicit **HERMES pin-reconciliation lane** with the `hermes-sdk-diff` expansion; today it's implied, not scheduled. Nothing here should be built until it lands.
+
+6. **Item 6 (duplicate memory API in `ARCHITECTURE.md`) is partly addressed.** P4-docs collapsed `ARCHITECTURE/CONTEXT/AGENTS`; re-verify the MCP `/mcp/memory` vs REST `/api/memory/*` glossary duplication against the collapsed doc and pick one native provider API + MCP-as-facade (matches §B/§5.6).
+
 ## Primary-source index
 
 - [Adding providers (live official docs)](https://hermes-agent.nousresearch.com/docs/developer-guide/adding-providers)

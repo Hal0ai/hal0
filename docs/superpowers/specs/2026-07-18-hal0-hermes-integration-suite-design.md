@@ -411,6 +411,22 @@ Stage on LXC105 after unit and integration gates pass. Exercise all three adapte
 
 Each phase must produce independently testable software and may ship separately. The memory, provider, and voice adapters remain independently disableable.
 
+## Review notes (2026-07-18, orchestrator) — status caveat + reconcile with landed rework
+
+The design is well-structured and correctly scoped (three adapters + core; dashboard/observability/context/streaming deferred). Six additions before implementation, cross-referencing `REWORK.md` / `REWORK_BOARD.md` and work landed this session:
+
+1. **"Status: Approved design" is gated on a prerequisite that isn't scheduled.** The whole suite hard-depends on Phase-0 upstream reconciliation (pin `earendil-works@0554ef1` → `NousResearch@7fd419e`), which is a **significant compat lane not yet on `REWORK_BOARD.md`**. Downgrade to "Approved, blocked on HERMES pin-reconciliation lane" and add that lane to the board (with the `hermes-sdk-diff` expansion) so the dependency is tracked, not implicit.
+
+2. **`hal0-voice` in the initial suite vs `REWORK.md` voice non-goal — clarify, they don't conflict.** `REWORK.md` defers the **hal0 voice *stack* / new voice models (§19)**. This suite's `hal0-voice` only **routes Hermes voice through existing hal0 STT/TTS slots** — no new models, no new hal0 voice runtime. State this distinction in Non-goals so a reader enforcing the freeze doesn't flag it. (It's in-scope; §19 is not.)
+
+3. **Provider alias resolution + "Configuration ownership" should name the now-landed primitives.** §11.1 opaque **slot-id** (name = mutable label) and §11.2 **PortAuthority** (`port_claim`) MERGED this session. The provider's "owning slot identifier" (Inventory contract) = the opaque slot-id; ports come from PortAuthority. Update the inventory/alias sections to bind to these, not to slot name/config port.
+
+4. **hal0-hermes-core auth + liveness.** Make the shared core's auth concrete against KB-1: `HAL0_CLIENT_KEY` for inference/read, `HAL0_ADMIN_KEY` for mutations, deny-by-default. **All reachability/preflight probes must hit an OPEN endpoint (`/api/health`), never admin-gated `/api/status`** — that exact bug (`#5`) failed every install until fixed this session. Add it to the "Provider diagnostics" + core contract.
+
+5. **"Configuration ownership: plugin sources root-owned/read-only while service sandboxed" now needs the §7.4 born-owned split.** §7.4 (F.7) LANDED: `$HERMES_HOME` trees are **born `hal0:hal0`** (both chown layers deleted); `/usr/local/bin/hermes` + `/etc/hal0/agents/hermes.toml` stay **root:root**; root residue flows through the audited `hal0-systemctl write-gateway-dropin` + `hal0-agentenv write-seed-toml` seams. Rewrite this section to draw the ownership line per-tree and reference the seams — the current one-liner reads as "everything root-owned," which is no longer true.
+
+6. **LXC105 migration = the same procedure as `REWORK.md` Honcho→Hindsight + the board's migration-window lane.** Don't fork it. The 10-step migration here should reference the canonical Honcho→Hindsight window (snapshot → per-workspace dry-run → migrate → verify counts/recalls → snapshot → reconfigure → ordered deletion → prove `Hal0Config` tolerates persisted `[honcho]`). Cross-link so there is one migration of record. Also: LXC105 is the **live reference box (do not disturb prematurely)**; the current deploy target is **halo143** — confirm which box the "live acceptance"/soak runs on (halo143 for validation; LXC105 stays rollback/reference until proven).
+
 ## Success criteria
 
 The suite is complete when:
