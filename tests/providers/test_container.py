@@ -516,6 +516,39 @@ class TestRenderUnit:
         assert "--override-kv" in tokens
         assert "tokenizer.ggml.add_bos=bool:false" in tokens
 
+    def test_json_extra_arg_preserves_quoting(self) -> None:
+        """A space-less JSON extra-arg value must survive systemd's ExecStart
+        parser intact (rework board bug).  ``--chat-template-kwargs
+        '{"enable_thinking":false}'`` shlex-splits into a bare, space-less
+        ``{"enable_thinking":false}`` token; the old emitter only quoted tokens
+        containing a space, so the double-quotes were emitted un-escaped and
+        systemd (and a shlex round-trip) stripped them to
+        ``{enable_thinking:false}`` → llama-server JSON parse error → the slot
+        never starts.  The emitter must ``shlex.quote`` every token so the JSON
+        reaches the process byte-for-byte."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        json_kwargs = '{"enable_thinking":false}'
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+            device_paths=["/dev/kfd", "/dev/dri/renderD128"],
+            extra_args=f"--chat-template-kwargs '{json_kwargs}'",
+        )
+        exec_start = self._get_exec_start(unit)
+        # The raw line must carry the (now single-quoted) JSON with its double
+        # quotes intact — never the double-quote-stripped form.
+        assert json_kwargs in exec_start
+        assert "{enable_thinking:false}" not in exec_start
+        # And a shell/systemd-style re-parse recovers the exact JSON token.
+        tokens = shlex.split(exec_start)
+        assert "--chat-template-kwargs" in tokens
+        assert tokens[tokens.index("--chat-template-kwargs") + 1] == json_kwargs
+
     def test_security_opts(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)

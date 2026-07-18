@@ -147,3 +147,79 @@ async def test_bare_manager_unchanged(hal0_home: Path) -> None:
     assert snap.slot_id is None
     assert "id" not in snap.as_dict()
     assert snap.port == 8081
+
+
+# ── internal id-keying of the in-memory caches (rework §11.1, increment B) ────
+
+
+async def test_inmemory_dicts_keyed_by_durable_slot_id(hal0_home: Path) -> None:
+    """With an identity store wired, every per-slot cache is keyed by the
+    durable ``slot_id`` — not the name."""
+    sm = _manager(hal0_home)
+    snap = await _create(sm, "chat", port=8081)
+    await sm._transition("chat", SlotState.READY, model_id="some-model", port=8081, force=True)
+    sm.bump_last_used("chat")
+    assert snap.slot_id in sm._states
+    assert snap.slot_id in sm._last_used
+    # the name is NEVER a key of the internal caches.
+    assert "chat" not in sm._states
+    assert "chat" not in sm._last_used
+    # the chokepoint round-trips.
+    assert sm._key("chat") == snap.slot_id
+    assert sm._name_for_key(snap.slot_id) == "chat"
+
+
+def test_bare_manager_key_is_negative_surrogate_bijection() -> None:
+    """No identity store → ``_key`` mints stable negative surrogates that can
+    never alias a real (>= 1) AUTOINCREMENT id, and the bijection holds."""
+    sm = SlotManager()
+    k_chat = sm._key("chat")
+    k_agent = sm._key("agent")
+    assert k_chat < 0 and k_agent < 0
+    assert k_chat != k_agent
+    # stable + bijective.
+    assert sm._key("chat") == k_chat
+    assert sm._name_for_key(k_chat) == "chat"
+    assert sm._name_for_key(k_agent) == "agent"
+    # aliases collapse onto the canonical name's handle.
+    assert sm._key("agent-hermes") == sm._key("agent")
+
+
+async def test_surrogate_rebinds_to_durable_id_when_row_appears(hal0_home: Path) -> None:
+    """A name touched BEFORE its identity row exists (the boot ordering where
+    ``reconcile_unconfigured_slots`` runs before ``fold_identity``) binds a
+    surrogate; the moment the row appears every cache entry is migrated
+    surrogate → durable id, so nothing is orphaned."""
+    sm = _manager(hal0_home)
+    # No row yet → surrogate handle.
+    surrogate = sm._key("chat")
+    assert surrogate < 0
+    # Simulate a pre-fold cache write under the surrogate.
+    await sm._transition("chat", SlotState.OFFLINE, message="pre-fold", force=True)
+    assert surrogate in sm._states
+    # The identity row appears (create-on-demand fold).
+    row = sm._ensure_identity("chat", {"name": "chat", "type": "llm", "device": "gpu-rocm"})
+    assert row is not None and row.id >= 1
+    # The cache entry migrated from the surrogate to the durable id.
+    assert surrogate not in sm._states
+    assert row.id in sm._states
+    assert sm._key("chat") == row.id
+    assert sm._name_for_key(row.id) == "chat"
+
+
+async def test_rename_does_not_rekey_caches(hal0_home: Path) -> None:
+    """The payoff of id-keying: a rename is a pure relabel — the id-keyed
+    caches keep the SAME entry under the SAME handle, only the display label
+    (and the name↔handle map) moves."""
+    sm = _manager(hal0_home)
+    snap = await _create(sm, "chat", port=8081)
+    slot_id = snap.slot_id
+    sm.bump_last_used("chat")
+    stamp = sm._last_used[slot_id]
+    await sm.rename("chat", "chat-primary")
+    # Same handle, same entry — the cache was never re-keyed.
+    assert sm._last_used.get(slot_id) == stamp
+    assert sm._key("chat-primary") == slot_id
+    # Old label no longer maps to the handle.
+    assert "chat" not in sm._name_to_key
+    assert sm._name_for_key(slot_id) == "chat-primary"

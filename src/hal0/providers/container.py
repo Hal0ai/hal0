@@ -684,8 +684,16 @@ def _render_unit_from_plan(
     argv.append(plan.image)
     argv.extend(plan.command)
 
-    # ExecStart is a single long line; systemd accepts bare argv tokens.
-    exec_start = " ".join(shlex.quote(a) if " " in a else a for a in argv)
+    # ExecStart is a single long line.  Every token is ``shlex.quote``-d so a
+    # value that is space-less but carries shell/systemd-special characters —
+    # notably a JSON blob like ``--chat-template-kwargs '{"enable_thinking":
+    # false}'`` — survives systemd's ExecStart word-splitter with its double
+    # quotes intact.  The old "quote only if it has a space" rule emitted such
+    # a token bare, and systemd stripped the inner double quotes, handing
+    # llama-server ``{enable_thinking:false}`` (invalid JSON → slot never
+    # starts).  ``shlex.quote`` leaves already-safe tokens (``--port``, ``8081``)
+    # untouched, so unit files stay readable.
+    exec_start = " ".join(shlex.quote(a) for a in argv)
     coerced = [Mount.coerce(m) for m in plan.mounts]
     return _unit_skeleton(
         slot_name,
