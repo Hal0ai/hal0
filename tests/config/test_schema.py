@@ -34,10 +34,12 @@ from hal0.config.schema import (
 
 
 class TestBrainChatConfig:
-    def test_defaults_are_permissive_and_stable(self) -> None:
+    def test_defaults_are_safe_and_stable(self) -> None:
         bc = BrainChatConfig()
         assert bc.enabled is True
-        assert bc.read_only is False
+        # KB-2/3: the steward SHIPS read-only; mutations need an explicit
+        # [brain_chat] read_only=false opt-in.
+        assert bc.read_only is True
         assert bc.model == ""
         assert bc.max_rounds == 8
         assert bc.completion_timeout_s == 300.0

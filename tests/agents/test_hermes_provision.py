@@ -2242,6 +2242,13 @@ def test_gateway_secrets_wire_routes_through_seam_non_root(
     # Override the root euid the helper set — emulate a non-root provision.
     monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(hp, "_HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
+    # Hermetic vault: the phase also runs ensure_gateway_api_server_key, whose
+    # outcome must not depend on the host's real /var/lib/hal0 state (on a bare
+    # CI runner a missing vault triggers key-gen → an extra merge-secrets seam
+    # call). A strong key on disk → outcome "present", no write.
+    vault = tmp_path / "hermes.env"
+    vault.write_text(f"API_SERVER_KEY={'k' * 43}\n", encoding="utf-8")
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
 
     seam_calls: list[tuple[list[str], Any]] = []
 
