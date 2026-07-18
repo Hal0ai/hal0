@@ -37,6 +37,7 @@ directly so they work without a running daemon.
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots`, `--source {release\|git}` |
 | `hal0 update owui` | Repin the OpenWebUI companion image to the latest (or an explicit) digest, pull, and restart. | `--check`, `--tag TAG`, `--target DIGEST`, `--yes`/`-y`, `--force` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
+| `hal0 chat` | Terminal chat REPL over `/v1/chat/completions` — handy for SSH/headless boxes. In-REPL: `/think on\|off\|default`, `/clear`, `/quit` (or Ctrl-D). | `--model` (default `agent`), `--base-url` (default `http://127.0.0.1:8080/v1`), `--no-stream` |
 
 `hal0 update` with no flags checks the configured channel and applies the
 update if one is newer; it polls the apply job to completion. `--channel`
@@ -56,6 +57,27 @@ with `--check` to only check the git remote without applying.
 `--purge` additionally deletes config, data, the hal0 system user, and all
 hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 `HAL0_FORCE=1`).
+
+## `hal0 chat` — terminal REPL
+
+A plain read-eval-print loop over the local `/v1/chat/completions`, useful on
+SSH/headless boxes where the dashboard's slide-out chat isn't reachable. Talks
+to a chat slot by alias (default `agent` — the tool-calling anchor every
+fallback chain ends in) or an explicit `--model`.
+
+| Flag | Purpose |
+|---|---|
+| `--model` | Slot alias or model id to chat with (default `agent`). |
+| `--base-url` | hal0 OpenAI-compatible API base, `…/v1` (default `http://127.0.0.1:8080/v1`; also honours `$HAL0_CHAT_BASE_URL`). |
+| `--no-stream` | Wait for each full reply instead of streaming tokens live. |
+
+In-REPL commands: `/think on\|off\|default` forces reasoning on/off for
+every turn from then on, or falls back to the slot's own configured default;
+`/clear` resets the conversation history; `/quit` (or Ctrl-D) exits.
+Reasoning tokens (`<think>...</think>` or an explicit `reasoning_content`
+field) are always split out of the model's reply before it's folded back
+into history, regardless of `/think` state — a long session never re-feeds
+its own prior chain-of-thought back to the model as context bloat.
 
 ## `hal0 setup` — first-run setup
 
