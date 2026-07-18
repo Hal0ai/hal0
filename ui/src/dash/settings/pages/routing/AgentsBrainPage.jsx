@@ -10,17 +10,15 @@
 // key applies live (board_chat._brain_chat_config reads app.state per turn), so
 // the ApplyBadge shows "live". Saves via the generic PUT /api/settings.
 import { useState, useEffect } from 'react'
-import { useSettings, useSettingsUpdate, useApplyPlan } from '@/api/hooks/useSettings'
+import { useSettingsClient } from '../../data/settingsClient.js'
 import { useSlots } from '@/api/hooks/useSlots'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { _advInputStyle } from '../../shared/SchemaRow.jsx'
 
 export function AgentsBrainPage() {
-  const applyPlanQuery = useApplyPlan();
-  const registry = applyPlanQuery.data?.registry || {};
-  const settings = useSettings();
-  const update = useSettingsUpdate();
+  // R5 data seam: one typed client instead of three ad-hoc hooks.
+  const { settings, update, registry } = useSettingsClient();
   const slotsQuery = useSlots();
 
   const live = settings.data?.brain_chat || {};

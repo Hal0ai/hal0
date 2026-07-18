@@ -20,7 +20,7 @@ from hal0.api.auth import (
     resolve_principal_from_scope,
     verify_admin_key,
 )
-from hal0.errors import Unauthorized
+from hal0.errors import TooManyRequests, Unauthorized
 
 log = structlog.get_logger(__name__)
 
@@ -31,8 +31,19 @@ class LoginRequest(BaseModel):
     key: str
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort caller IP for the login rate-limit key.
+
+    Falls back to a constant bucket when the ASGI scope carries no client
+    tuple (some test transports) so those requests still share ONE budget
+    rather than silently escaping the limiter.
+    """
+    client = request.client
+    return client.host if client is not None else "unknown"
+
+
 @router.post("/login")
-async def login(body: LoginRequest, response: Response) -> dict[str, object]:
+async def login(body: LoginRequest, request: Request, response: Response) -> dict[str, object]:
     """Validate ``key`` against ``HAL0_ADMIN_KEY`` and mint the session cookie.
 
     Reuses the exact HMAC cookie machinery ``agents/_auth.py`` already
@@ -41,7 +52,24 @@ async def login(body: LoginRequest, response: Response) -> dict[str, object]:
     accepted. There is no client-key login: the client tier is
     Bearer/``?api_key=``-only by design (it's meant for programmatic /
     embedded callers, not a browser session).
+
+    Brute-force guard: every attempt (success OR failure) is metered by a
+    per-IP sliding-window limiter (``app.state.login_limiter``) BEFORE the
+    key is checked, so an automated guesser is capped at a handful of tries
+    per minute per source. The check runs first — a blocked caller never
+    reaches the constant-time key compare. The limiter is optional on
+    ``app.state`` so a bare/mocked app still logs in.
     """
+    limiter = getattr(request.app.state, "login_limiter", None)
+    if limiter is not None:
+        client_ip = _client_ip(request)
+        if not limiter.allow(client_ip):
+            log.warning("hal0.auth.login_rate_limited", client=client_ip)
+            raise TooManyRequests(
+                "too many login attempts; slow down and retry shortly",
+                code="auth.rate_limited",
+                details={"retry_after_s": int(limiter.retry_after(client_ip)) + 1},
+            )
     if not verify_admin_key(body.key):
         log.warning("hal0.auth.login_failed")
         raise Unauthorized("invalid key", code="auth.invalid_key")

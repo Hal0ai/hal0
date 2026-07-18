@@ -181,6 +181,10 @@ RULES: tuple[_Rule, ...] = (
     _Rule("secrets", _prefix("/api/secrets"), AuthClass.ADMIN, None),
     _Rule("memory", _prefix("/api/memory"), AuthClass.ADMIN, None),
     _Rule("board", _prefix("/api/board"), AuthClass.ADMIN, None),
+    # hal0-brain steward chat (R4 §G): primary /api/brain/chat surface, sibling
+    # of the /api/board/chat alias. Admin-only — it drives the full platform
+    # admin tool surface (slot mutations, model pulls, board writes).
+    _Rule("brain (hal0-brain steward chat)", _prefix("/api/brain"), AuthClass.ADMIN, None),
     _Rule("providers", _prefix("/api/providers"), AuthClass.ADMIN, None),
     _Rule("upstreams", _prefix("/api/upstreams"), AuthClass.ADMIN, None),
     _Rule("updates", _prefix("/api/updates"), AuthClass.ADMIN, None),

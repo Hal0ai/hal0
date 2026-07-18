@@ -1,12 +1,12 @@
-"""RuntimeLaunchPlan + the single unit renderer (#4 — fold the two argv
-builders into one, with first-class read-only mounts and health).
+"""RuntimeLaunchPlan + the single Quadlet renderer (P3-quadlet — one renderer,
+first-class read-only mounts and health).
 
 Covers what the refactor newly guarantees:
   * Mount expresses read-only as a flag (not a ":ro" target string), and the
-    renderer emits the right --volume value either way (incl. legacy tuples);
-  * HealthCheck renders the --health-* podman flags;
-  * _render_unit (scalar shim) and _render_unit_from_plan agree byte-for-byte —
-    the legacy llama path now folds into the spec path;
+    renderer emits the right ``Volume=`` value either way (incl. legacy tuples);
+  * HealthCheck renders the ``Health*=`` Quadlet keys;
+  * the llama scalar shim and building the equivalent RuntimeLaunchPlan agree on
+    the ``Exec=`` argv — the legacy llama path folds into the spec path;
   * _spec_provider_for routes on the profile's runtime_family.
 """
 
@@ -15,25 +15,60 @@ from __future__ import annotations
 import shlex
 
 from hal0.config.schema import ProfileConfig, resolve_profile_flags
+from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, RuntimeLaunchPlan
 from hal0.providers.comfyui import ComfyUIProvider
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
-    _render_unit,
-    _render_unit_from_plan,
+    _llama_launch_plan,
+    _render_quadlet_from_plan,
     _spec_provider_for,
 )
 from hal0.providers.flm import FLMProvider
 from hal0.providers.kokoro import KokoroProvider
 
-_TEST_RUNTIME = "/usr/bin/docker"
+
+# Thin shims so call sites change minimally. ``runtime_bin`` is accepted and
+# IGNORED — Quadlet is podman-only, there is no runtime to select.
+def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"):
+    return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
 
 
-def _exec_start(unit_text: str) -> str:
+def _render_llama(
+    token,
+    image,
+    port,
+    model_path,
+    flags_str,
+    *,
+    runtime_bin=None,
+    device_paths=None,
+    context_size=None,
+    extra_args=None,
+    model_alias=None,
+    publish_host="127.0.0.1",
+):
+    devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
+    plan = _llama_launch_plan(
+        image=image,
+        port=port,
+        model_path=model_path,
+        flags_str=flags_str,
+        devices=list(devices),
+        group_ids=[str(g) for g in resolve_gpu_group_ids()],
+        context_size=context_size,
+        extra_args=extra_args,
+        model_alias=model_alias,
+    )
+    return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
+
+
+def _exec(unit_text: str) -> str:
+    """The in-container argv from the Quadlet ``Exec=`` line (no podman preamble)."""
     for line in unit_text.splitlines():
-        if line.startswith("ExecStart="):
-            return line[len("ExecStart=") :]
-    raise AssertionError("ExecStart not found")
+        if line.startswith("Exec="):
+            return line[len("Exec=") :]
+    raise AssertionError("Exec not found")
 
 
 # ── Mount ──────────────────────────────────────────────────────────────────────
@@ -89,65 +124,50 @@ class TestHealthCheck:
 class TestRenderUnitFromPlan:
     def test_host_network_skips_publish(self) -> None:
         plan = RuntimeLaunchPlan(image="img", command=["x"], port=8080, network_mode="host")
-        unit = _render_unit_from_plan("s", plan, runtime_bin=_TEST_RUNTIME)
-        assert "--publish" not in unit
-        assert "--network=host" in unit
+        unit = _render_from_plan("s", plan)
+        assert "PublishPort" not in unit
+        assert "Network=host" in unit
 
     def test_empty_network_publishes_loopback_from_port(self) -> None:
         plan = RuntimeLaunchPlan(image="img", command=["x"], port=8080, network_mode="")
-        unit = _render_unit_from_plan("s", plan, runtime_bin=_TEST_RUNTIME)
-        assert "--publish=127.0.0.1:8080:8080" in unit
-        assert "--network=" not in unit
-
-    def test_health_flags_precede_image(self) -> None:
-        plan = RuntimeLaunchPlan(
-            image="the-image",
-            command=["--go"],
-            port=8080,
-            network_mode="",
-            health=HealthCheck(cmd="probe || exit 1"),
-        )
-        tokens = shlex.split(
-            _exec_start(_render_unit_from_plan("s", plan, runtime_bin=_TEST_RUNTIME))
-        )
-        health = next(t for t in tokens if t.startswith("--health-cmd="))
-        assert tokens.index(health) < tokens.index("the-image")
+        unit = _render_from_plan("s", plan)
+        assert "PublishPort=127.0.0.1:8080:8080" in unit
+        assert "Network=" not in unit
 
     def test_no_health_emits_no_health_flags(self) -> None:
         plan = RuntimeLaunchPlan(image="img", command=["x"], port=8080, network_mode="")
-        assert "--health-cmd=" not in _render_unit_from_plan("s", plan, runtime_bin=_TEST_RUNTIME)
+        assert "HealthCmd=" not in _render_from_plan("s", plan)
 
     def test_mount_and_legacy_tuple_render_identically(self) -> None:
-        # The renderer coerces a legacy (src, dst:ro) tuple to the same volume
-        # arg a first-class read-only Mount produces.
+        # The renderer coerces a legacy (src, dst:ro) tuple to the same Volume
+        # value a first-class read-only Mount produces.
         as_mount = RuntimeLaunchPlan(
             image="img", command=["x"], mounts=[Mount("/m", "/m", read_only=True)]
         )
         as_tuple = RuntimeLaunchPlan(image="img", command=["x"], mounts=[("/m", "/m:ro")])
-        m_unit = _render_unit_from_plan("s", as_mount, runtime_bin=_TEST_RUNTIME)
-        t_unit = _render_unit_from_plan("s", as_tuple, runtime_bin=_TEST_RUNTIME)
-        assert "--volume=/m:/m:ro" in m_unit
-        assert _exec_start(m_unit) == _exec_start(t_unit)
+        m_unit = _render_from_plan("s", as_mount)
+        t_unit = _render_from_plan("s", as_tuple)
+        assert "Volume=/m:/m:ro" in m_unit.splitlines()
+        assert m_unit == t_unit
 
 
 # ── legacy shim folds into the single builder ──────────────────────────────────
 
 
-def test_render_unit_shim_matches_equivalent_plan(monkeypatch) -> None:
-    """_render_unit (scalar shim) must produce the same unit as building the
+def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
+    """The llama scalar shim must produce the same ``Exec=`` argv as building the
     equivalent RuntimeLaunchPlan and rendering it — proving the legacy llama
     path is now just the spec path with a thin adapter."""
     monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
     profile = ProfileConfig(image="ghcr.io/x:server", flags="-fa on --no-mmap", mtp=False)
     flags = resolve_profile_flags(profile)
 
-    shim_unit = _render_unit(
+    shim_unit = _render_llama(
         "chat",
         profile.image,
         8095,
         "/mnt/ai-models/m.gguf",
         flags,
-        runtime_bin=_TEST_RUNTIME,
         device_paths=["/dev/kfd", "/dev/dri/renderD128"],
         context_size=131072,
         model_alias="my-model",
@@ -176,14 +196,10 @@ def test_render_unit_shim_matches_equivalent_plan(monkeypatch) -> None:
         health=HealthCheck(cmd="curl -fsS http://127.0.0.1:8095/health || exit 1"),
     )
 
-    # group_add is resolved from the host in the shim; compare ExecStart minus
-    # the host-specific --group-add tokens.
-    def _strip_gids(unit: str) -> list[str]:
-        return [t for t in shlex.split(_exec_start(unit)) if not t.startswith("--group-add=")]
-
-    assert _strip_gids(shim_unit) == _strip_gids(
-        _render_unit_from_plan("chat", equivalent, runtime_bin=_TEST_RUNTIME)
-    )
+    # group_add is resolved from the host in the shim, but it renders as a
+    # ``GroupAdd=`` [Container] key, not into ``Exec=`` — so the in-container
+    # argv is directly comparable.
+    assert _exec(shim_unit) == _exec(_render_from_plan("chat", equivalent))
 
 
 # ── runtime-family dispatch (#1 provider-half: stop string-matching) ───────────

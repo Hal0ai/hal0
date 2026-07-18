@@ -842,7 +842,7 @@ async def test_status_surfaces_last_used_at(
     await sm.load("chat")
     # Cold slot — clear any bumps internal load paths may have produced
     # so we exercise the "no bumps yet" branch deterministically.
-    sm._last_used.pop("chat", None)
+    sm._last_used.pop(sm._key("chat"), None)
     snap = await sm.status("chat")
     assert snap.last_used_at is None
     assert snap.as_dict()["last_used_at"] is None

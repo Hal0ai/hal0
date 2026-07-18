@@ -118,6 +118,7 @@ from hal0.slots.watchdog import (
 if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
     from hal0.slots.arbiter import GpuArbiter
+    from hal0.slots.interface import SlotInterface
 
 log = logging.getLogger(__name__)
 
@@ -279,7 +280,19 @@ class SlotManager:
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
+        identity_store: Any | None = None,
+        port_authority: Any | None = None,
     ) -> None:
+        # Stable-id identity bridge + single port allocator (rework §11.1/§11.2).
+        # Both are OPT-IN (default None): a bare ``SlotManager()`` — every unit
+        # test — keeps the existing name-keyed, TOML-port behaviour untouched.
+        # The API lifespan injects live stores (:class:`hal0.slots.identity.
+        # SlotIdentityStore` + :class:`hal0.ports.authority.PortAuthority`) so
+        # slots gain an opaque ``id``, ports flow through one authority, and
+        # rename becomes a pure relabel. Every use below is guarded + best-
+        # effort so an identity/DB hiccup can never break slot lifecycle.
+        self._identity: Any | None = identity_store
+        self._port_authority: Any | None = port_authority
         # Optional EventBus for footer/dashboard observability. Not part
         # of the slot state machine — purely a side-channel so the
         # dashboard footer can render transitions without polling. None
@@ -289,8 +302,24 @@ class SlotManager:
         # slots can auto-register/deregister kind="remote" entries at load/unload
         # time.  None in test contexts (container upstream wiring is skipped).
         self._upstreams_registry = upstreams_registry
+        # ── internal id-keying (rework §11.1) ────────────────────────────
+        # Every in-memory per-slot dict below is keyed by the slot's STABLE
+        # integer handle, not its (mutable) name — so a rename is a pure
+        # relabel that never re-keys a single cache. The handle is the durable
+        # identity ``slot_id`` (the ``slot`` table's AUTOINCREMENT PK, always
+        # >= 1) when an identity store is wired; otherwise a process-local
+        # surrogate. Surrogates are NEGATIVE so they can never alias a real
+        # slot_id: if a name is touched before its identity row exists (e.g.
+        # ``reconcile_unconfigured_slots`` runs before ``fold_identity`` at
+        # boot), the surrogate binds first and is transparently rebound to the
+        # durable id — migrating every cache entry — the moment the row
+        # appears (see :meth:`_bind_key`). ``_key`` is the single chokepoint;
+        # ``_name_for_key`` is its reverse. Both maps live only in memory.
+        self._name_to_key: dict[str, int] = {}
+        self._key_to_name: dict[int, str] = {}
+        self._local_key_seq: int = -1
         # Per-slot locks to prevent concurrent load/unload/restart races.
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
         # Parsed slot-TOML cache: canonical slot name → (mtime_ns, size,
         # parsed dict).  ``resolve_for_request`` calls ``iter_configs``
         # twice per routed request, which used to re-read + re-parse every
@@ -302,19 +331,19 @@ class SlotManager:
         # coarse-mtime filesystem can't serve a stale parse after our own
         # write.  Callers receive deep copies — the cached dict is never
         # handed out for mutation.
-        self._cfg_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
+        self._cfg_cache: dict[int, tuple[int, int, dict[str, Any]]] = {}
         # In-memory copy of the latest state per slot (mirrors state.json).
-        self._states: dict[str, SlotStateRecord] = {}
+        self._states: dict[int, SlotStateRecord] = {}
         # SSE subscribers: list of queues; one per active state_stream().
         self._subscribers: list[asyncio.Queue[SlotStateRecord]] = []
         # Idle-tracking — last request timestamp per slot.
-        self._last_used: dict[str, float] = {}
+        self._last_used: dict[int, float] = {}
         # Per-slot background tasks that poll the container unit's
         # is-active state and push a transition when it drops out from
         # underneath us. Keyed by slot name; only present while the
         # slot is in a live state. Owned here (not by SlotWatchdog) since
         # `_transition` needs to check/mutate it synchronously.
-        self._fail_watchers: dict[str, asyncio.Task[None]] = {}
+        self._fail_watchers: dict[int, asyncio.Task[None]] = {}
         # Push-driven failure detector (P3-slots §1b-watchdog) — see watchdog.py.
         self._watchdog: SlotWatchdog = SlotWatchdog(self)
         # PULLING — optional model-pull hook + cache predicate.  When
@@ -330,7 +359,7 @@ class SlotManager:
         # first concurrent entry and back to READY on the last exit.  A
         # single asyncio.Lock guards the counter to prevent toggle storms
         # when N concurrent requests arrive in the same tick.
-        self._serving_count: dict[str, int] = {}
+        self._serving_count: dict[int, int] = {}
         self._serving_lock: asyncio.Lock = asyncio.Lock()
         # DR-2 — per-slot committed-dispatch tickets.  ``Dispatcher.forward``
         # takes a ticket synchronously right after the image-mode guard and
@@ -338,7 +367,7 @@ class SlotManager:
         # passed the guard but not yet entered ``serving()``.  ``in_flight_count``
         # sums tickets + serving so the GpuArbiter drain never unloads a slot
         # out from under a request that is already committed to dispatch.
-        self._dispatch_tickets: dict[str, int] = {}
+        self._dispatch_tickets: dict[int, int] = {}
         # IDLE — background sweeper task that demotes READY→IDLE after
         # ``idle_after_s`` seconds of inactivity.  Started explicitly via
         # ``start_idle_monitor()`` (the API lifespan owns the lifecycle so
@@ -366,6 +395,11 @@ class SlotManager:
         # ``.arbiter`` access so CLI/test contexts that never touch image
         # mode pay nothing. See the ``arbiter`` property below.
         self._arbiter: GpuArbiter | None = None
+        # Deep intent interface (REWORK.md §E) — the narrow inspect/apply/
+        # delete/subscribe surface, constructed lazily on first ``.interface``
+        # access. Additive: delegates to the wide surface above, never replaces
+        # it. See the ``interface`` property below and hal0.slots.interface.
+        self._interface: SlotInterface | None = None
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -474,9 +508,10 @@ class SlotManager:
         return restored
 
     def _lock(self, name: str) -> asyncio.Lock:
-        if name not in self._locks:
-            self._locks[name] = asyncio.Lock()
-        return self._locks[name]
+        key = self._key(name)
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
 
     @staticmethod
     def _resolve_alias(name: str) -> str:
@@ -503,9 +538,334 @@ class SlotManager:
             return []
         return sorted(p.stem for p in cfg_dir.glob("*.toml") if not p.name.startswith("."))
 
+    # ── internal id-keying chokepoint (rework §11.1) ─────────────────────────
+    #
+    # Every per-slot in-memory dict (_states/_locks/_last_used/_cfg_cache/
+    # _fail_watchers/_serving_count/_dispatch_tickets) is keyed by the integer
+    # handle these return, NOT by name. ``_key`` is cache-first (a pure dict
+    # lookup on the hot dispatch path — no DB round-trip); the durable identity
+    # ``slot_id`` is resolved only on the cold first-touch of a name. See the
+    # __init__ note on why surrogates are negative.
+
+    _KEY_DICTS_ATTR = (
+        "_states",
+        "_locks",
+        "_last_used",
+        "_cfg_cache",
+        "_fail_watchers",
+        "_serving_count",
+        "_dispatch_tickets",
+    )
+
+    def _bind_key(self, name: str, key: int) -> None:
+        """Bind *name* → *key*, rebinding every cache when the key changes.
+
+        Called from the identity-fold / create / rename paths with the durable
+        ``slot_id``. If *name* was previously bound to a (negative) surrogate,
+        every in-memory dict entry is migrated surrogate → durable id so
+        nothing touched before the identity row existed is orphaned.
+        """
+        canonical = self._resolve_alias(name)
+        prev = self._name_to_key.get(canonical)
+        if prev is not None and prev != key:
+            for attr in self._KEY_DICTS_ATTR:
+                d = getattr(self, attr)
+                if prev in d:
+                    d[key] = d.pop(prev)
+            self._key_to_name.pop(prev, None)
+        self._name_to_key[canonical] = key
+        self._key_to_name[key] = canonical
+
+    def _key(self, name: str) -> int:
+        """Resolve a slot name to its stable integer cache handle.
+
+        Cache-first (hot path is a single dict lookup). On the first touch of a
+        name we resolve the durable ``slot_id`` from the identity store when one
+        is wired, else mint a process-local negative surrogate. The binding is
+        memoised for the process lifetime; :meth:`rename` moves it, and
+        :meth:`_bind_key` rebinds a surrogate to the durable id once the row
+        appears.
+        """
+        canonical = self._resolve_alias(name)
+        cached = self._name_to_key.get(canonical)
+        if cached is not None:
+            return cached
+        if self._identity is not None:
+            row = self._identity_row(canonical)
+            if row is not None:
+                self._name_to_key[canonical] = int(row.id)
+                self._key_to_name[int(row.id)] = canonical
+                return int(row.id)
+        surrogate = self._local_key_seq
+        self._local_key_seq -= 1
+        self._name_to_key[canonical] = surrogate
+        self._key_to_name[surrogate] = canonical
+        return surrogate
+
+    def _peek_key(self, name: str) -> int | None:
+        """Non-minting key lookup: the current handle for *name*, or ``None``.
+
+        Used by existence checks / cache invalidation that must not fabricate a
+        surrogate for a slot that may not exist.
+        """
+        canonical = self._resolve_alias(name)
+        cached = self._name_to_key.get(canonical)
+        if cached is not None:
+            return cached
+        if self._identity is not None:
+            row = self._identity_row(canonical)
+            if row is not None:
+                return int(row.id)
+        return None
+
+    def _name_for_key(self, key: int) -> str:
+        """Reverse of :meth:`_key`: the current canonical name for a handle."""
+        return self._key_to_name.get(key, "")
+
+    def _forget_key(self, name: str) -> None:
+        """Drop the name↔handle binding (delete path)."""
+        canonical = self._resolve_alias(name)
+        key = self._name_to_key.pop(canonical, None)
+        if key is not None:
+            self._key_to_name.pop(key, None)
+
+    # ── slot-id identity + port authority bridge (rework §11.1/§11.2) ────────
+    #
+    # All best-effort + guarded: when no store is injected (unit tests) these
+    # are no-ops and the existing name-keyed/TOML-port paths run unchanged.
+
+    def _derive_identity_fields(
+        self, name: str, cfg: dict[str, Any]
+    ) -> tuple[str, str, str | None, bool]:
+        """(slot_type, device, coresident_group, is_seed) from a slot cfg."""
+        slot_type = str(cfg.get("type") or "llm")
+        device = str(cfg.get("device") or "")
+        # device=npu slots co-reside in one FLM process and share its port —
+        # same derivation as the harvester's coresident marker (hal0.ports).
+        coresident_group = "npu-flm-trio" if device == "npu" else None
+        try:
+            is_seed = name in self.seeded_slots()
+        except Exception:
+            is_seed = False
+        return slot_type, device, coresident_group, is_seed
+
+    def _identity_row(self, name: str) -> Any | None:
+        """Best-effort identity row for *name*, or None (no store / miss)."""
+        if self._identity is None:
+            return None
+        try:
+            return self._identity.get_by_name(self._resolve_alias(name))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("slot.identity_lookup_failed", extra={"slot": name, "error": str(exc)})
+            return None
+
+    def _ensure_identity(self, name: str, cfg: dict[str, Any]) -> Any | None:
+        """Get-or-create the identity row for *name* (the on-demand fold).
+
+        On success, binds the name to its durable ``slot_id`` (rebinding any
+        surrogate the caches were keyed under before the row existed).
+        """
+        if self._identity is None:
+            return None
+        canonical = self._resolve_alias(name)
+        row: Any | None = None
+        try:
+            row = self._identity.get_by_name(canonical)
+            if row is None:
+                st, dev, grp, seed = self._derive_identity_fields(canonical, cfg)
+                row = self._identity.create(
+                    name=canonical,
+                    slot_type=st,
+                    device=dev,
+                    coresident_group=grp,
+                    is_seed=seed,
+                )
+        except Exception as exc:
+            # A UNIQUE(name) race resolves to the existing row; anything else
+            # is logged and degrades to "no id" (slot_id stays None).
+            row = None
+            with contextlib.suppress(Exception):
+                row = self._identity.get_by_name(canonical)
+            if row is None:
+                log.warning(
+                    "slot.identity_ensure_failed",
+                    extra={"slot": canonical, "error": str(exc)},
+                )
+        if row is not None:
+            self._bind_key(canonical, int(row.id))
+        return row
+
+    def _stamp_id(self, slot: Slot) -> Slot:
+        """Populate ``slot.slot_id`` from the identity store, best-effort."""
+        if self._identity is not None and slot.slot_id is None:
+            row = self._identity_row(slot.name)
+            if row is not None:
+                slot.slot_id = row.id
+                # Keep the in-memory handle bound to the durable id (rebinds a
+                # pre-fold surrogate) — the get_by_name read already happened.
+                self._bind_key(slot.name, int(row.id))
+        return slot
+
+    def slot_id_to_name(self, slot_id: int) -> str:
+        """Resolve an opaque slot id to its current name (raises SlotNotFound)."""
+        if self._identity is None:
+            raise SlotNotFound(
+                "slot id lookup unavailable (no identity store)",
+                details={"id": slot_id},
+            )
+        try:
+            return self._identity.get(slot_id).name
+        except Exception as exc:
+            raise SlotNotFound(
+                f"no slot with id={slot_id}",
+                details={"id": slot_id},
+            ) from exc
+
+    async def fold_identity(self) -> int:
+        """One-shot boot fold: ensure an identity row + a seeded port_claim for
+        every configured slot (rework §3.1/§3.2, non-destructive variant).
+
+        Idempotent + additive: it populates the ``slot`` table and stamps the
+        ``port_claim`` authority from each slot's current TOML ``port`` without
+        renaming any on-disk artefact or systemd unit (the destructive file/
+        unit id-migration is deferred — see the handback). A TOML port already
+        live-claimed by another slot (the documented duplicate-8081 bug) is
+        logged and left for the operator, never auto-reassigned.
+
+        Returns the number of identity rows present after the fold.
+        """
+        if self._identity is None:
+            return 0
+        count = 0
+        for name in self._all_configured_slot_names():
+            try:
+                cfg = await self._load_slot_config(name)
+            except SlotConfigError:
+                continue
+            row = self._ensure_identity(name, cfg)
+            if row is None:
+                continue
+            count += 1
+            if self._port_authority is None:
+                continue
+            port = _cfg_port(cfg)
+            if not port:
+                continue
+            try:
+                if self._port_authority.held_by(row.id) is not None:
+                    continue
+                _, _, grp, _ = self._derive_identity_fields(name, cfg)
+                # include_listeners=False: the slot's own server socket must
+                # not block seeding its own claim.
+                if not self._port_authority.is_free(port, include_listeners=False):
+                    log.warning(
+                        "slot.port_seed_conflict",
+                        extra={"slot": name, "port": port},
+                    )
+                    continue
+                self._port_authority.acquire(
+                    row.id,
+                    preferred=port,
+                    coresident_group=grp,
+                    owner_label=f"slot:{name}",
+                    include_listeners=False,
+                )
+            except Exception as exc:
+                log.warning(
+                    "slot.port_seed_failed",
+                    extra={"slot": name, "port": port, "error": str(exc)},
+                )
+        log.info("slot.identity_folded", extra={"rows": count})
+        return count
+
+    async def rename(self, slot_name: str, new_name: str) -> Slot:
+        """Rename a slot's display label (rework §11.1).
+
+        The identity ``id`` is stable, so the label change itself is a pure
+        ``UPDATE`` — but until the destructive id-keyed file/unit migration
+        lands, the on-disk TOML + state.json are still name-keyed, so this
+        also moves those two artefacts and re-keys the in-memory caches. To
+        avoid orphaning a live ``hal0-slot@<oldname>`` unit, rename is refused
+        unless the slot is OFFLINE.
+        """
+        if self._identity is None:
+            raise SlotConfigError(
+                "rename requires the identity store (not wired in this context)",
+                details={"slot": slot_name},
+            )
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise SlotConfigError("new name must be a non-empty string")
+        new_name = new_name.strip()
+        canonical = self._resolve_alias(slot_name)
+        self._ensure_known(canonical)
+        if canonical == new_name:
+            return await self.status(canonical)
+        if self._current_state(canonical) != SlotState.OFFLINE:
+            raise SlotConfigError(
+                f"slot {canonical!r} must be offline to rename "
+                "(unload it first — the systemd unit is still name-keyed)",
+                details={"slot": canonical, "state": self._current_state(canonical).value},
+            )
+        cfg = await self._maybe_load_config(canonical)
+        row = self._ensure_identity(canonical, cfg or {"name": canonical})
+        if row is None:
+            raise SlotConfigError(
+                f"could not resolve identity for slot {canonical!r}",
+                details={"slot": canonical},
+            )
+        async with self._lock(canonical):
+            with slot_write_lock():
+                # 1. The label move (raises SlotAlreadyExists on a name clash).
+                from hal0.slots.identity import SlotAlreadyExists
+
+                try:
+                    self._identity.rename(row.id, new_name)
+                except SlotAlreadyExists as exc:
+                    raise SlotConfigError(
+                        f"slot name {new_name!r} already exists",
+                        details={"slot": new_name},
+                    ) from exc
+                # 2. Move the (still name-keyed) TOML, rewriting its name field.
+                old_cfg_path = self._config_file(canonical)
+                new_cfg_path = self._config_file(new_name)
+                if old_cfg_path.exists():
+                    cfg_dict = _cfg_to_dict(cfg) if cfg else {"name": new_name}
+                    cfg_dict["name"] = new_name
+                    write_slot_toml(new_cfg_path, cfg_dict)
+                    with contextlib.suppress(FileNotFoundError):
+                        old_cfg_path.unlink()
+                # 3. Move the state dir + rewrite the persisted name. The
+                #    in-memory caches are keyed by the stable id (``row.id``),
+                #    so only the record's display ``name`` field moves — the
+                #    dict entry stays under the same handle.
+                key = int(row.id)
+                rec = self._states.get(key) or read_state(self._state_file(canonical))
+                if rec is not None:
+                    moved = SlotStateRecord(
+                        name=new_name,
+                        state=rec.state,
+                        model_id=rec.model_id,
+                        port=rec.port,
+                        updated_at=time.time(),
+                        message=rec.message,
+                        extra=dict(rec.extra),
+                    )
+                    write_state_atomic(self._state_file(new_name), moved)
+                    self._states[key] = moved
+                    with contextlib.suppress(FileNotFoundError):
+                        self._state_file(canonical).unlink()
+                # 4. Repoint the name↔handle map at the new label. The id-keyed
+                #    caches (_states/_last_used/_cfg_cache/…) need NO re-keying —
+                #    the whole point of id-keying is that rename is a relabel.
+                self._name_to_key.pop(canonical, None)
+                self._bind_key(new_name, key)
+                self._cfg_cache.pop(key, None)
+        return await self.status(new_name)
+
     def _ensure_known(self, name: str) -> None:
         """Raise SlotNotFound if no config and no state for this slot."""
-        if name in self._states:
+        peeked = self._peek_key(name)
+        if peeked is not None and peeked in self._states:
             return
         if self._config_file(name).exists():
             return
@@ -559,13 +919,14 @@ class SlotManager:
     # ── state machine ────────────────────────────────────────────────────────
 
     def _current_state(self, name: str) -> SlotState:
-        rec = self._states.get(name)
+        key = self._key(name)
+        rec = self._states.get(key)
         if rec is None:
             # Try disk.
             rec = read_state(self._state_file(name))
             if rec is None:
                 return SlotState.OFFLINE
-            self._states[name] = rec
+            self._states[key] = rec
         return rec.state
 
     async def _transition(
@@ -595,7 +956,8 @@ class SlotManager:
                 details={"slot": name, "from": current.value, "to": to_state.value},
             )
 
-        prior = self._states.get(name)
+        key = self._key(name)
+        prior = self._states.get(key)
         # Carry prior extras forward (backend / provider stamped at create
         # time should survive starting→warming→ready transitions). Caller-
         # supplied keys override, missing keys inherit.
@@ -640,7 +1002,7 @@ class SlotManager:
         # Persist atomically before broadcasting — readers via state_stream
         # observe state.json on disk after they read the queue (Tier 3).
         write_state_atomic(self._state_file(name), record)
-        self._states[name] = record
+        self._states[key] = record
         log.info(
             "slot.transition", extra={"slot": name, "from": current.value, "to": to_state.value}
         )
@@ -923,7 +1285,7 @@ class SlotManager:
                     force=True,
                 )
                 raise
-            self._last_used.pop(slot_name, None)
+            self._last_used.pop(self._key(slot_name), None)
             return await self.status(slot_name)
 
     async def restart(self, slot_name: str) -> Slot:
@@ -1033,7 +1395,7 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
+        rec = self._states.get(self._key(slot_name)) or read_state(self._state_file(slot_name))
         active = await self._is_active(slot_name)
         if rec is None:
             # No state.json yet — but the TOML may exist (configured slot
@@ -1053,17 +1415,19 @@ class SlotManager:
             # not the stale legacy ``backend`` TOML field — see
             # ``_cfg_effective_backend``.
             eff_backend = _cfg_effective_backend(cfg) if cfg else None
-            return Slot(
-                name=slot_name,
-                state=SlotState.OFFLINE,
-                port=int(cfg.get("port") or 0) if cfg else 0,
-                backend=eff_backend,
-                metadata={
-                    "provider": cfg.get("provider"),
-                    "backend": eff_backend,
-                }
-                if cfg
-                else {},
+            return self._stamp_id(
+                Slot(
+                    name=slot_name,
+                    state=SlotState.OFFLINE,
+                    port=int(cfg.get("port") or 0) if cfg else 0,
+                    backend=eff_backend,
+                    metadata={
+                        "provider": cfg.get("provider"),
+                        "backend": eff_backend,
+                    }
+                    if cfg
+                    else {},
+                )
             )
         # Reconcile with unit reality.
         observed = rec.state
@@ -1118,14 +1482,16 @@ class SlotManager:
             config_drift = await self.compute_config_drift(slot_name, cfg=cfg, active=active)
             if config_drift is not None:
                 meta["config_drift"] = config_drift
-        return Slot(
-            name=slot_name,
-            state=observed,
-            port=rec.port,
-            model_id=rec.model_id,
-            backend=backend,
-            metadata=meta,
-            last_used_at=self._last_used.get(slot_name),
+        return self._stamp_id(
+            Slot(
+                name=slot_name,
+                state=observed,
+                port=rec.port,
+                model_id=rec.model_id,
+                backend=backend,
+                metadata=meta,
+                last_used_at=self._last_used.get(self._key(slot_name)),
+            )
         )
 
     async def compute_config_drift(
@@ -1167,8 +1533,10 @@ class SlotManager:
         """Return snapshots for all configured slots, concurrently."""
         names = self._all_configured_slot_names()
         # Slots that only exist in memory (test injection) also show up.
-        for n in self._states:
-            if n not in names:
+        # ``_states`` is id-keyed now — resolve each handle back to its name.
+        for key in self._states:
+            n = self._name_for_key(key)
+            if n and n not in names:
                 names.append(n)
         if not names:
             return []
@@ -1443,6 +1811,33 @@ class SlotManager:
                     ) from exc
                 self._invalidate_cfg_cache(slot_name)
 
+                # §11.1/§11.2: assign the opaque id + route the port through the
+                # single authority. The granted port is written back into the
+                # TOML (the field becomes the read-only mirror of the claim).
+                # Best-effort: an authority hiccup falls back to the TOML port.
+                ident = self._ensure_identity(slot_name, cfg_dict)
+                if ident is not None and self._port_authority is not None:
+                    _, _, grp, _ = self._derive_identity_fields(slot_name, cfg_dict)
+                    preferred = _cfg_port(cfg_dict) or None
+                    try:
+                        granted = self._port_authority.acquire(
+                            ident.id,
+                            preferred=preferred,
+                            coresident_group=grp,
+                            owner_label=f"slot:{slot_name}",
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "slot.port_acquire_failed",
+                            extra={"slot": slot_name, "error": str(exc)},
+                        )
+                        granted = None
+                    if granted is not None and granted != _cfg_port(cfg_dict):
+                        cfg_dict["port"] = granted
+                        with contextlib.suppress(OSError):
+                            write_slot_toml(cfg_path, cfg_dict)
+                            self._invalidate_cfg_cache(slot_name)
+
             # Initialise state.
             await self._transition(
                 slot_name,
@@ -1495,6 +1890,17 @@ class SlotManager:
         if current != SlotState.OFFLINE:
             await self.unload(slot_name)
 
+        # §11.2/§11.1: release the port claim (audit trail preserved via
+        # released_at) and drop the identity row before the on-disk artefacts.
+        # Best-effort — a store hiccup must not block the delete.
+        ident = self._identity_row(slot_name)
+        if ident is not None:
+            if self._port_authority is not None:
+                with contextlib.suppress(Exception):
+                    self._port_authority.release(ident.id)
+            with contextlib.suppress(Exception):
+                self._identity.delete(ident.id)
+
         # Remove state.json and the slot config.
         for path in (
             self._state_file(slot_name),
@@ -1502,11 +1908,16 @@ class SlotManager:
         ):
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
-        # Drop in-memory bookkeeping last.
-        self._states.pop(slot_name, None)
-        self._locks.pop(slot_name, None)
-        self._last_used.pop(slot_name, None)
-        self._invalidate_cfg_cache(slot_name)
+        # Drop in-memory bookkeeping last. Resolve the handle BEFORE forgetting
+        # the binding (and note the identity row was just deleted, so peek the
+        # cached handle rather than re-resolving through the store).
+        key = self._peek_key(slot_name)
+        if key is not None:
+            self._states.pop(key, None)
+            self._locks.pop(key, None)
+            self._last_used.pop(key, None)
+            self._cfg_cache.pop(key, None)
+        self._forget_key(slot_name)
 
     async def update_config(
         self,
@@ -1583,7 +1994,7 @@ class SlotManager:
         #
         # Only touch keys the caller actually changed — leave the rest of
         # ``extra`` (adopted flag, modelless_ready_blocked, etc.) alone.
-        rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
+        rec = self._states.get(self._key(slot_name)) or read_state(self._state_file(slot_name))
         if rec is not None:
             mirrored = {"backend", "provider"}
             dirty = mirrored & updates.keys()
@@ -1615,7 +2026,7 @@ class SlotManager:
                     extra=new_extra,
                 )
                 write_state_atomic(self._state_file(slot_name), refreshed)
-                self._states[slot_name] = refreshed
+                self._states[self._key(slot_name)] = refreshed
 
         # #599 follow-up: ``[image].idle_restore_minutes`` is read into the
         # GpuArbiter once at lazy construction, so a config write alone left
@@ -1680,13 +2091,15 @@ class SlotManager:
         for cfg_path in cfg_files:
             slot_name = cfg_path.stem
             try:
-                rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
+                rec = self._states.get(self._key(slot_name)) or read_state(
+                    self._state_file(slot_name)
+                )
                 if rec is None or rec.state != SlotState.ERROR:
                     continue
                 msg = (rec.message or "").lower()
                 # Cache the hydrated record so _transition compares
                 # against the right baseline.
-                self._states[slot_name] = rec
+                self._states[self._key(slot_name)] = rec
                 # Pre-fix "no model.default set" ERRORs → OFFLINE+CTA.
                 if "no model.default set" in msg:
                     cfg = await self._maybe_load_config(slot_name)
@@ -1858,10 +2271,10 @@ class SlotManager:
         context also bumps on every request boundary so a steady stream
         keeps the slot READY.
         """
-        self._last_used[slot_name] = time.time()
+        self._last_used[self._key(slot_name)] = time.time()
 
     def last_used(self, slot_name: str) -> float | None:
-        return self._last_used.get(slot_name)
+        return self._last_used.get(self._key(slot_name))
 
     # ── PULLING ──────────────────────────────────────────────────────────────
     #
@@ -1966,8 +2379,9 @@ class SlotManager:
 
     async def _serving_enter(self, slot_name: str) -> None:
         async with self._serving_lock:
-            prev = self._serving_count.get(slot_name, 0)
-            self._serving_count[slot_name] = prev + 1
+            key = self._key(slot_name)
+            prev = self._serving_count.get(key, 0)
+            self._serving_count[key] = prev + 1
             self.bump_last_used(slot_name)
             if prev > 0:
                 return
@@ -1984,12 +2398,13 @@ class SlotManager:
 
     async def _serving_exit(self, slot_name: str) -> None:
         async with self._serving_lock:
-            remaining = self._serving_count.get(slot_name, 1) - 1
+            key = self._key(slot_name)
+            remaining = self._serving_count.get(key, 1) - 1
             if remaining > 0:
-                self._serving_count[slot_name] = remaining
+                self._serving_count[key] = remaining
                 self.bump_last_used(slot_name)
                 return
-            self._serving_count.pop(slot_name, None)
+            self._serving_count.pop(key, None)
             self.bump_last_used(slot_name)
             current = self._current_state(slot_name)
             if current != SlotState.SERVING:
@@ -2012,7 +2427,8 @@ class SlotManager:
         an in-flight request.  Temporary overlap while both counters hold the
         same request is harmless — both reach 0 only when the request ends.
         """
-        return self._serving_count.get(slot_name, 0) + self._dispatch_tickets.get(slot_name, 0)
+        key = self._key(slot_name)
+        return self._serving_count.get(key, 0) + self._dispatch_tickets.get(key, 0)
 
     def enter_dispatch(self, slot_name: str) -> None:
         """Synchronously commit a dispatch ticket for ``slot_name`` (DR-2).
@@ -2023,7 +2439,8 @@ class SlotManager:
         interleave between the guard read and the ticket take, so any request
         that passed the guard registers before the drain's next poll.
         """
-        self._dispatch_tickets[slot_name] = self._dispatch_tickets.get(slot_name, 0) + 1
+        key = self._key(slot_name)
+        self._dispatch_tickets[key] = self._dispatch_tickets.get(key, 0) + 1
 
     def exit_dispatch(self, slot_name: str) -> None:
         """Release the dispatch ticket taken by :meth:`enter_dispatch` (DR-2).
@@ -2031,13 +2448,29 @@ class SlotManager:
         Balanced on EVERY exit path of ``Dispatcher.forward``'s slot branches
         (success, typed raises, ``UpstreamUnavailable``, cancellation).
         """
-        remaining = self._dispatch_tickets.get(slot_name, 1) - 1
+        key = self._key(slot_name)
+        remaining = self._dispatch_tickets.get(key, 1) - 1
         if remaining > 0:
-            self._dispatch_tickets[slot_name] = remaining
+            self._dispatch_tickets[key] = remaining
         else:
-            self._dispatch_tickets.pop(slot_name, None)
+            self._dispatch_tickets.pop(key, None)
 
     # ── GpuArbiter (Phase D, spec §7) ────────────────────────────────────────
+
+    @property
+    def interface(self) -> SlotInterface:
+        """The deep intent surface (REWORK.md §E), lazily constructed.
+
+        ``inspect`` / ``apply`` / ``delete`` / ``subscribe`` keyed by stable
+        slot id — the narrow counterpart to this class's wide verb surface.
+        Additive: it delegates to the existing methods, so both surfaces stay
+        live during the migration (principle 6). See :mod:`hal0.slots.interface`.
+        """
+        if self._interface is None:
+            from hal0.slots.interface import SlotInterface
+
+            self._interface = SlotInterface(self)
+        return self._interface
 
     @property
     def arbiter(self) -> GpuArbiter:
@@ -2211,11 +2644,12 @@ class SlotManager:
         # the single chokepoint for config reads; callers that already resolved
         # are unaffected (canonical names pass through unchanged).
         slot_name = self._resolve_alias(slot_name)
+        cache_id = self._key(slot_name)
         path = self._config_file(slot_name)
         if not path.exists():
             # In-memory-only slot (test injection) — fall back to the
             # state.json record.  Real callers should always have a TOML.
-            rec = self._states.get(slot_name)
+            rec = self._states.get(cache_id)
             if rec is None:
                 # Issue #35: no TOML and no in-memory state means the slot
                 # simply doesn't exist — raise the 404-shaped SlotNotFound so
@@ -2255,7 +2689,7 @@ class SlotManager:
         except OSError:
             cache_key = None
         if cache_key is not None:
-            cached = self._cfg_cache.get(slot_name)
+            cached = self._cfg_cache.get(cache_id)
             if cached is not None and (cached[0], cached[1]) == cache_key:
                 # Deep-copy: callers freely mutate the returned dict
                 # (merge pipelines, _paths injection) and must never
@@ -2272,7 +2706,7 @@ class SlotManager:
         except tomllib.TOMLDecodeError as exc:
             # A malformed TOML must not be served from a stale cache entry
             # on subsequent calls either — drop whatever we had.
-            self._cfg_cache.pop(slot_name, None)
+            self._cfg_cache.pop(cache_id, None)
             raise SlotConfigError(
                 f"slot config {path} is not valid TOML: {exc}",
                 details={"slot": slot_name, "path": str(path)},
@@ -2290,7 +2724,7 @@ class SlotManager:
         if "name" not in data:
             data["name"] = slot_name
         if cache_key is not None:
-            self._cfg_cache[slot_name] = (
+            self._cfg_cache[cache_id] = (
                 cache_key[0],
                 cache_key[1],
                 copy.deepcopy(data),
@@ -2306,7 +2740,9 @@ class SlotManager:
         :meth:`_load_slot_config` — guarantees our own writes are never
         masked even on a filesystem with coarse mtime resolution.
         """
-        self._cfg_cache.pop(self._resolve_alias(slot_name), None)
+        key = self._peek_key(slot_name)
+        if key is not None:
+            self._cfg_cache.pop(key, None)
 
     async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
         """Look up model metadata from the registry.
@@ -2534,18 +2970,20 @@ class SlotManager:
             },
         )
         # Build the Slot snapshot directly from the just-written record.
-        rec = self._states[slot_name]
-        return Slot(
-            name=slot_name,
-            state=resolved,
-            port=rec.port,
-            model_id=rec.model_id,
-            backend=rec.extra.get("backend"),
-            metadata={
-                "updated_at": rec.updated_at,
-                "message": rec.message,
-                **rec.extra,
-            },
+        rec = self._states[self._key(slot_name)]
+        return self._stamp_id(
+            Slot(
+                name=slot_name,
+                state=resolved,
+                port=rec.port,
+                model_id=rec.model_id,
+                backend=rec.extra.get("backend"),
+                metadata={
+                    "updated_at": rec.updated_at,
+                    "message": rec.message,
+                    **rec.extra,
+                },
+            )
         )
 
 

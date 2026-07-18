@@ -29,12 +29,12 @@ async def test_adoption_bumps_last_used(
     """Adopting a running slot starts its idle clock."""
     sm = SlotManager()
     container_stub.active.add("chat")
-    assert "chat" not in sm._last_used
+    assert sm._key("chat") not in sm._last_used
 
     snap = await sm.status("chat")  # no state.json + active unit → adoption
     assert snap.state == SlotState.READY
     assert snap.metadata.get("adopted") is True
-    assert "chat" in sm._last_used
+    assert sm._key("chat") in sm._last_used
 
 
 async def test_adoption_records_effective_backend_not_hardcoded_vulkan(
@@ -72,11 +72,11 @@ async def test_sweep_candidates_falls_back_to_state_updated_at(
     sm = SlotManager()
     container_stub.active.add("chat")
     await sm._transition("chat", SlotState.READY, force=True)
-    sm._last_used.pop("chat", None)
+    sm._last_used.pop(sm._key("chat"), None)
 
     candidates = sm._sweep_candidates()
     assert "chat" in candidates
-    assert candidates["chat"] == sm._states["chat"].updated_at
+    assert candidates["chat"] == sm._states[sm._key("chat")].updated_at
 
 
 async def test_idle_sweep_evicts_slot_missing_from_last_used(
@@ -87,7 +87,7 @@ async def test_idle_sweep_evicts_slot_missing_from_last_used(
     sm = SlotManager(evict_after_s=0.05)
     container_stub.active.add("chat")
     await sm._transition("chat", SlotState.READY, force=True)
-    sm._last_used.pop("chat", None)
+    sm._last_used.pop(sm._key("chat"), None)
 
     await asyncio.sleep(0.1)  # exceed the tiny TTL
     await sm._sweep_idle_once()
@@ -120,7 +120,7 @@ async def test_pressure_sweep_sees_slot_missing_from_last_used(
     sm = SlotManager(evict_pressure_mb=1024)
     container_stub.active.add("chat")
     await sm._transition("chat", SlotState.READY, force=True)
-    sm._last_used.pop("chat", None)
+    sm._last_used.pop(sm._key("chat"), None)
     # Host reads as under pressure on every probe.
     monkeypatch.setattr(sm, "_probe_host_free_mb", lambda: 128.0)
 

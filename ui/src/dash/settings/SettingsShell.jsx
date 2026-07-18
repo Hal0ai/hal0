@@ -23,6 +23,8 @@ import { GeneralPage } from './pages/server/GeneralPage.jsx'
 import { SecurityPage } from './pages/server/SecurityPage.jsx'
 import { LoadedModelsPage } from './pages/models/LoadedModelsPage.jsx'
 import { LibraryDownloadsPage } from './pages/models/LibraryDownloadsPage.jsx'
+import { ModelDefaultsPage } from './pages/models/ModelDefaultsPage.jsx'
+import { BackendGpuPage } from './pages/inference/BackendGpuPage.jsx'
 import { HardwareTuningPage } from './pages/inference/HardwareTuningPage.jsx'
 import { NpuPage } from './pages/inference/NpuPage.jsx'
 import { VoicePage } from './pages/inference/VoicePage.jsx'
@@ -47,6 +49,8 @@ export function SettingsShell({ param }) {
       case "security": return <SecurityPage />;
       case "slots": return <LoadedModelsPage />;
       case "library": return <LibraryDownloadsPage />;
+      case "modeldefaults": return <ModelDefaultsPage />;
+      case "backend": return <BackendGpuPage />;
       case "hwtuning": return <HardwareTuningPage />;
       case "npu": return <NpuPage />;
       case "voice": return <VoicePage />;

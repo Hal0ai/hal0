@@ -20,11 +20,15 @@ from hal0.errors import BadRequest
 from hal0.providers.container import (
     ContainerProvider,
     _llama_launch_plan,
-    _render_unit_from_plan,
+    _render_quadlet_from_plan,
     resolved_command_for_slot,
 )
 
-_TEST_RUNTIME = "/usr/bin/docker"
+
+def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"):
+    """Shim so call sites barely change: the Quadlet renderer no longer takes a
+    runtime binary (podman-only via its systemd generator), so accept+ignore it."""
+    return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
 
 
 def _gpu_profile(**overrides: Any) -> ProfileConfig:
@@ -297,8 +301,8 @@ def test_server_env_threads_into_plan_and_unit() -> None:
             cfg, {"_model_key": "m", "path": "/mnt/ai-models/m.gguf"}
         )
     assert spec.env == {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}
-    unit = _render_unit_from_plan("gpu-slot", spec, runtime_bin=_TEST_RUNTIME)
-    assert "--env=HSA_OVERRIDE_GFX_VERSION=11.0.0" in unit
+    unit = _render_from_plan("gpu-slot", spec)
+    assert "Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0" in unit
 
 
 def test_env_empty_when_no_server_env() -> None:

@@ -6,7 +6,7 @@
 // working; only the nav label + group changed.
 import { useState } from 'react'
 import { useSlots, useSlotEdit } from '@/api/hooks/useSlots'
-import { useSettings, useSettingsUpdate, useSettingsSchema, useApplyPlan } from '@/api/hooks/useSettings'
+import { useSettingsClient } from '../../data/settingsClient.js'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce } from '../../shared/SchemaRow.jsx'
 
 const RUNTIME_KEYS = [
@@ -46,11 +46,8 @@ export function LoadedModelsPage() {
   };
 
   // --- Slots runtime (moved from Advanced: slots.max_slots etc.) ---
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const schemaQuery = useSettingsSchema();
-  const applyPlanQuery = useApplyPlan();
-  const registry = applyPlanQuery.data?.registry || {};
+  // R5 data seam: one typed client instead of four ad-hoc hooks.
+  const { settings, update, schema: schemaQuery, registry } = useSettingsClient({ schema: true });
   const schema = schemaQuery.data || null;
   const live = settings.data || null;
 

@@ -65,7 +65,7 @@ async def test_pressure_evict_noop_when_above_floor(
     _write_slot(slot_root, "rerank", port=8090, lru=True)
     sm = SlotManager(evict_pressure_mb=4096.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0  # ancient — would be evicted if pressure fired
+    sm._last_used[sm._key("rerank")] = 0.0  # ancient — would be evicted if pressure fired
 
     # Free RAM is above the floor → no eviction.
     _patch_free_mb(monkeypatch, sm, 8192.0)
@@ -87,7 +87,7 @@ async def test_pressure_evict_disabled_when_floor_is_zero(
     _write_slot(slot_root, "rerank", port=8090, lru=True)
     sm = SlotManager(evict_pressure_mb=0.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0
+    sm._last_used[sm._key("rerank")] = 0.0
 
     # Even with zero free RAM, pressure eviction is disabled.
     _patch_free_mb(monkeypatch, sm, 0.0)
@@ -109,7 +109,7 @@ async def test_pressure_evict_skips_non_lru_slot(
     _write_slot(slot_root, "rerank", port=8090, lru=False)  # NOT lru-eligible
     sm = SlotManager(evict_pressure_mb=8192.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0
+    sm._last_used[sm._key("rerank")] = 0.0
 
     # Free RAM well below floor → pressure fires, but rerank lacks lru=true.
     _patch_free_mb(monkeypatch, sm, 512.0)
@@ -132,7 +132,7 @@ async def test_pressure_evict_never_evicts_agent(
     _write_slot(slot_root, "agent", port=8095, lru=True)
     sm = SlotManager(evict_pressure_mb=8192.0)
     await sm.load("agent")
-    sm._last_used["agent"] = 0.0  # ancient
+    sm._last_used[sm._key("agent")] = 0.0  # ancient
 
     _patch_free_mb(monkeypatch, sm, 512.0)  # well below floor
     await sm._pressure_evict_once()
@@ -158,7 +158,7 @@ async def test_pressure_evict_skips_serving_slot(
     _patch_free_mb(monkeypatch, sm, 256.0)  # far below floor
 
     async with sm.serving("rerank"):
-        sm._last_used["rerank"] = 0.0  # ancient — but serving_count > 0
+        sm._last_used[sm._key("rerank")] = 0.0  # ancient — but serving_count > 0
         await sm._pressure_evict_once()
         assert (await sm.status("rerank")).state == SlotState.SERVING
 
@@ -177,7 +177,7 @@ async def test_pressure_evict_unloads_lru_slot_under_floor(
     _write_slot(slot_root, "rerank", port=8090, lru=True)
     sm = SlotManager(evict_pressure_mb=8192.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0
+    sm._last_used[sm._key("rerank")] = 0.0
 
     _patch_free_mb(monkeypatch, sm, 1024.0)  # below floor
     await sm._pressure_evict_once()
@@ -197,7 +197,7 @@ async def test_pressure_evict_noop_when_probe_fails(
     _write_slot(slot_root, "rerank", port=8090, lru=True)
     sm = SlotManager(evict_pressure_mb=8192.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0
+    sm._last_used[sm._key("rerank")] = 0.0
 
     def _boom() -> tuple[float, float]:
         raise OSError("cannot read /proc/meminfo")
@@ -233,8 +233,8 @@ async def test_pressure_evict_lru_order(
     await sm.load("embed")
 
     # embed is older (LRU) → must be evicted first.
-    sm._last_used["rerank"] = 1000.0  # newer
-    sm._last_used["embed"] = 100.0  # older → evicted first
+    sm._last_used[sm._key("rerank")] = 1000.0  # newer
+    sm._last_used[sm._key("embed")] = 100.0  # older → evicted first
 
     evicted: list[str] = []
 
@@ -281,9 +281,9 @@ async def test_pressure_evict_stops_when_floor_met(
     for name in ("rerank", "embed", "stt"):
         await sm.load(name)
 
-    sm._last_used["stt"] = 50.0  # oldest
-    sm._last_used["embed"] = 200.0
-    sm._last_used["rerank"] = 500.0  # newest
+    sm._last_used[sm._key("stt")] = 50.0  # oldest
+    sm._last_used[sm._key("embed")] = 200.0
+    sm._last_used[sm._key("rerank")] = 500.0  # newest
 
     call_count = 0
 

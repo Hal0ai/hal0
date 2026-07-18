@@ -143,7 +143,7 @@ def _pin_npu_ready(client: TestClient) -> None:
     from hal0.slots.state import SlotState, SlotStateRecord
 
     sm = client.app.state.slot_manager
-    sm._states["flm"] = SlotStateRecord(
+    sm._states[sm._key("flm")] = SlotStateRecord(
         name="flm",
         state=SlotState.READY,
         model_id="gemma3:1b",

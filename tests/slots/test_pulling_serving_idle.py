@@ -225,7 +225,7 @@ async def test_idle_monitor_demotes_ready_to_idle(
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
     await sm.load("agent")
     # Make sure last_used is older than idle_after_s.
-    sm._last_used["agent"] = 0.0  # epoch — definitely > 0.05s ago
+    sm._last_used[sm._key("agent")] = 0.0  # epoch — definitely > 0.05s ago
     await sm.start_idle_monitor()
     try:
         # Poll for the transition.
@@ -248,7 +248,7 @@ async def test_idle_monitor_skips_serving_slots(
     await sm.start_idle_monitor()
     try:
         async with sm.serving("chat"):
-            sm._last_used["chat"] = 0.0  # ancient timestamp
+            sm._last_used[sm._key("chat")] = 0.0  # ancient timestamp
             # Wait a few sweep intervals — the slot must stay SERVING.
             for _ in range(5):
                 await asyncio.sleep(0.03)
@@ -264,7 +264,7 @@ async def test_serving_resets_idle_clock(
     """serving() exit bumps last_used so the slot doesn't immediately re-idle."""
     sm = SlotManager(idle_after_s=10.0, idle_monitor_interval_s=10.0)
     await sm.load("chat")
-    sm._last_used["chat"] = 0.0
+    sm._last_used[sm._key("chat")] = 0.0
     async with sm.serving("chat"):
         pass
     ts = sm.last_used("chat")
@@ -304,7 +304,7 @@ async def test_idle_sweep_unloads_slot_past_ttl(
     sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
     await sm.load("rerank")
     assert (await sm.status("rerank")).state == SlotState.READY
-    sm._last_used["rerank"] = 0.0  # ancient — well past the 0.01s TTL
+    sm._last_used[sm._key("rerank")] = 0.0  # ancient — well past the 0.01s TTL
 
     await sm._sweep_idle_once()
 
@@ -320,7 +320,7 @@ async def test_idle_sweep_pins_slot_with_zero_timeout(
     _write_min_slot(slot_root, "rerank", port=8090, idle_timeout_s=0)
     sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0  # ancient
+    sm._last_used[sm._key("rerank")] = 0.0  # ancient
 
     await sm._sweep_idle_once()
 
@@ -338,7 +338,7 @@ async def test_idle_sweep_does_not_evict_default_anchor(
     _write_min_slot(slot_root, "agent", port=8095)
     sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
     await sm.load("agent")
-    sm._last_used["agent"] = 0.0  # ancient
+    sm._last_used[sm._key("agent")] = 0.0  # ancient
 
     await sm._sweep_idle_once()
 
@@ -355,7 +355,7 @@ async def test_idle_sweep_never_evicts_serving_slot(
     sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
     await sm.load("rerank")
     async with sm.serving("rerank"):
-        sm._last_used["rerank"] = 0.0  # ancient, but serving_count > 0
+        sm._last_used[sm._key("rerank")] = 0.0  # ancient, but serving_count > 0
         await sm._sweep_idle_once()
         assert (await sm.status("rerank")).state == SlotState.SERVING
     assert not container_stub.unload_calls
@@ -372,13 +372,13 @@ async def test_explicit_positive_ttl_is_honored(
     await sm.load("rerank")
 
     # Idle for ~1s: under the 2s TTL → still loaded.
-    sm._last_used["rerank"] = time.time() - 1.0
+    sm._last_used[sm._key("rerank")] = time.time() - 1.0
     await sm._sweep_idle_once()
     assert (await sm.status("rerank")).state in (SlotState.READY, SlotState.IDLE)
     assert not container_stub.unload_calls
 
     # Idle for ~3s: past the 2s TTL → evicted.
-    sm._last_used["rerank"] = time.time() - 3.0
+    sm._last_used[sm._key("rerank")] = time.time() - 3.0
     await sm._sweep_idle_once()
     assert (await sm.status("rerank")).state == SlotState.OFFLINE
     assert any(c.get("name") == "rerank" for c in container_stub.unload_calls)
@@ -392,7 +392,7 @@ async def test_evicted_slot_wakes_on_next_request(
     _write_min_slot(slot_root, "rerank", port=8090)
     sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
     await sm.load("rerank")
-    sm._last_used["rerank"] = 0.0
+    sm._last_used[sm._key("rerank")] = 0.0
     await sm._sweep_idle_once()
     assert (await sm.status("rerank")).state == SlotState.OFFLINE
 

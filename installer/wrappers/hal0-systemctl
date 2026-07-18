@@ -23,6 +23,11 @@ UNIT_PREFIX="hal0-slot@"
 UNIT_DIR="/etc/systemd/system"
 SELF_UNIT="hal0-api.service"
 
+# P3-quadlet: per-slot Podman Quadlet source files live here, root-owned by
+# design; podman's systemd generator turns hal0-slot@<id>.container into
+# hal0-slot@<id>.service on daemon-reload.
+QUADLET_DIR="/etc/containers/systemd"
+
 # Fixed, literal drop-in path for the hermes gateway secrets fragment. Written
 # by the hermes provisioner when it runs unprivileged (as the hal0 user) and so
 # cannot write /etc/systemd/system itself. LITERAL — no variable, no traversal:
@@ -50,6 +55,17 @@ case "$cmd" in
   remove-unit)                # remove-unit <slot-id>   (rm -f semantics: ok if absent)
     id="${1:-}"; validate_slot_id "$id"
     rm -f "${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
+    ;;
+
+  write-quadlet)              # write-quadlet <slot-id>   (.container body on stdin)
+    id="${1:-}"; validate_slot_id "$id"
+    install -d -m 0755 -o root -g root "$QUADLET_DIR"
+    install -m 0644 -o root -g root /dev/stdin "${QUADLET_DIR}/${UNIT_PREFIX}${id}.container"
+    ;;
+
+  remove-quadlet)             # remove-quadlet <slot-id>   (rm -f semantics: ok if absent)
+    id="${1:-}"; validate_slot_id "$id"
+    rm -f "${QUADLET_DIR}/${UNIT_PREFIX}${id}.container"
     ;;
 
   write-gateway-dropin)       # write the hermes-gateway secrets drop-in (body on stdin)
@@ -87,6 +103,8 @@ case "$cmd" in
 usage: hal0-systemctl <command> [slot-id]
   write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
   remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
+  write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (body on stdin)
+  remove-quadlet <slot-id>         rm -f ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container
   write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service

@@ -130,18 +130,52 @@ warn_unused_configs = true
 # `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
 # `chore(hermes): bump upstream pin to <short-sha>` PR).
 [tool.hal0.upstream-hermes]
-repo   = "https://github.com/earendil-works/hermes-agent"
-commit = "0554ef1aa3a2e5818f292f76a676110239a5d34b"
-date   = "2026-05-28"
+# Aligned to the reviewed official compatibility freeze (research doc §"Supported
+# compatibility freeze"): NousResearch/hermes-agent v2026.7.7.2 / 0.18.2, the same
+# immutable commit the installer requirements.txt and the frozen contract fixtures
+# (tests/fixtures/hermes/contracts/) pin. The drift-watch, the compat pin, and the
+# fixtures MUST stay in lockstep — tests/agents/hermes/test_contract_compatibility.py
+# enforces it. Preserve the prior earendil-works@0554ef1 (2026-05-28) as historical
+# provenance in git history; it is NOT the production source of record.
+repo   = "https://github.com/NousResearch/hermes-agent"
+commit = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
+date   = "2026-07-07"
 
 # Surfaces hal0 vendors, shims, or proxies. The diff job only opens an
 # issue when one of these paths changes between the pinned commit and
 # upstream HEAD; commits that don't touch this list are ignored.
+#
+# Expanded from the original six-file slice to the full contract surface the
+# planned adapter suite (hal0-memory / hal0-provider / hal0-voice / executor
+# bridge / jobs-cron automation) consumes, so a Hermes bump that would break an
+# adapter trips the drift-watch first (research doc §Phase 0.3). Each path is
+# annotated with the consuming lane. Every path is verified to exist at the
+# pinned commit; the old earendil-only `agent/events.py` was dropped — it does
+# not exist at the official pin (see the handback design-doc mismatch list).
 tracked_files = [
+    # hal0-memory
+    "agent/memory_provider.py",      # MemoryProvider ABC (full lifecycle)
+    "plugins/memory/__init__.py",    # specialized memory-plugin loader + layout
+    # hal0-provider
+    "providers/base.py",             # ProviderProfile (chat_completions transport)
+    "providers/__init__.py",         # register_provider / get_provider_profile seam
+    # hal0-voice
+    "agent/tts_registry.py",         # TTS provider registry (Python path)
+    "agent/transcription_registry.py",  # STT provider registry (Python path)
+    "hermes_cli/voice.py",           # voice-mode command-provider machinery
+    # executor bridge + jobs/cron automation + security (item 4)
+    "gateway/platforms/api_server.py",  # /v1/runs, /api/sessions, /api/jobs, binds/keys
+    # shared: plugin registration, config schema, hooks, cron
+    "hermes_cli/plugins.py",         # PluginContext registration seams
+    "hermes_cli/config.py",          # config defaults incl. terminal/memory/tts/stt
+    "hermes_cli/hooks.py",           # lifecycle/gateway hook contract
+    "hermes_cli/cron.py",            # scheduled-agent automation
+    "hermes_cli/auth.py",            # has_usable_secret / placeholder denylist
+    "agent/context_engine.py",       # optional future hal0-context ABC
+    # dashboard SDK surface (tracked for drift; dashboard adapter is a non-goal
+    # of the initial suite but the SDK contract still drifts hot upstream)
     "web/src/plugins/registry.ts",
     "web/src/plugins/slots.ts",
     "hermes_cli/web_server.py",
-    "agent/memory_provider.py",
-    "tools/registry.py",
-    "agent/events.py",
+    "tools/registry.py",             # general tool registry (hal0-tools control plane)
 ]

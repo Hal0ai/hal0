@@ -40,7 +40,7 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -232,6 +232,55 @@ def resolve_principal_from_scope(scope: Any) -> AuthPrincipal:
 
 
 # ---------------------------------------------------------------------------
+# Origin defence-in-depth (CSRF / drive-by-WS belt-and-suspenders)
+
+# Methods that can change server state. Safe methods (GET/HEAD/OPTIONS) are
+# exempt: they carry no side effect, and OPTIONS is the CORS preflight.
+_STATE_CHANGING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _origin_allowed(scope: dict[str, Any]) -> bool:
+    """Belt-and-suspenders Origin check for browser-driven requests.
+
+    This runs *alongside* the tier auth above, not instead of it. The threat
+    it closes is the browser-only one: a malicious page in the operator's own
+    browser driving a state-changing request or opening a WebSocket against
+    hal0 using the operator's ambient session cookie (classic CSRF / drive-by
+    WS). Token-bearing programmatic callers (curl, the OpenAI SDK) are NOT the
+    target — they have to steal a key first, and a stolen key works from
+    anywhere regardless of Origin.
+
+    Policy:
+
+    * No ``Origin`` header  -> allow. Only browsers set ``Origin`` on
+      cross-origin/WS requests; its absence means a same-origin navigation or
+      a non-browser client, neither of which is a cross-site vector.
+    * ``Origin`` in the shared allowlist (``HAL0_ALLOWED_ORIGINS`` /
+      :func:`hal0.api.agents._auth.allowed_origins`) -> allow. One allowlist
+      for both this gate and the chat-proxy WS gate.
+    * ``Origin`` whose scheme://host[:port] equals the request ``Host``
+      -> allow (genuine same-origin: the dashboard served from the very host
+      it is calling, regardless of which LAN name/IP that is).
+    * otherwise -> deny.
+    """
+    headers = _headers_from_scope(scope)
+    origin = headers.get("origin", "")
+    if not origin:
+        return True
+
+    from hal0.api.agents._auth import allowed_origins
+
+    if origin in allowed_origins():
+        return True
+
+    # Same-origin: compare the Origin's netloc against the Host header. The
+    # browser always sends both; equality means the request targets its own
+    # origin, which no cross-site attacker page can forge.
+    host = headers.get("host", "")
+    return bool(host) and urlsplit(origin).netloc == host
+
+
+# ---------------------------------------------------------------------------
 # Enforcement decision
 
 
@@ -309,6 +358,34 @@ class AuthEnforcementMiddleware:
         # is no scope["method"] for a websocket scope, so classify() gets
         # the same pseudo-method the exposure-CI test uses.
         method = scope.get("method", "GET") if scope_type == "http" else "GET"
+
+        # Origin defence-in-depth: reject browser cross-site WebSocket
+        # upgrades and state-changing requests BEFORE tier auth. Requests
+        # with no Origin (SDKs/curl/same-origin) pass through untouched --
+        # see _origin_allowed for the full policy.
+        origin_gated = scope_type == "websocket" or method in _STATE_CHANGING_METHODS
+        if origin_gated and not _origin_allowed(scope):
+            log.info(
+                "hal0.auth.origin_rejected",
+                path=path,
+                method=method,
+                scope_type=scope_type,
+            )
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 4403})
+                return
+            payload = json.dumps(_envelope("auth.origin_forbidden", "origin not allowed")).encode(
+                "utf-8"
+            )
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": payload})
+            return
 
         auth_class = classify(method, path)
         principal = resolve_principal(scope)

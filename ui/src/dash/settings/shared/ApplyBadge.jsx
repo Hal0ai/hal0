@@ -13,8 +13,16 @@
 //
 // Extracted verbatim from settings.jsx (P3-ui split, phase 1) — no
 // window-global dependency, this component was always self-contained.
+//
+// R5 data seam: the class now resolves through the ONE reload-class source
+// (`reloadClassFor`), not a raw `registry[key]` lookup. That closes the
+// "NPU hardcoded amber chip" anti-pattern (spec risk #2) — a key the backend
+// apply-plan doesn't enumerate but the frontend fallback classifies (per-slot
+// / per-model keys) now renders its real badge instead of silently nothing.
+import { reloadClassFor } from '../data/reloadClass.js'
+
 export function ApplyBadge({ settingsKey, registry }) {
-  const entry = registry && registry[settingsKey];
+  const entry = reloadClassFor(settingsKey, registry);
   if (!entry) return null;
   const cls = entry.apply_class;
   const isImmediate = cls === "immediate";
