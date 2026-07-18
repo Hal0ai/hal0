@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -467,6 +468,37 @@ def _container_runtime() -> str:
     raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
 
 
+@functools.lru_cache(maxsize=1)
+def _podman_major_version() -> int:
+    """Best-effort podman major version, 0 when undeterminable.
+
+    Cached for the process lifetime — the binary doesn't change under a
+    running daemon, and the quadlet renderer consults this per unit render.
+    """
+    try:
+        out = subprocess.run(
+            [_container_runtime(), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+        # "podman version 4.9.3" / "podman version 5.2.1"
+        return int(out.strip().rsplit(" ", 1)[-1].split(".", 1)[0])
+    except Exception:
+        return 0
+
+
+def _quadlet_supports_autoremove() -> bool:
+    """``AutoRemove=`` is a quadlet key only since podman 5.0.
+
+    4.x generators hard-fail the whole ``.container`` conversion on the
+    unknown key (halo150 O8) — so when the version can't be determined we
+    OMIT the key: losing crash-path auto-remove is recoverable, a unit that
+    never generates is not.
+    """
+    return _podman_major_version() >= 5
+
+
 def _slot_publish_host() -> str:
     """Live ``[slots].publish_host`` — the address slot ports publish on.
 
@@ -558,12 +590,19 @@ def _render_quadlet_from_plan(
         "[Container]",
         f"Image={plan.image}",
         f"ContainerName={container_name}",
-        # Quadlet always auto-removes on stop (the old ``--rm``). ``LogDriver=none``
-        # keeps conmon→journal the single sink so ``journalctl -u`` isn't double-fed
-        # (podman's own journald driver would tag a second copy — the old B3 note).
-        "AutoRemove=yes",
+        # ``LogDriver=none`` keeps conmon→journal the single sink so
+        # ``journalctl -u`` isn't double-fed (podman's own journald driver
+        # would tag a second copy — the old B3 note).
         "LogDriver=none",
     ]
+    # ``AutoRemove=`` (the old ``--rm``) is a quadlet key only since podman
+    # 5.0 — 4.x generators HARD-FAIL the whole conversion on it ("unsupported
+    # key 'AutoRemove'") and emit NO unit at all (halo150 O8, podman 4.9.3 on
+    # Ubuntu 24.04). Emit only when the generator supports it; below 5.0 the
+    # generated unit's own ExecStopPost `podman rm` handles stop-cleanup, we
+    # only lose the crash-path auto-remove.
+    if _quadlet_supports_autoremove():
+        lines.append("AutoRemove=yes")
     if plan.network_mode:
         lines.append(f"Network={plan.network_mode}")
     # Explicit device nodes (podman won't recurse /dev/dri, #674); CDI names

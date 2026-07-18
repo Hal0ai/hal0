@@ -1001,3 +1001,25 @@ class TestFamilyDefaults:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
         assert "q8_0" not in argv  # basic seed forces no KV quant
+
+
+class TestQuadletAutoRemoveGate:
+    """halo150 O8: AutoRemove= is podman-5.0+ — 4.x generators hard-fail the
+    whole .container conversion on the unknown key and emit NO unit."""
+
+    def _rendered(self, monkeypatch, major: int) -> str:
+        from hal0.providers import container as c
+
+        monkeypatch.setattr(c, "_podman_major_version", lambda: major)
+        return _render_llama("qtest", "img:latest", 18081, "/models/m.gguf", "-fa on")
+
+    def test_podman5_emits_autoremove(self, monkeypatch):
+        assert "AutoRemove=yes" in self._rendered(monkeypatch, 5)
+
+    def test_podman4_omits_autoremove(self, monkeypatch):
+        assert "AutoRemove" not in self._rendered(monkeypatch, 4)
+
+    def test_unknown_version_omits_autoremove(self, monkeypatch):
+        # Fail-soft: a unit that never generates is worse than losing
+        # crash-path auto-remove.
+        assert "AutoRemove" not in self._rendered(monkeypatch, 0)
