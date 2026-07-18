@@ -82,6 +82,13 @@ _DOCKER_OK = _docker_available()
 
 pytestmark = [
     pytest.mark.integration,
+    # P4-tests markers: this fixture chain runs a real `docker run` (a
+    # container runtime) and, via _docker_pull, a real `docker pull` from
+    # ghcr.io (outbound network) — both genuinely required, not mocked.
+    # `-m "not podman and not systemd and not network"` skips this file
+    # entirely for a local capped verify.
+    pytest.mark.podman,
+    pytest.mark.network,
     pytest.mark.skipif(
         not _DOCKER_OK,
         reason=(
