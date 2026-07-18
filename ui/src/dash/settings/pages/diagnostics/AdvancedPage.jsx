@@ -11,11 +11,12 @@
 // PUT /api/settings as the rest of the page; per-key effect chips come from
 // the apply-plan registry, and any dirty manual-restart key routes through a
 // confirm gate before the write.
-import { useState, Fragment } from 'react'
-import { useSettings, useSettingsUpdate, useSettingsSchema, useApplyPlan } from '@/api/hooks/useSettings'
+import { Fragment } from 'react'
+import { useSettingsClient } from '../../data/settingsClient.js'
+import { useSettingsForm } from '../../data/useSettingsForm.js'
 import { ConfirmDialog } from '../../../primitives.jsx'
 import { RestartApiPanel } from '../../shared/RestartApiPanel.jsx'
-import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce } from '../../shared/SchemaRow.jsx'
+import { AdvRow, _getIn } from '../../shared/SchemaRow.jsx'
 
 const ADV_GROUPS = [
   { title: "Dispatcher", sub: "hal0.toml [dispatcher] · upstream routing tunables", keys: [
@@ -34,47 +35,21 @@ const ACTIVITY_DESC_OVERRIDE = {
 };
 
 export function AdvancedPage() {
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const schemaQuery = useSettingsSchema();
-  const applyPlanQuery = useApplyPlan();
-  const registry = applyPlanQuery.data?.registry || {};
-  const schema = schemaQuery.data || null;
+  // R5 data seam: one typed client + the shared schema-driven form helper —
+  // the buffer / dirty / coerce / patch / manual-restart-gate loop that used
+  // to live inline here now lives once in useSettingsForm.
+  const client = useSettingsClient({ schema: true });
+  const { settings, update, schema: schemaQuery, registry } = client;
   const live = settings.data || null;
 
-  // Edit buffer — dotKey → raw control value; only touched keys present.
-  const [buf, setBuf] = useState({});
-  const [confirmKeys, setConfirmKeys] = useState(null);
-  const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
-
   const allKeys = ADV_GROUPS.flatMap(g => g.keys);
-  const fields = {};
-  for (const k of allKeys) fields[k] = _schemaField(schema, k);
-
-  // A key is dirty when its coerced buffer value differs from the live one.
-  const dirtyKeys = Object.keys(buf).filter(k => {
-    const { ok, value } = _advCoerce(fields[k], buf[k]);
-    if (!ok) return true; // invalid counts as dirty so Save stays visible (but disabled)
-    const cur = _getIn(live, k);
-    return value !== (cur === undefined ? (fields[k]?.default ?? null) : cur);
-  });
-  const invalidKeys = dirtyKeys.filter(k => !_advCoerce(fields[k], buf[k]).ok);
-  const canSave = dirtyKeys.length > 0 && invalidKeys.length === 0 && !update.isPending;
+  const form = useSettingsForm(client, allKeys);
+  const { buf, fields, dirtyKeys, invalidKeys, canSave, confirmKeys } = form;
+  const onChange = form.set;
 
   const doSave = async () => {
-    let patch = {};
-    for (const k of dirtyKeys) {
-      const { value } = _advCoerce(fields[k], buf[k]);
-      patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
-    }
-    // Restart hint comes from the client-side registry over the keys we're
-    // about to write — computed BEFORE the buffer clears. (The PUT response
-    // also carries _hal0.apply_plan, but deriving locally keeps the toast
-    // correct against older backends that only matched top-level body keys.)
-    const needsRestart = dirtyKeys.some(k => registry[k] && registry[k].apply_class !== "immediate");
     try {
-      await update.mutateAsync(patch);
-      setBuf({});
+      const { needsRestart } = await form.commit();
       window.__hal0Toast && window.__hal0Toast(
         needsRestart ? "Saved — restart hal0-api (below) to apply the marked changes" : "Advanced settings saved",
         needsRestart ? "warn" : "ok",
@@ -84,9 +59,13 @@ export function AdvancedPage() {
     }
   };
 
-  const onSaveClick = () => {
-    const manual = dirtyKeys.filter(k => registry[k]?.apply_class === "manual-restart");
-    if (manual.length > 0) { setConfirmKeys(manual); return; }
+  const onSaveClick = async () => {
+    // form.submit() gates on any dirty manual-restart key (→ confirmKeys),
+    // otherwise commits. On the gated path it returns {deferred:true} and the
+    // ConfirmDialog below drives doSave(); on the immediate path it already
+    // committed, so mirror the toast here.
+    const manual = dirtyKeys.filter(k => client.reloadClass(k)?.apply_class === "manual-restart");
+    if (manual.length > 0) { form.submit(); return; }
     doSave();
   };
 
@@ -139,7 +118,7 @@ export function AdvancedPage() {
               )}
             </span>
             <div style={{display: "inline-flex", gap: 8}}>
-              <button className="btn ghost sm" disabled={dirtyKeys.length === 0 || update.isPending} onClick={() => setBuf({})}>Reset</button>
+              <button className="btn ghost sm" disabled={dirtyKeys.length === 0 || update.isPending} onClick={form.reset}>Reset</button>
               <button className="btn" disabled={!canSave} onClick={onSaveClick}>{update.isPending ? "Saving…" : "Save changes"}</button>
             </div>
           </div>
@@ -148,8 +127,8 @@ export function AdvancedPage() {
 
           <ConfirmDialog
             open={!!confirmKeys}
-            onCancel={() => setConfirmKeys(null)}
-            onConfirm={() => { setConfirmKeys(null); doSave(); }}
+            onCancel={form.clearConfirm}
+            onConfirm={() => { form.clearConfirm(); doSave(); }}
             title="Manual restart required"
             message={
               <span>

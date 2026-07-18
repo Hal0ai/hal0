@@ -22,8 +22,8 @@ import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
   'General', 'Security',
-  'Loaded Models', 'Library & Downloads',
-  'Hardware Tuning', 'NPU', 'Voice', 'Image-gen',
+  'Loaded Models', 'Library & Downloads', 'Model Defaults',
+  'Backend & GPU', 'Hardware Tuning', 'NPU', 'Voice', 'Image-gen',
   'Agents / Brain',
   'Health & Stats',
   'Storage', 'Memory',
@@ -32,7 +32,7 @@ const SECTIONS = [
 ]
 
 test.describe('Settings v3 (/settings)', () => {
-  test('renders rail nav with all 17 sections', async ({ page }) => {
+  test('renders rail nav with all sections', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.view .vh h1')).toHaveText('Settings')
     const nav = page.locator('.settings-nav .nav-item')
@@ -56,5 +56,20 @@ test.describe('Settings v3 (/settings)', () => {
   test('no Runtime section remains (#687 Phase E)', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.settings-nav .nav-item', { hasText: 'Runtime' })).toHaveCount(0)
+  })
+
+  // ML-4-unblocked pages (R5 data seam): both mount without a runtime error
+  // (spec risk #5 — the ESM split must thread the old window-globals or pages
+  // blow up at click time with no compile error).
+  test('Model Defaults section mounts', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Model Defaults' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Model Defaults')
+  })
+
+  test('Backend & GPU section mounts', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Backend & GPU' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Backend & GPU')
   })
 })
