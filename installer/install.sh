@@ -1275,6 +1275,38 @@ PYEOF
             warn "${SYSTEMCTL_SUDOERS_SRC} not found — systemctl sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #5 (O12): hal0-podman-ro covers READ-ONLY podman
+    # introspection (image presence today) against ROOT's podman store — the
+    # store slots actually populate via Quadlet, NOT hal0-api's own rootless
+    # store. Narrow + hardcoded (no shell, no wildcards, no operator-supplied
+    # podman flags) — see the wrapper source.
+    PODMAN_RO_SRC="${REPO_ROOT}/installer/wrappers/hal0-podman-ro"
+    if [[ -f "${PODMAN_RO_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${PODMAN_RO_SRC}" "${LIB_DIR}/bin/hal0-podman-ro"
+        info "wrote ${LIB_DIR}/bin/hal0-podman-ro"
+    else
+        warn "${PODMAN_RO_SRC} not found — podman introspection seam helper not installed"
+    fi
+
+    # sudoers grant for the podman introspection seam. Real installs only;
+    # visudo-validate before activating so a malformed drop-in can never wedge
+    # sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        PODMAN_RO_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-podman-ro"
+        PODMAN_RO_SUDOERS_DST="/etc/sudoers.d/hal0-podman-ro"
+        if [[ -f "${PODMAN_RO_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${PODMAN_RO_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${PODMAN_RO_SUDOERS_SRC}" "${PODMAN_RO_SUDOERS_DST}"
+                info "wrote ${PODMAN_RO_SUDOERS_DST}"
+            else
+                warn "${PODMAN_RO_SUDOERS_SRC} failed visudo check — podman introspection sudoers grant not installed"
+            fi
+        else
+            warn "${PODMAN_RO_SUDOERS_SRC} not found — podman introspection sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi

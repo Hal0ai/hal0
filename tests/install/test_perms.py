@@ -256,6 +256,32 @@ def test_flip_makes_state_root_service_owned(tmp_hal0_home: str) -> None:
     assert (hermes.owner, hermes.group, hermes.mode) == ("hal0", "hal0", 0o700)
 
 
+def test_ownership_table_has_no_rootless_podman_home_rows(tmp_hal0_home: str) -> None:
+    """O12: the 9e07c0d3 ``.config``/``.local`` rootless-HOME rows are gone.
+
+    They papered over the WRONG-context symptom (hal0's rootless podman
+    erroring on a root-owned HOME dir) instead of the actual finding: slot
+    introspection must route through root's podman store via the
+    hal0-podman-ro seam (see hal0.providers.podman_introspect), not hal0's
+    own rootless store at all. Every OTHER var_lib row — especially the
+    *.lock advisory-lock rows — must be untouched by the removal.
+    """
+    table = perms.ownership_table(service_user="hal0")
+    var_lib = paths.var_lib()
+    targets = {r.target for r in table}
+    assert var_lib / ".config" not in targets
+    assert var_lib / ".local" not in targets
+    # lock-file rows survive untouched.
+    assert var_lib / ".first-run.lock" in targets
+    lock_rows = [r for r in table if r.target == var_lib and r.glob == "*.lock"]
+    assert len(lock_rows) == 1
+    assert lock_rows[0].child_mode == 0o664
+    # HERMES_HOME and the rest of the state-root rows are untouched.
+    assert var_lib / ".hermes" in targets
+    assert var_lib / "agents" in targets
+    assert var_lib / "secrets" in targets
+
+
 def test_flip_honors_custom_service_group(tmp_hal0_home: str) -> None:
     """A non-default service_group threads through the service-owned rows."""
     rows = _by_target(perms.ownership_table(service_user="svc", service_group="svcgrp"))
