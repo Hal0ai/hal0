@@ -21,12 +21,12 @@ from hal0.config.schema import (
     StackConfig,
 )
 
-# Grep-verified against src/hal0/config/data/seed_profiles.toml: 20 seed
-# profiles today. The pre-refactor schema.py module docstring's "25" was
-# already stale (per the P3-schema spec's own verified count of 21); the
-# actual SEED_PROFILES dict this externalization is byte-for-byte replacing
-# has 20 entries — see test_seeds_parity.py for the byte-identical guard.
-_EXPECTED_PROFILE_COUNT = 20
+# Grep-verified against src/hal0/config/data/seed_profiles.toml: 17 seed
+# profiles today (§7.1a / ML-5 dropped rocm-dense-nojinja /
+# vulkan-dense-nojinja / rocm-dense-small — jinja moved to a runner
+# capability, so the nojinja clones are redundant; was 20 pre-ML-5) — see
+# test_seeds_parity.py for the byte-identical guard.
+_EXPECTED_PROFILE_COUNT = 17
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
 
 

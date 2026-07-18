@@ -59,7 +59,11 @@ def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
     )
     assert created.seed is False
     assert created.runtime_family == "llama-server"
-    assert MTP_FLAG_BUNDLE in created.resolved_flags
+    # §7.1a / ML-5: profile.mtp is informational only now — the catalog's
+    # resolved_flags (no model bound at this level) never MTP-expands, even
+    # for an mtp=true profile. See providers.container._effective_mtp for
+    # where the real, model-aware decision now lives.
+    assert MTP_FLAG_BUNDLE not in created.resolved_flags
 
     updated = catalog.update("my-rocm", ProfilePatch(flags="-fa off", mtp=False))
     assert updated.flags == "-fa off"

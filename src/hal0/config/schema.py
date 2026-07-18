@@ -955,20 +955,35 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
 _KNOWN_FAMILIES: tuple[str, ...] = ("gemma", "qwen", "llama", "phi", "mistral", "deepseek")
 
 
-def model_family(*hints: str | None) -> str | None:
-    """Best-effort model family from id/name/path hints (lower-cased token scan).
+def model_family(*hints: str | None, architecture: str | None = None) -> str | None:
+    """Best-effort model family, preferring the registry's ``architecture``.
 
-    Returns the first :data:`_KNOWN_FAMILIES` token found across the hints, or
-    ``None``.  Cheap and side-effect-free so the launch + preview argv paths can
-    both call it.
+    §7.1a / ML-5: when ``architecture`` (``registry.model.Model.architecture``,
+    e.g. ``"gemma3"``, ``"qwen2"``, ``"qwen3next"``, ``"gpt-oss"``, ``"mamba"``)
+    is given (non-empty), it is the ONLY signal consulted — a token-membership
+    match against :data:`_KNOWN_FAMILIES` (so ``"gemma3"`` -> ``"gemma"``,
+    ``"qwen3next"`` -> ``"qwen"``), else ``None``. An architecture hal0 has no
+    :data:`FAMILY_DEFAULTS` override for (e.g. ``"gpt-oss"``, ``"mamba"``) is
+    deliberately NOT re-guessed from the filename hints below — a real,
+    authoritative signal that just doesn't map to a known family beats a
+    coincidental filename token match.
+
+    ``hints`` (id/filename/path) are the FALLBACK token scan, used only when
+    ``architecture`` is unset/empty — the pre-existing path for registry
+    rows the architecture-detection lane (§7.1d) hasn't backfilled yet.
+    Cheap and side-effect-free so the launch + preview argv paths can both
+    call it.
     """
+    if architecture:
+        arch_hay = architecture.lower()
+        return next((fam for fam in _KNOWN_FAMILIES if fam in arch_hay), None)
     hay = " ".join(h for h in hints if h).lower()
     return next((fam for fam in _KNOWN_FAMILIES if fam in hay), None)
 
 
-def family_flags(*hints: str | None) -> str:
+def family_flags(*hints: str | None, architecture: str | None = None) -> str:
     """The :data:`FAMILY_DEFAULTS` flag string for the model's family, else ''."""
-    fam = model_family(*hints)
+    fam = model_family(*hints, architecture=architecture)
     return FAMILY_DEFAULTS.get(fam, "") if fam else ""
 
 
@@ -1006,8 +1021,12 @@ class ProfileConfig(BaseModel):
     mtp: bool = Field(
         default=False,
         description=(
-            "When true, the MTP draft-speculation bundle is appended to ``flags`` "
-            "at resolve time (see ``resolve_profile_flags()``)."
+            "INFORMATIONAL ONLY (§7.1a / ML-5) — no longer read by "
+            "resolve_profile_flags() or the launch path. MTP is a MODEL "
+            "capability now (ModelDefaults.mtp / the registry 'mtp' tag), gated "
+            "by the launching runner's supports.mtp; see "
+            "providers.container._effective_mtp. Kept on this class for "
+            "on-disk/API back-compat until P3-schema externalizes profiles."
         ),
     )
     device_class: Literal["gpu", "cpu", "npu", "img"] = Field(
@@ -1275,22 +1294,32 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
     model path, port, and context size are the slot's concern — they are
     NOT included here.
 
-    The effective MTP value is resolved as follows:
-      - ``mtp_override=True``  → force MTP on regardless of profile.mtp.
-      - ``mtp_override=False`` → force MTP off regardless of profile.mtp.
-      - ``mtp_override=None``  → inherit ``profile.mtp`` (default behaviour).
+    §7.1a / ML-5: ``profile.mtp`` is NO LONGER consulted here — MTP is a
+    MODEL capability now (``ModelDefaults.mtp`` / the registry ``mtp``
+    tag), gated by the launching runner's ``supports.mtp``. This function
+    only expands the bundle when the CALLER explicitly says so:
+
+      - ``mtp_override=True``  → append the bundle.
+      - ``mtp_override=False`` / ``None`` → do not append it.
+
+    :func:`hal0.providers.container._resolve_llama_scalars` is the single
+    caller that computes a real decision (via ``_effective_mtp``, which
+    folds in slot.mtp / defaults.mtp / the tag+runner-support AUTO tier)
+    and always passes an explicit bool; every other caller (e.g.
+    ``ResolvedProfile.resolved_flags``, computed with no override for
+    profile-catalog listings/cards) now correctly renders MTP-free, since a
+    profile alone — without a model bound to it — has no opinion on MTP.
 
     Args:
         profile: A validated :class:`ProfileConfig`.
-        mtp_override: Per-slot override from :attr:`SlotConfig.mtp`.
-            ``None`` means "inherit from profile".
+        mtp_override: Explicit True/False decision from the caller.
+            ``None`` behaves the same as ``False`` (no bundle).
 
     Returns:
         The complete flag string ready to pass to llama-server.
     """
     base = profile.flags.strip()
-    effective_mtp = mtp_override if mtp_override is not None else profile.mtp
-    if effective_mtp:
+    if mtp_override:
         # MTP_FLAG_BUNDLE is a set of DEFAULTS. A profile may pin its own
         # ``--spec-draft-*`` values (a hand-tuned draft KV type, p-min, …); those
         # must WIN, with the bundle only supplying the flags the profile left
