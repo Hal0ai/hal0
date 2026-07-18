@@ -109,14 +109,15 @@ def model_to_row(
     ``created_at`` should be passed through unchanged on an UPDATE (only
     ``updated_at`` advances); on an INSERT both default to "now".
 
-    §7.1 columns with no ``Model`` field yet (``revision``,
-    ``preferred_runner``, ``mtp``, ``jinja``) always write NULL in this
-    pilot — they exist purely as a ready-made landing spot for the ML-4/
-    ML-5 lanes that add those fields to ``Model`` itself. ``architecture``
-    IS populated here — §7.1d is the lane that lands it (see
-    ``Model.architecture``). ``capability_flags``/``modalities_override``
-    have no reserved column yet, so they fold into the ``extra`` JSON blob
-    under the reserved keys above instead of a schema migration.
+    §7.1 columns with no ``Model`` field yet (``revision``, ``mtp``,
+    ``jinja``) always write NULL in this pilot — they exist purely as a
+    ready-made landing spot for the ML-5 lane that adds those fields to
+    ``Model`` itself. ``architecture`` and ``preferred_runner`` ARE
+    populated here — §7.1d lands ``architecture``, ML-4 lands
+    ``preferred_runner`` (see ``Model.preferred_runner``).
+    ``capability_flags``/``modalities_override`` have no reserved column
+    yet, so they fold into the ``extra`` JSON blob under the reserved keys
+    above instead of a schema migration.
     """
     defaults = model.defaults or ModelDefaults()
 
@@ -138,7 +139,7 @@ def model_to_row(
         "source_repo": model.hf_repo or None,
         "revision": None,
         "path": model.path,
-        "preferred_runner": None,
+        "preferred_runner": model.preferred_runner,
         "mmproj": model.mmproj,
         "architecture": model.architecture,
         "context_length": context_length,
@@ -345,6 +346,7 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         backends=list(backends) if backends else [],
         mmproj=row["mmproj"],
         architecture=row["architecture"],
+        preferred_runner=row["preferred_runner"],
         capability_flags=capability_flags,
         modalities_override=modalities_override,
         defaults=defaults,

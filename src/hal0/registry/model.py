@@ -218,6 +218,20 @@ class Model(BaseModel):
         ),
     )
 
+    preferred_runner: str | None = Field(
+        default=None,
+        description=(
+            "A key into hal0.runners.RUNNER_IMAGES (§7.1b / ML-4) — the "
+            "runner this model prefers to launch under, e.g. 'rocmfpx' or "
+            "'flm'. Consulted by providers.container._resolve_image_ref "
+            "ahead of the profile/HW-gated default, but only when the "
+            "runner's runtime_family/device_class/backend actually fits "
+            "the launching slot (hal0.runners.runner_matches) — an "
+            "incompatible or unknown key is silently skipped rather than "
+            "launching the wrong runtime. None = no preference."
+        ),
+    )
+
     modalities_override: list[Modality] | None = Field(
         default=None,
         description=(
