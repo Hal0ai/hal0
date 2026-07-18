@@ -94,7 +94,8 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | HP-core | shared Hermes adapter core: auth, discovery, typed errors, retry policy, correlation IDs | ✔ | HERMES | HP-compat✔, KB-1✔ | merge `b1115b9d` | independent review + security re-review approved; 61 combined tests; exact-head full CI + Playwright green | merged on descar; Stage 1 core accepted |
 | HP-role-api | generation-stamped runtime `GET /api/agents/{agent_id}/role-slots` + invalidation events | ▶ | API/HERMES | §11.1✔, §11.2✔, KB-1✔ | Task 3 merge `b02447a4`; WIP evidence banked `c11b21cb`/`a9fe36bd` | independently approved; combined 134 pass + 2 environment-only exclusions; ruff/format/import/sunset green | merged/pushed on descar; exact-head CI `29651621820` + Playwright `29651621876` running |
 | HP-contract-surface | drift-watch → official pin (NousResearch `9de9c25f`) + contract freeze expanded 6→18 tracked files across all adapter touchpoints (MemoryProvider ABC, ProviderProfile, voice/PluginContext, API-server routes + security defaults) | ✔ | HERMES | HP-compat✔ | merge on descar (`merge(hermes): contract freeze expanded`) | 24 tests + 1 strict xfail; Opus-built, Fable-reviewed + independently re-run post-rebase; fixtures verbatim from pinned source; design-doc mismatches adjudicated (events.py dropped — hal0-side EventBus; runtime.py unfrozen — no stable single-file seam at pin) | **DECIDED (user, 2026-07-18): accept `terminal.backend=local`, harden the seam hal0 owns** — (i) audit + pin unit hardening (NoNewPrivileges, ProtectSystem=strict, ProtectHome, minimal ReadWritePaths, no hal0-secret paths) with a CI-checked test on the rendered unit; (ii) move `terminal.cwd` off `/etc/hal0` to a scratch dir; both fold into the hermes-provision rewrite lane. Strict xfail stays as the upstream-default record |
-| hermes-provision-rewrite | §I convergent installer rewrite of `agents/hermes_provision.py` (5,368 lines — largest diagnosed module) + DECIDED security items: unit-hardening directives CI-checked, `terminal.cwd` → scratch dir, strong random `API_SERVER_KEY` generation | ☐ | HERMES/INSTALL | §7.4✔, HP-contract-surface✔ | spec `spec-hermes-provision.final.md` | convergent rerun (already-converged detection), no wholesale config.yaml replace, smoke test | R4; was implied under "slim installer" — explicit row per plan review |
+| hermes-provision inc 1 | six security/validation deliverables: unit-hardening CI test · terminal.cwd→scratch · strong random API_SERVER_KEY · AppArmor containers.conf preflight (smoke-triggered) · stale agent drop-in cleanup (241 class) · --repair ownership reconcile | ✔ | HERMES/INSTALL | §7.4✔, HP-contract-surface✔ | merge `db3c5513` (lane `0703a0ec`) | Opus-built, Fable-reviewed + independently re-run (71 targeted + 149 combined); all six with tests; contract suite green | deploy smoke on 150 (apparmor path) + 143 (clean path) per both-boxes policy |
+| hermes-provision inc 2 | the convergence rewrite: delete PHASES/run()/provision.json machinery → linear `install_hermes()`; module split; substantial line/scar drop (file now 5,696); rewrite 3 coupled test files; brain-phase relocation (cross-fence with brain/api — coordinate) | ☐ | HERMES/INSTALL | inc 1✔ | spec `spec-hermes-provision.final.md` | double-run convergence test via fakes | R4 |
 | HP-memory | exclusive `hal0-memory`: private raw turns, shared durable facts default, private durable override, ranked provenance recall | ☐ | HERMES | HP-core✔, HP-contract-surface✔ | design `d75e5f88` (local) | two-copy parity; prefetch/prompt/sync; privacy and injection-resistance tests | held for R4 |
 | HP-provider | `hal0-provider` (`chat_completions`): live slot/model inventory and restart-free role aliases | ☐ | HERMES | HP-core, HP-role-api | design `d75e5f88` (local) | discovery, SSE/backfill/gap, hot-swap, tool/stream/reasoning/vision tests | held for R4 |
 | HP-voice | `hal0-voice`: Hermes STT/TTS routed through existing hal0 voice slots | ⏸ | HERMES | HP-core, §11.1✔, §11.2✔ | design `d75e5f88` (local) | capability/readiness, audio limits, interruption/fallback tests | **post-core (user 2026-07-18)** — below the R4 exit bar |
@@ -102,7 +103,7 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | HP-automation | Hermes Jobs/cron for scheduled agent work using stable hal0 role aliases | ⏸ | HERMES | HP-core, HP-provider | plan `447a851f`+ | CRUD/lifecycle, alias hot-swap, cron-memory isolation, no maintenance jobs | **post-core (user 2026-07-18)** — below the R4 exit bar |
 | HP-context | optional non-memory context-engine plugin | ⏸ | HERMES | HP-core | design `d75e5f88` (local) | separate context contract suite if promoted | post-core; do not merge with memory |
 | KB-2/3 | brain read-only default + approval-gate; resilience | ☐ | HERMES | — | — | — | — |
-| KB-4/5/6 | hal0-owned board in SQLite; narrow dispatch seam; ETag concurrency | ☐ | HERMES | SQLite | — | — | — |
+| KB-4/5/6 | hal0-owned board in SQLite (migration 005); Hermes proxy DELETED; local WS events; additive ETag/If-Match → 409; KB-5 executor seam (Protocol + no-op registry) | ✔ | HERMES | SQLite✔ | merge `516965d9` (lane 3 commits) | Opus-built, Fable-reviewed + independently re-run (240 lane + 283 combined); frozen wire contract; one-time tolerant import; board serves with hermes_kanban=None (core-without-Hermes) | HP-executor now unblocked (attach at the KB-5 seam) |
 | HP-legacy-suite | superseded image/TTS/context/dashboard plugin bundle | ⏸ | HERMES | — | history/specs banked | superseded by focused HP-* lanes | post-core unless explicitly promoted |
 
 ### R5 — Surface + launch
@@ -163,6 +164,15 @@ base in isolated worktrees. The Hermes suite proceeds with Stage 1 (`HP-core` an
 - **Deploy rows:** podman-5 template refresh (R5); hermes-provision lane gains: AppArmor
   containers.conf preflight (unconfined LXC), stale agent drop-in cleanup (241/CONFIGURATION_
   DIRECTORY class), `bootstrap --repair` correctness (O3 ownership drift).
+- **halo143 second-box findings (2026-07-18 late):** O1 degrade fix + doctor-auth proven in
+  anger on a second substrate; probe-cache poisoning fixed `86589fd1`; root-owned rootless-podman
+  HOME dirs fixed via perms rows `9e07c0d3`; **version gate proven bidirectionally** (150 =
+  compat branch, 143 = native branch). OPEN: (a) **rootful/rootless image-store split** —
+  system-info probes hal0's rootless store while slots pull rootful → `installable` lie; probe
+  the store slots use (via seam) — needs a row/lane; (b) **native AutoRemove on unprivileged
+  podman-5-in-LXC suspected in slot start failure + netns teardown race** — under live diagnosis;
+  likely resolution: stop emitting AutoRemove entirely. **STANDING POLICY: deploy-affecting
+  lanes validate on BOTH 150 (4.9.3/privileged) and 143 (5.7/unprivileged).**
 
 ## Fable plan-review adds (2026-07-18 — accepted "ok"; fold into waves)
 - **Migration-number allocation (protocol add):** numbers assigned at DISPATCH, on this board.
