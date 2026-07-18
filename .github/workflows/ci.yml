@@ -42,11 +42,14 @@ jobs:
         python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.12"]')) || fromJSON('["3.12","3.13","3.14"]') }}
     steps:
       - uses: actions/checkout@v6
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          enable-cache: true
+          cache: pip
+      - name: Install uv
+        # Via pip on the setup-python interpreter — no third-party action tag
+        # to chase (astral-sh/setup-uv@v8 didn't resolve and bricked the job).
+        run: pip install uv
       - name: Install system deps
         # ffmpeg backs the in-container moonshine audio decoder
         # (packaging/toolbox/moonshine/moonshine_server.py). The redaction
@@ -59,7 +62,9 @@ jobs:
         # from pyproject.toml, so CI installs the exact pinned versions —
         # the same ones a local `uv sync` venv gets. Fixes CI pip-installing
         # newer floating deps (FastAPI/Pydantic) that local venvs never see.
-        run: uv sync --frozen --extra dev
+        # --python pins the venv to the matrix interpreter setup-python laid
+        # down, so uv can't silently pick a different system python.
+        run: uv sync --frozen --extra dev --python "$(which python)"
       - name: Lint
         run: uv run ruff check src tests
       - name: Format check
