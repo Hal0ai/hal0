@@ -57,6 +57,8 @@ from typing import Any
 
 import structlog
 
+from hal0.agents.role_slots import RoleSlotCandidate, resolve_role_slots
+
 log = structlog.get_logger(__name__)
 
 # Schema version embedded in every provision.json. Bump when the on-disk
@@ -3841,7 +3843,6 @@ _MAIN_AUX_TASKS: tuple[str, ...] = ("vision", "web_extract")
 # Canonical role→slot names. Kept here (not in the template) so the
 # resolution stays data-driven and a future slot rename is a one-line edit.
 _DELEGATION_SLOT_NAME = "agent"
-_UTILITY_SLOT_NAME = "utility"
 
 
 def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
@@ -3864,28 +3865,6 @@ def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, 
             continue
         return s
     return None
-
-
-def _has_ready_npu_llm_slot(slots: list[dict[str, Any]]) -> bool:
-    """True if a ready ``type=='llm'`` slot reports ``device_class``/``device`` npu.
-
-    Used to detect the utility role living on the NPU slot (name ``npu``, not
-    ``utility``) when ``/api/slots`` doesn't expose ``role``. Callers then route
-    the utility aux group to the ``hal0/utility`` virtual.
-    """
-    for s in slots:
-        if not isinstance(s, dict):
-            continue
-        if (s.get("device_class") or s.get("device") or "").lower() != "npu":
-            continue
-        if (s.get("type") or "").lower() != "llm":
-            continue
-        if not _is_ready(s):
-            continue
-        if not _slot_model_id(s):
-            continue
-        return True
-    return False
 
 
 def _resolve_delegation(
@@ -3926,33 +3905,48 @@ def _resolve_auxiliary_tasks(
     the slot's model_id — swapping the slot's model flows through on the
     next ``--repair``.
     """
-    tasks: dict[str, dict[str, Any]] = {}
-    for task in _MAIN_AUX_TASKS:
-        tasks[task] = {"provider": "main", "model": "", "base_url": ""}
+    candidates: list[RoleSlotCandidate] = []
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, dict):
+            continue
+        label = _slot_alias(slot)
+        raw_capabilities = slot.get("capabilities") or slot.get("labels") or ()
+        capabilities = tuple(str(item) for item in raw_capabilities)
+        slot_type = str(slot.get("type") or "").lower()
+        if slot_type and slot_type not in capabilities:
+            capabilities = (*capabilities, slot_type)
+        candidates.append(
+            RoleSlotCandidate(
+                slot_id=str(slot.get("slot_id") or slot.get("id") or f"{label}:{index}"),
+                label=label,
+                model=_slot_model_id(slot),
+                ready=_is_ready(slot),
+                capabilities=capabilities,
+                device_class=str(slot.get("device_class") or slot.get("device") or "") or None,
+                role_hint=str(slot.get("role") or "") or None,
+            )
+        )
 
-    utility = _find_named_ready_slot(slots, _UTILITY_SLOT_NAME)
-    # When no utility-slot named ``utility`` exists but a ready NPU llm slot
-    # does (device="npu"), route aux tasks to hal0/npu. The retired ``role``
-    # tag was removed (slot ``name`` is the routing key) so hal0/utility
-    # resolves only to a slot literally named `utility`. hal0/npu is
-    # special-cased to match by device, then falls back to the anchor.
-    npu_utility = utility is None and _has_ready_npu_llm_slot(slots)
-    for task in _UTILITY_AUX_TASKS:
-        if utility is not None:
-            tasks[task] = {
-                "provider": "custom",
-                "model": _slot_model_id(utility),
-                "base_url": hal0_base_url,
-            }
-        elif npu_utility:
-            tasks[task] = {
-                "provider": "custom",
-                "model": "hal0/npu",
-                "base_url": hal0_base_url,
-            }
-        else:
-            # Degrade safely: no utility target → inherit the chat model.
-            tasks[task] = {"provider": "main", "model": "", "base_url": ""}
+    role_map = resolve_role_slots("hermes", candidates)
+    by_role = {entry.role: entry for entry in role_map.entries}
+    task_roles = {
+        "vision": "vision",
+        "web_extract": "vision",
+        "compression": "compression",
+        "session_search": "session_search",
+        "title_generation": "compression",
+        "skills_hub": "skills_hub",
+        "mcp": "mcp",
+    }
+    tasks: dict[str, dict[str, Any]] = {}
+    for task in (*_MAIN_AUX_TASKS, *_UTILITY_AUX_TASKS):
+        entry = by_role[task_roles[task]]
+        custom = entry.basis in {"utility", "npu_virtual"}
+        tasks[task] = {
+            "provider": "custom" if custom else "main",
+            "model": entry.model if custom else "",
+            "base_url": hal0_base_url if custom else "",
+        }
     return tasks
 
 
