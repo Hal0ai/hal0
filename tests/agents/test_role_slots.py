@@ -143,6 +143,25 @@ def test_mapping_adapter_normalizes_scalar_capability() -> None:
     assert candidate.capabilities == ("llm", "tools")
 
 
+def test_mapping_adapter_normalizes_mixed_case_npu_device() -> None:
+    candidate = candidate_from_slot_mapping(
+        {
+            "id": "opaque-npu",
+            "name": "accelerator",
+            "model_id": "physical-model",
+            "state": "ready",
+            "type": "llm",
+            "device_class": "NpU",
+        }
+    )
+
+    result = resolve_role_slots("hermes", [_slot("agent"), candidate])
+    mcp = next(entry for entry in result.entries if entry.role == "mcp")
+    assert candidate.device_class == "npu"
+    assert mcp.model == "hal0/npu"
+    assert mcp.basis == "npu_virtual"
+
+
 def test_model_swap_changes_advertised_model_and_generation() -> None:
     before = resolve_role_slots("hermes", [_slot("utility", model="model-a")])
     after = resolve_role_slots("hermes", [_slot("utility", model="model-b")])

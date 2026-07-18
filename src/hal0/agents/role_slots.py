@@ -80,6 +80,7 @@ def _capability_values(value: Any) -> tuple[str, ...]:
 def candidate_from_slot_mapping(slot: Mapping[str, Any]) -> RoleSlotCandidate:
     """Parse the current slot wire mapping without manufacturing identity."""
     raw_id = slot.get("slot_id") if "slot_id" in slot else slot.get("id")
+    device_class = _string(slot.get("device_class") or slot.get("device"))
     raw_ready = slot.get("ready")
     if isinstance(raw_ready, bool):
         ready = raw_ready
@@ -99,7 +100,7 @@ def candidate_from_slot_mapping(slot: Mapping[str, Any]) -> RoleSlotCandidate:
         model=_string(slot.get("model_id") or slot.get("model") or slot.get("default_model")),
         ready=ready,
         capabilities=tuple(sorted(capabilities)),
-        device_class=_string(slot.get("device_class") or slot.get("device")),
+        device_class=device_class.lower() if device_class else None,
         role_hint=_string(slot.get("role_hint") or slot.get("role")),
     )
 
