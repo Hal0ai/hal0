@@ -1,24 +1,15 @@
-// DIAGNOSTICS ▸ Doctor — NEW nav slot per task scope ("Add Doctor page in
-// MINIMAL form; if nothing exists, a stub page that's clearly labeled").
-// settings.jsx had no Doctor section — `hal0 doctor` exists as a CLI only
-// (cli/doctor_commands.py / cli/doctor_verify.py); there's no HTTP
-// `GET /api/doctor` with stable diagnosis IDs yet (spec (d).3, gated §21.4).
-// Minimal stub, not a fabricated diagnostics UI.
+// DIAGNOSTICS ▸ Doctor (D6, post-R3 surface rework).
+//
+// Was a labelled stub ("no HTTP endpoint with stable diagnosis IDs yet"). D6
+// mounts the generic DiagnosisPanel here: `hal0 doctor` now emits typed
+// diagnoses (HAL0-* id / severity / evidence / next_steps — src/hal0/
+// diagnostics.py), and while there's still no /api/doctor HTTP feed, the panel
+// wires to the real data that DOES exist (GET /api/system-info hardware
+// evidence) and renders it in the exact generic shape the doctor feed will use.
+// The missing verdict feed is shown in-panel as a stub-with-reason (API-lane
+// request: GET /api/doctor), never faked.
+import { DiagnosisPanel } from '../../../diagnostics/DiagnosisPanel.jsx'
+
 export function DoctorPage() {
-  return (
-    <div className="s-section">
-      <h2>Doctor</h2>
-      <p className="desc">
-        Environment + install health checks. Today this only exists as the{" "}
-        <span className="mono">hal0 doctor</span> CLI command — there's no HTTP endpoint with
-        stable diagnosis IDs yet to back a UI (spec §21.4). Run{" "}
-        <span className="mono">hal0 doctor</span> on the host in the meantime.
-      </p>
-      <div className="s-panel">
-        <div className="s-row" style={{padding: "18px 16px"}}>
-          <span className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>not yet wired — placeholder</span>
-        </div>
-      </div>
-    </div>
-  );
+  return <DiagnosisPanel />
 }
