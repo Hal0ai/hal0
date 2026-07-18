@@ -30,6 +30,7 @@ from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
+from hal0.runners import RUNNER_IMAGES
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +140,10 @@ def tts_profile_for_device(device: str) -> str:
 # ── Backends ──────────────────────────────────────────────────────────────────
 
 
-_FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
+#: Sourced from the runner-image registry (§7.1b / ML-4) — was the 4th
+#: independent FLM image literal (alongside the seed profile, flm.py, and
+#: manifest.json); now RUNNER_IMAGES["flm"].image is the one source.
+_FLM_TOOLBOX_IMAGE = RUNNER_IMAGES["flm"].image
 
 
 # FLM tags hidden from the dashboard catalog because of upstream FLM

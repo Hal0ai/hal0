@@ -124,19 +124,41 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
         return _resolve_profile(base)
 
 
-def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
+def _resolve_image_ref(
+    slot_cfg: Mapping[str, Any] | None,
+    profile: Any,
+    *,
+    model_info: Mapping[str, Any] | None = None,
+) -> str:
     """Resolve the container image ref for a slot launch.
 
-    Resolution order (matches :meth:`ComfyUIProvider.image_ref`):
+    Resolution order (§7.1b / ML-4 — the runner-image registry):
 
       1. ``slot_cfg["image"]`` (top-level string override in the slot TOML).
       2. ``slot_cfg["slot"]["image"]`` (nested under the ``[slot]`` table).
-      3. ``profile.image`` (a deliberate profile/operator pin) — honored verbatim.
-         The basic seed profiles intentionally leave this empty so they fall
-         through to (4); the ROCmFPX/custom profiles pin it explicitly.
-      4. :func:`~hal0.config.schema.resolve_default_image` — the HW-gated
-         default: the rocmfpx runner on gfx1151/Strix-Halo, the lean toolbox
-         (or cuda / cpu image) elsewhere.
+      3. ``model_info["preferred_runner"]`` — a per-model runner-key
+         preference (``registry.model.Model.preferred_runner``), resolved
+         through :func:`hal0.runners.resolve_runner_image`. Only honored
+         when it names a real ``llama-server``-family runner AND fits this
+         lane's device_class/backend (:func:`hal0.runners.runner_matches`)
+         — an FLM/kokoro/qwen3tts/comfyui key, a stale/unknown key (e.g.
+         the fileset auto-detector's ``"llama-server"`` family-only hint,
+         which is not itself a ``RUNNER_IMAGES`` key), or a cross-backend
+         key is silently skipped rather than launching the wrong runtime.
+      4. ``profile.image`` (a deliberate profile/operator pin) — honored
+         verbatim, unresolved. NOTE (spec deviation, see handback):
+         ProfileConfig.image is NOT removed by ML-4 (that's ML-5/P3-schema
+         scope), so it stays in the chain here rather than being dropped —
+         dropping it now would silently break every custom profile's image
+         pin (the updater's stale-pin escape hatch depends on this exact
+         "honored verbatim" contract) a full lane before ML-5 removes the
+         field.
+      5. :func:`hal0.runners.runner_for_backend` (+
+         :func:`hal0.runners.resolve_runner_image`) — the HW-gated default:
+         the rocmfpx runner on an AMD GPU lane, the lean toolbox (or cuda /
+         cpu image) elsewhere. Replaces the old direct
+         :func:`~hal0.config.schema.resolve_default_image` call — same
+         values, now also honoring an env-var override per runner.
 
     Only STRING values are treated as image-ref overrides. The
     ``[image]`` TOML section that holds image-gen settings (#599) shares
@@ -158,33 +180,55 @@ def _resolve_image_ref(slot_cfg: Mapping[str, Any] | None, profile: Any) -> str:
         for c in candidates:
             if isinstance(c, str) and c:
                 return c
-    profile_image = getattr(profile, "image", None)
-    if isinstance(profile_image, str) and profile_image:
-        return profile_image  # deliberate profile/operator pin — honored verbatim
-    # No image pin anywhere → HW-gated default: the rocmfpx runner on
-    # gfx1151/Strix-Halo, the lean toolbox (or cuda / cpu image) elsewhere.
-    # Backend comes from the slot override when set, else the profile;
-    # device_class from the profile. Lazy import avoids a schema→providers cycle.
-    from hal0.config.schema import resolve_default_image
 
+    # Backend comes from the slot override when set, else the profile;
+    # device_class from the profile. Computed once, shared by tiers 3 + 5.
     backend = getattr(profile, "backend", None)
     device_class = getattr(profile, "device_class", None)
     if isinstance(slot_cfg, Mapping):
         sb = slot_cfg.get("backend")
         if isinstance(sb, str) and sb:
             backend = sb
-    return resolve_default_image(backend, device_class)
+
+    if isinstance(model_info, Mapping):
+        preferred = model_info.get("preferred_runner")
+        if isinstance(preferred, str) and preferred:
+            from hal0.errors import NotFound
+            from hal0.runners import get_runner, resolve_runner_image, runner_matches
+
+            try:
+                preferred_runner = get_runner(preferred)
+            except NotFound:
+                preferred_runner = None
+            if (
+                preferred_runner is not None
+                and preferred_runner.runtime_family == "llama-server"
+                and runner_matches(preferred_runner, device_class=device_class, backend=backend)
+            ):
+                return resolve_runner_image(preferred_runner)
+
+    profile_image = getattr(profile, "image", None)
+    if isinstance(profile_image, str) and profile_image:
+        return profile_image  # deliberate profile/operator pin — honored verbatim
+
+    # No image pin anywhere → HW-gated default via the runner registry.
+    from hal0.runners import resolve_runner_image, runner_for_backend
+
+    return resolve_runner_image(runner_for_backend(backend, device_class))
 
 
 def _profile_image_and_flags(
     profile: Any,
     mtp_override: bool | None = None,
     slot_cfg: Mapping[str, Any] | None = None,
+    *,
+    model_info: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Extract ``(image, resolved_flags)`` for a slot launch.
 
     Image resolution walks the priority chain in :func:`_resolve_image_ref`:
-    slot-level override → profile.image → ``DEFAULT_ROCMFPX_IMAGE``.
+    slot-level override → model.preferred_runner → profile.image → the
+    runner-registry HW-gated default.
 
     Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
     ``resolved_flags`` is already MTP-expanded) and a plain ``ProfileConfig``
@@ -198,6 +242,11 @@ def _profile_image_and_flags(
     baked into a :class:`~hal0.profiles.ResolvedProfile`.  Both
     ``ResolvedProfile`` and ``ProfileConfig`` expose ``.flags`` and ``.mtp``,
     so this path works for both types.
+
+    ``model_info`` is optional (defaults to ``None``, matching every
+    existing call site) — it's the registry model dict, threaded through
+    from :func:`_resolve_llama_scalars` so :func:`_resolve_image_ref` can
+    read ``model_info["preferred_runner"]``.
     """
     if mtp_override is not None:
         # Slot override wins over any pre-expanded resolved_flags: recompute
@@ -208,7 +257,7 @@ def _profile_image_and_flags(
         flags = getattr(profile, "resolved_flags", None)
         if flags is None:
             flags = resolve_profile_flags(profile)
-    return _resolve_image_ref(slot_cfg, profile), str(flags)
+    return _resolve_image_ref(slot_cfg, profile, model_info=model_info), str(flags)
 
 
 def _effective_mtp(
@@ -901,7 +950,9 @@ def _resolve_llama_scalars(
     effective_mtp = _effective_mtp(
         slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch
     )
-    image, flags_str = _profile_image_and_flags(profile, effective_mtp, slot_cfg=slot_cfg)
+    image, flags_str = _profile_image_and_flags(
+        profile, effective_mtp, slot_cfg=slot_cfg, model_info=model_info
+    )
 
     slot_parallel = _effective_parallel(slot_cfg)
     if for_launch:

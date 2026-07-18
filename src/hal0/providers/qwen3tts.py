@@ -50,9 +50,12 @@ from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Mount, Provider
+from hal0.runners import RUNNER_IMAGES
 
-# Default image tag (overridable via HAL0_TOOLBOX_IMAGE_QWEN3TTS for dev/test).
-_DEFAULT_QWEN3TTS_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
+# Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
+# lives in exactly one place (hal0.runners.RUNNER_IMAGES["qwen3tts"].image).
+# Kept as a module attribute for back-compat imports.
+_DEFAULT_QWEN3TTS_IMAGE = RUNNER_IMAGES["qwen3tts"].image
 
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "tts-qwen3"
@@ -126,8 +129,29 @@ class Qwen3TTSProvider(Provider):
     # ── Image / container spec ─────────────────────────────────────────────────
 
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
-        """Return the Qwen3-TTS toolbox image reference."""
-        return os.environ.get("HAL0_TOOLBOX_IMAGE_QWEN3TTS", _DEFAULT_QWEN3TTS_IMAGE)
+        """Return the Qwen3-TTS toolbox image reference.
+
+        Resolution (§7.1b / ML-4): ``slot_cfg["image"]`` (top-level or
+        ``[slot]``-nested string override) → the runner registry
+        (``HAL0_TOOLBOX_IMAGE_QWEN3TTS`` env override → the manifest digest
+        pin → the bundled default) — see
+        :func:`hal0.runners.resolve_runner_image`. Previously this was
+        env-only; :meth:`container_spec` (the actual call site — this
+        method has no live caller today) used ``profile.image`` directly
+        and never consulted this method or ``slot.image`` at all.
+        """
+        override: Any = None
+        if isinstance(slot_cfg, dict):
+            override = slot_cfg.get("image")
+            if not (isinstance(override, str) and override):
+                nested = slot_cfg.get("slot")
+                override = nested.get("image") if isinstance(nested, dict) else None
+        if isinstance(override, str) and override:
+            return override
+
+        from hal0.runners import get_runner, resolve_runner_image
+
+        return resolve_runner_image(get_runner("qwen3tts"))
 
     def container_spec(
         self,
@@ -177,7 +201,7 @@ class Qwen3TTSProvider(Provider):
         cache_dir = _cache_dir()
 
         return ContainerSpec(
-            image=profile.image,
+            image=self.image_ref(slot_cfg),
             command=command,
             # MIOpen user DB + custom kernel cache on the writable /cache mount;
             # FAST find-mode avoids the multi-minute exhaustive GEMM search.
