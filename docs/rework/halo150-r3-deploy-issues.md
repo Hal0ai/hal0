@@ -36,7 +36,19 @@ podman 4.9.3 (Ubuntu 24.04) does not support → no slot unit is generated → n
 
 ## Open
 
-### O8 — R3 quadlet renderer requires podman ≥5.0; box has 4.9.3  *(PHASE-2 BLOCKER)*
+### O8 — RESOLVED via podman-4.x compat (`PodmanArgs=`) — Phase 2 GREEN
+**Resolution:** the compat path already on descar (`5adf6e0f` + tests `a2e04193`) translates the
+5.0-only keys to raw flags via `PodmanArgs=--group-add … --security-opt …` (a key 4.x quadlet
+supports) and drops only `AutoRemove` (cosmetic crash-path cleanup). Deployed `container.py@a2e04193`
+to the box → generator converts, `/run/systemd/generator/hal0-slot@qtest.service` produced,
+container **Up**, health `{"status":"ok"}`, inference generates on GPU, teardown clean. **GPU groups
+preserved.** No substrate change, no rewrite (~20 lines, container.py only).
+
+**Confirmed substrate:** lxc105 (live R3 reference) runs **podman 4.9.3 / Ubuntu 24.04 — identical
+to this box**. R3's real substrate is 4.9.3; the compat path is the correct fix. Template refresh to
+a podman-5 base (native keys + auto-remove) is an R5 cutover item, not a blocker.
+
+*Original blocker (for the record):*
 Removing the O7 debris revealed the real quadlet outcome. The `@`-filename itself is fine
 (generator loads it); conversion then fails on **podman-5.0-only keys**:
 ```
@@ -84,11 +96,10 @@ Expected; deferred by choice.
 ## Runbook status
 
 - **Phase 0** (snapshot/baseline): done — `/root/halo150-pre-r3-*.tgz`, podman 4.9.3.
-- **Phase 1** (deploy + health): deploy ✔, API 200 ✔, `doctor all` clean after redeploy ✔.
-  Golden-path load blocked by O8.
-- **Phase 2** (quadlet `@`-name verify): **RED — O8**. `@`-name accepted; `AutoRemove` key rejected → no unit. Stopped here per runbook.
-- **Phase 3** (M5 rehearsal on copy): not started.
-- **Phase 4** (live smoke): not reached (needs a runnable slot).
+- **Phase 1** (deploy + health): deploy ✔, API 200 ✔, `doctor all` clean ✔, golden-path load + GPU inference ✔ (after O8 compat).
+- **Phase 2** (quadlet `@`-name verify): **GREEN via O8 compat** — `@`-name accepted, generator converts (`PodmanArgs=`), container Up, health ok, teardown clean (file+unit+container gone).
+- **Phase 3** (M5 rehearsal on copy): pending.
+- **Phase 4** (live smoke): pending (rename semantics, `enable_thinking=false` quoting fix, doctor bundle, system-info, `/api/ports`).
 
 ## Environment notes (accepted, not issues)
 - Privileged + `apparmor unconfined` ⇒ container root ≈ host root (requested).
