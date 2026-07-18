@@ -43,9 +43,9 @@
 #   preflight_node             — node on PATH + version >= NODE_MIN_MAJOR
 #                                (default 20). Soft, always returns 0 — a
 #                                Node-less box is a valid install; the
-#                                dashboard UI build / pi-coder / opencode
-#                                agents just aren't available until Node is
-#                                installed (install.sh auto-provisions it).
+#                                dashboard UI build just isn't available
+#                                until Node is installed (install.sh
+#                                auto-provisions it).
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #                                (soft — informational only — when
@@ -856,16 +856,15 @@ preflight_ports() {
 }
 
 # Node.js / npm — needed for the dashboard UI build (Vite 6 / Tailwind v4;
-# ui/package.json has no `engines` floor to surface a mismatch) and for the
-# pi-coder / opencode bundled agents, which both shell out to npm. Soft:
+# ui/package.json has no `engines` floor to surface a mismatch). Soft:
 # always returns 0 (a Node-less box is a valid install — the dashboard build
-# and those two agents just aren't available until Node is installed). This
-# is the read-only `hal0 doctor` view; install.sh's own "Node.js toolchain"
-# step actually provisions Node when it's missing/too old.
+# just isn't available until Node is installed). This is the read-only
+# `hal0 doctor` view; install.sh's own "Node.js toolchain" step actually
+# provisions Node when it's missing/too old.
 NODE_MIN_MAJOR=20
 preflight_node() {
     if ! command -v node >/dev/null 2>&1; then
-        warn "node: not found — dashboard UI build + pi-coder/opencode agents need Node ${NODE_MIN_MAJOR}+ LTS"
+        warn "node: not found — dashboard UI build needs Node ${NODE_MIN_MAJOR}+ LTS"
         return 0
     fi
     local ver major
@@ -875,21 +874,22 @@ preflight_node() {
     if (( major >= NODE_MIN_MAJOR )); then
         info "node: ${ver}"
     else
-        warn "node: ${ver} — below the ${NODE_MIN_MAJOR}+ LTS floor (dashboard build / pi-coder / opencode may fail)"
+        warn "node: ${ver} — below the ${NODE_MIN_MAJOR}+ LTS floor (dashboard build may fail)"
     fi
     return 0
 }
 
 # ── Node.js provisioning ────────────────────────────────────────────────────
-# Node/npm is a HARD dependency for three hal0 features: the dashboard Vite
-# build (see the "Dashboard UI" step in install.sh), and the pi-coder +
-# opencode bundled agents (installer/agents/*.sh both shell out to npm and
-# fail with a misleading "upstream breaking change" message when npm is
-# simply absent). install.sh used to only WARN on a missing/old npm; this
-# resolves — or, when asked, auto-installs — a Node >= NODE_MIN_MAJOR via the
-# detected package manager, mirroring resolve_main_python's pattern.
-# Best-effort and never fatal: a Node-less box still installs, just without
-# the dashboard build / those two agents until Node is added later.
+# Node/npm is a HARD dependency for the dashboard Vite build (see the
+# "Dashboard UI" step in install.sh) — the pi-coder + opencode bundled
+# agents used to need it too (installer/agents/*.sh both shelled out to
+# npm) but those speculative drivers were deleted; hal0 v0.3 only ever
+# ships hermes, which doesn't need Node. install.sh used to only WARN on a
+# missing/old npm; this resolves — or, when asked, auto-installs — a
+# Node >= NODE_MIN_MAJOR via the detected package manager, mirroring
+# resolve_main_python's pattern. Best-effort and never fatal: a Node-less
+# box still installs, just without the dashboard build until Node is added
+# later.
 
 # Echo the Node major version (e.g. "20") of the `node` on PATH; nothing +
 # non-zero if node isn't found or its version can't be parsed.

@@ -62,18 +62,17 @@ def test_memory_stats_unknown_agent_returns_404(client: TestClient) -> None:
     assert body["error"]["code"] == "agent.unknown"
 
 
-def test_memory_stats_pi_coder_is_a_known_agent(
+def test_memory_stats_pi_coder_404s_now_that_the_driver_is_gone(
     client: TestClient, fake_wrapper_empty: _FakeWrapper
 ) -> None:
-    """pi-coder is a real bundled agent (``hal0.agents.manager.BUNDLED_AGENTS``)
-    with its own hal0-memory plugin — the sidebar chip must not 404 for it."""
+    """pi-coder was removed from ``hal0.agents.manager.BUNDLED_AGENTS`` (refs
+    P1-drivers) — the sidebar memory chip must 404 for it like any other
+    unknown agent id, not 200 against a driver that no longer exists."""
     r = client.get("/api/agents/pi-coder/memory/stats")
-    assert r.status_code == 200, r.text
+    assert r.status_code == 404
     body = r.json()
-    assert body["agent_id"] == "pi-coder"
-    assert body["namespace"] == "private:pi-coder"
-    assert body["available"] is True
-    assert fake_wrapper_empty.calls[0]["dataset"] == "private:pi-coder"
+    assert body["error"]["code"] == "agent.unknown"
+    assert fake_wrapper_empty.calls == []
 
 
 def test_memory_stats_no_wrapper_returns_available_false(client: TestClient) -> None:

@@ -289,7 +289,7 @@ def _tool_schemas() -> list[dict[str, Any]]:
         ),
         _fn(
             "list_agents",
-            "List the installed platform agents (e.g. hermes, pi-coder).",
+            "List the installed platform agents (e.g. hermes).",
             {},
             [],
         ),

@@ -69,12 +69,12 @@ def test_render_shell_includes_step_and_pane_text():
 
 
 def test_extension_checklist_marks_enabled():
-    state = {"openwebui": True, "hermes": True, "pi": False}
+    state = {"openwebui": True, "hermes": True}
     r = render_extension_checklist(EXTENSIONS, state, cursor=0)
     con = Console(width=80, record=True)
     con.print(r)
     text = con.export_text()
-    assert "Open WebUI" in text and "Hermes" in text and "Pi" in text
+    assert "Open WebUI" in text and "Hermes" in text
     assert "Apps" in text and "Agents" in text
 
 
@@ -99,24 +99,18 @@ def test_suggestion_table_stars_recommended():
 
 
 def test_no_agent_skips_agent_step():
-    steps = plan_steps(
-        extensions={"openwebui": True, "hermes": False, "pi": False}, npu_present=True
-    )
+    steps = plan_steps(extensions={"openwebui": True, "hermes": False}, npu_present=True)
     assert "agent" not in steps
     assert "main" in steps  # OWUI on → main shown
 
 
 def test_agent_on_shows_agent_and_main():
-    steps = plan_steps(
-        extensions={"openwebui": False, "hermes": True, "pi": False}, npu_present=True
-    )
+    steps = plan_steps(extensions={"openwebui": False, "hermes": True}, npu_present=True)
     assert "main" in steps and "agent" in steps  # agent routes to main too
 
 
 def test_nothing_consuming_chat_hides_main():
-    steps = plan_steps(
-        extensions={"openwebui": False, "hermes": False, "pi": False}, npu_present=False
-    )
+    steps = plan_steps(extensions={"openwebui": False, "hermes": False}, npu_present=False)
     assert "main" not in steps and "agent" not in steps and "npu" not in steps
 
 
@@ -568,7 +562,7 @@ def test_render_provision_picker_has_scaffold_and_skip_rows():
 
 
 def test_extension_checklist_numbers_rows():
-    state = {"openwebui": False, "comfyui": False, "hermes": False, "pi": False}
+    state = {"openwebui": False, "comfyui": False, "hermes": False}
     con = Console(width=80, record=True)
     con.print(render_extension_checklist(EXTENSIONS, state, cursor=0))
     text = con.export_text()

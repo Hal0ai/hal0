@@ -6,7 +6,7 @@ shape the dashboard's persona picker (PR-8) + the ``hal0 agent persona``
 CLI (future) consume.
 
 Route shape (master-plan §2 generalization): every endpoint is
-parameterized by ``agent_id`` so v0.4 can unlock pi-coder by adding a
+parameterized by ``agent_id`` so a future release can unlock another agent by adding a
 registry entry without rewriting the route table. v0.3 only resolves
 ``"hermes"`` — any other id returns 404 at :func:`_resolve_agent`.
 
@@ -38,7 +38,7 @@ router = APIRouter()
 
 # ── agent registry ──────────────────────────────────────────────────────────
 #
-# v0.3 ships hermes only. Future agents (pi-coder in v0.4) get a row here
+# v0.3 ships hermes only. A future bundled agent gets a row here
 # pointing at their personas root and the existing /personas routes light
 # up unchanged. Keeping this as a module-level dict (vs hard-coding the
 # "hermes" string in every handler) is the v0.3-only place that knows

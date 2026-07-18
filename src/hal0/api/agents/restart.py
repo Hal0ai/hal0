@@ -18,8 +18,8 @@ subprocess call rather than getting tangled up with the lifecycle routes.
 Resolution
 ----------
 v0.3 only resolves ``"hermes"`` (single-pick). The agent
-registry mirrors :mod:`hal0.api.agents.personas` — adding pi-coder in
-v0.4 lights up restart automatically without touching this file.
+registry mirrors :mod:`hal0.api.agents.personas` — adding a future
+bundled agent lights up restart automatically without touching this file.
 
 Audit log
 ---------
@@ -48,8 +48,8 @@ router = APIRouter()
 
 
 # Mirror :data:`hal0.api.agents.personas._AGENT_PERSONAS_ROOTS` — one
-# place per file that knows about agent identity, so a v0.4 pi-coder
-# add-on lights up restart automatically. Stored as a frozenset to
+# place per file that knows about agent identity, so a future bundled
+# agent lights up restart automatically. Stored as a frozenset to
 # emphasise the "membership check only" intent.
 _KNOWN_AGENT_IDS: Final[frozenset[str]] = frozenset({"hermes"})
 
@@ -76,7 +76,7 @@ def _unit_name(agent_id: str) -> str:
     """Compose the unit name for an agent id.
 
     Matches ``installer/systemd/hal0-agent@.service`` — the template
-    unit is parameterised by agent id so v0.4 pi-coder is a drop-in.
+    unit is parameterised by agent id so a future bundled agent is a drop-in.
     """
     return f"hal0-agent@{agent_id}.service"
 

@@ -611,8 +611,6 @@ def _client_display_name(client_id: str) -> str:
         return "Cursor"
     if "hermes" in low:
         return "Hermes-Agent"
-    if "pi-coder" in low:
-        return "pi-coder"
     return client_id
 
 

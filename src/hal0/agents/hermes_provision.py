@@ -2760,7 +2760,7 @@ def _build_identity_card(state: BootstrapState) -> dict[str, Any]:
                 "transport": "streamable-http",
             },
             "delegation": {
-                "accepts_tasks_from": ["claude-code", "pi-coder", "user"],
+                "accepts_tasks_from": ["claude-code", "user"],
                 "max_concurrent": 3,
             },
             "hal0_state": {

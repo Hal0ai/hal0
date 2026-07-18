@@ -661,24 +661,23 @@ fi
 
 ui_step "Node.js toolchain"
 
-# Node/npm is a hard dependency for THREE things: the dashboard UI build
-# right below, and the pi-coder + opencode bundled agents (both shell out to
-# npm; `hal0 agent install pi-coder`/`opencode` fail with a misleading
-# "upstream breaking change" message when npm is simply absent — the real
-# cause is no Node on the box). Provisioning it here, once, up front covers
-# all three instead of only warning in the Dashboard UI step below and
-# leaving the agent installs to fail later with no clue why. Best-effort:
-# resolve_node tries an already-present Node >=20 first, then auto-installs
-# via the detected package manager (NodeSource setup script on Debian/
-# Ubuntu, since their base repos ship an ancient Node; direct package
-# install elsewhere); never fatal — a Node-less box still installs, just
-# without the dashboard build / those two agents until Node is added later.
+# Node/npm is a hard dependency for the dashboard UI build right below
+# (the pi-coder + opencode bundled agents used to need it too — both shelled
+# out to npm — but those speculative drivers were deleted; hal0 v0.3 only
+# ever ships hermes, which doesn't need Node). Provisioning it here, once,
+# up front covers the dashboard build instead of only warning in the
+# Dashboard UI step below. Best-effort: resolve_node tries an
+# already-present Node >=20 first, then auto-installs via the detected
+# package manager (NodeSource setup script on Debian/Ubuntu, since their
+# base repos ship an ancient Node; direct package install elsewhere); never
+# fatal — a Node-less box still installs, just without the dashboard build
+# until Node is added later.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build / pi-coder / opencode agents)"
+    info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build)"
 elif HAL0_NODE_AUTOINSTALL=1 resolve_node; then
     info "node: $(node -v 2>/dev/null || echo present) (>= ${NODE_MIN_MAJOR} LTS)"
 else
-    warn "could not provision Node.js ${NODE_MIN_MAJOR}+ LTS — dashboard UI build will be skipped; pi-coder/opencode agent installs will fail until Node is installed"
+    warn "could not provision Node.js ${NODE_MIN_MAJOR}+ LTS — dashboard UI build will be skipped until Node is installed"
     warn "  install manually: https://nodejs.org/en/download (or your distro's nodejs/NodeSource package), then re-run install.sh"
 fi
 

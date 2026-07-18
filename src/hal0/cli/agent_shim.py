@@ -18,7 +18,7 @@ This is a deliberately tiny entry point that:
   unit can't express that.
 * The agent-id parameterisation (``%i`` in the template) needs to drive
   the resolution of which upstream binary to run. ``hermes`` today,
-  ``pi-coder`` for v0.4. Keeping that map in the shim lets us add new
+  a future bundled agent. Keeping that map in the shim lets us add new
   agent types without editing the template unit.
 * ``mcp serve`` mode in Hermes upstream is a query-only MCP server
   with NO event stream — picking it kills the chat surface on day 1

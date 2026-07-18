@@ -30,7 +30,7 @@ from hal0.cli._shared import (
 from hal0.cli._shared import _console as _stderr_console
 from hal0.mcp.approval_queue import _PRIMARY_TARGET_ARG
 
-app = typer.Typer(help="Manage bundled agents (Phase 8 — pi-coder / Hermes-Agent).")
+app = typer.Typer(help="Manage bundled agents (Phase 8 — Hermes-Agent).")
 console = Console()
 
 # Approvals lives as a sub-sub-app so ``hal0 agent approvals list``
@@ -57,7 +57,8 @@ app.add_typer(personas_app, name="personas")
 @app.command("install")
 def agent_install(
     name: str = typer.Argument(
-        ..., help="Bundled agent name (pi-coder | opencode | hermes | turnstone)."
+        ...,
+        help="Bundled agent name (hermes | turnstone).",
     ),
     switch: bool = typer.Option(
         False,
@@ -164,7 +165,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     # "hermes" already in installed_names() and takes its idempotent
     # no-op path instead of raising AgentAlreadyInstalledError. That let
     # `hal0 agent install hermes` (no --switch) land ALONGSIDE an
-    # existing pi-coder/opencode install. Check disk truth here, up
+    # existing non-coexisting incumbent. Check disk truth here, up
     # front, so hermes gets the same guarantee the manager enforces for
     # the other bundled agents.
     _enforce_hermes_single_pick(switch=switch)
@@ -288,7 +289,7 @@ def _enforce_turnstone_single_pick(*, switch: bool) -> None:
     """Clear any incumbent that can't coexist with turnstone before provisioning.
 
     Turnstone + hermes coexist (:data:`hal0.agents.manager.COEXISTING_AGENTS`);
-    pi-coder/opencode do not, so an incumbent coder still blocks (or, with
+    any other (non-coexisting) bundled agent still blocks (or, with
     ``--switch``, is uninstalled). Mirrors :func:`_enforce_hermes_single_pick`.
     """
     from hal0.agents.manager import COEXISTING_AGENTS
@@ -402,8 +403,8 @@ def _enforce_hermes_single_pick(*, switch: bool) -> None:
     before hermes provisioning writes anything to disk.
 
     Mirrors the contract :meth:`hal0.agents.manager.AgentManager.install`
-    enforces for pi-coder/opencode: at most one bundled agent installed at
-    a time, ``switch=True`` required to swap. Hermes can't just call
+    enforces for every bundled agent: at most one non-coexisting agent
+    installed at a time, ``switch=True`` required to swap. Hermes can't just call
     ``AgentManager.install()`` up front (provisioning has to happen first —
     there's no venv/binary for the manager to register yet), so this checks
     the same disk-truth ``installed_names()`` the manager uses and either

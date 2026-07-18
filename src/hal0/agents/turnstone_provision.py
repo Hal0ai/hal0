@@ -115,7 +115,7 @@ MEMORY_DATASET = "agents"
 # NOT registered this pass (hal0-brain stays on hermes → hermes__hal0-brain).
 BRAIN_PROFILE_AGENT_ID_RESERVED = "turnstone__hal0-brain"
 
-# hal0-api MCP mounts (LAN-reachable surfaces, same ones hermes/opencode use).
+# hal0-api MCP mounts (LAN-reachable surfaces, same ones hermes uses).
 MEMORY_MCP_PATH = "/mcp/memory"
 ADMIN_MCP_PATH = "/mcp/admin"
 
@@ -279,7 +279,7 @@ def build_mcp_servers(*, api_base: str, bearer: str | None) -> dict[str, Any]:
 
     Two remote HTTP/SSE mounts — the hindsight-backed ``hal0-memory`` (5
     tools) and ``hal0-admin`` — each scoped by the ``X-hal0-Agent`` header
-    exactly like the opencode driver + hermes. deferred-load friendly.
+    exactly like the hermes driver. deferred-load friendly.
 
     NOTE: the precise JSON key shape turnstone expects is validated on-box by
     the smoke phase (upstream docs don't pin the schema); this mirrors the

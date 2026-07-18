@@ -43,7 +43,7 @@ def _manual_selections() -> Selections:
             ),
             SlotSelection("coder", "coder", 8082, None),  # pick-free empty scaffold
         ],
-        extensions={"openwebui": True, "comfyui": True, "hermes": True, "pi": False},
+        extensions={"openwebui": True, "comfyui": True, "hermes": True},
         npu_opt_in=True,
         comfyui_defaults=(("txt2img", "qwen-image"), ("img2img", "qwen-image-edit")),
     )
@@ -131,9 +131,8 @@ def test_write_answers_creates_parent_dirs_and_header(tmp_path):
 
 def test_apps_omits_comfyui_key():
     doc = dump_answers(_manual_selections())
-    assert set(doc["apps"].keys()) == {"openwebui", "hermes", "pi"}
+    assert set(doc["apps"].keys()) == {"openwebui", "hermes"}
     assert doc["apps"]["openwebui"] == {"enabled": True}
-    assert doc["apps"]["pi"] == {"enabled": False}
 
 
 def test_gen_mode_derived_from_comfyui_extension():
@@ -145,7 +144,7 @@ def test_gen_mode_derived_from_comfyui_extension():
     off_sel = Selections(
         storage_dir="/var/lib/hal0/models",
         slots=[],
-        extensions={"openwebui": True, "comfyui": False, "hermes": False, "pi": False},
+        extensions={"openwebui": True, "comfyui": False, "hermes": False},
         npu_opt_in=False,
         comfyui_defaults=(),
     )
@@ -230,7 +229,7 @@ def test_cli_emit_answers_from_answers_file(tmp_path, _forbid_apply):
               - { capability: chat, name: chat, port: 8081, model_id: auto }
             npu: { opt_in: false }
             gen: { mode: "off" }
-            apps: { openwebui: { enabled: true }, hermes: { enabled: false }, pi: { enabled: false } }
+            apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
             """
         )
     )
