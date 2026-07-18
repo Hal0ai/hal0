@@ -42,6 +42,7 @@ from hal0.activity import AuditStore
 from hal0.agents.personas import Persona, PersonaApproval, save_persona
 from hal0.api.routes import board_chat as bc
 from hal0.board import HermesKanbanClient
+from hal0.config.schema import BrainChatConfig
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -132,6 +133,10 @@ def _fake_request(
         brain_persona_root=persona_root or Path("/nonexistent-personas-root"),
         audit_store=store,
         memory_dispatcher=None,
+        # The approval-gate e2e flows drive gated/mutating tools directly, so
+        # the harness opts out of the shipped read-only default (spec-kb23
+        # §4b) — read_only=true refuses gated calls BEFORE they can enqueue.
+        hal0_config=SimpleNamespace(brain_chat=BrainChatConfig(read_only=False)),
     )
     return SimpleNamespace(app=SimpleNamespace(state=state), headers={})
 

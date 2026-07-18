@@ -251,27 +251,24 @@ config widen it:
   autonomous → gated, but only takes effect once `read_only = false` (the
   guardrail is checked first and independently).
 
-### 4b. Implementation status — DEVIATION (cross-lane blocker)
+### 4b. Implementation status — RESOLVED (default flipped at merge)
 
-The `read_only` **enforcement** described above is fully built and proven
-(tests in `tests/brain/test_brain_read_only.py`). The pydantic **default** in
-`hal0.config.schema.BrainChatConfig.read_only` currently ships **`False`**.
+The `read_only` **enforcement** is fully built and proven
+(tests in `tests/brain/test_brain_read_only.py`), and the pydantic default in
+`hal0.config.schema.BrainChatConfig.read_only` now ships **`True`** — the
+mandated §4 posture is the shipped posture.
 
-Flipping that shared default to `True` was measured to break **17 tests** in
-the `tests/board/` concurrent lane (all the board-mutation tests plus
-`test_config_accessor_defaults_when_absent`, which pins the default `False`).
-Those files are OWNED by a concurrent lane, are fenced read-only to this lane,
-and the KB-2/3 verify gate requires them green. There is a single source of
-truth for the default (the pydantic model field; no separate shipped-config
-layer exists), and the board tests rely on the permissive default because they
-exercise the very mutation tools read-only blocks.
-
-**Remediation (cross-lane coordination required):** the `tests/board` lane must
-opt its mutation-test harness into `read_only=False` explicitly (its
-`_make_app` / `_set_brain_chat_config`), after which
-`BrainChatConfig.read_only` flips to `True` in one line. Until then the
-guardrail stands and is fully enforced whenever `read_only=true` is set by
-config; only the *default value* awaits the flip. Tracked as a KB-2/3 deviation.
+History: the KB-2/3 build lane could not flip the shared default itself — it
+was measured to break 17 fenced `tests/board/` tests whose mutation harnesses
+relied on the permissive default. The orchestrator performed the cross-lane
+reconciliation at merge time: the three board-chat test harnesses
+(`test_board_chat.py::_make_app`, `test_board_chat_admin_tools.py` /
+`test_board_chat_tool_use_e2e.py::_fake_request`) now opt into
+`read_only=False` explicitly (they exercise the very tools the guardrail
+blocks), `test_config_accessor_defaults_when_absent` pins the new shipped
+default `True`, and `test_schema_default_documented_and_enforceable` guards
+against regression. Full `tests/brain/` + `tests/board/` green under the
+flipped default (261 tests).
 
 ---
 

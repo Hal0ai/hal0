@@ -70,11 +70,12 @@ def _fake_request(
 
 
 def test_schema_default_documented_and_enforceable() -> None:
-    """The pydantic default currently ships False (KB-2/3 §4b deviation), but
-    the guardrail is fully enforceable once set True — proven by every test
-    below that constructs BrainChatConfig(read_only=True)."""
-    assert BrainChatConfig().read_only is False  # tracked flip; see spec §4b
-    assert BrainChatConfig(read_only=True).read_only is True
+    """The steward SHIPS read-only (KB-2/3): a bare config refuses mutating
+    and admin-write tools until an operator sets [brain_chat]
+    read_only=false. The §4b reconciliation landed — mutation harnesses
+    opt in explicitly; the shipped default is the safe one."""
+    assert BrainChatConfig().read_only is True  # KB-2/3 shipped default
+    assert BrainChatConfig(read_only=False).read_only is False
 
 
 # ── reads always pass under read-only ────────────────────────────────────────
