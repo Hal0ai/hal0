@@ -237,9 +237,17 @@ class ServerConfig(BaseModel):
     here too rather than at top-level so the surface stays grouped.
 
     See docs/internal/models-slots-impl-plan.md §A3 and the ``flag_merge`` util.
+
+    ``extra="forbid"`` (P3-schema Part C): there is no legitimate unknown
+    ``[server]`` key — a typo (e.g. ``extraargs``) should fail loudly at load
+    time rather than silently vanish. The escape hatch for anything not
+    modeled here is ``extra_args`` itself (a freeform CLI passthrough string)
+    plus ``env`` (an arbitrary env-var dict) — both are already declared
+    fields, so this is additive hardening, not a behavior change for any
+    TOML that only sets ``extra_args``/``env``.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     extra_args: str | None = Field(
         default=None,
@@ -757,9 +765,15 @@ class SlotConfig(BaseModel):
 
 
 class ProviderEntry(BaseModel):
-    """One [[provider]] entry in providers.toml."""
+    """One [[provider]] entry in providers.toml.
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    ``extra="forbid"`` (P3-schema Part C): typo'd provider keys should raise
+    at load time rather than silently round-trip as dead weight. The
+    containing ``ProvidersConfig`` (the ``[[provider]]`` list) stays
+    ``allow`` for forward-compat.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     catalog_id: str = Field(
         ...,
@@ -1348,9 +1362,14 @@ class UpstreamModelFilters(BaseModel):
 
 
 class UpstreamEntry(BaseModel):
-    """One [[upstream]] entry in upstreams.toml."""
+    """One [[upstream]] entry in upstreams.toml.
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    ``extra="forbid"`` (P3-schema Part C): typo'd upstream keys should raise
+    at load time. The containing ``UpstreamsConfig`` (the ``[[upstream]]``
+    list) stays ``allow`` for forward-compat.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     name: str = Field(..., description="Unique upstream name.")
     kind: str = Field(default="remote", description="'slot' | 'remote'.")
@@ -1633,9 +1652,14 @@ class HardwareInfo(BaseModel):
 
 
 class MetaConfig(BaseModel):
-    """[meta] section in hal0.toml.  Tracks config schema version for migrations."""
+    """[meta] section in hal0.toml.  Tracks config schema version for migrations.
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table with no
+    legitimate unknown key — see PLAN.md §5 Tier 1 ("backend = vukan raises
+    with the field path"), which only holds if leaf tables reject typos.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     schema_version: int = Field(
         default=CURRENT_SCHEMA_VERSION,
@@ -1648,9 +1672,12 @@ class MetaConfig(BaseModel):
 
 
 class SlotsConfig(BaseModel):
-    """[slots] section in hal0.toml.  Global slot policy."""
+    """[slots] section in hal0.toml.  Global slot policy.
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     max_slots: int = Field(
         default=0,
@@ -1748,9 +1775,12 @@ class SlotsConfig(BaseModel):
 
 
 class DispatcherConfig(BaseModel):
-    """[dispatcher] section in hal0.toml."""
+    """[dispatcher] section in hal0.toml.
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     # TIER2: configurable prefetch timeout (was hardcoded 4s in haloai
     # lib/dispatcher.py:217-237).  Default 8s per PLAN.md §5 Tier 2.
@@ -1778,9 +1808,12 @@ class DispatcherConfig(BaseModel):
 
 
 class TelemetryConfig(BaseModel):
-    """[telemetry] section in hal0.toml."""
+    """[telemetry] section in hal0.toml.
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     enabled: bool = Field(
         default=False,
@@ -1887,9 +1920,11 @@ class AgentAuthConfig(BaseModel):
     it. The actual token is loaded by the agent driver at process
     startup (from systemd-credential or a 0600 env file) and never
     appears on the command line.
+
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     kind: AgentAuthKindLiteral = Field(
         default="none",
@@ -1936,9 +1971,11 @@ class ToolPolicy(BaseModel):
     posture in :class:`MCPServerConfig`, that means an MCP server with
     no ``tools`` block has *zero* callable tools — which is what we
     want for a fresh registration the user hasn't reviewed yet.
+
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     allow: list[str] = Field(
         default_factory=list,
@@ -2551,7 +2588,13 @@ class ActivityConfig(BaseModel):
     table that survives restarts. ``retention_days`` and ``max_rows`` keep the
     DB bounded without losing recent history. ``HAL0_ACTIVITY_RETENTION_DAYS``
     overrides retention at the env layer.
+
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table. Previously
+    had no explicit ``model_config`` (pydantic's default is ``"ignore"``, not
+    ``"allow"``) -- made explicit here rather than left implicit.
     """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     enabled: bool = True
     retention_days: int = Field(default=30, ge=1)
@@ -2576,7 +2619,13 @@ class BrainChatConfig(BaseModel):
     falls back to the ``agent`` slot). ``max_rounds`` bounds the per-turn tool
     loop (runaway backstop); ``completion_timeout_s`` is the transport timeout
     for each LLM round against the target slot.
+
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table. Previously
+    had no explicit ``model_config`` (pydantic's default is ``"ignore"``, not
+    ``"allow"``) -- made explicit here rather than left implicit.
     """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     enabled: bool = True
     read_only: bool = False
