@@ -61,6 +61,16 @@ def _fake_bundled_agent_manager(monkeypatch: pytest.MonkeyPatch) -> _FakeAgentMa
     return fake
 
 
+@pytest.fixture(autouse=True)
+def _euid_nonroot_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the CLI install suite to a NON-root euid — the in-process
+    provisioning path (§7.4 _provision_hermes). Keeps the suite hermetic even
+    when tests/agents/conftest.py (which patches the global os.geteuid to 0)
+    runs in the same session. The root-drop test overrides per-test.
+    """
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+
+
 def test_install_hermes_runs_prereqs_then_bootstrap_then_register(
     monkeypatch,
 ) -> None:
@@ -550,3 +560,88 @@ def test_install_hermes_switch_uninstalls_incumbent_before_provisioning(monkeypa
 
     assert fake.uninstalled == ["pi-coder"]
     assert events == ["bootstrap_cli"]
+
+
+# ── §7.4 privilege drop: _provision_hermes ───────────────────────────────────
+
+
+def test_provision_hermes_non_root_runs_in_process(monkeypatch) -> None:
+    """euid != 0 (dev / already-hal0): call bootstrap_cli in-process, no re-exec."""
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+
+    seen: dict[str, Any] = {}
+
+    def _fake_bootstrap_cli(**kwargs):  # type: ignore[no-untyped-def]
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision.bootstrap_cli", _fake_bootstrap_cli, raising=True
+    )
+
+    def _boom() -> None:
+        raise AssertionError("root prelude must not run when non-root")
+
+    monkeypatch.setattr(ac, "_hermes_root_prelude", _boom)
+    monkeypatch.setattr(ac, "_run_as_hal0", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()))
+
+    rc = ac._provision_hermes(adopt=True, repair=True)
+
+    assert rc == 0
+    assert seen["adopt"] is True and seen["repair"] is True
+
+
+def test_provision_hermes_root_drops_to_hal0(monkeypatch) -> None:
+    """euid == 0: run the root prelude then re-exec `agent bootstrap hermes` as hal0."""
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+
+    events: list[str] = []
+    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda: events.append("prelude"))
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/local/bin/hal0")
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_as_hal0(argv: list[str]) -> int:
+        captured["argv"] = argv
+        events.append("run_as_hal0")
+        return 0
+
+    monkeypatch.setattr(ac, "_run_as_hal0", _fake_run_as_hal0)
+
+    def _boom(**_k):  # type: ignore[no-untyped-def]
+        raise AssertionError("root path must re-exec, not call bootstrap_cli in-process")
+
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _boom, raising=True)
+
+    rc = ac._provision_hermes(repair=True, adopt=True, skip_phases=("mcp_wire",), verbose=True)
+
+    assert rc == 0
+    # Prelude runs BEFORE the drop.
+    assert events == ["prelude", "run_as_hal0"]
+    argv = captured["argv"]
+    assert argv[:4] == ["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"]
+    assert "--repair" in argv and "--adopt" in argv and "--verbose" in argv
+    assert argv[argv.index("--skip-phase") + 1] == "mcp_wire"
+
+
+def test_run_as_hal0_builds_runuser_argv(monkeypatch) -> None:
+    """_run_as_hal0 sanitizes the env (strip HERMES_HOME, set HOME) via runuser."""
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/sbin/runuser" if n == "runuser" else None)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd: list[str], **_k):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        return type("_D", (), {"returncode": 0})()
+
+    # _run_as_hal0 imports subprocess locally; patch the module-level run.
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    rc = ac._run_as_hal0(["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"])
+
+    assert rc == 0
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["runuser", "-u", "hal0", "--"]
+    assert "env" in cmd and "-u" in cmd and "HERMES_HOME" in cmd
+    # The actual command is preserved at the tail.
+    assert cmd[-4:] == ["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"]
