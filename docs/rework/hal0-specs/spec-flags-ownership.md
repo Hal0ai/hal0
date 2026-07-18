@@ -89,7 +89,8 @@ model.preferred_runner     (selects the runner; validated against fit/format com
 - **Images belong to RUNNERS, full stop.** Neither slots nor models nor profiles carry raw
   image strings. `profile.image` pin: delete (ML-4 §3.2 already directs image out of profiles;
   the pin is the last crosscutting layer). `SlotConfig.image` override: expiring shim, sunset.
-- **`slot.device` and per-slot `chat_template` fold into the model.** With materialized flags,
+- **RATIFIED (user, 2026-07-18): `slot.device` and per-slot `chat_template` fold into the
+  model.** With materialized flags,
   the model's tune text is already device-flavored (`-dev`, `-ngl`, backend choice); a separate
   slot-level device knob would silently contradict the stamped text. Same model on two devices
   = two model rows (weights are refcounted/shared — no storage cost) or a profile re-stamp.
