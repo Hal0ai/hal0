@@ -241,7 +241,7 @@ PYTHON_MIN = (3, 11)
 # when upstream ships 3.14 support (#1249).
 PYTHON_MAX_EXCLUSIVE = (3, 14)
 MIN_FREE_GIB = 4
-DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/status"
+DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/health"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
 # Canonical CLI entry point on PATH (locked decision #3). The thin
 # ``hermes`` wrapper injects HAL0_AGENT_ID and execs the venv hermes
@@ -506,8 +506,11 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
       (Ubuntu 26.04 ships 3.14 only, #1248). A host with uv passes even
       without one — the install phase provisions a managed interpreter
       (#1250).
-    * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
+    * ``hal0`` daemon reachable at ``/api/health`` — agents that can't
       reach hal0 are useless. Catch it now instead of during config_write.
+      Probes the OPEN shallow-liveness endpoint (spec-kb1-auth exposure
+      allowlist), NOT the admin-scoped ``/api/status`` which 401s even when
+      ``auth_enabled`` is false and would fail every provision (#kb1).
     * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
       phases; a real touch/unlink catches a root-owned ``$HERMES_HOME`` (or
       SELinux/ACL block) that an ``os.access`` check on ``/var/lib/hal0`` misses.
