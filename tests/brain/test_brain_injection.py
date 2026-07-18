@@ -213,7 +213,7 @@ def test_fabricated_approval_id_does_not_execute_gated_call(monkeypatch) -> None
     )
     request = _fake_request(stub, kanban=_FakeKanban({"columns": []}), queue=queue)
 
-    events = _run(_collect(request))
+    _run(_collect(request))
     # The gate fired and timed out; the real call is still pending, never run.
     assert rest.calls == []
     pending = queue.list_pending()
@@ -240,7 +240,9 @@ def test_only_real_approval_id_executes(monkeypatch) -> None:
 
     async def _drive() -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        async for frame in bc._chat_stream(request, {"messages": [{"role": "user", "content": "x"}]}):
+        async for frame in bc._chat_stream(
+            request, {"messages": [{"role": "user", "content": "x"}]}
+        ):
             event = _parse(frame)
             events.append(event)
             if event["type"] == "approval_required":

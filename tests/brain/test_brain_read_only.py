@@ -89,10 +89,8 @@ async def test_read_only_allows_board_read() -> None:
     assert _READ_ONLY_MARKER not in str(result)
 
 
-@pytest.mark.asyncio
-async def test_read_only_allows_admin_autonomous_read() -> None:
+def test_read_only_allows_admin_autonomous_read() -> None:
     """An admin autonomous-read (profile_list) is read-safe under read-only."""
-    request = _fake_request(read_only=True)
     # It must be classified a read and NOT refused before dispatch.
     assert bc._is_read_tool("profile_list", {}) is True
 
@@ -158,8 +156,20 @@ async def test_read_only_overrides_persona_auto_approve(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["get_board", "get_task", "get_assignees", "get_orchestration", "list_slots", "get_slot",
-     "list_models", "hardware_stats", "list_agents", "profile_list", "settings_get", "model_show"],
+    [
+        "get_board",
+        "get_task",
+        "get_assignees",
+        "get_orchestration",
+        "list_slots",
+        "get_slot",
+        "list_models",
+        "hardware_stats",
+        "list_agents",
+        "profile_list",
+        "settings_get",
+        "model_show",
+    ],
 )
 def test_is_read_tool_true_for_reads(name: str) -> None:
     assert bc._is_read_tool(name, {"task_id": "t", "name": "n"}) is True
@@ -167,8 +177,18 @@ def test_is_read_tool_true_for_reads(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["move_task", "create_task", "update_orchestration", "slot_load", "slot_unload",
-     "slot_restart", "model_edit", "model_pull", "slot_delete", "config_write"],
+    [
+        "move_task",
+        "create_task",
+        "update_orchestration",
+        "slot_load",
+        "slot_unload",
+        "slot_restart",
+        "model_edit",
+        "model_pull",
+        "slot_delete",
+        "config_write",
+    ],
 )
 def test_is_read_tool_false_for_mutations(name: str) -> None:
     assert bc._is_read_tool(name, {"task_id": "t", "name": "n", "model_id": "m"}) is False
