@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import json
 import logging
 import os
@@ -468,24 +467,34 @@ def _container_runtime() -> str:
     raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
 
 
-@functools.lru_cache(maxsize=1)
-def _podman_major_version() -> int:
-    """Best-effort podman major version, 0 when undeterminable.
+# Successful-probe cache for _podman_major_version. NOT lru_cache: caching a
+# FAILED probe poisons the process — on halo143 a fresh unprivileged podman's
+# first invocation did storage-graph init, blew the 5s timeout, and the api
+# rendered the 4.x PodmanArgs compat on a 5.7 box for its whole lifetime.
+# Only a determinate (>0) answer is worth remembering; failures retry on the
+# next render (and each failed render still fails SAFE into the compat branch).
+_podman_major_cache: int | None = None
 
-    Cached for the process lifetime — the binary doesn't change under a
-    running daemon, and the quadlet renderer consults this per unit render.
-    """
+
+def _podman_major_version() -> int:
+    """Best-effort podman major version, 0 when undeterminable (not cached)."""
+    global _podman_major_cache
+    if _podman_major_cache is not None:
+        return _podman_major_cache
     try:
         out = subprocess.run(
             [_container_runtime(), "--version"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=10,
         ).stdout
         # "podman version 4.9.3" / "podman version 5.2.1"
-        return int(out.strip().rsplit(" ", 1)[-1].split(".", 1)[0])
+        major = int(out.strip().rsplit(" ", 1)[-1].split(".", 1)[0])
     except Exception:
         return 0
+    if major > 0:
+        _podman_major_cache = major
+    return major
 
 
 def _slot_publish_host() -> str:

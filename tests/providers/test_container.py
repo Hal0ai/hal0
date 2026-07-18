@@ -1042,3 +1042,41 @@ class TestQuadletAutoRemoveGate:
         text = self._rendered(monkeypatch, 0)
         assert "AutoRemove" not in text
         assert "GroupAdd=" not in text
+
+
+# Captured at import time — BEFORE the autouse _pin_podman5 fixture replaces
+# the module attribute — so the cache test exercises the real implementation.
+_REAL_PODMAN_MAJOR_VERSION = _container_mod._podman_major_version
+
+
+class TestPodmanVersionProbeCache:
+    """halo143 finding: a FAILED probe must not poison the process cache."""
+
+    def _reset(self):
+        from hal0.providers import container as c
+
+        c._podman_major_cache = None
+
+    def test_failed_probe_not_cached_success_recovers(self, monkeypatch):
+        from hal0.providers import container as c
+
+        self._reset()
+        calls = {"n": 0}
+
+        def _run(*a, **kw):
+            calls["n"] += 1
+
+            class _R:
+                stdout = "" if calls["n"] == 1 else "podman version 5.7.0"
+
+            if calls["n"] == 1:
+                raise TimeoutError("first probe slow (storage init)")
+            return _R()
+
+        monkeypatch.setattr(c.subprocess, "run", _run)
+        monkeypatch.setattr(c, "_container_runtime", lambda: "/usr/bin/podman")
+        assert _REAL_PODMAN_MAJOR_VERSION() == 0  # fails safe, NOT cached
+        assert _REAL_PODMAN_MAJOR_VERSION() == 5  # retried, now correct
+        assert _REAL_PODMAN_MAJOR_VERSION() == 5  # success IS cached
+        assert calls["n"] == 2
+        self._reset()
