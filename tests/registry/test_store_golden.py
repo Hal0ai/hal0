@@ -13,10 +13,11 @@ dropped): a real cross-filesystem hardlink degrade-to-copy (needs two real
 mounts), a real NFS mount's relabel omission (``is_nfs_path`` reads the host
 ``/proc/mounts`` — the pure-logic branch is exercised in
 ``tests/config/test_store.py``), and SELinux ``chcon`` behaviour. The
-filesystem-vs-db *bare-bytes* reconcile (a regular file on disk with NO
-``store_blob`` row) is NOT implemented in ``hal0.registry.gc`` today — see
-``TestGcReconcilesDbVsFilesystem`` for what the current refcount-driven GC
-does cover, and the module note there for the gap.
+filesystem-vs-db *bare-bytes* reconcile (a regular file on disk under the
+store root with NO ``store_blob`` AND no ``model_file`` row) IS implemented
+now — ``hal0.registry.gc.reconcile_store_tree`` — and
+``TestGcReconcilesDbVsFilesystem`` exercises BOTH halves of the GC: the
+refcount-row-driven prune and the fs-walk reconcile.
 
 Why these live alongside the existing unit tests rather than replacing them:
 ``test_fileset.py`` proves ``plan_fileset`` groups shards; ``test_gc.py``
@@ -361,31 +362,48 @@ class TestRefcountSafeDelete:
         assert dest_b.exists()
         assert dest_b.read_bytes() == shared
 
-        # ── KNOWN LATENT WART (see report) ────────────────────────────────
-        # store_blob.blob_path still points at dest_a — the CANONICAL referent
-        # we just unlinked — even though the live bytes now survive only via
-        # dest_b's hardlink. delete_model_files decrements the shared refcount
-        # and unlinks the model's own dest, but does NOT re-point the blob's
-        # canonical path to a surviving referent. Not a byte leak (bytes are
-        # safe, last-delete below reclaims them via the model's own dest), but
-        # it (a) leaves a dangling store_blob.blob_path and (b) makes a THIRD
-        # model's pull of the same sha miss the hardlink-dedup fast path
-        # (_maybe_hardlink_from_blob checks blob_path.is_file() → False).
-        # Encoded here as current reality, flagged for a follow-up fix.
-        assert Path(_blob(registry, digest)["blob_path"]) == dest_a  # dangling
-        assert not Path(_blob(registry, digest)["blob_path"]).exists()
+        # ── #8 FIX: canonical blob_path re-pointed to a surviving referent ──
+        # delete_model_files unlinked keep-a's dest — which WAS the blob's
+        # canonical blob_path — but the blob is still referenced (refcount 1),
+        # so it re-points blob_path at keep-b's live hardlink instead of
+        # leaving it dangling at the deleted dest_a. blob_path now always
+        # points at a live file while refcount > 0.
+        assert Path(_blob(registry, digest)["blob_path"]) == dest_b  # re-pointed
+        assert Path(_blob(registry, digest)["blob_path"]).exists()
+
+        # ── #8 FIX: a THIRD same-sha pull now hits hardlink-dedup ──────────
+        # With blob_path live again, _maybe_hardlink_from_blob's
+        # blob_path.is_file() probe succeeds, so keep-c hardlinks off the
+        # existing blob (refcount++ , SAME inode) instead of re-downloading.
+        dest_c = await _pull_fileset(
+            "keep-c", "org/c-gguf", "rev-c", {"shared.gguf": shared}, registry=registry
+        )
+        assert _blob(registry, digest)["refcount"] == 2
+        # Same physical inode as the surviving referent — proof of a hardlink,
+        # not a fresh download (a re-download would allocate a new inode).
+        assert os.stat(dest_c).st_ino == os.stat(dest_b).st_ino
+        assert dest_c.read_bytes() == shared
+
+        # Delete keep-c: refcount back to 1. blob_path is dest_b (still live,
+        # keep-b holds it), NOT dest_c, so no re-point is needed here.
+        with connect(registry.db_path) as conn:
+            gc.delete_model_files(conn, "keep-c")
+        assert _blob(registry, digest)["refcount"] == 1
+        assert not dest_c.exists()
+        assert dest_b.exists()  # keep-b still references the shared bytes
+        assert Path(_blob(registry, digest)["blob_path"]) == dest_b
 
         # Delete the LAST referent: refcount hits 0 and the bytes are unlinked
-        # immediately (the model's OWN dest hardlink is unlinked — this is why
-        # bytes are still reclaimed despite the dangling canonical path).
+        # immediately (the model's OWN dest hardlink — now also the canonical
+        # blob_path — is unlinked). Last-delete reclaims the bytes.
         with connect(registry.db_path) as conn:
             gc.delete_model_files(conn, "keep-b")
         assert _blob(registry, digest)["refcount"] == 0
         assert not dest_b.exists()  # bytes reclaimed on last delete
 
         # The refcount=0 store_blob ROW persists for a subsequent prune sweep
-        # to reap. Its blob_path is the (already-unlinked) dangling canonical
-        # path, so the sweep just tolerates the absence + drops the row.
+        # to reap. Its blob_path is the (now-unlinked) dest_b, so the sweep
+        # tolerates the absence + drops the row.
         with connect(registry.db_path) as conn:
             stale_path = _blob(registry, digest)["blob_path"]
             assert gc.collect_orphans(conn) == [stale_path]
@@ -398,17 +416,17 @@ class TestRefcountSafeDelete:
 
 
 class TestGcReconcilesDbVsFilesystem:
-    """The GC that EXISTS is refcount-driven: ``prune_orphans`` reconciles
-    every ``store_blob`` row with ``refcount <= 0`` against the filesystem —
-    unlinking its bytes, tolerating already-missing bytes, and never touching a
-    live-referenced (refcount > 0) blob.
+    """GC reconciles db rows AND filesystem state (REWORK.md §B) — BOTH halves:
 
-    NOT covered here because it is NOT implemented in ``hal0.registry.gc``: a
-    bare-bytes reconcile — a regular file on disk under the store root with NO
-    ``store_blob`` row at all. Collecting those requires a full store-tree walk
-    that distinguishes legit non-LFS files (tokenizer/config rows carry no
-    blob) from true orphans; that walk does not exist today. Flagged so the
-    golden-path bullet is tracked, not silently assumed-covered.
+    * refcount-row-driven: ``prune_orphans`` reconciles every ``store_blob``
+      row with ``refcount <= 0`` against the filesystem — unlinking its bytes,
+      tolerating already-missing bytes, never touching a live (refcount > 0)
+      blob (:meth:`test_orphan_pruned_live_retained_missing_bytes_tolerated`).
+    * filesystem-walk-driven: ``reconcile_store_tree`` walks the store root and
+      reaps *bare bytes* — a file with NO ``store_blob`` AND no ``model_file``
+      row (crashed pull / manual copy) — while retaining live-referenced files
+      and skipping in-flight ``.tmp`` partials
+      (:meth:`test_reconcile_reaps_bare_bytes_retains_live_skips_partial`).
     """
 
     @pytest.mark.asyncio
@@ -460,6 +478,52 @@ class TestGcReconcilesDbVsFilesystem:
         # The live (refcount 1) blob + its bytes are UNTOUCHED.
         assert live_dest.exists()
         assert _blob(registry, live_sha)["refcount"] == 1
+
+    @pytest.mark.asyncio
+    async def test_reconcile_reaps_bare_bytes_retains_live_skips_partial(
+        self, registry: SqliteModelRegistry
+    ) -> None:
+        # A real installed file (store_blob + model_file rows) — live bytes.
+        live_body = _body("live2.gguf", 300)
+        live_dest = await _pull_fileset(
+            "live2", "org/live2-gguf", "rev-l2", {"live2.gguf": live_body}, registry=registry
+        )
+
+        # Bare bytes: a regular file physically under the store root that NO
+        # store_blob row and NO model_file row tracks (a crashed pull, an
+        # interrupted write, a manual copy). Same snapshot dir as the live file.
+        bare = live_dest.parent / "bare-orphan.gguf"
+        bare.write_bytes(b"bare-bytes-with-no-db-row")
+
+        # An in-flight partial under the pull staging dir (.tmp) — the fs-walk
+        # must skip it entirely so a concurrent download is never corrupted.
+        tmp_dir = store.store_root() / ".tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        partial = tmp_dir / "downloading--model.gguf.part"
+        partial.write_bytes(b"half-a-download")
+
+        # Dry-run: finds the bare file, unlinks nothing.
+        with connect(registry.db_path) as conn:
+            dry = gc.reconcile_store_tree(conn, dry_run=True)
+        assert dry.orphans_found == 1
+        assert dry.orphans_deleted == 0
+        assert bare.exists()
+
+        # Real pass: only the bare file is reaped.
+        with connect(registry.db_path) as conn:
+            report = gc.reconcile_store_tree(conn, dry_run=False)
+        assert report.orphans_found == 1
+        assert report.orphans_deleted == 1
+        assert report.errors == []
+        assert report.bytes_reclaimed == len(b"bare-bytes-with-no-db-row")
+        assert not bare.exists()  # bare bytes reaped
+
+        # Live-referenced file retained (its store_blob + model_file rows track
+        # it); the in-flight .tmp partial never touched.
+        assert live_dest.exists()
+        assert live_dest.read_bytes() == live_body
+        assert partial.exists()
+        assert partial.read_bytes() == b"half-a-download"
 
 
 # ── 7. read/write store-path precedence is identical ─────────────────────────

@@ -22,7 +22,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -775,14 +774,97 @@ def test_install_venv_keeps_supported_venv(tmp_path: Path) -> None:
 
 def test_requirements_floor_blocks_broken_hermes_agent() -> None:
     # Regression guard for #1247: hermes-agent 0.15.2's wheel is broken
-    # (imports hermes_cli.dashboard_auth, ships without it). The floor must
-    # stay >= 0.16.0 so no resolver — including old-Python fallbacks — can
-    # ever select it.
-    req = hp.HERMES_REQUIREMENTS
-    line = next(ln for ln in req.read_text().splitlines() if ln.startswith("hermes-agent"))
-    m = re.search(r">=\s*(\d+)\.(\d+)\.(\d+)", line)
-    assert m, f"no version floor in: {line!r}"
-    assert tuple(int(g) for g in m.groups()) >= (0, 16, 0)
+    # (imports hermes_cli.dashboard_auth, ships without it). The shipped
+    # requirement must foreclose that broken build by ONE of two *reviewed*
+    # means — never an arbitrary/unreviewed pin:
+    #   * a version floor >= 0.16.0, so no resolver (incl. old-Python wheel
+    #     fallbacks) can select 0.15.2; OR
+    #   * a pin to a commit/tag in hp.VETTED_HERMES_REFS — the production
+    #     posture, where the ref was built from vetted upstream source.
+    text = hp.HERMES_REQUIREMENTS.read_text()
+    line = hp._hermes_requirement_line(text)
+    floor = hp.hermes_requirement_floor(line)
+    ref = hp.hermes_pinned_ref(line)
+    floored = floor is not None and floor >= hp.HERMES_MIN_VERSION
+    vetted_pin = ref is not None and ref in hp.VETTED_HERMES_REFS
+    assert floored or vetted_pin, (
+        f"hermes requirement neither floored >= {hp.HERMES_MIN_VERSION} nor pinned "
+        f"to a vetted ref — a broken/unreviewed build could be selected: {line!r}"
+    )
+    # Protection intent: a VCS pin that is NOT on the reviewed allowlist must
+    # never satisfy the guard (that is exactly how a broken 0.15.2 commit, or
+    # any unvetted ref, would sneak past a floor-only check).
+    if ref is not None and not floored:
+        assert ref in hp.VETTED_HERMES_REFS, f"unreviewed hermes ref pinned: {line!r}"
+    # Single source of truth for the allowlist + broken-build floor.
+    assert hp.hermes_requirement_is_vetted(text)
+
+
+def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
+    # The requirement string landed on this branch pins the reviewed
+    # NousResearch commit; confirm the classifier recognizes it as a VCS pin
+    # (no numeric floor) whose ref is on the allowlist.
+    line = hp._hermes_requirement_line(hp.HERMES_REQUIREMENTS.read_text())
+    assert hp.hermes_requirement_floor(line) is None
+    assert hp.hermes_pinned_ref(line) in hp.VETTED_HERMES_REFS
+
+
+@pytest.mark.parametrize(
+    ("line", "vetted"),
+    [
+        # Vetted commit pin — the production posture.
+        (
+            "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
+            "9de9c25f620ff7f1ce0fd5457d596052d5159596",
+            True,
+        ),
+        # Floored+capped spec — blocks 0.15.2 numerically.
+        ("hermes-agent[web]>=0.16.0,<1.0", True),
+        # Broken build hard-pinned by version — rejected (below floor, no ref).
+        ("hermes-agent[web]==0.15.2", False),
+        # Sub-floor floor — 0.15.x still selectable, rejected.
+        ("hermes-agent[web]>=0.15.0,<1.0", False),
+        # Unreviewed commit pin — NOT on the allowlist, rejected.
+        (
+            "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            False,
+        ),
+    ],
+)
+def test_requirement_vetted_classifier_enforces_protections(line: str, vetted: bool) -> None:
+    # The broken-build protection lives in one seam; exercise both accept paths
+    # (vetted ref / >=0.16.0 floor) and the reject paths (sub-floor, hard-pinned
+    # broken version, unreviewed commit) directly.
+    assert hp.hermes_requirement_is_vetted(line) is vetted
+
+
+def _version_pin_for(monkeypatch, tmp_path: Path, contents: str) -> str:
+    """Run hp._hermes_version_pin() against a synthetic requirements.txt."""
+    req = tmp_path / "installer" / "agents" / "hermes" / "requirements.txt"
+    req.parent.mkdir(parents=True, exist_ok=True)
+    req.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(hp, "REPO_ROOT_FOR_INSTALLER", tmp_path)
+    return hp._hermes_version_pin()
+
+
+def test_version_pin_reports_commit_ref_without_crashing(monkeypatch, tmp_path) -> None:
+    # #3: a git-commit pin has no PEP 440 version. The runtime identifier path
+    # (identity card / self-report) must degrade to the short ref, not crash or
+    # go blank, on the shipped commit-pinned requirement.
+    pin = _version_pin_for(
+        monkeypatch,
+        tmp_path,
+        "# comment\nhermes-agent[web] @ git+https://github.com/NousResearch/"
+        "hermes-agent.git@9de9c25f620ff7f1ce0fd5457d596052d5159596\n",
+    )
+    assert pin == "9de9c25f620f"
+
+
+def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_path) -> None:
+    assert _version_pin_for(monkeypatch, tmp_path, "hermes-agent[web]==0.18.2\n") == "0.18.2"
+    assert _version_pin_for(monkeypatch, tmp_path, "hermes-agent[web]>=0.16.0,<1.0\n") == ">=0.16.0"
+    assert _version_pin_for(monkeypatch, tmp_path, "# only comments\n") == "unknown"
 
 
 # ── #241 phase impls — env_probe / config_write ─────────────────────────────

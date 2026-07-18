@@ -310,6 +310,45 @@ def drop_blob_ref(conn: sqlite3.Connection, sha256: str, *, by: int = 1) -> int:
     return new_count
 
 
+def set_blob_path(conn: sqlite3.Connection, sha256: str, blob_path: str) -> None:
+    """Re-point ``store_blob.blob_path`` at ``blob_path`` (the canonical
+    on-disk referent for ``sha256``).
+
+    The delete path uses this to keep ``blob_path`` pointing at a *live*
+    hardlink after the original canonical referent is unlinked but the blob
+    is still referenced (refcount > 0) — see
+    :func:`hal0.registry.gc.delete_model_files`. Without it, ``blob_path``
+    would dangle at the deleted path, breaking hardlink-dedup for a later
+    same-sha pull (:func:`hal0.registry.pull._maybe_hardlink_from_blob`
+    probes ``blob_path.is_file()``).
+    """
+    conn.execute("UPDATE store_blob SET blob_path = ? WHERE sha256 = ?", (str(blob_path), sha256))
+
+
+def blob_referents(
+    conn: sqlite3.Connection, sha256: str, *, exclude_model_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Return every ``model_file`` row referencing ``sha256``.
+
+    ``exclude_model_id`` drops the model being deleted so the caller can find
+    a *surviving* referent to re-point a shared blob's canonical
+    ``blob_path`` at (:func:`hal0.registry.gc.delete_model_files`). Rows are
+    returned in a stable order (``model_id``, ``rel``) so re-point choice is
+    deterministic across runs.
+    """
+    if exclude_model_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM model_file WHERE sha256 = ? AND model_id != ? ORDER BY model_id, rel",
+            (sha256, exclude_model_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM model_file WHERE sha256 = ? ORDER BY model_id, rel",
+            (sha256,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Model:
     """Reconstruct a ``Model`` from one `model` table row.
 
