@@ -56,9 +56,13 @@ def test_core_routes_live_without_hermes(client_factory) -> None:
 def test_brain_chat_surface_is_exposed_without_hermes(client_factory) -> None:
     with client_factory() as client:
         # hal0-brain is a hal0 subsystem, not a Hermes persona: its route is
-        # registered independently of any Hermes provisioning.
-        paths = {getattr(r, "path", None) for r in client.app.routes}
-        assert "/api/brain/chat" in paths
+        # registered independently of any Hermes provisioning. Probe the
+        # surface behaviorally — a mounted route answers with anything but
+        # 404 (422 on an empty body, 401/403 if gated, 200 on success).
+        # Introspecting app.routes is version-fragile: newer FastAPI keeps
+        # include_router()'d routes behind lazy _IncludedRouter wrappers, so
+        # the flat path-set is empty there (the CI-only gp15 failure).
+        assert client.post("/api/brain/chat").status_code != 404
 
 
 def test_brain_engine_import_graph_pulls_in_no_hermes() -> None:
