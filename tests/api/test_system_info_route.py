@@ -36,6 +36,26 @@ def test_system_info_route_folds_hardware_features_backends(
         assert entry["device_class"] == RUNNER_IMAGES[key].device_class
 
 
+def test_system_info_backends_expose_runner_supports_metadata(
+    isolated_client: TestClient,
+) -> None:
+    """UI-API-1 item 2: each backend exposes the runner registry's per-runner
+    capability metadata (runtime_family, backend, and the typed launch-support
+    gates) so the model drawer can filter to compatible runners."""
+    from hal0.runners import RUNNER_IMAGES
+
+    body = isolated_client.get("/api/system-info").json()
+    for key, entry in body["backends"].items():
+        runner = RUNNER_IMAGES[key]
+        assert entry["runtime_family"] == runner.runtime_family
+        assert entry["backend"] == runner.backend
+        assert entry["supports"] == {
+            "mtp": runner.supports.mtp,
+            "jinja": runner.supports.jinja,
+            "mmproj": runner.supports.mmproj,
+        }
+
+
 def test_system_info_matches_hardware_and_features_endpoints(
     isolated_client: TestClient,
 ) -> None:

@@ -828,6 +828,19 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "runtime_family": runner.runtime_family,
             "device_class": runner.device_class,
             "backend": runner.backend,
+            # Per-runner capability metadata (UI-API-1 item 2 / spec §7): expose
+            # what the runner registry actually knows so the model drawer can
+            # filter its runner-override dropdown to COMPATIBLE runners. Only
+            # the typed launch-capability gates exist today
+            # (hal0.runners.RunnerSupports); a format/arch-support field (the
+            # lxc105 "forks reject newer GGUFs" finding) is NOT yet in the
+            # registry, so it is deliberately omitted here rather than faked —
+            # tracked as an increment-2 gap.
+            "supports": {
+                "mtp": runner.supports.mtp,
+                "jinja": runner.supports.jinja,
+                "mmproj": runner.supports.mmproj,
+            },
             "state": _backend_state(image, local_repos),
         }
 
