@@ -9,7 +9,10 @@ value and drops only the earlier duplicates — so the slot launches identically
 
 from __future__ import annotations
 
-from hal0.slots.argv import normalize_argv, resolve_argv
+import pytest
+
+from hal0.errors import BadRequest
+from hal0.slots.argv import MANAGED_ARGS_DENYLIST, normalize_argv, resolve_argv
 
 # The flag portion of the live `agent` slot resolved_command (post `--port`).
 # Verbatim from `mcp__hal0-admin__slot_list` — includes the profile MTP bundle
@@ -277,3 +280,82 @@ def test_resolve_argv_omits_append_flags_from_provenance() -> None:
     flags = {p.flag for p in res.provenance}
     assert "--lora" not in flags  # append flags aren't deduped -> no single "winner"
     assert "--jinja" in flags
+
+
+# ── §21.7: managed-args denylist ──────────────────────────────────────────────
+#
+# ``[server].extra_args`` is free-form and is the LAST segment ``container.py``
+# passes to ``resolve_argv`` — these pin that it can't smuggle a flag hal0
+# itself owns (model path, listen address/port, context size, GPU-layer
+# override, advertised alias) past the merge.
+
+_BASE_SEGMENTS = [
+    ("base", ["--host", "0.0.0.0", "--port", "8101", "--model", "/models/m.gguf"]),
+    ("profile", ["-fa", "on", "--threads", "16"]),
+]
+
+
+@pytest.mark.parametrize(
+    "denied_tokens",
+    [
+        ["--model", "/etc/passwd"],
+        ["--port", "9999"],
+        ["--host", "0.0.0.0"],
+        ["--ctx-size", "8192"],
+        ["-c", "8192"],
+        ["-ngl", "0"],
+        ["--n-gpu-layers", "0"],
+        ["--alias", "not-the-real-model"],
+    ],
+)
+def test_resolve_argv_rejects_managed_flag_in_extra_args(denied_tokens: list[str]) -> None:
+    segments = [*_BASE_SEGMENTS, ("extra_args", ["--flash-attn", "on", *denied_tokens])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.code == "slot.managed_arg_denied"
+    assert denied_tokens[0] in exc_info.value.message
+
+
+def test_resolve_argv_rejects_multiple_managed_flags_in_one_extra_args() -> None:
+    segments = [*_BASE_SEGMENTS, ("extra_args", ["--model", "/tmp/evil.gguf", "--port", "1"])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.details["flags"] == ["--model", "--port"]
+
+
+def test_resolve_argv_allows_clean_extra_args() -> None:
+    """A slot's real extra_args (bench tuning, no managed flags) passes through."""
+    segments = [*_BASE_SEGMENTS, ("extra_args", ["--flash-attn", "on", "--threads", "8"])]
+    res = resolve_argv(segments)
+    # extra_args wins the -fa/--flash-attn and --threads collisions (last-wins,
+    # winning spelling kept) — no managed flag present, so nothing is raised.
+    assert res.argv == [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8101",
+        "--model",
+        "/models/m.gguf",
+        "--flash-attn",
+        "on",
+        "--threads",
+        "8",
+    ]
+
+
+def test_resolve_argv_only_screens_untrusted_labels() -> None:
+    """A managed flag in a non-``extra_args`` (trusted) segment is not screened.
+
+    ``base``/``profile``/``model_defaults``/``slot_overrides`` are hal0-computed,
+    not caller-supplied — only labels in ``UNTRUSTED_SEGMENT_LABELS`` are
+    screened, so legitimate managed-layer flags (e.g. ``-ngl`` set from
+    ``[model].n_gpu_layers`` in the ``slot_overrides`` segment) never trip it.
+    """
+    segments = [*_BASE_SEGMENTS, ("slot_overrides", ["-ngl", "40"])]
+    res = resolve_argv(segments)  # must not raise
+    assert "-ngl" in res.argv
+
+
+def test_managed_args_denylist_covers_expected_flags() -> None:
+    expected = frozenset({"--model", "--ctx-size", "--host", "--port", "--n-gpu-layers", "--alias"})
+    assert expected == MANAGED_ARGS_DENYLIST
