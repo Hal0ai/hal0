@@ -44,6 +44,24 @@ def usr_lib() -> Path:
     return Path("/usr/lib/hal0/current")
 
 
+def lib() -> Path:
+    """Return the hal0 shipped-tree root (the whole ``/usr/lib/hal0`` dir).
+
+    Distinct from :func:`usr_lib` (which returns the ``current`` version
+    symlink): this is the PARENT that also holds every versioned release dir,
+    the ``bin/`` wrapper seams (``hal0-agentenv``, ``hal0-benchctl``,
+    ``hal0-systemctl``), and the guards/hooks/bench trees — the whole
+    read-only, root-owned shipped surface (P3-perms, ``OwnershipStore``).
+
+    FHS: /usr/lib/hal0
+    HAL0_HOME: $HAL0_HOME/usr-lib/hal0
+    """
+    home = _hal0_home()
+    if home is not None:
+        return home / "usr-lib" / "hal0"
+    return Path("/usr/lib/hal0")
+
+
 def etc() -> Path:
     """Return the hal0 config root (/etc/hal0 or $HAL0_HOME/etc/hal0).
 
