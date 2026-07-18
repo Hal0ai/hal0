@@ -52,6 +52,7 @@ The following is the recommended full suite. “Verified seam” means upstream 
 - identify an owning slot by its opaque stable slot ID; treat the name as a mutable label and source any surfaced port from PortAuthority rather than slot config;
 - set OpenAI transport, normalize tool/reasoning fields, and identify `owned_by=hal0` models;
 - support regular and auxiliary roles (`compression`, `vision`, approval, skill curation, MCP sampling) through named hal0 slots;
+- promote the current provision-time `_resolve_auxiliary_tasks()` logic into a generation-stamped runtime role-slot endpoint; the provider must query that endpoint rather than freeze role assignments into profile config;
 - provide a fallback chain from local hal0 slots to explicitly operator-configured cloud providers, never silently;
 - make doctor check reachability, auth, model availability, and tool-call capability separately.
 
@@ -163,11 +164,12 @@ If hal0 continues embedding upstream plugins inside its own dashboard, replace t
 1. Build a shared hal0 client/config package used by all plugins: endpoint discovery, auth, retries, timeouts, error schema, correlation/idempotency IDs.
 2. Package plugins as a versioned, standalone hal0 distribution with pip entry points and/or staged directories under managed `$HERMES_HOME`; record source commit and file hashes.
 3. Add `hal0 hermes plugins plan|apply|verify|rollback`, never a blind `plugins update`.
+4. Add the hal0-side runtime role-slot API, seeded from `_resolve_auxiliary_tasks()`, before implementing restart-free provider aliases.
 
 ### Phase 2 — core integrations
 
 1. Migrate and harden `hal0-memory`; test lifecycle, isolation, failed backend, compression, delegation, session switch and shutdown.
-2. Add `hal0-provider`; test discovery, tool calling, streaming, reasoning, vision/auxiliary roles, fallback and model hot-swap.
+2. Add `hal0-provider`; consume `/api/events/stream?since=<cursor>` plus `/api/events?since=<cursor>` backfill and the runtime role-slot API; test discovery, gaps, tool calling, streaming, reasoning, vision/auxiliary roles, fallback and model hot-swap.
 3. Add `hal0-tools` plus generated MCP servers; test read-only/mutating authorization and approval propagation.
 
 ### Phase 3 — user surfaces

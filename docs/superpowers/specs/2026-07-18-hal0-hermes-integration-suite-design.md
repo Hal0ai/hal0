@@ -128,15 +128,18 @@ Hermes main and auxiliary work use stable hal0 aliases rather than concrete port
 
 hal0 resolves each alias to current platform truth. Alias ownership follows the opaque slot ID across a rename; a model swap changes the target behind the alias without rewriting every Hermes profile. If diagnostics surface a backend port, it comes from the live PortAuthority `port_claim`, never from a slot-name convention or copied slot config.
 
+The current `_resolve_auxiliary_tasks()` implementation in `hermes_provision.py` is only the seed logic: it computes role assignments during provisioning and writes static Hermes config. Restart-free alias following requires a hal0 runtime contract before `hal0-provider` can ship. Promote that logic into `GET /api/agents/{agent_id}/role-slots`, returning one complete generation-stamped mapping whose entries include role, opaque slot ID, mutable slot label, advertised model/alias, readiness, and capability basis. The endpoint owns resolution; the provider consumes it and never reimplements role policy.
+
 ### Automatic refresh
 
 The refresh protocol is invalidate-and-refetch:
 
 1. Fetch a complete inventory at Hermes startup.
-2. Subscribe to monotonically sequenced hal0 change events.
+2. Subscribe to `GET /api/events/stream?since=<cursor>`, the existing SSE stream with monotonically increasing event IDs.
 3. Treat relevant events as cache invalidations, never as partial authoritative inventory.
 4. Refetch the complete inventory after slot create/delete, model swap, capability change, readiness transition, or relevant config commit.
-5. Periodically reconcile to repair missed events.
+5. On reconnect, backfill through `GET /api/events?since=<cursor>` and advance from its `next_since` cursor. An `events.gap` event forces immediate full inventory and role-map reconciliation.
+6. Periodically reconcile to repair a missed stream or exhausted ring-buffer history.
 
 The last valid inventory remains usable during a temporary event-stream or API outage and is marked stale. A selected model that no longer exists must not be silently replaced.
 
@@ -415,12 +418,13 @@ Use halo143 as the validation and soak target after unit and integration gates p
 
 1. **Hermes compatibility prerequisite:** select a reviewed official release/tag or commit (the researched upstream `main` SHA is not automatically the production pin), reconcile fork lineage, add contract fixtures, and expand `hermes-sdk-diff`. No downstream adapter work begins before this lands.
 2. **Shared core and bundle lifecycle:** endpoint/auth/error library plus plan/apply/verify/rollback packaging.
-3. **Hindsight memory:** correct loader layout, implement full lifecycle, visibility policy, migration, tools, and failure spool.
-4. **Dynamic provider:** unified inventory, stable role aliases, event invalidation, reconciliation, and diagnostics.
-5. **Voice:** managed dynamic wrappers, local fallback, privacy policy, and diagnostics.
-6. **halo143 validation and soak:** stage, migrate representative data, verify, and complete the rollback drill and soak while LXC105 remains untouched.
-7. **LXC105 production migration:** open an explicit migration window only after halo143 passes; snapshot, migrate, verify, and perform ordered legacy cleanup.
-8. **Optional future work:** consider `hal0-context`, streaming voice, dashboard, or observability only from demonstrated requirements.
+3. **Runtime role-resolution prerequisite:** promote `_resolve_auxiliary_tasks()` policy into the generation-stamped `GET /api/agents/{agent_id}/role-slots` runtime endpoint and emit invalidating events when its inputs change.
+4. **Hindsight memory:** correct loader layout, implement full lifecycle, visibility policy, migration, tools, and failure spool.
+5. **Dynamic provider:** unified inventory, live role-slot map, EventBus invalidation/backfill, reconciliation, and diagnostics. This phase is blocked on step 3.
+6. **Voice:** managed dynamic wrappers, local fallback, privacy policy, and diagnostics.
+7. **halo143 validation and soak:** seed deterministic synthetic Honcho workspaces and memories (or use a separately exported, read-only sanitized LXC105 fixture), stage the bundle, exercise the real migration path, verify, and complete the rollback drill and soak while LXC105 remains untouched.
+8. **LXC105 production migration:** open an explicit migration window only after halo143 passes; snapshot, migrate, verify, and perform ordered legacy cleanup.
+9. **Optional future work:** consider `hal0-context`, streaming voice, dashboard, or observability only from demonstrated requirements.
 
 Each phase must produce independently testable software and may ship separately. The memory, provider, and voice adapters remain independently disableable.
 
