@@ -7,7 +7,6 @@ from tests.fixtures.hermes.contracts.memory_provider import MemoryProvider
 from tests.fixtures.hermes.contracts.provider_profile import ProviderProfile
 from tests.fixtures.hermes.contracts.voice import PluginContext
 
-
 HERMES_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
 
 
@@ -30,9 +29,7 @@ def test_memory_provider_preserves_turn_lifecycle_signatures() -> None:
 
 
 def test_voice_registration_callables_match_plugin_context() -> None:
-    assert str(signature(PluginContext.register_tts_provider)) == (
-        "(self, provider) -> 'None'"
-    )
+    assert str(signature(PluginContext.register_tts_provider)) == ("(self, provider) -> 'None'")
     assert str(signature(PluginContext.register_transcription_provider)) == (
         "(self, provider) -> 'None'"
     )

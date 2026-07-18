@@ -2,6 +2,9 @@
 # Copyright (c) 2025 Nous Research
 """Minimal copy of the Hermes memory lifecycle signatures hal0 consumes."""
 
+# Preserve the reviewed upstream ABC and typing spellings verbatim.
+# ruff: noqa: B024, B027, UP006, UP035, UP045
+
 from __future__ import annotations
 
 from abc import ABC
