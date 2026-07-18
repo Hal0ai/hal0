@@ -37,8 +37,6 @@ from hal0.registry.pull import pull_job_file as _pull_job_file
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.services import models_service as _svc
 from hal0.upstreams.filters import apply_filters
-from hal0.upstreams.huggingface import fetch_repo as _fetch_hf_repo
-from hal0.upstreams.huggingface import normalise_repo_slug as _normalise_hf_repo
 
 # See slots.py for the writer-gate rationale.
 
@@ -432,12 +430,10 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
     ``[models].roots`` we trust the operator owns the path; when it's
     elsewhere we still allow it (the operator can point anywhere they
     have read access to).
-    """
-    from hal0.registry.detect import detect
-    from hal0.registry.discover import _normalise_id
-    from hal0.registry.model import Model
-    from hal0.registry.store import ModelAlreadyExists
 
+    Detection + derivation + registry write + event emit live in
+    :func:`hal0.services.models_service.add_from_path`.
+    """
     registry = request.app.state.model_registry
     try:
         body = await request.json()
@@ -445,112 +441,8 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-
-    raw_path = body.get("path")
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise BadRequest("'path' must be a non-empty absolute path string")
-
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        raise BadRequest(
-            f"'path' must be absolute (got {raw_path!r})",
-            code="model.path_relative",
-        )
-    if not path.exists() or not path.is_file():
-        raise BadRequest(
-            f"path {str(path)!r} is not a readable file",
-            code="model.path_missing",
-            details={"path": str(path)},
-        )
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path
-
-    # Enforce the same extension allow-list the scan walker uses so
-    # accidentally pointing at a tokenizer.json or a README.md fails
-    # loudly rather than landing in the registry.
-    cfg = load_hal0_config()
-    allowed_exts = {e.lower() for e in cfg.models.file_extensions}
-    if resolved.suffix.lower() not in allowed_exts:
-        raise BadRequest(
-            f"file extension {resolved.suffix!r} not in [models].file_extensions",
-            code="model.unsupported_format",
-            details={"path": str(resolved), "allowed": sorted(allowed_exts)},
-        )
-
-    detection = detect(resolved)
-    raw_labels = body.get("labels")
-    if isinstance(raw_labels, list) and raw_labels:
-        capabilities = [str(c) for c in raw_labels if isinstance(c, str) and c.strip()]
-    else:
-        capabilities = list(detection.suggested_capabilities) or ["chat"]
-
-    raw_id = body.get("id")
-    if isinstance(raw_id, str) and raw_id.strip():
-        model_id = raw_id.strip()
-    else:
-        # Prefer the detector's suggested_name (post-GGUF arch+param sniff)
-        # falling back to the slug of the stem so two paths to the same
-        # file land on the same id as the auto-scan would.
-        model_id = _normalise_id(detection.suggested_name or resolved.stem)
-
-    raw_name = body.get("name")
-    if isinstance(raw_name, str) and raw_name.strip():
-        display_name = raw_name.strip()
-    else:
-        display_name = detection.suggested_name or resolved.stem
-
-    overwrite = bool(body.get("overwrite", False))
-
-    try:
-        size_bytes = resolved.stat().st_size
-    except OSError:
-        size_bytes = 0
-
-    metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
-    if detection.context_length is not None:
-        metadata["context_length"] = detection.context_length
-
-    try:
-        model = Model(
-            id=model_id,
-            name=display_name,
-            path=str(resolved),
-            size_bytes=size_bytes,
-            quant=detection.quant,
-            capabilities=capabilities,
-            backends=list(detection.suggested_backends),
-            metadata=metadata,
-        )
-    except (TypeError, ValueError) as exc:
-        raise BadRequest(f"invalid Model payload: {exc}") from exc
-
-    if overwrite and registry.has(model_id):
-        registry.remove(model_id)
-
-    try:
-        registry.add(model)
-    except ModelAlreadyExists as exc:
-        # Convert to the structured envelope shape (409) so the UI can
-        # branch on the code rather than the message text.
-        raise exc
-
     event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "model.registered",
-            "info",
-            f"model:{model.id}",
-            f"{model.id}: registered (add-from-path)",
-            data={
-                "id": model.id,
-                "backends": list(model.backends),
-                "capabilities": list(model.capabilities),
-                "source": "add-from-path",
-            },
-        )
-    return _model_to_dict(model)
+    return await _svc.add_from_path(body, registry=registry, event_bus=event_bus)
 
 
 @router.post("", status_code=201)
@@ -1210,12 +1102,12 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
 # ── HuggingFace inspect (POST /api/models/inspect) ────────────────────────────
 
 
-# In-process TTL cache keyed by normalised HF repo id. Storing the whole
-# response shape (variants + tags + metadata) keeps repeat Inspect clicks
-# on the same modal session free; the 5 minute TTL is short enough that
-# a freshly-uploaded quant lands within one render.
-_INSPECT_TTL_SECONDS = 300
-_INSPECT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+# The repo-coordinate resolution + TTL cache + Hub fetch moved to
+# ``hal0.services.models_service`` (P3-routers §J). The cache binding is
+# re-exported so ``tests/api/test_models_routes.py`` can still reset it via
+# ``routes.models._INSPECT_CACHE.clear()``.
+_INSPECT_TTL_SECONDS = _svc.INSPECT_TTL_SECONDS
+_INSPECT_CACHE = _svc.INSPECT_CACHE
 
 
 @router.post("/inspect")
@@ -1239,7 +1131,8 @@ async def inspect_model(request: Request) -> dict[str, Any]:
 
     Cached for ~5 minutes per repo. HF unreachable / 5xx → ``502``
     with ``hf.unreachable`` / ``hf.upstream_error``. Repo missing →
-    ``404`` with ``hf.repo_not_found``.
+    ``404`` with ``hf.repo_not_found``. Resolution + cache + fetch live in
+    :func:`hal0.services.models_service.inspect_hf_repo`.
     """
     try:
         body = await request.json()
@@ -1247,35 +1140,7 @@ async def inspect_model(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-
-    repo_input = body.get("hf_repo")
-    if not isinstance(repo_input, str) or not repo_input.strip():
-        repo_input = body.get("hf_url")
-    if not isinstance(repo_input, str) or not repo_input.strip():
-        raise BadRequest(
-            "either 'hf_repo' (org/name) or 'hf_url' is required",
-            code="hf.bad_request",
-        )
-
-    repo = _normalise_hf_repo(repo_input)
-    if "/" not in repo:
-        raise BadRequest(
-            f"'{repo_input}' is not a valid org/name HF repo coordinate",
-            code="hf.bad_request",
-            details={"input": repo_input},
-        )
-
-    now = time.time()
-    cached = _INSPECT_CACHE.get(repo)
-    if cached is not None and now - cached[0] < _INSPECT_TTL_SECONDS:
-        payload = dict(cached[1])
-        payload["repo"] = repo
-        payload["cached"] = True
-        return payload
-
-    result = await _fetch_hf_repo(repo)
-    _INSPECT_CACHE[repo] = (now, result)
-    return {"repo": repo, "cached": False, **result}
+    return await _svc.inspect_hf_repo(body)
 
 
 @router.post("/{model_id}/pull/cancel")
