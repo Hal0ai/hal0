@@ -65,9 +65,6 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
     # tmp dir so a run on a real host (which may have a live hermes-gateway) stays
     # hermetic. The pipeline_io `run` seam also stubs systemctl is-active/pgrep.
     monkeypatch.setattr(hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),))
-    # ownership_reconcile chmods /var/lib/hal0/agents to 0711; redirect it under
-    # tmp so a root test runner never touches the live agents dir.
-    monkeypatch.setattr(hp, "AGENTS_DIR", tmp_path / "var" / "lib" / "hal0" / "agents")
     return hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
 
@@ -160,10 +157,8 @@ def test_phase_names_in_planned_order() -> None:
         "brain_profile_mcp_wire",
         "model_automap",
         "voice_wire",
-        # Late always-run ownership reconcile: re-chown HERMES_HOME + repair
-        # 0711 on /var/lib/hal0/agents after the phases that write root-owned
-        # files into the home (fixes the config.yaml root:root ordering bug).
-        "ownership_reconcile",
+        # (ownership_reconcile removed — §7.4 F.7: born hal0:hal0, nothing to
+        # reconcile.)
         # #437 (SYSTEM scope): the gateway secrets drop-in lands after
         # voice_wire (which may write the vault it references) and before
         # smoke_tests.
@@ -214,11 +209,9 @@ def test_rerun_is_noop_when_all_phases_ok(
 ) -> None:
     hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
     second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    # All phases skipped because their checkpoint is already ok — EXCEPT the
-    # always-run ownership_reconcile, which re-runs every invocation.
-    assert set(second.skipped) == set(hp.PHASE_NAMES) - {"ownership_reconcile"}
-    assert "ownership_reconcile" not in second.skipped
-    assert second.phases["ownership_reconcile"]["status"] == hp.PhaseStatus.OK.value
+    # All phases skipped because their checkpoint is already ok — no always_run
+    # phase remains after the ownership_reconcile removal (§7.4 F.7).
+    assert set(second.skipped) == set(hp.PHASE_NAMES)
     assert second.failed == []
 
 

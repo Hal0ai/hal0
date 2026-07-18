@@ -196,11 +196,8 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
         )
         return
 
-    # §7.4: provisioning now drops to hal0 (see _provision_hermes), so the trees
-    # are already born hal0:hal0 — this chown-back is a no-op and is removed in
-    # inc 5 (F.7). Retained for one increment as a belt while born-owned is
-    # validated end-to-end. No-op off-root / no such user.
-    _chown_hermes_trees_to_agent_user()
+    # §7.4 F.7: no chown-back — provisioning drops to hal0 (see _provision_hermes)
+    # so the trees are born hal0:hal0.
 
     # Register + honour --switch via the daemon (venv now present → gate passes).
     url = _api_base()
@@ -290,16 +287,16 @@ def _ensure_hermes_writable_or_die() -> None:
     """Abort with a sudo hint when provisioning can't write its trees.
 
     ``hal0 agent install hermes`` provisions into root-owned ``/var/lib/hal0``
-    and is built to run as root on a system install — it chowns the result to
-    the ``hal0`` agent user afterwards (:func:`_chown_hermes_trees_to_agent_user`).
-    Run as a normal login user it used to crash several phases into the
-    bootstrap with a raw ``PermissionError`` and leave half-owned trees behind
-    (observed on a Fedora install). Catch the privilege mismatch up front, before
-    the toolchain shell-out, so we abort cleanly with no side effects.
+    and is built to run as root on a system install — it then drops the
+    provisioning pipeline to the ``hal0`` user so the trees are born hal0:hal0
+    (:func:`_provision_hermes`). Run as a normal login user it used to crash
+    several phases into the bootstrap with a raw ``PermissionError`` and leave
+    half-owned trees behind (observed on a Fedora install). Catch the privilege
+    mismatch up front, before the toolchain shell-out, so we abort cleanly with
+    no side effects.
 
-    No-op when we're root (root writes anywhere; the post-provision chown hands
-    the trees to ``hal0``) or on a dev / rootless install that already owns the
-    trees (the probe passes).
+    No-op when we're root (root provisions, dropping to hal0 for the writes) or
+    on a dev / rootless install that already owns the trees (the probe passes).
     """
     import os as _os
 
@@ -316,39 +313,14 @@ def _ensure_hermes_writable_or_die() -> None:
         + f", but you're running as uid={_os.getuid()} and those live under "
         "root-owned /var/lib/hal0.\n\n"
         "Re-run as root:\n    sudo hal0 agent install hermes\n\n"
-        f"(Provisioning runs as root, then hands the trees to the "
-        f"'{_AGENT_RUNTIME_USER}' agent user automatically.)"
+        f"(Provisioning runs as root, then drops to the "
+        f"'{_AGENT_RUNTIME_USER}' agent user to write the trees born-owned.)"
     )
 
 
-def _chown_hermes_trees_to_agent_user() -> None:
-    """Recursively chown the provisioned trees to the agent runtime user.
-
-    Only acts when we're root AND the agent user exists — off-root installs
-    (dev / `--dev`) already own everything, and a missing user means a
-    non-standard layout we shouldn't second-guess. Skipping is silent and safe.
-    """
-    import os as _os
-    import pwd as _pwd
-    import subprocess as _subprocess
-    from pathlib import Path as _Path
-
-    if _os.geteuid() != 0:
-        return
-    try:
-        _pwd.getpwnam(_AGENT_RUNTIME_USER)
-    except KeyError:
-        console.print(
-            f"[yellow]agent user '{_AGENT_RUNTIME_USER}' not found — skipping chown; "
-            "the agent unit may not be able to write $HERMES_HOME.[/yellow]"
-        )
-        return
-    for tree in _HERMES_AGENT_TREES:
-        if _Path(tree).exists():
-            _subprocess.run(  # nosec B603 B607 — fixed argv, known paths
-                ["chown", "-R", f"{_AGENT_RUNTIME_USER}:{_AGENT_RUNTIME_USER}", tree],
-                check=False,
-            )
+# _chown_hermes_trees_to_agent_user removed (§7.4 F.7): provisioning drops to
+# hal0 (see _provision_hermes below), so the trees are born hal0:hal0 with no
+# chown-back needed.
 
 
 # ── §7.4 privilege drop: provision as the hal0 service user ──────────────────

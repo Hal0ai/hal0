@@ -25,22 +25,16 @@ See ``docs/internal/hermes-bootstrap-plan-2026-05-23.md`` §3 + §16 for
 the full design contract and ``docs/internal/adr/0012-remove-auth-and-caddy.md``
 for the agent-identity model (X-hal0-Agent header, not Bearer).
 
-P3-perms (OwnershipStore adoption) follow-up note: ``_chown_tree_to_hal0`` and
-the late ``_phase_ownership_reconcile`` phase were investigated as dead-code
-deletion candidates once ``hal0-api`` flips to ``User=hal0`` and the installer
-adopts the born-owned contract (drop privileges before config writes). They
-are NOT dead: ``installer/install.sh`` still invokes
-``hal0 agent install hermes`` as ROOT (intentionally — that same CLI
-invocation's ``_phase_install`` writes ``/usr/local/bin/hermes`` +
-``hal0-hermes``, a genuinely root-only path unrelated to this module's
-``$HERMES_HOME``/config writes), so every phase in THIS pipeline still runs
-under a root euid at install time and would otherwise leave ``config.yaml`` /
-``runtime.json`` / the venv root:root for the ``User=hal0``
-``hal0-agent@hermes.service`` unit to fail reading. A true fix needs an
-in-process privilege drop inside this module BETWEEN "write
-/usr/local/bin" (root) and "write $HERMES_HOME" (hal0) — out of scope for the
-P3-perms pass that added the ``OwnershipStore`` rows this file's HERMES_HOME
-mirrors (``agents/`` 0711, HERMES_HOME 0700). Keep both alive.
+Born-owned contract (§7.4 F.7): every ``$HERMES_HOME`` write here is born
+``hal0:hal0`` because the CLI drops provisioning to the hal0 service user before
+running this pipeline (``cli/agent_commands._provision_hermes``: a root-only
+prelude installs the ``/usr/local/bin`` wrapper + ensures the setgid hal0-owned
+skeleton, then re-execs ``hal0 agent bootstrap hermes`` as hal0). Root:root
+artifacts (seed TOML, driver env, gateway drop-in) go through the
+``hal0-agentenv`` / ``hal0-systemctl`` sudo seams. Consequently the former
+chown-back layers — ``_chown_tree_to_hal0`` and the ``ownership_reconcile``
+phase, plus the CLI's ``_chown_hermes_trees_to_agent_user`` — are removed:
+nothing is chowned after the fact.
 """
 
 from __future__ import annotations
@@ -51,9 +45,7 @@ import glob
 import hashlib
 import json
 import os
-import pwd
 import shutil
-import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 from collections.abc import Callable
@@ -675,8 +667,8 @@ def _provision_python_via_uv(
     # base interpreter — silently reproducing the very "gateway venv python
     # won't start" failure this /var/lib/hal0 move was meant to fix. chmod the
     # leaf to 0o755 to guarantee traversal; idempotent under --repair, and
-    # mirrors the other hal0-reachable dirs (gateway drop-in .chmod(0o755),
-    # AGENTS_DIR.chmod(0o711)). Best-effort: a perms hiccup (e.g. unprivileged
+    # mirrors the other hal0-reachable dirs (gateway drop-in .chmod(0o755)).
+    # Best-effort: a perms hiccup (e.g. unprivileged
     # caller) must not abort an otherwise-working provision, so log and
     # continue rather than fall through to the None/range-error path.
     try:
@@ -870,61 +862,6 @@ def upgrade_hermes_runtime(
     target = version or "latest matching requirements"
     suffix = " + config migrated" if migrated else " (config migrate skipped — see logs)"
     return True, f"hermes-agent upgraded → {target}{suffix}"
-
-
-_HAL0_SERVICE_USER = "hal0"
-
-
-def _resolve_user_ids(user: str) -> tuple[int, int] | None:
-    """Return ``(uid, gid)`` for ``user``, or ``None`` if the user is absent."""
-    try:
-        ent = pwd.getpwnam(user)
-    except KeyError:
-        return None
-    return (ent.pw_uid, ent.pw_gid)
-
-
-def _chown_tree_to_hal0(
-    path: Path,
-    *,
-    user: str = _HAL0_SERVICE_USER,
-    geteuid: Callable[[], int] = os.geteuid,
-    resolve_ids: Callable[[str], tuple[int, int] | None] = _resolve_user_ids,
-    chown: Callable[[str, int, int], None] = os.lchown,
-) -> int:
-    """Recursively chown ``path`` to the hal0 service user, returning the count.
-
-    Hands ownership of root-created artifacts (venv, ``$HERMES_HOME`` tree,
-    ``runtime.json``) to the unprivileged ``hal0`` user so the ``User=hal0``
-    systemd unit can read/write them instead of hitting EACCES or silently
-    falling back to the default provider — the root-clobber regression (#843).
-
-    Uses :func:`os.lchown` (NOT :func:`os.chown`) so a symlink entry chowns the
-    LINK itself, never the file it points at. As root, following a symlink would
-    hand ownership of an arbitrary out-of-tree target to the hal0 service user —
-    a real hazard now that ``--adopt`` runs this over a foreign home of uncertain
-    provenance (a planted ``evil -> /outside/secret`` symlink). For a regular
-    file ``lchown`` is identical to ``chown``, so nothing else changes.
-
-    A no-op (returns 0) when not root, when ``user`` doesn't exist, or when
-    ``path`` is missing, so it's safe in dev/non-root installs and idempotent
-    under ``bootstrap --repair``.
-    """
-    if geteuid() != 0:
-        return 0
-    ids = resolve_ids(user)
-    if ids is None:
-        return 0
-    if not path.exists():
-        return 0
-    uid, gid = ids
-    count = 0
-    chown(str(path), uid, gid)
-    count += 1
-    for sub in path.rglob("*"):
-        chown(str(sub), uid, gid)
-        count += 1
-    return count
 
 
 # Content marker that identifies the hal0-managed wrapper. The managed
@@ -1143,12 +1080,9 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
             )
     details["plugins"] = [str(p) for p in plugin_targets.values()]
 
-    # ── F.7 chown-back (deleted once born-owned lands, §7.4 inc 5) ───────────
-    # The venv lives outside HERMES_HOME (/var/lib/hal0/venvs/hermes); a root
-    # install hands it to hal0 so it isn't left root-owned (#843). No-op when the
-    # provisioner already runs as hal0 (the venv is then born hal0:hal0).
-    _chown_tree_to_hal0(venv)
-
+    # No chown-back (§7.4 F.7): provisioning runs as hal0 (cli/_provision_hermes
+    # drops before this pipeline), so the venv under /var/lib/hal0/venvs is born
+    # hal0:hal0.
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
@@ -1348,11 +1282,9 @@ def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
     for sub in standard_subdirs:
         (hermes_home / sub).mkdir(parents=True, exist_ok=True)
 
-    # Hand the whole tree to the hal0 service user so a root-context bootstrap
-    # never leaves root:root files the User=hal0 unit can't read (#843).
-    # No-op when not root; also reconciles ownership under --repair.
-    _chown_tree_to_hal0(hermes_home)
-
+    # No chown-back (§7.4 F.7): the tree is created as hal0 (the CLI drops
+    # provisioning to hal0 before this pipeline) under the setgid /var/lib/hal0,
+    # so the whole $HERMES_HOME layout is born hal0:hal0.
     details: dict[str, Any] = {
         "hermes_home": str(hermes_home),
         "marker": str(hermes_home / _HAL0_MANAGED_MARKER),
@@ -4915,13 +4847,9 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     # provisioner delegates the write to `sudo -n hal0-agentenv`.
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
     env_path, env_wrote = _write_driver_env(state)
-    # ── hal0-owned artifact (born hal0:hal0 when the provisioner runs as hal0) ─
+    # ── hal0-owned artifact — runtime.json (0600) is born hal0:hal0 (§7.4 F.7:
+    #    provisioning runs as hal0, so the chat proxy can read it directly) ─────
     runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
-
-    # ── F.7 chown-back (deleted once born-owned lands, §7.4 inc 5) ───────────
-    # runtime.json carries the embed token at 0600 — a root install chowns it to
-    # hal0 so the User=hal0 chat proxy can read it (#843). No-op as hal0.
-    _chown_tree_to_hal0(runtime_path)
 
     return PhaseResult(
         status=PhaseStatus.OK,
@@ -4936,58 +4864,15 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     )
 
 
-# ── Phase: ownership_reconcile ───────────────────────────────────────────────
+# ── ownership_reconcile phase removed (§7.4 F.7) ─────────────────────────────
 #
-# Late always-run phase that re-hands HERMES_HOME to the hal0 service user and
-# repairs the 711 mode on /var/lib/hal0/agents. It fixes an ORDERING bug: the
-# home tree is chowned in home_init (phase 4) but config_write (phase 7) writes
-# config.yaml as root AFTER that, so config.yaml lands root:root on the happy
-# path and the User=hal0 unit can't read it (falls back to defaults / offline).
-# Running the chown after every home-writing phase closes that gap. It must run
-# on plain re-runs and --repair (ownership drifts independently of checkpoints),
-# so the Phase is marked always_run and the orchestrator never phase_done-skips
-# it.
-
-# Where agent homes live; the User=hal0 unit needs 0711 to traverse to its own
-# home without being able to enumerate siblings. Module-level so tests redirect
-# it under tmp_path (same posture as the other path constants).
-AGENTS_DIR = Path("/var/lib/hal0/agents")
-
-
-def _phase_ownership_reconcile(ctx: PhaseContext) -> PhaseResult:
-    """Re-chown HERMES_HOME to hal0 + repair 0711 on the agents dir.
-
-    Idempotent and privilege-aware: :func:`_chown_tree_to_hal0` no-ops when
-    not root / the hal0 user is absent / the path is missing, so this is safe
-    on dev + non-root installs. Runs on every invocation (``always_run``) so a
-    root-owned artifact written by a later phase (config.yaml — bug F) gets
-    reconciled even when no checkpoint drifted.
-    """
-    hermes_home = Path(ctx.state.hermes_home)
-    chowned = _chown_tree_to_hal0(hermes_home)
-
-    mode_fixed = False
-    agents_mode: str | None = None
-    if AGENTS_DIR.exists():
-        try:
-            current = stat.S_IMODE(AGENTS_DIR.stat().st_mode)
-            if current != 0o711:
-                AGENTS_DIR.chmod(0o711)
-                mode_fixed = True
-            agents_mode = oct(stat.S_IMODE(AGENTS_DIR.stat().st_mode))
-        except OSError as exc:
-            agents_mode = f"error: {exc}"
-
-    return PhaseResult(
-        status=PhaseStatus.OK,
-        details={
-            "hermes_home": str(hermes_home),
-            "chowned": chowned,
-            "agents_dir": str(AGENTS_DIR),
-            "agents_dir_mode": agents_mode,
-            "agents_dir_mode_fixed": mode_fixed,
-        },
-    )
+# The late always-run phase re-chowned HERMES_HOME to hal0 and repaired 0711 on
+# /var/lib/hal0/agents. It existed solely to undo the root:root config.yaml that
+# the root-context config_write wrote AFTER home_init's chown. Provisioning now
+# runs as hal0 (cli/_provision_hermes drops before this pipeline), so config.yaml
+# and the whole home are born hal0:hal0 — there is nothing to reconcile. The
+# 0711 traversal mode on /var/lib/hal0/agents is an OwnershipStore row applied by
+# `doctor perms --fix`, not this phase.
 
 
 # ── Phase pipeline plumbing (issue #702) ────────────────────────────────────
@@ -5160,12 +5045,8 @@ PHASES: list[Phase] = [
     # any more — only config_write still does (needs_previous above).
     Phase("model_automap", _phase_model_automap),
     Phase("voice_wire", _phase_voice_wire),
-    # Late ownership reconcile (always-run): re-chown HERMES_HOME to hal0 +
-    # repair 0711 on /var/lib/hal0/agents AFTER config_write/context_link/
-    # install_artifacts wrote root-owned files into the home (fixes the
-    # config.yaml root:root ordering bug). always_run so a plain re-run still
-    # reconciles ownership even with every checkpoint already ok.
-    Phase("ownership_reconcile", _phase_ownership_reconcile, always_run=True),
+    # (ownership_reconcile phase removed — §7.4 F.7: provisioning runs as hal0,
+    # so config.yaml / the home are born hal0:hal0 with nothing to reconcile.)
     # #437 (SYSTEM scope): wire the gateway secrets drop-in so fresh
     # provisions/reinstalls come up with Telegram + Discord connected,
     # surviving hermes_cli main-unit regeneration. Runs after voice_wire
@@ -5328,8 +5209,10 @@ def run(
                 print(f"[skip] {name} (--skip-phase)")
             continue
 
-        # always_run phases (ownership_reconcile) never phase_done-skip — their
-        # work reconciles state that drifts independently of checkpoints.
+        # always_run phases never phase_done-skip — their work reconciles state
+        # that drifts independently of checkpoints. (No phase currently sets
+        # always_run since the ownership_reconcile removal, §7.4 F.7; the
+        # machinery stays for future phases.)
         if not repair and not phase.always_run and state.phase_done(name):
             if verbose:
                 print(f"[skip] {name} (already ok)")
