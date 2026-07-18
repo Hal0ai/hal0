@@ -40,7 +40,17 @@ HP-compat ──> HP-core ──┬──> HP-memory ──> P2-memory rehearsal
                                   └────────> halo143 suite acceptance
 ```
 
-Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5–8 (memory) and 11–12 (voice), which may proceed after HP-core while HP-role-api/provider work continues in the API collision class.
+Each `###` task is a reviewer-sized gate. Stages are checkpoint boundaries: do not start a later stage until the preceding exit gate is satisfied. Within Stage 2, the memory, provider, and voice lanes may run in parallel because their file ownership is disjoint; serialize work that touches `hermes_provision.py`, shared plugin packaging, or the HERMES collision class.
+
+## Stage 0 — Compatibility freeze
+
+**Purpose:** Establish the exact upstream contract before feature code is written.
+
+**Entry:** R2 is on `main`; §7.4/F.7 is landed; current Hermes evidence is available.
+
+**Work:** Task 1 (`HP-compat`).
+
+**Exit gate:** Reviewed immutable Hermes pin, copied contract fixtures, plugin discovery smoke, targeted tests and CI green. If compatibility cannot be proven, stop the suite here and keep the current bundle active.
 
 ### Task 1: Pin and fixture the supported Hermes contract
 
@@ -60,6 +70,16 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 3: Select a reviewed official Hermes tag/commit**, record tag, commit SHA, release date, and source links in the research note, pin it exactly in `requirements.txt`, and copy only the minimal ABC/signature fixtures under the test-only path with upstream license headers.
 - [ ] **Step 4: Run the compatibility test** and `./.venv/bin/python scripts/check_sunset.py`; expect PASS and scar baseline unchanged.
 - [ ] **Step 5: Commit** with `test(hermes): pin supported plugin contracts`.
+
+## Stage 1 — Shared platform seams
+
+**Purpose:** Build the small reusable transport and move role resolution to live hal0 truth.
+
+**Entry:** Stage 0 accepted.
+
+**Work:** Task 2 (`HP-core`), then Tasks 3–4 (`HP-role-api`). Task 2 may begin independently; Tasks 3 and 4 remain sequential.
+
+**Exit gate:** Shared client passes auth/redaction/retry tests; role endpoint is generation-stamped and CLIENT-classified; slot/config changes emit invalidations; core still starts with Hermes absent; combined CI green.
 
 ### Task 2: Build the shared authenticated transport
 
@@ -112,6 +132,22 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 3: Implement the thin router** (`parse -> resolve_role_slots -> model_dump`) and an invalidation publisher called after committed slot create/delete/rename/model/capability/readiness changes. Events are hints only; the endpoint remains authoritative.
 - [ ] **Step 4: Run API tests, event tests, exposure tests, import smoke, ruff, and sunset**; expect PASS.
 - [ ] **Step 5: Commit** with `feat(api): add live Hermes role-slot map`.
+
+## Stage 2 — Independently shippable adapters
+
+**Purpose:** Deliver memory, provider, and voice as separate vertical slices before combining installer wiring.
+
+**Entry:** Stage 1 accepted.
+
+**Parallel lanes:**
+
+- **Stage 2A — Memory:** Tasks 5–8. Tasks 5 and 6 establish server policy; Task 7 upgrades the plugin; Task 8 rehearses the existing migrator.
+- **Stage 2B — Provider:** Tasks 9–10. Requires the Stage 1 role endpoint and event contract.
+- **Stage 2C — Voice:** Task 11. Requires shared transport and existing unified audio endpoints, but not provider completion.
+
+**Integration step:** Task 12 begins only after 2A, 2B, and 2C pass their targeted gates.
+
+**Exit gate:** Each adapter independently passes its contract and failure tests; specialized plugin destinations and two-copy memory parity are correct; repeated installation converges without overwriting unrelated Hermes configuration; combined CI green.
 
 ### Task 5: Add server-enforced Hermes memory identity and visibility
 
@@ -247,6 +283,16 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 4: Run provision, CLI, seed parity, import smoke, ruff, format, and sunset checks**; expect PASS.
 - [ ] **Step 5: Commit** with `feat(hermes): install hal0 integration suite`.
 
+## Stage 3 — Optional orchestration adapters
+
+**Purpose:** Add deeper board and cron integration without making either a second source of hal0 truth.
+
+**Entry:** Stage 2 accepted. `HP-executor` additionally waits for KB-4/5/6's canonical hal0 board dispatch/ETag seam. `HP-automation` additionally requires stable provider role aliases from Tasks 9–10.
+
+**Parallel lanes:** Task 13 (`HP-executor`) and Task 14 (`HP-automation`) may run independently once their individual prerequisites are met. If KB-4 is not ready, defer Task 13 without blocking automation or the core adapter suite.
+
+**Exit gate:** hal0 remains canonical for board state and appliance scheduling; executor reconciliation is idempotent; cron pins stable hal0 aliases, isolates cron memory, rejects maintenance jobs, and never accesses Hermes internal storage; CI green.
+
 ### Task 13: Add the hal0-board Hermes executor bridge
 
 **Files:**
@@ -283,6 +329,16 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 5: Run automation, provider alias, memory, exposure, and degradation tests**; expect fail-closed behavior when a pinned provider/role disappears and no implicit cloud fallback.
 - [ ] **Step 6: Commit** with `feat(hermes): add scheduled agent automation`.
 
+## Stage 4 — Resilience and optionality gate
+
+**Purpose:** Prove that no adapter failure compromises another adapter or hal0 core.
+
+**Entry:** All promoted Stage 2 and Stage 3 lanes are merged. A deferred `HP-executor` is excluded explicitly rather than represented as partially complete.
+
+**Work:** Task 15.
+
+**Exit gate:** Failure matrix passes for API, events, memory, voice, executor, and automation surfaces that are present; Hermes-absent import/start passes; capped combined verification and CI green.
+
 ### Task 15: Prove independent degradation and core-without-Hermes
 
 **Files:**
@@ -297,6 +353,16 @@ Each `###` task is a reviewer-sized gate. Execute tasks in order except Tasks 5�
 - [ ] **Step 3: Run** `PYTHONPATH=$PWD/src ./.venv/bin/pytest tests/agents/hermes/test_suite_degradation.py tests/harness/integration/test_voice_roundtrip.py -q`; fix only integration seams exposed by these scenarios.
 - [ ] **Step 4: Run the capped lane gate**: ruff check, ruff format check, import smoke, sunset, and all targeted Hermes plugin/API/memory tests under 90 seconds per group.
 - [ ] **Step 5: Commit** with `test(hermes): prove adapter isolation and optionality`.
+
+## Stage 5 — halo143 deployment and R4 acceptance
+
+**Purpose:** Validate deployment-shaped behavior, migration, upgrade, rollback, and restart-free updates on the clean target box.
+
+**Entry:** Stage 4 accepted at a specific CI-green commit; wheel and Hermes pin recorded; halo143 snapshot available.
+
+**Work:** Task 16. Run only the acceptance sections for promoted lanes, explicitly recording deferred lanes.
+
+**Exit gate:** Fresh and repeated install, provider hot-swap, memory migration/privacy, voice roundtrip, promoted orchestration adapters, and rollback all pass; canonical board rows contain commit, CI, verification, and halo143 evidence; LXC105 remains untouched.
 
 ### Task 16: Rehearse and accept on halo143
 
