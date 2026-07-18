@@ -997,6 +997,25 @@ if [[ -f "${PODMAN_FWD_UNIT_SRC}" ]]; then
     info "wrote ${PODMAN_FWD_UNIT_DST}"
 fi
 
+# Legacy slot-unit cleanup (R3 quadlet migration). Pre-quadlet installs
+# shipped a static hal0-slot@.service template (+ per-slot drop-ins). Static
+# units in /etc/systemd/system SHADOW podman's generator units, so a leftover
+# template breaks every quadlet slot with "Failed to load environment files"
+# (halo150 Phase-2 finding: the generator accepted hal0-slot@qtest.container
+# and produced the service, but the docker-era template won the name).
+# Convergent: remove if present, no-op otherwise.
+LEGACY_SLOT_UNIT="${UNIT_DIR}/hal0-slot@.service"
+if [[ -f "${LEGACY_SLOT_UNIT}" ]]; then
+    rm -f "${LEGACY_SLOT_UNIT}"
+    info "removed legacy static ${LEGACY_SLOT_UNIT} (shadowed quadlet generator units)"
+fi
+for LEGACY_SLOT_DROPIN in "${UNIT_DIR}"/hal0-slot@*.service.d; do
+    if [[ -d "${LEGACY_SLOT_DROPIN}" ]]; then
+        rm -rf "${LEGACY_SLOT_DROPIN}"
+        info "removed legacy slot drop-in ${LEGACY_SLOT_DROPIN}"
+    fi
+done
+
 # hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
 # generic per-agent runner; the drop-in pins hermes-specific env.
 # Lay them down whether or not bootstrap has been run — the shim's
