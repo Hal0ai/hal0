@@ -278,7 +278,7 @@ def _build_identity(
     THIS identity verbatim for the record's cell_key (so plan↔run converge —
     DESIGN §5.4), and the real observed image/build are stamped onto the record's
     engine block for DISPLAY only (roster chips, run drawer). See the results
-    appendix in handoffs/box-bringup-prompt-2026-07-05.md.
+    appendix in docs/archive/handoffs/box-bringup-prompt-2026-07-05.md.
     """
     return Identity(
         model=Model(

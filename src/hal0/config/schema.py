@@ -1206,7 +1206,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: profiles have no entry → the card shows "—" until benched.
 #: The FP4 2x2 grid (rocm/vulkan x dense/moe) was tuned by the 2026-07-05
 #: ROCmFPX matrix (27B dense -b 512 -ub 512 ~29 t/s; 35B-A3B MoE -b 2048 -ub 512
-#: ~76 t/s — handoffs/rocmfpx-bench-results-2026-07-05.md), and the SMT-oversub
+#: ~76 t/s — docs/archive/handoffs/rocmfpx-bench-results-2026-07-05.md), and the SMT-oversub
 #: `--threads-batch 32` / `--poll` debris carried over from the pre-consolidation
 #: Q-quant profiles was dropped per the 2026-07-04 consolidation. The four grid
 #: cards intentionally carry no hero entry (they render "—"); their decode

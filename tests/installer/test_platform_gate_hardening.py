@@ -6,7 +6,7 @@ Two more gaps closed alongside bootstrap-prereq parity
 1. The ``hal0`` system user/group (and its render/video group membership)
    used to be created very late — after directories, the source copy,
    hal0.toml patching, and the systemd-unit render had already mutated the
-   host (handoffs/installer-setup-plan-2026-07-05.md, decision Q1). It is
+   host (docs/archive/handoffs/installer-setup-plan-2026-07-05.md, decision Q1). It is
    now created immediately after pre-flight, before the first mutating
    step ("Filesystem layout"'s ``mkdir -p``).
 2. The disk-space pre-flight only ever measured ``VAR_DIR``, never the

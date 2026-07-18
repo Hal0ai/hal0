@@ -1,6 +1,6 @@
 """Benchmarks API — /api/benchmarks/* over the hal0.bench result store.
 
-Endpoint shapes per the design (handoffs/benchmark-system-design-2026-07-05.md
+Endpoint shapes per the design (docs/archive/handoffs/benchmark-system-design-2026-07-05.md
 §7), ported in-tree from the benchlab lab repo's web/app.py on 2026-07-10.
 
 Zoom levels served (design §8):

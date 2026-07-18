@@ -318,7 +318,7 @@ do_apply() {
     log "  Hermes bridge now routes qwen3 TTS through hal0 slot via :8080."
     log "  The 'hal0-voice' switch continues to work (reads tts_voice.conf)."
     log "  Run 'hal0-voice status' to confirm :8095 is now served by the slot."
-    log "  See handoffs/qwen3tts-standalone-to-slot-migration-2026-06-28.md §7 for post-migration cleanup."
+    log "  See docs/archive/handoffs/qwen3tts-standalone-to-slot-migration-2026-06-28.md §7 for post-migration cleanup."
 }
 
 do_dry_run() {

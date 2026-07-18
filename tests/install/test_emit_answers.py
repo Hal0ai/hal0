@@ -2,7 +2,7 @@
 ``write_answers`` serializer half of the answer-file round trip, and the CLI
 wiring that resolves + writes + exits before any apply.
 
-Spec: ``handoffs/hal0-setup-answers-spec-2026-07-05.md`` §2 (CLI surface),
+Spec: ``docs/archive/handoffs/hal0-setup-answers-spec-2026-07-05.md`` §2 (CLI surface),
 §3 (schema), §8 (security — never inline a token).
 """
 

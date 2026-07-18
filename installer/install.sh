@@ -405,7 +405,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # never touches — a box could sail through pre-flight with 20 GB free on
     # / while the actual model store is nearly full. Measure it too, but
     # non-fatal (warn only, per the Q4 posture in
-    # handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
+    # docs/archive/handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
     # yet at install time, so an undersized store shouldn't hard-block the
     # rest of the platform gate the way a genuinely full root disk should —
     # `hal0 setup` / the pull gate re-validates before any download lands.
@@ -445,7 +445,7 @@ fi
 #
 # Created here, immediately after pre-flight and BEFORE any filesystem
 # mutation (was previously created much later, after directories/units/
-# config were already written — handoffs/installer-setup-plan-2026-07-05.md
+# config were already written — docs/archive/handoffs/installer-setup-plan-2026-07-05.md
 # Q1), so the render/video group membership below is settled before any
 # later step that depends on group membership or on the user existing
 # (the FLM cache / HF cache / STATE.md ownership work further down).
