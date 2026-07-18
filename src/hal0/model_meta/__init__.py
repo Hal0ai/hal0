@@ -84,6 +84,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from hal0.model_meta.modality import MODALITY_ALIASES, Modality
+
 log = logging.getLogger(__name__)
 
 
@@ -241,35 +243,18 @@ def map_backend_to_device(backend: str | None) -> str:
 #: (Literal — kept in sync by tests/model_meta).
 SLOT_TYPES: tuple[str, ...] = ("llm", "embedding", "reranking", "transcription", "tts", "image")
 
-#: Canonical ``model.capabilities`` spellings the registry stores:
-#: registry/model.py documents chat/embed/rerank/vision/asr/tts;
-#: registry/detect.py additionally emits ``image`` (ComfyUI tree) and the
-#: shared filename table (:func:`capability_from_filename`) can yield
-#: ``video`` via registry/discover (#940 diffusion hardening).
-MODEL_CAPABILITIES: tuple[str, ...] = (
-    "chat",
-    "vision",
-    "embed",
-    "rerank",
-    "asr",
-    "tts",
-    "image",
-    "video",
-)
+#: Canonical ``model.capabilities`` spellings the registry stores — now
+#: enum-driven (§7.1d): sourced from :class:`hal0.model_meta.modality.Modality`
+#: so adding a new modality automatically updates ``/api/meta/enums``
+#: instead of needing a second hand-synced tuple.
+MODEL_CAPABILITIES: tuple[str, ...] = tuple(m.value for m in Modality)
 
-#: Tolerated capability synonyms → canonical spelling. Matches what the code
-#: actually accepts today: ``classify``'s ``_CAPABILITY_TO_TYPE`` folds
-#: stt→asr-bucket and img→image; the layout migration
-#: (cli/migrate_commands._CAPABILITY_TO_LEAF_CAP) additionally tolerates the
-#: slot-type-flavoured embedding/embeddings/reranking/transcription spellings.
-CAPABILITY_ALIASES: dict[str, str] = {
-    "embedding": "embed",
-    "embeddings": "embed",
-    "reranking": "rerank",
-    "transcription": "asr",
-    "stt": "asr",
-    "img": "image",
-}
+#: Tolerated capability synonyms → canonical spelling. Single source is
+#: :data:`hal0.model_meta.modality.MODALITY_ALIASES` (the ingest fold
+#: :func:`hal0.model_meta.modality.normalize_modality` uses); this name is
+#: kept for the existing ``/api/meta/enums`` payload + callers that have
+#: not moved to ``normalize_modality`` yet.
+CAPABILITY_ALIASES: dict[str, str] = dict(MODALITY_ALIASES)
 
 #: Valid ``model.backends`` values in the registry. The GGUF compatibility
 #: seed is registry/detect._GGUF_BACKENDS (vulkan/rocm/cuda/cpu — ``cuda`` is
@@ -298,8 +283,9 @@ MODEL_BACKENDS: tuple[str, ...] = (
 #: catalogue so a new seed tag can't silently drift out of the enums payload.
 CURATED_MODEL_TAGS: tuple[str, ...] = (
     # behaviour-driving type tags (routing / slot-feature gates)
+    # "moe" removed (§7.1d) — it was declared but never read anywhere;
+    # Model.architecture (hardware/recommend.is_moe) is the replacement.
     "mtp",
-    "moe",
     "tool-calling",
     "reasoning",
     "coder",
@@ -608,10 +594,11 @@ def model_is_mtp_eligible(model_info: Mapping[str, Any]) -> bool:
 def labels_of(cfg: dict[str, Any]) -> set[str]:
     """Pull the ``model.labels`` list out of a slot config dict.
 
-    Single source for both :func:`SlotManager.route_for_request` and the
-    omni-router tool filter (``omni_router/filter.py``) so the filter's
-    decision always matches what ``route_for_request`` will pick — they
-    used to be two hand-synced copies.
+    Kept as the fallback reader for slot TOMLs written before the
+    ``capability_flags.tool_calling`` fold (registry/import_toml.py) has
+    run over them — :func:`model_capabilities_of` is the primary source
+    now; see its docstring + the 🔴 routing-gate fix in
+    ``omni_router/filter.py`` / ``slots/routing.py``.
     """
     model = cfg.get("model") or {}
     if isinstance(model, dict):
@@ -619,6 +606,30 @@ def labels_of(cfg: dict[str, Any]) -> set[str]:
         if isinstance(raw, (list, tuple)):
             return {str(x) for x in raw}
     return set()
+
+
+# ── typed capability extraction (§7.1d 🔴 routing-gate fix) ──────────────────
+
+
+def model_capabilities_of(model_info: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Extract the typed ``ModelCapabilities`` bools from a registry dump.
+
+    ``model_info`` is the shape :meth:`hal0.registry.model.Model.model_dump`
+    produces (or the ``SlotManager._resolve_model_info`` dict, which folds
+    that dump in verbatim): a ``capability_flags`` key holding
+    ``{"tool_calling": bool | None, ...}``. Returns ``{}`` when
+    ``model_info`` is ``None``/empty or carries no ``capability_flags``
+    dict — callers apply their own fallback (see
+    ``omni_router/filter.py``'s caller-gate, which falls back to
+    :func:`labels_of` when ``tool_calling`` comes back ``None``, so slot
+    TOMLs that predate this field still route tool calls).
+    """
+    if not model_info:
+        return {}
+    flags = model_info.get("capability_flags")
+    if isinstance(flags, Mapping):
+        return dict(flags)
+    return {}
 
 
 __all__ = [
@@ -644,5 +655,6 @@ __all__ = [
     "is_resolvable",
     "labels_of",
     "map_backend_to_device",
+    "model_capabilities_of",
     "model_is_mtp_eligible",
 ]
