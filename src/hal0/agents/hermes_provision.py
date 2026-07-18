@@ -24,6 +24,23 @@ upstream subcommands.
 See ``docs/internal/hermes-bootstrap-plan-2026-05-23.md`` §3 + §16 for
 the full design contract and ``docs/internal/adr/0012-remove-auth-and-caddy.md``
 for the agent-identity model (X-hal0-Agent header, not Bearer).
+
+P3-perms (OwnershipStore adoption) follow-up note: ``_chown_tree_to_hal0`` and
+the late ``_phase_ownership_reconcile`` phase were investigated as dead-code
+deletion candidates once ``hal0-api`` flips to ``User=hal0`` and the installer
+adopts the born-owned contract (drop privileges before config writes). They
+are NOT dead: ``installer/install.sh`` still invokes
+``hal0 agent install hermes`` as ROOT (intentionally — that same CLI
+invocation's ``_phase_install`` writes ``/usr/local/bin/hermes`` +
+``hal0-hermes``, a genuinely root-only path unrelated to this module's
+``$HERMES_HOME``/config writes), so every phase in THIS pipeline still runs
+under a root euid at install time and would otherwise leave ``config.yaml`` /
+``runtime.json`` / the venv root:root for the ``User=hal0``
+``hal0-agent@hermes.service`` unit to fail reading. A true fix needs an
+in-process privilege drop inside this module BETWEEN "write
+/usr/local/bin" (root) and "write $HERMES_HOME" (hal0) — out of scope for the
+P3-perms pass that added the ``OwnershipStore`` rows this file's HERMES_HOME
+mirrors (``agents/`` 0711, HERMES_HOME 0700). Keep both alive.
 """
 
 from __future__ import annotations
