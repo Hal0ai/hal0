@@ -911,14 +911,20 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
       (the unified ROCmFPX runner; serves chat + ``--embedding`` + ``--reranking``).
 
     Deterministic and probe-free — no hardware read on the hot render path.
+
+    §7.1b / ML-4: this is now a thin back-compat SHIM over the runner-image
+    registry (:mod:`hal0.runners`) — ``hal0.runners.runner_for_backend`` owns
+    the HW-gate logic above (verbatim) and ``resolve_runner_image`` adds the
+    env-var / manifest-digest tiers this function never had. The name +
+    signature stay put because a wide set of imports/tests depend on them
+    (updater, tests/config/test_default_image_gate.py, …). The import is
+    LOCAL (not at module top) to avoid a cycle: ``hal0.runners`` imports the
+    image constants from THIS module at its own top level, so this module
+    can't import ``hal0.runners`` back until this function actually runs.
     """
-    be = (backend or "").lower()
-    dc = (device_class or "").lower()
-    if be == "cuda":
-        return FALLBACK_CUDA_IMAGE
-    if dc == "cpu" or be == "cpu":
-        return FALLBACK_VULKAN_IMAGE
-    return DEFAULT_ROCMFPX_IMAGE
+    from hal0.runners import resolve_runner_image, runner_for_backend
+
+    return resolve_runner_image(runner_for_backend(backend, device_class))
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
