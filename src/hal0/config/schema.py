@@ -400,12 +400,16 @@ class SlotConfig(BaseModel):
     vision: bool = Field(
         default=True,
         description=(
-            "Per-slot vision toggle (#901). When the bound model carries an "
-            "mmproj sidecar, the container provider loads it (--mmproj) so the "
-            "slot accepts images — default-on. Set false to boot the slot "
-            "text-only (no --mmproj, modalities.vision:false) on memory-tight "
-            "hosts; the projector is ~0.9 GB resident. No effect when the model "
-            "has no sidecar."
+            "Per-slot vision toggle (#901). §7.1d: this is an OVERRIDE of the "
+            "registry model's derived ``Modality.VISION`` membership (see "
+            "hal0.model_meta.modality.derive_modalities), not a primary "
+            "modality source — the model's own mmproj presence is what "
+            "actually determines vision capability. When the bound model "
+            "carries an mmproj sidecar, the container provider loads it "
+            "(--mmproj) so the slot accepts images — default-on. Set false "
+            "to force-suppress it (no --mmproj) on memory-tight hosts even "
+            "though the model is vision-capable; the projector is ~0.9 GB "
+            "resident. No effect when the model has no sidecar."
         ),
     )
 
