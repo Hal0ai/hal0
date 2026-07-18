@@ -111,18 +111,6 @@ SERVICES: tuple[ServiceDef, ...] = (
         loopback_port=9177,
     ),
     ServiceDef(
-        id="honcho",
-        name="Honcho",
-        description="Honcho v3 memory engine (docker compose stack, loopback :8000).",
-        unit="hal0-honcho.service",
-        public_url_env="HAL0_HONCHO_PUBLIC_URL",
-        probe="http",
-        probe_url="http://127.0.0.1:8000/health",
-        probe_url_env="HAL0_HONCHO_PROBE_URL",
-        actions=_FULL,
-        loopback_port=8000,
-    ),
-    ServiceDef(
         id="n8n",
         name="n8n",
         description="Workflow automation (external — not deployed by hal0).",
