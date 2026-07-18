@@ -379,3 +379,57 @@ def test_unknown_device_warns_and_returns_no_opinion(
     with caplog.at_level("WARNING", logger="hal0.model_meta"):
         assert device_to_backend("quantum-annealer") == (None, None)
     assert any("unknown_device" in r.message for r in caplog.records)
+
+
+# ── model_is_mtp_eligible (§7.1a / ML-5) ──────────────────────────────────────
+#
+# Eligibility is now purely model-driven data: an explicit
+# ModelDefaults.mtp tri-state wins in EITHER direction over the registry
+# 'mtp' tag; the old filename/GGUF-name 'MTP' marker sniff (_MTP_NAME_RE)
+# is REMOVED entirely — a name marker with no tag and no explicit
+# defaults.mtp is simply NOT eligible anymore.
+
+_MTP_ELIGIBILITY_CASES: list[tuple[str, dict[str, Any], bool]] = [
+    ("tagged", {"_model_key": "plain-name", "tags": ["chat", "mtp"]}, True),
+    ("untagged_no_defaults", {"_model_key": "gemma-4-12b-it", "tags": ["chat"]}, False),
+    ("no_tags_key_at_all", {"_model_key": "temptation-7b"}, False),
+    (
+        "name_marker_alone_no_longer_eligible",
+        {"_model_key": "CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN"},
+        False,
+    ),
+    ("path_name_marker_alone_no_longer_eligible", {"path": "/m/Qwopus3.5-4B-Coder-MTP.gguf"}, False),
+    (
+        "explicit_true_beats_absent_tag",
+        {"_model_key": "plain", "tags": [], "defaults": {"mtp": True}},
+        True,
+    ),
+    (
+        "explicit_false_beats_present_tag",
+        {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": False}},
+        False,
+    ),
+    (
+        "explicit_none_falls_back_to_tag_present",
+        {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": None}},
+        True,
+    ),
+    (
+        "explicit_none_falls_back_to_tag_absent",
+        {"_model_key": "plain", "tags": [], "defaults": {"mtp": None}},
+        False,
+    ),
+    ("no_defaults_key_at_all", {"_model_key": "tagged", "tags": ["mtp"]}, True),
+    ("defaults_not_a_dict_ignored", {"_model_key": "tagged", "tags": ["mtp"], "defaults": "x"}, True),
+]
+
+
+@pytest.mark.parametrize(
+    "model_info,expected",
+    [(c[1], c[2]) for c in _MTP_ELIGIBILITY_CASES],
+    ids=[c[0] for c in _MTP_ELIGIBILITY_CASES],
+)
+def test_model_is_mtp_eligible(model_info: dict[str, Any], expected: bool) -> None:
+    from hal0.model_meta import model_is_mtp_eligible
+
+    assert model_is_mtp_eligible(model_info) is expected

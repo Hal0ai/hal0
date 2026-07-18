@@ -19,15 +19,23 @@ from __future__ import annotations
 import tomllib
 
 from hal0.config.paths import slots_config_dir
-from hal0.registry.model import Model
+from hal0.registry.model import Model, ModelDefaults
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.updater.updater import clear_stale_mtp_overrides
 
 
-def _register(model_id: str, *, tags: list[str] | None = None) -> None:
+def _register(
+    model_id: str, *, tags: list[str] | None = None, mtp: bool | None = None
+) -> None:
     ModelRegistry().add(
-        Model(id=model_id, path=f"/tmp/{model_id}.gguf", capabilities=["chat"], tags=tags or [])
+        Model(
+            id=model_id,
+            path=f"/tmp/{model_id}.gguf",
+            capabilities=["chat"],
+            tags=tags or [],
+            defaults=ModelDefaults(mtp=mtp) if mtp is not None else None,
+        )
     )
 
 
@@ -90,6 +98,35 @@ async def test_swap_defuse_leaves_unresolvable_model_alone(tmp_hal0_home: str) -
     await sm.create("s", _slot_cfg("s", "old-model", mtp=True))
     assert await sm._defuse_stale_mtp_on_swap("s", "not-in-registry") is False
     assert _on_disk_mtp("s") is True
+
+
+# ── §7.1a / ML-5: explicit defaults.mtp tri-state wins over the tag ───────────
+
+
+async def test_swap_defuse_keeps_force_on_for_defaults_mtp_true_even_untagged(
+    tmp_hal0_home: str,
+) -> None:
+    """An explicit ModelDefaults.mtp=True is eligible even with NO registry
+    tag — the tri-state override wins over "no tag" the same way it would
+    win over an eligible tag."""
+    _register("explicit-mtp-model", mtp=True)
+    sm = SlotManager()
+    await sm.create("s", _slot_cfg("s", "old-model", mtp=True))
+    assert await sm._defuse_stale_mtp_on_swap("s", "explicit-mtp-model") is False
+    assert _on_disk_mtp("s") is True
+
+
+async def test_swap_defuse_clears_force_on_for_defaults_mtp_false_even_tagged(
+    tmp_hal0_home: str,
+) -> None:
+    """An explicit ModelDefaults.mtp=False makes the model ineligible even
+    though it carries the registry 'mtp' tag — the explicit override wins
+    in EITHER direction."""
+    _register("suppressed-mtp-model", tags=["mtp"], mtp=False)
+    sm = SlotManager()
+    await sm.create("s", _slot_cfg("s", "old-model", mtp=True))
+    assert await sm._defuse_stale_mtp_on_swap("s", "suppressed-mtp-model") is True
+    assert _on_disk_mtp("s") is None
 
 
 # ── updater migration ─────────────────────────────────────────────────────────
