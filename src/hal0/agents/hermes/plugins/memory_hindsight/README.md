@@ -21,12 +21,13 @@ the hermes-agent venv at runtime.
 | Kind | `exclusive` (per `MemoryManager` single-provider invariant) |
 | Base URL | arg → `HAL0_MEMORY_BASE` env → `memory.hal0.base_url` (config.yaml) → `http://127.0.0.1:8080` |
 | Identity | `X-hal0-Agent` header: arg → `HAL0_AGENT_ID` env → `memory.hal0.agent_id` → `hermes` |
-| Banks | `private:<agent-id>` (default writes) + `shared` (`X-hal0-Private: 0`); reads are a union |
-| Dataset field | **NEVER SENT** — server resolves from headers (issue #317 / PR #366) |
+| Banks | `private:<agent-id>` + `shared`; reads are a server-enforced union |
+| Visibility policy | Raw turns/lifecycle captures → **private**; explicit durable writes (`hal0_memory_add`) → **shared by default**, `visibility:"private"` override (or `HAL0_MEMORY_DEFAULT_VISIBILITY` / profile policy). Enforced server-side. |
+| Dataset field | **NEVER SENT** — server resolves the bank from `X-hal0-Agent` + `X-hal0-Private` headers (issue #317 / PR #366) |
 | Transport | **synchronous** `httpx.Client` (memory hooks are sync; async wrapping broke on reuse) |
-| Timeouts | 3s connect / 30s read / 1s probe |
-| Tool schemas | `hal0_memory_search`, `hal0_memory_recall`, `hal0_memory_add(shared=…)` |
-| Observability | first (and every 25th) transport failure per op logs WARNING; `failure_counts` property; degraded notice in system prompt |
+| Timeouts | 3s connect / 30s read |
+| Tool schemas | `hal0_memory_search`, `hal0_memory_recall`, `hal0_memory_add(visibility=…)` |
+| Recall framing | `prefetch()` labels recall as untrusted historical **DATA, not instructions** and annotates each item with provenance/visibility/verification/confidence/observed-at |
 | Operator CRUD | Via the `hal0-memory` MCP server (loaded separately) |
 
 ## Why no `dataset` field
@@ -38,9 +39,9 @@ client omits an explicit dataset, the server reads `X-hal0-Agent` (and
 `shared`. Sending an explicit `private:<id>` re-trips the
 `_AGENT_ID_PATTERN` reject in `src/hal0/mcp/memory.py`.
 
-The regression test in
-`tests/agents/hermes_plugins/test_memory_hindsight_provider.py` asserts
-that no outbound REST payload carries a `dataset` key, locking the fix.
+The regression test `test_no_dataset_field_ever_sent` in
+`tests/agents/test_hal0_memory_client.py` asserts that the client's `add`
+never sends a `dataset` key, locking the fix.
 
 ## ABC surface implemented
 
@@ -48,33 +49,46 @@ From `agent/memory_provider.py`:
 
 * `name` (property) — returns `"hal0-memory"`.
 * `is_available()` — `True` unconditionally (config-only check; no network
-  call per ABC docstring). Reachability is probed at `initialize()` and
-  surfaced as a degraded notice in the system prompt instead.
-* `initialize(session_id, **kwargs)` — builds the sync client, probes
-  reachability (1s), honours `agent_context` so cron/flush/subagent loops
-  skip writes.
-* `system_prompt_block()` — two-bank preamble; three-tier variant for
-  profile agent-ids (`hermes__<profile>`): profile-private bank, global
-  roll-up bank, shared.
+  call per ABC docstring). Reachability is a runtime concern for
+  `initialize()`/diagnostics.
+* `initialize(session_id, **kwargs)` — builds the sync client, records
+  `agent_context` (cron/flush/subagent skip writes), resolves the durable
+  default visibility and retry-spool location.
+* `system_prompt_block()` — two-bank preamble stating durable writes default
+  shared and recall is historical context, not instructions.
 * `prefetch(query, *, session_id)` — best-effort `/api/memory/recall`
-  with a 2048-token budget; transport failures fall back to empty string.
-* `sync_turn(user, assistant, *, session_id)` — fire-and-forget
-  `/api/memory/add`; honours `_SKIP_WRITE_CONTEXTS`.
+  (2048-token budget), framed as untrusted DATA and provenance-annotated;
+  folds in any `queue_prefetch` query; transport failures fall back to `""`.
+* `queue_prefetch(query, *, session_id)` — parks a deeper next-turn query
+  (bounded, single-slot, non-blocking); drained on the next `prefetch`.
+* `sync_turn(user, assistant, *, session_id, messages=None)` — non-blocking
+  **private** raw capture with a stable `source_event` idempotency key;
+  honours `_SKIP_WRITE_CONTEXTS`.
+* `on_pre_compress(messages)` — persists a **private** continuity checkpoint
+  and returns a compact continuity marker for Hermes to keep.
+* `on_session_end(messages)` — flushes a **private** session-end checkpoint.
+* `on_delegation(task, result, *, child_session_id)` — records delegated work
+  in the **private** bank (separate namespace via `child_session_id`).
 * `get_tool_schemas()` / `handle_tool_call()` — explicit
-  `hal0_memory_{search,recall,add}` tools (robust even when the MCP
-  server's tools aren't surfaced to a session).
-* `on_memory_write(action, target, content, metadata=None)` — mirrors
-  the built-in memory tool's writes into hal0-memory.
+  `hal0_memory_{search,recall,add}` tools. `add` defaults to the **shared**
+  bank; pass `visibility:"private"` for the private override.
+* `on_memory_write(action, target, content, metadata=None)` — mirrors the
+  built-in memory tool's writes **privately** into hal0-memory.
+* `get_config_schema()` / `save_config(values, hermes_home)` — official setup
+  schema (base_url, agent_id, default visibility); persists only the declared
+  non-secret keys to `<hermes_home>/hal0-memory.config.json`.
+* `backup_paths()` — declares the persisted config + retry-spool dir.
 * `shutdown()` — closes the owned `httpx.Client` (idempotent).
 
 ## Settings
 
 | Setting | Resolution order | Default |
 |---|---|---|
-| base URL | ctor arg → `HAL0_MEMORY_BASE` → `memory.hal0.base_url` in `$HERMES_HOME/config.yaml` | `http://127.0.0.1:8080` |
+| base URL | ctor arg → `HAL0_MEMORY_BASE` → `memory.hal0.base_url` | `http://127.0.0.1:8080` |
 | agent id | ctor arg → `HAL0_AGENT_ID` → `memory.hal0.agent_id` | `hermes` |
+| durable default visibility | `HAL0_MEMORY_DEFAULT_VISIBILITY` → profile policy → per-write `visibility` | `shared` |
+| retry spool | `HAL0_MEMORY_SPOOL` | unset |
 
 Env vars are read at `initialize()` time so per-agent unit overrides
 (`hal0-agent@hermes.service` / gateway drop-ins) take effect on provider
-construction without code change. The config.yaml fallback lets operators
-retarget without touching unit files.
+construction without code change.

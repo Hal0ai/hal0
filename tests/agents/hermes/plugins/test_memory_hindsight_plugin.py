@@ -787,7 +787,7 @@ def test_on_pre_compress_returns_continuity_and_writes_private() -> None:
     provider.initialize()
     note = provider.on_pre_compress([{"role": "user", "content": "hello there"}])
     assert "Continuity checkpoint" in note
-    args, kwargs = fake_client.add.call_args
+    _args, kwargs = fake_client.add.call_args
     assert kwargs["private"] is True
     assert kwargs["metadata"]["visibility"] == "private"
 
@@ -815,7 +815,7 @@ def test_on_session_end_writes_private_checkpoint() -> None:
     provider = Hal0MemoryProvider(client=fake_client)
     provider.initialize()
     provider.on_session_end([{"role": "assistant", "content": "done"}])
-    args, kwargs = fake_client.add.call_args
+    _args, kwargs = fake_client.add.call_args
     assert "checkpoint" in kwargs["tags"]
     assert kwargs["private"] is True
 
@@ -841,7 +841,7 @@ def test_on_delegation_records_in_private_bank() -> None:
     provider = Hal0MemoryProvider(client=fake_client)
     provider.initialize()
     provider.on_delegation("do X", "did X", child_session_id="child-9")
-    args, kwargs = fake_client.add.call_args
+    _args, kwargs = fake_client.add.call_args
     assert "delegation" in kwargs["tags"]
     assert kwargs["private"] is True
     assert kwargs["metadata"]["child_session_id"] == "child-9"
@@ -983,9 +983,7 @@ def test_privacy_durable_add_shared_by_default_but_private_override_wins() -> No
     fake_client.add.reset_mock()
 
     # explicit private override → private
-    provider.handle_tool_call(
-        "hal0_memory_add", {"text": "secret fact", "visibility": "private"}
-    )
+    provider.handle_tool_call("hal0_memory_add", {"text": "secret fact", "visibility": "private"})
     assert fake_client.add.call_args.kwargs["private"] is True
 
 
