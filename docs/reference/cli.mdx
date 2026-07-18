@@ -265,6 +265,8 @@ below still works for existing scripts.
 | Command | Purpose | Key options |
 |---|---|---|
 | `registry import <path>` | Restore `registry.toml` from a v0.1.x backup tarball. Prefer `hal0 model import-backup <path>`. | `--force`/`-f`, `--dest` |
+| `registry export` | Export the SQLite model registry to TOML for inspection/backup. | `--dest` |
+| `registry import-sqlite` | Import an existing `registry.toml` catalog into the SQLite registry (idempotent, `INSERT OR IGNORE`). | `--force`/`-f` |
 
 `registry import` (and its canonical form, `model import-backup`) extracts the
 backup into a tempdir (with path-traversal protection), locates
