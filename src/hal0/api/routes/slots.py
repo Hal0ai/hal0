@@ -1318,8 +1318,23 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
 
 
 @router.post("/{name}/unload")
-async def unload_slot(name: str, request: Request) -> dict[str, object]:
+async def unload_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
+    """Unload a slot. A pinned slot (§21.10) requires ``?force=true``.
+
+    Pass ``?force=true`` to unload a pinned anchor (``agent``/``utility``/
+    ``npu`` by default, or any slot with ``SlotConfig.pinned = true``)
+    anyway — mirrors the existing seeded-slot ``force`` guard on
+    ``DELETE /{name}``. Automatic idle/pressure eviction is unaffected by
+    this guard (it already excludes pinned slots at candidate-selection).
+    """
     sm = _get_slot_manager(request)
+    if not force and await sm.is_pinned(name):
+        from hal0.slots.state import SlotPinned
+
+        raise SlotPinned(
+            f"slot {name!r} is pinned — pass ?force=true to unload it anyway",
+            details={"slot": name, "pinned": True},
+        )
     async with record_action(request, category="slot", action="slot.unload", target=name) as _rec:
         snap = await sm.unload(name)
         _rec.after = {"state": _state_value(snap)}

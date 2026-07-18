@@ -30,36 +30,82 @@ import asyncio
 import contextlib
 import copy
 import logging
-import os
 import re
-import shutil
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
 from hal0.errors import Hal0Error
-from hal0.model_meta import SLOT_TYPES
 from hal0.slot_config import (
     fold_ctx_size_alias,
-    merge_slot_config,
     slot_write_lock,
     write_slot_toml,
 )
+from hal0.slots._cfg_helpers import _cfg_port, _cfg_provider, _cfg_to_dict, _model_default
+from hal0.slots.config_write import (
+    _base_profile_for_backend,
+    _cfg_effective_backend,
+    _reconcile_device_profile,
+    check_default_uniqueness,
+    check_npu_exclusivity,
+    reconcile_and_guard_slot_config,
+    reconcile_slot_updates,
+)
+from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
+from hal0.slots.drift import compute_config_drift as _compute_config_drift
+from hal0.slots.npu.trio import is_npu_trio_shadow
+from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
+from hal0.slots.profile_adopt import (
+    apply_preferred_profile as _profile_adopt_apply_preferred_profile,
+)
+from hal0.slots.profile_adopt import (
+    defuse_stale_mtp_on_swap as _profile_adopt_defuse_stale_mtp_on_swap,
+)
+from hal0.slots.profile_adopt import (
+    preferred_profile_for as _profile_adopt_preferred_profile_for,
+)
+from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
+from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
+from hal0.slots.reaper import is_pinned as _reaper_is_pinned
+from hal0.slots.reaper import probe_host_free_mb as _reaper_probe_host_free_mb
+from hal0.slots.reaper import probe_host_total_mb as _reaper_probe_host_total_mb
+from hal0.slots.routing import (
+    _VALID_SLOT_TYPES,
+    NPU_SEEDED_SLOTS,
+    SEEDED_SLOTS,
+    SLOT_ALIASES,
+    LoadedSlot,
+    loaded_slot_from_config,
+)
+from hal0.slots.routing import add_slot as _routing_add_slot
+from hal0.slots.routing import default_slot_for as _routing_default_slot_for
+from hal0.slots.routing import loaded_slot as _routing_loaded_slot
+from hal0.slots.routing import remove_slot as _routing_remove_slot
+from hal0.slots.routing import resolve_for_request as _routing_resolve_for_request
+from hal0.slots.routing import route_for_request as _routing_route_for_request
+from hal0.slots.routing import seeded_slots as _routing_seeded_slots
 from hal0.slots.state import (
     DISPATCHABLE_STATES,
     IllegalSlotTransition,
-    NpuExclusivityViolation,
     SlotConfigError,
     SlotNotFound,
+    SlotPinned,
     SlotState,
     SlotStateRecord,
     is_transition_legal,
     provider_requires_model,
     read_state,
     write_state_atomic,
+)
+from hal0.slots.watchdog import (
+    _FAIL_WATCH_INTERVAL_S,
+    _FAIL_WATCH_LIVE_STATES,
+    _HEALTH_FAIL_STRIKES,
+    _WARMING_INACTIVE_STRIKES,
+    _WARMING_STALE_AFTER_S,
+    SlotWatchdog,
 )
 
 if TYPE_CHECKING:
@@ -84,131 +130,24 @@ class RegistryUnavailableError(Hal0Error):
     status = 503
 
 
-# ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
-
-#: Slots that exist on every hal0 install regardless of hardware. The
-#: dashboard creates these as empty cards at first run; the bundle
-#: picker (Phase 5) populates their ``model.default`` fields. ``agent``
-#: is the GPU MoE chat-role sibling of ``chat`` (moved here from the NPU
-#: set in #679 — it is a GPU slot, not the NPU FLM anchor).
-# ADR-0023: `utility` (cheap helper) + `agent` (capable/default anchor) are the two
-# canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
-# is unaffected; any llm slot serves it). `utility` is seeded so the memory
-# extraction target is always present on a fresh box.
-SEEDED_SLOTS: tuple[str, ...] = (
-    "utility",
-    "embed",
-    "rerank",
-    "stt",
-    "tts",
-    "img",
-    "vision",
-    "agent",
-)
-
-#: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
-#: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
-#: ride the same coresident FLM process as the NPU chat anchor — the
-#: separate ``flm`` slot, NOT listed here. ``agent`` was previously
-#: (wrongly) in this set; it is a GPU chat-role slot and moved to
-#: SEEDED_SLOTS in #679. Opt-in at Pro+ bundle tier.
-#:
-#: Named ``{anchor}-stt`` / ``{anchor}-embed`` (anchor is ``flm``) to match
-#: the occupancy-pane virtual sub-cards (:mod:`hal0.api.routes.npu` synthesises
-#: ``s.name + "-stt"``) and the ``_touch_npu_shadow_count`` activity counters
-#: (:mod:`hal0.api.routes.v1`), which both key off that convention. The legacy
-#: ``stt-npu`` / ``embed-npu`` names never matched either surface and are
-#: migrated forward by :meth:`SlotManager.reconcile_npu_trio_slots`.
-NPU_SEEDED_SLOTS: tuple[str, ...] = ("flm-stt", "flm-embed")
-
-#: Back-compat alias map: old slot names → canonical new names.
-#: Aliases resolve transparently for dispatch and config lookup but are
-#: NEVER stored on disk and NEVER appear in list() / iter_configs() /
-#: /api/slots. ``agent-hermes`` maps to ``agent`` (a GPU seed slot, #679)
-#: so no new TOML is created — the alias just redirects old references.
-#: ADR-0023 retired the `primary` and `chat` aliases. The canonical roles are
-#: `agent` (default anchor) + `utility` (helper); a lingering operator-custom `chat`
-#: slot is reachable by its own name via generalized `hal0/<slot>` resolution, not an
-#: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
-SLOT_ALIASES: dict[str, str] = {
-    "agent-hermes": "agent",
-    # Route curated NPU model IDs to the FLM trio slot.
-    "qwen3:4b": "flm",
-    "qwen3-4b": "flm",
-}
-
-#: Slot ``type`` vocabulary (plan §4.1) — sourced from the canonical
-#: taxonomy (:data:`hal0.model_meta.SLOT_TYPES`) so validation, profiles,
-#: and /api/meta/enums can never drift.
-_VALID_SLOT_TYPES: frozenset[str] = frozenset(SLOT_TYPES)
-
-#: Slot-name policy: kebab-case, max 32 chars, leading alphanumeric.
-_SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+# ── Seeded slot catalogue + routing (P3-slots §1i: moved to slots/routing.py)
+#
+# SEEDED_SLOTS / NPU_SEEDED_SLOTS / SLOT_ALIASES / LoadedSlot now live in
+# hal0.slots.routing (imported at module top); re-exported below so every
+# existing ``from hal0.slots.manager import X`` caller keeps working
+# unchanged (dispatcher._capability_resolve, api/__init__, omni_router,
+# stacks/apply, tests/slots/test_loaded_slot.py, tests/omni_router/conftest.py).
 
 
 # ── Tunables ─────────────────────────────────────────────────────────────────
 
-# Push-driven failure detector. While a slot is in a "live" state
-# (READY / SERVING / IDLE) a background task polls is_active every
-# _FAIL_WATCH_INTERVAL_S seconds. When the slot's container unit goes
-# inactive underneath us the watcher flips state and emits an SSE
-# frame within ~1s.
-_FAIL_WATCH_INTERVAL_S: float = 2.0
-#: The "live" states the fail-watcher polls: the dispatchable ready-set
-#: (container up and usable, aliased from the one canonical set — DR-8) PLUS
-#: WARMING. WARMING is watched because a health-wait timeout leaves the slot
-#: parked there indefinitely (see ``_await_ready``); without a watcher a unit
-#: that later dies is never noticed. WARMING gets softer treatment inside the
-#: loop: only the systemd is-active check can strike it (never /health), so a
-#: slot legitimately still loading a large model is never killed.
-_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES | {SlotState.WARMING}
-# #783/B4: an active unit is not necessarily healthy. The watcher also probes
-# the model server's /health; a crashed-but-active server (active unit, failing
-# /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
-# so a single transient blip doesn't trigger a disruptive model reload.
-_HEALTH_FAIL_STRIKES: int = 2
-# WARMING-only: consecutive is-active failures before a warming slot is
-# declared dead. Higher than _HEALTH_FAIL_STRIKES because a freshly-spawned
-# unit can legitimately read "activating"/inactive to the probe for a beat or
-# two while podman brings the container up — a warming slot must only be
-# flipped when the unit is *stably* down, never while a big model loads.
-_WARMING_INACTIVE_STRIKES: int = 3
-# WARMING-only staleness watchdog. /health is deliberately NOT probed while a
-# slot is WARMING (a large NPU/GGUF model can legitimately hold /health down
-# for minutes during a cold load — see ``_await_ready`` and its ceiling
-# ``providers.container._HEALTH_TIMEOUT_S`` = 180s per attempt), so a unit that
-# stays *active* forever while its model server never converges would otherwise
-# sit in WARMING indefinitely — 503ing every /v1/embeddings and NPU-trio
-# consumer with ``npu.trio_unavailable`` and never self-healing (a wedged FLM
-# NPU chat-anchor). This bound catches that: once a slot has been WARMING
-# longer than this, treat it as wedged and auto-recover (unload → load). It
-# MUST sit well ABOVE the legitimate cold-load ceiling so a slow-but-healthy
-# load is never demoted — 900s (15 min) is ~5x the 180s per-attempt health-wait
-# ceiling, comfortably clear of any real large-model load.
-_WARMING_STALE_AFTER_S: float = 900.0
-# Config-drift comparison keys. Spelling no longer needs to match the launch
-# renderer exactly: both sides of the comparison are canonicalized through
-# slots.argv.FLAG_ALIASES (so ``--batch-size`` in a running argv matches a
-# rendered ``-b`` instead of reporting false drift).
-_CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b", "-ub")
-
-# Idle-monitor defaults. A READY slot whose last activity is older than
-# _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics
-# can distinguish "warm but quiet" from "warm and serving".
-_IDLE_AFTER_S: float = 300.0
-_IDLE_MONITOR_INTERVAL_S: float = 30.0
-# Hard-eviction default TTL (#902). A slot idle past this long (resolved
-# per-slot: TOML idle_timeout_s overrides, then this global default) is
-# *unloaded* — freeing host RAM — not merely relabeled IDLE. 0 disables
-# eviction; per-slot idle_timeout_s = 0 pins that slot.
-_EVICT_AFTER_S: float = 300.0
-
-# Anchor slots pinned against TTL eviction *under default config* — i.e.
-# when their TOML carries no explicit idle_timeout_s. Evicting these would
-# defeat always-warm chat, the agent loop, and the NPU trio anchor. An
-# explicit per-slot idle_timeout_s in TOML still wins (lets an operator
-# opt a named anchor back into eviction); explicit 0 keeps it pinned.
-_PINNED_BY_DEFAULT: frozenset[str] = frozenset({"agent", "utility", "npu"})
+# NOTE: fail-watch tunables (_FAIL_WATCH_INTERVAL_S, _FAIL_WATCH_LIVE_STATES,
+# _HEALTH_FAIL_STRIKES, _WARMING_INACTIVE_STRIKES, _WARMING_STALE_AFTER_S)
+# moved to hal0.slots.watchdog (P3-slots §1b-watchdog) — imported + re-exported below.
+#
+# NOTE: idle-monitor tunables (_IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S,
+# _EVICT_AFTER_S) and _PINNED_BY_DEFAULT moved to hal0.slots.reaper
+# (P3-slots §1b) — imported + re-exported below.
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -283,43 +222,6 @@ class Slot:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class LoadedSlot:
-    """Typed routing result for an enabled slot.
-
-    Returned by :meth:`SlotManager.resolve_for_request` and
-    :meth:`SlotManager.loaded_slot` so callers do not have to route to a
-    bare name and then reopen raw slot TOML to recover the model id,
-    device, labels, or system prompt.
-    """
-
-    name: str
-    model_id: str
-    slot_type: str
-    device: str
-    enabled: bool
-    labels: frozenset[str]
-    system_prompt: str = ""
-    profile: str | None = None
-    default: bool = False
-
-
-def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
-    """True if *cfg* is an NPU FLM trio **shadow** (stt/embed), not the anchor.
-
-    The NPU runs a single FLM process — the chat anchor (``device=npu
-    type=llm``) — which also serves transcription/embedding when the
-    anchor's ``[npu]`` toggles are on. The ``stt``/``embed`` slots
-    are therefore *shadows*: served by the anchor's process and NOT
-    independently loadable. Issuing a standalone ``/v1/load`` for them on the
-    busy single-tenant NPU returns HTTP 500, so callers skip the spawn and
-    derive their state from the anchor. The anchor itself (``type=llm``) is
-    deliberately excluded.
-    """
-    d = _cfg_to_dict(cfg)
-    return d.get("device") == "npu" and d.get("type") in ("transcription", "embedding")
-
-
 # ── Manager ──────────────────────────────────────────────────────────────────
 
 
@@ -353,6 +255,7 @@ class SlotManager:
         idle_after_s: float = _IDLE_AFTER_S,
         evict_after_s: float = _EVICT_AFTER_S,
         evict_pressure_mb: float = 8192.0,
+        evict_pressure_pct: float | None = None,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -389,8 +292,11 @@ class SlotManager:
         # Per-slot background tasks that poll the container unit's
         # is-active state and push a transition when it drops out from
         # underneath us. Keyed by slot name; only present while the
-        # slot is in a live state.
+        # slot is in a live state. Owned here (not by SlotWatchdog) since
+        # `_transition` needs to check/mutate it synchronously.
         self._fail_watchers: dict[str, asyncio.Task[None]] = {}
+        # Push-driven failure detector (P3-slots §1b-watchdog) — see watchdog.py.
+        self._watchdog: SlotWatchdog = SlotWatchdog(self)
         # PULLING — optional model-pull hook + cache predicate.  When
         # ``pull_runner`` is unset, load() never enters PULLING (the model
         # is treated as already present, matching the legacy
@@ -426,8 +332,16 @@ class SlotManager:
         # this value (MiB), idle lru-eligible slots are evicted in LRU order
         # until free RAM recovers.  0 disables pressure eviction.
         self._evict_pressure_mb: float = float(evict_pressure_mb)
+        # §21.10 threshold_pct: when set, the pressure floor is instead
+        # ``evict_pressure_pct`` percent of total GTT-aware capacity,
+        # re-derived every sweep (total capacity can shift as the amdgpu
+        # GTT pool grows/shrinks). None (default) keeps the absolute
+        # ``evict_pressure_mb`` floor above — purely additive.
+        self._evict_pressure_pct: float | None = evict_pressure_pct
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
-        self._idle_monitor_task: asyncio.Task[None] | None = None
+        # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
+        # own task handle; see reaper.py.
+        self._reaper: SlotReaper = SlotReaper(self)
         # GpuArbiter (Phase D, spec §7) — constructed lazily on first
         # ``.arbiter`` access so CLI/test contexts that never touch image
         # mode pay nothing. See the ``arbiter`` property below.
@@ -754,7 +668,7 @@ class SlotManager:
         # TIER1: spawn/cancel the push-driven fail-watcher to match the new
         # state.  Done after broadcast so the SSE frame for the transition
         # itself lands before any watcher-induced follow-up frame.
-        self._update_fail_watcher(name, to_state)
+        self._watchdog.update(name, to_state)
         return record
 
     async def _broadcast(self, record: SlotStateRecord) -> None:
@@ -796,311 +710,31 @@ class SlotManager:
                 self._subscribers.remove(queue)
 
     # ── fail-watcher (push-driven failure detector) ──────────────────────────
+    #
+    # P3-slots §1b-watchdog: logic lives in hal0.slots.watchdog.SlotWatchdog
+    # (self._watchdog, constructed in __init__). Every method below is a
+    # thin delegator; `_transition`'s tail calls `self._watchdog.update`
+    # directly (see above) rather than through `_update_fail_watcher`.
 
     def _update_fail_watcher(self, name: str, new_state: SlotState) -> None:
-        """Spawn or cancel the per-slot fail-watcher to match ``new_state``.
-
-        Live states (READY/SERVING/IDLE/WARMING) → ensure a watcher task is
-        running. Any other state → cancel the watcher if present.
-
-        Self-cancellation is a no-op: when the watcher itself fires the
-        transition to ERROR, we let it return naturally rather than calling
-        ``task.cancel()`` on the currently-executing coroutine (which would
-        raise CancelledError on the await it just completed).
-        """
-        if new_state in _FAIL_WATCH_LIVE_STATES:
-            existing = self._fail_watchers.get(name)
-            if existing is not None and not existing.done():
-                return
-            try:
-                self._fail_watchers[name] = asyncio.create_task(
-                    self._fail_watch_loop(name),
-                    name=f"hal0-slot-fail-watch-{name}",
-                )
-            except RuntimeError:
-                # No running loop (sync-context test of _transition with
-                # force=True called outside asyncio). Skip — the watcher
-                # only matters when the slot is actually live in an event
-                # loop.
-                log.debug("slot.fail_watch_no_loop", extra={"slot": name})
-            return
-
-        existing = self._fail_watchers.pop(name, None)
-        if existing is None or existing.done():
-            return
-        try:
-            current_task = asyncio.current_task()
-        except RuntimeError:
-            current_task = None
-        if existing is current_task:
-            # Watcher self-cancel via its own transition — let it finish.
-            return
-        existing.cancel()
+        """See :meth:`hal0.slots.watchdog.SlotWatchdog.update`."""
+        self._watchdog.update(name, new_state)
 
     async def _fail_watch_loop(self, slot_name: str) -> None:
-        """Poll the container unit's is-active and flip state when it dies.
-
-        Runs as a background task while the slot is in READY/SERVING/IDLE —
-        or WARMING (the post-health-timeout blind spot): a warming slot is
-        judged ONLY on the unit's is-active (``_WARMING_INACTIVE_STRIKES``
-        consecutive failures), never on /health, so a dead unit is caught
-        while a slot legitimately still loading a large model is left alone.
-        Detection latency = up to one poll interval (~2s). Exits cleanly
-        once the slot leaves the live-state set, by self-cancel via the
-        ERROR transition, or via outer ``task.cancel()``.
-        """
-        health_failures = 0
-        warming_inactive = 0
-        try:
-            while True:
-                await asyncio.sleep(_FAIL_WATCH_INTERVAL_S)
-                # First gate: did the slot leave live-state from underneath
-                # us?  ``_update_fail_watcher`` already cancels in that case
-                # but this defends against the race where the watcher wakes
-                # before the cancel lands.
-                current = self._current_state(slot_name)
-                if current not in _FAIL_WATCH_LIVE_STATES:
-                    return
-                try:
-                    active = await self._is_active(slot_name)
-                except Exception as exc:
-                    # Probe failure is unusual — log and keep polling.
-                    log.warning(
-                        "slot.fail_watch_is_active_failed",
-                        extra={"slot": slot_name, "error": str(exc)},
-                    )
-                    continue
-                if active:
-                    warming_inactive = 0
-                    if current is SlotState.WARMING:
-                        # Warming slots are still loading — /health failing is
-                        # the EXPECTED condition, not a crash signal. Only the
-                        # unit's liveness may strike a warming slot, so skip
-                        # the health probe entirely (a big-model load can hold
-                        # /health down for minutes without being wedged).
-                        health_failures = 0
-                        # …but an active unit whose model server never converges
-                        # would otherwise sit in WARMING forever, 503ing every
-                        # embed/STT consumer (a wedged FLM NPU anchor). Bound the
-                        # WARMING dwell: once it exceeds the cold-load ceiling,
-                        # treat the slot as wedged and auto-recover. WARMING →
-                        # STARTING is an illegal transition, so recovery is
-                        # unload → load (as ``restart()`` does), not a direct
-                        # reload.
-                        rec = self._states.get(slot_name)
-                        warming_elapsed = time.time() - rec.updated_at if rec is not None else 0.0
-                        if warming_elapsed <= _WARMING_STALE_AFTER_S:
-                            continue
-                        log.warning(
-                            "slot.fail_watch_warming_stale",
-                            extra={
-                                "slot": slot_name,
-                                "warming_elapsed_s": round(warming_elapsed, 1),
-                                "stale_after_s": _WARMING_STALE_AFTER_S,
-                            },
-                        )
-                        try:
-                            await self.unload(slot_name)
-                            await self.load(slot_name)
-                        except Exception as exc:
-                            log.warning(
-                                "slot.fail_watch_warming_recover_failed",
-                                extra={"slot": slot_name, "error": str(exc)},
-                            )
-                        # unload → load re-stamps ``updated_at`` (restarting the
-                        # staleness clock) and re-arms a fresh fail-watcher via
-                        # its own transitions, so this now-orphaned watcher
-                        # returns cleanly instead of racing the new one or
-                        # tight-looping recovery every tick.
-                        return
-                    # #783/B4: active is necessary but not sufficient. Probe
-                    # the model server's /health — a crashed/wedged server is
-                    # active to systemd while /health fails, so an is-active-
-                    # only watcher leaves it lying as dispatchable READY.
-                    if await self._probe_health(slot_name):
-                        health_failures = 0
-                        continue
-                    health_failures += 1
-                    if health_failures < _HEALTH_FAIL_STRIKES:
-                        # Tolerate a transient blip; a real crash fails again.
-                        continue
-                    # Re-check state in case load/unload moved us mid-probe.
-                    current = self._current_state(slot_name)
-                    if current not in _FAIL_WATCH_LIVE_STATES:
-                        return
-                    # Confirmed unhealthy → ERROR (red dot, operator cue). The
-                    # health endpoint (#783 cr1) then reports degraded and
-                    # hal0_slot_up reads health_ok=False (#791). Recoverable —
-                    # the dispatcher reloads on the next request.
-                    try:
-                        await self._transition(
-                            slot_name,
-                            SlotState.ERROR,
-                            message="model server failed /health probe",
-                            extra={"health_ok": False},
-                            force=True,
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "slot.fail_watch_transition_failed",
-                            extra={"slot": slot_name, "error": str(exc)},
-                        )
-                    return
-                # The container unit went inactive while we believed it
-                # was live. Re-check state once more — load/unload may
-                # have moved us legitimately during the probe.
-                current = self._current_state(slot_name)
-                if current not in _FAIL_WATCH_LIVE_STATES:
-                    return
-                if current is SlotState.WARMING:
-                    # A warming slot tolerates a few inactive reads (a
-                    # freshly-spawned unit can look inactive to the probe
-                    # for a beat) but a *stably* dead unit is a real load
-                    # failure — flip to ERROR so the red dot cues the
-                    # operator instead of the slot lying in WARMING forever.
-                    warming_inactive += 1
-                    if warming_inactive < _WARMING_INACTIVE_STRIKES:
-                        continue
-                    try:
-                        await self._transition(
-                            slot_name,
-                            SlotState.ERROR,
-                            message="container unit died while warming",
-                            extra={"health_ok": False},
-                            force=True,
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "slot.fail_watch_transition_failed",
-                            extra={"slot": slot_name, "error": str(exc)},
-                        )
-                    return
-                # A stopped unit (GPU arbiter handoff, systemd stop,
-                # OOM-kill with Restart= pending) is a clean not-loaded
-                # state from the slot's perspective — the dispatcher
-                # lazy-loads on the next request. Reflect that as OFFLINE
-                # (grey dot) rather than ERROR (red dot, operator-
-                # investigation cue), reserving ERROR for the real
-                # failures: spawn/health/load exceptions.
-                try:
-                    await self._transition(
-                        slot_name,
-                        SlotState.OFFLINE,
-                        message="container stopped (auto-reloads on next request)",
-                        force=True,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "slot.fail_watch_transition_failed",
-                        extra={"slot": slot_name, "error": str(exc)},
-                    )
-                return
-        except asyncio.CancelledError:
-            # Normal shutdown path — slot left live-state cleanly.
-            raise
+        """See :meth:`hal0.slots.watchdog.SlotWatchdog._fail_watch_loop`."""
+        await self._watchdog._fail_watch_loop(slot_name)
 
     async def _is_active(self, slot_name: str) -> bool:
-        """Is the slot's container unit live? (systemctl is-active probe).
-
-        Synchronous probe, runs in an executor. Probe errors are coerced
-        to False so status()'s drift reconciler runs.
-        """
-        cfg = await self._maybe_load_config(slot_name)
-        if not cfg:
-            return False
-
-        from hal0.providers.container import container_provider
-
-        try:
-            return await asyncio.get_event_loop().run_in_executor(
-                None, container_provider().is_active, slot_name
-            )
-        except Exception as exc:
-            # The docstring contract: probe errors coerce to False so the
-            # status() drift reconciler runs instead of 500ing /api/slots.
-            log.warning(
-                "slot.is_active_probe_failed",
-                extra={"slot": slot_name, "error": str(exc)},
-            )
-            return False
+        """See :meth:`hal0.slots.watchdog.SlotWatchdog.is_active`."""
+        return await self._watchdog.is_active(slot_name)
 
     async def _probe_health(self, slot_name: str) -> bool:
-        """Probe the slot's model-server ``/health`` (#783/B4).
-
-        Returns ``False`` only on a *definitive* not-ok response. Anything
-        inconclusive — missing config, no port, an NPU trio shadow (whose
-        /health would target a non-existent child port), or a probe
-        exception — returns ``True`` so the fail-watch never demotes a slot
-        it cannot actually judge. The watcher's strike counter handles
-        transient single failures; this method only reports one probe.
-        """
-        cfg = await self._maybe_load_config(slot_name)
-        if not cfg or is_npu_trio_shadow(cfg):
-            return True
-        port = _cfg_port(cfg)
-        if not port:
-            return True
-
-        from hal0.providers.container import container_provider
-
-        try:
-            # Pass the slot config so FLM slots get the Tier-1 real-inference
-            # probe (health() delegates to FLMProvider.health when the cfg
-            # resolves to FLM) instead of the weak /v1/models fallback. The
-            # probe distinguishes "up but still loading" (ok=False) from
-            # "dead"; WARMING slots are never health-struck by the
-            # fail-watcher (is-active only), so a loading FLM model is safe.
-            health = await container_provider().health(port, cfg)
-        except Exception as exc:
-            # Inconclusive — a transport error is not proof the model server
-            # is dead. Don't demote; the next poll re-probes.
-            log.warning(
-                "slot.health_probe_failed",
-                extra={"slot": slot_name, "error": str(exc)},
-            )
-            return True
-        return bool(health.get("ok"))
+        """See :meth:`hal0.slots.watchdog.SlotWatchdog.probe_health`."""
+        return await self._watchdog.probe_health(slot_name)
 
     async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
-        """Check whether a container-backed slot is ready to serve requests.
-
-        Performs two live probes:
-          1. ``systemctl is-active`` — is the service unit running?
-          2. GET /health on the slot's port — has the inference server started?
-
-        Returns:
-          ``(True, "ready")`` — both probes passed; safe to forward.
-          ``(False, reason)`` — not ready; reason describes the failure
-            (e.g. ``"inactive"``, ``"starting"``, ``"health_check_failed"``).
-
-        Called by ``Dispatcher.forward()`` before forwarding to a
-        container upstream so that a down/starting container returns a
-        structured ``slot.loading`` 503 instead of a raw 502 ConnectError.
-        """
-        cfg = await self._maybe_load_config(slot_name)
-        if cfg is None:
-            return False, "config_missing"
-
-        from hal0.providers.container import container_provider
-
-        # 1) systemctl is-active (synchronous — run in executor)
-        active = await asyncio.get_event_loop().run_in_executor(
-            None, container_provider().is_active, slot_name
-        )
-        if not active:
-            return False, "inactive"
-
-        # 2) /health probe (only meaningful when the unit is active). The
-        # slot config is passed so FLM slots use the Tier-1 real-inference
-        # probe (see ContainerProvider.health) — a still-loading FLM reports
-        # ok=False here, which maps to the retryable "starting" reason.
-        port = _cfg_port(cfg)
-        if port:
-            health = await container_provider().health(port, cfg)
-            if not health.get("ok"):
-                return False, "starting"
-
-        return True, "ready"
+        """See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`."""
+        return await self._watchdog.readiness_check(slot_name)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -1469,50 +1103,14 @@ class SlotManager:
         cfg: dict[str, Any] | None = None,
         active: bool | None = None,
     ) -> dict[str, Any] | None:
-        """Compare live container argv to the command a restart would render.
+        """See :func:`hal0.slots.drift.compute_config_drift`.
 
-        Returns a structured payload when the comparison is meaningful, or
-        None when the slot is inactive, lacks a config, is an NPU trio shadow,
-        or the provider cannot read either side of the comparison.
+        Kept (not deleted) — P3-slots §6 investigation found a live drift
+        source (see slots/drift.py module docstring): a slot can run stale
+        argv after a TOML edit without a restart, which
+        ``test_real_drift_still_detected_across_spellings`` exercises.
         """
-        if active is None:
-            active = await self._is_active(slot_name)
-        if not active:
-            return None
-        if cfg is None:
-            cfg = await self._maybe_load_config(slot_name)
-        if not cfg or is_npu_trio_shadow(cfg):
-            return None
-
-        model_info = await self._resolve_model_info(_model_default(cfg))
-        from hal0.providers.container import container_provider
-
-        provider = container_provider()
-        loop = asyncio.get_event_loop()
-        running, rendered = await asyncio.gather(
-            loop.run_in_executor(None, provider.running_argv, slot_name),
-            loop.run_in_executor(None, provider.expected_argv, cfg, model_info),
-        )
-        if not running or not rendered:
-            return None
-
-        running_flags = _argv_values(running, _CONFIG_DRIFT_KEYS)
-        rendered_flags = _argv_values(rendered, _CONFIG_DRIFT_KEYS)
-        # #1226: the renderer resolves a registry model id to its on-disk path
-        # (``--model``) and slugifies it for the advertised ``--alias``. A raw
-        # id on either side must be run through the SAME resolution before
-        # comparison, else a slot created with a registry id permanently
-        # false-warns (running path/slug vs rendered id). Resolve both sides.
-        model_key = model_info.get("_model_key") or _model_default(cfg)
-        model_path = model_info.get("path")
-        running_flags = _resolve_drift_flags(running_flags, model_key, model_path)
-        rendered_flags = _resolve_drift_flags(rendered_flags, model_key, model_path)
-        diffs = [
-            {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
-            for key in _CONFIG_DRIFT_KEYS
-            if not _config_drift_values_equal(key, running_flags.get(key), rendered_flags.get(key))
-        ]
-        return {"drifted": bool(diffs), "diffs": diffs}
+        return await _compute_config_drift(self, slot_name, cfg=cfg, active=active)
 
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None:
         """Read the slot's TOML if it exists, swallowing parse errors.
@@ -1575,109 +1173,28 @@ class SlotManager:
         return out
 
     # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
+    #
+    # P3-slots §1i: the actual logic lives in hal0.slots.routing (pure
+    # config-query, no state-machine coupling). Every method below is a
+    # thin delegator so the public surface (and every existing caller /
+    # test) is unchanged.
 
     @staticmethod
     def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
-        """Return the seeded slot list, optionally including the NPU trio.
-
-        :data:`SEEDED_SLOTS` lands on every hal0 install. The NPU trio
-        shadows (``flm-stt`` / ``flm-embed``) only seed when the
-        FastFlowLM ``.deb`` is installed (``shutil.which('flm')``
-        truthy). Per plan §10.2 + §4.2.
-
-        Args:
-            include_npu: ``None`` (default) detects FLM presence at
-                runtime; ``True`` forces inclusion (tests + the bundle
-                picker's preview mode); ``False`` forces exclusion.
-        """
-        if include_npu is None:
-            include_npu = bool(shutil.which("flm"))
-        if include_npu:
-            return SEEDED_SLOTS + NPU_SEEDED_SLOTS
-        return SEEDED_SLOTS
+        """See :func:`hal0.slots.routing.seeded_slots`."""
+        return _routing_seeded_slots(include_npu=include_npu)
 
     async def default_slot_for(self, slot_type: str) -> str | None:
-        """Return the name of the slot with ``type=slot_type`` and ``default=true``.
-
-        Plan §4.4 step 1. Exactly one ``default = true`` per type is
-        allowed; two defaults raise :class:`SlotConfigError` so the
-        misconfiguration surfaces at the routing call site instead of
-        silently picking one. Returns ``None`` when no slot of the
-        type has ``default = true`` (the caller is expected to
-        fall-through to the first enabled slot — see
-        :meth:`route_for_request`).
-        """
-        candidates: list[str] = []
-        for cfg in await self.iter_configs():
-            if cfg.get("type") != slot_type:
-                continue
-            if cfg.get("default") is True:
-                candidates.append(str(cfg.get("name", "")))
-        if len(candidates) > 1:
-            raise SlotConfigError(
-                f"slot type {slot_type!r} has multiple default=true slots: "
-                f"{candidates}; exactly one is allowed",
-                details={"type": slot_type, "candidates": candidates},
-            )
-        return candidates[0] if candidates else None
+        """See :func:`hal0.slots.routing.default_slot_for`."""
+        return await _routing_default_slot_for(self, slot_type)
 
     def _loaded_slot_from_config(self, cfg: dict[str, Any]) -> LoadedSlot | None:
-        """Convert one raw slot config dict into a :class:`LoadedSlot`.
-
-        Returns ``None`` when the config does not describe an enabled slot
-        with a model id. The raw TOML shapes are intentionally absorbed here
-        so request routers and tool dispatchers consume a typed result.
-        """
-        name = str(cfg.get("name") or "").strip()
-        slot_type = str(cfg.get("type") or "").strip()
-        if not name or not slot_type:
-            return None
-        if cfg.get("enabled") is False:
-            return None
-
-        model_section = cfg.get("model") or {}
-        model_id = ""
-        if isinstance(model_section, dict):
-            raw_model = model_section.get("default", "")
-            if isinstance(raw_model, str):
-                model_id = raw_model.strip()
-        if not model_id:
-            return None
-
-        from hal0.model_meta import labels_of
-
-        raw_prompt = cfg.get("system_prompt")
-        system_prompt = raw_prompt if isinstance(raw_prompt, str) else ""
-        if not system_prompt:
-            extra = cfg.get("extra")
-            if isinstance(extra, dict) and isinstance(extra.get("system_prompt"), str):
-                system_prompt = extra["system_prompt"]
-
-        profile = cfg.get("profile")
-        return LoadedSlot(
-            name=name,
-            model_id=model_id,
-            slot_type=slot_type,
-            device=str(cfg.get("device") or ""),
-            enabled=True,
-            labels=frozenset(labels_of(cfg)),
-            system_prompt=system_prompt,
-            profile=profile if isinstance(profile, str) and profile else None,
-            default=cfg.get("default") is True,
-        )
+        """See :func:`hal0.slots.routing.loaded_slot_from_config`."""
+        return loaded_slot_from_config(cfg)
 
     async def loaded_slot(self, name: str) -> LoadedSlot | None:
-        """Return a typed view of an enabled configured slot, or ``None``.
-
-        Resolves back-compat aliases transparently. This is a read-only
-        inventory helper; it does not probe runtime state.
-        """
-        resolved = self._resolve_alias(name)
-        try:
-            cfg = await self._load_slot_config(resolved)
-        except SlotConfigError:
-            return None
-        return self._loaded_slot_from_config(cfg)
+        """See :func:`hal0.slots.routing.loaded_slot`."""
+        return await _routing_loaded_slot(self, name)
 
     async def resolve_for_request(
         self,
@@ -1685,52 +1202,8 @@ class SlotManager:
         *,
         required_labels: tuple[str, ...] = (),
     ) -> LoadedSlot | None:
-        """Resolve a request of type ``slot_type`` to a loaded slot.
-
-        Plan §4.4 four-step routing:
-
-          1. **Type match + default.** If a slot of ``type=slot_type``
-             carries ``default = true``, prefer it.
-          2. **Label filter overlay.** When ``required_labels`` is
-             non-empty, the chosen slot's model must advertise every
-             required label (sourced from the slot's
-             ``model.labels`` list). The default is dropped if it
-             can't satisfy the overlay.
-          3. **Fall-through.** Otherwise pick the first ``enabled =
-             true`` slot of ``slot_type`` in TOML declaration order
-             (still satisfying the label overlay if any).
-          4. ``None`` when nothing matches.
-        Returning :class:`LoadedSlot` keeps callers from reopening raw slot
-        configs to discover the model id, labels, device, or system prompt.
-        """
-
-        def _satisfies(slot: LoadedSlot) -> bool:
-            if not required_labels:
-                return True
-            return set(required_labels).issubset(slot.labels)
-
-        slots = [
-            slot
-            for cfg in await self.iter_configs()
-            if cfg.get("type") == slot_type
-            for slot in [self._loaded_slot_from_config(cfg)]
-            if slot is not None
-        ]
-
-        # Step 1+2: try the default first.
-        default_name = await self.default_slot_for(slot_type)
-        if default_name is not None:
-            default_slot = next((slot for slot in slots if slot.name == default_name), None)
-            if default_slot is not None and _satisfies(default_slot):
-                return default_slot
-
-        # Step 3: fall-through to first enabled + label-matching slot.
-        for slot in slots:
-            if not _satisfies(slot):
-                continue
-            return slot
-
-        return None
+        """See :func:`hal0.slots.routing.resolve_for_request`."""
+        return await _routing_resolve_for_request(self, slot_type, required_labels=required_labels)
 
     async def route_for_request(
         self,
@@ -1738,13 +1211,8 @@ class SlotManager:
         *,
         required_labels: tuple[str, ...] = (),
     ) -> str | None:
-        """Resolve a request of type ``slot_type`` to a concrete slot name.
-
-        Compatibility wrapper for callers that have not moved to
-        :meth:`resolve_for_request` yet.
-        """
-        slot = await self.resolve_for_request(slot_type, required_labels=required_labels)
-        return slot.name if slot is not None else None
+        """See :func:`hal0.slots.routing.route_for_request`."""
+        return await _routing_route_for_request(self, slot_type, required_labels=required_labels)
 
     async def add_slot(
         self,
@@ -1755,70 +1223,12 @@ class SlotManager:
         device: str = "gpu-rocm",
         port: int = 8081,
     ) -> Slot:
-        """Programmatic ``hal0 slot add`` (plan §4.3).
-
-        Validates kebab-case name, rejects seeded-name collisions,
-        rejects unknown slot types. The SlotConfig schema requires a
-        port in the 8081-8099 range.
-
-        Args:
-            name: Kebab-case identifier; must not collide with a
-                seeded slot (``SEEDED_SLOTS`` plus ``NPU_SEEDED_SLOTS``,
-                independently of whether FLM is installed).
-            type: One of ``llm | embedding | reranking | transcription
-                | tts | image``.
-            model: Model id to load by default.
-            device: Hardware preference (``gpu-rocm | gpu-vulkan | cpu
-                | npu``); see ``map_backend_to_device``. Default
-                ``gpu-rocm`` matches Strix Halo seed semantics.
-            port: SlotConfig.port — the container's loopback port.
-        """
-        if not _SLOT_NAME_RE.match(name):
-            raise SlotConfigError(
-                f"slot name {name!r}: use lowercase alphanumeric, hyphens, underscores; "
-                f"start with alphanumeric; max 32 chars",
-                details={"slot": name},
-            )
-        # Reject collisions with ALL seeded slots (include the NPU trio
-        # regardless of FLM presence — the names are reserved).
-        reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
-        if name in reserved:
-            raise SlotConfigError(
-                f"slot {name!r} collides with a seeded slot; pick a different name",
-                details={"slot": name, "reserved": sorted(reserved)},
-            )
-        if type not in _VALID_SLOT_TYPES:
-            raise SlotConfigError(
-                f"slot type {type!r} is not one of {sorted(_VALID_SLOT_TYPES)}",
-                details={"slot": name, "type": type},
-            )
-        cfg = {
-            "name": name,
-            "port": port,
-            "type": type,
-            "device": device,
-            "provider": "llama-server",
-            "enabled": True,
-            "model": {"default": model},
-        }
-        return await self.create(name, cfg)
+        """See :func:`hal0.slots.routing.add_slot`."""
+        return await _routing_add_slot(self, name, type=type, model=model, device=device, port=port)
 
     async def remove_slot(self, name: str) -> None:
-        """Programmatic ``hal0 slot remove`` (plan §4.3).
-
-        Rejects seeded-slot names (use :meth:`unload` or
-        ``capabilities.toml`` to disable a seeded slot, not delete it).
-        No side effect on the underlying model files — they stay in
-        the registry.
-        """
-        name = self._resolve_alias(name)
-        reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
-        if name in reserved:
-            raise SlotConfigError(
-                f"slot {name!r} is seeded; cannot remove (disable it via capabilities.toml)",
-                details={"slot": name, "reserved": sorted(reserved)},
-            )
-        await self.delete(name)
+        """See :func:`hal0.slots.routing.remove_slot`."""
+        await _routing_remove_slot(self, name)
 
     # ── low-level lifecycle ──────────────────────────────────────────────────
 
@@ -2010,21 +1420,32 @@ class SlotManager:
         return await self.status(slot_name)
 
     async def delete(self, slot_name: str, *, force: bool = False) -> None:
-        """Delete a slot. Seeded slots are protected unless ``force=True``.
+        """Delete a slot. Seeded + pinned slots are protected unless ``force=True``.
 
         A seeded slot (``primary`` / ``embed`` / … + the NPU trio) is normally
         undeletable — disable it via ``capabilities.toml`` instead. ``force``
         overrides that guard so an operator can remove a seeded slot outright;
         note an install/update reconcile may re-seed it later, and the name stays
         reserved (``create`` still rejects it) until then.
+
+        §21.10 operator-pin hardening: a pinned slot (default-pinned anchor
+        or ``SlotConfig.pinned = true``) is likewise refused without
+        ``force=True`` — HTTP 409 ``slot.pinned`` — so an accidental delete
+        can't take down an always-warm anchor.
         """
         slot_name = self._resolve_alias(slot_name)
-        if slot_name in self.seeded_slots() and not force:
-            raise SlotConfigError(
-                f"cannot delete seeded slot {slot_name!r} — disable it via "
-                "capabilities.toml, or pass force to delete it anyway",
-                details={"slot": slot_name, "seeded": True},
-            )
+        if not force:
+            if slot_name in self.seeded_slots():
+                raise SlotConfigError(
+                    f"cannot delete seeded slot {slot_name!r} — disable it via "
+                    "capabilities.toml, or pass force to delete it anyway",
+                    details={"slot": slot_name, "seeded": True},
+                )
+            if await self.is_pinned(slot_name):
+                raise SlotPinned(
+                    f"slot {slot_name!r} is pinned — pass force=true to delete it anyway",
+                    details={"slot": slot_name, "pinned": True},
+                )
         self._ensure_known(slot_name)
         # Make sure it's stopped first.
         current = self._current_state(slot_name)
@@ -2244,153 +1665,9 @@ class SlotManager:
                     extra={"slot": slot_name, "error": str(exc)},
                 )
 
-    #: FLM-trio shadow spec: (name suffix, slot type, anchor ``[npu]`` toggle
-    #: key, default model id). Drives :meth:`reconcile_npu_trio_slots`.
-    _TRIO_SHADOW_SPEC: tuple[tuple[str, str, str, str], ...] = (
-        ("stt", "transcription", "asr", "whisper-v3:turbo"),
-        ("embed", "embedding", "embed", "embed-gemma:300m"),
-    )
-
     async def reconcile_npu_trio_slots(self) -> int:
-        """Startup pass: reconcile the FLM-trio shadow slots to canon.
-
-        The NPU runs one ``flm serve`` container (the ``device=npu type=llm``
-        anchor, canonically ``flm``) that also serves transcription +
-        embedding. Those two modalities surface as *shadow* slot records
-        (``{anchor}-stt`` / ``{anchor}-embed``) so they show on the slots
-        page and gate trio dispatch (:func:`hal0.api.routes.v1._is_npu_trio_request`).
-        This pass keeps them coherent on every API start — for fresh installs
-        (anchor present, shadows never seeded), existing installs (legacy
-        names / drifted fields), and post-upgrade:
-
-          1. **Legacy rename.** ``stt-npu`` / ``embed-npu`` TOMLs — the old
-             naming that matched neither the occupancy pane's ``s.name+"-stt"``
-             synthesis nor the ``_touch_npu_shadow_count`` counters, and that
-             (ending ``-npu``, not ``-stt``/``-embed``) even leaked in as a
-             standalone occupancy tile — are moved to ``{anchor}-stt`` /
-             ``{anchor}-embed``. Skipped (and logged) when the canon target
-             already exists, so operator state is never clobbered.
-          2. **Ensure + normalize.** Each shadow is created if missing and its
-             structural fields are forced to the coresident shape: ``device=npu``,
-             ``profile=flm`` (so ``slot_view`` lifts ``device_class=npu`` — a
-             shadow without a resolvable npu profile makes the edit drawer take
-             the wrong branch, per the flm-satellite-slots-fix incident),
-             ``served_by=<anchor>``, ``port=<anchor port>``, and the trio
-             ``type``. A newly-created shadow's ``enabled`` mirrors the anchor's
-             ``[npu]`` toggle (``asr`` / ``embed``) so trio dispatch works out
-             of the box; an existing shadow's ``enabled`` and ``model.default``
-             are the operator's and left untouched.
-
-        No-op when there is no container NPU anchor. Best-effort: per-shadow
-        failures are logged and never block startup.
-
-        Returns the number of shadow records created or rewritten.
-        """
-        import tomllib
-
-        from hal0.dispatcher._npu_common import is_container_npu_cfg
-
-        # Locate the container NPU anchor (type=llm, device=npu). Mirrors
-        # CapabilityOrchestrator._set_flm_modality's scan.
-        try:
-            configs = await self.iter_configs()
-        except Exception as exc:
-            log.warning("slot.reconcile_trio_iter_failed", extra={"error": str(exc)})
-            return 0
-        anchor_cfg: dict[str, Any] | None = None
-        for cfg in configs:
-            if cfg.get("type") == "llm" and cfg.get("device") == "npu":
-                anchor_cfg = cfg
-                break
-        if anchor_cfg is None or not is_container_npu_cfg(anchor_cfg):
-            return 0
-        anchor_name = str(anchor_cfg.get("name", "")).strip()
-        anchor_port = anchor_cfg.get("port")
-        if not anchor_name or not anchor_port:
-            return 0
-        npu_tbl = anchor_cfg.get("npu")
-        if not isinstance(npu_tbl, dict):
-            npu_tbl = {}
-
-        changed = 0
-        slots_dir = paths.slots_config_dir()
-        for suffix, slot_type, npu_field, default_model in self._TRIO_SHADOW_SPEC:
-            canon = f"{anchor_name}-{suffix}"
-            legacy = f"{suffix}-npu"  # stt-npu / embed-npu
-            canon_path = slots_dir / f"{canon}.toml"
-            legacy_path = slots_dir / f"{legacy}.toml"
-            try:
-                # 1. Legacy rename — only when the canon target is free.
-                if legacy_path.exists():
-                    if canon_path.exists():
-                        log.warning(
-                            "slot.trio_shadow_rename_skipped",
-                            extra={
-                                "legacy": legacy,
-                                "canon": canon,
-                                "reason": "canon target already exists",
-                            },
-                        )
-                    else:
-                        legacy_raw = tomllib.loads(legacy_path.read_text(encoding="utf-8"))
-                        legacy_raw["name"] = canon
-                        write_slot_toml(canon_path, legacy_raw)
-                        with contextlib.suppress(FileNotFoundError):
-                            legacy_path.unlink()
-                        self._invalidate_cfg_cache(legacy)
-                        self._invalidate_cfg_cache(canon)
-                        log.info(
-                            "slot.trio_shadow_renamed",
-                            extra={"from": legacy, "to": canon},
-                        )
-
-                # 2. Ensure + normalize the canon shadow record. After a rename
-                #    canon_path now exists, so the same iteration normalizes it.
-                if canon_path.exists():
-                    raw = tomllib.loads(canon_path.read_text(encoding="utf-8"))
-                    desired = {
-                        "device": "npu",
-                        "profile": "flm",
-                        "served_by": anchor_name,
-                        "port": int(anchor_port),
-                        "type": slot_type,
-                    }
-                    if any(raw.get(k) != v for k, v in desired.items()):
-                        raw.update(desired)
-                        raw.setdefault("name", canon)
-                        write_slot_toml(canon_path, raw)
-                        self._invalidate_cfg_cache(canon)
-                        changed += 1
-                        log.info("slot.trio_shadow_normalized", extra={"slot": canon})
-                    continue
-
-                # 3. Missing → create it. ``enabled`` mirrors the anchor toggle
-                #    so trio dispatch is live when the modality is on.
-                enabled = bool(npu_tbl.get(npu_field))
-                cfg_dict = {
-                    "name": canon,
-                    "port": int(anchor_port),
-                    "device": "npu",
-                    "backend": "flm",
-                    "provider": "flm",
-                    "profile": "flm",
-                    "served_by": anchor_name,
-                    "type": slot_type,
-                    "enabled": enabled,
-                    "model": {"default": default_model},
-                }
-                await self.create(canon, cfg_dict)
-                changed += 1
-                log.info(
-                    "slot.trio_shadow_created",
-                    extra={"slot": canon, "enabled": enabled},
-                )
-            except Exception as exc:
-                log.warning(
-                    "slot.reconcile_trio_shadow_failed",
-                    extra={"slot": canon, "error": str(exc)},
-                )
-        return changed
+        """See :func:`hal0.slots.npu.trio.reconcile_trio_slots`."""
+        return await _npu_reconcile_trio_slots(self)
 
     async def _persist_model_default(self, slot_name: str, model_id: str) -> None:
         """Write ``[model] default = <model_id>`` into the slot's TOML.
@@ -2425,145 +1702,23 @@ class SlotManager:
             self._invalidate_cfg_cache(slot_name)
 
     # ── model preferred profile (Q1: profile loads with the model) ────────────
+    #
+    # P3-slots §1g: logic lives in hal0.slots.profile_adopt; every method
+    # below is a thin delegator.
 
     async def _preferred_profile_for(self, model_id: str | None) -> str | None:
-        """The model's preferred runtime profile name (``defaults.profile``).
+        """See :func:`hal0.slots.profile_adopt.preferred_profile_for`."""
+        return await _profile_adopt_preferred_profile_for(self, model_id)
 
-        A registry model may carry ``defaults.profile`` — the runtime profile
-        it wants loaded with it. Returns the name or ``None`` (no preference /
-        model not in registry).
-        """
-        if not model_id:
-            return None
-        info = await self._resolve_model_info(model_id)
-        defaults = info.get("defaults")
-        preferred = defaults.get("profile") if isinstance(defaults, dict) else None
-        return preferred if isinstance(preferred, str) and preferred else None
-
-    @staticmethod
-    def _profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
-        """True when ``profile_name`` is safe to adopt for this slot.
-
-        A model's profile preference is honoured only when the profile exists in
-        the catalog AND matches the slot's device/type. We never flip a slot's
-        hardware (device/backend) to satisfy a preference — an image or
-        cross-backend profile on the wrong device is rejected so the caller
-        keeps the slot's current/device-default profile.
-        """
-        from hal0.errors import NotFound
-        from hal0.profiles import ProfileCatalog
-
-        try:
-            resolved = ProfileCatalog().resolve(profile_name)
-        except NotFound:
-            return False
-        slot_type = cfg_dict.get("type")
-        if slot_type and slot_type not in resolved.supported_slot_types:
-            return False
-        device = str(cfg_dict.get("device") or "")
-        if device:
-            slot_class = (
-                "gpu"
-                if device.startswith("gpu")
-                else device
-                if device in ("npu", "cpu", "img")
-                else "cpu"
-            )
-            if resolved.device_class != slot_class:
-                return False
-            if resolved.backend:
-                from hal0.model_meta import device_to_backend
-
-                slot_backend = device_to_backend(device)[1]
-                if slot_backend and slot_backend != resolved.backend:
-                    return False
-        return True
+    _profile_fits_slot = staticmethod(_profile_adopt_profile_fits_slot)
 
     async def _apply_preferred_profile(self, slot_name: str, model_id: str) -> bool:
-        """Adopt ``model_id``'s preferred profile for this slot when compatible.
-
-        Q1 (model profiles): on every model swap the slot adopts the new
-        model's ``defaults.profile`` — but only when it fits the slot (see
-        :meth:`_profile_fits_slot`); an incompatible preference is logged and
-        ignored. Writes the slot TOML BEFORE the reload so the container comes
-        up on the new profile's image. Returns True when ``profile`` changed.
-        """
-        preferred = await self._preferred_profile_for(model_id)
-        if not preferred:
-            return False
-        # Read + rewrite under the shared cross-process slot-TOML lock so a
-        # concurrent config writer isn't silently dropped.
-        with slot_write_lock():
-            cfg = await self._load_slot_config(slot_name)
-            cfg_dict = _cfg_to_dict(cfg)
-            if cfg_dict.get("profile") == preferred:
-                return False
-            if not self._profile_fits_slot(preferred, cfg_dict):
-                log.info(
-                    "slot.preferred_profile_skipped",
-                    extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
-                )
-                return False
-            cfg_dict = {**cfg_dict, "profile": preferred}
-            try:
-                write_slot_toml(self._config_file(slot_name), cfg_dict)
-            except OSError as exc:
-                raise SlotConfigError(
-                    f"failed to persist preferred profile to slot {slot_name}: {exc}",
-                    details={"slot": slot_name, "profile": preferred},
-                ) from exc
-            self._invalidate_cfg_cache(slot_name)
-        log.info(
-            "slot.preferred_profile_applied",
-            extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
-        )
-        return True
+        """See :func:`hal0.slots.profile_adopt.apply_preferred_profile`."""
+        return await _profile_adopt_apply_preferred_profile(self, slot_name, model_id)
 
     async def _defuse_stale_mtp_on_swap(self, slot_name: str, model_id: str) -> bool:
-        """Clear a forced ``mtp = true`` when swapping onto a non-MTP model.
-
-        MTP is a model property, and a force-on pointing at a model with no MTP
-        heads makes llama-server exit at load ("context type MTP requested but
-        model doesn't contain MTP layers") — the override would down the slot
-        the moment the swapped container starts. Clears the override to AUTO
-        for exactly that combination; a force-off, a force-on for an eligible
-        model, and an unresolvable model (can't judge) all pass through
-        untouched. Returns True when the override was cleared.
-        """
-        from hal0.model_meta import model_is_mtp_eligible
-
-        with slot_write_lock():
-            cfg = await self._load_slot_config(slot_name)
-            cfg_dict = _cfg_to_dict(cfg)
-            if cfg_dict.get("mtp") is not True:
-                return False
-            try:
-                from hal0.registry.store import ModelRegistry
-
-                model = ModelRegistry().get(model_id)
-                info = model.model_dump() if hasattr(model, "model_dump") else dict(model)
-            except Exception:
-                return False  # unresolvable — leave the escape hatch alone
-            info.setdefault("_model_key", model_id)
-            if model_is_mtp_eligible(info):
-                return False
-            cfg_dict = dict(cfg_dict)
-            cfg_dict.pop("mtp", None)  # absent = AUTO (TOML has no null)
-            write_slot_toml(self._config_file(slot_name), cfg_dict)
-            self._invalidate_cfg_cache(slot_name)
-        log.warning(
-            "slot.mtp_force_on_cleared_on_swap",
-            extra={
-                "slot": slot_name,
-                "model_id": model_id,
-                "note": (
-                    "forced MTP would crash llama-server for this model (no MTP "
-                    "heads); override cleared to AUTO. Tag the model 'mtp' or "
-                    "re-force in the drawer if it really ships MTP layers."
-                ),
-            },
-        )
-        return True
+        """See :func:`hal0.slots.profile_adopt.defuse_stale_mtp_on_swap`."""
+        return await _profile_adopt_defuse_stale_mtp_on_swap(self, slot_name, model_id)
 
     async def _check_npu_exclusivity(
         self,
@@ -3004,6 +2159,10 @@ class SlotManager:
         return 60
 
     # ── IDLE monitor ─────────────────────────────────────────────────────────
+    #
+    # P3-slots §1b: logic lives in hal0.slots.reaper.SlotReaper
+    # (self._reaper, constructed in __init__). Every method below is a thin
+    # delegator so the public surface is unchanged.
 
     async def start_idle_monitor(
         self,
@@ -3011,6 +2170,7 @@ class SlotManager:
         idle_after_s: float | None = None,
         evict_after_s: float | None = None,
         evict_pressure_mb: float | None = None,
+        evict_pressure_pct: float | None = None,
         interval_s: float | None = None,
     ) -> None:
         """Start the background sweeper that demotes READY → IDLE and evicts.
@@ -3019,259 +2179,80 @@ class SlotManager:
         Callers in the API lifespan invoke this once at startup (wiring
         ``evict_after_s`` from ``slots.idle_timeout_s``); tests construct a
         SlotManager with shorter intervals and start the monitor explicitly.
+
+        ``evict_pressure_pct`` (§21.10, new): expresses the pressure floor
+        as a percentage of total GTT-aware capacity instead of an absolute
+        MiB value. ``None`` (default) leaves ``evict_pressure_mb`` in
+        charge — purely additive.
         """
-        if idle_after_s is not None:
-            self._idle_after_s = idle_after_s
-        if evict_after_s is not None:
-            self._evict_after_s = evict_after_s
-        if evict_pressure_mb is not None:
-            self._evict_pressure_mb = float(evict_pressure_mb)
-        if interval_s is not None:
-            self._idle_monitor_interval_s = interval_s
-        existing = self._idle_monitor_task
-        if existing is not None and not existing.done():
-            return
-        try:
-            self._idle_monitor_task = asyncio.create_task(
-                self._idle_monitor_loop(),
-                name="hal0-slot-idle-monitor",
-            )
-        except RuntimeError:
-            # No running loop (sync-context test).  Defer until callers
-            # are in an async context.
-            log.debug("slot.idle_monitor_no_loop")
+        await self._reaper.start(
+            idle_after_s=idle_after_s,
+            evict_after_s=evict_after_s,
+            evict_pressure_mb=evict_pressure_mb,
+            evict_pressure_pct=evict_pressure_pct,
+            interval_s=interval_s,
+        )
 
     async def stop_idle_monitor(self) -> None:
         """Cancel the idle-monitor task if running.  Idempotent."""
-        task = self._idle_monitor_task
-        self._idle_monitor_task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+        await self._reaper.stop()
 
     async def _idle_monitor_loop(self) -> None:
-        """Periodically sweep READY slots for idle-timeout and pressure."""
-        try:
-            while True:
-                await asyncio.sleep(self._idle_monitor_interval_s)
-                try:
-                    await self._sweep_idle_once()
-                except Exception as exc:  # never let the monitor die quietly
-                    log.warning("slot.idle_sweep_failed", extra={"error": str(exc)})
-                try:
-                    await self._pressure_evict_once()
-                except Exception as exc:
-                    log.warning("slot.pressure_sweep_failed", extra={"error": str(exc)})
-        except asyncio.CancelledError:
-            raise
+        """See :meth:`hal0.slots.reaper.SlotReaper._loop`."""
+        await self._reaper._loop()
 
     async def _evict_timeout_for(self, slot_name: str) -> float | None:
-        """Resolve the idle TTL after which a slot is hard-evicted (#902).
-
-        Returns ``None`` when the slot is pinned (never TTL-evicted):
-          * an explicit ``idle_timeout_s = 0`` in the slot's TOML, or
-          * a default-pinned anchor (chat / agent / npu) with no explicit
-            per-slot value, or
-          * a non-positive global default with no explicit per-slot value.
-
-        Otherwise returns the effective TTL in seconds: the per-slot TOML
-        ``idle_timeout_s`` when set (overrides the global), else the global
-        ``_evict_after_s`` default.  ``0`` consistently means "disabled" at
-        both levels, matching the config-schema contract.
-        """
-        canonical = self._resolve_alias(slot_name)
-        try:
-            cfg = await self._load_slot_config(canonical)
-        except (SlotConfigError, SlotNotFound):
-            cfg = {}
-        raw = cfg.get("idle_timeout_s")
-        if isinstance(raw, bool):  # bool is an int subclass — never a TTL
-            raw = None
-        if isinstance(raw, int):
-            return None if raw <= 0 else float(raw)
-        # No explicit per-slot value: pin the named anchors, else fall back
-        # to the global default (itself disabled when non-positive).
-        if canonical in _PINNED_BY_DEFAULT:
-            return None
-        return float(self._evict_after_s) if self._evict_after_s > 0 else None
+        """See :meth:`hal0.slots.reaper.SlotReaper.evict_timeout_for`."""
+        return await self._reaper.evict_timeout_for(slot_name)
 
     def _sweep_candidates(self) -> dict[str, float]:
-        """Slot → last-activity timestamp map for the idle/pressure sweeps.
-
-        ``_last_used`` only tracks slots that served a request (or were
-        adopted) during THIS process's lifetime. Dispatchable slots missing
-        from it — e.g. adopted before the bump-on-adoption fix, or hydrated
-        from a state.json that outlived an api restart — used to be
-        invisible to both sweeps and could squat on RAM forever. For those,
-        fall back to the state record's ``updated_at`` (the last observed
-        transition) as the activity timestamp; the sweeps' own state and
-        serving-count guards still apply on top.
-        """
-        candidates = dict(self._last_used)
-        for name, rec in list(self._states.items()):
-            if name in candidates:
-                continue
-            if rec.state not in (SlotState.READY, SlotState.IDLE):
-                continue
-            if rec.updated_at:
-                candidates[name] = float(rec.updated_at)
-        return candidates
+        """See :meth:`hal0.slots.reaper.SlotReaper.sweep_candidates`."""
+        return self._reaper.sweep_candidates()
 
     async def _sweep_idle_once(self) -> None:
-        """One idle-sweep pass over every tracked slot.
-
-        Stage 1 (soft): a READY slot idle past ``_idle_after_s`` is
-        relabeled IDLE so dashboards distinguish "warm but quiet" from
-        "warm and serving".
-
-        Stage 2 (hard, #902): a slot idle past its resolved per-slot TTL
-        (:meth:`_evict_timeout_for`) is **unloaded**, freeing host RAM —
-        the only way to reclaim it, since llama-server allocates KV
-        statically at ``ctx_size``.  ``idle_timeout_s = 0`` (or a pinned
-        anchor) is never evicted.  A slot mid-request
-        (``serving_count > 0``) is never touched; the dispatcher reloads an
-        evicted slot transparently on its next request (wake-on-request),
-        so eviction is safe.
-        """
-        now = time.time()
-        for slot_name, ts in self._sweep_candidates().items():
-            idle_for = now - ts
-            if self._serving_count.get(slot_name, 0) > 0:
-                continue
-            state = self._current_state(slot_name)
-            if state not in (SlotState.READY, SlotState.IDLE):
-                continue
-
-            # Stage 2 — hard TTL eviction.
-            evict_after = await self._evict_timeout_for(slot_name)
-            if evict_after is not None and idle_for >= evict_after:
-                try:
-                    await self.unload(slot_name)
-                    log.info(
-                        "slot.idle_evicted",
-                        extra={"slot": slot_name, "idle_s": round(idle_for)},
-                    )
-                except IllegalSlotTransition:
-                    # Raced with another transition — next sweep retries.
-                    pass
-                except Exception as exc:  # never let one slot kill the sweep
-                    log.warning(
-                        "slot.idle_evict_failed",
-                        extra={"slot": slot_name, "error": str(exc)},
-                    )
-                continue
-
-            # Stage 1 — soft demotion READY → IDLE.
-            if state == SlotState.READY and idle_for >= self._idle_after_s:
-                try:
-                    await self._transition(
-                        slot_name,
-                        SlotState.IDLE,
-                        message=f"idle for {idle_for:.0f}s",
-                    )
-                except IllegalSlotTransition:
-                    # Raced with an unload — fine; next sweep will skip it.
-                    continue
+        """See :meth:`hal0.slots.reaper.SlotReaper.sweep_idle_once`."""
+        await self._reaper.sweep_idle_once()
 
     def _probe_host_free_mb(self) -> float:
-        """Return host MemAvailable in MiB by reading /proc/meminfo (#903).
+        """Return free host memory in MiB, GTT-aware where possible (§21.10).
 
-        Reuses :func:`hal0.slots.capacity._read_meminfo` — the single
-        authoritative reader for /proc/meminfo in the slots subtree.
-        Returns ``inf`` on any probe failure so the pressure guard is
-        fail-SAFE: an unreadable probe reports "plenty of free RAM", so the
-        ``free_mb >= floor`` early-return skips eviction rather than evicting
-        blindly on a bad reading (the error is logged, not raised).
+        See :func:`hal0.slots.reaper.probe_host_free_mb`. Kept as an
+        overridable instance method (rather than calling the module
+        function directly from the reaper) so
+        ``tests/slots/test_pressure_eviction.py``'s
+        ``monkeypatch.setattr(sm, "_probe_host_free_mb", ...)`` pattern
+        keeps working unchanged — the reaper always calls back through
+        ``self._host._probe_host_free_mb()``.
         """
-        try:
-            from hal0.slots.capacity import _read_meminfo
+        return _reaper_probe_host_free_mb()
 
-            _total_mib, avail_mib = _read_meminfo()
-            return avail_mib
-        except Exception as exc:
-            log.warning("slot.pressure_probe_failed", extra={"error": str(exc)})
-            return float("inf")
+    def _probe_host_total_mb(self) -> float:
+        """Return total host memory in MiB, GTT-aware where possible (§21.10).
+
+        Only consulted when ``evict_pressure_pct`` is set. See
+        :func:`hal0.slots.reaper.probe_host_total_mb`.
+        """
+        return _reaper_probe_host_total_mb()
 
     async def _pressure_evict_once(self) -> None:
-        """One pressure-eviction pass (#903).
+        """See :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`."""
+        await self._reaper.pressure_evict_once()
 
-        Probes host free RAM. When MemAvailable < ``_evict_pressure_mb``,
-        evicts idle, ``lru``-eligible slots one at a time in
-        least-recently-used order (oldest ``last_used`` first) until free
-        RAM is back above the floor or no more eligible slots remain.
+    async def is_pinned(self, slot_name: str) -> bool:
+        """True when *slot_name* is exempt from eviction (§21.10 operator pin).
 
-        Guards:
-          - ``_evict_pressure_mb == 0`` → pressure eviction is disabled.
-          - A slot serving a request (``serving_count > 0``) is never evicted.
-          - The canonical ``agent`` slot (and other _PINNED_BY_DEFAULT names)
-            is never evicted by pressure.
-          - Only slots with ``lru = true`` in their TOML are eligible.
+        Combines the default-pinned anchor set (``agent``/``utility``/
+        ``npu``) with an explicit ``SlotConfig.pinned = true``. Resolves
+        the alias first; a missing/unreadable config is treated as "not
+        pinned" beyond the default set (same fail-open contract as
+        :meth:`hal0.slots.reaper.SlotReaper.evict_timeout_for`). Used by
+        :meth:`delete` and by ``api/routes/slots.py``'s manual-unload
+        guard (both require ``force=true`` on a pinned slot, HTTP 409
+        ``slot.pinned``).
         """
-        if self._evict_pressure_mb <= 0:
-            return
-        free_mb = self._probe_host_free_mb()
-        if free_mb >= self._evict_pressure_mb:
-            return
-
-        # Build the LRU-ordered candidate list. ``_sweep_candidates`` unions
-        # _last_used with dispatchable slots known only via state.json
-        # (adopted / restart-surviving), timestamped by their last observed
-        # transition, so pressure eviction can also reclaim those.
-        candidates: list[tuple[float, str]] = []
-        for slot_name, ts in self._sweep_candidates().items():
-            if self._serving_count.get(slot_name, 0) > 0:
-                continue
-            canonical = self._resolve_alias(slot_name)
-            if canonical in _PINNED_BY_DEFAULT:
-                continue
-            state = self._current_state(slot_name)
-            if state not in (SlotState.READY, SlotState.IDLE):
-                continue
-            # Read lru flag from slot TOML.
-            try:
-                cfg = await self._load_slot_config(slot_name)
-            except (SlotConfigError, SlotNotFound):
-                continue
-            if not cfg.get("lru", False):
-                continue
-            candidates.append((ts, slot_name))
-
-        # Evict oldest-first until pressure is relieved or list is exhausted.
-        candidates.sort(key=lambda pair: pair[0])
-        for _ts, slot_name in candidates:
-            # Re-check serving guard and state — may have changed since
-            # the list was built (another coroutine may have started a
-            # request or the TTL sweep may have evicted it already).
-            if self._serving_count.get(slot_name, 0) > 0:
-                continue
-            state = self._current_state(slot_name)
-            if state not in (SlotState.READY, SlotState.IDLE):
-                continue
-            try:
-                await self.unload(slot_name)
-                log.info(
-                    "slot.pressure_evicted",
-                    extra={
-                        "slot": slot_name,
-                        "free_mb": round(free_mb),
-                        "floor_mb": round(self._evict_pressure_mb),
-                    },
-                )
-            except IllegalSlotTransition:
-                # Raced with another transition — skip, next sweep retries.
-                pass
-            except Exception as exc:
-                log.warning(
-                    "slot.pressure_evict_failed",
-                    extra={"slot": slot_name, "error": str(exc)},
-                )
-                continue
-            # Re-probe free RAM after each eviction to avoid over-shedding.
-            free_mb = self._probe_host_free_mb()
-            if free_mb >= self._evict_pressure_mb:
-                break
+        canonical = self._resolve_alias(slot_name)
+        cfg = await self._maybe_load_config(canonical)
+        return _reaper_is_pinned(canonical, cfg)
 
     async def get_config(self, slot_name: str) -> dict[str, Any]:
         """Return the slot's TOML config as a plain dict (read-only view).
@@ -3747,399 +2728,42 @@ def _leading_token_overlap(a: list[str], b: list[str]) -> int:
     return shared
 
 
-def _cfg_to_dict(cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:
-    if hasattr(cfg, "model_dump"):
-        d: dict[str, Any] = cfg.model_dump()
-    elif isinstance(cfg, dict):
-        d = dict(cfg)
-    else:
-        raise SlotConfigError(f"unsupported slot cfg type {type(cfg).__name__}")
-    # An unset context_size (schema default None) must never reach the TOML
-    # writer: write_toml_atomic rejects None, and a persisted 4096 was the
-    # chat@4096 incident. Drop the key so the load path derives the model's
-    # native window instead (see providers.container._resolve_context_size).
-    model = d.get("model")
-    if isinstance(model, dict) and model.get("context_size") is None:
-        model.pop("context_size", None)
-    return d
+# NOTE: _argv_values / _resolve_drift_flags / _config_drift_values_equal /
+# _CONFIG_DRIFT_KEYS / compute_config_drift moved to hal0.slots.drift
+# (P3-slots §1c — investigated + KEPT, not deleted; see that module's
+# docstring). Imported + re-exported above.
 
-
-def _cfg_port(cfg: SlotConfig | dict[str, Any]) -> int:
-    d = _cfg_to_dict(cfg)
-    port = d.get("port") or d.get("slot", {}).get("port") or 0
-    return int(port)
-
-
-def _cfg_provider(cfg: SlotConfig | dict[str, Any]) -> str:
-    d = _cfg_to_dict(cfg)
-    return str(d.get("provider") or d.get("slot", {}).get("provider") or "llama-server")
-
-
-def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
-    d = _cfg_to_dict(cfg)
-    model = d.get("model") or {}
-    if isinstance(model, dict):
-        return str(model.get("default") or "")
-    return ""
-
-
-def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None]:
-    """Return the last value for each flag key in argv, alias-aware.
-
-    Both the requested ``keys`` and the argv tokens are canonicalized
-    through :data:`hal0.slots.argv.FLAG_ALIASES` before comparison, so a
-    running ``--batch-size 512`` matches a rendered ``-b 512`` (and vice
-    versa) instead of reporting false config drift. The result stays keyed
-    by the caller's original ``keys`` spelling (the drift payload contract).
-
-    Last value wins because slot ``[server].extra_args`` intentionally follows
-    profile flags and can override them.
-    """
-    from hal0.slots.argv import FLAG_ALIASES
-
-    canon_to_key = {FLAG_ALIASES.get(k, k): k for k in keys}
-    out: dict[str, str | None] = {}
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        flag, eq, inline = token.partition("=")
-        key = canon_to_key.get(FLAG_ALIASES.get(flag, flag))
-        if key is None:
-            i += 1
-            continue
-        if eq:
-            out[key] = inline
-            i += 1
-        else:
-            out[key] = argv[i + 1] if i + 1 < len(argv) else None
-            i += 2
-    return out
-
-
-def _resolve_drift_flags(
-    flags: dict[str, str | None],
-    model_key: str | None,
-    model_path: str | None,
-) -> dict[str, str | None]:
-    """Canonicalize the id-bearing drift flags the way the renderer does.
-
-    ``--model`` and ``--alias`` carry a model identity that the unit renderer
-    resolves (registry id → on-disk path for ``--model``; slugified id for
-    ``--alias``). A raw id surfaced on either side of the drift comparison is
-    put through the SAME resolution so a slot created with a registry id does
-    not permanently false-warn (#1226). Values already resolved (a real path,
-    an already-slugified alias) pass through unchanged.
-    """
-    from hal0.registry.discover import _normalise_id
-
-    out = dict(flags)
-    model_val = out.get("--model")
-    # Rendered/running may carry the bare registry id instead of the resolved
-    # path; substitute the known on-disk path so the realpath compare matches.
-    if model_val is not None and model_path and model_key and model_val == model_key:
-        out["--model"] = str(model_path)
-    alias_val = out.get("--alias")
-    if alias_val is not None:
-        # Slug is idempotent: slugifying an already-slugified alias is a no-op,
-        # so both a raw id and a rendered slug collapse to the same token.
-        out["--alias"] = _normalise_id(alias_val)
-    return out
-
-
-def _config_drift_values_equal(key: str, running: str | None, rendered: str | None) -> bool:
-    if key == "--model" and running is not None and rendered is not None:
-        return os.path.realpath(running) == os.path.realpath(rendered)
-    return running == rendered
-
-
-def _cfg_effective_backend(cfg: SlotConfig | dict[str, Any]) -> str | None:
-    """Derive the EFFECTIVE runtime backend token from a slot config.
-
-    W3 truth fix: ``device`` is the authoritative hardware-intent
-    field. The dashboard's SlotCard backend chip must reflect what
-    ``device`` will run — NOT the legacy, never-resynced ``backend``
-    TOML field which drifts the moment a user flips backend (which only
-    rewrites ``device``).
-
-    Returns the normalized token ``rocm`` | ``vulkan`` | ``cpu`` |
-    ``flm`` (NPU → ``flm``), or ``None`` when neither ``device`` nor a
-    legacy ``backend`` is set so callers can fall through to "unknown".
-    Pure/synchronous — safe on the status hot path.
-    """
-    d = _cfg_to_dict(cfg)
-    device = d.get("device")
-    if not device:
-        # Legacy TOMLs may carry only ``backend``; promote it the same way
-        # SlotConfig._promote_backend_to_device would, so we still emit the
-        # device-derived token rather than the raw legacy string.
-        legacy = d.get("backend")
-        if not legacy:
-            return None
-        from hal0.config.schema import map_backend_to_device
-
-        device = map_backend_to_device(str(legacy))
-    # Reuse the single device→(recipe, llamacpp_backend) mapping so the
-    # displayed token can never diverge from what the load path derives.
-    from hal0.model_meta import device_to_backend
-
-    recipe, llamacpp_backend = device_to_backend(str(device))
-    # NPU → recipe="flm" with no llamacpp_backend; surface "flm".
-    return llamacpp_backend or (recipe if recipe == "flm" else None)
-
-
-def _base_profile_for_backend(catalog: Any, backend: str) -> str:
-    """Pick the canonical (non-MTP) seed profile name for a GPU backend.
-
-    Prefers the seed profile named after the backend (``rocm`` / ``vulkan``);
-    falls back to any non-MTP then any profile that declares ``backend``.
-
-    This is the deliberate *non-MTP* counterpart of
-    :func:`hal0.install.profile_derive.derive_profile`'s ``rocm-dnse``
-    preference: it answers backend→base-profile from the live catalog so a
-    drawer device-flip re-derives a plain base image (``rocm``/``vulkan``) and
-    never silently switches a slot onto the MTP ``rocm-dnse`` image. Do NOT
-    fold it into the device→profile helper (finding PS-4).
-    """
-    named = catalog.profile.get(backend)
-    if named is not None and getattr(named, "backend", None) == backend:
-        return backend
-    for name, prof in catalog.profile.items():
-        if getattr(prof, "backend", None) == backend and not getattr(prof, "mtp", False):
-            return str(name)
-    for name, prof in catalog.profile.items():
-        if getattr(prof, "backend", None) == backend:
-            return str(name)
-    return backend
-
-
-def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> None:
-    """Keep a GPU slot's ``device`` and ``profile.backend`` coherent in place.
-
-    A GPU slot implies its backend twice: ``device`` (``gpu-rocm`` /
-    ``gpu-vulkan``) drives the llama-server backend, while ``profile`` selects
-    the container image + flags. They must agree — a vulkan device under a
-    rocm-dnse profile launches a Vulkan binary with ROCm-only MTP draft flags
-    (issue: utility slot). The field the operator changed wins; the stale side
-    is re-derived. Both changed to conflicting backends → operator error.
-
-    No-ops for slots without a GPU profile (npu/cpu/img profiles declare
-    ``backend=None``) and for ``auto`` device (empty) unless the profile
-    itself changed. Mutates ``cfg_dict`` in place.
-    """
-    profile_name = cfg_dict.get("profile")
-    if not isinstance(profile_name, str) or not profile_name:
-        return
-
-    from hal0.config.loader import load_profiles_config
-
-    prof = load_profiles_config().profile.get(profile_name)
-    prof_backend = getattr(prof, "backend", None) if prof is not None else None
-    if not prof_backend:
-        # Non-GPU profile (or unknown profile with no backend) — leave alone.
-        return
-
-    from hal0.config.schema import map_backend_to_device
-    from hal0.model_meta import device_to_backend
-
-    device = cfg_dict.get("device")
-    dev_backend = device_to_backend(str(device))[1] if device else None
-    if dev_backend == prof_backend:
-        return  # already coherent
-
-    prof_changed = "profile" in changed
-    dev_changed = "device" in changed
-
-    if not device:
-        # ``auto``/unset device: only adopt the profile's backend when the
-        # operator explicitly (re)selected the profile; otherwise leave auto.
-        if prof_changed:
-            cfg_dict["device"] = map_backend_to_device(prof_backend)
-        return
-
-    if prof_changed and not dev_changed:
-        cfg_dict["device"] = map_backend_to_device(prof_backend)
-    elif dev_changed and not prof_changed and dev_backend is not None:
-        catalog = load_profiles_config()
-        cfg_dict["profile"] = _base_profile_for_backend(catalog, dev_backend)
-    elif prof_changed and dev_changed:
-        raise SlotConfigError(
-            f"slot device {device!r} (backend {dev_backend!r}) conflicts with "
-            f"profile {profile_name!r} (backend {prof_backend!r}); "
-            "pick a device and profile with the same backend",
-            details={
-                "device": device,
-                "profile": profile_name,
-                "device_backend": dev_backend,
-                "profile_backend": prof_backend,
-            },
-        )
-    # neither changed (pre-existing on-disk drift surfaced by an unrelated
-    # update): leave both fields untouched so the unrelated edit doesn't
-    # silently mutate hardware intent. Drift heals on the next device/profile
-    # edit.
-
-
-# ── shared slot-config write pipeline (guards for every writer) ──────────────
-#
-# SlotManager.update_config, SlotManager.create, and the stacks apply engine
-# all project "partial updates onto an existing slot config". Historically
-# only update_config/create ran the full guard pipeline; the stacks engine
-# hand-rolled its own merge and could persist a vulkan-device+rocm-profile
-# incoherence or a second NPU anchor. These module-level, synchronous
-# functions are the ONE pipeline every writer calls.
-
-
-def _read_slot_toml_dict(path: Path) -> dict[str, Any] | None:
-    """Best-effort raw read of one ``slots/*.toml`` (with the [slot] hoist).
-
-    Returns ``None`` on a missing or malformed file — guard peer-walks skip
-    those rather than blocking the caller's legitimate write (the malformed
-    slot surfaces its own error on its own paths).
-    """
-    import tomllib
-
-    try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    slot_tbl = data.pop("slot", None)
-    if isinstance(slot_tbl, dict):
-        for k, v in slot_tbl.items():
-            data[k] = v
-    return data
-
-
-def _iter_peer_configs(
-    slot_name: str, slots_dir: Path | None = None
-) -> list[tuple[str, dict[str, Any]]]:
-    """(name, cfg) for every readable configured slot other than ``slot_name``."""
-    base = Path(slots_dir) if slots_dir is not None else paths.slots_config_dir()
-    if not base.is_dir():
-        return []
-    peers: list[tuple[str, dict[str, Any]]] = []
-    for path in sorted(base.glob("*.toml")):
-        if path.stem == slot_name:
-            continue
-        peer = _read_slot_toml_dict(path)
-        if peer is not None:
-            peers.append((path.stem, peer))
-    return peers
-
-
-def check_npu_exclusivity(
-    slot_name: str,
-    cfg_dict: dict[str, Any],
-    *,
-    slots_dir: Path | None = None,
-) -> None:
-    """Reject a write that would land a second enabled NPU LLM anchor.
-
-    Sync core of :meth:`SlotManager._check_npu_exclusivity` (see its
-    docstring for the full contract), shared with the stacks apply engine.
-    ``slots_dir`` overrides the default config dir for engines constructed
-    against a custom directory (tests).
-    """
-    if cfg_dict.get("device") != "npu" or cfg_dict.get("type") != "llm":
-        return
-    if cfg_dict.get("enabled") is False:
-        return
-    offenders = [
-        name
-        for name, peer in _iter_peer_configs(slot_name, slots_dir)
-        if peer.get("device") == "npu"
-        and peer.get("type") == "llm"
-        and peer.get("enabled") is not False
-    ]
-    if offenders:
-        raise NpuExclusivityViolation(
-            "only one NPU LLM slot may be enabled at a time "
-            f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
-            details={
-                "slot": slot_name,
-                "conflicting_slots": sorted(offenders),
-                "hint": "disable the existing NPU LLM slot before enabling another",
-            },
-        )
-
-
-def check_default_uniqueness(
-    slot_name: str,
-    cfg_dict: dict[str, Any],
-    *,
-    slots_dir: Path | None = None,
-) -> None:
-    """Reject a write that would land a second ``default=true`` per type.
-
-    Sync core of :meth:`SlotManager._check_default_uniqueness` (see its
-    docstring for the full contract), shared with the stacks apply engine.
-    """
-    if cfg_dict.get("default") is not True:
-        return
-    type_ = cfg_dict.get("type")
-    if not type_:
-        return
-    offenders = [
-        name
-        for name, peer in _iter_peer_configs(slot_name, slots_dir)
-        if peer.get("type") == type_ and peer.get("default") is True
-    ]
-    if offenders:
-        raise SlotConfigError(
-            f"slot type {type_!r} already has a default=true slot "
-            f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
-            details={
-                "slot": slot_name,
-                "type": type_,
-                "conflicting_slots": sorted(offenders),
-                "hint": "clear the existing default before setting another",
-            },
-        )
-
-
-def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    """Normalize + merge ``updates`` onto ``base`` and keep device/profile coherent.
-
-    The write-side projection shared by ``SlotManager.update_config`` and the
-    stacks apply engine: the copy-safe one-level merge + #585 ctx_size fold
-    (:func:`hal0.slot_config.merge_slot_config`) followed by
-    :func:`_reconcile_device_profile` driven by exactly the keys the caller
-    changed. Returns a fresh dict; ``base`` is never mutated.
-    """
-    merged = merge_slot_config(base, updates)
-    _reconcile_device_profile(merged, set(updates.keys()))
-    return merged
-
-
-def reconcile_and_guard_slot_config(
-    slot_name: str,
-    base: dict[str, Any],
-    updates: dict[str, Any],
-    *,
-    slots_dir: Path | None = None,
-) -> dict[str, Any]:
-    """The full guarded write pipeline: normalize + merge + reconcile + guards.
-
-    Raises :class:`SlotConfigError` / :class:`NpuExclusivityViolation` when the
-    projected config is incoherent (conflicting device+profile backends) or
-    violates a cross-slot invariant (second enabled NPU anchor, second
-    default=true of a type). Used by the stacks apply engine so a stack can no
-    longer persist what ``update_config`` would have refused.
-    """
-    merged = reconcile_slot_updates(base, updates)
-    check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
-    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir)
-    return merged
+# NOTE: _cfg_effective_backend / _base_profile_for_backend /
+# _reconcile_device_profile / _read_slot_toml_dict / _iter_peer_configs /
+# check_npu_exclusivity / check_default_uniqueness / reconcile_slot_updates /
+# reconcile_and_guard_slot_config moved to hal0.slots.config_write
+# (P3-slots §1f) — imported + re-exported above (see module docstring's
+# "New in P3-slots" note and __all__ below).
 
 
 __all__ = [
     "NPU_SEEDED_SLOTS",
     "SEEDED_SLOTS",
     "SLOT_ALIASES",
+    "_CONFIG_DRIFT_KEYS",
+    "_FAIL_WATCH_INTERVAL_S",
+    "_FAIL_WATCH_LIVE_STATES",
+    "_HEALTH_FAIL_STRIKES",
+    "_VALID_SLOT_TYPES",
+    "_WARMING_INACTIVE_STRIKES",
+    "_WARMING_STALE_AFTER_S",
+    "LoadedSlot",
     "Slot",
     "SlotManager",
+    "_argv_values",
+    "_base_profile_for_backend",
+    "_cfg_effective_backend",
+    "_cfg_port",
+    "_cfg_provider",
+    "_model_default",
     "check_default_uniqueness",
     "check_npu_exclusivity",
+    "is_npu_trio_shadow",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",
 ]

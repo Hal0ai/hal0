@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hal0.slots import manager as mgr_mod
+from hal0.slots import watchdog as wd_mod
 from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState
 from tests.slots.conftest import FakeContainerProvider
@@ -24,8 +24,14 @@ from tests.slots.conftest import FakeContainerProvider
 
 @pytest.fixture
 def fast_fail_watch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tighten the fail-watch poll interval so tests run in <5s."""
-    monkeypatch.setattr(mgr_mod, "_FAIL_WATCH_INTERVAL_S", 0.2)
+    """Tighten the fail-watch poll interval so tests run in <5s.
+
+    P3-slots §1b-watchdog: the real sleep now lives in
+    hal0.slots.watchdog._fail_watch_loop, so the interval constant it
+    reads at call time must be patched there (not on hal0.slots.manager,
+    which only re-exports the value for read access).
+    """
+    monkeypatch.setattr(wd_mod, "_FAIL_WATCH_INTERVAL_S", 0.2)
 
 
 async def _wait_for_state(
