@@ -87,10 +87,11 @@ _WARMING_STALE_AFTER_S: float = 900.0
 class WatchdogHost(Protocol):
     """Narrow seam :class:`SlotWatchdog` needs from ``SlotManager``."""
 
-    _fail_watchers: dict[str, asyncio.Task[None]]
-    _states: dict[str, SlotStateRecord]
+    _fail_watchers: dict[int, asyncio.Task[None]]
+    _states: dict[int, SlotStateRecord]
 
     def _current_state(self, name: str) -> SlotState: ...
+    def _key(self, name: str) -> int: ...
     async def _maybe_load_config(self, name: str) -> dict[str, Any] | None: ...
     async def _transition(self, name: str, to_state: SlotState, **kw: Any) -> SlotStateRecord: ...
     async def load(self, name: str) -> Slot: ...
@@ -115,12 +116,13 @@ class SlotWatchdog:
         raise CancelledError on the await it just completed).
         """
         host = self._host
+        key = host._key(name)
         if new_state in _FAIL_WATCH_LIVE_STATES:
-            existing = host._fail_watchers.get(name)
+            existing = host._fail_watchers.get(key)
             if existing is not None and not existing.done():
                 return
             try:
-                host._fail_watchers[name] = asyncio.create_task(
+                host._fail_watchers[key] = asyncio.create_task(
                     self._fail_watch_loop(name),
                     name=f"hal0-slot-fail-watch-{name}",
                 )
@@ -132,7 +134,7 @@ class SlotWatchdog:
                 log.debug("slot.fail_watch_no_loop", extra={"slot": name})
             return
 
-        existing = host._fail_watchers.pop(name, None)
+        existing = host._fail_watchers.pop(key, None)
         if existing is None or existing.done():
             return
         try:
@@ -195,7 +197,7 @@ class SlotWatchdog:
                         # STARTING is an illegal transition, so recovery is
                         # unload → load (as ``restart()`` does), not a direct
                         # reload.
-                        rec = host._states.get(slot_name)
+                        rec = host._states.get(host._key(slot_name))
                         warming_elapsed = time.time() - rec.updated_at if rec is not None else 0.0
                         if warming_elapsed <= _WARMING_STALE_AFTER_S:
                             continue
