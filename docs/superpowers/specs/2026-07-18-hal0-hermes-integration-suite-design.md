@@ -1,7 +1,9 @@
 # hal0 Hermes Integration Suite Design
 
-**Date:** 2026-07-18  
-**Status:** Approved design  
+**Date:** 2026-07-18
+
+**Status:** Approved; implementation gated on the Hermes compatibility prerequisite
+
 **Scope:** hal0-related Hermes extensions only
 
 ## Purpose
@@ -47,6 +49,7 @@ After delivery:
 - Moving slot lifecycle, model routing, or fallback policy into Hermes.
 - A new Hermes transport or `api_mode`; hal0 remains OpenAI chat-completions compatible.
 - Preserving LXC105's direct per-slot URLs or legacy Honcho configuration.
+- Building a new hal0 voice stack or adding voice models/runtimes. Initial `hal0-voice` only routes Hermes through existing hal0 STT/TTS slots.
 - A generic Hermes ecosystem bundle unrelated to hal0.
 - A dashboard extension, observability plugin, streaming voice provider, or custom context engine in the initial suite.
 - Silent cloud fallback for models, memory, STT, or TTS.
@@ -73,7 +76,9 @@ The adapters may share packaging and release metadata, but each has an independe
 This internal library owns behavior that must not drift between adapters:
 
 - hal0 endpoint discovery and compatibility negotiation;
-- authenticated HTTP requests;
+- authenticated HTTP requests, using `HAL0_CLIENT_KEY` for inference/read and `HAL0_ADMIN_KEY` only for mutations;
+- deny-by-default credential selection so an admin credential is never attached to a read-only or unrelated endpoint;
+- OPEN liveness checks against `/api/health`; preflight must never use admin-gated `/api/status` as a reachability probe;
 - connection and read timeouts;
 - bounded retry classification;
 - structured hal0 error decoding;
@@ -98,7 +103,7 @@ The provider fetches only the unified hal0 model inventory. It must not target o
 Each normalized model entry includes:
 
 - stable model identifier;
-- owning slot identifier;
+- owning opaque stable slot ID, with the slot name treated as a mutable display/routing label;
 - readiness state;
 - context length;
 - capability labels such as tools, reasoning, vision, embeddings, reranking, STT, and TTS where applicable;
@@ -121,7 +126,7 @@ Hermes main and auxiliary work use stable hal0 aliases rather than concrete port
 - `skills_hub`;
 - `mcp`.
 
-hal0 resolves each alias to current platform truth. A model swap changes the target behind the alias without rewriting every Hermes profile.
+hal0 resolves each alias to current platform truth. Alias ownership follows the opaque slot ID across a rename; a model swap changes the target behind the alias without rewriting every Hermes profile. If diagnostics surface a backend port, it comes from the live PortAuthority `port_claim`, never from a slot-name convention or copied slot config.
 
 ### Automatic refresh
 
@@ -146,7 +151,7 @@ The last valid inventory remains usable during a temporary event-stream or API o
 
 ### Provider diagnostics
 
-The provider's setup/doctor surface reports API reachability, authentication, schema compatibility, inventory freshness, empty inventory, missing role assignments, unavailable selected models, and tool-call capability.
+The provider's setup/doctor surface reports API reachability, authentication, schema compatibility, inventory freshness, empty inventory, missing role assignments, unavailable selected models, and tool-call capability. Reachability is established only through the OPEN `/api/health` endpoint; authenticated read and mutation checks are separate diagnostics so a missing credential cannot masquerade as a dead service.
 
 ## `hal0-memory`
 
@@ -154,7 +159,7 @@ The provider's setup/doctor surface reports API reachability, authentication, sc
 
 `hal0-memory` is the one active external Hermes memory provider. It lives under the official `plugins/memory/hal0-memory/` layout, implements the current `MemoryProvider` ABC, registers through the supported memory-provider mechanism, and is managed through `hermes plugins` and `memory.provider: hal0-memory`.
 
-The existing top-level `plugins/hal0-memory/` installation is treated as a compatibility bug until proven otherwise against the selected Hermes pin.
+hal0 intentionally maintains two parity-tested packaging copies: an importable source tree and an installable hyphenated seed. The compatibility defect is not that pair; it is the seed's current top-level runtime destination. Provisioning must install it at `plugins/memory/hal0-memory/` for the selected Hermes target.
 
 `is_available()` performs configuration-only checks and no network calls. Network health belongs in initialization/diagnostics. The provider implements the official setup schema, config persistence, lifecycle hooks, shutdown, and active-provider CLI contract.
 
@@ -282,7 +287,14 @@ Provisioning must:
 - snapshot before-state and record applied content hashes;
 - remain idempotent.
 
-The managed bundle records compatible hal0 and Hermes version ranges, source commit, config/manifest schema versions, and file hashes. Plugin sources are root-owned/read-only while the Hermes service remains sandboxed.
+The managed bundle records compatible hal0 and Hermes version ranges, source commit, config/manifest schema versions, and file hashes.
+
+Ownership follows the landed born-owned split:
+
+- `$HERMES_HOME`, including config, runtime state, profiles, and the installed plugin tree, is created directly as `hal0:hal0`; provisioning must not write as root and chown back.
+- The immutable distribution bundle, `/usr/local/bin/hermes`, and `/etc/hal0/agents/hermes.toml` remain root-owned.
+- Required root residue is written only through the audited, literal-path, body-on-stdin seams `hal0-systemctl write-gateway-dropin` and `hal0-agentenv write-seed-toml`.
+- The Hermes service remains sandboxed and receives only the credentials each adapter requires.
 
 ## LXC105 migration
 
@@ -295,18 +307,18 @@ The live host demonstrates desired user-facing behavior but contains legacy drif
 - voice uses mutable scripts and backup files;
 - service comments and effective behavior disagree about provider ownership.
 
-Migration therefore:
+Migration uses the existing `hal0 memory migrate --from honcho --to hindsight` implementation and the operator guidance in [`docs/guides/honcho-memory.mdx`](../../guides/honcho-memory.mdx); this suite must not create a second migration engine. The migration window is:
 
 1. snapshots Hermes config, profiles, plugin files, memory state, and service metadata;
-2. verifies the selected Hermes compatibility target;
-3. stages the versioned integration bundle;
-4. migrates useful Honcho memories through an explicit importer where compatible;
-5. selects `hal0-memory` for global and desired profiles;
-6. converts direct-slot profiles to unified hal0-provider roles;
-7. installs generated voice wrappers/config;
-8. restarts Hermes only after dry-run validation;
-9. verifies provider, memory, and voice behavior;
-10. proves rollback before deleting legacy configuration or backup artifacts.
+2. runs a per-workspace dry-run and records source counts;
+3. migrates with the existing resumable watermark;
+4. verifies destination counts and representative recalls;
+5. takes a post-migration snapshot before reconfiguration;
+6. verifies the selected Hermes compatibility target and stages the versioned integration bundle;
+7. selects `hal0-memory`, converts direct-slot profiles to unified hal0-provider roles, and installs generated voice wrappers/config;
+8. proves `Hal0Config` tolerates any persisted legacy `[honcho]` block during the compatibility window;
+9. restarts Hermes only after dry-run validation and verifies provider, memory, and voice behavior;
+10. deletes legacy state in dependency order only after rollback has been proven.
 
 Live data is not treated as authoritative architecture. Useful behavior is retained through the new contracts.
 
@@ -397,35 +409,20 @@ It should proceed only if lossless/context-DAG behavior is needed beyond memory 
 
 ### Live acceptance
 
-Stage on LXC105 after unit and integration gates pass. Exercise all three adapters, confirm automatic slot/model updates, verify private raw/shared durable memory, switch voice slots without restarting Hermes, simulate each backend outage, prove rollback, and complete a soak period before removing legacy state.
+Use halo143 as the validation and soak target after unit and integration gates pass. Exercise all three adapters, confirm automatic slot/model updates, verify private raw/shared durable memory, switch voice slots without restarting Hermes, simulate each backend outage, and prove rollback. LXC105 remains the live reference/rollback box and must not be migrated until halo143 has passed the soak and the operator opens the production migration window.
 
 ## Delivery sequence
 
-1. **Compatibility foundation:** select/reconcile official Hermes target; add contract fixtures and drift tracking.
+1. **Hermes compatibility prerequisite:** select a reviewed official release/tag or commit (the researched upstream `main` SHA is not automatically the production pin), reconcile fork lineage, add contract fixtures, and expand `hermes-sdk-diff`. No downstream adapter work begins before this lands.
 2. **Shared core and bundle lifecycle:** endpoint/auth/error library plus plan/apply/verify/rollback packaging.
 3. **Hindsight memory:** correct loader layout, implement full lifecycle, visibility policy, migration, tools, and failure spool.
 4. **Dynamic provider:** unified inventory, stable role aliases, event invalidation, reconciliation, and diagnostics.
 5. **Voice:** managed dynamic wrappers, local fallback, privacy policy, and diagnostics.
-6. **LXC105 migration and soak:** stage, migrate, verify, rollback drill, soak, legacy cleanup.
-7. **Optional future work:** consider `hal0-context`, streaming voice, dashboard, or observability only from demonstrated requirements.
+6. **halo143 validation and soak:** stage, migrate representative data, verify, and complete the rollback drill and soak while LXC105 remains untouched.
+7. **LXC105 production migration:** open an explicit migration window only after halo143 passes; snapshot, migrate, verify, and perform ordered legacy cleanup.
+8. **Optional future work:** consider `hal0-context`, streaming voice, dashboard, or observability only from demonstrated requirements.
 
 Each phase must produce independently testable software and may ship separately. The memory, provider, and voice adapters remain independently disableable.
-
-## Review notes (2026-07-18, orchestrator) — status caveat + reconcile with landed rework
-
-The design is well-structured and correctly scoped (three adapters + core; dashboard/observability/context/streaming deferred). Six additions before implementation, cross-referencing `REWORK.md` / `REWORK_BOARD.md` and work landed this session:
-
-1. **"Status: Approved design" is gated on a prerequisite that isn't scheduled.** The whole suite hard-depends on Phase-0 upstream reconciliation (pin `earendil-works@0554ef1` → `NousResearch@7fd419e`), which is a **significant compat lane not yet on `REWORK_BOARD.md`**. Downgrade to "Approved, blocked on HERMES pin-reconciliation lane" and add that lane to the board (with the `hermes-sdk-diff` expansion) so the dependency is tracked, not implicit.
-
-2. **`hal0-voice` in the initial suite vs `REWORK.md` voice non-goal — clarify, they don't conflict.** `REWORK.md` defers the **hal0 voice *stack* / new voice models (§19)**. This suite's `hal0-voice` only **routes Hermes voice through existing hal0 STT/TTS slots** — no new models, no new hal0 voice runtime. State this distinction in Non-goals so a reader enforcing the freeze doesn't flag it. (It's in-scope; §19 is not.)
-
-3. **Provider alias resolution + "Configuration ownership" should name the now-landed primitives.** §11.1 opaque **slot-id** (name = mutable label) and §11.2 **PortAuthority** (`port_claim`) MERGED this session. The provider's "owning slot identifier" (Inventory contract) = the opaque slot-id; ports come from PortAuthority. Update the inventory/alias sections to bind to these, not to slot name/config port.
-
-4. **hal0-hermes-core auth + liveness.** Make the shared core's auth concrete against KB-1: `HAL0_CLIENT_KEY` for inference/read, `HAL0_ADMIN_KEY` for mutations, deny-by-default. **All reachability/preflight probes must hit an OPEN endpoint (`/api/health`), never admin-gated `/api/status`** — that exact bug (`#5`) failed every install until fixed this session. Add it to the "Provider diagnostics" + core contract.
-
-5. **"Configuration ownership: plugin sources root-owned/read-only while service sandboxed" now needs the §7.4 born-owned split.** §7.4 (F.7) LANDED: `$HERMES_HOME` trees are **born `hal0:hal0`** (both chown layers deleted); `/usr/local/bin/hermes` + `/etc/hal0/agents/hermes.toml` stay **root:root**; root residue flows through the audited `hal0-systemctl write-gateway-dropin` + `hal0-agentenv write-seed-toml` seams. Rewrite this section to draw the ownership line per-tree and reference the seams — the current one-liner reads as "everything root-owned," which is no longer true.
-
-6. **LXC105 migration = the same procedure as `REWORK.md` Honcho→Hindsight + the board's migration-window lane.** Don't fork it. The 10-step migration here should reference the canonical Honcho→Hindsight window (snapshot → per-workspace dry-run → migrate → verify counts/recalls → snapshot → reconfigure → ordered deletion → prove `Hal0Config` tolerates persisted `[honcho]`). Cross-link so there is one migration of record. Also: LXC105 is the **live reference box (do not disturb prematurely)**; the current deploy target is **halo143** — confirm which box the "live acceptance"/soak runs on (halo143 for validation; LXC105 stays rollback/reference until proven).
 
 ## Success criteria
 
@@ -438,5 +435,5 @@ The suite is complete when:
 - recall combines shared and caller-private memory with provenance and visibility labels;
 - corrections, supersession, forgetting, session/compression hooks, and failure recovery work;
 - provider, memory, and voice outages degrade independently without taking down chat;
-- LXC105 migrates without losing approved useful data and has a proven rollback path;
+- halo143 passes validation and soak before LXC105's production migration window opens; LXC105 then migrates without losing approved useful data and retains a proven rollback path;
 - official Hermes compatibility and drift are continuously verified.
