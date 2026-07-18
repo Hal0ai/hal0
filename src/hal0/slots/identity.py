@@ -223,9 +223,7 @@ class SlotIdentityStore:
 
     # ── name-keyed bridge ────────────────────────────────────────────────
 
-    def get_by_name(
-        self, name: str, *, conn: sqlite3.Connection | None = None
-    ) -> SlotRow | None:
+    def get_by_name(self, name: str, *, conn: sqlite3.Connection | None = None) -> SlotRow | None:
         with self._read(conn) as c:
             row = c.execute("SELECT * FROM slot WHERE name = ?", (name,)).fetchone()
         return _row_to_slot(row) if row is not None else None

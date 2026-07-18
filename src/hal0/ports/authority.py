@@ -134,9 +134,7 @@ class PortAuthority:
 
     def _live_ports(self, conn: sqlite3.Connection | None = None) -> set[int]:
         with self._read(conn) as c:
-            rows = c.execute(
-                "SELECT port FROM port_claim WHERE released_at IS NULL"
-            ).fetchall()
+            rows = c.execute("SELECT port FROM port_claim WHERE released_at IS NULL").fetchall()
         return {int(r["port"]) for r in rows}
 
     def _listener_ports(self) -> set[int]:
@@ -227,9 +225,7 @@ class PortAuthority:
 
     # ── writes ───────────────────────────────────────────────────────────
 
-    def reserve(
-        self, port: int, *, label: str, conn: sqlite3.Connection | None = None
-    ) -> None:
+    def reserve(self, port: int, *, label: str, conn: sqlite3.Connection | None = None) -> None:
         """Reserve a port for a non-slot owner (the API's own port, etc.).
 
         Idempotent: reserving an already-live-reserved port under the same
@@ -291,13 +287,9 @@ class PortAuthority:
         attempts = (end - start + 1) + 1
         pref = preferred
         for _ in range(attempts):
-            port = self.next_free(
-                preferred=pref, include_listeners=include_listeners, conn=conn
-            )
+            port = self.next_free(preferred=pref, include_listeners=include_listeners, conn=conn)
             if port is None:
-                raise PortPoolExhausted(
-                    f"no free port in pool {self._pool} for slot {slot_id}"
-                )
+                raise PortPoolExhausted(f"no free port in pool {self._pool} for slot {slot_id}")
             try:
                 with self._write(conn) as c:
                     c.execute(

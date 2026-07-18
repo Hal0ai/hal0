@@ -974,9 +974,7 @@ async def delete_model(
         # referrers → clear [model].default → registry delete → snapshot GC);
         # the terminal model.deleted emit fires AFTER the audit context closes.
         slot_manager = getattr(request.app.state, "slot_manager", None)
-        removed = await _svc.cascade_delete_model(
-            registry, slot_manager, model_id, affected
-        )
+        removed = await _svc.cascade_delete_model(registry, slot_manager, model_id, affected)
         rec.after = {
             "id": model_id,
             "deleted": bool(removed),

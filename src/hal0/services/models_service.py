@@ -387,7 +387,9 @@ async def auto_scan_and_register(
     return result
 
 
-def preview_scan_rows(raw_paths: list[Any], recursive: bool, extensions: set[str]) -> list[dict[str, Any]]:
+def preview_scan_rows(
+    raw_paths: list[Any], recursive: bool, extensions: set[str]
+) -> list[dict[str, Any]]:
     """Walk ``raw_paths`` and return :class:`DetectionResult` rows (no mutation).
 
     Inspection-only: selects files matching ``extensions`` when walking dirs,

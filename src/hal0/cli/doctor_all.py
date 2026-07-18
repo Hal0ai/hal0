@@ -108,7 +108,9 @@ def check_migrations(pending: tuple[int, int] | None) -> Check:
     the planner could not be consulted (degrades to a skipped/pass note).
     """
     if pending is None:
-        return Check("migrations", "Migrations", _PASS, "layout migration planner unavailable — skipped")
+        return Check(
+            "migrations", "Migrations", _PASS, "layout migration planner unavailable — skipped"
+        )
     create, overwrite = pending
     if not create and not overwrite:
         return Check("migrations", "Migrations", _PASS, "model layout current")
@@ -132,9 +134,7 @@ def check_ports(slots: Any) -> Check:
     """
     if not isinstance(slots, list):
         return Check("ports", "Slot ports", _WARN, "slots endpoint unreachable")
-    bound = sorted(
-        {int(s["port"]) for s in slots if isinstance(s, dict) and s.get("port")}
-    )
+    bound = sorted({int(s["port"]) for s in slots if isinstance(s, dict) and s.get("port")})
     if not bound:
         return Check("ports", "Slot ports", _PASS, "no slot ports bound yet")
     return Check("ports", "Slot ports", _PASS, f"{len(bound)} bound: {', '.join(map(str, bound))}")

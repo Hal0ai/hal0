@@ -152,12 +152,8 @@ def test_coresident_shadow_shares_anchor_port(tmp_path: Path) -> None:
     stt = _slot(
         ident, "stt", slot_type="transcription", device="npu", coresident_group="npu-flm-trio"
     )
-    anchor_port = auth.acquire(
-        anchor, coresident_group="npu-flm-trio", include_listeners=False
-    )
-    shadow_port = auth.acquire(
-        stt, coresident_group="npu-flm-trio", include_listeners=False
-    )
+    anchor_port = auth.acquire(anchor, coresident_group="npu-flm-trio", include_listeners=False)
+    shadow_port = auth.acquire(stt, coresident_group="npu-flm-trio", include_listeners=False)
     assert shadow_port == anchor_port
     # Only ONE live claim exists for the shared port (the anchor's).
     assert sum(1 for c in auth.claims() if c.port == anchor_port) == 1

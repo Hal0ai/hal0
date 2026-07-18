@@ -164,9 +164,8 @@ def _preferred_runner_if_fits(
         preferred_runner = get_runner(preferred)
     except NotFound:
         return None
-    if (
-        preferred_runner.runtime_family == "llama-server"
-        and runner_matches(preferred_runner, device_class=device_class, backend=backend)
+    if preferred_runner.runtime_family == "llama-server" and runner_matches(
+        preferred_runner, device_class=device_class, backend=backend
     ):
         return preferred_runner
     return None

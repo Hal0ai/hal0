@@ -25,9 +25,7 @@ from hal0.slots.manager import SlotManager
 from hal0.updater.updater import clear_stale_mtp_overrides
 
 
-def _register(
-    model_id: str, *, tags: list[str] | None = None, mtp: bool | None = None
-) -> None:
+def _register(model_id: str, *, tags: list[str] | None = None, mtp: bool | None = None) -> None:
     ModelRegistry().add(
         Model(
             id=model_id,

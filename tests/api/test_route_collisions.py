@@ -96,9 +96,12 @@ def test_no_literal_route_is_shadowed_by_an_earlier_parameterized_route() -> Non
     assert effective, "flattener found no APIRoutes — router introspection broke"
 
     shadows = _find_shadows(effective)
-    assert not shadows, "route shadow(s) detected (parameterized route registered before literal):\n" + "\n".join(
-        f"  {lit} [{','.join(methods)}] is shadowed by earlier {param}"
-        for param, lit, methods in shadows
+    assert not shadows, (
+        "route shadow(s) detected (parameterized route registered before literal):\n"
+        + "\n".join(
+            f"  {lit} [{','.join(methods)}] is shadowed by earlier {param}"
+            for param, lit, methods in shadows
+        )
     )
 
 

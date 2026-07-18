@@ -100,17 +100,13 @@ class TestPackagedSlotsPortsMigration:
     def test_port_claim_slot_id_set_null_on_slot_delete(self, tmp_path: Path) -> None:
         with connect(tmp_path / "t.db") as conn:
             migrate(conn)
-            sid = conn.execute(
-                "INSERT INTO slot (name, slot_type) VALUES ('a', 'llm')"
-            ).lastrowid
+            sid = conn.execute("INSERT INTO slot (name, slot_type) VALUES ('a', 'llm')").lastrowid
             conn.execute(
                 "INSERT INTO port_claim (port, slot_id, owner_kind, owner_label) "
                 "VALUES (8081, ?, 'slot', 'slot:a')",
                 (sid,),
             )
             conn.execute("DELETE FROM slot WHERE id = ?", (sid,))
-            row = conn.execute(
-                "SELECT slot_id FROM port_claim WHERE port = 8081"
-            ).fetchone()
+            row = conn.execute("SELECT slot_id FROM port_claim WHERE port = 8081").fetchone()
             # Audit trail preserved; ownership dropped to NULL.
             assert row["slot_id"] is None

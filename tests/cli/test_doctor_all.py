@@ -153,9 +153,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         }.get(path)
 
     monkeypatch.setattr(da, "_get_any", _fake_get)
-    monkeypatch.setattr(
-        "hal0.cli.doctor_commands.pending_layout_migration", lambda: (0, 0)
-    )
+    monkeypatch.setattr("hal0.cli.doctor_commands.pending_layout_migration", lambda: (0, 0))
     # model file existence: pretend present so no spurious fail.
     monkeypatch.setattr(da.Path, "exists", lambda self: True)
 
@@ -171,9 +169,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
 
 def test_command_json_emits_rows_and_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        da, "build_all_checks", lambda: [_c("pass"), _c("fail")]
-    )
+    monkeypatch.setattr(da, "build_all_checks", lambda: [_c("pass"), _c("fail")])
     buf = io.StringIO()
     monkeypatch.setattr(da, "console", Console(file=buf))
     with pytest.raises(typer.Exit) as exc:

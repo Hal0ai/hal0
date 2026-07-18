@@ -128,11 +128,7 @@ def runner_fits_slot(runner_key: str, cfg_dict: dict[str, Any]) -> bool:
     if not device:
         return True  # no device pinned yet — nothing to conflict with
     slot_class = (
-        "gpu"
-        if device.startswith("gpu")
-        else device
-        if device in ("npu", "cpu", "img")
-        else "cpu"
+        "gpu" if device.startswith("gpu") else device if device in ("npu", "cpu", "img") else "cpu"
     )
     from hal0.model_meta import device_to_backend
 

@@ -398,7 +398,11 @@ _MTP_ELIGIBILITY_CASES: list[tuple[str, dict[str, Any], bool]] = [
         {"_model_key": "CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN"},
         False,
     ),
-    ("path_name_marker_alone_no_longer_eligible", {"path": "/m/Qwopus3.5-4B-Coder-MTP.gguf"}, False),
+    (
+        "path_name_marker_alone_no_longer_eligible",
+        {"path": "/m/Qwopus3.5-4B-Coder-MTP.gguf"},
+        False,
+    ),
     (
         "explicit_true_beats_absent_tag",
         {"_model_key": "plain", "tags": [], "defaults": {"mtp": True}},
@@ -420,7 +424,11 @@ _MTP_ELIGIBILITY_CASES: list[tuple[str, dict[str, Any], bool]] = [
         False,
     ),
     ("no_defaults_key_at_all", {"_model_key": "tagged", "tags": ["mtp"]}, True),
-    ("defaults_not_a_dict_ignored", {"_model_key": "tagged", "tags": ["mtp"], "defaults": "x"}, True),
+    (
+        "defaults_not_a_dict_ignored",
+        {"_model_key": "tagged", "tags": ["mtp"], "defaults": "x"},
+        True,
+    ),
 ]
 
 

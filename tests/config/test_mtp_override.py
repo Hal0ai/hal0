@@ -110,8 +110,7 @@ def test_no_filename_marker_sniffing_anymore():
     """§7.1a / ML-5: the old _MTP_NAME_RE path is REMOVED — an 'MTP' token
     in the model id/GGUF name no longer makes a model eligible on its own."""
     assert (
-        model_is_mtp_eligible({"_model_key": "CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN"})
-        is False
+        model_is_mtp_eligible({"_model_key": "CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN"}) is False
     )
     assert model_is_mtp_eligible({"path": "/m/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"}) is False
 
@@ -127,24 +126,18 @@ def test_explicit_defaults_mtp_false_wins_over_present_tag():
     """The explicit tri-state override wins in EITHER direction — even
     suppressing a model that DOES carry the registry tag."""
     assert (
-        model_is_mtp_eligible(
-            {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": False}}
-        )
+        model_is_mtp_eligible({"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": False}})
         is False
     )
 
 
 def test_defaults_mtp_none_falls_back_to_tag():
     assert (
-        model_is_mtp_eligible(
-            {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": None}}
-        )
+        model_is_mtp_eligible({"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": None}})
         is True
     )
     assert (
-        model_is_mtp_eligible(
-            {"_model_key": "untagged", "tags": [], "defaults": {"mtp": None}}
-        )
+        model_is_mtp_eligible({"_model_key": "untagged", "tags": [], "defaults": {"mtp": None}})
         is False
     )
 

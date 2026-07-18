@@ -40,7 +40,7 @@ def test_manifest_digest_pin_beats_bundled_default(tmp_hal0_home: str) -> None:
                     "digest": "sha256:" + "a" * 64,
                 }
             }
-        }
+        },
     )
     resolved = resolve_runner_image(runner)
     assert resolved == f"ghcr.io/hal0ai/hal0-toolbox-flm@sha256:{'a' * 64}"
@@ -58,7 +58,7 @@ def test_env_override_beats_manifest_digest_pin(tmp_hal0_home: str, monkeypatch)
                     "digest": "sha256:" + "a" * 64,
                 }
             }
-        }
+        },
     )
     monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_FLM", "ghcr.io/dev/flm-override:test")
     assert resolve_runner_image(runner) == "ghcr.io/dev/flm-override:test"
@@ -99,7 +99,7 @@ def test_no_manifest_key_skips_manifest_tier_even_if_manifest_has_a_match(
                     "digest": "sha256:" + "b" * 64,
                 }
             }
-        }
+        },
     )
     assert resolve_runner_image(runner) == runner.image
 
@@ -120,7 +120,7 @@ def test_manifest_tier_applies_to_every_manifest_backed_runner(
     digest = "sha256:" + "c" * 64
     _write_manifest(
         tmp_hal0_home,
-        {"toolbox_images": {runner.manifest_key: {"tag": runner.image, "digest": digest}}}
+        {"toolbox_images": {runner.manifest_key: {"tag": runner.image, "digest": digest}}},
     )
     resolved = resolve_runner_image(runner)
     assert resolved.endswith(f"@{digest}")
