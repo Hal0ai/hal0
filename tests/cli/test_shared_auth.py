@@ -25,9 +25,7 @@ def test_auth_headers_falls_back_to_client_env(monkeypatch: pytest.MonkeyPatch) 
     assert _shared._auth_headers() == {"Authorization": "Bearer cli-456"}
 
 
-def test_auth_headers_reads_api_env_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_auth_headers_reads_api_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     etc = tmp_path / "etc"
     etc.mkdir()
     (etc / "api.env").write_text(
