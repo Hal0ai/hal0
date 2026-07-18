@@ -210,6 +210,38 @@ def test_run_verify_returns_0_when_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rc == 0
 
 
+def test_run_verify_json_output_emits_verdict_and_diagnoses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as jsonlib
+
+    monkeypatch.setattr(
+        dv,
+        "gather_payloads",
+        lambda base=None: {
+            "health": None,
+            "urls": None,
+            "system": None,
+            "capabilities": None,
+            "memory": None,
+            "services": None,
+        },
+    )
+    buf = io.StringIO()
+    rc = dv.run_verify(
+        console=Console(file=buf, force_terminal=False, width=200),
+        json_output=True,
+    )
+    assert rc == 2
+    payload = jsonlib.loads(buf.getvalue())
+    assert payload["verdict"] == "critical"
+    ids = {d["id"] for d in payload["diagnoses"]}
+    assert "HAL0-API-UNREACHABLE" in ids
+    assert "HAL0-RUNNERS-NONE-HEALTHY" in ids
+    api_row = next(d for d in payload["diagnoses"] if d["id"] == "HAL0-API-UNREACHABLE")
+    assert api_row["severity"] == "critical"
+
+
 def test_gather_payloads_tolerates_api_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     from hal0.cli import _shared
 
