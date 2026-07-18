@@ -61,12 +61,19 @@ from hal0.slots.profile_adopt import (
     apply_preferred_profile as _profile_adopt_apply_preferred_profile,
 )
 from hal0.slots.profile_adopt import (
+    apply_preferred_runner as _profile_adopt_apply_preferred_runner,
+)
+from hal0.slots.profile_adopt import (
     defuse_stale_mtp_on_swap as _profile_adopt_defuse_stale_mtp_on_swap,
 )
 from hal0.slots.profile_adopt import (
     preferred_profile_for as _profile_adopt_preferred_profile_for,
 )
+from hal0.slots.profile_adopt import (
+    preferred_runner_for as _profile_adopt_preferred_runner_for,
+)
 from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
+from hal0.slots.profile_adopt import runner_fits_slot as _profile_adopt_runner_fits_slot
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
 from hal0.slots.reaper import is_pinned as _reaper_is_pinned
 from hal0.slots.reaper import probe_host_free_mb as _reaper_probe_host_free_mb
@@ -962,6 +969,18 @@ class SlotManager:
                 "slot.preferred_profile_swap_failed",
                 extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
             )
+        # §7.1b / ML-4: adopt the new model's preferred runner image — same
+        # soft-fail contract as the preferred-profile hook above (a write
+        # failure must not block the swap; the dynamic model_info tier in
+        # _resolve_image_ref means the right image still launches even if
+        # this persist is skipped).
+        try:
+            await self._apply_preferred_runner(slot_name, new_model_id)
+        except SlotConfigError as exc:
+            log.warning(
+                "slot.preferred_runner_swap_failed",
+                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
+            )
         # MTP defuse: a forced mtp=true pointing at a model with no MTP heads
         # makes llama-server exit at load ("model doesn't contain MTP layers"),
         # so a swap onto an ineligible model clears exactly that override
@@ -1355,6 +1374,17 @@ class SlotManager:
             preferred = await self._preferred_profile_for(model_tbl.get("default"))
             if preferred and self._profile_fits_slot(preferred, cfg_dict):
                 cfg_dict["profile"] = preferred
+        # §7.1b / ML-4: mirrors the profile adoption immediately above — a
+        # new slot bound to a model but with NO explicit image override
+        # adopts the model's preferred runner's image when it fits the
+        # slot's device/backend. An operator's explicit create-time image
+        # is left untouched (only an empty image is filled).
+        if isinstance(model_tbl, dict) and model_tbl.get("default") and not cfg_dict.get("image"):
+            preferred_runner = await self._preferred_runner_for(model_tbl.get("default"))
+            if preferred_runner and self._runner_fits_slot(preferred_runner, cfg_dict):
+                from hal0.runners import get_runner, resolve_runner_image
+
+                cfg_dict["image"] = resolve_runner_image(get_runner(preferred_runner))
         # Reject (or normalize) an incoherent device/profile backend pairing
         # before it ever lands on disk — the door the dashboard left open for
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
@@ -1719,6 +1749,21 @@ class SlotManager:
     async def _defuse_stale_mtp_on_swap(self, slot_name: str, model_id: str) -> bool:
         """See :func:`hal0.slots.profile_adopt.defuse_stale_mtp_on_swap`."""
         return await _profile_adopt_defuse_stale_mtp_on_swap(self, slot_name, model_id)
+
+    # ── model preferred runner (§7.1b / ML-4: image loads with the model) ─────
+    #
+    # Sibling of the preferred-profile hooks above; logic lives in
+    # hal0.slots.profile_adopt, this class is a thin delegator.
+
+    async def _preferred_runner_for(self, model_id: str | None) -> str | None:
+        """See :func:`hal0.slots.profile_adopt.preferred_runner_for`."""
+        return await _profile_adopt_preferred_runner_for(self, model_id)
+
+    _runner_fits_slot = staticmethod(_profile_adopt_runner_fits_slot)
+
+    async def _apply_preferred_runner(self, slot_name: str, model_id: str) -> bool:
+        """See :func:`hal0.slots.profile_adopt.apply_preferred_runner`."""
+        return await _profile_adopt_apply_preferred_runner(self, slot_name, model_id)
 
     async def _check_npu_exclusivity(
         self,
