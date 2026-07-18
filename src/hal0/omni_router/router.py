@@ -23,8 +23,8 @@ returns the final non-streaming response dict.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -35,6 +35,7 @@ from hal0.omni_router.dispatch import (
 )
 from hal0.omni_router.filter import SlotManagerLike, active_tools_for
 from hal0.omni_router.tools import ToolDefinition
+from hal0.toolloop.engine import run_tool_loop
 
 log = logging.getLogger(__name__)
 
@@ -122,60 +123,54 @@ class OmniRouter:
             return await self._chat_completion(self._strip_omni(body))
 
         ctx = self._build_context(caller_slot_name)
-        # Local mutable copy so we can append tool_result messages.
+        # Local mutable copy so the loop core can append tool_result messages.
         working = dict(self._strip_omni(body))
-        messages = list(working.get("messages") or [])
-        working["messages"] = messages
-        working["tools"] = [t.to_openai_tool() for t in tools_active]
-        # Streaming deferred to PR-18.
-        working["stream"] = False
+        working["messages"] = list(working.get("messages") or [])
+        tool_schemas = [t.to_openai_tool() for t in tools_active]
 
+        round_count = 0
         last_response: dict[str, Any] | None = None
-        for round_idx in range(_MAX_LOOP_ROUNDS):
-            response = await self._chat_completion(working)
-            last_response = response
-            tool_calls = self._extract_tool_calls(response)
-            if not tool_calls:
-                return response
 
-            # Append the assistant's tool_call message so the model
-            # sees its own turn on the next request.
-            assistant_message = self._extract_assistant_message(response)
-            if assistant_message is not None:
-                messages.append(assistant_message)
-
-            # Dispatch all tool_calls in parallel — multiple tool_calls
-            # in one response are a normal OpenAI shape and we don't
-            # want serial latency.
+        async def _dispatch_round(
+            tool_calls: list[dict[str, Any]],
+        ) -> AsyncIterator[dict[str, Any]]:
+            nonlocal round_count
+            # Dispatch all tool_calls in parallel — multiple tool_calls in
+            # one response are a normal OpenAI shape and we don't want
+            # serial latency.
             results = await asyncio.gather(
-                *(
-                    dispatch_tool(ctx, tc["function"]["name"], tc["function"]["arguments"])
-                    for tc in tool_calls
-                )
+                *(dispatch_tool(ctx, tc["name"], tc["arguments"]) for tc in tool_calls)
             )
             for tc, result in zip(tool_calls, results, strict=True):
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "name": tc["function"]["name"],
-                        "content": json.dumps(result),
-                    }
-                )
+                yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
             log.debug(
                 "omni_router.loop_round",
                 extra={
-                    "round": round_idx,
+                    "round": round_count,
                     "tool_calls": len(tool_calls),
                     "caller": caller_slot_name,
                 },
             )
+            round_count += 1
 
-        # Loop budget exhausted — return the last response we got.
-        log.warning(
-            "omni_router.loop_budget_exhausted",
-            extra={"max_rounds": _MAX_LOOP_ROUNDS, "caller": caller_slot_name},
-        )
+        async for event in run_tool_loop(
+            self._chat_completion,
+            tool_schemas,
+            _dispatch_round,
+            body=working,
+            max_rounds=_MAX_LOOP_ROUNDS,
+        ):
+            etype = event.get("type")
+            if etype == "response":
+                last_response = event["data"]
+            elif etype == "error" and "budget exhausted" in str(event.get("message", "")):
+                # Loop budget exhausted — the core still returns the last
+                # response we got via the "response" marker above.
+                log.warning(
+                    "omni_router.loop_budget_exhausted",
+                    extra={"max_rounds": _MAX_LOOP_ROUNDS, "caller": caller_slot_name},
+                )
+
         return last_response or {"error": "loop budget exhausted with no response"}
 
     # ── helpers ────────────────────────────────────────────────────
@@ -223,60 +218,6 @@ class OmniRouter:
         """Drop hal0-specific knobs that must not reach the upstream."""
         out = {k: v for k, v in body.items() if k != "omni"}
         return out
-
-    @staticmethod
-    def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
-        """Pull ``tool_calls`` out of a chat-completion response.
-
-        Normalises ``arguments`` to a dict — OpenAI ships it as a
-        JSON-encoded string. Malformed JSON yields an empty dict and
-        the dispatcher's argument-validator emits the missing-arg
-        error.
-        """
-        choices = response.get("choices") or []
-        if not choices:
-            return []
-        msg = choices[0].get("message") or {}
-        raw_calls = msg.get("tool_calls") or []
-        out: list[dict[str, Any]] = []
-        for tc in raw_calls:
-            if not isinstance(tc, dict):
-                continue
-            fn = tc.get("function") or {}
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                    if not isinstance(parsed, dict):
-                        parsed = {}
-                except ValueError:
-                    parsed = {}
-            elif isinstance(args, dict):
-                parsed = args
-            else:
-                parsed = {}
-            out.append(
-                {
-                    "id": tc.get("id", ""),
-                    "type": tc.get("type", "function"),
-                    "function": {
-                        "name": fn.get("name", ""),
-                        "arguments": parsed,
-                    },
-                }
-            )
-        return out
-
-    @staticmethod
-    def _extract_assistant_message(response: dict[str, Any]) -> dict[str, Any] | None:
-        """Pull the assistant turn message (with tool_calls) for replay."""
-        choices = response.get("choices") or []
-        if not choices:
-            return None
-        msg = choices[0].get("message")
-        if isinstance(msg, dict):
-            return msg
-        return None
 
 
 __all__ = ["OmniRouter"]
