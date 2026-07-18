@@ -232,6 +232,15 @@ def _touch_npu_shadow_count(request: Request, slot_name: str) -> None:
 
 _TRUTHY_PARAMS = frozenset({"1", "true", "yes", "on"})
 
+# §21.5: the raw-catalog modality buckets hidden from GET /v1/models by
+# default — media-generation + audio models an OpenAI *chat* client never
+# wants in its model picker. Text models (chat + embed + rerank) stay
+# visible so a client enumerating /v1/models can still discover the
+# embeddings/rerank endpoints. Vocabulary is ``hal0.model_meta.classify``'s
+# bucket names: ``img`` (image/video-gen), ``tts`` (speech synth), ``stt``
+# (ASR/transcription). ``?show_all=true`` returns everything regardless.
+_NON_TEXT_MODALITIES = frozenset({"img", "tts", "stt"})
+
 
 def _parse_bool_param(raw: str | None) -> bool:
     """Parse a query-param string as a bool; missing/unrecognised → False.
@@ -723,14 +732,30 @@ async def list_models(
     id, ``False`` for an upstream-only / not-yet-pulled id).
 
     By default, raw catalog entries whose modality (per
-    ``hal0.model_meta.classify``) isn't ``"chat"`` are hidden — a raw
-    image-gen/embed/rerank/tts/asr passthrough id otherwise pollutes a
-    chat-client's model picker. Pass ``?show_all=true`` to see everything
-    (slot alias entries are never filtered — every enabled llm slot is a
-    chat model by construction).
+    ``hal0.model_meta.classify``) is a NON-TEXT bucket
+    (``_NON_TEXT_MODALITIES`` — image/video-gen, TTS, ASR) are hidden: a
+    raw media-gen/audio passthrough id otherwise pollutes a chat client's
+    model picker. Text models (chat + embed + rerank) stay visible so a
+    client can still discover the embeddings/rerank endpoints. Pass
+    ``?show_all=true`` to see everything (slot alias entries are never
+    filtered — every enabled llm slot is a chat model by construction).
 
     PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
     catalog before sending Authorization headers continue to work.
+    """
+    show_all = _parse_bool_param(request.query_params.get("show_all"))
+    data = await _aggregate_models(request, show_all=show_all)
+    return {"object": "list", "data": data}
+
+
+async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[str, Any]]:
+    """Build the ``/v1/models`` ``data`` list (see :func:`list_models`).
+
+    Split out so ``get_model`` can request the UNFILTERED aggregate
+    (``show_all=True``) for a by-id lookup — an explicit direct fetch must
+    resolve a valid id even when the LIST default would hide its modality
+    — while the list route keeps the clean default. The ``owned_by`` /
+    ``X-hal0-Model-Filter`` curation applies in both paths.
     """
     from hal0.api import (
         hal0_apply_registry_detail,
@@ -739,7 +764,6 @@ async def list_models(
     )
     from hal0.model_meta import classify
 
-    show_all = _parse_bool_param(request.query_params.get("show_all"))
     upstreams = request.app.state.upstreams
     model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {}) or {}
     seen: set[str] = set()
@@ -792,7 +816,7 @@ async def list_models(
                 registry_entry = None
         if not show_all:
             capabilities = getattr(registry_entry, "capabilities", None)
-            if classify(mid, capabilities=capabilities) != "chat":
+            if classify(mid, capabilities=capabilities) in _NON_TEXT_MODALITIES:
                 return None
         row: dict[str, Any] = {
             "id": mid,
@@ -869,7 +893,7 @@ async def list_models(
     if owner_filter:
         data = [d for d in data if d.get("owned_by") == owner_filter]
 
-    return {"object": "list", "data": data}
+    return data
 
 
 @public_router.get("/models/{model_id:path}")
@@ -885,13 +909,15 @@ async def get_model(
     so SDKs that resolve a model handle through ``/v1/models/{id}``
     before chatting don't need credentials to do so.
 
-    Delegates to :func:`list_models` against the SAME request, so its
-    ``owned_by``/``show_all`` query params apply here too — a non-chat
-    id (embed/rerank/tts/image) 404s unless the caller passes
-    ``?show_all=true``, same as it would from the aggregate list.
+    A by-id fetch is an EXPLICIT request, so it bypasses the LIST route's
+    default non-text-modality hiding (``_aggregate_models(show_all=True)``)
+    — a valid embed/rerank/image/tts/asr id resolves here even though the
+    unfiltered catalog list would omit it by default. The ``owned_by`` /
+    ``X-hal0-Model-Filter`` curation still applies (a mismatched owner
+    scopes the id out, unchanged from before).
     """
-    listing = await list_models(request, dispatcher)
-    for entry in listing.get("data", []):  # type: ignore[union-attr]
+    data = await _aggregate_models(request, show_all=True)
+    for entry in data:
         if isinstance(entry, dict) and entry.get("id") == model_id:
             return entry
     from hal0.dispatcher.router import NoRouteFound

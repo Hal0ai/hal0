@@ -140,8 +140,9 @@ def test_model_filter_header_matches_query_param(client: TestClient) -> None:
 #
 # Extends GET /v1/models with labels/checkpoint/recipe/downloaded (sourced
 # from the local model registry row when a raw catalog id happens to be
-# registered) and a show_all query param that hides non-chat-modality raw
-# catalog ids by default.
+# registered) and a show_all query param that hides NON-TEXT-modality raw
+# catalog ids by default. Text models (chat + embed + rerank) stay visible;
+# only media-gen/audio (image / tts / asr) are hidden unless show_all=true.
 
 
 def test_registry_detail_folds_into_catalog_row(client: TestClient) -> None:
@@ -175,12 +176,28 @@ def test_registry_detail_folds_into_catalog_row(client: TestClient) -> None:
     assert "recipe" not in unregistered
 
 
-def test_show_all_hides_non_chat_modality_by_default(client: TestClient) -> None:
-    """A raw upstream id classified as non-chat (image-gen, per its
-    registered ``capabilities``) is hidden by default and restored by
-    ``?show_all=true``; genuine chat passthrough ids are unaffected."""
+def test_default_hides_media_modalities_keeps_text(client: TestClient) -> None:
+    """The default (show_all=false) view hides image-gen / TTS / ASR raw
+    catalog ids but KEEPS text models — chat AND embed AND rerank — since a
+    client enumerates /v1/models to find the embeddings/rerank endpoints."""
     _seed_remote(client)
     registry = client.app.state.model_registry
+    # Re-tag three of the seeded passthrough ids across the modality
+    # spectrum via their registered capabilities.
+    registry.add(
+        Model(
+            id="deepseek/deepseek-r1:free",
+            path="/var/lib/hal0/models/embed-bucket/embed/model.gguf",
+            capabilities=["embed"],
+        )
+    )
+    registry.add(
+        Model(
+            id="google/gemini-2.5-pro",
+            path="/var/lib/hal0/models/rerank-bucket/rerank/model.gguf",
+            capabilities=["rerank"],
+        )
+    )
     registry.add(
         Model(
             id="nvidia/llama-3.1-nemotron-70b",
@@ -189,28 +206,67 @@ def test_show_all_hides_non_chat_modality_by_default(client: TestClient) -> None
         )
     )
     ids_default = _listed_ids(client)
+    # Text models — chat passthroughs + the embed + the rerank id — visible.
+    assert "anthropic/claude-sonnet-4" in ids_default
+    assert "anthropic/claude-3-haiku" in ids_default
+    assert "deepseek/deepseek-r1:free" in ids_default  # embed
+    assert "google/gemini-2.5-pro" in ids_default  # rerank
+    # Media-gen modality hidden by default.
     assert "nvidia/llama-3.1-nemotron-70b" not in ids_default
-    for mid in OPENROUTER_MODELS:
-        if mid == "nvidia/llama-3.1-nemotron-70b":
-            continue
-        assert mid in ids_default
+
+
+def test_show_all_reveals_hidden_media_modalities(client: TestClient) -> None:
+    """``?show_all=true`` restores the media-gen/audio rows the default
+    view hides — image, tts, and asr modalities all reappear."""
+    _seed_remote(client)
+    registry = client.app.state.model_registry
+    registry.add(
+        Model(
+            id="anthropic/claude-sonnet-4",
+            path="/var/lib/hal0/models/image-bucket/image/sdxl.safetensors",
+            capabilities=["image"],
+        )
+    )
+    registry.add(
+        Model(
+            id="anthropic/claude-3-haiku",
+            path="/var/lib/hal0/models/tts-bucket/tts/kokoro.gguf",
+            capabilities=["tts"],
+        )
+    )
+    registry.add(
+        Model(
+            id="google/gemini-2.5-pro",
+            path="/var/lib/hal0/models/asr-bucket/asr/whisper.gguf",
+            capabilities=["asr"],
+        )
+    )
+    ids_default = _listed_ids(client)
+    for hidden in (
+        "anthropic/claude-sonnet-4",
+        "anthropic/claude-3-haiku",
+        "google/gemini-2.5-pro",
+    ):
+        assert hidden not in ids_default
 
     resp = client.get("/v1/models", params={"show_all": "true"})
     assert resp.status_code == 200, resp.text
     ids_show_all = [m["id"] for m in resp.json()["data"]]
-    assert "nvidia/llama-3.1-nemotron-70b" in ids_show_all
+    for mid in OPENROUTER_MODELS:
+        assert mid in ids_show_all
 
 
 def test_show_all_query_param_is_case_and_value_tolerant(client: TestClient) -> None:
     """A handful of truthy spellings all enable show_all; any other value
-    (including "false"/garbage) keeps the default hiding behavior."""
+    (including "false"/garbage) keeps the default hiding behavior. Uses an
+    image (non-text) id, which the default view hides."""
     _seed_remote(client)
     registry = client.app.state.model_registry
     registry.add(
         Model(
             id="google/gemini-2.5-pro",
-            path="/var/lib/hal0/models/embed-bucket/embed/model.gguf",
-            capabilities=["embed"],
+            path="/var/lib/hal0/models/image-bucket/image/sdxl.safetensors",
+            capabilities=["image"],
         )
     )
     for truthy in ("1", "true", "TRUE", "yes", "on"):
@@ -221,3 +277,43 @@ def test_show_all_query_param_is_case_and_value_tolerant(client: TestClient) -> 
     resp = client.get("/v1/models", params={"show_all": "false"})
     ids = [m["id"] for m in resp.json()["data"]]
     assert "google/gemini-2.5-pro" not in ids
+
+
+def test_get_model_by_id_bypasses_default_modality_filter(client: TestClient) -> None:
+    """GET /v1/models/{id} is an explicit fetch — a valid non-text id
+    (hidden from the default LIST) still resolves by id. Its registry
+    detail (labels/checkpoint/recipe/downloaded) rides along."""
+    _seed_remote(client)
+    registry = client.app.state.model_registry
+    registry.add(
+        Model(
+            id="nvidia/llama-3.1-nemotron-70b",
+            path="/var/lib/hal0/models/image-bucket/image/sdxl.safetensors",
+            capabilities=["image"],
+            quant="FP16",
+        )
+    )
+    # Hidden from the default list …
+    assert "nvidia/llama-3.1-nemotron-70b" not in _listed_ids(client)
+    # … but a direct by-id fetch resolves it (path-encoded slashes).
+    resp = client.get("/v1/models/nvidia/llama-3.1-nemotron-70b")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == "nvidia/llama-3.1-nemotron-70b"
+    assert body["downloaded"] is True
+    assert body["labels"] == ["image"]
+    assert body["checkpoint"] == "FP16"
+    assert body["recipe"] == "image-bucket"
+
+
+def test_get_model_by_id_still_honors_owned_by(client: TestClient) -> None:
+    """The by-id bypass is modality-only — the ``owned_by`` curation still
+    scopes a mismatched-owner id out (unchanged behavior)."""
+    _seed_remote(client)
+    # openrouter-owned id + owned_by=hal0 → out of scope → 404.
+    resp = client.get("/v1/models/anthropic/claude-sonnet-4", params={"owned_by": "hal0"})
+    assert resp.status_code == 404, resp.text
+    # Same id with the matching owner resolves.
+    resp2 = client.get("/v1/models/anthropic/claude-sonnet-4", params={"owned_by": "openrouter"})
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["id"] == "anthropic/claude-sonnet-4"
