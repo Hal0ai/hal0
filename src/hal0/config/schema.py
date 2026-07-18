@@ -912,330 +912,25 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
     return DEFAULT_ROCMFPX_IMAGE
 
 
-#: Seed profile catalog.  Slugs are backend-agnostic workload names — the
-#: ``backend`` field (not the slug) carries the ROCm/Vulkan choice, and the
-#: card chip renders the backend as colour, so the slug no longer repeats it.
-#: GPU profiles set ``backend``; non-GPU profiles (npu/cpu/img) omit it and
-#: let ``device_class`` drive display.
-#:
-#: The three ROCmFPX runner profiles (``rocmfpx-rocm``, ``vkfpx-moe``,
-#: ``vkfpx-dense``) keep their ``image`` field for now (Phase 1, 0.9.5)
-#: so existing custom profiles that depend on it round-trip cleanly.
-#: Operators are encouraged to override per-slot (``image = "..."`` at the
-#: top of ``/etc/hal0/slots/<name>.toml``) so future image bumps are a
-#: code-only release, not a per-profile migration.
-SEED_PROFILES: dict[str, dict[str, object]] = {
-    "rocm": {
-        # Basic general-purpose ROCm GPU LLM profile (Strix Halo toolbox image).
-        # Intentionally minimal: -ngl 999 (offload all), -fa on (flash attn),
-        # --jinja (chat templating). Per-model KV/batch/MTP tuning lives in the
-        # model's defaults.extra_args. mtp stays False — the ROCmFPX MTP lanes
-        # live in rocm-dense / rocm-moe (and the vulkan-dense / vulkan-moe
-        # pair on the Vulkan backend); the old rocmfpx-rocm / vkfpx-* slugs
-        # were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "-ngl 999 -fa on --jinja",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCm",
-        "quant": "FP4",
-    },
-    # ROCmFPX runner — 2x2 grid (backend x {dense,moe}). Replaces the
-    # rocmfpx-rocm / vkfpx-moe / vkfpx-dense slugs (consolidated 0.9.5).
-    # Image = DEFAULT_ROCMFPX_IMAGE (see the constant for lineage).
-    "rocm-dense": {
-        # ROCm0/HIP + ROCmFP4 DENSE weights. Sustained-decode win on Strix Halo
-        # (operator memory: ROCm lane wins sustained decode, Vulkan lane wins
-        # prefill by ~+24% PP). --no-mmap + --ctx-checkpoints are the dense
-        # workload's preferred memory pattern; per-model KV + spec-draft
-        # tuning come from the model's defaults.extra_args.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
-        "mtp": True,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCmFPX · DENSE · MTP (sustained-decode)",
-        "quant": "ROCmFP4",
-    },
-    "rocm-moe": {
-        # ROCm0/HIP + ROCmFPX MoEQuality weights. Vulkan is the recommended
-        # lane for MoE sustained-decode (better t/s); this profile is the
-        # prefill-bound / -dev ROCm0 opt-in for operators who want the same
-        # backend lane across all their ROCmFPX slots. -sm none (single GPU)
-        # and --no-context-shift per the validated Tool-Eval card.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
-        "mtp": True,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCmFPX · MOE · MTP (prefill-bound / -dev ROCm0)",
-        "quant": "ROCmFPX",
-    },
-    "vulkan-dense": {
-        # Vulkan0 + ROCmFP4 DENSE weights. Prefill win (~+24% PP) for prefill-
-        # bound dense workloads (RAG / long-context reads / re-prefill after a
-        # cache miss). Small ubatch wins on gfx1151; per-model KV + spec-draft
-        # tuning come from the model's defaults.extra_args.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
-        "mtp": True,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "VULKFPX · DENSE · MTP (prefill-bound)",
-        "quant": "ROCmFP4",
-    },
-    "vulkan-moe": {
-        # Vulkan0 + ROCmFPX MoEQuality weights. Best sustained-decode t/s for
-        # MoE on Strix Halo. The validated Tool-Eval card. External chat
-        # templates (e.g. Froggeric Qwen fixed) are set per-slot via
-        # [server].extra_args.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --jinja --metrics --no-webui",
-        "mtp": True,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "VULKFPX · MOE · MTP (best decode t/s)",
-        "quant": "ROCmFPX",
-    },
-    # ── Dense-family variants (no-jinja / small / long-context) ──────────────
-    # Reusable workload templates that sit alongside the 2x2 dense/moe grid.
-    # They stay lean — model-specific KV/sampler tuning still belongs in the
-    # model's defaults.extra_args, not here. Contributed from the operator
-    # catalog after the 2026-07-05 ROCmFPX tuning (same -b/-ub/threads shape as
-    # the retuned dense seeds, no SMT-oversub `--threads-batch`).
-    "rocm-dense-nojinja": {
-        # rocm-dense minus `--jinja`: for base models / GGUFs that carry a
-        # baked-in chat template, where llama.cpp's jinja layer would
-        # double-wrap the prompt. mtp False — no draft head assumed.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCmFPX · DENSE · no-jinja (baked chat template)",
-        "quant": "ROCmFP4",
-    },
-    "vulkan-dense-nojinja": {
-        # Vulkan sibling of rocm-dense-nojinja (see it for the no-jinja
-        # rationale). Mirrors vulkan-dense minus `--jinja`.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "VULKFPX · DENSE · no-jinja (baked chat template)",
-        "quant": "ROCmFP4",
-    },
-    "rocm-dense-small": {
-        # The dense batch/mmap tuning without MTP — for small dense chat models
-        # (≤~2B) that have no self-speculative draft head, where the spec-draft
-        # bundle would be inert. Keeps `--jinja`. Operators on a Vulkan-only box
-        # clone this to Vulkan0.
-        "image": DEFAULT_ROCMFPX_IMAGE,
-        "flags": "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "ROCmFPX · DENSE · small (no MTP draft head)",
-        "quant": "ROCmFP4",
-    },
-    "rocm-longctx": {
-        # Dense long-context template: q8_0 KV halves the KV-cache footprint so
-        # more context fits in the shared pool, plus `--poll` tuning for steady
-        # decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
-        # back to f16 KV (iSWA regresses on quantized KV). mtp False.
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --jinja --metrics --no-webui",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "Dense · long-context (q8_0 KV)",
-        "quant": "FP4",
-    },
-    "vulkan": {
-        # Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
-        # minimal: -ngl 999, -fa on, --jinja. No KV quant (defaults to f16, which
-        # is gemma-safe) — per-model KV/batch tuning lives in the model's
-        # defaults.extra_args.
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "-ngl 999 -fa on --jinja",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "Vulkan",
-        "quant": "Q4_K_M",
-    },
-    "cuda": {
-        # NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. The image is
-        # UPSTREAM llama.cpp (ghcr.io/ggml-org/llama.cpp:server-cuda), not the
-        # AMD Strix-Halo toolbox family the other GPU profiles use. Flags
-        # mirror the vulkan profile's conservative structure (no AMD-specific
-        # tuning, no KV-quant assumptions); requires nvidia-container-toolkit
-        # (CDI) for GPU passthrough — see providers/_gpu.nvidia_cdi_devices.
-        "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
-        "flags": "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap --jinja",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "cuda",
-        "intent": "CUDA · experimental",
-        "quant": "Q4_K_M",
-    },
-    "embed": {
-        # GPU embedding template (llama-server --embedding). Serves
-        # /v1/embeddings for Qwen3-Embedding / nomic / bge GGUFs. -ub must
-        # cover the longest single input: pooled embeddings run the whole
-        # sequence in ONE physical ubatch, so -ub 8192 (== -b) matches the
-        # 8k-token models and larger inputs would truncate/fail on a smaller
-        # ubatch (llama.cpp #6263/#11105). Pooling is left to GGUF metadata
-        # (Qwen3-Embedding pins --pooling last via its model defaults); no KV
-        # quant — meaningless for a single-pass encoder. GPU because these
-        # tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "Embeddings",
-        "quant": "",
-    },
-    "rerank": {
-        # GPU reranker template (llama-server --reranking → /v1/rerank, implies
-        # embedding-mode + rank pooling). Sized for bge-reranker-v2-m3
-        # (8192-token query+doc pairs): -ub 8192 must cover the longest pair or
-        # the request truncates. MUST be a SEPARATE instance from `embed` —
-        # combining --embedding and --reranking on one server yields all-zero
-        # scores (llama.cpp #20085). For parallel scoring raise ctx via the
-        # slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "Reranking",
-        "quant": "",
-    },
-    "vulkan-embed": {
-        # Vulkan-backend sibling of `embed`. The rocm-backed `embed`/`rerank`
-        # seeds fail the #807 device/backend coherence check on a gpu-vulkan box,
-        # so a Vulkan-only or CUDA-less GPU host has no device-coherent embed
-        # lane — derive_profile used to fall through to the plain `vulkan` CHAT
-        # profile, which never emits --embedding and silently serves
-        # /v1/completions instead of /v1/embeddings. Same llama-server / flag
-        # bundle as `embed`, just on the RADV image. See profile_derive.derive_profile.
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "Embeddings · Vulkan",
-        "quant": "",
-    },
-    "vulkan-rerank": {
-        # Vulkan-backend sibling of `rerank` (see `vulkan-embed` for why this
-        # exists). MUST be a SEPARATE instance from vulkan-embed — combining
-        # --embedding and --reranking on one server yields all-zero scores
-        # (llama.cpp #20085).
-        "image": DEFAULT_ROCMFPX_IMAGE,  # universal AMD-GPU default (Vulkan-portable)
-        "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "vulkan",
-        "intent": "Reranking · Vulkan",
-        "quant": "",
-    },
-    "flm": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
-        "flags": "",
-        "mtp": False,
-        "device_class": "npu",
-        "intent": "FLM · NPU",
-        "quant": "W4ABF16",
-    },
-    "tts": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-        "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
-        "mtp": False,
-        "device_class": "cpu",
-        "intent": "TTS · CPU",
-        "quant": "",
-    },
-    "tts-qwen3": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1",
-        "flags": (
-            "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice "
-            "--default_voice Ryan --default_language Auto"
-        ),
-        "mtp": False,
-        "device_class": "gpu",
-        "backend": "rocm",
-        "intent": "TTS · GPU",
-        "quant": "BF16",
-    },
-    "cpu-llm": {
-        # The Vulkan toolbox image runs in CPU-only mode when no GPU devices
-        # are passed to the container (llama-server auto-selects GGML_CPU).
-        # CPU-optimal flags: no flash-attn (not available without GPU), smaller
-        # batch to limit peak RAM, and a thread count sensible for a typical
-        # multi-core host.  backend=None keeps the #807 coherence check happy.
-        # NOTE: mmap is intentionally left ON here (no --no-mmap) — the CPU-only
-        # path is the documented exception to the universal-GPU --no-mmap rule
-        # (2026-07-04 Strix Halo consolidation, fact 6): CPU-only wants the page
-        # cache (faster re-loads, no GTT involved); --no-mmap would force the
-        # whole model into anonymous RAM and forfeit page-cache-backed reloads.
-        "image": FALLBACK_VULKAN_IMAGE,  # CPU-only: lean toolbox in CPU mode (rocmfpx is wasteful)
-        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --jinja",
-        "mtp": False,
-        "device_class": "cpu",
-        "intent": "CPU",
-        "quant": "Q4_K_M",
-    },
-    "comfyui": {
-        "image": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
-        "flags": "--disable-mmap --bf16-vae --cache-none",
-        "mtp": False,
-        "device_class": "img",
-        "intent": "ComfyUI",
-        "quant": "",
-    },
-}
+#: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
+#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 20 seed
+#: entries (with their per-profile rationale comments) and
+#: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
+#: is (re)assigned at the bottom of this module, once every model above
+#: exists, as a backward-compat shim so every existing
+#: ``from hal0.config.schema import SEED_PROFILES`` keeps working.
 
-#: Static bench numbers for seed profiles, surfaced as the card hero metric.
-#: ``tps`` = tokens/sec (LLM throughput); ``rtf`` = real-time factor (synth,
-#: e.g. TTS).  Grounded in hal0-container-bench-2026-06-08.md.  Custom
-#: profiles have no entry → the card shows "—" until benched.
-#: The FP4 2x2 grid (rocm/vulkan x dense/moe) was tuned by the 2026-07-05
-#: ROCmFPX matrix (27B dense -b 512 -ub 512 ~29 t/s; 35B-A3B MoE -b 2048 -ub 512
-#: ~76 t/s — handoffs/rocmfpx-bench-results-2026-07-05.md), and the SMT-oversub
-#: `--threads-batch 32` / `--poll` debris carried over from the pre-consolidation
-#: Q-quant profiles was dropped per the 2026-07-04 consolidation. The four grid
-#: cards intentionally carry no hero entry (they render "—"); their decode
-#: numbers live on the per-model roster.
-PROFILE_BENCH: dict[str, dict[str, float]] = {
-    "rocm": {"tps": 52.8},
-    "vulkan": {"tps": 41.0},
-    "flm": {"tps": 38.6},
-    "tts": {"rtf": 0.18},
-    # Native gfx1151 ~2.1x realtime -> rtf ~= 1/2.1 (memory qwen3tts-voice-ct105).
-    "tts-qwen3": {"rtf": 0.48},
-}
+#: Static bench numbers for seed profiles — externalized to shipped TOML
+#: (P3-schema, spec Part A). See ``hal0/config/data/profile_bench.toml``
+#: and ``hal0.config.seeds.profile_bench()``. ``PROFILE_BENCH`` is
+#: (re)assigned at the bottom of this module as a backward-compat shim.
 
-#: Per-family llama-server flag overrides — the "model-architecture quirks"
-#: layer, distinct from profiles (backend/hardware tuning) and slot config
-#: (per-instance).  Applied when a slot's model resolves to the family; each
-#: string merges into the ``model_defaults`` argv segment, so it OVERRIDES the
-#: profile's generic flags (``normalize_argv`` keeps the last occurrence) but a
-#: per-slot ``[model].defaults.extra_args`` still beats it.  Virtual like
-#: SEED_PROFILES — ships to every install, never persisted to config.
-FAMILY_DEFAULTS: dict[str, str] = {
-    # Gemma is an iSWA (interleaved sliding-window) architecture: quantized KV
-    # regresses prompt-processing — measured 2026-07-04 on gemma-4-12B @32k depth,
-    # -ctk/-ctv q8_0 costs -28.5% pp on RADV / -10% tg on rocm vs f16 (the mirror
-    # of qwen's +45% q8 gain) — and SWA + cache-reuse has upstream bugs
-    # (#21468/#21749).  So any gemma model, on any q8 profile, is pinned back to
-    # f16 KV with cache-reuse off.
-    "gemma": "-ctk f16 -ctv f16 --cache-reuse 0",
-}
+#: Per-family llama-server flag overrides — externalized to shipped TOML
+#: (P3-schema, spec Part A). See ``hal0/config/data/family_defaults.toml``
+#: and ``hal0.config.seeds.family_defaults()``. ``FAMILY_DEFAULTS`` is
+#: (re)assigned at the bottom of this module as a backward-compat shim;
+#: ``_KNOWN_FAMILIES``/``model_family``/``family_flags`` below are
+#: derivation logic, not data, and stay in Python unchanged.
 
 #: Families FAMILY_DEFAULTS can key on, matched as a token in the model id /
 #: filename.  GGUF ``general.architecture`` would be the canonical signal, but
@@ -1547,118 +1242,14 @@ class StacksConfig(BaseModel):
     stack: dict[str, StackConfig] = Field(default_factory=dict)
 
 
-# Built-in seed stacks (immutable, clone-only) — the day-one catalog the
-# Stacks page ships with (spec §10). Returned by ``load_stacks_config`` when no
-# stacks.toml exists yet, and consulted by ``StacksCatalog`` for the
-# seed-immutability guard. Grounded in the live Strix-Halo model roster and the
-# canonical ``agent``/``utility`` slots (ADR-0023; the spec's pre-ADR ``chat``/
-# ``primary``/``util`` slot names are mapped onto these). Each carries embed +
-# rerank capability rows so memory recall works out of the box. Model metadata
-# (``models{}``) is intentionally left empty — ``export_envelope`` fills it from
-# the live registry at export time, keeping the in-code seed lean.
-#
-# These reference this host's real registry ids; cloned-and-edited is the
-# intended path, and apply's dry-run surfaces any model that isn't local.
-
-
-def _embed_rerank_rows(device: str = "gpu-rocm") -> list[StackCapabilityRow]:
-    """The shared embed + rerank capability pair every seed ships with."""
-    return [
-        StackCapabilityRow(
-            child="embed",
-            device=device,
-            provider="llama-server",
-            model="qwen3-embedding-0-6b-q8-0",
-            enabled=True,
-        ),
-        StackCapabilityRow(
-            child="rerank",
-            device=device,
-            provider="llama-server",
-            model="bge-reranker-v2-m3-q4_k_m",
-            enabled=True,
-        ),
-    ]
-
-
-SEED_STACKS: dict[str, StackConfig] = {
-    # saber — max-throughput agentic MoE. Decode-per-GB leader on the board.
-    "saber": StackConfig(
-        name="Saber",
-        description="High-speed agentic MoE: a 35B-A3B agent on ROCm with a fast "
-        "Vulkan utility helper, plus memory recall.",
-        author="hal0",
-        icon="⚡",
-        tags=["agentic", "moe", "fast"],
-        slots=[
-            StackSlotEntry(
-                slot="agent",
-                model="qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
-                device="gpu-rocm",
-                profile="rocm",
-                mtp=True,
-                capabilities=_embed_rerank_rows(),
-            ),
-            StackSlotEntry(
-                slot="utility",
-                model="gemma-4-12b-it-ud-q4-k-xl",
-                device="gpu-vulkan",
-                profile="vulkan",
-            ),
-        ],
-    ),
-    # forge — coding-first developer loadout: a coder agent + a fast draft coder.
-    "forge": StackConfig(
-        name="Forge",
-        description="Coding-first: a 27B coder agent on ROCm with a small fast "
-        "draft coder as the utility, plus codebase retrieval.",
-        author="hal0",
-        icon="🛠️",
-        tags=["coding", "developer"],
-        slots=[
-            StackSlotEntry(
-                slot="agent",
-                model="qwopus3-6-27b-coder-mtp-q6-k",
-                device="gpu-rocm",
-                profile="rocm",
-                mtp=True,
-                capabilities=_embed_rerank_rows(),
-            ),
-            StackSlotEntry(
-                slot="utility",
-                model="qwopus3-5-4b-coder-mtp-q6-k",
-                device="gpu-vulkan",
-                profile="vulkan",
-                mtp=True,
-            ),
-        ],
-    ),
-    # pi — always-on support: faithful compaction, memory recall (quality > speed).
-    "pi": StackConfig(
-        name="Pi",
-        description="Always-on support: a q-rich 27B utility for faithful "
-        "compaction and recall, with a light Vulkan agent.",
-        author="hal0",
-        icon="🥧",
-        tags=["support", "memory", "compaction"],
-        slots=[
-            StackSlotEntry(
-                slot="utility",
-                model="chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean",
-                device="gpu-rocm",
-                profile="rocm",
-                mtp=True,
-                capabilities=_embed_rerank_rows(),
-            ),
-            StackSlotEntry(
-                slot="agent",
-                model="gemma-4-12b-it-ud-q4-k-xl",
-                device="gpu-vulkan",
-                profile="vulkan",
-            ),
-        ],
-    ),
-}
+# Built-in seed stacks — externalized to shipped TOML (P3-schema, spec Part
+# A). See ``hal0/config/data/seed_stacks.toml`` and
+# ``hal0.config.seeds.seed_stacks()``/``seeds._embed_rerank_rows()`` (the
+# shared embed+rerank capability pair moved there too, per spec §A.2(a)).
+# ``SEED_STACKS`` is (re)assigned at the bottom of this module as a
+# backward-compat shim so every existing
+# ``from hal0.config.schema import SEED_STACKS`` / ``schema.SEED_STACKS``
+# call site keeps working unchanged.
 
 
 def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = None) -> str:
@@ -3027,6 +2618,32 @@ class Hal0Config(BaseModel):
     honcho: HonchoConfig = Field(default_factory=HonchoConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
+
+
+# ── Shipped seed-data shims (P3-schema, spec Part A) ──────────────────────────
+#
+# SEED_PROFILES / SEED_STACKS / PROFILE_BENCH / FAMILY_DEFAULTS used to be
+# hardcoded dicts defined inline, above. They are now shipped TOML under
+# ``hal0/config/data/`` read + validated + cached by ``hal0.config.seeds``.
+# This import is placed at the BOTTOM of the module, after every pydantic
+# model above is fully defined, to break the circular import: ``seeds.py``
+# needs ``ProfileConfig``/``StackConfig`` (for validation) and this module
+# needs ``seeds`` (for the data) — importing ``seeds`` only once schema.py
+# has already built every class it might ask for avoids the deadlock (spec
+# risk R2; see ``tests/config/test_seeds_data.py`` for the cold-import
+# regression test: ``import hal0.config.schema`` and ``import
+# hal0.config.seeds`` must each succeed standalone).
+#
+# These remain plain module-level attributes (not a lazy ``__getattr__``
+# hook) so existing test fixtures that do
+# ``monkeypatch.setattr(schema, "SEED_STACKS", {})`` /
+# ``monkeypatch.setitem(schema.SEED_STACKS, ...)`` keep working unchanged.
+from hal0.config import seeds as _seeds  # noqa: E402
+
+SEED_PROFILES: dict[str, dict[str, object]] = _seeds.seed_profiles()
+SEED_STACKS: dict[str, StackConfig] = _seeds.seed_stacks()
+PROFILE_BENCH: dict[str, dict[str, float]] = _seeds.profile_bench()
+FAMILY_DEFAULTS: dict[str, str] = _seeds.family_defaults()
 
 
 __all__ = [
