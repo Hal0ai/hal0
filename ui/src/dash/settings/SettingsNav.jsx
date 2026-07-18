@@ -66,6 +66,9 @@ export const NAV_GROUPS = [
     items: [
       { id: "doctor", label: "Doctor" },
       { id: "updates", label: "Updates" },
+      // D3 (post-R3 surface rework): runner/image evidence page. Grouped here
+      // with Updates as the system & updates axis, far from the model editors.
+      { id: "runtimes", label: "Runtimes" },
       { id: "advanced", label: "Advanced" },
       { id: "about", label: "About" },
     ],

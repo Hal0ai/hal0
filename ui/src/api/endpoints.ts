@@ -28,6 +28,10 @@ export const ENDPOINTS = {
   comfyuiPreview: '/api/comfyui/preview',
 
   slotMetrics: '/api/slots/metrics',
+  // GET /api/system-info (CLIENT) — hardware + features + per-RUNNER_IMAGES
+  // backend state (installed | installable | unavailable). Feeds the Runtimes
+  // settings page (D3) — the runner/image evidence axis.
+  systemInfo: '/api/system-info',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,
   slotConfig: (name: string) => `/api/slots/${encodeURIComponent(name)}/config`,
   // TTS voice-list proxy — forwards to the slot container's /v1/audio/voices;

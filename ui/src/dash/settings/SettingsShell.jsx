@@ -35,6 +35,7 @@ import { StoragePage } from './pages/data/StoragePage.jsx'
 import { MemoryPage } from './pages/data/MemoryPage.jsx'
 import { DoctorPage } from './pages/diagnostics/DoctorPage.jsx'
 import { UpdatesPage } from './pages/diagnostics/UpdatesPage.jsx'
+import { RuntimesPage } from './pages/diagnostics/RuntimesPage.jsx'
 import { AdvancedPage } from './pages/diagnostics/AdvancedPage.jsx'
 import { AboutPage } from './pages/diagnostics/AboutPage.jsx'
 import { SecretsPage } from './pages/integrations/SecretsPage.jsx'
@@ -61,6 +62,7 @@ export function SettingsShell({ param }) {
       case "memory": return <MemoryPage />;
       case "doctor": return <DoctorPage />;
       case "updates": return <UpdatesPage />;
+      case "runtimes": return <RuntimesPage />;
       case "advanced": return <AdvancedPage />;
       case "about": return <AboutPage />;
       case "secrets": return <SecretsPage />;
