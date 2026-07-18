@@ -6,22 +6,25 @@ all configuration is passed per-call via slot_cfg and model_info.
 SlotManager dispatches every slot through ``ContainerProvider``, which
 builds a :class:`RuntimeLaunchPlan` via ``container_spec()`` and hands it
 to the single unit renderer
-(:func:`hal0.providers.container._render_unit_from_plan`); ``health()``
+(:func:`hal0.providers.container._render_quadlet_from_plan`); ``health()``
 and ``infer()`` probe and forward requests.
 
 Port target: haloai lib/providers/base.py.
 See PLAN.md §3, ARCHITECTURE.md §Key boundaries ("Providers are stateless").
 
 RuntimeLaunchPlan (alias ``ContainerSpec``) captures everything needed to
-render a container-run-based systemd ExecStart line.  Frozen so Providers
-cannot accidentally share mutable state across slots.
+render a Podman Quadlet ``.container`` unit.  Frozen so Providers cannot
+accidentally share mutable state across slots.
 """
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,42 @@ class Mount:
             opts.append("ro")
         if self.selinux:
             opts.append(self.selinux)
+        suffix = (":" + ",".join(opts)) if opts else ""
+        return f"{self.source}:{target}{suffix}"
+
+    def render_quadlet(self) -> str:
+        """Return the Podman Quadlet ``Volume=`` value: ``src:dst[:ro,z]``.
+
+        Same ``{src}:{dst}`` shape as :meth:`render`, but the mount options are
+        a single colon-separated group (``ro,z``) — Quadlet's ``Volume=`` syntax
+        — rather than the ``--volume=`` argv form (which :meth:`render` already
+        happens to match). Kept a distinct method so the load-bearing shape
+        difference is explicit and the SELinux-on-NFS suppression lives here.
+
+        **NFS gotcha:** an NFS source can't be SELinux-relabelled (``chcon`` →
+        ENOTSUP; podman aborts the bind). When the source is on NFS the ``:z`` /
+        ``:Z`` option is omitted entirely (:func:`hal0.config.paths.is_nfs`),
+        and a one-shot warning is logged — the Quadlet file is written once at
+        load and can't re-render on a later mount-state change.
+        """
+        target = self.target
+        read_only = self.read_only
+        if target.endswith(":ro"):
+            target = target[: -len(":ro")]
+            read_only = True
+        opts: list[str] = []
+        if read_only:
+            opts.append("ro")
+        if self.selinux:
+            from hal0.config.paths import is_nfs
+
+            if is_nfs(self.source):
+                _log.warning(
+                    "mount.selinux_relabel_omitted_on_nfs",
+                    extra={"source": self.source, "selinux": self.selinux},
+                )
+            else:
+                opts.append(self.selinux)
         suffix = (":" + ",".join(opts)) if opts else ""
         return f"{self.source}:{target}{suffix}"
 
@@ -103,18 +142,34 @@ class HealthCheck:
             f"--health-timeout={self.timeout}",
         ]
 
+    def render_quadlet(self) -> list[str]:
+        """Return the Podman Quadlet ``Health*=`` keys in a stable order.
+
+        The declarative equivalent of :meth:`render_flags` — Quadlet emits the
+        matching ``--health-*`` podman flags itself from these ``[Container]``
+        keys, so the slot's own port health probe overrides the image's baked
+        HEALTHCHECK exactly as before (#684).
+        """
+        return [
+            f"HealthCmd={self.cmd}",
+            f"HealthStartPeriod={self.start_period}",
+            f"HealthInterval={self.interval}",
+            f"HealthRetries={self.retries}",
+            f"HealthTimeout={self.timeout}",
+        ]
+
 
 @dataclass(frozen=True)
 class RuntimeLaunchPlan:
-    """Typed launch plan for a container-per-slot systemd unit.
+    """Typed launch plan for a container-per-slot Quadlet unit.
 
-    Carries everything the systemd/podman adapter needs to render one
-    ``hal0-slot@<name>.service`` unit: image, in-container argv, mounts
+    Carries everything the Quadlet adapter needs to render one
+    ``hal0-slot@<token>.container`` unit: image, in-container argv, mounts
     (read-only as a first-class flag), devices, security, port, and the
     optional health-check override.  Providers build one plan per
     (slot, model) pair from a :class:`hal0.profiles.ResolvedProfile`; the
-    adapter (:func:`hal0.providers.container._render_unit_from_plan`)
-    executes it.  There is exactly one argv builder.
+    adapter (:func:`hal0.providers.container._render_quadlet_from_plan`)
+    executes it.  There is exactly one renderer.
 
     Frozen for safety: a plan is computed once and never mutated, so two
     slots can never share mutable launch state.
@@ -246,10 +301,9 @@ class Provider(ABC):
         """
         raise NotImplementedError(f"Phase 1: {type(self).__name__} must implement image_ref()")
 
-    # NOTE (WS-15): the legacy ``render_systemd_override`` default — which
-    # rendered a docker-run drop-in from ``container_spec`` — was deleted.
-    # Unit rendering is owned by the single adapter
-    # :func:`hal0.providers.container._render_unit_from_plan`, which
+    # NOTE: unit rendering is owned by the single Quadlet adapter
+    # :func:`hal0.providers.container._render_quadlet_from_plan`, which
     # understands the full :class:`RuntimeLaunchPlan` shape (first-class
-    # :class:`Mount` read-only/SELinux flags, :class:`HealthCheck`); the old
-    # renderer only handled ``(src, dst)`` tuples and drifted from it.
+    # :class:`Mount` read-only/SELinux flags via ``render_quadlet``,
+    # :class:`HealthCheck` via ``render_quadlet``); providers only build the
+    # plan, never render.

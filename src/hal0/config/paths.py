@@ -170,6 +170,51 @@ def db_path() -> Path:
 #: ``HAL0_MODEL_STORE`` env var (see :func:`model_store_root`).
 DEFAULT_MODEL_STORE = "/mnt/ai-models"
 
+#: ``statfs.f_type`` magic for an NFS mount (``NFS_SUPER_MAGIC``). A Quadlet
+#: ``Volume=`` on an NFS source must OMIT the SELinux ``:z``/``:Z`` relabel —
+#: ``chcon`` is ENOTSUP on NFS and podman aborts the bind (rework §23.3).
+_NFS_SUPER_MAGIC = 0x6969
+
+
+def is_nfs(path: str | Path) -> bool:
+    """Return True iff *path* lives on an NFS mount.
+
+    Used by :meth:`hal0.providers.base.Mount.render_quadlet` to decide whether a
+    slot bind mount may carry the SELinux ``:z`` relabel — NFS can't be
+    relabelled (``chcon`` → ENOTSUP), and podman refuses the bind if we ask.
+
+    Resolves the longest ``/proc/mounts`` prefix covering *path* and checks its
+    filesystem type (``nfs`` / ``nfs4``). Fail-soft to ``False`` (assume a
+    relabel-capable local FS) on any error: a missing/unreadable ``/proc/mounts``
+    (non-Linux, CI, container-in-container) must never be the thing that decides
+    a mount is NFS. Walking ``/proc/mounts`` rather than issuing the raw
+    ``statfs(2)`` (which Python's stdlib doesn't expose without ctypes) keeps the
+    check dependency-free and unit-testable, and matches ``f_type == 0x6969``
+    for every real NFS mount.
+    """
+    try:
+        target = os.path.realpath(str(path))
+    except OSError:
+        return False
+    best_prefix = ""
+    best_fstype = ""
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point, fstype = parts[1], parts[2]
+                # Longest mount point that is a path-prefix of target wins.
+                if (
+                    target == mount_point or target.startswith(mount_point.rstrip("/") + "/")
+                ) and len(mount_point) >= len(best_prefix):
+                    best_prefix = mount_point
+                    best_fstype = fstype
+    except OSError:
+        return False
+    return best_fstype.startswith("nfs")
+
 
 def model_store_root() -> str:
     """Resolve the model-store directory that slot containers bind-mount.

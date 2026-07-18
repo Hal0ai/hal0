@@ -4,8 +4,20 @@ from typing import Any
 
 import pytest
 
-from hal0.providers.container import _render_unit_from_spec
+from hal0.providers.container import _render_quadlet_from_plan
 from hal0.providers.kokoro import KokoroProvider
+
+
+def _render_from_spec(token, spec, *, runtime_bin=None, publish_host="127.0.0.1"):
+    """Quadlet renderer shim (ignores the legacy runtime_bin kwarg)."""
+    return _render_quadlet_from_plan(token, spec, publish_host=publish_host)
+
+
+def _exec(unit):
+    for line in unit.splitlines():
+        if line.startswith("Exec="):
+            return line[len("Exec=") :]
+    raise AssertionError("Exec not found")
 
 
 @pytest.fixture(autouse=True)
@@ -72,28 +84,29 @@ def test_spec_ro_mount_is_read_only() -> None:
 
 
 def test_renderer_no_device_args_publish_volume_command() -> None:
-    """_render_unit_from_spec renders the kokoro spec correctly.
+    """The Quadlet renderer renders the kokoro spec correctly.
 
     Checks:
-    - No --device= args (CPU-only slot).
-    - --publish=127.0.0.1:8084:8084 present.
-    - Volume arg with /mnt/ai-models present.
-    - Command tail contains --model_path and --port.
+    - No AddDevice= keys (CPU-only slot).
+    - PublishPort=127.0.0.1:8084:8084 present.
+    - Volume key with /mnt/ai-models present.
+    - Exec argv contains --model_path and --port.
     """
     spec = KokoroProvider().container_spec(_slot_cfg(), {})
-    unit = _render_unit_from_spec("tts", spec, runtime_bin="/usr/bin/docker")
+    unit = _render_from_spec("tts", spec, runtime_bin="/usr/bin/docker")
+    lines = unit.splitlines()
 
-    # Flatten the ExecStart line for easy assertion.
-    exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
-
-    assert "--device=" not in exec_line, "CPU slot must not pass any --device= args"
-    assert "--publish=127.0.0.1:8084:8084" in exec_line
-    # Exact rendered token — pins the 3-colon podman ro syntax; a substring
-    # check would also pass on a malformed 4-colon render.
-    assert "--volume=/mnt/ai-models:/mnt/ai-models:ro" in exec_line
-    assert "--model_path" in exec_line
-    assert "--port" in exec_line
-    assert "8084" in exec_line
+    assert not any(line.startswith("AddDevice=") for line in lines), (
+        "CPU slot must not pass any device nodes"
+    )
+    assert "PublishPort=127.0.0.1:8084:8084" in lines
+    # Pins the 3-colon podman ro syntax; a substring check would also pass on a
+    # malformed 4-colon render (the SELinux :z suffix is appended by the mount).
+    assert "Volume=/mnt/ai-models:/mnt/ai-models:ro" in unit
+    exec_argv = _exec(unit)
+    assert "--model_path" in exec_argv
+    assert "--port" in exec_argv
+    assert "8084" in exec_argv
 
 
 def test_slot_port_override_wins() -> None:
@@ -103,6 +116,5 @@ def test_slot_port_override_wins() -> None:
     assert c[c.index("--port") + 1] == "8097"
     assert spec.port == 8097
 
-    unit = _render_unit_from_spec("tts", spec, runtime_bin="/usr/bin/docker")
-    exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
-    assert "--publish=127.0.0.1:8097:8097" in exec_line
+    unit = _render_from_spec("tts", spec, runtime_bin="/usr/bin/docker")
+    assert "PublishPort=127.0.0.1:8097:8097" in unit.splitlines()

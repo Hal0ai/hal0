@@ -10,8 +10,14 @@ from unittest.mock import patch
 
 import pytest
 
-from hal0.providers.container import _render_unit_from_spec, _spec_provider_for
+from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
 from hal0.providers.qwen3tts import Qwen3TTSProvider
+
+
+def _render_from_spec(token, spec, *, runtime_bin=None, publish_host="127.0.0.1"):
+    """Quadlet renderer shim (ignores the legacy runtime_bin kwarg)."""
+    return _render_quadlet_from_plan(token, spec, publish_host=publish_host)
+
 
 _FAKE_DEVICES = ["/dev/kfd", "/dev/dri/renderD128", "/dev/dri/amdgpu"]
 _FAKE_GIDS = [993, 44]
@@ -128,18 +134,18 @@ def test_no_registry_model_path_required() -> None:
 
 def test_renderer_emits_gpu_args_cache_volume_and_miopen_env() -> None:
     spec = Qwen3TTSProvider().container_spec(_slot_cfg(), {})
-    unit = _render_unit_from_spec("qwen3tts", spec, runtime_bin="/usr/bin/podman")
-    exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    unit = _render_from_spec("qwen3tts", spec, runtime_bin="/usr/bin/podman")
+    lines = unit.splitlines()
 
-    assert "--device=/dev/kfd" in exec_line
-    assert "--device=/dev/dri/renderD128" in exec_line
-    assert "--group-add=993" in exec_line
-    assert "--group-add=44" in exec_line
-    assert "--publish=127.0.0.1:8095:8095" in exec_line
-    assert "--volume=/mnt/ai-models:/mnt/ai-models:ro,z" in exec_line
-    assert "--volume=/var/lib/hal0/qwen3tts-cache:/cache:z" in exec_line
-    assert "--env=MIOPEN_FIND_MODE=FAST" in exec_line
-    assert "HSA_OVERRIDE_GFX_VERSION" not in exec_line
+    assert "AddDevice=/dev/kfd" in lines
+    assert "AddDevice=/dev/dri/renderD128" in lines
+    assert "GroupAdd=993" in lines
+    assert "GroupAdd=44" in lines
+    assert "PublishPort=127.0.0.1:8095:8095" in lines
+    assert "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" in lines
+    assert "Volume=/var/lib/hal0/qwen3tts-cache:/cache:z" in lines
+    assert "Environment=MIOPEN_FIND_MODE=FAST" in lines
+    assert "HSA_OVERRIDE_GFX_VERSION" not in unit
 
 
 def test_slot_port_override_wins() -> None:

@@ -75,6 +75,60 @@ def test_write_unit_rejects_non_slot_unit_name(tmp_path: Path) -> None:
         seam.write_unit(tmp_path / "hal0-api.service", "[Unit]\n")
 
 
+# ── write_quadlet / remove_quadlet (P3-quadlet) ──────────────────────────────
+
+
+def test_write_quadlet_direct_when_not_hal0_user(tmp_path: Path) -> None:
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+    quadlet = tmp_path / "sub" / "hal0-slot@chat.container"
+
+    seam.write_quadlet(quadlet, "[Container]\n")
+
+    assert quadlet.read_text() == "[Container]\n"  # parent dir auto-created
+    assert calls == []
+
+
+def test_write_quadlet_routes_through_seam_when_hal0_user(tmp_path: Path) -> None:
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+    quadlet = tmp_path / "hal0-slot@chat.container"
+
+    seam.write_quadlet(quadlet, "[Container]\n")
+
+    assert not quadlet.exists()  # never written directly
+    assert calls == [["sudo", "-n", SEAM_BIN, "write-quadlet", "chat"]]
+
+
+def test_write_quadlet_rejects_non_slot_name(tmp_path: Path) -> None:
+    _, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+    with pytest.raises(ValueError, match="not a hal0-slot@ quadlet file"):
+        seam.write_quadlet(tmp_path / "hal0-slot@chat.service", "[Container]\n")
+
+
+def test_remove_quadlet_direct_when_not_hal0_user(tmp_path: Path) -> None:
+    quadlet = tmp_path / "hal0-slot@chat.container"
+    quadlet.write_text("[Container]\n")
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+
+    seam.remove_quadlet(quadlet)  # idempotent
+
+    assert not quadlet.exists()
+    assert calls == []
+
+
+def test_remove_quadlet_routes_through_seam_when_hal0_user(tmp_path: Path) -> None:
+    quadlet = tmp_path / "hal0-slot@chat.container"
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    seam.remove_quadlet(quadlet)
+
+    assert calls == [["sudo", "-n", SEAM_BIN, "remove-quadlet", "chat"]]
+
+
 # ── remove_unit ────────────────────────────────────────────────────────────
 
 

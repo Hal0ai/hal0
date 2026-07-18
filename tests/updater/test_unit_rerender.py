@@ -37,9 +37,9 @@ _PROFILE = ProfileConfig(
 def rerender_env(tmp_hal0_home: str, tmp_path, monkeypatch):
     """Sandbox the systemd dir, container runtime, profile lookup, and
     systemctl calls; return the fake unit dir + recorded systemctl argv."""
-    unit_dir = tmp_path / "systemd"
+    unit_dir = tmp_path / "quadlet"
     unit_dir.mkdir()
-    monkeypatch.setattr(container_mod, "_SYSTEMD_SYSTEM_DIR", unit_dir)
+    monkeypatch.setattr(container_mod, "_QUADLET_DIR", unit_dir)
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "/usr/bin/podman")
     monkeypatch.setattr(container_mod, "_resolve_profile", lambda name: _PROFILE)
 
@@ -60,7 +60,8 @@ def rerender_env(tmp_hal0_home: str, tmp_path, monkeypatch):
 
 
 def _unit_path(unit_dir, name: str):
-    return unit_dir / f"hal0-slot@{name}.service"
+    # P3-quadlet: the slot unit source is a Podman Quadlet ``.container`` file.
+    return unit_dir / f"hal0-slot@{name}.container"
 
 
 async def _mk_slot(name: str, port: int) -> None:
