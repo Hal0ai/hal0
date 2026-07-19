@@ -20,27 +20,15 @@ def _api_base() -> str:
 
 
 def _key_from_api_env() -> str | None:
-    """Best-effort read of an API key from /etc/hal0/api.env.
+    """Best-effort read of an API key from /etc/hal0/api.env (admin preferred).
 
-    The CLI usually runs on the box itself (often as root), where api.env is
-    readable even though the keys aren't in the caller's environment. Admin
-    key preferred (doctor probes admin surfaces); silent None on any failure —
-    auth then simply isn't attached, same as before this seam existed.
+    Thin back-compat wrapper over :func:`hal0.service_identity.keys_from_api_env`
+    — the box-key discovery now lives in one place shared with the brain
+    steward's internal self-calls so the two surfaces can't drift.
     """
-    try:
-        from hal0.config import paths as cfg_paths
+    from hal0.service_identity import keys_from_api_env
 
-        text = (cfg_paths.etc() / "api.env").read_text(encoding="utf-8")
-    except Exception:
-        return None
-    found: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        if k in ("HAL0_ADMIN_KEY", "HAL0_CLIENT_KEY") and v:
-            found[k] = v.strip().strip('"').strip("'")
+    found = keys_from_api_env()
     return found.get("HAL0_ADMIN_KEY") or found.get("HAL0_CLIENT_KEY")
 
 
@@ -49,12 +37,13 @@ def _auth_headers() -> dict[str, str]:
 
     Precedence: HAL0_ADMIN_KEY env → HAL0_CLIENT_KEY env → api.env on disk.
     Empty when no key is discoverable — loopback dev boxes stay keyless and
-    the API's development-open posture handles them.
+    the API's development-open posture handles them. Delegates to the shared
+    :mod:`hal0.service_identity` seam (admin-preferred, matching the CLI's
+    historical behaviour).
     """
-    key = os.environ.get("HAL0_ADMIN_KEY") or os.environ.get("HAL0_CLIENT_KEY")
-    if not key:
-        key = _key_from_api_env()
-    return {"Authorization": f"Bearer {key}"} if key else {}
+    from hal0.service_identity import service_auth_headers
+
+    return service_auth_headers(prefer="admin")
 
 
 def _api_unreachable(url: str) -> bool:
