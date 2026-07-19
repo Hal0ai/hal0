@@ -42,6 +42,7 @@ import os
 import pwd
 import re
 import shutil
+import sqlite3
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 from collections.abc import Callable
@@ -969,6 +970,133 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
         status=PhaseStatus.OK,
         details={"hermes_home": str(hermes_home), "changed": created},
     )
+
+
+# ── Phase D2: kanban_db_init ─────────────────────────────────────────────────
+#
+# O20 (docs/rework/r4-stage-validation.md): the Hermes gateway's kanban-board
+# WATCHER opens ``$HERMES_HOME/kanban.db`` via a raw sqlite path — never
+# through ``hermes_cli.kanban_db.connect()``. ``connect()``'s first-call
+# auto-init is the ONLY thing that has ever created the schema, and today that
+# only fires when hal0's HP-executor registers (``HERMES_DASHBOARD_BASE_URL``
+# set — see ``board/hermes_executor.py``). A box whose executor never
+# registers therefore has a watcher that hits ``no such table: tasks`` /
+# ``kanban_notify_subs`` every tick. Operator-validated fix (both live boxes):
+# calling ``init_db(<kanban.db>)`` creates all the tables and the watcher
+# errors go to zero. The watcher is PINNED UPSTREAM Hermes
+# (:data:`VETTED_HERMES_REFS`) and cannot be patched here — the fix is
+# hal0-side: guarantee the schema exists before any watcher tick, independent
+# of executor registration.
+#
+# We invoke the HERMES VENV's own ``hermes_cli.kanban_db.init_db`` via
+# ``python -c`` rather than replicating ``SCHEMA_SQL`` in hal0 — duplicating
+# the schema here would drift against the pin the moment upstream adds a
+# column. The convergent pre-check reads ``sqlite_master`` with hal0's own
+# stdlib ``sqlite3`` (read-only — safe, no schema knowledge required); only
+# the CREATE path goes through hermes's code.
+
+KANBAN_DB_NAME = "kanban.db"
+
+# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py,
+# pinned ref 9de9c25f620ff7f1ce0fd5457d596052d5159596 / PyPI 0.18.2 parity).
+# Used ONLY as a cheap existence probe for the convergent skip — never as a
+# CREATE statement source, so a future upstream migration can add columns or
+# tables without hal0 drifting out of sync.
+KANBAN_DB_EXPECTED_TABLES: frozenset[str] = frozenset(
+    {
+        "tasks",
+        "task_links",
+        "task_comments",
+        "task_events",
+        "task_runs",
+        "task_attachments",
+        "kanban_notify_subs",
+    }
+)
+
+
+def _kanban_db_tables(db_path: Path) -> set[str]:
+    """Read ``sqlite_master`` for the table names present at ``db_path``.
+
+    Read-only, hal0's own stdlib ``sqlite3`` — the CHECK may read the file;
+    only the CREATE must come from hermes's ``init_db`` (no schema
+    duplication against the pin). A missing file, an empty/zero-byte file, or
+    any read error is treated as "no tables" so the step falls through to
+    invoking hermes's init_db rather than raising out of a provision run.
+    """
+    if not db_path.exists():
+        return set()
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+            rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        return {row[0] for row in rows}
+    except sqlite3.Error:
+        return set()
+
+
+def _phase_kanban_db_init(ctx: _StepCtx) -> PhaseResult:
+    """Guarantee the kanban board DB schema exists, independent of executor
+    registration (O20).
+
+    Convergent: when every expected table is already present the step is a
+    no-op (``details["changed"]`` False) — the common case once a box has
+    either registered the HP-executor or had this step run before. Tolerates
+    a hermes-venv-absent fresh/partial install with an honest ``skip`` — this
+    step must never fail the bootstrap just because ``install`` hasn't run
+    yet (e.g. a preflight-only dry pass, or install itself failing upstream).
+    """
+    state = ctx.state
+    hermes_home = Path(state.hermes_home)
+    db_path = hermes_home / KANBAN_DB_NAME
+    details: dict[str, Any] = {"db_path": str(db_path)}
+
+    hermes_python = _venv_python(Path(state.venv))
+    if not hermes_python.exists():
+        details["hermes_python"] = str(hermes_python)
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
+            details=details,
+            reason=(
+                f"hermes venv absent at {hermes_python} — kanban DB init deferred to the next run"
+            ),
+        )
+
+    existing = _kanban_db_tables(db_path)
+    missing = sorted(KANBAN_DB_EXPECTED_TABLES - existing)
+    details["tables_before"] = sorted(existing)
+    if not missing:
+        details["changed"] = False
+        return PhaseResult(status=PhaseStatus.OK, details=details)
+
+    # HERMES_HOME must exist before sqlite creates the file under it —
+    # home_init runs earlier in the pipeline, but this step is also callable
+    # standalone (tests, --repair re-entry), so make it self-sufficient.
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    details["missing_before"] = missing
+
+    # HOME-sanitized (O15): the venv python runs as hal0; a leaked HOME=/root
+    # would send its own dot-dirs into root's unwritable home. HERMES_HOME is
+    # set explicitly, matching every other hermes-venv subprocess call here.
+    env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))
+    script = f"from hermes_cli.kanban_db import init_db; init_db({str(db_path)!r})"
+    try:
+        ctx.io.run(
+            [str(hermes_python), "-c", script],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )  # nosec B603 — argv from local config, no untrusted input
+    except (subprocess.SubprocessError, OSError) as exc:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            details=details,
+            reason=f"kanban init_db failed: {exc}",
+        )
+
+    details["changed"] = True
+    return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
 # ── Phase C: env_probe ──────────────────────────────────────────────────────
@@ -4972,6 +5100,7 @@ _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("install", _phase_install),
     ("env_probe", _phase_env_probe),
     ("home_init", _phase_home_init),
+    ("kanban_db_init", _phase_kanban_db_init),
     ("install_artifacts", _phase_install_artifacts),
     # RELOCATE(brain-lane): persona seeding moves to the hal0-api lifespan.
     ("persona_seed", _phase_persona_seed),
