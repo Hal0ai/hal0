@@ -69,6 +69,28 @@ function frame(record: Record<string, unknown>) {
   return { record, epoch: EPOCH }
 }
 
+
+// Emit records and wait for each one's OWN row (keyed by its distinct
+// severity) before proceeding. The pane remounts on Slots-state transitions
+// (see useActivity.ts ring-cache comment), reconnecting its EventSource — an
+// emit fired into that gap lands on a dead listener and vanishes, and the
+// ring has no id-dedup so blind re-emits could double-count. A 3s window per
+// attempt rules out slow-render before re-emitting.
+async function emitAndAwait(page: any, records: Array<Record<string, unknown>>) {
+  for (const r of records) {
+    const own = page.locator(`[data-testid="act-row"][data-severity="${(r as any).severity}"]`)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await emitSse(page, STREAM, frame(r))
+      try {
+        await expect(own).toHaveCount(1, { timeout: 3_000 })
+        break
+      } catch {
+        /* lost to a reconnect gap — re-emit */
+      }
+    }
+  }
+}
+
 test.describe('ActivityLog sidebar pane (#slots)', () => {
   test.beforeEach(async ({ page }) => {
     await installSseHarness(page)
@@ -88,8 +110,7 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     await waitForSse(page, STREAM, 6_000)
 
-    await emitSse(page, STREAM, frame(OK_REC))
-    await emitSse(page, STREAM, frame(ERR_REC))
+    await emitAndAwait(page, [OK_REC, ERR_REC])
 
     const rows = page.locator('[data-testid="act-row"]')
     await expect(rows).toHaveCount(2)
@@ -103,8 +124,7 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     await waitForSse(page, STREAM, 6_000)
 
-    await emitSse(page, STREAM, frame(OK_REC))
-    await emitSse(page, STREAM, frame(ERR_REC))
+    await emitAndAwait(page, [OK_REC, ERR_REC])
 
     const okRow = page.locator('[data-testid="act-row"][data-severity="ok"]')
     const errRow = page.locator('[data-testid="act-row"][data-severity="error"]')
@@ -118,15 +138,13 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     await waitForSse(page, STREAM, 6_000)
 
-    await emitSse(page, STREAM, frame(OK_REC))
-    await emitSse(page, STREAM, frame(ERR_REC))
-    await emitSse(page, STREAM, frame(WARN_REC))
-    await expect(page.locator('[data-testid="act-row"]')).toHaveCount(3)
+    const rows = page.locator('[data-testid="act-row"]')
+    await emitAndAwait(page, [OK_REC, ERR_REC, WARN_REC])
+    await expect(rows).toHaveCount(3)
 
     // Click the `error` chip — only the error row should remain (client-side
     // residual filter applies immediately to the ring).
     await page.locator('[data-testid="act-sev-error"]').click()
-    const rows = page.locator('[data-testid="act-row"]')
     await expect(rows).toHaveCount(1)
     await expect(rows.first()).toHaveAttribute('data-severity', 'error')
 
@@ -153,11 +171,18 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     const body = page.locator('[data-testid="activity-log-body"]')
     await expect(body).toBeVisible({ timeout: 6_000 })
-    const overflowY = await body.evaluate((el) => getComputedStyle(el).overflowY)
-    expect(['auto', 'scroll']).toContain(overflowY)
-    const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
+    // A remount between toBeVisible and evaluate leaves a detached node, and
+    // getComputedStyle on a detached node reads as "" — poll with locator
+    // re-resolution instead of a one-shot evaluate.
+    await expect
+      .poll(async () => body.evaluate((el) => getComputedStyle(el).overflowY), { timeout: 6_000 })
+      .toMatch(/^(auto|scroll)$/)
     // A real px cap (not "none") proves the pane is bounded.
-    expect(maxH).not.toBe('none')
-    expect(parseFloat(maxH)).toBeGreaterThan(0)
+    await expect
+      .poll(async () => {
+        const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
+        return maxH !== 'none' && parseFloat(maxH) > 0
+      }, { timeout: 6_000 })
+      .toBe(true)
   })
 })
