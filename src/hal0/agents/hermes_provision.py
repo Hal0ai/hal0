@@ -391,6 +391,45 @@ UV_PYTHON_FALLBACK = "3.13"
 #: the interpreter usable by the service and survives root-homedir cleanups.
 UV_PYTHON_INSTALL_DIR = Path("/var/lib/hal0/python")
 
+#: The hal0 service state root — the fallback HOME for provisioning subprocesses
+#: (see :func:`_hal0_subprocess_env`). install.sh chowns ``.cache``/``.config``
+#: under here to hal0, so tools that write dot-dirs land in a hal0-owned tree.
+_HAL0_STATE_ROOT = Path("/var/lib/hal0")
+#: uv cache home, pinned under the hal0 state root (never ~/.cache → /root).
+UV_CACHE_DIR = _HAL0_STATE_ROOT / ".cache" / "uv"
+
+
+def _hal0_service_home() -> str:
+    """The hal0 service account's home dir, for subprocess HOME sanitization.
+
+    Provisioning runs as the ``hal0`` service user (the CLI drops privileges
+    before this module runs), but the *inherited* environment can still carry
+    the root caller's ``HOME=/root`` (O15): the drop-to-hal0 seam sets HOME, yet
+    a caller that bypasses it — or a stale env — leaves ``HOME`` pointing at
+    root's 0700 home. uv/pip then reach into ``/root`` (``uv.toml`` /
+    ``.cache``) and fail with ``Permission denied`` as hal0. Resolve the real
+    hal0 home from passwd, falling back to the state root.
+    """
+    try:
+        home = pwd.getpwnam("hal0").pw_dir
+    except (KeyError, OSError):
+        home = None
+    return home or str(_HAL0_STATE_ROOT)
+
+
+def _hal0_subprocess_env(**overrides: str) -> dict[str, str]:
+    """os.environ with HOME pinned to the hal0 home + caller ``overrides`` (O15).
+
+    Every provisioning subprocess spawned *after* the drop to hal0 (uv, venv,
+    pip, hermes-cli) inherits this so a leaked ``HOME=/root`` can never send a
+    tool reaching for ``~/uv.toml`` / ``~/.cache`` into root's unwritable home.
+    HOME is forced (not defaulted) precisely because the leak is that HOME is
+    already set to the wrong value.
+    """
+    env = {**os.environ, "HOME": _hal0_service_home()}
+    env.update(overrides)
+    return env
+
 
 def _uv_available(prober: Callable[[str], str | None] = shutil.which) -> str | None:
     return prober("uv")
@@ -412,7 +451,14 @@ def _provision_python_via_uv(
     uv = _uv_available(prober)
     if uv is None:
         return None
-    env = {**os.environ, "UV_PYTHON_INSTALL_DIR": str(UV_PYTHON_INSTALL_DIR)}
+    # Sanitize HOME + pin uv's cache to hal0-owned paths (O15): as hal0 with a
+    # leaked HOME=/root, uv would try to open /root/uv.toml and /root/.cache/uv
+    # → "Permission denied" → bootstrap failed. Force HOME to the hal0 home and
+    # UV_CACHE_DIR under the state root so uv never reaches into /root.
+    env = _hal0_subprocess_env(
+        UV_PYTHON_INSTALL_DIR=str(UV_PYTHON_INSTALL_DIR),
+        UV_CACHE_DIR=str(UV_CACHE_DIR),
+    )
     # Create the install dir world-traversable BEFORE uv writes into it.
     # uv inherits root's umask, so on a restrictive-umask host (e.g. 077) the
     # tree lands 0700 and the hal0 service user can't traverse to the symlinked
@@ -539,16 +585,22 @@ def _install_venv(
         # by requires-python — so rebuild on the resolved interpreter. Venv
         # holds packages only; $HERMES_HOME state is untouched.
         shutil.rmtree(venv)
+    # Sanitize HOME for venv + pip (same O15 leak class as uv above): as hal0
+    # with a leaked HOME=/root, pip's ~/.cache/pip + ~/.config/pip land under
+    # root's unwritable home. Pin HOME to the hal0 home so both stay hal0-owned.
+    env = _hal0_subprocess_env()
     if not venv.exists():
-        runner.run([py, "-m", "venv", str(venv)], check=True)  # nosec B603
+        runner.run([py, "-m", "venv", str(venv)], check=True, env=env)  # nosec B603
     pip = _venv_python(venv)
     runner.run(  # nosec B603 — argv from local config
         [str(pip), "-m", "pip", "install", "--upgrade", "pip"],
         check=True,
+        env=env,
     )
     runner.run(  # nosec B603
         [str(pip), "-m", "pip", "install", "-r", str(requirements)],
         check=True,
+        env=env,
     )
 
 
@@ -673,7 +725,7 @@ def upgrade_hermes_runtime(
     hermes_bin = pip.parent / "hermes"
     migrated = False
     try:
-        env = {**os.environ, "HERMES_HOME": str(hermes_home)}
+        env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))  # HOME-sanitized (O15)
         runner.run([str(hermes_bin), "config", "migrate"], check=True, env=env)  # nosec B603
         migrated = True
     except (subprocess.SubprocessError, OSError) as exc:
@@ -1292,7 +1344,10 @@ def _ensure_hermes_config(hermes_bin: Path, hermes_home: Path, run: Callable[...
     Non-fatal: a migrate hiccup is logged but the subsequent ``config set``
     calls still create/populate the file. Returns whether migrate succeeded.
     """
-    env = {**os.environ, "HERMES_HOME": str(hermes_home)}
+    # HOME-sanitized (O15): hermes-cli runs as hal0; a leaked HOME=/root would
+    # send its own dot-dirs into root's unwritable home. HERMES_HOME is set
+    # explicitly so config lands in the managed tree regardless.
+    env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))
     try:
         run(
             [str(hermes_bin), "config", "migrate"],
@@ -1319,7 +1374,7 @@ def _apply_config_set(
     Returns ``(applied_count, errors)``. Each set is idempotent (writes the
     same value on a re-run), so the whole overlay is safe under ``--repair``.
     """
-    env = {**os.environ, "HERMES_HOME": str(hermes_home)}
+    env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))  # HOME-sanitized (O15)
     applied = 0
     errors: list[str] = []
     for key, value in pairs:
