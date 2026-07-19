@@ -42,6 +42,24 @@ export function isMockForced() {
   return FORCED
 }
 
+// Forced-mock warm-up: kick off the `./mockFixtures.ts` dynamic import once,
+// eagerly, at module init instead of waiting for the first substituted GET
+// to trigger it cold (see `buildMockPayload` below). In dev/e2e the dynamic
+// import is a real dev-server module fetch, not a bundled function call —
+// paying that round-trip lazily on e.g. the page's first `/api/slots`
+// request pushes the response past React's initial commit, so a
+// query-driven loading/populated branch switch (SlotsView) observably
+// remounts children (ActivityLog) that a caller — or a Playwright locator
+// that already resolved a "visible" element — was holding onto. Warming
+// here collapses the fetch into app bootstrap so the first real call
+// resolves against an already-settled (or already in-flight) promise.
+// FORCED is only ever true under the opt-in `VITE_MOCK_HAL0=1` build flag
+// (dev/e2e), so this never runs — and never pulls fixtures into — a plain
+// production bundle.
+let mockFixturesWarm: Promise<typeof import('./mockFixtures')> | null = FORCED
+  ? import('./mockFixtures')
+  : null
+
 // ─── Allowlist (first match wins) ─────────────────────────────────
 // Route metadata only — no builder function references, so this array is
 // cheap to construct eagerly and never pulls `./mockFixtures.ts` (and its
@@ -170,9 +188,10 @@ function jsonResponse(body: unknown, status = 200) {
 // `./mockFixtures.ts` — the ONLY place that module is ever reached from —
 // so its builder functions and fixture data (Memory story, FU2 synthetic
 // graph, seed profiles/stacks/chat-templates…) are never pulled into the
-// bundle unless a mock substitution is actually about to happen.
+// bundle unless a mock substitution is actually about to happen. Prefers
+// the warmed-up promise above so a FORCED call never pays a cold fetch.
 async function buildMockPayload(key: string, url: string, match: RegExpMatchArray): Promise<unknown> {
-  const { MOCK_BUILDERS } = await import('./mockFixtures')
+  const { MOCK_BUILDERS } = await (mockFixturesWarm ?? import('./mockFixtures'))
   const build = MOCK_BUILDERS[key]
   return build ? build(url, match) : null
 }
