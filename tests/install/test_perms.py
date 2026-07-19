@@ -282,6 +282,47 @@ def test_runtime_slots_and_registry_are_service_owned(tmp_hal0_home: str) -> Non
     assert registry.optional is False
 
 
+def test_models_store_row_is_declared_recursive_and_service_owned(tmp_hal0_home: str) -> None:
+    """r5-sync-assessment §6.2 (O13 class): models/ needs its own PermRow.
+
+    ``${VAR_DIR}/models`` is born root:root 0755 by the same install.sh mkdir
+    as slots/ and registry/, but had no row — ``doctor perms --fix`` could not
+    heal it and default-store pulls failed with PermissionError under
+    User=hal0. The row must be non-optional, setgid, service-owned, recursive
+    (pulls nest ``<model_id>/<file>``), and give files a distinct mode from
+    dirs (plain ``open(part, "wb")`` births files 0644, not the dir's 2775).
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    var_lib = paths.var_lib()
+
+    models = rows[var_lib / "models"]
+    assert (models.owner, models.group, models.mode) == ("hal0", "hal0", 0o2775)
+    assert models.optional is False
+    assert models.recursive is True
+    assert models.glob == "*"
+    assert models.child_mode == 0o2775  # nested per-model dirs
+    assert models.child_file_mode == 0o644  # weight files
+
+
+def test_models_store_row_heals_root_owned_tree(tmp_hal0_home: str) -> None:
+    """A root-owned models/ tree (+ a root-owned per-model subdir) plans as drift."""
+    var_lib = paths.var_lib()
+    models = var_lib / "models"
+    (models / "some-model").mkdir(parents=True)
+
+    def _root_observe(p: Path) -> perms.PermObservation:
+        return perms.PermObservation(
+            path=p, exists=p.exists(), owner="root", group="root", mode=0o755
+        )
+
+    rows = [r for r in perms.ownership_table() if r.target == models]
+    assert rows, "models/ row must be present in the table"
+    pl = perms.plan(rows, observe_fn=_root_observe)
+    drifted = {d.path for d in pl.drifted}
+    assert models in drifted
+    assert models / "some-model" in drifted
+
+
 def test_runtime_slots_row_heals_root_owned_tree(tmp_hal0_home: str) -> None:
     """O13 heal path: a root-owned runtime slots/ tree is planned as drift.
 
@@ -401,15 +442,17 @@ def test_nested_state_json_two_levels_deep_plans_as_drift_and_heals(tmp_hal0_hom
 def test_recursive_glob_does_not_alter_non_recursive_rows(tmp_hal0_home: str) -> None:
     """Auditing the recursion feature: every OTHER glob row stays single-level.
 
-    ``recursive`` defaults False and only the slots/ row opts in — this locks
+    ``recursive`` defaults False and only the slots/ + models/ rows opt in
+    (both nest per-item state one level below the glob'd dir) — this locks
     that in so future edits don't silently widen the lock-file / .hermes /
     secrets/agents / benchmarks glob rows to walk nested subdirectories.
     """
     table = perms.ownership_table(service_user="hal0")
+    _recursive_targets = {paths.var_lib() / "slots", paths.var_lib() / "models"}
     non_recursive_glob_rows = [
-        r for r in table if r.glob is not None and r.target != paths.var_lib() / "slots"
+        r for r in table if r.glob is not None and r.target not in _recursive_targets
     ]
-    assert non_recursive_glob_rows, "expected at least one non-slots glob row to audit"
+    assert non_recursive_glob_rows, "expected at least one non-recursive glob row to audit"
     for row in non_recursive_glob_rows:
         assert row.recursive is False, row.label
         assert row.child_file_mode is None, row.label

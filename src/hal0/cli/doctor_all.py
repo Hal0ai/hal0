@@ -9,7 +9,8 @@ command, with ``--json`` for machine consumers.
 It re-uses the tested :class:`hal0.cli.doctor_verify.Check` row type and the
 verify report-card classifiers (API, runners, DNS, capabilities, memory,
 OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
-auth posture, model-store integrity, pending migrations, and bound slot ports.
+auth posture, model-store integrity, pending migrations, bound slot ports,
+and the ``hal0.target`` boot-enable anchor (r5-sync-assessment §6.1).
 
 Strictly read-only — there is no ``--fix`` here; the per-surface subcommands
 own repair. Exit codes:
@@ -22,6 +23,9 @@ own repair. Exit codes:
 from __future__ import annotations
 
 import json as jsonlib
+import shutil
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +129,74 @@ def check_migrations(pending: tuple[int, int] | None) -> Check:
     )
 
 
+def _hal0_target_enabled_probe() -> bool | None:
+    """Real ``systemctl is-enabled --quiet hal0.target`` probe.
+
+    Returns ``True``/``False`` for a definitive answer, ``None`` when the
+    question can't be asked at all (no ``systemctl`` on PATH, e.g. a
+    container/CI box) — the caller degrades that to an advisory warn rather
+    than a fail. Kept as a free function (not inlined) so tests can swap it
+    out via the ``is_enabled`` seam without touching subprocess.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            ["systemctl", "is-enabled", "--quiet", "hal0.target"],
+            check=False,
+            timeout=5,
+        )
+    except OSError:
+        return None
+    return result.returncode == 0
+
+
+def check_hal0_target(
+    *,
+    unit_dir: Path | None = None,
+    exists: Callable[[Path], bool] | None = None,
+    is_enabled: Callable[[], bool | None] | None = None,
+) -> Check:
+    """``hal0.target`` — the boot-enable anchor every slot Quadlet depends on.
+
+    Every rendered per-slot Quadlet declares
+    ``[Install] WantedBy=hal0.target`` (``providers/container.py``); if the
+    target unit is missing, or installed but not enabled, slots that looked
+    healthy before a reboot silently stay down after one
+    (r5-sync-assessment §6.1, launch-blocker #1). ``exists``/``is_enabled``
+    are injectable seams (mirrors ``check_model_store``'s ``exists`` param)
+    so this is testable without a real systemd or filesystem.
+    """
+    _unit_dir = unit_dir if unit_dir is not None else Path("/etc/systemd/system")
+    _exists = exists if exists is not None else (lambda p: p.exists())
+    unit_path = _unit_dir / "hal0.target"
+    if not _exists(unit_path):
+        return Check(
+            "hal0_target",
+            "hal0.target",
+            _FAIL,
+            f"{unit_path} not installed — slots will not autostart after reboot; "
+            "re-run the installer (sudo bash install.sh) to ship it",
+        )
+    _is_enabled = is_enabled if is_enabled is not None else _hal0_target_enabled_probe
+    enabled = _is_enabled()
+    if enabled is False:
+        return Check(
+            "hal0_target",
+            "hal0.target",
+            _FAIL,
+            "hal0.target installed but not enabled — run `sudo systemctl enable --now hal0.target`",
+        )
+    if enabled is None:
+        return Check(
+            "hal0_target",
+            "hal0.target",
+            _WARN,
+            "hal0.target installed — enabled state unknown (systemctl unavailable)",
+        )
+    return Check("hal0_target", "hal0.target", _PASS, "installed and enabled")
+
+
 def check_ports(slots: Any) -> Check:
     """Bound slot ports (informational evidence, always advisory-clean).
 
@@ -172,6 +244,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_model_store(_get_any("/api/models", base)),
         check_migrations(pending_layout_migration()),
         check_ports(_get_any("/api/slots", base)),
+        check_hal0_target(),
     ]
     return verify_rows + extra_rows
 
@@ -225,8 +298,9 @@ def doctor_all_cmd(
 
     Composes the ``doctor verify`` report card (API, runners, DNS, capability
     slots, memory, OpenWebUI, Hermes) with auth posture, model-store integrity,
-    pending migrations, and bound slot ports. Read-only — use the per-surface
-    subcommands (``perms``/``models``) for ``--fix``.
+    pending migrations, bound slot ports, and the ``hal0.target`` boot-enable
+    anchor. Read-only — use the per-surface subcommands (``perms``/``models``)
+    for ``--fix``.
 
     Exit codes: 0 clean, 1 an actionable fail, 2 a critical failure (API
     unreachable / zero healthy runners).
@@ -252,6 +326,7 @@ def doctor_all_cmd(
 __all__ = [
     "build_all_checks",
     "check_auth_posture",
+    "check_hal0_target",
     "check_migrations",
     "check_model_store",
     "check_ports",

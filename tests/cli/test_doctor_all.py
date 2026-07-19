@@ -103,6 +103,43 @@ def test_ports_lists_bound() -> None:
     assert "8081" in c.detail and "8082" in c.detail
 
 
+# ── check_hal0_target ─────────────────────────────────────────────────────────
+
+
+def test_hal0_target_missing_fails() -> None:
+    c = da.check_hal0_target(exists=lambda _p: False)
+    assert c.status == "fail"
+    assert c.key == "hal0_target"
+    assert "not installed" in c.detail
+
+
+def test_hal0_target_installed_but_disabled_fails() -> None:
+    c = da.check_hal0_target(exists=lambda _p: True, is_enabled=lambda: False)
+    assert c.status == "fail"
+    assert "not enabled" in c.detail
+
+
+def test_hal0_target_installed_and_enabled_passes() -> None:
+    c = da.check_hal0_target(exists=lambda _p: True, is_enabled=lambda: True)
+    assert c.status == "pass"
+
+
+def test_hal0_target_systemctl_unavailable_warns() -> None:
+    c = da.check_hal0_target(exists=lambda _p: True, is_enabled=lambda: None)
+    assert c.status == "warn"
+
+
+def test_hal0_target_uses_given_unit_dir(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "hal0.target").write_text("[Unit]\n")
+    c = da.check_hal0_target(unit_dir=tmp_path, is_enabled=lambda: True)
+    assert c.status == "pass"
+
+
+def test_hal0_target_enabled_probe_no_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: None)
+    assert da._hal0_target_enabled_probe() is None
+
+
 # ── overall_verdict + exit codes ──────────────────────────────────────────────
 
 
@@ -154,13 +191,15 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(da, "_get_any", _fake_get)
     monkeypatch.setattr("hal0.cli.doctor_commands.pending_layout_migration", lambda: (0, 0))
-    # model file existence: pretend present so no spurious fail.
+    # model file existence + hal0.target unit file: pretend present so
+    # neither spuriously fails.
     monkeypatch.setattr(da.Path, "exists", lambda self: True)
+    monkeypatch.setattr(da, "_hal0_target_enabled_probe", lambda: True)
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 4 extras.
-    assert keys[-4:] == ["auth", "models", "migrations", "ports"]
+    # 7 verify rows + 5 extras.
+    assert keys[-5:] == ["auth", "models", "migrations", "ports", "hal0_target"]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
 
