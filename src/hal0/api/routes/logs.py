@@ -135,9 +135,11 @@ async def journalctl_sse(
     before it's framed. NOTE: despite this module's file-level docstring,
     the slot-scoped ``/api/slots/{name}/logs/stream`` route does NOT call
     this generator — it has its own independent journalctl plumbing in
-    :mod:`hal0.slots.logs` (``tail_journal``/``read_tail``), which does
-    not redact and is unaffected by this fix. Only ``/api/logs`` and
-    ``/api/logs/stream`` (this module) get the api-logs-redact fix.
+    :mod:`hal0.slots.logs` (``tail_journal``/``read_tail``). That stream
+    route now applies the same :func:`hal0.api._redact.redact_log_line`
+    helper itself, at its own SSE-framing point in ``slots.py``
+    (lane/slotlogs-redact) — so both routes share the redaction
+    behaviour even though they don't share this generator.
     """
     if shutil.which("journalctl") is None:
         yield 'event: error\ndata: {"message":"journalctl unavailable"}\n\n'

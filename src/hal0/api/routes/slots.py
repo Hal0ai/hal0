@@ -33,6 +33,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
+from hal0.api._redact import redact_log_line
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.model_meta import is_resolvable
 from hal0.slot_view import (
@@ -1084,6 +1085,13 @@ async def slot_logs_stream(
     has no journal entries yet. Client disconnects close the subprocess.
     The journalctl follow generator lives in
     :func:`hal0.slots.logs.tail_journal`.
+
+    Each line is redacted via :func:`hal0.api._redact.redact_log_line`
+    before it's framed — same shared helper as ``/api/logs`` and
+    ``/api/logs/stream`` (api-logs-redact). This route has its own
+    independent journalctl plumbing in :mod:`hal0.slots.logs`
+    (``tail_journal``), which does not redact on its own, so the
+    redaction happens here at the SSE framing boundary instead.
     """
     import shutil
 
@@ -1099,7 +1107,7 @@ async def slot_logs_stream(
             yield 'event: degraded\ndata: {"message":"journalctl unavailable"}\n\n'
             return
         async for line in _logs.tail_journal(f"hal0-slot@{name}.service", backfill, quiet):
-            yield f"data: {json.dumps(line)}\n\n"
+            yield f"data: {json.dumps(redact_log_line(line))}\n\n"
 
     return StreamingResponse(
         event_source(),
