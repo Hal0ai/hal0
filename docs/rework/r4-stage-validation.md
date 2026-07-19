@@ -66,6 +66,30 @@ API runs as `hal0`; the slots tree + `state.json` are `root:root` after install 
 `error` (O1 code degrades gracefully). **`doctor perms --fix` does not cover the slots tree** →
 not self-healing; needs a manual `chown -R hal0:hal0 /var/lib/hal0/slots`. Both boxes.
 
+## Revalidation on the fix wave (`c98a7bc3`, both boxes redeployed)
+
+Force-reinstalled venv (same-version 0.9.8 hop), `[slots].network_mode=host` set on 143.
+
+| Item | Result |
+|---|---|
+| **O17 steward auth** | ✅ `service_identity` in venv (3 sites); `/api/brain/chat` no longer 401 |
+| **O18 framing** | ✅ singular `{"message"}` no longer trips `No user query` |
+| **Phase 4 read-only** | ✅ mutation refused (`tool 'slot_load' refused … read_only=true`); widen `read_only=false` → `slot_load` executes; reverted |
+| **Phase 7 render** | ✅ uniform PodmanArgs, gate-free, both boxes |
+| **143 host-net lane** | ✅ via hal0: `Network=host` + `--host 127.0.0.1`, bind `127.0.0.1:8082`, restart **0 netns errors**, LAN-fenced (slot refused, API answers) |
+| **O14 `--adopt`** | ✅ unknown-flag Error, help clean, both |
+| **O16 uninstall** | ✅ `Uninstalled hermes`, HERMES_HOME gone, no 500 (soft "memory teardown skipped" warning), reinstall clean |
+| **O13 perms self-heal** | ◑ `doctor perms --fix` heals the slots **dir** root→hal0 (8/9 paths); does **not** recurse into nested `state.json` (stayed root in aggressive test → slots error until `chown -R`). Dir-level fix works; nested-state gap is a follow-up |
+| **Phase 6 executor** | ◑ `board.hermes_executor_registered` logs when `HERMES_DASHBOARD_BASE_URL` set (143); board-card dispatch blocked by O20 |
+
+### New findings this pass
+- **O19** — auth posture auto-enables on `0.0.0.0` bind but the **dashboard ships no login UI** → operator locked out of the browser (`authentication required` everywhere, nothing to log in with). Workaround applied on these boxes: `HAL0_REQUIRE_AUTH=0` (trusted-LAN open, matches lxc105). Fix: render a login when `auth_required && tier==anon`, or don't gate the UI shell without a login path.
+- **O20** — hermes-gateway **kanban board DB missing schema**: `no such table: tasks` / `kanban_notify_subs`, the watcher errors every tick (`kanban_db.py:release_stale_claims`). Board non-functional on 150 → Phase 6 worker-path dispatch can't be driven until the board schema initializes.
+- **steward config note** — fresh-box `[brain_chat] model=""` doesn't route (dispatch 404); needs a configured model + a brain slot with ≥8k ctx (steward system prompt ≈ 7.3k tokens). Also observed `read_only=false` persisted post-redeploy (config not clobbered) — reset to the `true` default.
+- **O15 not testable here** — 143 now has python3.13 (deadsnakes), so the uv fallback path doesn't trigger; the `_hal0_subprocess_env` HOME-sanitize fix is code-verified only.
+
+**Closed:** O12 (live), O14, O16, O17, O18, Phase 4, Phase 7, 143 host-net. **Open/follow-up:** O13 nested-state, O19, O20, Phase 5 full liveness (memory write/recall via hermes-agent chat — not driven headlessly).
+
 ## Standing policy
 Validated on both boxes per policy: 150 = podman-4.9.3 / privileged / AppArmor; 143 = podman-5.7 /
 unprivileged. Host-net slot lane still queued for 143 (bridge netns teardown) — Phase 7 was
