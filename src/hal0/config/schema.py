@@ -365,7 +365,7 @@ class SlotConfig(BaseModel):
         default=True,
         description="Whether this slot is started on hal0 startup.",
     )
-    # HAL0-SUNSET: v0.10.0 — runtime is Literal["container"] only; field is ceremony, drop it.
+    # HAL0-SUNSET: v1.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",
         description=(
@@ -486,7 +486,7 @@ class SlotConfig(BaseModel):
     # keys, not [server] keys, into the validated SlotConfig).  The new
     # nested ``server`` model below holds fields that are authored under
     # [server] in TOML — keep additions there.
-    # HAL0-SUNSET: v0.10.0 — workers is inert; a non-default value only logs a warning.
+    # HAL0-SUNSET: v1.0.0 — workers is inert; a non-default value only logs a warning.
     workers: int = Field(
         default=1,
         ge=1,
@@ -2384,7 +2384,7 @@ class MemoryConfig(BaseModel):
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )
-    # HAL0-SUNSET: v0.10.0 — 'cognee' engine value resolves to hindsight at runtime; drop the alias.
+    # HAL0-SUNSET: v1.0.0 — 'cognee' engine value resolves to hindsight at runtime; drop the alias.
     engine: str = Field(
         default="hindsight",
         description=(
