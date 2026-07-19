@@ -30,12 +30,14 @@ from hal0.config.schema import (
 )
 from hal0.providers import container as _container_mod
 from hal0.providers._gpu import resolve_gpu_group_ids
+from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
     _container_runtime,
     _image_mismatch,
     _llama_launch_plan,
+    _loopback_fence_command,
     _render_quadlet_from_plan,
     _resolve_model_path,
     resolved_command_for_slot,
@@ -1029,3 +1031,113 @@ class TestUniformQuadletRender:
         text = self._rendered()
         if "--group-add" in text:
             assert "PodmanArgs=" in text
+
+
+def _exec_tokens(unit_text: str) -> list[str]:
+    """shlex-split the rendered ``Exec=`` argv back into tokens."""
+    return shlex.split(_exec_line(unit_text))
+
+
+class TestHostNetLoopbackFence:
+    """host-net ⇄ loopback-bind coupling (podman-unprivileged-findings.md, Issue 1).
+
+    Under ``Network=host`` there is no ``PublishPort=127.0.0.1:…`` fence, so the
+    process bind IS the fence — the renderer must flip ``--host 0.0.0.0`` (and
+    ComfyUI's ``--listen 0.0.0.0``) to loopback. The invariant: a host-net plan
+    can NEVER render a 0.0.0.0 bind. Bridge mode keeps 0.0.0.0 + the 127.0.0.1
+    PublishPort pin unchanged.
+    """
+
+    def _llama_plan(self, network_mode: str = "") -> RuntimeLaunchPlan:
+        return RuntimeLaunchPlan(
+            image="img:latest",
+            command=["--host", "0.0.0.0", "--port", "8095", "--model", "/models/m.gguf"],
+            port=8095,
+            network_mode=network_mode,
+        )
+
+    # ── INVARIANT: host-net plan never renders a 0.0.0.0 bind ────────────────
+    def test_host_net_plan_never_renders_zero_bind(self) -> None:
+        """THE invariant. A plan pinned network_mode=host binds loopback."""
+        plan = self._llama_plan(network_mode="host")
+        unit = _render_quadlet_from_plan("slot", plan)
+        assert "Network=host" in unit.splitlines()
+        assert "0.0.0.0" not in unit  # no bind, no publish, nowhere
+        tokens = _exec_tokens(unit)
+        assert tokens[tokens.index("--host") + 1] == "127.0.0.1"
+        # host net → no PublishPort (would be a no-op).
+        assert not any(ln.startswith("PublishPort=") for ln in unit.splitlines())
+
+    def test_config_default_host_net_flips_bind_for_bridge_plan(self) -> None:
+        """A plan with empty network_mode picks up the [slots].network_mode=host
+        box default and STILL gets the loopback bind + Network=host — the
+        deploy-time knob drives the fence, not just an explicit per-plan mode."""
+        plan = self._llama_plan(network_mode="")  # bridge-shaped plan
+        unit = _render_quadlet_from_plan("slot", plan, network_mode_default="host")
+        assert "Network=host" in unit.splitlines()
+        assert "0.0.0.0" not in unit
+        tokens = _exec_tokens(unit)
+        assert tokens[tokens.index("--host") + 1] == "127.0.0.1"
+
+    # ── REGRESSION: bridge mode keeps 0.0.0.0 + loopback PublishPort ─────────
+    def test_bridge_mode_keeps_zero_bind_and_loopback_publish(self) -> None:
+        """Bridge (empty network_mode, no host default): the process binds
+        0.0.0.0 inside its netns and the 127.0.0.1 PublishPort is the fence —
+        unchanged from before this lane."""
+        plan = self._llama_plan(network_mode="")
+        unit = _render_quadlet_from_plan("slot", plan)  # network_mode_default=""
+        assert not any(ln.startswith("Network=") for ln in unit.splitlines())
+        assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
+        tokens = _exec_tokens(unit)
+        assert tokens[tokens.index("--host") + 1] == "0.0.0.0"
+
+    def test_bridge_mode_publish_host_widen_still_binds_zero(self) -> None:
+        """publish_host=0.0.0.0 widens the PUBLISH (bridge); the process bind is
+        untouched (still 0.0.0.0 in-netns). Only host-net flips the bind."""
+        plan = self._llama_plan(network_mode="")
+        unit = _render_quadlet_from_plan("slot", plan, publish_host="0.0.0.0")
+        assert "PublishPort=0.0.0.0:8095:8095" in unit.splitlines()
+
+    # ── ComfyUI --listen inside a bash -lc payload string ───────────────────
+    def test_comfyui_shell_payload_listen_flipped_under_host_net(self) -> None:
+        """ComfyUI templates ``--listen 0.0.0.0`` inside a single bash -lc token
+        AND always runs host net — the chokepoint must reach into the shell
+        string too so its web UI port is loopback-fenced like every slot."""
+        payload = "cd /opt/ComfyUI && exec python main.py --listen 0.0.0.0 --port 8188 -fa"
+        plan = RuntimeLaunchPlan(
+            image="comfy:latest",
+            command=["bash", "-lc", payload],
+            port=8188,
+            network_mode="host",
+        )
+        unit = _render_quadlet_from_plan("img", plan)
+        assert "Network=host" in unit.splitlines()
+        assert "0.0.0.0" not in unit
+        assert "--listen 127.0.0.1" in _exec_line(unit)
+
+
+class TestLoopbackFenceCommand:
+    """Unit coverage for the fence helper across every bind-flag shape."""
+
+    def test_split_token_host(self) -> None:
+        assert _loopback_fence_command(["--host", "0.0.0.0", "--port", "9"]) == [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9",
+        ]
+
+    def test_split_token_listen(self) -> None:
+        assert _loopback_fence_command(["--listen", "0.0.0.0"]) == ["--listen", "127.0.0.1"]
+
+    def test_inline_equals_form(self) -> None:
+        assert _loopback_fence_command(["--host=0.0.0.0"]) == ["--host=127.0.0.1"]
+
+    def test_embedded_shell_string(self) -> None:
+        out = _loopback_fence_command(["bash", "-lc", "python m.py --listen 0.0.0.0 --port 8"])
+        assert out[-1] == "python m.py --listen 127.0.0.1 --port 8"
+
+    def test_no_bind_flag_untouched(self) -> None:
+        # A bare 0.0.0.0 not preceded by a bind flag is left alone (defensive:
+        # the fence targets bind addresses, not arbitrary values).
+        assert _loopback_fence_command(["--some-ip", "0.0.0.0"]) == ["--some-ip", "0.0.0.0"]

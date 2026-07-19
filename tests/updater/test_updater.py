@@ -988,3 +988,42 @@ def test_is_newer_falls_back_to_tuple_for_nightly() -> None:
     digit-tuple compare and keeps timestamp monotonicity."""
     assert _is_newer("0.5.1-nightly.20260615120000", "0.5.1-nightly.20260615") is True
     assert _is_newer("0.5.1-nightly.20260615", "0.5.0-nightly.20260615") is True
+
+
+class TestVenvRefreshIsCommitAgnostic:
+    """The venv refresh must NOT gate on the version string.
+
+    Operator finding: ``hal0 update --source git`` on an unchanged version
+    (0.9.8) left OLD code running because a plain ``pip install <tree>`` is a
+    no-op when pip sees the same version already satisfied. The src-side
+    refresh (:func:`_reinstall_into_venv`, used by every commit/apply/rollback)
+    must therefore ALWAYS force-reinstall so a same-version-but-different-commit
+    tree still lands its new code. This test locks that invariant.
+
+    (The install.sh ``--source git`` path is out of this lane's fence — the
+    corresponding ``pip install --force-reinstall`` delta is in the report.)
+    """
+
+    def test_reinstall_forces_and_does_not_version_gate(self, monkeypatch, tmp_path) -> None:
+        from hal0.updater.updater import _reinstall_into_venv
+
+        captured: dict[str, Any] = {}
+
+        class _OK:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, *a, **k):
+            captured["cmd"] = cmd
+            return _OK()
+
+        monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+        _reinstall_into_venv(tmp_path / "hal0-0.9.8")
+
+        cmd = captured["cmd"]
+        assert "install" in cmd
+        # Commit-agnostic: force-reinstall regardless of version equality.
+        assert "--force-reinstall" in cmd
+        # Never conditions the pip call on a version comparison.
+        assert str(tmp_path / "hal0-0.9.8") in cmd

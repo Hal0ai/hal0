@@ -1788,6 +1788,30 @@ class SlotsConfig(BaseModel):
         ),
     )
 
+    network_mode: str = Field(
+        default="",
+        description=(
+            "Box-default podman network mode for slot containers "
+            "(``Network=<mode>`` in the generated Quadlet). Empty (the default) "
+            "means bridge networking with a loopback ``PublishPort`` — the safe "
+            "default that keeps raw slot ports off the LAN behind hal0-api. "
+            "Set to ``host`` on netns-limited substrates (unprivileged "
+            "podman-in-LXC, where bridge netns teardown races leave slots "
+            "unloadable) so every slot renders ``Network=host``. This is "
+            "DEPLOY-TIME configuration for the box's substrate, not a runtime "
+            "probe — the renderer never sniffs podman/LXC itself. "
+            "SECURITY NOTE: host networking shares the container's loopback "
+            "with hal0-api, so a host-net slot can reach 127.0.0.1 services on "
+            "the CT (e.g. hal0-api itself); the compensating fence is that the "
+            "slot process is force-bound to 127.0.0.1 (not 0.0.0.0) and every "
+            "hal0-api route is auth-gated — the raw unauthenticated slot port "
+            "is never LAN-reachable. This shared-loopback reach is the accepted "
+            "residual (see docs/rework/podman-unprivileged-findings.md). A slot "
+            "whose provider REQUIRES host net (ComfyUI) already forces it "
+            "regardless of this default. Applies on the next slot (re)start."
+        ),
+    )
+
     @field_validator("publish_host")
     @classmethod
     def _publish_host_sane(cls, v: str) -> str:
@@ -1808,6 +1832,26 @@ class SlotsConfig(BaseModel):
                 "(no spaces, ':', or '/'; IPv6 literals are not supported here)"
             )
         return host
+
+    @field_validator("network_mode")
+    @classmethod
+    def _network_mode_known(cls, v: str) -> str:
+        """Allow only the modes the renderer actually couples a fence to.
+
+        ``""`` (bridge + loopback PublishPort) and ``host`` (Network=host +
+        forced loopback bind) are the two the fence logic understands. Anything
+        else (``bridge``, ``none``, a custom CNI name) would render an
+        un-fenced ``Network=`` with no corresponding bind flip, so it is
+        rejected rather than silently accepted — the value lands verbatim in a
+        Quadlet ``Network=`` key, so it must also be a bare token.
+        """
+        mode = str(v).strip()
+        if mode in ("", "host"):
+            return mode
+        raise ValueError(
+            f"[slots].network_mode {mode!r} is not supported "
+            "(use '' for bridge+loopback-publish, or 'host' for host networking)"
+        )
 
     @model_validator(mode="after")
     def port_range_sane(self) -> SlotsConfig:
