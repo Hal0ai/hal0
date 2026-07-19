@@ -25,7 +25,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 from pydantic import BaseModel
 
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
-from hal0.config.paths import model_store_root
+from hal0.config.paths import model_asset_dirs, model_store_root
 
 router = APIRouter()
 
@@ -85,7 +85,9 @@ def _render_check(text: str) -> str | None:
     return None
 
 
-def _templates_dir() -> Path:
+def _write_dir() -> Path:
+    """Canonical WRITE target for a custom template — the effective store root
+    (``POST`` always lands here, unchanged by the O26c multi-root read fix)."""
     return Path(model_store_root()) / "chat-templates"
 
 
@@ -94,17 +96,29 @@ def _entry(template_id: str, label: str, error: str | None) -> dict[str, Any]:
 
 
 def _catalog() -> list[dict[str, Any]]:
-    """Build the full catalog: ``auto`` first, then store entries sorted by id."""
+    """Build the full catalog: ``auto`` first, then store entries sorted by id.
+
+    Templates are unioned across every mounted model root (effective store +
+    ``pull_root``) via :func:`model_asset_dirs`, so a ``chat-templates`` tree
+    living under ``pull_root`` — e.g. after reverting ``[models].store`` to the
+    default — is still listed (O26c). A given id is emitted once; the first root
+    (store) wins on a cross-root collision.
+    """
     # ``auto`` defers to the GGUF's embedded template — nothing for us to lint.
     entries: list[dict[str, Any]] = [_entry("auto", "Auto (GGUF embedded)", None)]
-    store = _templates_dir()
-    if store.is_dir():
-        for p in sorted(store.glob("*.jinja")):
+    seen: set[str] = set()
+    found: list[tuple[str, dict[str, Any]]] = []
+    for store in model_asset_dirs("chat-templates"):
+        for p in store.glob("*.jinja"):
+            if p.stem in seen:
+                continue
+            seen.add(p.stem)
             try:
                 error = _render_check(p.read_text())
             except OSError as exc:
                 error = f"unreadable: {exc}"
-            entries.append(_entry(p.stem, p.stem, error))
+            found.append((p.stem, _entry(p.stem, p.stem, error)))
+    entries.extend(entry for _, entry in sorted(found, key=lambda t: t[0]))
     return entries
 
 
@@ -129,7 +143,7 @@ async def create_chat_template(body: _TemplateBody) -> dict[str, Any]:
     if not _VALID_ID_RE.fullmatch(body.id):
         raise BadRequest(f"Invalid template id: {body.id!r}", code="chat_template.invalid_id")
 
-    store = _templates_dir()
+    store = _write_dir()
     try:
         store.mkdir(parents=True, exist_ok=True)
         (store / f"{body.id}.jinja").write_text(body.content)

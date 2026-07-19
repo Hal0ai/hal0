@@ -90,6 +90,49 @@ def test_get_catalog_auto_is_first(store_client: TestClient) -> None:
     assert entries[0]["id"] == "auto", "auto should be the first entry"
 
 
+# ── O26c: templates under pull_root are listed (store≠pull_root) ──────────────
+
+
+def test_get_catalog_lists_template_under_pull_root(
+    store_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat-template that lives under pull_root (store empty of them) is still
+    listed — the O26c regression where reverting [models].store blanked it."""
+    from hal0.api.routes import chat_templates as ct
+
+    pull = tmp_path / "pull-root"
+    (pull / "chat-templates").mkdir(parents=True)
+    (pull / "chat-templates" / "underpull.jinja").write_text("{{ x }}")
+
+    # store (HAL0_MODEL_STORE=tmp_path) has no chat-templates; union across
+    # [store, pull_root] must still surface the pull_root template.
+    monkeypatch.setattr(
+        ct, "model_asset_dirs", lambda _sub: [pull / "chat-templates"], raising=True
+    )
+    r = store_client.get("/api/chat-templates")
+    assert r.status_code == 200, r.text
+    ids = {e["id"] for e in r.json()}
+    assert "underpull" in ids
+
+
+def test_catalog_dedups_same_id_across_roots(
+    store_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same template id under two roots is emitted once (store wins)."""
+    from hal0.api.routes import chat_templates as ct
+
+    a = tmp_path / "a" / "chat-templates"
+    b = tmp_path / "b" / "chat-templates"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    (a / "dup.jinja").write_text("{{ a }}")
+    (b / "dup.jinja").write_text("{{ b }}")
+    monkeypatch.setattr(ct, "model_asset_dirs", lambda _sub: [a, b], raising=True)
+    r = store_client.get("/api/chat-templates")
+    dup_entries = [e for e in r.json() if e["id"] == "dup"]
+    assert len(dup_entries) == 1
+
+
 # ── POST /api/chat-templates ──────────────────────────────────────────────────
 
 

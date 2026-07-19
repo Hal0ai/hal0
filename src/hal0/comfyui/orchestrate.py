@@ -99,9 +99,12 @@ def _default_log_path(log_dir: Path | None, clock: Callable[[], float]) -> Path:
     """Resolve the orchestration log path, honouring the model-store layout."""
     if log_dir is None:
         try:
-            from hal0.config.paths import model_store_root
+            from hal0.config.paths import model_asset_dir
 
-            log_dir = Path(model_store_root()) / "comfyui" / "logs"
+            # Resolve across mounted model roots (store + pull_root) so logs sit
+            # beside the comfyui asset tree wherever it actually lives, falling
+            # back to the store root when no root has it yet (O26c).
+            log_dir = model_asset_dir("comfyui/logs")
         except Exception:
             log_dir = Path("/tmp/hal0-comfyui-logs")
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(clock()))

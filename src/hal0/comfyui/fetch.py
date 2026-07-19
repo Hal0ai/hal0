@@ -134,15 +134,20 @@ def _workflows_dir() -> Path:
     """Target dir to provision curated workflow JSONs into.
 
     Honours ``COMFYUI_WORKFLOWS_DIR`` (same override the launch route reads),
-    else ``<model-store>/comfyui/workflows`` (default ``/mnt/ai-models``).
+    else resolves ``comfyui/workflows`` across the mounted model roots
+    (effective store + ``pull_root``) via :func:`model_asset_dir` — so when the
+    workflow tree already lives under ``pull_root`` (e.g. ``[models].store`` is
+    the default), provisioning lands where the reader looks instead of a fresh,
+    unmounted store subdir (O26c). Falls back to ``<store>/comfyui/workflows``
+    (default ``/mnt/ai-models``) when no root has it yet.
     """
     override = os.environ.get("COMFYUI_WORKFLOWS_DIR", "").strip()
     if override:
         return Path(override)
     try:
-        from hal0.config.paths import model_store_root
+        from hal0.config.paths import model_asset_dir
 
-        return Path(model_store_root()) / "comfyui" / "workflows"
+        return model_asset_dir("comfyui/workflows")
     except Exception:
         return Path("/mnt/ai-models/comfyui/workflows")
 

@@ -306,6 +306,48 @@ def model_mount_roots() -> list[str]:
     return result
 
 
+def model_asset_dir(subdir: str) -> Path:
+    """Resolve a model-tree asset subdir to ONE directory (O26c).
+
+    ``subdir`` is a relative asset tree under a model root, e.g.
+    ``"chat-templates"`` or ``"comfyui/workflows"``. Returns the FIRST existing
+    ``<root>/<subdir>`` across :func:`model_mount_roots` (effective store +
+    ``[models].pull_root``, deduped) — so an asset tree that lives under
+    ``pull_root`` is found even when ``[models].store`` is the default and holds
+    no such subdir. When NO root has the subdir yet, returns the canonical
+    ``<model_store_root()>/<subdir>`` so a writer / provisioner lands in the
+    effective store.
+    """
+    for root in model_mount_roots():
+        cand = Path(root) / subdir
+        if cand.is_dir():
+            return cand
+    return Path(model_store_root()) / subdir
+
+
+def model_asset_dirs(subdir: str) -> list[Path]:
+    """Every EXISTING ``<root>/<subdir>`` across :func:`model_mount_roots` (O26c).
+
+    Root order (effective store first), deduped; empty when none exist. Asset
+    LISTING/READ paths union across these so a template / workflow / model
+    present under ANY mounted root is surfaced — reverting ``[models].store`` to
+    the default when assets actually live under ``pull_root`` no longer blanks
+    the listing. WRITES resolve a single dir via :func:`model_asset_dir` (or the
+    canonical :func:`model_store_root`).
+    """
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for root in model_mount_roots():
+        cand = Path(root) / subdir
+        key = os.path.normpath(str(cand))
+        if key in seen:
+            continue
+        seen.add(key)
+        if cand.is_dir():
+            dirs.append(cand)
+    return dirs
+
+
 def default_flm_models_dir() -> str:
     """Return FLM's default model cache (/var/lib/hal0/.config/flm/models).
 

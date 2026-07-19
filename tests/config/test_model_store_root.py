@@ -109,3 +109,62 @@ def test_mount_roots_trailing_slash_not_double_dropped(monkeypatch) -> None:
         lambda: _Cfg("ignored", pull_root="/mnt/ai-models"),
     )
     assert paths.model_mount_roots() == ["/mnt/ai-models"]
+
+
+# ── model_asset_dir / model_asset_dirs — O26c: resolve assets across roots ──
+
+
+def _cfg_roots(monkeypatch, store: str, pull_root: str = "") -> None:
+    monkeypatch.setenv("HAL0_MODEL_STORE", store)
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: _Cfg("ignored", pull_root=pull_root))
+
+
+def test_asset_dir_found_under_pull_root_when_store_empty(monkeypatch, tmp_path) -> None:
+    """store is default/empty, the asset tree lives under pull_root → resolved
+    to the pull_root dir (the O26c regression: reverting store blanked it)."""
+    store = tmp_path / "store"
+    pull = tmp_path / "pull"
+    (pull / "chat-templates").mkdir(parents=True)
+    _cfg_roots(monkeypatch, str(store), str(pull))
+    assert paths.model_asset_dir("chat-templates") == pull / "chat-templates"
+
+
+def test_asset_dir_prefers_store_then_falls_back_to_store_for_writes(monkeypatch, tmp_path) -> None:
+    store = tmp_path / "store"
+    pull = tmp_path / "pull"
+    (store / "chat-templates").mkdir(parents=True)
+    (pull / "chat-templates").mkdir(parents=True)
+    _cfg_roots(monkeypatch, str(store), str(pull))
+    # store is first in model_mount_roots → wins on a cross-root presence tie.
+    assert paths.model_asset_dir("chat-templates") == store / "chat-templates"
+    # nothing exists → the canonical store dir is returned (write target).
+    assert paths.model_asset_dir("comfyui/workflows") == store / "comfyui" / "workflows"
+
+
+def test_asset_dirs_unions_existing_roots(monkeypatch, tmp_path) -> None:
+    store = tmp_path / "store"
+    pull = tmp_path / "pull"
+    (store / "chat-templates").mkdir(parents=True)
+    (pull / "chat-templates").mkdir(parents=True)
+    _cfg_roots(monkeypatch, str(store), str(pull))
+    assert paths.model_asset_dirs("chat-templates") == [
+        store / "chat-templates",
+        pull / "chat-templates",
+    ]
+
+
+def test_asset_dirs_dedup_when_store_equals_pull_root(monkeypatch, tmp_path) -> None:
+    root = tmp_path / "ai-models"
+    (root / "chat-templates").mkdir(parents=True)
+    _cfg_roots(monkeypatch, str(root), str(root))
+    # store == pull_root → model_mount_roots collapses to one → no double.
+    assert paths.model_asset_dirs("chat-templates") == [root / "chat-templates"]
+
+
+def test_asset_dirs_empty_when_no_root_has_subdir(monkeypatch, tmp_path) -> None:
+    store = tmp_path / "store"
+    pull = tmp_path / "pull"
+    store.mkdir()
+    pull.mkdir()
+    _cfg_roots(monkeypatch, str(store), str(pull))
+    assert paths.model_asset_dirs("chat-templates") == []
