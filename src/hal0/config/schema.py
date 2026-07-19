@@ -2756,6 +2756,40 @@ class BrainChatConfig(BaseModel):
     completion_timeout_s: float = Field(default=300.0, gt=0)
 
 
+class SecurityConfig(BaseModel):
+    """[security] section — persisted auth-enforcement posture (KB-1 / O19).
+
+    ``require_auth`` is the durable enable/disable toggle the dashboard
+    Security page writes (``PUT /api/auth/require``). Its default is
+    ``None`` = *unset*, which the runtime resolves to auth **OFF** — the
+    shipped posture as of the 2026-07-19 operator decision: hal0 runs
+    trusted-LAN-open by default, matching how the boxes are actually run.
+
+    This deliberately retires KB-1's bind-address / key-presence auto-on:
+    that auto-on armed enforcement on a 0.0.0.0 bind but the dashboard
+    shipped no login UI, so every route answered ``authentication
+    required`` and operators disabled auth wholesale (``HAL0_REQUIRE_AUTH=0``)
+    to use the product (docs/rework r4 finding O19). Auth is now
+    explicit-enable only.
+
+    Resolution precedence (see :func:`hal0.api.auth.require_auth_enabled`):
+    the ``HAL0_REQUIRE_AUTH`` env var wins over this persisted value, which
+    in turn wins over the OFF default.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    require_auth: bool | None = Field(
+        default=None,
+        description=(
+            "Persisted auth-enforcement toggle. None = unset → auth OFF "
+            "(trusted-LAN open, the shipped default). True/False are explicit "
+            "operator choices. Overridden at runtime by the HAL0_REQUIRE_AUTH "
+            "env var."
+        ),
+    )
+
+
 class Hal0Config(BaseModel):
     """Top-level hal0.toml pydantic model.
 
@@ -2778,6 +2812,7 @@ class Hal0Config(BaseModel):
     honcho: HonchoConfig = Field(default_factory=HonchoConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
 
 # ── Shipped seed-data shims (P3-schema, spec Part A) ──────────────────────────
@@ -2848,6 +2883,7 @@ __all__ = [
     "ProfilesConfig",
     "ProviderEntry",
     "ProvidersConfig",
+    "SecurityConfig",
     "ServerConfig",
     "SlotConfig",
     "SlotsConfig",

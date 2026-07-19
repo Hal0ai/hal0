@@ -51,11 +51,6 @@ log = structlog.get_logger(__name__)
 
 Tier = Literal["anon", "client", "admin"]
 
-# Mirrors config/network.py's private _LOOPBACK_BIND_HOSTS. Duplicated
-# rather than imported because network.py doesn't export it and this
-# module may not add new exports to a file outside its owned set.
-_LOOPBACK_BIND_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
-
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -133,13 +128,21 @@ def _tier_for_key(candidate: str) -> Tier | None:
 def require_auth_enabled() -> bool:
     """The rollout posture: should the enforcement middleware do anything?
 
-    ``HAL0_REQUIRE_AUTH`` (``1``/``true``/``yes``/``on`` or
-    ``0``/``false``/``no``/``off``) is an explicit override. Unset derives
-    the default: enforce when the API is bound somewhere other than
-    loopback, OR when an operator has configured either key. Loopback +
-    no keys configured is dev-open -- this is what keeps the existing
-    TestClient suite (which runs on neither) green without every one of
-    ~700 tests needing to know auth exists.
+    Precedence (highest first):
+
+    1. ``HAL0_REQUIRE_AUTH`` env var (``1``/``true``/``yes``/``on`` or
+       ``0``/``false``/``no``/``off``) — an explicit runtime override.
+    2. The persisted ``[security].require_auth`` config toggle the
+       dashboard Security page writes (``PUT /api/auth/require``).
+    3. **OFF** — the shipped default (operator decision 2026-07-19): hal0
+       runs trusted-LAN-open unless auth is explicitly enabled.
+
+    This inverts KB-1's original derived default (auto-enable on a
+    non-loopback bind OR when a key was configured). That auto-on locked
+    operators out of a dashboard that shipped no login UI (finding O19),
+    so they disabled auth wholesale to use the product — the posture
+    defeated itself. Auth is now explicit-enable only; the enforcement
+    machinery, keys, and login flow are all unchanged once it IS enabled.
     """
     raw = os.environ.get("HAL0_REQUIRE_AUTH", "").strip().lower()
     if raw in _TRUE_VALUES:
@@ -147,11 +150,50 @@ def require_auth_enabled() -> bool:
     if raw in _FALSE_VALUES:
         return False
 
-    from hal0.config import network
+    persisted = _config_require_auth()
+    if persisted is not None:
+        return persisted
 
-    if network.bind_host() not in _LOOPBACK_BIND_HOSTS:
-        return True
-    return has_admin_key() or _client_key() is not None
+    return False
+
+
+# Cheap live read of the persisted ``[security].require_auth`` toggle for
+# the per-request enforcement hot path. Cached on ``(path, mtime)`` so the
+# common configured-box case doesn't re-parse hal0.toml on every request,
+# yet a Security-page toggle (which rewrites the file, bumping its mtime)
+# is picked up on the very next request — no restart, no reload call.
+_require_auth_cache: tuple[str, float, bool | None] | None = None
+
+
+def _config_require_auth() -> bool | None:
+    """Return the persisted ``[security].require_auth`` value, or ``None``.
+
+    ``None`` means *unset* (no config file, no ``[security]`` table, or a
+    malformed config) — the caller then applies the OFF default. This is
+    best-effort by design: a broken hal0.toml must never make the auth
+    gate raise on the request path.
+    """
+    global _require_auth_cache
+    try:
+        from hal0.config import paths
+
+        target = str(paths.hal0_toml())
+        try:
+            mtime = os.stat(target).st_mtime
+        except OSError:
+            return None  # no config file on disk → unset
+
+        cached = _require_auth_cache
+        if cached is not None and cached[0] == target and cached[1] == mtime:
+            return cached[2]
+
+        from hal0.config.loader import load_hal0_config
+
+        value = load_hal0_config().security.require_auth
+        _require_auth_cache = (target, mtime, value)
+        return value
+    except Exception:  # pragma: no cover - defensive; never fail the gate
+        return None
 
 
 # ---------------------------------------------------------------------------

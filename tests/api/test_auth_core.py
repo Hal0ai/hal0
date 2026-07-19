@@ -24,9 +24,17 @@ from hal0.security.exposure import AuthClass
 
 @pytest.fixture(autouse=True)
 def isolate_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """Force the HMAC secret onto a per-test path (mirrors test_chat_proxy_auth)."""
+    """Force the HMAC secret + config home onto per-test paths.
+
+    HAL0_HOME isolation keeps ``require_auth_enabled``'s persisted-config
+    read (``[security].require_auth``) hermetic — it must never see a
+    stray hal0.toml on the dev/CI box. The module-level mtime cache is
+    also reset so no prior test's read leaks across.
+    """
     secret_path = tmp_path / "secret.bin"
     monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(secret_path))
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "hal0_home"))
+    auth_mod._require_auth_cache = None
     yield secret_path
 
 
@@ -164,6 +172,14 @@ def test_has_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
 # require_auth_enabled posture
 
 
+# New posture (operator decision 2026-07-19, finding O19): auth is OFF unless
+# explicitly enabled. KB-1's bind-address / key-presence auto-on is retired —
+# it locked operators out of a login-less dashboard, so they disabled auth
+# wholesale. These tests PIN the inverted default: off-by-default, explicit
+# env / persisted-config enable still works, and enforcement once on is
+# unchanged (covered by test_exposure::test_enforcement_wired).
+
+
 def test_require_auth_disabled_by_default_on_loopback_no_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -174,26 +190,67 @@ def test_require_auth_disabled_by_default_on_loopback_no_keys(
     assert auth_mod.require_auth_enabled() is False
 
 
-def test_require_auth_enabled_when_admin_key_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HAL0_REQUIRE_AUTH", raising=False)
-    monkeypatch.setenv("HAL0_ADMIN_KEY", "x")
-    assert auth_mod.require_auth_enabled() is True
-
-
-def test_require_auth_enabled_when_client_key_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HAL0_REQUIRE_AUTH", raising=False)
-    monkeypatch.setenv("HAL0_CLIENT_KEY", "x")
-    assert auth_mod.require_auth_enabled() is True
-
-
-def test_require_auth_enabled_when_bind_host_non_loopback(
+def test_require_auth_key_presence_no_longer_auto_enables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Configuring a key no longer arms enforcement — explicit-enable only."""
+    monkeypatch.delenv("HAL0_REQUIRE_AUTH", raising=False)
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "x")
+    assert auth_mod.require_auth_enabled() is False
+
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "x")
+    assert auth_mod.require_auth_enabled() is False
+
+
+def test_require_auth_bind_host_no_longer_auto_enables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0.0.0.0 bind no longer arms enforcement (the retired KB-1 auto-on)."""
     monkeypatch.delenv("HAL0_REQUIRE_AUTH", raising=False)
     monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
     monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
     monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    assert auth_mod.require_auth_enabled() is False
+
+
+def test_require_auth_persisted_config_enables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The persisted [security].require_auth toggle arms enforcement."""
+    from hal0.config import paths
+    from hal0.config.loader import save_hal0_config
+    from hal0.config.schema import Hal0Config
+
+    monkeypatch.delenv("HAL0_REQUIRE_AUTH", raising=False)
+    cfg = Hal0Config()
+    cfg.security.require_auth = True
+    paths.hal0_toml().parent.mkdir(parents=True, exist_ok=True)
+    save_hal0_config(cfg)
+    auth_mod._require_auth_cache = None
     assert auth_mod.require_auth_enabled() is True
+
+    # And an explicit disable persists as False.
+    cfg.security.require_auth = False
+    save_hal0_config(cfg)
+    auth_mod._require_auth_cache = None
+    assert auth_mod.require_auth_enabled() is False
+
+
+def test_require_auth_env_override_beats_persisted_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.config import paths
+    from hal0.config.loader import save_hal0_config
+    from hal0.config.schema import Hal0Config
+
+    cfg = Hal0Config()
+    cfg.security.require_auth = True
+    paths.hal0_toml().parent.mkdir(parents=True, exist_ok=True)
+    save_hal0_config(cfg)
+    auth_mod._require_auth_cache = None
+
+    # Env OFF beats persisted ON.
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    assert auth_mod.require_auth_enabled() is False
 
 
 def test_require_auth_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,6 +379,45 @@ def test_login_success_sets_session_cookie(auth_client, monkeypatch: pytest.Monk
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "tier": "admin"}
     assert agents_auth.SESSION_COOKIE_NAME in resp.cookies
+
+
+def test_logout_clears_session_cookie(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    auth_client.post("/api/auth/login", json={"key": "the-real-key"})
+    resp = auth_client.post("/api/auth/logout")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    # The Set-Cookie header expires the session cookie (max-age 0 / past date).
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert agents_auth.SESSION_COOKIE_NAME in set_cookie
+
+
+def test_require_toggle_persists_and_applies_live(
+    auth_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PUT /api/auth/require flips the persisted toggle; the gate reads it live."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.delenv("HAL0_REQUIRE_AUTH", raising=False)
+    auth_mod._require_auth_cache = None
+
+    # Auth off by default → an ADMIN route is reachable with no creds.
+    assert auth_client.get("/api/settings").status_code not in (401, 403)
+
+    # Enable auth (rides through unauthenticated because enforcement is still off).
+    resp = auth_client.put("/api/auth/require", json={"require_auth": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"require_auth": True, "applies_live": True}
+    auth_mod._require_auth_cache = None
+
+    # Now the same ADMIN route denies with no creds — applied live, no restart.
+    assert auth_client.get("/api/settings").status_code in (401, 403)
+
+
+def test_require_toggle_refuses_enable_without_admin_key(auth_client) -> None:
+    """Enabling auth with no admin key would lock everyone out → 400."""
+    resp = auth_client.put("/api/auth/require", json={"require_auth": True})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "auth.no_admin_key"
 
 
 def test_dev_open_bypass_reaches_admin_route_with_no_creds(auth_client) -> None:
