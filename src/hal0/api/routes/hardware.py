@@ -784,7 +784,11 @@ def _backend_state(image: str, local_repos: set[str] | None) -> str:
     """
     if local_repos is None:
         return "unavailable"
-    return "installed" if _image_repo(image) in local_repos else "installable"
+    # ``local_repos`` now holds fully-qualified ``repo:tag`` refs (O26b); this
+    # backend-state view is intentionally repo-level (tag/digest drift is owned
+    # by ``hal0 doctor toolbox-pull``), so match on the bare repo of each ref.
+    local_bare = {_image_repo(ref) for ref in local_repos}
+    return "installed" if _image_repo(image) in local_bare else "installable"
 
 
 @router.get("/system-info")

@@ -294,6 +294,50 @@ def test_pull_status_missing_when_no_job(container_client: TestClient) -> None:
     assert r.json()["state"] == "missing"
 
 
+# ── O26b: per-slot status reads the ROOTFUL store with tag precision ──────────
+
+
+def _rootful(*refs: str):
+    from hal0.providers.podman_introspect import PodmanImagesResult
+
+    return PodmanImagesResult(repos=set(refs), context="rootful")
+
+
+def test_pull_status_present_from_rootful_tagged_match(container_client: TestClient) -> None:
+    """A READY slot whose TAGGED image is in root's store reads present — even
+    though hal0-api's own (rootless) image_present would say False (wrong store)."""
+    fake_catalog, prof = _fake_profile_catalog()
+    with (
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        # rootless probe would (wrongly) report missing — must be ignored.
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=False),
+        patch(
+            "hal0.providers.podman_introspect.images",
+            return_value=_rootful(prof.image, "other/thing:v9"),
+        ),
+    ):
+        r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "present"
+
+
+def test_pull_status_missing_when_tag_absent_from_rootful(container_client: TestClient) -> None:
+    """The rootful store holds a DIFFERENT tag of the same repo → missing (tag
+    precision, not a tag-blind repo hit)."""
+    fake_catalog, _ = _fake_profile_catalog()
+    with (
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
+        patch(
+            "hal0.providers.podman_introspect.images",
+            return_value=_rootful("ghcr.io/hal0ai/amd-strix-halo-toolboxes:some-other-tag"),
+        ),
+    ):
+        r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "missing"
+
+
 # ── ContainerProvider.image_present() unit tests ──────────────────────────────
 
 

@@ -35,6 +35,7 @@ from fastapi.responses import StreamingResponse
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.model_meta import is_resolvable
+from hal0.providers import podman_introspect
 from hal0.slot_view import (
     SlotViewAggregator,
     config_enrichment,
@@ -1198,6 +1199,32 @@ _ImagePullJob = _image_pull.ImagePullJob
 _run_image_pull = _image_pull.run_image_pull
 
 
+async def _slot_image_present_state(image: str | None) -> str:
+    """``present`` | ``missing`` for a slot's image, with TAG precision, read
+    from the ROOTFUL store slots actually run out of (O26b).
+
+    A READY slot runs its image from ROOT's podman store, but hal0-api runs as
+    the unprivileged ``hal0`` user, whose own (rootless) ``image inspect`` hits
+    a DIFFERENT store — so the old probe reported a genuinely-present image as
+    ``missing``. Match the slot's full tagged ref against the rootful
+    ``hal0-podman-ro images`` listing instead (an implicit ``:latest`` is
+    tried when the ref carries no tag/digest). Only the authoritative
+    ``rootful`` listing is trusted here; when the seam isn't usable (dev box /
+    grant not installed) the listing degrades to hal0-api's OWN store — the
+    same store the prior ``inspect_image_state`` probe reads — so we fall back
+    to it and preserve the pre-O26b behaviour exactly.
+    """
+    if not image:
+        return "missing"
+    result = await asyncio.to_thread(podman_introspect.images)
+    if result is not None and result.context == "rootful":
+        candidates = {image}
+        if "@" not in image and ":" not in image.rsplit("/", 1)[-1]:
+            candidates.add(f"{image}:latest")
+        return "present" if candidates & result.repos else "missing"
+    return await _image_pull.inspect_image_state(image)
+
+
 @router.post("/{name}/pull", status_code=202)
 async def pull_slot_image(
     name: str, request: Request, background: BackgroundTasks
@@ -1266,7 +1293,7 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
             # No active pull — inspect the image to surface present|missing.
             sm = _get_slot_manager(request)
             image = await _image_pull.resolve_slot_image(sm, name)
-            state = await _image_pull.inspect_image_state(image)
+            state = await _slot_image_present_state(image)
             yield f"data: {json.dumps({'slot_name': name, 'image': image, 'state': state, 'layer': 0, 'total_layers': 0})}\n\n"
             return
 
@@ -1316,7 +1343,7 @@ async def pull_slot_image_status(name: str, request: Request) -> dict[str, objec
     # poller gets the same present|missing terminal the SSE stream emits.
     sm = _get_slot_manager(request)
     image = await _image_pull.resolve_slot_image(sm, name)
-    state = await _image_pull.inspect_image_state(image)
+    state = await _slot_image_present_state(image)
 
     return {
         "slot_name": name,

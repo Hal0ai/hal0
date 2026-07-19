@@ -68,7 +68,15 @@ _RunFn = Callable[..., "subprocess.CompletedProcess[str]"]
 
 @dataclass(frozen=True)
 class PodmanImagesResult:
-    """``podman images`` output + which store it actually came from."""
+    """``podman images`` output + which store it actually came from.
+
+    ``repos`` holds fully-qualified ``registry/repo:tag`` refs (O26b — the
+    wrapper now emits ``{{.Repository}}:{{.Tag}}``), so a per-slot check can
+    match a slot's TAGGED image ref exactly instead of a tag-blind repo. A
+    caller that only wants repo-level presence (e.g. hardware backend-state)
+    strips the tag itself; dangling / untagged (``<none>``) entries are
+    dropped.
+    """
 
     repos: set[str]
     context: PodmanContext
@@ -88,7 +96,22 @@ def _run(
 
 
 def _parse_repos(stdout: str) -> set[str]:
-    return {line.strip() for line in stdout.splitlines() if line.strip() and line != "<none>"}
+    """Parse ``{{.Repository}}:{{.Tag}}`` lines into a set of tagged refs.
+
+    Dangling / untagged images surface as ``<none>`` in either field; those
+    aren't usable refs, so drop them (never let ``<none>:<none>`` pollute a
+    presence check).
+    """
+    refs: set[str] = set()
+    for line in stdout.splitlines():
+        ref = line.strip()
+        if not ref or ref == "<none>":
+            continue
+        repo, _, tag = ref.rpartition(":")
+        if repo == "<none>" or tag == "<none>":
+            continue
+        refs.add(ref)
+    return refs
 
 
 def images(
@@ -98,7 +121,7 @@ def images(
     is_hal0_user: Callable[[], bool] = is_hal0_service_user,
     timeout: float = 10.0,
 ) -> PodmanImagesResult | None:
-    """The local ``registry/repo`` set, from root's store when reachable.
+    """The local ``registry/repo:tag`` ref set, from root's store when reachable.
 
     Only ATTEMPTS the ``sudo -n hal0-podman-ro images`` seam when this
     process is the ``hal0`` service account (mirrors
@@ -120,7 +143,7 @@ def images(
     podman = which_fn("podman")
     if podman is None:
         return None
-    proc = _run(run, [podman, "images", "--format", "{{.Repository}}"], timeout=timeout)
+    proc = _run(run, [podman, "images", "--format", "{{.Repository}}:{{.Tag}}"], timeout=timeout)
     if proc is None or proc.returncode != 0:
         return None
     return PodmanImagesResult(repos=_parse_repos(proc.stdout), context="rootless")

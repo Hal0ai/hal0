@@ -30,7 +30,9 @@ def _completed(returncode: int = 0, stdout: str = "") -> MagicMock:
     return m
 
 
-def _recorder(*, seam_returncode: int = 0, seam_stdout: str = "repo/a\nrepo/b\n<none>\n"):
+def _recorder(
+    *, seam_returncode: int = 0, seam_stdout: str = "repo/a:v1\nrepo/b:latest\n<none>:<none>\n"
+):
     calls: list[list[str]] = []
 
     def _run(argv: object, **kwargs: object) -> MagicMock:
@@ -47,8 +49,8 @@ def test_images_skips_seam_when_not_hal0_user() -> None:
     calls, run = _recorder()
     result = images(run=run, which=lambda _n: "/usr/bin/podman", is_hal0_user=lambda: False)
 
-    assert calls == [["/usr/bin/podman", "images", "--format", "{{.Repository}}"]]
-    assert result == PodmanImagesResult(repos={"repo/a", "repo/b"}, context="rootless")
+    assert calls == [["/usr/bin/podman", "images", "--format", "{{.Repository}}:{{.Tag}}"]]
+    assert result == PodmanImagesResult(repos={"repo/a:v1", "repo/b:latest"}, context="rootless")
 
 
 def test_images_returns_none_when_not_hal0_user_and_podman_missing() -> None:
@@ -63,11 +65,11 @@ def test_images_returns_none_when_not_hal0_user_and_podman_missing() -> None:
 
 
 def test_images_routes_through_seam_when_hal0_user() -> None:
-    calls, run = _recorder(seam_stdout="ghcr.io/hal0ai/tb\n")
+    calls, run = _recorder(seam_stdout="ghcr.io/hal0ai/tb:c077206\n")
     result = images(run=run, which=lambda _n: "/usr/bin/podman", is_hal0_user=lambda: True)
 
     assert calls == [["sudo", "-n", SEAM_BIN, "images"]]
-    assert result == PodmanImagesResult(repos={"ghcr.io/hal0ai/tb"}, context="rootful")
+    assert result == PodmanImagesResult(repos={"ghcr.io/hal0ai/tb:c077206"}, context="rootful")
 
 
 # ── denied seam → honest rootless fallback ───────────────────────────────────
@@ -84,15 +86,15 @@ def test_images_falls_back_to_rootless_when_seam_denied() -> None:
         calls.append(argv_list)
         if argv_list[:2] == ["sudo", "-n"]:
             return _completed(returncode=1, stdout="")  # sudo: a password is required
-        return _completed(returncode=0, stdout="repo/rootless\n")
+        return _completed(returncode=0, stdout="repo/rootless:latest\n")
 
     result = images(run=_run, which=lambda _n: "/usr/bin/podman", is_hal0_user=lambda: True)
 
     assert calls == [
         ["sudo", "-n", SEAM_BIN, "images"],
-        ["/usr/bin/podman", "images", "--format", "{{.Repository}}"],
+        ["/usr/bin/podman", "images", "--format", "{{.Repository}}:{{.Tag}}"],
     ]
-    assert result == PodmanImagesResult(repos={"repo/rootless"}, context="rootless")
+    assert result == PodmanImagesResult(repos={"repo/rootless:latest"}, context="rootless")
 
 
 def test_images_falls_back_when_seam_binary_missing_raises_oserror() -> None:
@@ -105,11 +107,11 @@ def test_images_falls_back_when_seam_binary_missing_raises_oserror() -> None:
         calls.append(argv_list)
         if argv_list[:2] == ["sudo", "-n"]:
             raise FileNotFoundError(SEAM_BIN)
-        return _completed(returncode=0, stdout="repo/rootless\n")
+        return _completed(returncode=0, stdout="repo/rootless:latest\n")
 
     result = images(run=_run, which=lambda _n: "/usr/bin/podman", is_hal0_user=lambda: True)
 
-    assert result == PodmanImagesResult(repos={"repo/rootless"}, context="rootless")
+    assert result == PodmanImagesResult(repos={"repo/rootless:latest"}, context="rootless")
 
 
 # ── neither context reachable → None (pre-O12 graceful-degrade contract) ────
@@ -140,3 +142,22 @@ def test_images_returns_none_on_rootless_nonzero_exit() -> None:
     result = images(run=_run, which=lambda _n: "/usr/bin/podman", is_hal0_user=lambda: False)
 
     assert result is None
+
+
+# ── O26b: repo:tag parsing keeps tag precision, drops <none> entries ─────────
+
+
+def test_images_parses_repo_tag_and_drops_none_entries() -> None:
+    stdout = (
+        "ghcr.io/hal0ai/hal0-rocmfpx:c077206\n"
+        "localhost:5000/x:latest\n"  # registry-with-port stays intact
+        "<none>:<none>\n"  # dangling
+        "repo/y:<none>\n"  # untagged build
+        "<none>\n"  # bare none
+        "\n"
+    )
+    _, run = _recorder(seam_stdout=stdout)
+    result = images(run=run, which=lambda _n: "/usr/bin/podman", is_hal0_user=lambda: True)
+
+    assert result is not None
+    assert result.repos == {"ghcr.io/hal0ai/hal0-rocmfpx:c077206", "localhost:5000/x:latest"}

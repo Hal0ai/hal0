@@ -25,14 +25,14 @@ die() { echo "hal0-podman-ro: $1" >&2; exit 64; }
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
-  images)                  # local registry/repo set (root's image store)
-    exec "$PODMAN" images --format '{{.Repository}}'
+  images)                  # local repo:tag set (root's image store)
+    exec "$PODMAN" images --format '{{.Repository}}:{{.Tag}}'
     ;;
 
   help|"")
     cat <<EOF
 usage: hal0-podman-ro <command>
-  images    podman images --format {{.Repository}}   (root's image store)
+  images    podman images --format {{.Repository}}:{{.Tag}}   (root's image store)
 EOF
     ;;
 
