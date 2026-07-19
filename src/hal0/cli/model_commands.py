@@ -301,7 +301,7 @@ def model_add(
     caps = ", ".join(m.get("capabilities", []) or []) or "—"
     console.print(f"  capabilities: {caps}")
     console.print(
-        f"[dim]Next: hal0 model run {mid}   (or: hal0 model assign {mid} --slot <slot>)[/dim]"
+        f"[dim]Next: hal0 model run {mid}   (or: hal0 slot edit <slot> --model {mid})[/dim]"
     )
 
 
