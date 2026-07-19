@@ -140,6 +140,11 @@ RULES: tuple[_Rule, ...] = (
     # posture once auth is on (while it's off the middleware isn't enforcing,
     # so the first enable rides through — the intended "turn it on" path).
     _Rule("auth require toggle", _exact("/api/auth/require"), AuthClass.ADMIN, _PUT),
+    # Rotate the admin/client box key — destructive, writes /etc/hal0/api.env.
+    # ADMIN: only the operator may mint a new key. Same posture as the require
+    # toggle (rides through while auth is OFF; admin-only once it's ON). Rate-
+    # limited like login (routes/auth.py reuses app.state.login_limiter).
+    _Rule("auth key rotate", _exact("/api/auth/rotate"), AuthClass.ADMIN, _POST),
     # ── BOOTSTRAP: installer, open only until an admin key exists ──────
     _Rule("installer", _prefix("/api/install"), AuthClass.BOOTSTRAP, None),
     # ── explicit ADMIN for FastAPI's own docs/meta routes ──────────────

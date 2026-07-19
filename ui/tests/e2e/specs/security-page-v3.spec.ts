@@ -72,17 +72,54 @@ test.describe('Settings → Security', () => {
     await expect(page.getByTestId('exposure-live-stub')).toContainText(/API-lane/i)
   })
 
-  test('rotate flow opens; the destructive confirm is disabled-with-reason', async ({ page }) => {
+  test('rotate flow gates on type-to-confirm', async ({ page }) => {
     await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'admin' })
     await openSecurity(page)
 
     await page.getByTestId('security-rotate-admin').click()
     await expect(page.getByTestId('rotate-confirm-input')).toBeVisible()
-    // Even typing the confirm phrase can't enable rotate — no endpoint.
-    await page.getByTestId('rotate-confirm-input').fill('rotate admin')
+    // Confirm is disabled until the exact phrase is typed.
     await expect(page.getByTestId('rotate-confirm')).toBeDisabled()
-    await expect(page.getByTestId('rotate-blocked-reason')).toContainText(/API-lane/i)
-    // Nothing revealed — there is no value to reveal without a rotation.
-    await expect(page.getByTestId('rotate-revealed-once')).toHaveCount(0)
+    await page.getByTestId('rotate-confirm-input').fill('rotate admin')
+    await expect(page.getByTestId('rotate-confirm')).toBeEnabled()
+  })
+
+  test('rotate calls POST /api/auth/rotate and shows status-only result, never a value', async ({
+    page,
+  }) => {
+    await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'admin' })
+    // The endpoint returns STATUS ONLY — no key value ever crosses the wire.
+    await page.route('**/api/auth/rotate', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          tier: 'admin',
+          rotated_at: '2026-07-19T06:00:00Z',
+          key_len: 43,
+          fingerprint: 'ab12cd34',
+          applies_live: true,
+          restart_required: false,
+          session_preserved: true,
+          note: 'New admin key written to /etc/hal0/api.env — retrieve it there; it is never shown in the dashboard.',
+        }),
+      }),
+    )
+    await openSecurity(page)
+
+    await page.getByTestId('security-rotate-admin').click()
+    await page.getByTestId('rotate-confirm-input').fill('rotate admin')
+    await page.getByTestId('rotate-confirm').click()
+
+    // Result panel shows the fingerprint + notice — never a key value.
+    await expect(page.getByTestId('rotate-result')).toBeVisible()
+    await expect(page.getByTestId('rotate-fingerprint')).toContainText('ab12cd34')
+    await expect(page.getByTestId('rotate-note')).toContainText(/never shown/i)
+    // No revealed value; the dialog renders no <code> value block or input now.
+    await expect(page.getByTestId('rotate-result').locator('input')).toHaveCount(0)
+
+    // After Done, the admin key row shows the fingerprint (status-only), no value.
+    await page.getByTestId('rotate-done').click()
+    await expect(page.getByTestId('security-key-admin')).toContainText('ab12cd34')
   })
 })
