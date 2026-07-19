@@ -15,6 +15,12 @@ import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
 // enforcement is on and the session is anonymous; a no-op on open boxes (the
 // shipped default). Real ESM import, like SettingsShell above.
 import { AuthGate } from './auth/AuthGate.jsx'
+// VERS-flash (docs/rework/handoff-r5-drive2.md §3): same live-version
+// pattern as AboutPage.jsx — once mounted, keep document.title in sync with
+// the real running backend (not just the build-time stamp baked into
+// index.html), so a box that's live-updated without a UI rebuild still
+// shows its true version.
+import { useUpdateState } from '@/api/hooks/useUpdates'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -154,6 +160,19 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useStateA(false);
   const [navOpen, setNavOpen] = useStateA(false);
   const [chatOpen, setChatOpen] = useStateA(false);
+
+  // VERS-flash: mirror the live hal0 version into the tab title once the
+  // real value is known. index.html's build-time stamp already shows the
+  // correct number on first paint (no flash) — this just keeps the title
+  // truthful if the running backend is newer than the bundle it served
+  // (e.g. box updated without a UI rebuild).
+  const { data: updateState } = useUpdateState();
+  useEffectA(() => {
+    const liveVersion = updateState?.hal0?.current;
+    if (liveVersion) {
+      document.title = `hal0 dashboard — v${liveVersion}`;
+    }
+  }, [updateState?.hal0?.current]);
 
   // Agent-chat slide-out (the orchestrator) is hoisted to App so it can be
   // opened from anywhere in the dash — the topbar Agent Chat button and the

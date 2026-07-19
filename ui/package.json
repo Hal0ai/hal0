@@ -1,7 +1,7 @@
 {
   "name": "hal0-ui",
   "private": true,
-  "version": "0.5.0-alpha.1",
+  "version": "0.9.8",
   "type": "module",
   "scripts": {
     "dev": "vite",

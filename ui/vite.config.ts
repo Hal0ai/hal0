@@ -1,7 +1,8 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 // hal0 v3 dashboard — React+TS+Vite scaffold (Phase A).
 // `npm run dev` serves on 5173; /api+/v1 are proxied to the local hal0-api on
@@ -24,6 +25,26 @@ function apiProxy() {
   }
 }
 
+// VERS-flash (docs/rework/handoff-r5-drive2.md §3): `ui/index.html` used to
+// hardcode `v0.5.0-alpha.1` in <title>/<meta description>, which both
+// flashed a stale number before React mounted AND had drifted from the
+// backend's real version (pyproject `0.9.8`). ui/package.json is now kept
+// reconciled to that backend version, and this plugin stamps it into the
+// HTML at build time — one source of truth, baked in before first paint, so
+// there's nothing stale to flash.
+const appVersion = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf-8'),
+).version as string
+
+function versionHtmlPlugin(version: string): Plugin {
+  return {
+    name: 'hal0-version-html',
+    transformIndexHtml(html) {
+      return html.replace(/%APP_VERSION%/g, version)
+    },
+  }
+}
+
 export default defineConfig({
   plugins: [
     react({
@@ -33,6 +54,7 @@ export default defineConfig({
       include: [/\.jsx?$/, /\.tsx?$/],
     }),
     tailwindcss(),
+    versionHtmlPlugin(appVersion),
   ],
   resolve: {
     alias: {
