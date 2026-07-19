@@ -61,6 +61,7 @@ from hal0.slots.config_write import (
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
+from hal0.slots.layout import is_id_stem
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
 from hal0.slots.profile_adopt import (
@@ -537,12 +538,135 @@ class SlotManager:
     def _config_file(self, name: str) -> Path:
         return paths.slots_config_dir() / f"{name}.toml"
 
-    def _all_configured_slot_names(self) -> list[str]:
-        """Enumerate slots by listing /etc/hal0/slots/*.toml."""
+    # ── bilingual (name-or-id) on-disk key resolution (P3-runtime-db) ─────────
+    #
+    # HARD INVARIANT: a name-keyed box resolves EXACTLY the name paths it does
+    # today. Id-keying is purely additive — a slot is id-keyed only once its
+    # identity row exists AND its ``<id>.toml`` is physically on disk (the M5
+    # migration moved it). Until then every ``_for`` resolver falls straight
+    # back to the name-keyed primitive above.
+
+    def _slot_id_if_id_keyed(self, name: str) -> int | None:
+        """The durable id IFF *name* is stored id-keyed (``<id>.toml`` exists).
+
+        Non-minting (uses :meth:`_peek_key`, never fabricates a surrogate) and
+        cache-first, so this is cheap on the hot state path. Returns None for a
+        name-keyed slot — no identity store, no row, a negative surrogate, or a
+        row whose ``<id>.toml`` has not been migrated onto disk yet — so the
+        callers degrade to today's name paths with byte-identical behaviour.
+        """
+        sid = self._peek_key(self._resolve_alias(name))
+        if sid is None or sid < 1:
+            return None
+        if (paths.slots_config_dir() / f"{sid}.toml").exists():
+            return sid
+        return None
+
+    def _config_file_for(self, name: str) -> Path:
+        """Bilingual config path: ``<id>.toml`` when id-keyed, else ``<name>.toml``."""
+        sid = self._slot_id_if_id_keyed(name)
+        if sid is not None:
+            return paths.slots_config_dir() / f"{sid}.toml"
+        return self._config_file(self._resolve_alias(name))
+
+    def _state_file_for(self, name: str) -> Path:
+        """Bilingual state path with a half-migrated fallback.
+
+        Id-keyed (``<id>.toml`` present) → ``<id>/state.json`` when it exists;
+        else the name-keyed ``<name>/state.json`` if THAT exists (the M5 window
+        where the TOML moved but state.json did not — §3.3 roll-forward);
+        else the id path as the durable write target. Name-keyed → ``<name>/
+        state.json`` exactly as today.
+        """
+        canonical = self._resolve_alias(name)
+        sid = self._slot_id_if_id_keyed(canonical)
+        if sid is None:
+            return self._state_file(canonical)
+        id_state = paths.slot_data_dir(str(sid)) / "state.json"
+        if id_state.exists():
+            return id_state
+        name_state = self._state_file(canonical)
+        if name_state.exists():
+            return name_state  # half-migrated: TOML id-keyed, state still name-keyed
+        return id_state
+
+    def _slot_name_from_id_toml(self, path: Path, slot_id: int) -> str | None:
+        """Recover the display name embedded in an id-keyed TOML (never a digit).
+
+        Reads ``[slot].name`` / top-level ``name``; falls back to the identity
+        store's row for *slot_id*. Returns None (caller skips + logs) when no
+        NON-digit name can be recovered — the guard that stops the whole bug:
+        a digit filename must never masquerade as a slot name.
+        """
+        import tomllib as _tomllib
+
+        raw: dict[str, Any] = {}
+        try:
+            with open(path, "rb") as f:
+                raw = _tomllib.load(f)
+        except (OSError, _tomllib.TOMLDecodeError) as exc:
+            log.warning("slot.id_toml_unreadable", extra={"path": str(path), "error": str(exc)})
+        name: Any = None
+        slot_tbl = raw.get("slot")
+        if isinstance(slot_tbl, dict):
+            name = slot_tbl.get("name")
+        if not name:
+            name = raw.get("name")
+        if not name and self._identity is not None:
+            with contextlib.suppress(Exception):
+                name = self._identity.get(slot_id).name
+        if name and not str(name).isdigit():
+            return str(name)
+        return None
+
+    def _iter_configured_slots(self) -> list[tuple[int | None, str, Path]]:
+        """Enumerate configured slots as ``(slot_id | None, name, toml_path)``.
+
+        THE single bilingual chokepoint that replaced the three glob-stem-as-
+        name sites (``list_slots`` / ``_all_configured_slot_names`` /
+        ``reconcile_unconfigured_slots``). A digit stem (``143.toml``) is an
+        id-keyed slot: the id comes from the stem, the NAME is recovered from
+        the file's embedded ``name`` (or the identity row) — NEVER the digit. A
+        name stem (``brain.toml``) is name-keyed: the name is the stem and the
+        id is a best-effort identity lookup (None until folded).
+
+        GUARD: the returned ``name`` is asserted non-digit — that assertion is
+        the whole bug's tripwire. A digit-stemmed file whose name cannot be
+        recovered is skipped (logged), never surfaced under a bogus name.
+        """
         cfg_dir = paths.slots_config_dir()
         if not cfg_dir.exists():
             return []
-        return sorted(p.stem for p in cfg_dir.glob("*.toml") if not p.name.startswith("."))
+        out: list[tuple[int | None, str, Path]] = []
+        for p in sorted(cfg_dir.glob("*.toml")):
+            if p.name.startswith("."):
+                continue
+            stem = p.stem
+            if is_id_stem(stem):
+                sid = int(stem)
+                name = self._slot_name_from_id_toml(p, sid)
+                if name is None:
+                    log.warning("slot.id_toml_no_name", extra={"path": str(p), "id": sid})
+                    continue
+                assert not name.isdigit(), f"enumerator leaked a digit name for {p}"
+                out.append((sid, name, p))
+            else:
+                name = stem
+                peeked = self._peek_key(name)
+                sid_opt = peeked if (peeked is not None and peeked >= 1) else None
+                assert not name.isdigit(), f"enumerator leaked a digit name for {p}"
+                out.append((sid_opt, name, p))
+        return out
+
+    def _all_configured_slot_names(self) -> list[str]:
+        """Enumerate configured slot NAMES (bilingual, digit-stems resolved).
+
+        Delegates to :meth:`_iter_configured_slots` so an id-keyed ``143.toml``
+        surfaces as its embedded display name (``"flm"``), never the digit —
+        the fix for the reconcile/fold split-brain. On a name-keyed box this is
+        the same sorted list of stems as before.
+        """
+        return [name for (_sid, name, _path) in self._iter_configured_slots()]
 
     # ── internal id-keying chokepoint (rework §11.1) ─────────────────────────
     #
@@ -712,6 +836,26 @@ class SlotManager:
                 self._bind_key(slot.name, int(row.id))
         return slot
 
+    def identity_names(self) -> set[str]:
+        """Every display name the identity store currently knows (empty if none).
+
+        The seed guard's "already known" signal (P3-runtime-db inc3): a slot
+        migrated to id-keying has NO ``<name>.toml`` on disk, so the static
+        seeder can no longer rely on the file's presence to skip re-copying it.
+        Threading these names in lets ``seed_static_slots`` skip a slot the
+        identity store already tracks — closing the seed split-brain (a fresh
+        ``brain.toml`` re-materialising beside the migrated ``143.toml``). No
+        store wired (bare manager / tests) or a read hiccup → empty set, so the
+        seeder falls back to its pre-existing file-existence check unchanged.
+        """
+        if self._identity is None:
+            return set()
+        try:
+            return {r.name for r in self._identity.list_all()}
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("slot.identity_names_failed", extra={"error": str(exc)})
+            return set()
+
     def slot_id_to_name(self, slot_id: int) -> str:
         """Resolve an opaque slot id to its current name (raises SlotNotFound)."""
         if self._identity is None:
@@ -743,7 +887,12 @@ class SlotManager:
         if self._identity is None:
             return 0
         count = 0
-        for name in self._all_configured_slot_names():
+        # Iterate (slot_id, name) pairs via the bilingual enumerator. An
+        # id-keyed slot already owns an identity row, so ``_ensure_identity``
+        # get-or-creates by its REAL name and no-ops — the digit stem never
+        # reaches the store, so a bogus digit-named identity row can never be
+        # minted (the split-brain this lane closes).
+        for _sid, name, _path in self._iter_configured_slots():
             try:
                 cfg = await self._load_slot_config(name)
             except SlotConfigError:
@@ -831,21 +980,41 @@ class SlotManager:
                         f"slot name {new_name!r} already exists",
                         details={"slot": new_name},
                     ) from exc
-                # 2. Move the (still name-keyed) TOML, rewriting its name field.
-                old_cfg_path = self._config_file(canonical)
-                new_cfg_path = self._config_file(new_name)
-                if old_cfg_path.exists():
-                    cfg_dict = _cfg_to_dict(cfg) if cfg else {"name": new_name}
-                    cfg_dict["name"] = new_name
-                    write_slot_toml(new_cfg_path, cfg_dict)
-                    with contextlib.suppress(FileNotFoundError):
-                        old_cfg_path.unlink()
-                # 3. Move the state dir + rewrite the persisted name. The
-                #    in-memory caches are keyed by the stable id (``row.id``),
-                #    so only the record's display ``name`` field moves — the
-                #    dict entry stays under the same handle.
                 key = int(row.id)
-                rec = self._states.get(key) or read_state(self._state_file(canonical))
+                # Bilingual: an id-keyed slot's TOML + state.json are addressed
+                # by the STABLE id, so a rename never moves a file — it only
+                # rewrites the embedded display ``name`` in place. A name-keyed
+                # slot still moves <oldname>.* → <newname>.* as before.
+                id_toml = paths.slots_config_dir() / f"{row.id}.toml"
+                id_keyed = id_toml.exists()
+                # 2. TOML: rewrite the name field (in place for id-keyed, moved
+                #    for name-keyed).
+                if id_keyed:
+                    cfg_dict = _cfg_to_dict(cfg) if cfg else {"name": new_name, "id": key}
+                    cfg_dict["name"] = new_name
+                    cfg_dict["id"] = key
+                    write_slot_toml(id_toml, cfg_dict)
+                else:
+                    old_cfg_path = self._config_file(canonical)
+                    new_cfg_path = self._config_file(new_name)
+                    if old_cfg_path.exists():
+                        cfg_dict = _cfg_to_dict(cfg) if cfg else {"name": new_name}
+                        cfg_dict["name"] = new_name
+                        write_slot_toml(new_cfg_path, cfg_dict)
+                        if new_cfg_path != old_cfg_path:
+                            with contextlib.suppress(FileNotFoundError):
+                                old_cfg_path.unlink()
+                # 3. State: rewrite the persisted name. The in-memory caches are
+                #    keyed by the stable id (``row.id``), so only the record's
+                #    display ``name`` moves — the dict entry stays under the
+                #    same handle. Id-keyed → rewrite <id>/state.json in place;
+                #    name-keyed → move <oldname>/state.json → <newname>/.
+                if id_keyed:
+                    old_state = new_state = paths.slot_data_dir(str(row.id)) / "state.json"
+                else:
+                    old_state = self._state_file(canonical)
+                    new_state = self._state_file(new_name)
+                rec = self._states.get(key) or read_state(old_state)
                 if rec is not None:
                     moved = SlotStateRecord(
                         name=new_name,
@@ -856,10 +1025,11 @@ class SlotManager:
                         message=rec.message,
                         extra=dict(rec.extra),
                     )
-                    write_state_atomic(self._state_file(new_name), moved)
+                    write_state_atomic(new_state, moved)
                     self._states[key] = moved
-                    with contextlib.suppress(FileNotFoundError):
-                        self._state_file(canonical).unlink()
+                    if new_state != old_state:
+                        with contextlib.suppress(FileNotFoundError):
+                            old_state.unlink()
                 # 4. Repoint the name↔handle map at the new label. The id-keyed
                 #    caches (_states/_last_used/_cfg_cache/…) need NO re-keying —
                 #    the whole point of id-keying is that rename is a relabel.
@@ -873,11 +1043,11 @@ class SlotManager:
         peeked = self._peek_key(name)
         if peeked is not None and peeked in self._states:
             return
-        if self._config_file(name).exists():
+        if self._config_file_for(name).exists():
             return
         # Check state.json as a final fallback (slot may have been create()'d
         # in-memory only during tests).
-        if self._state_file(name).exists():
+        if self._state_file_for(name).exists():
             return
         raise SlotNotFound(
             f"slot {name!r} is not configured",
@@ -928,8 +1098,8 @@ class SlotManager:
         key = self._key(name)
         rec = self._states.get(key)
         if rec is None:
-            # Try disk.
-            rec = read_state(self._state_file(name))
+            # Try disk (bilingual: <id>/state.json when id-keyed, else name).
+            rec = read_state(self._state_file_for(name))
             if rec is None:
                 return SlotState.OFFLINE
             self._states[key] = rec
@@ -1007,7 +1177,9 @@ class SlotManager:
         )
         # Persist atomically before broadcasting — readers via state_stream
         # observe state.json on disk after they read the queue (Tier 3).
-        write_state_atomic(self._state_file(name), record)
+        # Bilingual write target: <id>/state.json for an id-keyed slot so the
+        # id-keyed read path (and a re-boot) hydrate the same file.
+        write_state_atomic(self._state_file_for(name), record)
         self._states[key] = record
         log.info(
             "slot.transition", extra={"slot": name, "from": current.value, "to": to_state.value}
@@ -1401,7 +1573,7 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        rec = self._states.get(self._key(slot_name)) or read_state(self._state_file(slot_name))
+        rec = self._states.get(self._key(slot_name)) or read_state(self._state_file_for(slot_name))
         active = await self._is_active(slot_name)
         if rec is None:
             # No state.json yet — but the TOML may exist (configured slot
@@ -1524,7 +1696,7 @@ class SlotManager:
         Returns ``None`` when the TOML is missing or invalid — callers
         treat that as "no override available" rather than a hard failure.
         """
-        path = self._config_file(slot_name)
+        path = self._config_file_for(slot_name)
         if not path.exists():
             return None
         try:
@@ -1803,7 +1975,12 @@ class SlotManager:
         # the TOML lands on disk (belt to default_slot_for's routing-time
         # suspenders). Fast fast path when this write isn't a new default.
         await self._check_default_uniqueness(slot_name, cfg_dict)
-        cfg_path = self._config_file(slot_name)
+        # Bilingual clobber guard: resolve to <id>.toml when a slot of this
+        # name is already id-keyed on disk, so a duplicate create() is refused
+        # instead of writing a name-keyed sibling next to the id file (split-
+        # brain). A genuinely-new slot has no <id>.toml, so this is <name>.toml
+        # exactly as before and new slots stay name-keyed until the seam flip.
+        cfg_path = self._config_file_for(slot_name)
         # TOCTOU fix: the exists-check + write below used to run unlocked, so
         # two concurrent create() calls (all callers are async — api routes,
         # orchestrator, stacks _create_missing_slots) could both pass the
@@ -1927,8 +2104,14 @@ class SlotManager:
             with contextlib.suppress(Exception):
                 self._identity.delete(ident.id)
 
-        # Remove state.json and the slot config.
+        # Remove state.json and the slot config (bilingual: the id-keyed
+        # <id>.toml / <id>/state.json when this slot was migrated, else the
+        # name-keyed artefacts). Resolve BEFORE dropping the identity row above
+        # would matter, but the id row is already gone — so also sweep the
+        # name-keyed siblings to catch a half-migrated leftover.
         for path in (
+            self._state_file_for(slot_name),
+            self._config_file_for(slot_name),
             self._state_file(slot_name),
             self._config_file(slot_name),
         ):
@@ -1957,7 +2140,10 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        cfg_path = self._config_file(slot_name)
+        # Bilingual: write back to the same key the slot lives under on disk
+        # (<id>.toml when id-keyed) so an update never spawns a name-keyed
+        # sibling next to the id-keyed file (the split-brain this lane closes).
+        cfg_path = self._config_file_for(slot_name)
         # The whole read→merge→guard→write below is one cross-process
         # critical section (slot_write_lock): a concurrent CLI / stacks /
         # capabilities writer can no longer interleave its own RMW and drop
@@ -2020,7 +2206,7 @@ class SlotManager:
         #
         # Only touch keys the caller actually changed — leave the rest of
         # ``extra`` (adopted flag, modelless_ready_blocked, etc.) alone.
-        rec = self._states.get(self._key(slot_name)) or read_state(self._state_file(slot_name))
+        rec = self._states.get(self._key(slot_name)) or read_state(self._state_file_for(slot_name))
         if rec is not None:
             mirrored = {"backend", "provider"}
             dirty = mirrored & updates.keys()
@@ -2051,7 +2237,7 @@ class SlotManager:
                     message=rec.message,
                     extra=new_extra,
                 )
-                write_state_atomic(self._state_file(slot_name), refreshed)
+                write_state_atomic(self._state_file_for(slot_name), refreshed)
                 self._states[self._key(slot_name)] = refreshed
 
         # #599 follow-up: ``[image].idle_restore_minutes`` is read into the
@@ -2102,23 +2288,22 @@ class SlotManager:
         READY without a load) — this pass is a state-machine cleanup,
         not a fresh status check.
         """
-        # Walk slot configs on disk. Hydrate state.json into _states
-        # the same way _current_state does, but without going through
-        # status() (no adoption probes).
+        # Walk slot configs on disk via the bilingual enumerator so an id-keyed
+        # <id>.toml surfaces under its real name (never the digit stem), and
+        # hydrate state.json into _states the same way _current_state does —
+        # without going through status() (no adoption probes).
         try:
-            slot_dir = paths.slots_config_dir()
-            cfg_files = sorted(slot_dir.glob("*.toml")) if slot_dir.exists() else []
+            configured = self._iter_configured_slots()
         except OSError as exc:
             log.warning(
                 "slot.reconcile_unconfigured_dir_failed",
                 extra={"error": str(exc)},
             )
             return
-        for cfg_path in cfg_files:
-            slot_name = cfg_path.stem
+        for _sid, slot_name, _cfg_path in configured:
             try:
                 rec = self._states.get(self._key(slot_name)) or read_state(
-                    self._state_file(slot_name)
+                    self._state_file_for(slot_name)
                 )
                 if rec is None or rec.state != SlotState.ERROR:
                     continue
@@ -2173,7 +2358,8 @@ class SlotManager:
             base_model = existing_model if isinstance(existing_model, dict) else {}
             cfg_dict = {**cfg_dict, "model": {**base_model, "default": model_id}}
 
-            cfg_path = self._config_file(slot_name)
+            # Bilingual: rewrite the same on-disk key (<id>.toml when id-keyed).
+            cfg_path = self._config_file_for(slot_name)
             try:
                 write_slot_toml(cfg_path, cfg_dict)
             except OSError as exc:
@@ -2667,7 +2853,11 @@ class SlotManager:
         # are unaffected (canonical names pass through unchanged).
         slot_name = self._resolve_alias(slot_name)
         cache_id = self._key(slot_name)
-        path = self._config_file(slot_name)
+        # Bilingual read: an id-keyed slot resolves to <id>.toml, a name-keyed
+        # one to <name>.toml (today's path). The embedded ``name`` in the id
+        # TOML is hoisted below, so the returned dict always carries the real
+        # display name — never the digit stem.
+        path = self._config_file_for(slot_name)
         if not path.exists():
             # In-memory-only slot (test injection) — fall back to the
             # state.json record.  Real callers should always have a TOML.

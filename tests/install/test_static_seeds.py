@@ -82,6 +82,34 @@ def test_static_seed_slots_matches_shipped_files() -> None:
         assert (src_dir / f"{name}.toml").is_file(), f"missing seed source for {name!r}"
 
 
+def test_seed_static_slots_skips_identity_known_name(tmp_path: Path) -> None:
+    """P3-runtime-db inc3 (the direct halo143 guard): a slot the identity store
+    already tracks is SKIPPED even when no ``<name>.toml`` exists on disk —
+    the id-keyed layout where the file lives at ``<id>.toml``. Without this the
+    seeder re-materialises a stale ``brain.toml`` beside the migrated
+    ``143.toml`` (the split-brain)."""
+    installer_root = _fake_installer_root(tmp_path)
+    dest = tmp_path / "slots"
+    dest.mkdir()
+    # 'brain' is known to identity but has NO brain.toml (it's id-keyed as
+    # <id>.toml) — the seeder must not recreate brain.toml.
+    seeded = seed_static_slots(
+        installer_root=installer_root, slots_dir=dest, existing_names={"brain"}
+    )
+    assert "brain" not in seeded
+    assert not (dest / "brain.toml").exists()
+    # every OTHER seed (not identity-known, no file) is still copied.
+    assert "agent" in seeded
+
+
+def test_seed_static_slots_existing_names_default_empty_unchanged(tmp_path: Path) -> None:
+    """Omitting existing_names keeps the pure file-existence behaviour."""
+    installer_root = _fake_installer_root(tmp_path)
+    dest = tmp_path / "slots"
+    seeded = seed_static_slots(installer_root=installer_root, slots_dir=dest)
+    assert set(seeded) == set(STATIC_SEED_SLOTS)
+
+
 def test_seed_static_slots_default_args_seed_real_tree(tmp_path: Path) -> None:
     """Default args (no installer_root/slots_dir override) resolve the
     real repo tree in this dev/editable checkout and seed every slot."""

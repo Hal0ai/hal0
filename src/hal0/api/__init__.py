@@ -1402,7 +1402,14 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
     try:
         from hal0.install.static_seeds import seed_static_slots
 
-        seeded_slots = await asyncio.to_thread(seed_static_slots)
+        # P3-runtime-db inc3 (seed split-brain fix): thread the identity
+        # store's known names in. This phase runs AFTER slot_reconcile+
+        # fold_identity, so a slot migrated to id-keying (living at <id>.toml,
+        # with NO <name>.toml) is already an identity row here — passing its
+        # name lets the seeder skip it instead of re-materialising a stale
+        # <name>.toml beside the id-keyed file.
+        existing_names = ctx.slot_manager.identity_names()
+        seeded_slots = await asyncio.to_thread(seed_static_slots, existing_names=existing_names)
         if seeded_slots:
             log.info("slots.startup_seed", names=seeded_slots)
     except Exception as exc:  # seeding must never block startup

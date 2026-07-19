@@ -19,6 +19,7 @@ source here, mirroring how ``setup_command._SETUP_SLOTS`` and
 from __future__ import annotations
 
 import shutil
+from collections.abc import Collection
 from pathlib import Path
 
 import structlog
@@ -45,6 +46,7 @@ def seed_static_slots(
     *,
     installer_root: Path | None = None,
     slots_dir: Path | None = None,
+    existing_names: Collection[str] = (),
 ) -> list[str]:
     """Copy any missing static seed TOML into the slots config dir.
 
@@ -52,6 +54,16 @@ def seed_static_slots(
     operator edit, a seed from a prior run, or a slot the operator
     created by hand under that name — is left untouched. Returns the
     slot names actually seeded this call (empty on a converged box).
+
+    ``existing_names`` (P3-runtime-db inc3 — the seed split-brain fix) is the
+    set of slot names the identity store already tracks. A slot migrated to
+    id-keying has NO ``<name>.toml`` on disk (it lives at ``<id>.toml``), so
+    the file-existence check alone would re-copy the seed and split-brain the
+    slot (a fresh ``brain.toml`` beside the migrated ``143.toml``). A slot is
+    therefore "already known" — and skipped — when its name is in
+    ``existing_names`` OR a name-keyed ``<name>.toml`` still exists (the pre-
+    identity fresh box). Defaults to empty, so every existing caller / test
+    keeps the pure file-existence behaviour.
 
     ``installer_root`` defaults to :data:`hal0.agents.hermes_provision.
     REPO_ROOT_FOR_INSTALLER`, the same dev/editable-vs-FHS probe every
@@ -66,11 +78,14 @@ def seed_static_slots(
         installer_root = REPO_ROOT_FOR_INSTALLER
     dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
     src_dir = installer_root / "installer" / "etc-hal0" / "slots"
+    known = set(existing_names)
 
     seeded: list[str] = []
     for name in STATIC_SEED_SLOTS:
         dest = dest_dir / f"{name}.toml"
-        if dest.exists():
+        # "Already known" = the identity store tracks it (id-keyed, no
+        # <name>.toml) OR a name-keyed file still exists (pre-migration box).
+        if name in known or dest.exists():
             continue
         src = src_dir / f"{name}.toml"
         if not src.is_file():
