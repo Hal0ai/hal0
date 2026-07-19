@@ -1337,16 +1337,34 @@ async def _boot_publish_runtime(app: FastAPI, ctx: BootState) -> None:
 
 
 async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
-    """Phase — idempotent persona + static-slot fresh-install seeds."""
+    """Phase — idempotent persona + static-slot fresh-install seeds.
+
+    RELOCATE(brain-lane): folds in two of the five relocated
+    hermes_provision install steps — both are local-FS-only, no memory
+    call, so they belong here beside the pre-existing seed calls rather
+    than in the memory-dependent terminal ``_boot_brain_lane`` phase:
+
+    - ``persona_seed`` — DEDUPED, not re-added. This phase already called
+      ``seed_default_personas(root=hermes_home / "personas")`` below
+      before persona_seed existed as an install step at all; that call is
+      unchanged and IS this relocation for personas — the standalone
+      ``hermes_provision._phase_persona_seed`` function is kept only for
+      its own direct-call unit coverage (its wider agent_id/overwrite
+      handling collapses to the same defaults this call already used).
+    - ``brain_profile_mcp_wire`` — genuinely new here (see below).
+    """
     # Agent personas — idempotently seed any missing defaults (hermes /
     # coder / hal0-brain). The dashboard's agent-chat slide-out embodies the
     # hal0-brain profile (routes/board_chat), so a box updated from a release
-    # that predates a seed must still grow its editable TOML: provisioning's
-    # persona_seed phase is checkpointed and never re-runs on `hal0 update`,
-    # which makes the post-update API restart the only hook every install
-    # path (update, editable/dev, fresh) shares. Existing files are never
-    # touched (overwrite=False); `hal0 agent install hermes --repair` stays
-    # the reset-to-canonical path. The root goes through paths.var_lib()
+    # that predates a seed must still grow its editable TOML: this seed
+    # is the only hook every install path (update, editable/dev, fresh)
+    # shares, now that RELOCATE(brain-lane) retired the install-time
+    # persona_seed step entirely (see hermes_provision.py). Existing files
+    # are never touched (overwrite=False) — there is no boot-time
+    # equivalent of `hal0 agent install hermes --repair`'s forced reset;
+    # an operator who needs a hard reset removes the persona TOML(s) and
+    # restarts hal0-api, or re-runs `--repair` (still installed, just no
+    # longer touching personas). The root goes through paths.var_lib()
     # rather than the module's PERSONAS_ROOT constant so HAL0_HOME installs
     # (tests, dev boxes) seed under their own tree instead of the host's
     # /var/lib/hal0 — in FHS production the two resolve identically.
@@ -1389,6 +1407,32 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
             log.info("slots.startup_seed", names=seeded_slots)
     except Exception as exc:  # seeding must never block startup
         log.warning("slots.startup_seed_failed", error=str(exc))
+
+    # RELOCATE(brain-lane): brain_profile_mcp_wire — deep-merge hal0's two
+    # MCP servers (hal0-admin, hal0-memory) + memory.provider into the
+    # hal0-brain hermes profile's config.yaml, reproducibly. Local FS only
+    # (reads/writes ~/.hermes/profiles/hal0-brain/config.yaml, no memory
+    # call), so it runs here instead of the memory-dependent
+    # _boot_brain_lane phase. Skips when the profile config is absent (the
+    # upstream hermes binary owns profile creation) or PyYAML is missing;
+    # only rewrites when the merged content actually differs, so a
+    # correctly configured box is left byte-untouched on every restart.
+    try:
+        from hal0.agents.hermes_provision import BootstrapState as _BrainWireState
+        from hal0.agents.hermes_provision import InstallIO as _BrainWireIO
+        from hal0.agents.hermes_provision import _phase_brain_profile_mcp_wire
+        from hal0.agents.hermes_provision import _StepCtx as _BrainWireCtx
+        from hal0.config import paths as _hal0_paths_wire
+
+        wire_home = _hal0_paths_wire.var_lib() / ".hermes"
+        wire_result = await asyncio.to_thread(
+            _phase_brain_profile_mcp_wire,
+            _BrainWireCtx(state=_BrainWireState(hermes_home=str(wire_home)), io=_BrainWireIO()),
+        )
+        if wire_result.details.get("wired") and wire_result.details.get("changed"):
+            log.info("brain_profile.mcp_wire_startup_seed", path=wire_result.details.get("path"))
+    except Exception as exc:  # seeding must never block startup
+        log.warning("brain_profile.mcp_wire_startup_seed_failed", error=str(exc))
 
 
 async def _boot_capabilities(app: FastAPI, ctx: BootState) -> None:
@@ -1583,6 +1627,189 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
         app.state.npu_trio_router = None
 
 
+# RELOCATE(brain-lane): namespace_register, brain_profile_seed, and
+# self_report (hermes_provision.py) used to run once at `hal0 agent install
+# hermes` time. They now run on every hal0-api boot instead, via the
+# terminal ``_boot_brain_lane`` phase below. All three call out through
+# hermes_provision's ``ctx.io.mcp_memory_call`` seam, whose production
+# default (``_mcp_memory_call``) POSTs to ``/api/memory/*`` over loopback
+# HTTP (http://127.0.0.1:8080) — that only works once uvicorn's socket is
+# bound and accepting connections. uvicorn.Server.startup() runs
+# ``await self.lifespan.startup()`` BEFORE it creates the listening socket,
+# so at every point during lifespan startup (including every boot phase in
+# this module) that socket does not exist yet — reusing ``_mcp_memory_call``
+# as-is here would always fail with connection-refused, regardless of which
+# phase it ran in.
+#
+# ``_boot_memory_dispatch`` / ``_boot_mcp_memory_call`` below are a drop-in
+# substitute for hermes_provision's IO seam that instead reaches the memory
+# provider IN-PROCESS — the same seam
+# ``hal0.dispatcher.memory_dispatcher.MemoryDispatcher`` uses so the admin
+# MCP server's own memory_* tools skip the loopback tax. That dispatcher
+# isn't reused directly because it's bound to AMBIENT per-request resolvers
+# (Bearer/header derived); there is no HTTP request during boot, so those
+# would resolve to "anonymous"/non-private and silently mis-stamp the
+# agent identity. Building a fresh ``make_dispatcher(...)`` per call with
+# explicit ``agent_id``/``private`` reproduces exactly what the HTTP path's
+# ``X-hal0-Agent`` / ``X-hal0-Private`` headers used to do.
+async def _boot_memory_dispatch(
+    app: FastAPI,
+    method: str,
+    params: dict[str, Any],
+    *,
+    agent_id: str,
+    private: bool = False,
+) -> dict[str, Any]:
+    """Boot-time, in-process substitute for ``hermes_provision._mcp_memory_call``.
+
+    Same ``{"ok": bool, "result": ...}`` / ``{"ok": False, "error": ...}``
+    envelope the hermes_provision phase bodies already expect, so they need
+    no changes to consume this instead of the HTTP-based default.
+    """
+    if method != "tools/call" or not isinstance(params, dict):
+        return {"ok": False, "error": f"unsupported method {method!r}"}
+    tool = params.get("name")
+    if tool not in ("memory_search", "memory_add", "memory_delete"):
+        return {"ok": False, "error": f"unsupported tool {tool!r}"}
+    arguments = params.get("arguments") or {}
+    memory_provider = getattr(app.state, "memory_provider", None)
+    if memory_provider is None:
+        # [memory].enabled = false, or provider construction failed in
+        # create_app() — same warn-as-OK degradation the HTTP path hits
+        # when hal0-memory is unreachable.
+        return {"ok": False, "error": "memory provider not configured"}
+
+    from hal0.mcp.memory import make_dispatcher
+
+    dispatcher = make_dispatcher(
+        memory_provider,
+        client_id_resolver=lambda: agent_id,
+        private_resolver=lambda: private,
+    )
+    try:
+        result = await dispatcher(tool, arguments)
+    except Exception as exc:  # pragma: no cover — defensive; make_dispatcher already catches
+        return {"ok": False, "error": str(exc)}
+    if result.get("status") == "ok":
+        return {"ok": True, "result": {k: v for k, v in result.items() if k != "status"}}
+    error = result.get("error") or {}
+    detail = error.get("detail") or error.get("code") or "memory dispatch failed"
+    return {"ok": False, "error": detail}
+
+
+def _boot_mcp_memory_call(
+    app: FastAPI,
+    loop: asyncio.AbstractEventLoop,
+    method: str,
+    params: dict[str, Any],
+    *,
+    agent_id: str,
+    base_url: str = "http://127.0.0.1:8080",
+    timeout: float = 5.0,
+    private: bool = False,
+) -> dict[str, Any]:
+    """Sync bridge matching ``InstallIO.mcp_memory_call``'s callable shape.
+
+    The hermes_provision phase bodies (``_phase_namespace_register`` et al.)
+    are plain synchronous functions run off the event-loop thread via
+    ``asyncio.to_thread`` (see ``_boot_brain_lane``) — required because
+    blocking that worker thread on ``future.result()`` below would deadlock
+    if it were the loop's own thread. From the worker thread this submits
+    :func:`_boot_memory_dispatch` onto the SAME running loop the memory
+    provider was constructed on (``run_coroutine_threadsafe``) and blocks
+    only the worker thread for the result — never the loop. Bounded so a
+    hung memory engine can never block boot indefinitely; ``base_url`` is
+    accepted (unused) purely for call-site / signature compatibility with
+    ``_mcp_memory_call``.
+    """
+    del base_url
+    coro = _boot_memory_dispatch(app, method, params, agent_id=agent_id, private=private)
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        return future.result(timeout=timeout + 5.0)
+    except Exception as exc:
+        future.cancel()
+        return {"ok": False, "error": str(exc)}
+
+
+async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
+    """Phase — RELOCATE(brain-lane): identity-card + self-report memory publishes.
+
+    Runs LAST (after ``background_tasks``, the final named phase before this
+    one) so ``app.state``/``ctx.boot_report`` reflect a fully-booted process
+    by the time ``self_report`` writes its summary. Reuses hermes_provision's
+    ``_phase_namespace_register`` / ``_phase_brain_profile_seed`` /
+    ``_phase_self_report`` bodies UNCHANGED via the same ``InstallIO`` /
+    ``_StepCtx`` injection seam their tests already use — only
+    ``mcp_memory_call`` is swapped for the boot-safe in-process adapter
+    above (see its docstring for why the HTTP-loopback default can't be
+    reused during lifespan startup). All three are warn-as-OK: memory-layer
+    unavailability must never fail boot, matching their install-time posture.
+
+    ``self_report`` originally read ``ctx.output_of("smoke_tests")`` for its
+    failure rollup — there is no lifespan analogue to a smoke-test pass, so
+    this substitutes a ``{"failures": [<phase name>, ...]}`` shape built
+    from ``ctx.boot_report``'s phases that ended in ``status == "error"``.
+    This is a DESIGN SUBSTITUTION, not a real smoke test: it reports boot
+    *phase* failures (a phase that had to raise), not a functional
+    self-test of chat/memory/etc. Flagged here and in the relocation
+    handoff notes; a future lane could add a lightweight post-boot
+    self-check if a closer smoke_tests equivalent is wanted.
+    """
+    import functools
+
+    from hal0.agents.hermes_provision import (
+        BootstrapState,
+        InstallIO,
+        _phase_brain_profile_seed,
+        _phase_namespace_register,
+        _phase_self_report,
+        _StepCtx,
+    )
+
+    state = BootstrapState()
+    loop = asyncio.get_running_loop()
+    io = InstallIO(mcp_memory_call=functools.partial(_boot_mcp_memory_call, app, loop))
+
+    try:
+        ns_result = await asyncio.to_thread(_phase_namespace_register, _StepCtx(state=state, io=io))
+        if not ns_result.details.get("registered"):
+            log.info(
+                "brain_lane.namespace_register_degraded",
+                warnings=ns_result.details.get("warnings"),
+            )
+    except Exception as exc:  # pragma: no cover — defensive, must never block boot
+        log.warning("brain_lane.namespace_register_failed", error=str(exc))
+
+    try:
+        brain_result = await asyncio.to_thread(
+            _phase_brain_profile_seed, _StepCtx(state=state, io=io)
+        )
+        if not brain_result.details.get("registered"):
+            log.info(
+                "brain_lane.brain_profile_seed_degraded",
+                warnings=brain_result.details.get("warnings"),
+            )
+    except Exception as exc:  # pragma: no cover — defensive, must never block boot
+        log.warning("brain_lane.brain_profile_seed_failed", error=str(exc))
+
+    # self_report MUST run last — see docstring above re: the smoke_tests
+    # substitution.
+    boot_failures = [p.name for p in ctx.boot_report.phases if p.status == "error"]
+    prior = {"smoke_tests": {"failures": boot_failures}}
+    try:
+        report_result = await asyncio.to_thread(
+            _phase_self_report, _StepCtx(state=state, io=io, _prior=prior)
+        )
+        if not report_result.details.get("published"):
+            log.info(
+                "brain_lane.self_report_degraded",
+                warning=report_result.details.get("warning"),
+            )
+    except Exception as exc:  # pragma: no cover — defensive, must never block boot
+        log.warning("brain_lane.self_report_failed", error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application boot/shutdown, decomposed into named, ordered boot phases.
@@ -1615,6 +1842,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
     await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
     await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))
+    # RELOCATE(brain-lane): terminal phase — namespace_register,
+    # brain_profile_seed, self_report (in that order; self_report last).
+    # Runs after every other phase so its self-report reflects a fully
+    # booted process. See _boot_brain_lane's docstring.
+    await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
 
     from contextlib import AsyncExitStack
 

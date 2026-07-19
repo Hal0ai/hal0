@@ -2189,6 +2189,12 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
 
 # ── Phase H.5: persona_seed (PR-3) ──────────────────────────────────────────
 #
+# RELOCATE(brain-lane) — LANDED: no longer in ``_INSTALL_STEPS``. The
+# hal0-api boot lifespan's ``_boot_seeds`` phase now covers this (it already
+# called ``seed_default_personas`` directly, before this function existed as
+# an install step — this function is kept for ``--repair``-style direct
+# calls and its existing unit coverage).
+#
 # Seeds the operator-visible personas hal0 manages on top of Hermes's own
 # personality slot. Two personas land on first install — ``hermes``
 # (default, helpful) and ``hal0-brain`` (the dashboard agent chat's
@@ -2760,6 +2766,13 @@ def _mcp_memory_call(
 def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
     """Write the Hermes identity card to the `agents` memory dataset.
 
+    RELOCATE(brain-lane) — LANDED: no longer in ``_INSTALL_STEPS``. Called
+    from the hal0-api boot lifespan's terminal ``_boot_brain_lane`` phase
+    instead, with ``ctx.io.mcp_memory_call`` swapped for an in-process
+    boot-safe adapter (the HTTP-loopback ``_mcp_memory_call`` default only
+    works once uvicorn's socket is bound, which is never true during
+    lifespan startup). This function's body is unchanged and reused as-is.
+
     Idempotency: search for an existing card by ``agent_id`` first;
     if present, delete it before writing the fresh one (cards are
     immutable, but bootstrap rewrites refresh the
@@ -2906,6 +2919,10 @@ def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
 
 
 # ── Phase H.6: brain_profile_seed ───────────────────────────────────────────
+#
+# RELOCATE(brain-lane) — LANDED: no longer in ``_INSTALL_STEPS``. Called
+# from the hal0-api boot lifespan's terminal ``_boot_brain_lane`` phase
+# (same in-process ``mcp_memory_call`` substitution as namespace_register).
 #
 # ``hal0-brain`` ships both as a hal0 persona (personas.py) AND as a
 # first-class memory *profile* agent-id (``hermes__hal0-brain``). Prior to
@@ -3069,6 +3086,11 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 
 
 # ── Phase H.7: brain_profile_mcp_wire ───────────────────────────────────────
+#
+# RELOCATE(brain-lane) — LANDED: no longer in ``_INSTALL_STEPS``. Folded into
+# the hal0-api boot lifespan's ``_boot_seeds`` phase (local FS only, no
+# memory call, so it belongs beside the persona/slot seeds rather than the
+# memory-dependent trio in ``_boot_brain_lane``).
 #
 # The hal0-brain profile (``~/.hermes/profiles/hal0-brain/``, created by the
 # upstream hermes binary) needs the two hal0-owned MCP servers — hal0-admin
@@ -4731,6 +4753,13 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
 def _phase_self_report(ctx: _StepCtx) -> PhaseResult:
     """Write a bootstrap-completion summary into the agent's private namespace.
 
+    RELOCATE(brain-lane) — LANDED: no longer in ``_INSTALL_STEPS``. Called
+    LAST from the hal0-api boot lifespan's terminal ``_boot_brain_lane``
+    phase. ``ctx.output_of("smoke_tests")`` has no lifespan analogue — the
+    boot phase substitutes a ``{"failures": [...]}`` shape derived from
+    ``app.state.boot_report`` (boot-phase failures, not real smoke-test
+    results; see ``_boot_brain_lane``'s docstring).
+
     Failure of the memory write is non-fatal — same posture as
     namespace_register (#243): the memory layer being unavailable
     shouldn't fail bootstrap.
@@ -5013,10 +5042,18 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
 # converging write (``hermes config set`` re-applies the same value; file writes
 # hash-skip), not from stored checkpoints.
 #
-# The brain/persona/memory-identity steps (persona_seed, namespace_register,
-# brain_profile_seed, brain_profile_mcp_wire, self_report) still run here for now
-# but are marked ``# RELOCATE(brain-lane):`` — a concurrent lane moves them into
-# the hal0-api lifespan; leave them functioning until it lands.
+# RELOCATE(brain-lane) — LANDED: the brain/persona/memory-identity steps
+# (persona_seed, namespace_register, brain_profile_seed, brain_profile_mcp_wire,
+# self_report) no longer run as part of this linear pipeline. They moved into
+# the hal0-api boot lifespan (src/hal0/api/__init__.py: _boot_seeds folds in
+# persona_seed + brain_profile_mcp_wire; the new terminal _boot_brain_lane phase
+# runs namespace_register, brain_profile_seed, self_report) so they execute on
+# every API boot (fresh/update/dev) instead of once at install time. The step
+# FUNCTIONS below stay put and reusable — the lifespan phases call them
+# directly via the same InstallIO/_StepCtx injection seam the tests use, only
+# swapping ``mcp_memory_call`` for a boot-safe in-process adapter (the HTTP
+# loopback ``_mcp_memory_call`` below only works once uvicorn's socket is
+# bound, which is never true during lifespan startup).
 
 
 @dataclass(frozen=True)
@@ -5101,9 +5138,10 @@ class InstallReport:
     def mutated(self) -> list[str]:
         """Names of the host-mutating steps that changed state this run.
 
-        The brain-lane memory/persona publishes are external (memory store)
-        side effects, not local install mutations, so they never appear here —
-        the convergence contract is about the on-disk install surface.
+        The brain-lane memory/persona publishes (RELOCATE(brain-lane)) no
+        longer run as install steps at all — they moved to the hal0-api boot
+        lifespan — so they never appear here either way; the convergence
+        contract is about the on-disk install surface.
         """
         return [s.name for s in self.steps if s.changed]
 
@@ -5113,25 +5151,13 @@ class InstallReport:
         return not self.mutated
 
 
-# Host-mutating steps whose ``changed`` flag feeds the convergence contract.
-# The brain-lane steps (persona/memory publishes) are deliberately excluded —
-# they touch the memory store, not the local install surface. They still run
-# (marked ``# RELOCATE(brain-lane):``) but never count as an install mutation.
-_BRAIN_LANE_STEPS: frozenset[str] = frozenset(
-    {
-        "persona_seed",
-        "namespace_register",
-        "brain_profile_seed",
-        "brain_profile_mcp_wire",
-        "self_report",
-    }
-)
-
-
+# RELOCATE(brain-lane) — LANDED: the brain-lane steps (persona/memory
+# publishes) no longer appear in ``_INSTALL_STEPS`` at all (see the module
+# docstring above ``InstallIO``), so the convergence contract never sees
+# their names — the ``_BRAIN_LANE_STEPS`` exemption this function used to
+# consult is retired along with them.
 def _step_changed(name: str, result: PhaseResult) -> bool:
     """Derive a step's convergence signal from its :class:`PhaseResult`."""
-    if name in _BRAIN_LANE_STEPS:
-        return False  # external memory-store publishes are not install mutations
     if result.status != PhaseStatus.OK:
         return False
     d = result.details or {}
@@ -5145,6 +5171,13 @@ def _step_changed(name: str, result: PhaseResult) -> bool:
 # probe result directly. ``model_automap`` is gone — config_write already sets
 # ``model.*`` + ``model_aliases.*`` (the post-bootstrap slot refresh is a runtime
 # concern of ``render_live_context``). ``ownership_reconcile`` is gone (§7.4 F.7).
+# RELOCATE(brain-lane) — LANDED: persona_seed, namespace_register,
+# brain_profile_seed, brain_profile_mcp_wire, and self_report used to run
+# here (each marked ``# RELOCATE(brain-lane):``); they now run in the
+# hal0-api boot lifespan instead (see the module docstring above
+# ``InstallIO``). The functions are unchanged and still directly callable
+# (tests + the lifespan phases both use them) — only their membership in
+# this pipeline moved.
 _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("preflight", _phase_preflight),
     ("install", _phase_install),
@@ -5152,22 +5185,12 @@ _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("home_init", _phase_home_init),
     ("kanban_db_init", _phase_kanban_db_init),
     ("install_artifacts", _phase_install_artifacts),
-    # RELOCATE(brain-lane): persona seeding moves to the hal0-api lifespan.
-    ("persona_seed", _phase_persona_seed),
     ("mcp_wire", _phase_mcp_wire),
     ("config_write", _phase_config_write),
     ("context_link", _phase_context_link),
-    # RELOCATE(brain-lane): identity-card publish moves to the lifespan.
-    ("namespace_register", _phase_namespace_register),
-    # RELOCATE(brain-lane): brain profile identity publish.
-    ("brain_profile_seed", _phase_brain_profile_seed),
-    # RELOCATE(brain-lane): brain profile MCP wiring.
-    ("brain_profile_mcp_wire", _phase_brain_profile_mcp_wire),
     ("voice_wire", _phase_voice_wire),
     ("gateway_secrets_wire", _phase_gateway_secrets_wire),
     ("smoke_tests", _phase_smoke_tests),
-    # RELOCATE(brain-lane): self-report memory write.
-    ("self_report", _phase_self_report),
 )
 
 
