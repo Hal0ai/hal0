@@ -1266,9 +1266,7 @@ def agent_status(
             # `--json` wasn't a recognized option at all, so Typer/Click
             # raised a UsageError to stderr and stdout stayed empty
             # (the exact symptom from live install-validation m4).
-            typer.echo(
-                _json.dumps({"name": name, "provisioned": False, "phases": {}}, indent=2)
-            )
+            typer.echo(_json.dumps({"name": name, "provisioned": False, "phases": {}}, indent=2))
             raise typer.Exit(0)
         console.print(f"[dim]{name}: no provision.json yet (run bootstrap first).[/dim]")
         raise typer.Exit(0)
