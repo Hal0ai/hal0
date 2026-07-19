@@ -17,6 +17,8 @@
 // taxonomy + stub-with-reason for the live table). Un-disabled in SettingsNav.
 
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
+import { useSetRequireAuth, useLogout } from '@/api/hooks/useAuthActions'
+import { loginErrorMessage } from '@/dash/auth/gateDecision.js'
 import { RotateKeyDialog } from './RotateKeyDialog.jsx'
 import { ExposureTable } from './ExposureTable.jsx'
 
@@ -60,6 +62,8 @@ const SET_CLIENT_REASON =
 
 export function SecurityPage() {
   const auth = useAuthStatus()
+  const setRequireAuth = useSetRequireAuth()
+  const logout = useLogout()
   const [rotateOpen, setRotateOpen] = useStateS(false)
 
   const s = auth.data
@@ -69,14 +73,22 @@ export function SecurityPage() {
   const adminState = errored ? 'unknown' : loading ? 'unknown' : s?.has_admin_key ? 'set' : 'unset'
   const authArmed = !!s?.auth_required
   const tier = s?.tier || 'unknown'
+  const hasAdminKey = adminState === 'set'
+  const isAdminSession = tier === 'admin'
+
+  // Enabling enforcement with no admin key would lock EVERYONE out (the login
+  // endpoint rejects every attempt with no key), so the control is gated on a
+  // configured key — the same guard the backend enforces (400 auth.no_admin_key).
+  const canEnable = hasAdminKey
+  const toggleErr = setRequireAuth.isError ? loginErrorMessage(setRequireAuth.error) : null
 
   return (
     <div className="s-section" data-testid="security-page">
       <h2>Security &amp; Access</h2>
       <p className="desc">
-        API-key status, exposure policy, and login throttle. Status only — hal0&apos;s auth surface
-        (<span className="mono">GET /api/auth/status</span>) never returns a key value, and neither does
-        this page. Assumes an admin session (a browser HMAC session is admin-equivalent).
+        Authentication posture, API-key status, exposure policy, and login throttle. hal0&apos;s auth
+        surface (<span className="mono">GET /api/auth/status</span>) never returns a key value, and
+        neither does this page. Assumes an admin session (a browser HMAC session is admin-equivalent).
       </p>
 
       {/* ── session posture ─────────────────────────────────────────── */}
@@ -86,8 +98,89 @@ export function SecurityPage() {
             enforcement {authArmed ? 'armed' : 'open'} · this session:
             <span data-testid="security-tier" style={{ color: authArmed ? 'var(--ok)' : 'var(--warn)', marginLeft: 6 }}>{tier}</span>
           </span>
-          {errored && <span className="err" style={{ fontSize: 11 }}>auth status probe failed</span>}
+          <span style={{ display: 'inline-flex', gap: 10, alignItems: 'center' }}>
+            {errored && <span className="err" style={{ fontSize: 11 }}>auth status probe failed</span>}
+            {isAdminSession && (
+              <button
+                className="btn ghost sm"
+                data-testid="security-logout"
+                disabled={logout.isPending}
+                onClick={() => logout.mutate()}
+                title="End this browser session (clears the session cookie)"
+              >
+                {logout.isPending ? 'Logging out…' : 'Log out'}
+              </button>
+            )}
+          </span>
         </div>
+      </div>
+
+      {/* ── enforcement toggle (real, live-applied) ─────────────────── */}
+      <h3 style={{ margin: '0 0 6px', fontSize: 13 }}>Authentication</h3>
+      <div className="s-panel" data-testid="security-enforcement" style={{ marginBottom: 16 }}>
+        <div className="s-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, padding: '13px 14px' }}>
+          <div>
+            <div style={{ fontSize: 13, color: 'var(--fg)' }}>
+              Require authentication
+              <span
+                data-testid="security-enforcement-state"
+                className="chip mono"
+                style={{
+                  marginLeft: 8,
+                  fontSize: 10,
+                  color: authArmed ? 'var(--ok)' : 'var(--fg-4)',
+                  borderColor: authArmed ? 'var(--ok-line)' : 'var(--line)',
+                  background: authArmed ? 'var(--ok-soft)' : 'var(--bg-2)',
+                }}
+              >
+                {authArmed ? '● on' : '○ off'}
+              </span>
+            </div>
+            <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 3, lineHeight: 1.55, maxWidth: 460 }}>
+              {authArmed
+                ? 'Every route requires the admin key (or a logged-in session). Applies live — no restart.'
+                : 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.'}
+            </div>
+          </div>
+          {authArmed ? (
+            <button
+              className="btn ghost sm"
+              data-testid="security-enforcement-disable"
+              disabled={setRequireAuth.isPending}
+              onClick={() => setRequireAuth.mutate(false)}
+            >
+              {setRequireAuth.isPending ? 'Saving…' : 'Disable'}
+            </button>
+          ) : (
+            <button
+              className="btn sm"
+              data-testid="security-enforcement-enable"
+              disabled={!canEnable || setRequireAuth.isPending}
+              title={!canEnable ? 'Configure an admin key first — enabling auth with no key locks everyone out.' : undefined}
+              onClick={() => setRequireAuth.mutate(true)}
+            >
+              {setRequireAuth.isPending ? 'Saving…' : 'Enable'}
+            </button>
+          )}
+        </div>
+        {!authArmed && !canEnable && (
+          <div
+            data-testid="security-enforcement-blocked"
+            className="mono"
+            style={{ fontSize: 10.5, color: 'var(--warn)', padding: '0 14px 12px', lineHeight: 1.55 }}
+          >
+            ○ No admin key configured — set <span style={{ color: 'var(--fg-3)' }}>HAL0_ADMIN_KEY</span> before enabling, or you&apos;ll lock yourself out.
+          </div>
+        )}
+        {toggleErr && (
+          <div
+            data-testid="security-enforcement-error"
+            className="mono err"
+            style={{ fontSize: 10.5, padding: '0 14px 12px', lineHeight: 1.55 }}
+          >
+            {toggleErr.text}
+          </div>
+        )}
       </div>
 
       {/* ── keys ────────────────────────────────────────────────────── */}

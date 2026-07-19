@@ -27,6 +27,11 @@ import { test, expect, json } from '../fixtures/apiMock'
 const FIVE_S = 5_500
 
 async function openApprovals(page: any) {
+  // The listener (dash/main.jsx) attaches only after the app mounts — and the
+  // AuthGate (O19) defers that mount by one /api/auth/status round-trip, so a
+  // dispatch fired straight after goto() can land on a listener-less window
+  // and vanish. Wait for the mounted app shell first, then dispatch.
+  await page.waitForSelector('.topbar', { timeout: 10_000 })
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent('hal0:open-approvals'))
   })

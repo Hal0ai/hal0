@@ -289,10 +289,10 @@ async def test_dispatch_and_forward_does_not_normalize_non_chat(monkeypatch):
 
 
 def test_loaded_models_includes_ready_container_slots():
-    """The loaded set derives from container-backed remotes (kind='remote' +
-    slot_name): those upstreams advertise their served model only while up,
-    so their cached catalog IS the loaded set (cutover #662). Genuine
-    external remotes (slot_name=None) are not local slots and never count."""
+    """The loaded set derives from container-backed upstreams (``slot_name``
+    set): those advertise their served model only while up, so their cached
+    catalog IS the loaded set (cutover #662). Genuine external remotes
+    (slot_name=None) are not local slots and never count."""
     req = _make_request(
         upstreams=[
             SimpleNamespace(name="agent", kind="remote", slot_name="agent"),
@@ -304,6 +304,48 @@ def test_loaded_models_includes_ready_container_slots():
     assert "chadrock-35b-ace-saber" in loaded
     # A genuine external remote (no slot_name) is NOT a local container slot.
     assert "gpt-x" not in loaded
+
+
+def test_loaded_models_includes_kind_slot_upstreams_o21():
+    """O21 regression: SlotManager registers LOCAL container slots as
+    kind="slot" (upstreams/registry guards that kind as SlotManager-owned),
+    but the loaded-set collector filtered kind=="remote" only — starving the
+    hal0/<slot> alias resolver of every local slot's model and 404ing all
+    virtual ids on real boxes. The container-backed marker is ``slot_name``,
+    regardless of kind."""
+    req = _make_request(
+        upstreams=[
+            SimpleNamespace(name="brain", kind="slot", slot_name="brain"),
+        ],
+        upstream_models={"brain": ["hal0-brain-fpx8-agent"]},
+    )
+    loaded = v1._normalize_loaded_models(req)
+    assert "hal0-brain-fpx8-agent" in loaded
+
+
+@pytest.mark.asyncio
+async def test_hal0_brain_alias_resolves_via_kind_slot_upstream_o21():
+    """End-to-end O21 repro: [brain_chat] model="hal0/brain" with the brain
+    slot loaded (registered the way SlotManager actually registers it —
+    kind="slot") must rewrite to the slot's model id, not fall through to
+    legacy capability routing."""
+    cfgs = [
+        {
+            "name": "brain",
+            "type": "llm",
+            "enabled": True,
+            "device": "gpu-rocm",
+            "role": None,
+            "model": {"default": "hal0-brain-fpx8-agent", "context_size": 16384},
+        }
+    ]
+    req = _make_request(
+        cfgs=cfgs,
+        upstreams=[SimpleNamespace(name="brain", kind="slot", slot_name="brain")],
+        upstream_models={"brain": ["hal0-brain-fpx8-agent"]},
+    )
+    out = await v1._normalize_chat_body(req, {"model": "hal0/brain", "messages": []})
+    assert out["model"] == "hal0-brain-fpx8-agent"
 
 
 def test_container_slot_not_treated_as_remote_for_thinking():

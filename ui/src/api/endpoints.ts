@@ -67,6 +67,10 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // Per-type default MODEL marker: POST {default:true} promotes (demoting the
+  // current holder of the type), {default:false} clears. Server enforces the
+  // single-holder invariant in one chokepoint.
+  modelSetDefault: (id: string) => `/api/models/${encodeURIComponent(id)}/default`,
   // HF update check + in-place update. Check is GET (TTL-cached server-side,
   // ?refresh=1 forces); update re-pulls the row's hf_repo/hf_filename over
   // its installed path and reports through the standard pull job surface.
@@ -261,6 +265,17 @@ export const ENDPOINTS = {
   // (D4 flags them as API-lane requests); the page shows disabled-with-reason
   // rather than fabricating them. There is no key-rotation route either.
   authStatus: '/api/auth/status',
+  // POST /api/auth/login (OPEN) — body { key }; on success mints the HttpOnly
+  // session cookie and returns { ok, tier }. Wrong key → 401 auth.invalid_key;
+  // throttled → 429 auth.rate_limited with details.retry_after_s.
+  authLogin: '/api/auth/login',
+  // POST /api/auth/logout (OPEN) — clears the session cookie (HttpOnly, so JS
+  // can't; this route is the only session end the browser has).
+  authLogout: '/api/auth/logout',
+  // PUT /api/auth/require (ADMIN) — body { require_auth }; persists the
+  // [security].require_auth enforcement toggle. Applies live (no restart).
+  // Refuses enabling with no admin key configured (400 auth.no_admin_key).
+  authRequire: '/api/auth/require',
 
   // ── Flag-migration report (D5 migration-resolve) ─────────────────
   // GET /api/migrations/flag-report — MISSING today (API-lane request). The

@@ -8,8 +8,23 @@ CLI would leave it — without a real hermes binary.
 
 from __future__ import annotations
 
+import re
+import sqlite3
 from pathlib import Path
 from typing import Any
+
+# Mirrors hp.KANBAN_DB_EXPECTED_TABLES — kept as a literal (not an import) so
+# this fake stays a hermetic stand-in independent of the module under test.
+_KANBAN_DB_TABLES = (
+    "tasks",
+    "task_links",
+    "task_comments",
+    "task_events",
+    "task_runs",
+    "task_attachments",
+    "kanban_notify_subs",
+)
+_KANBAN_INIT_DB_RE = re.compile(r"init_db\((['\"])(.*?)\1\)")
 
 
 class _Completed:
@@ -63,6 +78,34 @@ def apply_hermes_config_cli(argv: list[str], env: dict[str, str] | None) -> bool
         cfg.write_text(yaml.safe_dump(data, sort_keys=False))
         return True
     return False
+
+
+def apply_kanban_db_init_cli(argv: list[str]) -> bool:
+    """Simulate ``hermes_cli.kanban_db.init_db(<path>)`` by creating its tables.
+
+    Detects the hal0 ``kanban_db_init`` phase's ``<venv>/python -c "from
+    hermes_cli.kanban_db import init_db; init_db('<path>')"`` invocation
+    (:func:`hal0.agents.hermes_provision._phase_kanban_db_init`) and creates
+    the same table set the real ``init_db`` would, so hermetic pipeline tests
+    (no real hermes venv) still exercise the convergent skip on a second run.
+    Returns True if it handled the argv, False otherwise so the caller can
+    fall through to other interception or a real subprocess.
+    """
+    if len(argv) < 3 or "kanban_db" not in argv[2] or "init_db" not in argv[2]:
+        return False
+    match = _KANBAN_INIT_DB_RE.search(argv[2])
+    if not match:
+        return False
+    db_path = Path(match.group(2))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        for table in _KANBAN_DB_TABLES:
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    return True
 
 
 def fake_hermes_run(record: list[list[str]] | None = None):
@@ -202,6 +245,8 @@ def install_io(hp, *, record: list[list[str]] | None = None, slots=None):
         if argv[:2] == ["systemctl", "daemon-reload"]:
             return _C()
         if apply_hermes_config_cli(argv, kw.get("env")):
+            return _C()
+        if apply_kanban_db_init_cli(argv):
             return _C()
         return real_run(argv, *a, **kw)
 

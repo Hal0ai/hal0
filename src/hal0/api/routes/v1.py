@@ -377,14 +377,19 @@ def _normalize_loaded_models(request: Request) -> set[str]:
     import contextlib
 
     loaded: set[str] = set()
-    # Container-backed remotes (kind="remote" + slot_name) advertise their
-    # served model only while up, so their cached catalog == "loaded".
+    # Container-backed upstreams advertise their served model only while up, so
+    # their cached catalog == "loaded". SlotManager registers local container
+    # slots as kind="slot" (registry guards that kind as SlotManager-owned);
+    # kind="remote" covers externally-configured container remotes. Filtering
+    # on kind=="remote" alone starved the hal0/<slot> alias resolver of every
+    # LOCAL slot's model, 404ing all virtual ids on real boxes (O21) — the
+    # container-backed marker is ``slot_name``, so key on that.
     upstreams = getattr(request.app.state, "upstreams", None)
     model_cache = getattr(request.app.state, "upstream_models", None)
     if upstreams is not None and model_cache is not None:
         with contextlib.suppress(Exception):
             for up in upstreams.list():
-                if getattr(up, "kind", "") == "remote" and getattr(up, "slot_name", None):
+                if getattr(up, "slot_name", None):
                     loaded |= set(model_cache.get(up.name, []))
     return loaded
 

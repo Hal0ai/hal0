@@ -22,7 +22,7 @@
 // is flat-merged wholesale, so we start from the stored defaults and override
 // only the keys we surface (emptying an input deletes just that key).
 
-import { useModelUpdate, useAddModelFromPath } from '@/api/hooks/useModels'
+import { useModelUpdate, useAddModelFromPath, useModelSetDefault } from '@/api/hooks/useModels'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
@@ -322,6 +322,7 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 function ModelDrawer({ open, onClose, model }) {
   const update = useModelUpdate();
+  const setDefault = useModelSetDefault();
   const templates = useChatTemplates(open);
   const profilesQuery = useProfiles();
   const enums = useMetaEnums();
@@ -348,6 +349,11 @@ function ModelDrawer({ open, onClose, model }) {
   // Local UI state.
   const [dupOpen, setDupOpen] = useStateMD(false);
   const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
+  // Per-type default: `model` is a SNAPSHOT captured when the drawer opened
+  // (models.jsx passes the selected row), so the invalidation-driven list
+  // refetch never reaches this prop. Track the POST response as the local
+  // authority so the badge flips live; null = defer to the snapshot.
+  const [defaultOverride, setDefaultOverride] = useStateMD(null);
 
   useEffectMD(() => {
     if (open && model) {
@@ -367,6 +373,7 @@ function ModelDrawer({ open, onClose, model }) {
       setChatTemplate(init.chat_template ?? "auto");
       setMtp(triFromDefault(init.mtp));
       setJinja(triFromDefault(init.jinja));
+      setDefaultOverride(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, model?.id]);
@@ -454,6 +461,29 @@ function ModelDrawer({ open, onClose, model }) {
       confirmLabel: "Reset to profile",
       onConfirm: () => { setExtra(sourceProfile.flags || ""); setConfirm(null); },
     });
+  };
+
+  // Per-type default marker toggle. Server-side single chokepoint enforces
+  // "one default per type" (promoting demotes the current holder). The list's
+  // badges refresh via the models-query invalidation; THIS drawer's badge
+  // flips from the POST response (the `model` prop is an open-time snapshot).
+  const isTypeDefault = defaultOverride ?? !!model.default;
+  const typeLabel = model.type || "type";
+  const onToggleDefault = async () => {
+    const next = !isTypeDefault;
+    try {
+      const res = await setDefault.mutateAsync({ id: model.id, default: next });
+      setDefaultOverride(typeof res.default === "boolean" ? res.default : next);
+      window.__hal0Toast && window.__hal0Toast(
+        next
+          ? `${model.longName || model.id} is now the ${res.type} default` +
+              (res.demoted && res.demoted.length ? ` (demoted ${res.demoted.join(", ")})` : "")
+          : `Removed ${model.longName || model.id} as the ${res.type} default`,
+        "ok",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Default change failed — ${e?.message || "see logs"}`, "err");
+    }
   };
 
   const dirty =
@@ -561,6 +591,31 @@ function ModelDrawer({ open, onClose, model }) {
                   className={"mdl-chip" + (on ? " on" : "")} onClick={() => toggleType(tag)}>{tag}</button>
               );
             })}
+          </div>
+        </div>
+
+        {/* ── Per-type default marker (Set / Remove) ── */}
+        <div className="form-row">
+          <div className="form-lbl">
+            <span>default for {typeLabel}</span>
+            <span className="sub">the model this type falls back to · one per type</span>
+          </div>
+          <div className="form-ctl" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {isTypeDefault ? (
+              <span className="tag" data-testid="model-default-badge"
+                style={{ color: "var(--ok)", borderColor: "var(--ok)", background: "var(--bg-2)", fontFamily: "var(--jbm)", fontSize: 9, letterSpacing: ".05em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, border: "1px solid var(--ok)" }}>
+                ✓ {typeLabel} default
+              </span>
+            ) : (
+              <span className="tag" data-testid="model-default-none"
+                style={{ color: "var(--fg-4)", borderColor: "var(--line)", background: "var(--bg-2)", fontFamily: "var(--jbm)", fontSize: 9, letterSpacing: ".05em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, border: "1px solid var(--line)" }}>
+                not the default
+              </span>
+            )}
+            <button type="button" className="btn ghost sm" data-testid="model-default-toggle"
+              onClick={onToggleDefault} disabled={setDefault.isPending}>
+              {setDefault.isPending ? "Saving…" : isTypeDefault ? "Remove default" : "Set as default"}
+            </button>
           </div>
         </div>
 

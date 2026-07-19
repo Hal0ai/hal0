@@ -2709,6 +2709,20 @@ class BrainChatConfig(BaseModel):
     loop (runaway backstop); ``completion_timeout_s`` is the transport timeout
     for each LLM round against the target slot.
 
+    Context floor (fresh-box finding, docs/rework/r4-stage-validation.md
+    "steward config note"): whichever slot ends up serving the chat --
+    ``model``/``tool_model`` here, the persona's ``preferred_model``, or the
+    ``hal0/brain`` -> ``agent`` resolver fallback -- MUST be loaded with at
+    least 8k tokens of context. The built-in hal0-brain system prompt alone
+    is ~7.3k tokens before any conversation history or tool schemas are
+    added; a smaller context window truncates the prompt and the steward
+    degrades silently (malformed tool calls, prompt-following failures)
+    rather than failing loudly. Separately, a ``model``/``tool_model`` (or
+    resolver fallback) that resolves to NO loaded slot at all 404s the self
+    ``/v1/chat/completions`` call outright -- surfaced by
+    :mod:`hal0.brain.chat` as an actionable SSE ``error`` frame (naming the
+    model tried and how to fix it) rather than the raw transport failure.
+
     ``extra="forbid"`` (P3-schema Part C): a leaf tunable table. Previously
     had no explicit ``model_config`` (pydantic's default is ``"ignore"``, not
     ``"allow"``) -- made explicit here rather than left implicit.
@@ -2725,6 +2739,10 @@ class BrainChatConfig(BaseModel):
     # Empty → persona preferred_model (hal0/brain). Set to a virtual slot model
     # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
     # explicit per-request ``model`` in the chat body still wins over this.
+    # Whatever slot this ends up pointing at (directly, via the persona, or
+    # via the hal0/brain -> agent resolver fallback) needs >= 8k context —
+    # the steward system prompt alone is ~7.3k tokens — and must actually be
+    # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
     # Route tool-calling turns to a capable, tool-format-compatible model. The
     # steward always offers tools, so when set this is the model its tool loop
@@ -2736,6 +2754,44 @@ class BrainChatConfig(BaseModel):
     tool_model: str = ""
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
+
+
+class SecurityConfig(BaseModel):
+    """[security] section — persisted auth-enforcement posture (KB-1 / O19).
+
+    ``require_auth`` is the durable enable/disable toggle the dashboard
+    Security page writes (``PUT /api/auth/require``). Its default is
+    ``None`` = *unset*, which the runtime resolves to auth **OFF** — the
+    shipped posture as of the 2026-07-19 operator decision: hal0 runs
+    trusted-LAN-open by default, matching how the boxes are actually run.
+
+    This deliberately retires KB-1's bind-address / key-presence auto-on:
+    that auto-on armed enforcement on a 0.0.0.0 bind but the dashboard
+    shipped no login UI, so every route answered ``authentication
+    required`` and operators disabled auth wholesale (``HAL0_REQUIRE_AUTH=0``)
+    to use the product (docs/rework r4 finding O19). Auth is now
+    explicit-enable only.
+
+    Resolution precedence (see :func:`hal0.api.auth.require_auth_enabled`):
+    the ``HAL0_REQUIRE_AUTH`` env var wins over this persisted value, which
+    in turn wins over the OFF default.
+
+    ``extra="forbid"`` (P3-schema Part C leaf-table policy, same as
+    ``[brain_chat]``): a typo'd key in the SECURITY section must fail loudly
+    at load, never silently no-op an enforcement toggle.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    require_auth: bool | None = Field(
+        default=None,
+        description=(
+            "Persisted auth-enforcement toggle. None = unset → auth OFF "
+            "(trusted-LAN open, the shipped default). True/False are explicit "
+            "operator choices. Overridden at runtime by the HAL0_REQUIRE_AUTH "
+            "env var."
+        ),
+    )
 
 
 class Hal0Config(BaseModel):
@@ -2760,6 +2816,7 @@ class Hal0Config(BaseModel):
     honcho: HonchoConfig = Field(default_factory=HonchoConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
 
 # ── Shipped seed-data shims (P3-schema, spec Part A) ──────────────────────────
@@ -2830,6 +2887,7 @@ __all__ = [
     "ProfilesConfig",
     "ProviderEntry",
     "ProvidersConfig",
+    "SecurityConfig",
     "ServerConfig",
     "SlotConfig",
     "SlotsConfig",

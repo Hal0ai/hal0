@@ -404,7 +404,7 @@ class SlotManager:
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _register_container_upstream(self, slot_name: str, port: int) -> None:
-        """Add a kind="remote" upstream for a container slot's loopback port.
+        """Add a kind="slot" upstream for a container slot's loopback port.
 
         Idempotent via upsert — if the slot was already registered (e.g. a
         restart), the entry is refreshed with the current port.
@@ -433,7 +433,7 @@ class SlotManager:
         )
 
     def _deregister_container_upstream(self, slot_name: str) -> None:
-        """Remove the kind="remote" upstream for a container slot."""
+        """Remove the kind="slot" upstream for a container slot."""
         if self._upstreams_registry is None:
             return
         removed = self._upstreams_registry.remove(slot_name)
@@ -443,7 +443,7 @@ class SlotManager:
     async def reconcile_container_upstreams(self) -> list[str]:
         """Re-register upstreams for containers that outlived the process (#732).
 
-        Per-slot ``kind="remote"`` upstreams exist only in the in-memory
+        Per-slot ``kind="slot"`` upstreams exist only in the in-memory
         registry and die with the api process, while the podman containers
         (and their loaded models) survive a ``systemctl restart hal0-api``.
         Pre-fix, every restart left "ready" slots returning
