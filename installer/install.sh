@@ -503,6 +503,18 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
+# O13: the runtime state trees (slots/, registry/) are born root:root from the
+# mkdir above, but hal0-api runs User=hal0 and must create slots/<id>/state.json
+# + write the registry there. Left root:root, every slot degrades to `error` on
+# a fresh box. The `doctor perms --fix` backstop (Service start) also heals these
+# via their OwnershipStore rows (src/hal0/install/perms.py), but chown here so
+# they're born correct before the daemon's first touch. Prod-only + hal0-gated:
+# the service user doesn't exist in dev mode.
+if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
+    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" 2>/dev/null || true
+    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" 2>/dev/null || true
+fi
+
 # Production (FHS, #495) ships the source tree into the versioned dir
 # ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
 # `hal0 update` can atomically swap `current` to a new versioned tree.
