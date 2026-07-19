@@ -69,6 +69,28 @@ function frame(record: Record<string, unknown>) {
   return { record, epoch: EPOCH }
 }
 
+
+// Emit records and wait for each one's OWN row (keyed by its distinct
+// severity) before proceeding. The pane remounts on Slots-state transitions
+// (see useActivity.ts ring-cache comment), reconnecting its EventSource — an
+// emit fired into that gap lands on a dead listener and vanishes, and the
+// ring has no id-dedup so blind re-emits could double-count. A 3s window per
+// attempt rules out slow-render before re-emitting.
+async function emitAndAwait(page: any, records: Array<Record<string, unknown>>) {
+  for (const r of records) {
+    const own = page.locator(`[data-testid="act-row"][data-severity="${(r as any).severity}"]`)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await emitSse(page, STREAM, frame(r))
+      try {
+        await expect(own).toHaveCount(1, { timeout: 3_000 })
+        break
+      } catch {
+        /* lost to a reconnect gap — re-emit */
+      }
+    }
+  }
+}
+
 test.describe('ActivityLog sidebar pane (#slots)', () => {
   test.beforeEach(async ({ page }) => {
     await installSseHarness(page)
@@ -88,8 +110,7 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     await waitForSse(page, STREAM, 6_000)
 
-    await emitSse(page, STREAM, frame(OK_REC))
-    await emitSse(page, STREAM, frame(ERR_REC))
+    await emitAndAwait(page, [OK_REC, ERR_REC])
 
     const rows = page.locator('[data-testid="act-row"]')
     await expect(rows).toHaveCount(2)
@@ -103,8 +124,7 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     await waitForSse(page, STREAM, 6_000)
 
-    await emitSse(page, STREAM, frame(OK_REC))
-    await emitSse(page, STREAM, frame(ERR_REC))
+    await emitAndAwait(page, [OK_REC, ERR_REC])
 
     const okRow = page.locator('[data-testid="act-row"][data-severity="ok"]')
     const errRow = page.locator('[data-testid="act-row"][data-severity="error"]')
@@ -118,15 +138,13 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     await waitForSse(page, STREAM, 6_000)
 
-    await emitSse(page, STREAM, frame(OK_REC))
-    await emitSse(page, STREAM, frame(ERR_REC))
-    await emitSse(page, STREAM, frame(WARN_REC))
-    await expect(page.locator('[data-testid="act-row"]')).toHaveCount(3)
+    const rows = page.locator('[data-testid="act-row"]')
+    await emitAndAwait(page, [OK_REC, ERR_REC, WARN_REC])
+    await expect(rows).toHaveCount(3)
 
     // Click the `error` chip — only the error row should remain (client-side
     // residual filter applies immediately to the ring).
     await page.locator('[data-testid="act-sev-error"]').click()
-    const rows = page.locator('[data-testid="act-row"]')
     await expect(rows).toHaveCount(1)
     await expect(rows.first()).toHaveAttribute('data-severity', 'error')
 
@@ -153,11 +171,19 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     const body = page.locator('[data-testid="activity-log-body"]')
     await expect(body).toBeVisible({ timeout: 6_000 })
-    const overflowY = await body.evaluate((el) => getComputedStyle(el).overflowY)
-    expect(['auto', 'scroll']).toContain(overflowY)
-    const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
+    // SlotsView renders ActivityLog from several mutually-exclusive
+    // early-return branches (loading / empty / populated — see
+    // `useActivityStream`'s ring-cache comment in useActivity.ts) and swaps
+    // branches once the forced-mock `/api/slots` resolves, which unmounts
+    // the loading-branch pane and mounts a fresh `.act-body` DOM node. A
+    // plain `locator.evaluate()` can resolve the element a tick before that
+    // swap and read a just-detached node (every computed style reports as
+    // `''`). `toHaveCSS` re-resolves the locator on every retry, so it
+    // settles once the pane stops remounting instead of racing it.
+    await expect(body).toHaveCSS('overflow-y', /^(auto|scroll)$/)
     // A real px cap (not "none") proves the pane is bounded.
-    expect(maxH).not.toBe('none')
+    await expect(body).not.toHaveCSS('max-height', 'none')
+    const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
     expect(parseFloat(maxH)).toBeGreaterThan(0)
   })
 })

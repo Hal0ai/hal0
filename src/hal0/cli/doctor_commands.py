@@ -265,7 +265,14 @@ def doctor_logs(
     Thin client over ``GET /api/logs`` (and ``/api/logs/stream`` with
     ``--follow``), the same endpoints the dashboard's log panel uses.
     """
-    from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
+    from hal0.cli._shared import (
+        CliApiError,
+        _api_base,
+        _api_unreachable,
+        api_get,
+        die,
+        follow_sse_logs,
+    )
 
     url = _api_base()
     if _api_unreachable(url):
@@ -297,18 +304,7 @@ def doctor_logs(
         stream_params["level"] = level
     if since is not None:
         stream_params["since"] = since
-    try:
-        with httpx.stream("GET", url + "/api/logs/stream", params=stream_params, timeout=None) as r:
-            for raw in r.iter_lines():
-                if not raw or not raw.startswith("data:"):
-                    continue
-                payload = raw[5:].strip()
-                try:
-                    console.print(jsonlib.loads(payload))
-                except ValueError:
-                    console.print(payload)
-    except (httpx.HTTPError, KeyboardInterrupt):
-        return
+    follow_sse_logs("/api/logs/stream", console=console, params=stream_params)
 
 
 # ── hal0 doctor toolbox-pull ──────────────────────────────────────────────────
@@ -466,8 +462,6 @@ def toolbox_pull(
       1 — at least one image could not be reached.
       2 — manifest.json is empty or has no toolbox_images entries.
     """
-    import json as jsonlib
-
     manifest = load_manifest(manifest_path) if manifest_path else load_manifest()
     images = manifest.get("toolbox_images") or {}
     if not isinstance(images, dict) or not images:

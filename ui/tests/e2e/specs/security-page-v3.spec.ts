@@ -1,14 +1,17 @@
 /**
- * security-page-v3 — D4 Settings → Security (post-R3 surface rework).
+ * security-page-v3 — D4 Settings → Security (post-R3 surface rework; UI-API-2
+ * wired the route-exposure table live).
  *
  * Status-only key management. The page is driven by GET /api/auth/status
  * ({ auth_required, has_admin_key, tier }) and NEVER renders a key value —
- * this suite asserts that absence directly. Everything the endpoint can't back
- * (client-key status, rotation, throttle counts, the live per-route exposure
- * table) is disabled-with-reason, and the rotate flow's destructive confirm is
- * gated on the missing rotation route.
+ * this suite asserts that absence directly. Client-key status and login
+ * throttle counts stay disabled-with-reason (genuinely no backend route yet);
+ * the rotate flow's destructive confirm is gated on typing the phrase. The
+ * route-exposure table (GET /api/auth/exposure) is now live — a separate
+ * describe block below drives its loaded/empty/permission-denied states.
  *
- * /api/auth/status is NOT in the in-bundle mock allowlist, so page.route wins.
+ * /api/auth/status and /api/auth/exposure are NOT in the in-bundle mock
+ * allowlist, so page.route wins for both.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -19,6 +22,29 @@ function mockAuthStatus(
   return page.route('**/api/auth/status', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) }),
   )
+}
+
+function mockAuthExposure(
+  page: import('@playwright/test').Page,
+  body: unknown,
+  status = 200,
+) {
+  return page.route('**/api/auth/exposure', (route) =>
+    route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }),
+  )
+}
+
+const EXPOSURE_FIXTURE = {
+  classes: ['open', 'client', 'admin', 'bootstrap'],
+  rules: [
+    { label: 'auth status', auth_class: 'open', methods: ['GET'], pattern: '/api/auth/status', kind: 'exact' },
+    { label: 'inference', auth_class: 'client', methods: ['POST'], pattern: '/v1/chat/completions', kind: 'prefix' },
+    { label: 'settings', auth_class: 'admin', methods: null, pattern: '/api/settings', kind: 'prefix' },
+  ],
+  open_allowlist: [
+    { method: 'GET', path: '/api/health' },
+    { method: 'GET', path: '/v1/models' },
+  ],
 }
 
 async function openSecurity(page: import('@playwright/test').Page) {
@@ -61,15 +87,41 @@ test.describe('Settings → Security', () => {
     expect(body).not.toMatch(/[A-Za-z0-9_-]{24,}/)
   })
 
-  test('exposure table shows the class taxonomy + a live-table stub reason', async ({ page }) => {
+  test('exposure table shows the class taxonomy + the live per-route table', async ({ page }) => {
     await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'admin' })
+    await mockAuthExposure(page, EXPOSURE_FIXTURE)
     await openSecurity(page)
 
     await expect(page.getByTestId('exposure-table')).toBeVisible()
     for (const cls of ['open', 'client', 'admin', 'bootstrap']) {
       await expect(page.getByTestId(`exposure-class-${cls}`)).toBeVisible()
     }
-    await expect(page.getByTestId('exposure-live-stub')).toContainText(/API-lane/i)
+
+    // Live rows come from GET /api/auth/exposure — one per fixture rule.
+    await expect(page.getByTestId('exposure-rule-row')).toHaveCount(EXPOSURE_FIXTURE.rules.length)
+    await expect(page.getByTestId('exposure-live-rules')).toContainText('inference')
+    await expect(page.getByTestId('exposure-live-rules')).toContainText('/v1/chat/completions')
+    await expect(page.getByTestId('exposure-live-rules')).toContainText('ADMIN')
+
+    // The OPEN allowlist renders as its own list.
+    await expect(page.getByTestId('exposure-allowlist-row')).toHaveCount(EXPOSURE_FIXTURE.open_allowlist.length)
+    await expect(page.getByTestId('exposure-live-allowlist')).toContainText('/api/health')
+
+    // No leftover stub-reason markup.
+    await expect(page.getByTestId('exposure-live-stub')).toHaveCount(0)
+  })
+
+  test('exposure table shows a permission reason when GET /api/auth/exposure 403s', async ({ page }) => {
+    await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'client' })
+    await mockAuthExposure(
+      page,
+      { error: { code: 'auth.forbidden', message: 'admin session required' } },
+      403,
+    )
+    await openSecurity(page)
+
+    await expect(page.getByTestId('exposure-live-error')).toContainText(/admin session/i)
+    await expect(page.getByTestId('exposure-live-rules')).toHaveCount(0)
   })
 
   test('rotate flow gates on type-to-confirm', async ({ page }) => {

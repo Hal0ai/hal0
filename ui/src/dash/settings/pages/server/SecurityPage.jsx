@@ -7,14 +7,17 @@
 // So this page shows STATUS ONLY. It never renders a key VALUE. Key rotation is
 // real (POST /api/auth/rotate) and returns status-only fields — after a rotate
 // the admin-key row shows the returned fingerprint + rotated-at (never the
-// value). What /api/auth/status still can't back (client-key set/unset, live
-// login-throttle counts, the per-route exposure table) stays surfaced as
-// disabled-with-reason. Assumed ADMIN-gated: a browser HMAC session is
-// admin-equivalent (spec §22 / KB-1).
+// value). GET /api/auth/exposure landed (Phase 1 wave 2), so the route-exposure
+// table below is now LIVE (ExposureTable.jsx / useAuthExposure), not a stub.
+// What /api/auth/status still can't back (client-key set/unset, live
+// login-throttle counts) stays surfaced as disabled-with-reason — those are
+// genuinely still missing routes (API-lane requests below), not stale gates.
+// Assumed ADMIN-gated: a browser HMAC session is admin-equivalent (spec §22 /
+// KB-1).
 //
 // Files: this page + RotateKeyDialog.jsx (type-to-confirm → POST /api/auth/
 // rotate; shows fingerprint/rotated_at, never the value) + ExposureTable.jsx
-// (static class taxonomy + stub-with-reason for the live table).
+// (static class taxonomy + live per-route table from GET /api/auth/exposure).
 
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSetRequireAuth, useLogout } from '@/api/hooks/useAuthActions'
@@ -249,7 +252,7 @@ export function SecurityPage() {
         </div>
       </div>
 
-      {/* ── route exposure (static taxonomy + stub-with-reason) ─────── */}
+      {/* ── route exposure (static taxonomy + live per-route table) ─── */}
       <ExposureTable />
 
       <RotateKeyDialog

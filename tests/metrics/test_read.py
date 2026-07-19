@@ -104,6 +104,89 @@ class TestStatsSummary:
         assert "qwen3-4b x rocm x hw:hw123" in out["bench_baseline"]
 
 
+class TestRequestsRollup:
+    """GET /api/stats/requests payload -- see hal0.metrics.read.requests_rollup."""
+
+    def test_unmigrated_db_returns_zeroed_shape(self, tmp_path: Path) -> None:
+        out = metrics_read.requests_rollup(tmp_path / "fresh.db")
+        assert out == {
+            "window_s": 60,
+            "req_per_min": 0.0,
+            "p50_ms": None,
+            "p95_ms": None,
+            "endpoints": [],
+            "errors": 0,
+            "dedupe": False,
+        }
+
+    def test_migrated_but_empty_db_returns_zeroed_shape(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        with connect(db) as conn:
+            migrate(conn)
+        out = metrics_read.requests_rollup(db)
+        assert out["req_per_min"] == 0.0
+        assert out["p50_ms"] is None
+        assert out["endpoints"] == []
+        assert out["errors"] == 0
+
+    def test_only_in_window_rows_counted(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        now = datetime.now(UTC)
+        with connect(db) as conn:
+            migrate(conn)
+            recent = (now - timedelta(seconds=10)).isoformat()
+            stale = (now - timedelta(minutes=5)).isoformat()
+            conn.execute(
+                "INSERT INTO request_metric (ts, request_id, model_id, ok, total_ms) "
+                "VALUES (?, 'r1', 'qwen3-4b', 1, 120.0)",
+                (recent,),
+            )
+            conn.execute(
+                "INSERT INTO request_metric (ts, request_id, model_id, ok, total_ms) "
+                "VALUES (?, 'r2', 'qwen3-4b', 1, 999.0)",
+                (stale,),
+            )
+        out = metrics_read.requests_rollup(db, window_s=60)
+        assert out["endpoints"] == [{"path": "qwen3-4b", "count": 1}]
+        assert out["p50_ms"] == 120.0
+        assert out["req_per_min"] == 1.0  # 1 request / (60s / 60) minutes
+
+    def test_endpoints_grouped_by_model_id_and_errors_counted(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        now = datetime.now(UTC)
+        recent = (now - timedelta(seconds=5)).isoformat()
+        with connect(db) as conn:
+            migrate(conn)
+            conn.execute(
+                "INSERT INTO request_metric (ts, request_id, model_id, ok, total_ms) "
+                "VALUES (?, 'r1', 'model-a', 1, 100.0)",
+                (recent,),
+            )
+            conn.execute(
+                "INSERT INTO request_metric (ts, request_id, model_id, ok, total_ms) "
+                "VALUES (?, 'r2', 'model-a', 0, 200.0)",
+                (recent,),
+            )
+            conn.execute(
+                "INSERT INTO request_metric (ts, request_id, model_id, ok, total_ms) "
+                "VALUES (?, 'r3', 'model-b', 1, 300.0)",
+                (recent,),
+            )
+            conn.execute(
+                # No model_id -- must fall back to "unknown", never crash.
+                "INSERT INTO request_metric (ts, request_id, model_id, ok, total_ms) "
+                "VALUES (?, 'r4', NULL, 1, 400.0)",
+                (recent,),
+            )
+        out = metrics_read.requests_rollup(db, window_s=60)
+        assert out["errors"] == 1
+        by_path = {e["path"]: e["count"] for e in out["endpoints"]}
+        assert by_path == {"model-a": 2, "model-b": 1, "unknown": 1}
+        # Sorted by count descending -- model-a (2) must come first.
+        assert out["endpoints"][0]["path"] == "model-a"
+        assert out["p95_ms"] == 400.0
+
+
 @dataclass
 class _FakeSlot:
     name: str

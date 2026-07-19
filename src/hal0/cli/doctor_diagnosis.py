@@ -1,18 +1,18 @@
 """``hal0 doctor``'s CLI-side ``Diagnosis`` re-export + adapters (§21.4).
 
 The dataclasses themselves live in :mod:`hal0.diagnostics` (layering-pure,
-no ``hal0.cli`` import — see that module's docstring). This module is the
-doctor-family's single import point for them, plus the two small CLI-only
-helpers every ``--json`` renderer shares: :func:`to_diagnosis` (adapts the
-older :class:`hal0.cli.doctor_verify.Check` row into a ``Diagnosis``) and
-:func:`render_json` (the stable JSON emission every subcommand's ``--json``
-flag prints).
+no ``hal0.cli`` import — see that module's docstring). ``to_diagnosis``
+lives in :mod:`hal0.health_report` (also layering-pure — shared with
+``GET /api/doctor``, which can't import ``hal0.cli``) and is re-exported
+here unchanged for existing call sites. This module is the doctor-family's
+single import point for them, plus the CLI-only helper every ``--json``
+renderer shares: :func:`render_json` (the stable JSON emission every
+subcommand's ``--json`` flag prints).
 """
 
 from __future__ import annotations
 
 import json as jsonlib
-from typing import TYPE_CHECKING
 
 from hal0.diagnostics import (
     DIAGNOSIS_IDS,
@@ -23,51 +23,7 @@ from hal0.diagnostics import (
     Severity,
     overall_verdict,
 )
-
-if TYPE_CHECKING:
-    from hal0.cli.doctor_verify import Check
-
-# id_map is the spec's §1.3 contract: one Check.key -> one stable Diagnosis id.
-_CHECK_ID_MAP: dict[str, str] = {
-    "api": "HAL0-API-UNREACHABLE",
-    "dns": "HAL0-DNS-LOCAL-UNRESOLVED",
-    "runners": "HAL0-RUNNERS-NONE-HEALTHY",
-    "capabilities": "HAL0-CAPABILITIES-NONE",
-    "memory": "HAL0-MEMORY-ENGINE-UNREACHABLE",
-    "openwebui": "HAL0-OPENWEBUI-DOWN",
-    "hermes": "HAL0-HERMES-DOWN",
-}
-
-
-def to_diagnosis(c: Check) -> Diagnosis:
-    """Map one ``doctor_verify.Check`` row to a ``Diagnosis`` row.
-
-    ``status`` -> ``severity``: a critical-flagged ``fail`` becomes
-    ``critical`` (the two anchor conditions — API unreachable, zero healthy
-    runners); every other ``fail``/``warn``/``pass`` maps to
-    ``fail``/``warn``/``info`` respectively. ``confidence`` is always
-    ``"high"`` — every ``Check`` is sourced from an unconditional live-API
-    probe, not a heuristic.
-    """
-    from hal0.cli.doctor_verify import _FAIL, _WARN
-
-    if c.status == _FAIL and c.critical:
-        severity: Severity = "critical"
-    elif c.status == _FAIL:
-        severity = "fail"
-    elif c.status == _WARN:
-        severity = "warn"
-    else:
-        severity = "info"
-    return Diagnosis(
-        id=_CHECK_ID_MAP[c.key],
-        severity=severity,
-        confidence="high",
-        summary=c.label,
-        detail=c.detail,
-        evidence=[Evidence(kind="endpoint", summary=c.detail)],
-        next_steps=[],
-    )
+from hal0.health_report import to_diagnosis
 
 
 def render_json(diagnoses: list[Diagnosis]) -> str:

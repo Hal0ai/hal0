@@ -3,11 +3,16 @@
 journalctl is rarely available in CI, so the route must degrade
 gracefully — returning ``{"lines": [], "hint": "..."}`` instead of
 raising. These tests cover that path plus the validation envelope.
+
+The redaction tests (api-logs-redact) mock ``asyncio.create_subprocess_exec``
+directly so they exercise the real redaction wiring without depending on
+a real journalctl binary or actual secrets on the test host.
 """
 
 from __future__ import annotations
 
 import shutil
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -117,3 +122,89 @@ def test_logs_stream_invalid_unit_rejects(client: TestClient) -> None:
     r = client.get("/api/logs/stream", params={"unit": "bad name with space"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "system.logs_error"
+
+
+# ── Secret redaction (api-logs-redact) ───────────────────────────────────────
+#
+# routes/logs.py streamed raw journalctl output with zero redaction — a
+# leak path independent of the MCP client_id fix (SEC-mcp-clientid). Both
+# endpoints must now scrub Bearer / client_id= / *_KEY= secrets before a
+# journal line reaches a client. journalctl itself is mocked out via
+# asyncio.create_subprocess_exec so these tests run without systemd.
+
+_SECRET_LINES = [
+    "[00:00] hal0.api.startup version=0.2.0a2",
+    "[00:01] outbound Authorization: Bearer sk-or-LEAK-1 to provider",
+    "[00:02] env dump: HAL0_ADMIN_KEY=abcdef1234567890",
+    "[00:03] mcp.tool.invoked client_id=abcdefghijklmnopqrstuvwxyz0123456789 tool=slot_list",
+]
+
+_LEAKED_SECRETS = (
+    "sk-or-LEAK-1",
+    "abcdef1234567890",
+    "abcdefghijklmnopqrstuvwxyz0123456789",
+)
+
+
+def _make_oneshot_proc(stdout: bytes) -> MagicMock:
+    """Fake asyncio.Process for the one-shot `journalctl -n N` call."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(stdout, b""))
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock()
+    return proc
+
+
+def _make_streaming_proc(lines: list[bytes]) -> MagicMock:
+    """Fake asyncio.Process for the follow (`journalctl -f`) call.
+
+    ``proc.stdout`` is an async generator so ``async for raw in proc.stdout``
+    in journalctl_sse() iterates it exactly like a real StreamReader, then
+    exits the loop naturally (no infinite follow, no CancelledError needed).
+    """
+
+    async def _stdout_iter():
+        for line in lines:
+            yield line
+
+    proc = MagicMock()
+    proc.stdout = _stdout_iter()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock()
+    return proc
+
+
+def test_logs_list_redacts_secret_bearing_lines(client: TestClient) -> None:
+    """GET /api/logs never echoes a Bearer / client_id= / *_KEY= secret."""
+    stdout = ("\n".join(_SECRET_LINES) + "\n").encode()
+    proc = _make_oneshot_proc(stdout)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    text = str(body)
+    for secret in _LEAKED_SECRETS:
+        assert secret not in text, f"leaked secret {secret!r} in {text!r}"
+    assert "***REDACTED***" in text
+    # Non-secret content survives untouched.
+    assert any("hal0.api.startup" in line for line in body["lines"])
+
+
+def test_logs_stream_redacts_secret_bearing_lines(client: TestClient) -> None:
+    """GET /api/logs/stream never emits a Bearer / client_id= / *_KEY= secret
+    in any SSE frame."""
+    proc = _make_streaming_proc([f"{line}\n".encode() for line in _SECRET_LINES])
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs/stream", params={"unit": "hal0-api"})
+    assert r.status_code == 200
+    body = r.text
+    for secret in _LEAKED_SECRETS:
+        assert secret not in body, f"leaked secret {secret!r} in stream body"
+    assert "***REDACTED***" in body
+    assert "hal0.api.startup" in body

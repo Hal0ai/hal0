@@ -45,13 +45,9 @@ import datetime
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from hal0.config import paths as _paths
-
-if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Iterable
-
 
 # ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -723,9 +719,3 @@ def installer_script_path(name: str) -> Path:
     if editable_candidate.is_file():
         return editable_candidate
     return fhs_candidate
-
-
-def _all_known_drivers() -> Iterable[str]:
-    """Test hook — lets the test suite iterate driver names without
-    importing the modules (some CI environments lack pi-mono on PATH)."""
-    return BUNDLED_AGENTS

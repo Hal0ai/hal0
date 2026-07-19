@@ -69,6 +69,12 @@ def _exact(path: str) -> Matcher:
     def _match(candidate: str) -> bool:
         return candidate == path
 
+    # Introspectable pattern metadata -- lets GET /api/auth/exposure
+    # (routes/auth.py) serialize RULES without duplicating the literal
+    # path strings a second time. Read-only attributes on the closure;
+    # never consulted by match()/applies() itself.
+    _match.pattern = path  # type: ignore[attr-defined]
+    _match.kind = "exact"  # type: ignore[attr-defined]
     return _match
 
 
@@ -83,6 +89,8 @@ def _prefix(prefix: str) -> Matcher:
     def _match(candidate: str) -> bool:
         return candidate == prefix or candidate.startswith(prefix + "/")
 
+    _match.pattern = prefix  # type: ignore[attr-defined]
+    _match.kind = "prefix"  # type: ignore[attr-defined]
     return _match
 
 
@@ -100,6 +108,10 @@ def _outside_api_v1_mcp(candidate: str) -> bool:
     return not (
         candidate.startswith("/api") or candidate.startswith("/v1") or candidate.startswith("/mcp")
     )
+
+
+_outside_api_v1_mcp.pattern = None  # type: ignore[attr-defined]
+_outside_api_v1_mcp.kind = "catchall"  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True)
@@ -145,6 +157,12 @@ RULES: tuple[_Rule, ...] = (
     # toggle (rides through while auth is OFF; admin-only once it's ON). Rate-
     # limited like login (routes/auth.py reuses app.state.login_limiter).
     _Rule("auth key rotate", _exact("/api/auth/rotate"), AuthClass.ADMIN, _POST),
+    # Serializes RULES + OPEN_ALLOWLIST (the whole deny-by-default table) for
+    # the Settings ▸ Security page's live exposure table (ExposureTable.jsx
+    # stub-with-reason). ADMIN: the rule table is itself a map of the API's
+    # full auth posture — same "surface map is sensitive-ish" reasoning this
+    # module already applies to /api/docs and /api/openapi.json below.
+    _Rule("auth exposure table (GET)", _exact("/api/auth/exposure"), AuthClass.ADMIN, _GET),
     # ── BOOTSTRAP: installer, open only until an admin key exists ──────
     _Rule("installer", _prefix("/api/install"), AuthClass.BOOTSTRAP, None),
     # ── explicit ADMIN for FastAPI's own docs/meta routes ──────────────
@@ -212,6 +230,12 @@ RULES: tuple[_Rule, ...] = (
     _Rule("metrics json (GET)", _exact("/api/metrics"), AuthClass.CLIENT, _GET),
     _Rule("features (GET)", _exact("/api/features"), AuthClass.CLIENT, _GET),
     _Rule("features (mutations)", _prefix("/api/features"), AuthClass.ADMIN, None),
+    # Doctor verdict feed (D6 diagnostics panel) — a GET, but classified
+    # ADMIN rather than CLIENT: it aggregates + re-surfaces details from
+    # ADMIN-only subsystems (capability slots, memory engine, services
+    # health), same "when unsure, more restrictive" default this module's
+    # docstring names. Mirrors `hal0 doctor verify --json` (operator-only).
+    _Rule("doctor verdict feed (GET)", _exact("/api/doctor"), AuthClass.ADMIN, _GET),
     # ── ADMIN: everything mutating / config / secret ────────────────────
     _Rule("comfyui", _prefix("/api/comfyui"), AuthClass.ADMIN, None),
     _Rule("services", _prefix("/api/services"), AuthClass.ADMIN, None),

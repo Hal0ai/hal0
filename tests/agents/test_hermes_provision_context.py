@@ -6,10 +6,13 @@ Replaces the retired PhaseIO / PhaseContext / Phase-graph contract. Pins:
   and it is frozen.
 * ``_StepCtx.output_of(name)`` returns an earlier step's details, empty when the
   step hasn't run — no needs-graph enforcement.
-* the ``_INSTALL_STEPS`` order (persona_seed + mcp_wire before config_write;
-  self_report after smoke_tests) and the ``report.converged`` signal.
-* the brain-lane steps still run but never count as install mutations, and each
-  carries a ``# RELOCATE(brain-lane):`` marker in the source.
+* the ``_INSTALL_STEPS`` order (mcp_wire before config_write) and the
+  ``report.converged`` signal.
+* RELOCATE(brain-lane) landed: persona_seed, namespace_register,
+  brain_profile_seed, brain_profile_mcp_wire, self_report no longer appear
+  in ``_INSTALL_STEPS`` at all — they run from the hal0-api boot lifespan
+  instead (src/hal0/api/__init__.py). The step functions stay importable
+  and directly callable for unit coverage + lifespan reuse.
 """
 
 from __future__ import annotations
@@ -64,9 +67,7 @@ def test_output_of_empty_when_step_has_not_run() -> None:
 
 def test_install_steps_ordering() -> None:
     names = [name for name, _fn in hp._INSTALL_STEPS]
-    assert names.index("persona_seed") < names.index("config_write")
     assert names.index("mcp_wire") < names.index("config_write")
-    assert names.index("smoke_tests") < names.index("self_report")
     # model_automap is gone; ownership_reconcile is gone.
     assert "model_automap" not in names
     assert "ownership_reconcile" not in names
@@ -87,26 +88,58 @@ def test_retired_machinery_is_gone() -> None:
         assert not hasattr(hp, attr), f"{attr} should be deleted"
 
 
-def test_brain_lane_steps_carry_relocate_markers() -> None:
-    """Each brain-lane step is annotated for the concurrent relocation lane."""
-    src = inspect.getsource(hp)
-    # The pipeline table marks each brain-lane entry.
-    assert src.count("# RELOCATE(brain-lane):") >= len(hp._BRAIN_LANE_STEPS)
-    assert {
+_RELOCATED_BRAIN_LANE_STEPS = frozenset(
+    {
         "persona_seed",
         "namespace_register",
         "brain_profile_seed",
         "brain_profile_mcp_wire",
         "self_report",
-    } == hp._BRAIN_LANE_STEPS
+    }
+)
 
 
-def test_brain_lane_steps_never_count_as_mutations() -> None:
-    """A brain-lane step is excluded from the convergence signal even if it wrote."""
+def test_brain_lane_steps_relocated_out_of_install() -> None:
+    """RELOCATE(brain-lane) landed: the 5 brain-lane steps no longer run as
+    part of the linear install pipeline — they moved into the hal0-api boot
+    lifespan (``_boot_seeds`` for persona_seed/brain_profile_mcp_wire, the
+    terminal ``_boot_brain_lane`` phase for namespace_register/
+    brain_profile_seed/self_report; see src/hal0/api/__init__.py).
+
+    The step FUNCTIONS themselves stay put and importable — the lifespan
+    phases call them directly (no copy-pasted body) via the same
+    InstallIO/_StepCtx seam this test module's other tests already use to
+    call them in isolation. Only their ``_INSTALL_STEPS`` membership moved.
+    """
+    names = {name for name, _fn in hp._INSTALL_STEPS}
+    assert _RELOCATED_BRAIN_LANE_STEPS.isdisjoint(names), (
+        f"still in _INSTALL_STEPS after relocation: {_RELOCATED_BRAIN_LANE_STEPS & names}"
+    )
+    assert callable(hp._phase_persona_seed)
+    assert callable(hp._phase_namespace_register)
+    assert callable(hp._phase_brain_profile_seed)
+    assert callable(hp._phase_brain_profile_mcp_wire)
+    assert callable(hp._phase_self_report)
+    # The _INSTALL_STEPS table + the InstallIO docstring above it record the
+    # relocation explicitly (RELOCATE(brain-lane) — LANDED), so a future
+    # reader can't miss it.
+    src = inspect.getsource(hp)
+    assert src.count("RELOCATE(brain-lane)") >= len(_RELOCATED_BRAIN_LANE_STEPS)
+    # _BRAIN_LANE_STEPS (the convergence-exemption set) is retired along with
+    # the markers — nothing in _INSTALL_STEPS needs the exemption anymore.
+    assert not hasattr(hp, "_BRAIN_LANE_STEPS")
+
+
+def test_relocated_steps_no_longer_special_cased_in_step_changed() -> None:
+    """_step_changed has no brain-lane exemption branch left to test — a
+    result carrying details["changed"]=True for one of the relocated names
+    now just follows the normal path (there's no caller left that would
+    ever pass one of these names in, since they're gone from
+    _INSTALL_STEPS, but the function itself should not silently resurrect
+    a special case for them)."""
     result = hp.PhaseResult(status=hp.PhaseStatus.OK, details={"changed": True})
-    for name in hp._BRAIN_LANE_STEPS:
-        assert hp._step_changed(name, result) is False
-    # A host-mutating step honours its details["changed"].
+    for name in _RELOCATED_BRAIN_LANE_STEPS:
+        assert hp._step_changed(name, result) is True
     assert hp._step_changed("config_write", result) is True
 
 

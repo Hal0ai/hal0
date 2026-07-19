@@ -59,7 +59,12 @@ import httpx
 
 from hal0.config import store as model_store_module
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_mount_roots, model_store_root
-from hal0.config.schema import family_flags, resolve_chat_template, resolve_profile_flags
+from hal0.config.schema import (
+    build_mtp_flag_bundle,
+    family_flags,
+    resolve_chat_template,
+    resolve_profile_flags,
+)
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
@@ -264,6 +269,11 @@ def _resolve_image_ref(
     the ``image`` key — treating that dict as a ref renders ``str(dict)``
     into ExecStart and podman fails with 'invalid reference format'.
     """
+    # HAL0-SUNSET: v1.0.0 — images belong to RUNNERS (spec-flags-ownership §7).
+    # The slot ``image`` string override (tiers 1-2 below) is an expiring shim:
+    # neither slots nor profiles should carry raw image strings once the
+    # Runtimes-panel flow lands. Honored for now so live slot TOMLs pinning an
+    # image keep launching; the sunset ratchet drops the override read.
     if slot_cfg is not None:
         # Walk both possible nestings; first non-empty string wins.
         candidates: list[Any] = []
@@ -649,6 +659,15 @@ def _render_quadlet_from_plan(
         "",
         "[Unit]",
         f"Description=hal0 container inference slot ({instance_token})",
+        # StartLimit*= are [Unit]-section directives (systemd.unit(5)), not
+        # [Service]. Quadlet passes [Unit] through verbatim to the generated
+        # unit, so they belong here — emitting them under [Service] makes
+        # systemd log "Unknown key" and SILENTLY DROP them, disabling the
+        # slot's restart rate-limiting (install-validation m2, halo150,
+        # 2026-07-19). Restart=/RestartSec= stay in [Service] below — those
+        # ARE Service-section keys.
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
         "",
         "[Container]",
         f"Image={plan.image}",
@@ -747,15 +766,14 @@ def _render_quadlet_from_plan(
 
     # Restart=always lets systemd own crash recovery (the old hand-rendered
     # Restart=no forced the manager to reap+restart every failed slot). The
-    # StartLimit caps match the manager-driven behaviour it replaces.
+    # StartLimit caps (emitted in [Unit] above — systemd.unit(5), not
+    # [Service]) match the manager-driven behaviour it replaces.
     lines.extend(
         [
             "",
             "[Service]",
             "Restart=always",
             "RestartSec=3",
-            "StartLimitIntervalSec=300",
-            "StartLimitBurst=5",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",
@@ -789,17 +807,36 @@ def _llama_argv_segments(
     provenance) consume THESE segments, so what an operator previews via
     ``GET /api/slots`` / ``.../resolved`` is exactly what launches.
 
+    FLAGS-own (spec-flags-ownership §2/§4): launch flags attach ONLY to models.
+    The ``profile`` segment and the slot ``slot_overrides`` / ``extra_args``
+    segments have been REMOVED from this chain — a profile is now a
+    copy-on-stamp template (read at stamp time, never at launch) and a slot
+    carries no flag surface. The model's materialized tune is the whole story:
+    the trusted schema field ``defaults.n_gpu_layers`` (``model_defaults``
+    segment) plus the free-form ``defaults.extra_args`` (``model_extra_args``
+    segment, still screened against the §21.7 managed-arg denylist by
+    :func:`~hal0.slots.argv.resolve_argv`).
+
     Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
     LAST occurrence of each canonical flag)::
 
-        base < profile < model_defaults < chat_template < mmproj
-             < slot_overrides < extra_args
+        base < model_extra_args < model_defaults < chat_template < mmproj
 
-    Rationale: profile flags are generic bench-tuning; per-model registry
-    ``defaults`` should override the profile; the chat-template / mmproj the
-    slot+model resolve to come next; a slot-level ``[model].n_gpu_layers`` beats
-    the model default; and a hand-authored ``[server].extra_args`` always wins.
+    Golden path #5: with the ``profile`` segment gone, launch never resolves a
+    profile's flags — the stamped model tune is the sole source.
+
+    ``profile_flags`` / ``slot_n_gpu_layers`` / ``slot_parallel`` / ``extra_args``
+    are accepted-and-ignored (kept for call-site compat until the sunset ratchet
+    drops the plumbing). The migrator
+    (:mod:`hal0.config.migrations.slot_flags_fold`) folds each slot's effective
+    tune into its model's ``defaults`` during the deploy window; until then a
+    stale slot flag simply does not reach launch.
     """
+    # HAL0-SUNSET: v1.0.0 — slots lost the flag surface (spec-flags-ownership
+    # §2/§4). These params are inert; drop them (and the callers threading them)
+    # once the migrator has folded every live slot's tune into its model.
+    del profile_flags, slot_n_gpu_layers, slot_parallel, extra_args
+
     base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
     if model_path:
         base += ["--model", model_path]
@@ -811,8 +848,6 @@ def _llama_argv_segments(
     # a slot silently inherit llama-server's 4096 default).
     if context_size is not None:
         base += ["--ctx-size", str(context_size)]
-
-    profile_tokens = shlex.split(profile_flags) if profile_flags and profile_flags.strip() else []
 
     # Model-registry defaults: shlex-split extra_args + `-ngl <n>` from
     # defaults.n_gpu_layers. rope_freq_base is intentionally NOT emitted
@@ -838,33 +873,12 @@ def _llama_argv_segments(
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
 
-    # Slot-level overrides (schema fields), emitted just before extra_args so
-    # they beat the profile / model defaults but a hand-authored extra_args
-    # still wins. [model].n_gpu_layers (schema default -1 = unset) and the
-    # continuous-batching `parallel` field.
-    slot_override_tokens: list[str] = []
-    if slot_n_gpu_layers is not None and int(slot_n_gpu_layers) >= 0:
-        slot_override_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
-    if slot_parallel is not None and int(slot_parallel) >= 1:
-        slot_override_tokens += ["--parallel", str(int(slot_parallel))]
-        if int(slot_parallel) > 1:
-            # Unified KV so --ctx-size stays a SHARED pool (each request may use
-            # up to the full context) instead of being silently split to ctx/N
-            # per sequence slot — the surprise the resolved-command work exists
-            # to prevent. See the concurrency-batching plan (D2).
-            slot_override_tokens += ["--kv-unified"]
-
-    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
-
     return [
         ("base", base),
-        ("profile", profile_tokens),
         ("model_extra_args", md_extra_tokens),
         ("model_defaults", md_ngl_tokens),
         ("chat_template", chat_tokens),
         ("mmproj", mmproj_tokens),
-        ("slot_overrides", slot_override_tokens),
-        ("extra_args", extra_tokens),
     ]
 
 
@@ -1067,33 +1081,24 @@ def _resolve_llama_scalars(
     VALUES are identical on both paths, preserving launch/preview parity.
     """
     # SINGLE SOURCE for "which runner's capabilities gate this launch" — the
-    # same runner backs the image resolution inside _profile_image_and_flags
-    # (via _resolve_image_ref) and the mtp/jinja capability gates below, so
-    # they can never drift onto two different runners (§7.1a / ML-5).
+    # same runner backs the image resolution (:func:`_resolve_image_ref`) and
+    # the mtp/jinja capability gates below, so they can never drift onto two
+    # different runners (§7.1a / ML-5).
     runner = _effective_runner(slot_cfg, profile, model_info)
     effective_mtp = _effective_mtp(
         slot_cfg.get("mtp"), model_info, runner, log_ineligible=for_launch
     )
-    image, flags_str = _profile_image_and_flags(
-        profile, effective_mtp, slot_cfg=slot_cfg, model_info=model_info
-    )
+    # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
+    # resolving the profile's flags — the profile flag resolver
+    # (:func:`resolve_profile_flags`) is NOT consulted at launch. The model's
+    # materialized ``defaults`` is the whole tune; a profile is a copy-on-stamp
+    # template read only in the drawer, never on the launch/preview path.
+    image = _resolve_image_ref(slot_cfg, profile, model_info=model_info)
+    # ``flags_str`` retained (empty) for dict-shape/caller compat; profile flags
+    # no longer enter the argv chain (see _llama_argv_segments).
+    flags_str = ""
 
-    slot_parallel = _effective_parallel(slot_cfg)
     if for_launch:
-        if effective_mtp and slot_parallel is not None and slot_parallel > 1:
-            # MTP x continuous batching runs on current llama.cpp master
-            # (parallel drafting merged 2026-05) but is perf-unproven on
-            # gfx1151 and needs a build new enough to allow n_parallel>1 with
-            # draft-mtp. Surface it; don't refuse (the plan's D3, bench-gated).
-            log.info(
-                "mtp.batched_speculation",
-                extra={
-                    "slot": str(slot_cfg.get("name") or ""),
-                    "parallel": slot_parallel,
-                    "hint": "batched slot — MTP speculation gain unverified here; "
-                    "requires a build that allows draft-mtp with --parallel>1",
-                },
-            )
         workers = slot_cfg.get("workers")
         if workers is not None and int(workers or 1) != 1:
             log.warning(
@@ -1167,13 +1172,14 @@ def _resolve_llama_scalars(
     # profile segment, still loses to a hand-authored [model].defaults
     # extra_args or [server].extra_args later in the precedence chain).
     #
-    # Never injected for an --embedding/--reranking profile: jinja chat-
+    # Never injected for an --embedding/--reranking model: jinja chat-
     # template rendering is meaningless there (llama-server's --jinja is a
-    # chat-completions feature) — every embed/rerank seed profile
-    # deliberately omitted --jinja even before this lane, so this mirrors
-    # that intentional exclusion instead of regressing it.
-    profile_tokens_for_mode = set(shlex.split(flags_str)) if flags_str.strip() else set()
-    is_embed_or_rerank_mode = bool(profile_tokens_for_mode & {"--embedding", "--reranking"})
+    # chat-completions feature). FLAGS-own: the mode marker now rides the
+    # model's materialized tune (``defaults.extra_args``, family-merged above),
+    # NOT a live profile flag string — so read it from there.
+    mode_tune = (model_defaults or {}).get("extra_args") or ""
+    mode_tokens = set(shlex.split(mode_tune)) if mode_tune.strip() else set()
+    is_embed_or_rerank_mode = bool(mode_tokens & {"--embedding", "--reranking"})
     model_jinja = defaults.get("jinja") if isinstance(defaults, dict) else None
     effective_jinja = (
         bool(getattr(runner.supports, "jinja", False))
@@ -1185,6 +1191,22 @@ def _resolve_llama_scalars(
             model_defaults = {}
         existing = model_defaults.get("extra_args") or ""
         model_defaults["extra_args"] = f"{existing} --jinja".strip()
+
+    # MTP draft-speculation bundle (§7.1a / ML-5, FLAGS-own): MTP is a MODEL
+    # capability (``defaults.mtp`` / the registry ``mtp`` tag) gated by the
+    # launching runner — the profile no longer carries it. Previously the
+    # ``--spec-draft-*`` bundle was appended inside ``resolve_profile_flags``
+    # (the now-severed profile-flag path); inject it here instead, computed
+    # from the model-resolved ``effective_mtp`` + the backend's draft device.
+    # PREPENDED so a model's own ``defaults.extra_args`` spec-draft overrides
+    # still win (last-wins). Draft device tracks the profile backend (device
+    # axis, unchanged). Never for an embed/rerank mode (no chat drafting).
+    if effective_mtp and not is_embed_or_rerank_mode:
+        bundle = build_mtp_flag_bundle(getattr(profile, "backend", None))
+        if model_defaults is None:
+            model_defaults = {}
+        existing = model_defaults.get("extra_args") or ""
+        model_defaults["extra_args"] = f"{bundle} {existing}".strip()
 
     slot_n_gpu_layers = model_table.get("n_gpu_layers")
 
@@ -1208,8 +1230,11 @@ def _resolve_llama_scalars(
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
+        # FLAGS-own: slot flag surface is inert — these keys are retained for
+        # dict-shape/caller compat but no longer reach the argv chain (the
+        # migrator folds a slot's effective tune into its model's defaults).
         "slot_n_gpu_layers": slot_n_gpu_layers,
-        "slot_parallel": slot_parallel,
+        "slot_parallel": None,
         "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
         # GPU vendor discriminator: the profile's declared backend (rocm /
         # vulkan / cuda / None) — configuration, not host probing.

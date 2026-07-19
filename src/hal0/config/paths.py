@@ -397,6 +397,7 @@ def first_run_lock() -> Path:
     return var_lib() / ".first-run.lock"
 
 
+# HAL0-SUNSET: v1.0.0 — picker deferred; marker unwired.
 def bundle_chosen_marker() -> Path:
     """Return the bundle-picker completion marker path.
 

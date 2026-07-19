@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import time
@@ -25,15 +24,7 @@ from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
-from hal0.registry.pull import (
-    PullInvalidSource,
-    PullJob,
-    PullJobNotFound,
-    list_persisted_jobs,
-    make_job,
-)
-from hal0.registry.pull import persist_pull_job as _persist_pull_job
-from hal0.registry.pull import pull_job_file as _pull_job_file
+from hal0.registry.pull import PullInvalidSource
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
@@ -47,12 +38,13 @@ log = logging.getLogger(__name__)
 
 # ── durable pull-job store (#626 / #MR-1) ─────────────────────────────────────
 #
-# The snapshot writer lives in registry.pull (imported above as
-# ``_persist_pull_job``/``_pull_job_file``) so ``run_pull`` persists terminal
-# state for EVERY caller — the dashboard route AND the installer/bundle-tier
-# pulls that call run_pull directly. The disk-fallback READ path
-# (``load_persisted``/``reconcile_persisted``) now lives in
-# ``hal0.registry.pull_jobs`` and is re-bound below.
+# The snapshot writer lives in registry.pull (``persist_pull_job``/
+# ``pull_job_file``) so ``run_pull`` persists terminal state for EVERY caller —
+# the dashboard route AND the installer/bundle-tier pulls that call run_pull
+# directly. The full pull-job orchestration (start/track/update/cancel flows,
+# the disk-fallback READ path ``load_persisted``/``reconcile_persisted``) now
+# lives in ``hal0.registry.pull_jobs``; the route handlers below are thin shells
+# over it and the underscore names are re-bound below.
 
 
 # ── service-layer bindings (P3-routers §J) ───────────────────────────────────
@@ -356,41 +348,12 @@ async def list_pulls(request: Request) -> list[dict[str, Any]]:
     """Return all pull jobs (active in-memory + persisted terminal from disk).
 
     Dedup: in-memory jobs win over persisted snapshots for the same model_id.
+    Aggregation + enrichment + sort live in :func:`hal0.registry.pull_jobs.list_all`.
     """
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-    registry = request.app.state.model_registry
-
-    # Start with persisted TERMINAL jobs from disk.
-    # Non-terminal snapshots (e.g. "running" from a crash) are skipped
-    # — there is no matching in-memory job to reconcile them.
-    persisted = list_persisted_jobs()
-    by_model: dict[str, dict[str, Any]] = {}
-    for p in persisted:
-        state = p.get("state")
-        if state not in ("completed", "failed", "cancelled"):
-            continue
-        mid = p.get("model_id")
-        if isinstance(mid, str) and mid:
-            by_model[mid] = p
-
-    # Overlay in-memory jobs (they win — reflect live state)
-    for mid, job in jobs.items():
-        by_model[mid] = job.as_dict()
-
-    # Build response entries enriched with registry data
-    result: list[dict[str, Any]] = []
-    for mid, data in by_model.items():
-        entry = _pull_entry(data, mid, registry)
-        result.append(entry)
-
-    # Sort: active first, then by started_at descending
-    result.sort(
-        key=lambda e: (
-            0 if e.get("state") in ("queued", "running") else 1,
-            -(e.get("started_at") or 0),
-        )
+    return _pull_jobs.list_all(
+        request.app.state.model_pull_jobs,
+        request.app.state.model_registry,
     )
-    return result
 
 
 # ── HF update check (models with newer bytes on the Hub) ─────────────────────
@@ -492,53 +455,17 @@ async def update_model_from_hf(
             details={"model_id": model_id, "path": dest},
         )
 
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-    in_flight = jobs.get(model_id)
-    if in_flight is not None and in_flight.state in ("queued", "running"):
-        return {
-            "id": in_flight.job_id,
-            "model_id": model_id,
-            "state": in_flight.state,
-            "resumed": True,
-        }
-
-    job = make_job(model_id)
-    jobs[model_id] = job
-    _persist_pull_job(job)
-
-    event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "pull.queued",
-            "info",
-            f"pull:{model_id}",
-            f"{model_id}: update queued ({hf_repo}/{hf_file})",
-            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file, "update": True},
-        )
-
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    _schedule_pull_task(
-        request.app.state,
-        model_id,
-        _run_pull_with_events(
-            job,
-            hf_repo=hf_repo,
-            hf_file=hf_file,
-            registry=registry,
-            hf_token=hf_token,
-            event_bus=event_bus,
-            dest_override=dest,
-        ),
+    # Job creation + queued-snapshot persist + emit + detached scheduling live in
+    # ``pull_jobs.enqueue_update``; ``_run_pull_with_events`` is passed by module
+    # binding to preserve the test-suite monkeypatch seam.
+    return await _pull_jobs.enqueue_update(
+        request,
+        model_id=model_id,
+        hf_repo=hf_repo,
+        hf_file=hf_file,
+        dest=dest,
+        run_wrapper=_run_pull_with_events,
     )
-    return {
-        "id": job.job_id,
-        "model_id": model_id,
-        "state": job.state,
-        "hf_repo": hf_repo,
-        "hf_file": hf_file,
-        "dest_path": dest,
-        "update": True,
-    }
 
 
 @router.get("/{model_id}")
@@ -825,38 +752,10 @@ async def delete_model(
 async def delete_pull(model_id: str, request: Request):
     """Clear a terminal pull job from memory + disk.
 
-    Returns 409 if the job is still active (queued/running).
+    Returns 409 if the job is still active (queued/running). The active-guard +
+    mem/disk removal live in :func:`hal0.registry.pull_jobs.delete`.
     """
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-
-    # Check in-memory first — active jobs must not be cleared
-    job = jobs.get(model_id)
-    if job is not None and job.state in ("queued", "running"):
-        from hal0.errors import Conflict
-
-        raise Conflict(
-            f"pull job for {model_id!r} is still active (state={job.state})",
-            code="pull.active",
-            details={"model_id": model_id, "state": job.state},
-        )
-
-    # Remove from in-memory dict
-    deleted_mem = jobs.pop(model_id, None) is not None
-
-    # Remove persisted file
-    deleted_disk = False
-    with contextlib.suppress(OSError):
-        p = _pull_job_file(model_id)
-        if p.exists():
-            p.unlink()
-            deleted_disk = True
-
-    if not deleted_mem and not deleted_disk:
-        raise PullJobNotFound(
-            f"no pull job for model {model_id!r}",
-            details={"model_id": model_id},
-        )
-
+    _pull_jobs.delete(model_id, request.app.state.model_pull_jobs)
     return Response(status_code=204)
 
 
@@ -888,97 +787,14 @@ async def pull_model(
     ``queued``/``running`` state, the existing job's handle is returned
     rather than spawning a duplicate. A completed/failed/cancelled job
     is replaced.
+
+    In-flight dedup, FLM dispatch, source/capability resolution, registry
+    seeding, job creation + queued-snapshot persist, ``pull.queued`` emit and
+    detached scheduling all live in :func:`hal0.registry.pull_jobs.enqueue`;
+    ``_run_pull_with_events`` is passed by module binding to preserve the
+    test-suite monkeypatch seam.
     """
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-
-    # Don't double-pull. A user spamming the wizard's Download button
-    # shouldn't kick off two streams against the same HF URL.
-    existing = jobs.get(model_id)
-    if existing is not None and existing.state in ("queued", "running"):
-        return {
-            "id": existing.job_id,
-            "model_id": model_id,
-            "state": existing.state,
-            "resumed": True,
-        }
-
-    # FLM/NPU tags route through the toolbox container instead of HF.
-    # The ``model:tag`` shape is the dispatch signal (HF ids never use
-    # colons), validated against the FLM probe so a stray ``foo:bar``
-    # falls through to the HF resolver and gets a clean 422.
-    from hal0.providers.flm import is_flm_tag
-
-    if is_flm_tag(model_id):
-        return await _start_flm_pull(model_id, request, jobs)
-
-    # Body is optional — an empty / non-JSON request is the legacy
-    # "pull by id" path used by the wizard's Pull-against-curated row.
-    body: dict[str, Any] | None = None
-    try:
-        if int(request.headers.get("content-length") or 0) > 0:
-            body = await request.json()
-            if not isinstance(body, dict):
-                body = None
-    except Exception:
-        body = None
-
-    hf_repo, hf_file, mmproj_file, from_body = _resolve_pull_source_with_body(
-        request, model_id, body
-    )
-    if from_body:
-        labels = body.get("labels") if isinstance(body, dict) else None
-        if not isinstance(labels, list):
-            labels = None
-        chat_template = body.get("chat_template") if isinstance(body, dict) else None
-        if not isinstance(chat_template, str):
-            chat_template = None
-        _seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template)
-    job = make_job(model_id)
-    jobs[model_id] = job
-    # Persist the queued snapshot before returning so a status poll resolves
-    # even if the daemon restarts before the background task runs (#626).
-    _persist_pull_job(job)
-
-    event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "pull.queued",
-            "info",
-            f"pull:{model_id}",
-            f"{model_id}: queued ({hf_repo}/{hf_file})",
-            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file},
-        )
-
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    registry = request.app.state.model_registry
-    # P3: route the download into the capability-grouped store layout when the
-    # capability is resolvable (body → registry → curated); None → flat fallback.
-    capability, comfyui_subdir = _resolve_pull_capability(request, model_id, body)
-    _schedule_pull_task(
-        request.app.state,
-        model_id,
-        _run_pull_with_events(
-            job,
-            hf_repo=hf_repo,
-            hf_file=hf_file,
-            registry=registry,
-            hf_token=hf_token,
-            event_bus=event_bus,
-            capability=capability,
-            comfyui_subdir=comfyui_subdir,
-            mmproj_file=mmproj_file,
-        ),
-    )
-    out: dict[str, object] = {
-        "id": job.job_id,
-        "model_id": model_id,
-        "state": job.state,
-        "hf_repo": hf_repo,
-        "hf_file": hf_file,
-    }
-    if mmproj_file:
-        out["mmproj_file"] = mmproj_file
-    return out
+    return await _pull_jobs.enqueue(request, model_id=model_id, run_wrapper=_run_pull_with_events)
 
 
 @router.get("/{model_id}/pull/status")
@@ -991,18 +807,13 @@ async def pull_status(model_id: str, request: Request) -> dict[str, object]:
 
     Falls back to the on-disk store (#626) so a status poll still
     resolves after an ``hal0-api`` restart wiped the process-local dict.
+    Snapshot + disk-fallback live in :func:`hal0.registry.pull_jobs.status`.
     """
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-    job = jobs.get(model_id)
-    if job is None:
-        persisted = _load_persisted_pull_job(model_id, request.app.state.model_registry)
-        if persisted is not None:
-            return persisted
-        raise PullJobNotFound(
-            f"no pull job for model {model_id!r}",
-            details={"model_id": model_id},
-        )
-    return job.as_dict()
+    return _pull_jobs.status(
+        model_id,
+        request.app.state.model_pull_jobs,
+        request.app.state.model_registry,
+    )
 
 
 @router.get("/{model_id}/pull/stream")
@@ -1016,69 +827,11 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
 
     Falls back to the on-disk store (#626) when the in-memory job is
     absent (e.g. after an ``hal0-api`` restart): emits one terminal
-    frame from the persisted snapshot and closes.
+    frame from the persisted snapshot and closes. The generator + disk
+    fallback + shutdown short-circuit live in
+    :func:`hal0.registry.pull_jobs.build_stream_response`.
     """
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-    job = jobs.get(model_id)
-    if job is None:
-        persisted = _load_persisted_pull_job(model_id, request.app.state.model_registry)
-        if persisted is not None:
-            # Serve one terminal frame from the persisted snapshot so the
-            # client's SSE consumer sees the final state and can close.
-            async def _gen_persisted() -> Any:
-                yield f"data: {json.dumps(persisted)}\n\n"
-
-            return StreamingResponse(
-                _gen_persisted(),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-        raise PullJobNotFound(
-            f"no pull job for model {model_id!r}",
-            details={"model_id": model_id},
-        )
-
-    shutting_down: asyncio.Event | None = getattr(request.app.state, "shutting_down", None)
-
-    async def _gen() -> Any:
-        # Emit an immediate snapshot so SSE clients don't sit at zero
-        # while waiting for the first progress signal.
-        yield f"data: {json.dumps(job.as_dict())}\n\n"
-        while job.state in ("queued", "running"):
-            # hal0-api shutdown (issue #1225): don't leave this generator
-            # dangling open — it's a live HTTP connection that would
-            # otherwise block uvicorn's graceful-shutdown connection drain
-            # for as long as the job stays non-terminal. In the common case
-            # the job itself flips to "cancelled" promptly once the
-            # lifespan shutdown path cancels its pull task (see
-            # hal0.api._shutdown_pull_jobs), which already unblocks the
-            # loop condition above; this flag additionally bounds the wait
-            # for any stream whose job doesn't (e.g. one already terminal
-            # on disk but still being polled by a stale in-memory handle).
-            if shutting_down is not None and shutting_down.is_set():
-                break
-            event = job.progress_event
-            try:
-                await asyncio.wait_for(event.wait(), timeout=5.0)
-            except TimeoutError:
-                if shutting_down is not None and shutting_down.is_set():
-                    break
-                # Keep-alive — surfaces stuck downloads without closing
-                # the stream.
-                yield f"data: {json.dumps(job.as_dict())}\n\n"
-                continue
-            yield f"data: {json.dumps(job.as_dict())}\n\n"
-        # One terminal frame so the UI sees the final state and can close.
-        yield f"data: {json.dumps(job.as_dict())}\n\n"
-
-    return StreamingResponse(
-        _gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return _pull_jobs.build_stream_response(model_id, request)
 
 
 # ── HuggingFace inspect (POST /api/models/inspect) ────────────────────────────
@@ -1132,14 +885,7 @@ async def pull_cancel(model_id: str, request: Request) -> dict[str, object]:
     Sets a cancel flag the background task observes on the next chunk
     boundary; the partial download is unlinked, the job transitions to
     ``cancelled``. Idempotent — cancelling a completed job is a no-op.
+    The flag-set + not-found guard live in
+    :func:`hal0.registry.pull_jobs.cancel`.
     """
-    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
-    job = jobs.get(model_id)
-    if job is None:
-        raise PullJobNotFound(
-            f"no pull job for model {model_id!r}",
-            details={"model_id": model_id},
-        )
-    if job.state in ("queued", "running"):
-        job.cancel_requested = True
-    return job.as_dict()
+    return _pull_jobs.cancel(model_id, request.app.state.model_pull_jobs)

@@ -28,7 +28,7 @@ import os
 import httpx
 import typer
 
-from hal0.cli._shared import _api_base
+from hal0.cli._shared import _api_base, _auth_headers
 
 # Imported as a MODULE ATTRIBUTE (not `from ... import _api_reachable` used at
 # call-site only) so tests can monkeypatch ``hal0.cli.setup_install._api_reachable``.
@@ -51,7 +51,7 @@ async def _dashboard_url() -> str:
     """
     base = _api_base()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0), headers=_auth_headers()) as client:
             resp = await client.get(f"{base}/api/config/urls")
             resp.raise_for_status()
             api = str(resp.json().get("api") or "").strip()
@@ -224,13 +224,23 @@ async def _apply_via_api(sel) -> None:
     aborted setup (issue #1158).
 
     We now treat a 409 as a recoverable no-op: surface the service's own
-    message and continue cleanly, leaving any existing slots untouched. All
-    other non-2xx statuses still raise so genuine failures aren't hidden.
+    message and continue cleanly, leaving any existing slots untouched. A
+    ``401``/``403`` (missing or stale CLI credentials on an auth-enabled box)
+    similarly gets one actionable line instead of a raw traceback. All other
+    non-2xx statuses still raise so genuine failures aren't hidden.
     """
     payload = dataclasses.asdict(sel)
     url = f"{_api_base()}/api/install/apply-selections"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), headers=_auth_headers()) as client:
         resp = await client.post(url, json=payload)
+    if resp.status_code in (401, 403):
+        typer.echo(
+            f"hal0 setup: not authorized ({resp.status_code}) to apply via the live API "
+            f"({_conflict_message(resp)}). Check HAL0_ADMIN_KEY/HAL0_CLIENT_KEY on this box, "
+            "or re-run with hal0-api stopped to apply in-process.",
+            err=True,
+        )
+        raise typer.Exit(1)
     if resp.status_code == 409:
         dashboard = await _dashboard_url()
         typer.echo(

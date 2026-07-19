@@ -9,6 +9,8 @@ Surfaced to agents as the ``port_list`` admin tool.
 
 from __future__ import annotations
 
+import contextlib
+
 from fastapi import APIRouter, Request
 
 router = APIRouter()
@@ -48,6 +50,15 @@ async def list_ports(request: Request) -> dict[str, object]:
                 authority_claims = [c.as_dict() for c in authority.claims(live_only=True)]
             except Exception:
                 authority_claims = None
+            # Reconcile pass (rework §11.2): flag pool listeners that no live
+            # authority claim covers — otherwise a socket bound outside the
+            # authority (e.g. out-of-band) is invisible to /api/ports even
+            # though the harvester's four-source view would show it. Purely
+            # observational (no writes), so a probe failure degrades to the
+            # unreconciled claim list rather than failing the whole route.
+            if authority_claims is not None:
+                with contextlib.suppress(Exception):
+                    authority_claims = authority_claims + authority.reconcile_listeners()
 
     return port_report(
         slots_dir=slots_config_dir(),

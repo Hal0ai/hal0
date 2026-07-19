@@ -49,16 +49,21 @@ def _render_llama(
     publish_host="127.0.0.1",
 ):
     devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
+    # FLAGS-own: profile flags / slot extra_args are inert at launch — route the
+    # tune through the model's materialized defaults.extra_args (simulate a
+    # stamped model), which is the one segment that still reaches the argv.
+    merged_tune = " ".join(p for p in ((flags_str or "").strip(), (extra_args or "").strip()) if p)
     plan = _llama_launch_plan(
         image=image,
         port=port,
         model_path=model_path,
-        flags_str=flags_str,
+        flags_str="",
         devices=list(devices),
         group_ids=[str(g) for g in resolve_gpu_group_ids()],
         context_size=context_size,
-        extra_args=extra_args,
+        extra_args=None,
         model_alias=model_alias,
+        model_defaults={"extra_args": merged_tune} if merged_tune else None,
     )
     return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
 

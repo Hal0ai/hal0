@@ -355,7 +355,7 @@ def test_device_metadata_is_internally_consistent() -> None:
         assert BACKEND_TO_DEVICE[d.id] == d.id  # idempotent
         assert DEVICE_TO_DEFAULT_PROFILE[d.id] == d.default_profile
     recommended = [d.id for d in CANONICAL_DEVICES if d.recommended]
-    assert recommended == ["gpu-rocm"]  # CONTEXT.md: ROCm default, Vulkan fallback
+    assert recommended == ["gpu-rocm"]  # ARCHITECTURE.md: ROCm default, Vulkan fallback
 
 
 # ── unified unknown-value policy ─────────────────────────────────────────────

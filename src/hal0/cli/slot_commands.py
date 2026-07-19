@@ -6,7 +6,6 @@ import json as jsonlib
 from enum import StrEnum
 from typing import Any
 
-import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -22,6 +21,7 @@ from hal0.cli._shared import (
     api_post,
     api_put,
     die,
+    follow_sse_logs,
 )
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 
@@ -289,6 +289,28 @@ def slot_restart(
     console.print(f"Restarted [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))}")
 
 
+@app.command("rename")
+def slot_rename(
+    name: str = typer.Argument(..., help="Current slot name"),
+    new_name: str = typer.Argument(..., help="New slot name"),
+) -> None:
+    """Rename a slot in place (POST /api/slots/{name}/rename).
+
+    The slot's ``id`` is stable across the rename — quadlets, port claims,
+    and history stay bound to the id, not the label; only the display name
+    changes.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        snap = api_post(f"/api/slots/{name}/rename", json={"new_name": new_name})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(f"Renamed [bold]{name}[/bold] → [bold]{snap.get('name', new_name)}[/bold]")
+
+
 @app.command("swap")
 def slot_swap(
     name: str = typer.Argument(..., help="Slot name to swap"),
@@ -362,18 +384,7 @@ def slot_logs(
         return
 
     # Stream SSE — line-buffered passthrough.
-    try:
-        with httpx.stream("GET", url + f"/api/slots/{name}/logs/stream", timeout=None) as r:
-            for raw in r.iter_lines():
-                if not raw or not raw.startswith("data:"):
-                    continue
-                payload = raw[5:].strip()
-                try:
-                    console.print(jsonlib.loads(payload))
-                except ValueError:
-                    console.print(payload)
-    except (httpx.HTTPError, KeyboardInterrupt):
-        return
+    follow_sse_logs(f"/api/slots/{name}/logs/stream", console=console)
 
 
 @app.command("create")
@@ -409,6 +420,7 @@ def slot_create(
         ),
         case_sensitive=False,
     ),
+    # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
         "--backend",
@@ -507,6 +519,7 @@ def slot_edit(
         case_sensitive=False,
         help="Change the slot's hardware backend (vulkan | rocm | cpu).",
     ),
+    # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
         "--backend",
@@ -604,6 +617,7 @@ def slot_delete(
     console.print(f"Deleted slot [bold]{name}[/bold].")
 
 
+# HAL0-SUNSET: v1.0.0 — alias for `slot create`; drop the alias.
 @app.command("add", hidden=True)
 def slot_add(
     name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
@@ -632,6 +646,7 @@ def slot_add(
     )
 
 
+# HAL0-SUNSET: v1.0.0 — alias for `slot delete`; drop the alias.
 @app.command("remove", hidden=True)
 def slot_remove(
     name: str = typer.Argument(..., help="Slot name to delete"),

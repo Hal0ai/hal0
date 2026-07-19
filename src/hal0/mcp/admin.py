@@ -11,12 +11,20 @@ flagged this as a potential exfiltration vector — an agent that can
 gate a single ``logs_tail`` approval inherits every secret the log
 redactor doesn't yet cover.
 
-We compile a single regex covering the three highest-frequency leak
-shapes and apply it to every line the tool returns to the client.
-Redaction happens in :func:`_redact_logs_payload` after the REST call
-returns and before the dispatch envelope ships to the agent — keep the
-logic localised to this module so future patterns slot in next to the
-existing ones without touching :mod:`hal0.api.routes.logs`.
+A single regex (:data:`hal0.api._redact.LOG_SECRET_RE`) covers the
+highest-frequency leak shapes and is applied to every line the tool
+returns to the client. Redaction happens in
+:func:`_redact_logs_payload` after the REST call returns and before
+the dispatch envelope ships to the agent.
+
+api-logs-redact (Phase 1) found a second, independent leak path: the
+plain REST ``GET /api/logs`` / ``GET /api/logs/stream`` surface in
+:mod:`hal0.api.routes.logs` streamed the same journald output with
+zero redaction. Rather than duplicate the regex there, the redactor
+moved to :mod:`hal0.api._redact` (dependency-free) so both surfaces
+import the one true implementation — see that module for the pattern
+and :func:`hal0.api.routes.logs.journalctl_sse` / ``list_logs`` for
+the REST-side wiring.
 
 Transport
 ---------
@@ -41,31 +49,36 @@ Tool catalog
 Autonomous read::
 
     slot_list, slot_status, slot_metrics, slot_capacity,
+    slot_by_name, slot_by_id, slot_resolved, slot_state,
     model_list, model_show, model_scan_preview,
     model_catalogue, model_update_check, model_pulls_list,
     model_pull_status, model_inspect, model_store,
-    hardware_probe, capability_list, provider_list, version_info,
+    hardware_probe, system_info, capability_list, provider_list, version_info,
     stack_list, stack_status, profile_list, profile_status,
     profile_export, upstream_list, upstream_get, upstream_test,
     settings_get, settings_schema, settings_apply_plan,
     bench_runs, bench_run_status, bench_queue,
     # Host-introspection probes (issue #237)
-    gpu_target_version, npu_status, env_report, model_store_probe
+    gpu_target_version, npu_status, env_report, model_store_probe,
+    # Memory reads — readOnly per their MCP annotations (moved out of
+    # autonomous-write in the §4.3 buildout; they never mutate state)
+    memory_search, memory_list, memory_recall
 
 Autonomous write::
 
     model_swap, model_assign, model_edit, model_scan,
-    model_pull_cancel,
-    slot_load, slot_unload, slot_edit,
+    model_pull_cancel, model_pull_delete,
+    model_set_default, model_duplicate,
+    slot_load, slot_unload, slot_edit, slot_set_defaults,
     settings_reload,
-    memory_add, memory_search, memory_list,
+    memory_add,
     memory_delete (when len(ids) == 1)
 
 Gated (destructive — enqueued for owner approval)::
 
     model_pull, model_delete, model_register, model_add,
     model_store_set, model_store_migrate, model_update,
-    slot_create, slot_delete, slot_restart,
+    slot_create, slot_delete, slot_restart, slot_rename,
     capability_set, config_write, provider_credential_write,
     memory_delete (when len(ids) > 1),
     # Profile CRUD (create/update/import/delete)
@@ -75,8 +88,9 @@ Gated (destructive — enqueued for owner approval)::
     stack_export, stack_snapshot, stack_delete,
     # Upstream provider CRUD (create/update/delete; test is a read)
     upstream_create, upstream_update, upstream_delete,
-    # Benchmarks — enqueue/control load models onto slots (disruptive)
-    bench_enqueue, bench_control,
+    # Benchmarks — enqueue/control load models onto slots (disruptive);
+    # queue-item delete drops a pending cell before it runs
+    bench_enqueue, bench_control, bench_queue_delete,
     # Journald surfaces gated for security (MED-1)
     logs_tail, slot_logs
 
@@ -85,6 +99,15 @@ The memory_* tools are delegates that forward into
 (the admin server hosts every tool an agent might call; the memory
 server is a focused alternative mount that an agent can use when it
 only needs memory access).
+
+Deliberate exclusions
+----------------------
+
+Some REST/CLI-level capabilities are intentionally NOT surfaced as admin
+MCP tools (policy decisions, not coverage gaps) — see
+:data:`EXCLUDED_TOOLS` for the full name → reason table (board CRUD,
+brain chat, the updater surface, auth rotation, credential reads, agent
+session administration).
 
 Authentication
 --------------
@@ -120,46 +143,21 @@ from typing import Any
 import httpx
 import structlog
 
+from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
-# Compiled once at import time. Each alternative ends with a
-# ``(?P<...>...)`` capture of just the secret token; the substitution
-# function rewrites that token to ``***REDACTED***`` while leaving the
-# surrounding ``Authorization:``, ``Bearer``, or ``HAL0_BEARER_TOKEN=``
-# prefix in place. The case-insensitive flag covers the lowercase
-# ``authorization:`` header style some clients emit, and the explicit
-# alternatives are ordered most-to-least specific so the precise header
-# form wins over the bare-``Bearer`` fallback. (Python's re alternation
-# is leftmost-wins inside a single match.)
-_LOG_SECRET_RE = re.compile(
-    r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?P<auth_token>\S+)"
-    r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?P<env_token>\S+)"
-    r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)",
-    re.IGNORECASE,
-)
-
-
-def _redact_log_line(line: str) -> str:
-    """Replace Bearer / HAL0_BEARER_TOKEN secrets in ``line`` with
-    ``***REDACTED***``.
-
-    The prefix is preserved so an operator reading a redacted log still
-    sees that an Authorization header was present — only the token
-    body is destroyed.
-    """
-
-    def _sub(match: re.Match[str]) -> str:
-        groups = match.groupdict()
-        if groups["prefix_auth"] is not None:
-            return f"{groups['prefix_auth']}***REDACTED***"
-        if groups["prefix_env"] is not None:
-            return f"{groups['prefix_env']}***REDACTED***"
-        return f"{groups['prefix_bearer']}***REDACTED***"
-
-    return _LOG_SECRET_RE.sub(_sub, line)
+# Moved to :mod:`hal0.api._redact` (as ``redact_log_line`` /
+# ``LOG_SECRET_RE``) so ``hal0.api.routes.logs`` — the plain REST
+# ``/api/logs`` + ``/api/logs/stream`` surface, mounted on every install
+# — can reuse the exact same secret-scrubbing logic without importing
+# this module, which hard-fails at import time when the optional
+# ``mcp`` SDK isn't installed (see the "Fail-fast import" section
+# below). Re-imported here under the original private name so the rest
+# of this module (and the existing test suite, which pokes
+# ``admin._redact_log_line`` directly) is unchanged (api-logs-redact).
 
 
 # ── List-shaped REST responses → top-level dict ──────────────────────────────
@@ -258,6 +256,14 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "slot_status",
         "slot_metrics",
         "slot_capacity",
+        # Canonical name/id-keyed lookups (rework §11.1) — identical
+        # payload shape to slot_status, just a different key.
+        "slot_by_name",
+        "slot_by_id",
+        # Auditable resolved-argv view + the lightweight state-machine
+        # poll — both pure reads, no REST mutation.
+        "slot_resolved",
+        "slot_state",
         # Models. model_scan is NOT here — walking the roots registers new
         # files (a mutation); model_scan_preview is the read-shaped dry run.
         # model_inspect is a read-shaped POST: it fetches HF repo metadata
@@ -276,6 +282,7 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # GATED_TOOLS until the logs.py redactor covers every key shape
         # (security review MED-1).
         "hardware_probe",
+        "system_info",
         "port_list",
         "capability_list",
         "provider_list",
@@ -310,6 +317,14 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # reads above); test probes the provider but changes no state.
         "upstream_get",
         "upstream_test",
+        # Memory reads — moved out of AUTONOMOUS_WRITE_TOOLS (§4.3): their
+        # ToolAnnotations have always said readOnlyHint=True, the
+        # classification bucket just hadn't caught up. memory_recall is
+        # new here — the handler already exists in hal0.mcp.memory's
+        # _MEMORY_HANDLERS, this catalog just didn't advertise it yet.
+        "memory_search",
+        "memory_list",
+        "memory_recall",
     }
 )
 
@@ -325,16 +340,27 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         "model_edit",
         "model_scan",
         "model_pull_cancel",
+        # Clears a TERMINAL pull job's bookkeeping only (409s if still
+        # queued/running) — no bytes on disk are touched, and the job can
+        # always be re-started via model_pull, so this is low-blast-radius
+        # like model_pull_cancel above, not gated like model_delete.
+        "model_pull_delete",
+        # Promotion is atomic + idempotent (single-holder invariant,
+        # re-promoting a no-op); duplicate shares weights via refcount, no
+        # byte copy — both reversible via model_edit/model_delete.
+        "model_set_default",
+        "model_duplicate",
         # Slot lifecycle
         "slot_load",
         "slot_unload",
         "slot_edit",
+        # PATCH convenience wrapper over slot_edit's PUT — same blast
+        # radius, just a narrower [model] sub-table merge.
+        "slot_set_defaults",
         # Settings
         "settings_reload",
         # Memory
         "memory_add",
-        "memory_search",
-        "memory_list",
         # memory_delete with len(ids) == 1 is autonomous; bulk goes
         # gated. The dispatch helper applies that rule at call time.
         "memory_delete",
@@ -356,6 +382,10 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "slot_create",
         "slot_delete",
         "slot_restart",
+        # Rename touches the display label an operator/agent uses to
+        # target the slot everywhere else — gated so a rename can't
+        # silently redirect a subsequent autonomous call (spec §4.3).
+        "slot_rename",
         # Capability / config
         "capability_set",
         "config_write",
@@ -379,8 +409,10 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "profile_delete",
         # Benchmarks: enqueue/control load models onto slots and can evict
         # what's currently serving — disruptive, so owner-approval gated.
+        # Queue-item delete drops a pending cell outright — destructive.
         "bench_enqueue",
         "bench_control",
+        "bench_queue_delete",
         # logs_tail / slot_logs are gated until the redactor in logs.py
         # covers Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
         # docs/internal/phase-8-pending/mcp-backend.md §2.
@@ -428,6 +460,12 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "slot_metrics": ("GET", "/api/slots/metrics"),
     "slot_capacity": ("GET", "/api/slots/capacity"),
     "port_list": ("GET", "/api/ports"),
+    "slot_by_name": ("GET", "/api/slots/by-name/{name}"),
+    "slot_by_id": ("GET", "/api/slots/by-id/{slot_id}"),
+    "slot_resolved": ("GET", "/api/slots/{name}/resolved"),
+    "slot_state": ("GET", "/api/slots/{name}/state"),
+    "slot_rename": ("POST", "/api/slots/{name}/rename"),
+    "slot_set_defaults": ("PATCH", "/api/slots/{name}/defaults"),
     "slot_load": ("POST", "/api/slots/{name}/load"),
     "slot_unload": ("POST", "/api/slots/{name}/unload"),
     "slot_edit": ("PUT", "/api/slots/{name}/config"),
@@ -445,6 +483,9 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     # returns detection rows without touching the registry.
     "model_inspect": ("POST", "/api/models/inspect"),
     "model_store": ("GET", "/api/settings/models/store"),
+    "model_pull_delete": ("DELETE", "/api/models/pulls/{model_id}"),
+    "model_set_default": ("POST", "/api/models/{model_id}/default"),
+    "model_duplicate": ("POST", "/api/models/{model_id}/duplicate"),
     # ── Profiles ───────────────────────────────────────────────────────
     "profile_list": ("GET", "/api/profiles"),
     "profile_status": ("GET", "/api/profiles/{name}"),
@@ -463,8 +504,10 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "bench_queue": ("GET", "/api/benchmarks/queue"),
     "bench_enqueue": ("POST", "/api/benchmarks/queue"),
     "bench_control": ("POST", "/api/benchmarks/control"),
+    "bench_queue_delete": ("DELETE", "/api/benchmarks/queue/{item_id}"),
     # ── System ─────────────────────────────────────────────────────────
     "version_info": ("GET", "/api/status"),
+    "system_info": ("GET", "/api/system-info"),
     "upstream_list": ("GET", "/api/upstreams"),
     "hardware_probe": ("GET", "/api/stats/hardware"),
     "logs_tail": ("GET", "/api/logs"),
@@ -517,6 +560,12 @@ _REST_MAP: dict[str, tuple[str, str]] = {
 _PATH_ARGS: dict[str, tuple[str, ...]] = {
     # Slots
     "slot_status": ("name",),
+    "slot_by_name": ("name",),
+    "slot_by_id": ("slot_id",),
+    "slot_resolved": ("name",),
+    "slot_state": ("name",),
+    "slot_rename": ("name",),
+    "slot_set_defaults": ("name",),
     "slot_load": ("name",),
     "slot_unload": ("name",),
     "slot_edit": ("name",),
@@ -530,11 +579,15 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "model_pull": ("model_id",),
     "model_pull_status": ("model_id",),
     "model_pull_cancel": ("model_id",),
+    "model_pull_delete": ("model_id",),
+    "model_set_default": ("model_id",),
+    "model_duplicate": ("model_id",),
     "model_delete": ("model_id",),
     "model_edit": ("model_id",),
     "model_update": ("model_id",),
     # Benchmarks
     "bench_run_status": ("run_id",),
+    "bench_queue_delete": ("item_id",),
     # Profiles
     "profile_status": ("name",),
     "profile_export": ("name",),
@@ -684,6 +737,33 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "slot_rename": {
+        "properties": {
+            "name": {"type": "string", "description": "CURRENT slot name (slot must be OFFLINE)"},
+            "new_name": {"type": "string", "description": "New display name — must be unique"},
+        },
+        "required": ["new_name"],
+    },
+    "model_set_default": {
+        "properties": {
+            "model_id": {"type": "string", "description": "Model id to promote/clear"},
+            "default": {
+                "type": "boolean",
+                "description": "true=promote (demotes current holder), false=clear; default true",
+            },
+        },
+    },
+    "model_duplicate": {
+        "properties": {
+            "model_id": {"type": "string", "description": "SOURCE model id to duplicate"},
+            "new_id": {"type": "string", "description": "New registry id — must be unused"},
+            "profile": {
+                "type": "string",
+                "description": "Optional profile name to stamp into the new row's defaults",
+            },
+        },
+        "required": ["new_id"],
+    },
 }
 
 
@@ -744,6 +824,23 @@ def _format_url(base_url: str, template: str, path_args: dict[str, str]) -> str:
     return base_url.rstrip("/") + template.format(**path_args)
 
 
+#: HTTP methods ``_call_rest`` knows how to forward, mapped to the httpx
+#: kwarg that carries the payload (``params`` for query-string verbs,
+#: ``json`` for body verbs). ``_validate_catalog`` checks every
+#: ``_REST_MAP`` entry's method against this table at import time so an
+#: unsupported method (e.g. a typo'd verb, or a route added with a method
+#: nobody wired a branch for) fails loudly at import instead of surviving
+#: operator approval and raising deep inside a gated tool call — see
+#: upstream_update's PATCH route, which shipped mapped but unforwardable.
+_REST_VERB_PAYLOAD_KWARG: dict[str, str] = {
+    "GET": "params",
+    "DELETE": "params",
+    "POST": "json",
+    "PUT": "json",
+    "PATCH": "json",
+}
+
+
 async def _call_rest(
     *,
     base_url: str,
@@ -771,17 +868,15 @@ async def _call_rest(
     # transports without re-issuing tokens.
     headers["X-Requested-With"] = "XMLHttpRequest"
 
+    if method not in _REST_VERB_PAYLOAD_KWARG:
+        raise ValueError(f"unsupported HTTP method: {method}")
+    payload_kwarg = _REST_VERB_PAYLOAD_KWARG[method]
+    call_kwargs: dict[str, Any] = {"headers": headers}
+    call_kwargs[payload_kwarg] = (payload or None) if payload_kwarg == "params" else (payload or {})
+
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
-        if method == "GET":
-            response = await client.get(url, params=payload or None, headers=headers)
-        elif method == "DELETE":
-            response = await client.delete(url, params=payload or None, headers=headers)
-        elif method == "POST":
-            response = await client.post(url, json=payload or {}, headers=headers)
-        elif method == "PUT":
-            response = await client.put(url, json=payload or {}, headers=headers)
-        else:
-            raise ValueError(f"unsupported HTTP method: {method}")
+        verb = getattr(client, method.lower())
+        response = await verb(url, **call_kwargs)
 
     if response.status_code >= 400:
         try:
@@ -1128,6 +1223,18 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "slot_capacity": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "slot_by_name": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_by_id": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_resolved": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_state": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
     # Models
     "model_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -1159,6 +1266,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     ),
     # System. logs_tail / slot_logs read-only but server-gated (MED-1).
     "hardware_probe": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "system_info": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "logs_tail": ToolAnnotations(
@@ -1236,6 +1346,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "memory_recall": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
     # ── Autonomous write — mutating, reversible, idempotent writes. ────
     "model_swap": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -1253,6 +1366,22 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_pull_cancel": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    # Clears a terminal job's bookkeeping only — a resource disappears
+    # (destructive per the module docstring's definition) but re-delete
+    # of an already-cleared job just 404s, so end state is stable.
+    "model_pull_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    # Promotion is atomic + idempotent (re-promoting the current holder
+    # is a documented no-op).
+    "model_set_default": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Each call mints a NEW registry row (new_id) — re-duplicating the
+    # same new_id 409s rather than converging, so non-idempotent.
+    "model_duplicate": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
     "slot_load": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -1260,6 +1389,11 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "slot_edit": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # PATCH convenience wrapper over slot_edit's PUT — same "set X to Y"
+    # semantics, same idempotency.
+    "slot_set_defaults": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "settings_reload": ToolAnnotations(
@@ -1330,6 +1464,12 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "slot_restart": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
+    # Relabels a slot — not destructive (nothing is removed), but a
+    # second identical call targets a name that no longer exists (404),
+    # so non-idempotent.
+    "slot_rename": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
     # Reaches outside hal0 (HuggingFace / upstream registries).
     "model_pull": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
@@ -1357,6 +1497,10 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     ),
     "bench_control": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Drops a pending queue item outright.
+    "bench_queue_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     # Destructive — re-delete is a no-op so idempotentHint stays true.
     "model_delete": ToolAnnotations(
@@ -1391,6 +1535,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_status": "Get one slot's lifecycle state + metadata.",
     "slot_metrics": "Get per-slot performance metrics (tok/s, latency, queue depth).",
     "slot_capacity": "Get GPU/NPU memory capacity and per-slot allocation.",
+    "slot_by_name": "Canonical name-keyed slot lookup (identical payload to slot_status).",
+    "slot_by_id": "Stable-id slot lookup: opaque id → current name → snapshot.",
+    "slot_resolved": (
+        "The resolved llama-server argv with per-flag provenance (which segment — "
+        "base/profile/extra_args — set each surviving flag)."
+    ),
+    "slot_state": "Just the state-machine fields for a slot (lighter than slot_status).",
     "port_list": (
         "The global port-claim map: every port owned by a slot config (incl. "
         "disabled), a runtime slot row, a reserved service, or a live listener — "
@@ -1413,6 +1564,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "candidate paths. Pulls always download into this store."
     ),
     "hardware_probe": "Live hardware probe — backends, memory, accelerators.",
+    "system_info": (
+        "Consolidated hardware + feature flags + per-runner backend state "
+        "(installed/installable/unavailable) — one read for 'what can this box run'."
+    ),
     "capability_list": "Capability overlay state — backends + selections.",
     "provider_list": "List configured providers.",
     "version_info": "hal0 version + runtime status.",
@@ -1455,6 +1610,17 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
     "model_scan": "Walk the configured model roots + store and register newly-found files.",
     "model_pull_cancel": "Cancel an in-flight model pull job.",
+    "model_pull_delete": (
+        "Clear a TERMINAL pull job's record from memory + disk (409s if still queued/running)."
+    ),
+    "model_set_default": (
+        "Promote or clear a model's per-type default marker. "
+        "Args: model_id, optional default=true|false (default true — bare call promotes)."
+    ),
+    "model_duplicate": (
+        "Duplicate a registry row to share the SAME weights under a new id (no byte copy). "
+        "Args: model_id=source, new_id=required new registry id, optional profile to stamp."
+    ),
     "slot_load": (
         "Load a slot (optionally assign a model first). "
         "Args: name=SLOT name, optional model_id=registered model to load."
@@ -1463,10 +1629,18 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_edit": (
         "Update one or more slot config fields (model, port, ctx-size, provider, hardware)."
     ),
+    "slot_set_defaults": (
+        "Update slot defaults (ctx_size/context_size, n_gpu_layers, …) — merges into the "
+        "slot's [model] sub-table. Provider-specific params belong under 'extra'."
+    ),
     "settings_reload": "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
     "memory_add": "Add an item to long-term memory.",
     "memory_search": "Search long-term memory.",
     "memory_list": "Page through long-term memory items.",
+    "memory_recall": (
+        "Recall token-budgeted, consolidated memory (preferred over search). "
+        "types defaults to world+experience+observation."
+    ),
     "memory_delete": (
         "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise)."
     ),
@@ -1498,6 +1672,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "start it."
     ),
     "slot_delete": "Delete a slot (gated).",
+    "slot_rename": (
+        "Rename a slot's display label (gated). Args: name=CURRENT name, new_name=new label. "
+        "Slot must be OFFLINE; id stays stable so port/state semantics are untouched."
+    ),
     "slot_restart": (
         "Restart a slot's systemd unit (gated). Prefer slot_load for a slot in "
         "error state or after a config change — load regenerates the unit; "
@@ -1522,8 +1700,56 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "profile_delete": "Delete a custom profile from the catalog (gated).",
     "bench_enqueue": "Enqueue benchmark cells (model x slot x settings) for the runner (gated).",
     "bench_control": "Start/stop/pause the benchmark runner (gated).",
+    "bench_queue_delete": "Drop a pending item from the benchmark queue (gated).",
     "logs_tail": "Tail journald for one systemd unit (gated).",
     "slot_logs": "Tail one slot's journal output (gated).",
+}
+
+
+# ── Deliberate exclusions (tier b — spec §4.3) ───────────────────────────────
+#
+# Capabilities that exist on the REST/CLI surface but are intentionally NOT
+# exposed as admin MCP tools — policy decisions, not coverage gaps. Recorded
+# explicitly (label -> reason) so future coverage tooling (the §4.4 route-map
+# autogen lane) can tell "missing, add it" from "excluded, leave it" instead
+# of re-litigating the same call every buildout pass. Keys are documentation
+# labels, NOT tool names — they must never collide with a real catalog tool
+# (checked by :func:`_validate_catalog`).
+EXCLUDED_TOOLS: dict[str, str] = {
+    "board_crud": (
+        "Board CRUD (create/update/move cards) is better reached via the KB-2/3 "
+        "brain tool tiers than a raw MCP REST passthrough — a policy call, not "
+        "a coverage gap."
+    ),
+    "brain_chat": (
+        "Steward/brain chat is its own SSE surface (hal0.api.routes.board_chat), "
+        "not a stateless request/response REST passthrough — doesn't fit the "
+        "admin tool shape."
+    ),
+    "updater_apply": (
+        "Self-update/restart is a destructive host-level action; exposing it as "
+        "an MCP tool needs its own POLICY_NO_LOOSEN + operator-confirmation "
+        "design, deferred to a dedicated lane rather than hand-added here."
+    ),
+    "auth_rotate": (
+        "Key rotation is a lockout-recovery / operator-console action — never "
+        "agent-callable, gated or not."
+    ),
+    "auth_me": (
+        "Identity self-lookup backs the MCP transport's own bearer_resolver; "
+        "surfacing it as a callable tool would let an agent probe its own "
+        "credential label for no operational benefit."
+    ),
+    "provider_credential_read": (
+        "Provider credentials are write-only from the agent's side "
+        "(provider_credential_write exists); no tool ever reads a secret value "
+        "back to a caller."
+    ),
+    "agent_sessions": (
+        "Hermes/agent session administration (list/kill sessions) is an "
+        "operator-console concern, not a tool an agent should hold over its "
+        "own or sibling agents' sessions."
+    ),
 }
 
 
@@ -1548,6 +1774,11 @@ def _validate_catalog() -> None:
     if overlaps:
         problems.append(f"tools in more than one classification: {sorted(overlaps)}")
 
+    if excluded_overlap := set(EXCLUDED_TOOLS) & catalog:
+        problems.append(
+            f"labels in both EXCLUDED_TOOLS and the live catalog: {sorted(excluded_overlap)}"
+        )
+
     # memory_* dispatch in-process (or report unconfigured); probes never
     # touch REST. Everything else must route somewhere.
     routed = {t for t in catalog if not t.startswith("memory_")} - PROBE_TOOLS
@@ -1564,13 +1795,18 @@ def _validate_catalog() -> None:
             f"extra: {sorted(set(TOOL_DESCRIPTIONS) - catalog)}"
         )
 
-    for tool, (_method, template) in _REST_MAP.items():
+    for tool, (method, template) in _REST_MAP.items():
         placeholders = set(re.findall(r"{(\w+)}", template))
         declared = set(_PATH_ARGS.get(tool, ()))
         if placeholders != declared:
             problems.append(
                 f"{tool}: _PATH_ARGS {sorted(declared)} != template placeholders "
                 f"{sorted(placeholders)}"
+            )
+        if method not in _REST_VERB_PAYLOAD_KWARG:
+            problems.append(
+                f"{tool}: _REST_MAP method {method!r} unsupported by _call_rest "
+                f"(supported: {sorted(_REST_VERB_PAYLOAD_KWARG)})"
             )
 
     # Param hints must reference real catalog tools, and every 'required'
@@ -1671,6 +1907,7 @@ def build_server(
 __all__ = [
     "AUTONOMOUS_READ_TOOLS",
     "AUTONOMOUS_WRITE_TOOLS",
+    "EXCLUDED_TOOLS",
     "GATED_TOOLS",
     "POLICY_NO_LOOSEN",
     "TOOL_DESCRIPTIONS",

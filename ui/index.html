@@ -12,10 +12,16 @@
     <link rel="apple-touch-icon" href="/brand/logo-halo-dark-favico.png" />
     <link rel="mask-icon" href="/favicon.svg" color="#feaf00" />
 
-    <title>hal0 dashboard — v0.5.0-alpha.1</title>
+    <!-- VERS-flash (docs/rework/handoff-r5-drive2.md §3): stamped at build
+         time from ui/package.json by the hal0-version-html plugin in
+         vite.config.ts. package.json is kept reconciled to the backend
+         release (pyproject `version`), so this is a single source of truth,
+         not a second literal that drifts / flashes stale. Do not hand-edit
+         the version below — bump ui/package.json instead. -->
+    <title>hal0 dashboard — v%APP_VERSION%</title>
     <meta
       name="description"
-      content="hal0 v0.5.0-alpha.1 dashboard — container-runtime slots, NPU trio, OmniRouter, agent approvals. Operator surface for a local AI appliance."
+      content="hal0 v%APP_VERSION% dashboard — container-runtime slots, NPU trio, OmniRouter, agent approvals. Operator surface for a local AI appliance."
     />
 
     <!-- Fonts are self-hosted via @fontsource imports in src/main.tsx — no

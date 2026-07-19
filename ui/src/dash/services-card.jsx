@@ -15,6 +15,7 @@
 
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { useComfyui, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
+import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState, useEffect, useRef, useCallback } = React
 
@@ -115,8 +116,8 @@ function ComfyJobQueue({ comfyReachable }) {
     const base = comfyNativeBase()
     try {
       const [qRes, hRes] = await Promise.all([
-        fetch(`${base}/queue`, { signal: AbortSignal.timeout(3000) }),
-        fetch(`${base}/history?max_items=10`, { signal: AbortSignal.timeout(3000) }),
+        fetch(`${base}${ENDPOINTS.comfyNativeQueue}`, { signal: AbortSignal.timeout(3000) }),
+        fetch(`${base}${ENDPOINTS.comfyNativeHistory}?max_items=10`, { signal: AbortSignal.timeout(3000) }),
       ])
       if (!qRes.ok) { setOffline(true); setQueueData(null); return }
       const q = await qRes.json()

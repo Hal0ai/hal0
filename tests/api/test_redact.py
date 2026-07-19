@@ -21,6 +21,7 @@ from hal0.api import create_app
 from hal0.api._redact import (
     is_sensitive_key,
     redact_config,
+    redact_log_line,
     redact_value,
 )
 
@@ -273,6 +274,81 @@ def test_upstreams_serialize_redacts_api_key_if_present() -> None:
     assert out["auth_value_env"] == "OPENROUTER_API_KEY"  # env-var NAME, not value
     assert out["api_key"] == {"value": "***REDACTED***", "set": True}
     assert out["models"] == []
+
+
+# ── redact_log_line (api-logs-redact) ──────────────────────────────────────
+#
+# Free-text counterpart to redact_config: scans a raw log LINE for known
+# secret shapes rather than walking a dict by key name. Shared by
+# hal0.mcp.admin's logs_tail/slot_logs redaction and
+# hal0.api.routes.logs's /api/logs + /api/logs/stream (moved here so the
+# REST route doesn't have to import hal0.mcp.admin, which hard-fails
+# without the optional mcp SDK installed).
+
+
+@pytest.mark.parametrize(
+    "raw,expected_masked_fragment,leaked_secret",
+    [
+        (
+            "GET /v1/models Authorization: Bearer sk-or-supersecret-xyz",
+            "Authorization: Bearer ***REDACTED***",
+            "sk-or-supersecret-xyz",
+        ),
+        (
+            "env loaded: HAL0_BEARER_TOKEN=hal0_tok_xyz",
+            "HAL0_BEARER_TOKEN=***REDACTED***",
+            "hal0_tok_xyz",
+        ),
+        (
+            "raw fallback: Bearer abcDEF123_-.tok still gets masked",
+            "Bearer ***REDACTED***",
+            "abcDEF123_-.tok",
+        ),
+        (
+            "mcp.tool.invoked client_id=abcdefghijklmnopqrstuvwxyz0123456789 tool=slot_list",
+            "client_id=***REDACTED***",
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+        ),
+        (
+            # Bare `_KEY=`-suffixed secret (hal0's own admin/client keys) —
+            # the leak shape halo150 O9 found in structured config, now
+            # also guarded against verbatim in free-text log lines.
+            "env dump: HAL0_ADMIN_KEY=abcdef1234567890",
+            "HAL0_ADMIN_KEY=***REDACTED***",
+            "abcdef1234567890",
+        ),
+        (
+            "env dump: SOME_API_KEY=sk-live-abcdef1234567890",
+            "SOME_API_KEY=***REDACTED***",
+            "sk-live-abcdef1234567890",
+        ),
+        (
+            "config dump: KEY=abcdef1234567890",
+            "KEY=***REDACTED***",
+            "abcdef1234567890",
+        ),
+    ],
+)
+def test_redact_log_line_masks_known_secret_shapes(
+    raw: str, expected_masked_fragment: str, leaked_secret: str
+) -> None:
+    out = redact_log_line(raw)
+    assert expected_masked_fragment in out
+    assert leaked_secret not in out
+
+
+def test_redact_log_line_passes_through_safe_content() -> None:
+    """No false positives on lines that don't carry secrets — including
+    KEY-shaped substrings that are not a trailing `_KEY=`/`KEY=` field."""
+    line = "[12:00:00] hal0.api.startup version=0.2.0a2 KEY_ROTATION_DAYS=30"
+    assert redact_log_line(line) == line
+
+
+def test_redact_log_line_does_not_mask_short_client_id_labels() -> None:
+    """The hashed client_id label (12 hex chars) and short agent ids stay
+    visible — only long, key-shaped `client_id=` values are secrets."""
+    line = "mcp.tool.invoked client_id=1a2b3c4d5e6f tool=slot_list outcome=ok"
+    assert redact_log_line(line) == line
 
 
 class TestBareKeySuffix:

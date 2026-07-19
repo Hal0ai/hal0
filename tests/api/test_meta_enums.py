@@ -81,7 +81,7 @@ def test_devices_complete_and_shaped(client: TestClient) -> None:
 
 
 def test_gpu_rocm_is_the_only_recommended_device(client: TestClient) -> None:
-    # CONTEXT.md: gpu-rocm is the recommended default on Strix Halo;
+    # ARCHITECTURE.md: gpu-rocm is the recommended default on Strix Halo;
     # gpu-vulkan is the slower fallback.
     devices = _get_enums(client)["devices"]
     recommended = [d["id"] for d in devices if d["recommended"]]

@@ -32,6 +32,14 @@ def target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
 
 def _install(target: tuple[Path, Path], *, io=None, repair=False, record=None, state_root=None):
     home, venv = target
+    # RELOCATE(brain-lane): persona seeding now runs in the hal0-api boot
+    # lifespan's _boot_seeds phase, which in production always runs before
+    # `hal0 agent install hermes` (install talks to the already-running API
+    # over loopback HTTP). Mirror that ordering hermetically so
+    # install_hermes sees the personas it now expects to already exist —
+    # idempotent (overwrite=False), so calling it again before a second
+    # _install() in the same test is a no-op once seeded.
+    P.seed_default_personas(agent_id="hermes-agent", root=home / "personas")
     return hp.install_hermes(
         hermes_home=home,
         venv=venv,
@@ -111,16 +119,17 @@ def test_report_written_for_agent_status(target: tuple[Path, Path], tmp_path: Pa
 
 
 # ── repair semantics ─────────────────────────────────────────────────────────
-
-
-def test_repair_run_rewrites_persona_seeds(target: tuple[Path, Path]) -> None:
-    """``--repair`` overwrites operator persona edits with the canonical seeds."""
-    io = install_io(hp)
-    _install(target, io=io)
-    persona_path = target[0] / "personas" / "hermes.toml"
-    persona_path.write_text('[persona]\nid = "hermes"\ndisplay_name = "Custom"\n', encoding="utf-8")
-    _install(target, io=io, repair=True)
-    assert P.load_persona("hermes", root=persona_path.parent).display_name == "Hermes"
+#
+# RELOCATE(brain-lane) — LANDED: persona_seed no longer runs as part of
+# `install_hermes()`/`--repair` at all (it moved to the hal0-api boot
+# lifespan's _boot_seeds phase, which never forces an overwrite — an
+# operator-chosen edit only gets reset by removing the persona TOML and
+# restarting hal0-api). The direct-call unit coverage for
+# `_phase_persona_seed`'s own overwrite=True/False behavior lives in
+# tests/agents/test_hermes_provision_context.py::
+# test_persona_seed_overwrites_on_repair — that function is unchanged and
+# still exercises the real overwrite logic, just without going through
+# `install_hermes()`.
 
 
 # ── config.yaml content contracts ────────────────────────────────────────────
@@ -239,10 +248,13 @@ def test_namespace_register_rewrites_when_delete_count_matches() -> None:
 # ── pipeline ordering ────────────────────────────────────────────────────────
 
 
-def test_persona_seed_runs_before_config_write() -> None:
-    """persona_seed must precede config_write so the first render sees the persona."""
+def test_persona_seed_relocated_out_of_install_pipeline() -> None:
+    """RELOCATE(brain-lane): persona_seed no longer runs inside install_hermes
+    at all — config_write's active-persona read now depends on the hal0-api
+    boot lifespan having already seeded personas (see _install()'s
+    pre-seed call in this file's fixtures, which mirrors that ordering)."""
     names = [name for name, _fn in hp._INSTALL_STEPS]
-    assert names.index("persona_seed") < names.index("config_write")
+    assert "persona_seed" not in names
 
 
 def test_mcp_wire_runs_before_config_write() -> None:

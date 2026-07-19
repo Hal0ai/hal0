@@ -190,7 +190,14 @@ const DEFAULT_METRICS: SlotMetrics = {
 // `group` for built-in slots (primary, embed, stt, …). The v3 SlotsView
 // groups via `slots.filter(s => s.group === "chat")` etc., so without
 // inference the page renders just the header — looks blank/black.
-// Infer from BUILTIN_SLOTS conventions (primary→chat/llm, embed→embed/…).
+//
+// A slot's NAME is operator-controlled (useSlotRename lets anyone relabel
+// any slot at any time), so it is the least honest signal available here —
+// last resort only. Prefer `provider` (backend-reported, describes what the
+// slot actually IS) and semantic role keywords in the name (`includes`,
+// describing what the slot DOES) over an exact-name convention guess
+// (`name === 'primary'`), which only fires for the narrow sparse-response
+// case where the backend gives us nothing else to go on.
 function inferSlotShape(s: any): { type: string; group: string; device: string } {
   const name = String(s?.name ?? '').toLowerCase()
   const provider = String(s?.provider ?? '').toLowerCase()
@@ -201,19 +208,29 @@ function inferSlotShape(s: any): { type: string; group: string; device: string }
   let device = s?.device as string | undefined
 
   if (!type || !group) {
-    if (name === 'primary' || name === 'agent' || name.includes('chat')) {
+    if (provider.includes('llama') || provider.includes('llm')) {
       type ??= 'llm'; group ??= 'chat'
-    } else if (name === 'rerank' || name.includes('rerank')) {
+    } else if (name.includes('rerank')) {
       type ??= 'reranking'; group ??= 'embed'
-    } else if (name === 'embed' || name.includes('embed')) {
+    } else if (name.includes('embed')) {
       type ??= 'embedding'; group ??= 'embed'
-    } else if (name === 'stt' || name.includes('whisper') || name.includes('moonshine')) {
+    } else if (name.includes('whisper') || name.includes('moonshine')) {
       type ??= 'transcription'; group ??= 'voice'
-    } else if (name === 'tts' || name.includes('kokoro') || name.includes('vibe')) {
+    } else if (name.includes('kokoro') || name.includes('vibe')) {
       type ??= 'tts'; group ??= 'voice'
-    } else if (name === 'img' || name === 'image' || name.includes('image') || name.includes('sd')) {
+    } else if (name.includes('image') || name.includes('sd')) {
       type ??= 'image'; group ??= 'img'
-    } else if (provider.includes('llama') || provider.includes('llm')) {
+    } else if (name === 'stt') {
+      type ??= 'transcription'; group ??= 'voice'
+    } else if (name === 'tts') {
+      type ??= 'tts'; group ??= 'voice'
+    } else if (name === 'img') {
+      type ??= 'image'; group ??= 'img'
+    } else if (name === 'primary' || name === 'agent' || name.includes('chat')) {
+      // Last-resort convention guess — the built-in default chat slot is
+      // usually named "primary" or "agent", but this is display-name, not
+      // a role marker; every branch above (provider + semantic keyword) is
+      // tried first.
       type ??= 'llm'; group ??= 'chat'
     }
   }

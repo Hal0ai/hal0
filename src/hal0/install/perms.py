@@ -328,6 +328,33 @@ def ownership_table(
             0o644,
             role="registry/hal0.db",
         ),
+        # models/ — the default model-store directory (paths.models_dir()),
+        # born root:root 0755 by the SAME install.sh mkdir as slots/ and
+        # registry/ above (O13 class). No row existed for it: `doctor perms
+        # --fix` could not heal it, and a default-store pull
+        # (registry/pull_jobs.py:222 writes ``models_dir()/<model_id>/<file>``
+        # via a plain ``open(part, "wb")`` — born 0644 under the User=hal0
+        # unit's default umask 0022, with intermediate dirs made on demand)
+        # fails with PermissionError the moment the User=hal0 daemon tries to
+        # create a subdir under a root:root parent. (Live boxes mostly point
+        # [models].store at /mnt/ai-models instead, so this default path was
+        # plausibly never exercised — r5-sync-assessment §6.2.) Recursive +
+        # setgid 2775 like the slots/ row above so nested per-model dirs
+        # inherit the shared hal0 group; child files get 0644 (matches the
+        # plain-open() birth mode, not 0600 — weight files have no secrecy
+        # requirement and are read by the slot container's bind-mounted view).
+        PermRow(
+            var_lib / "models",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*",
+            child_mode=0o2775,
+            child_file_mode=0o644,
+            recursive=True,
+            optional=False,
+            role="models/ (default model store, recursive)",
+        ),
         # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
         # User=hal0 unit needs to traverse INTO its own home without being able
         # to enumerate siblings. Was repaired ad hoc by hermes_provision's late

@@ -364,8 +364,8 @@ def test_system_prompt_block_mentions_private_bank_name() -> None:
     provider.initialize()
     block = provider.system_prompt_block()
     assert "private:hermes" in block
-    assert "hal0_memory_search" in block
-    assert "hal0_memory_add" in block
+    assert "hindsight_recall" in block
+    assert "hindsight_retain" in block
 
 
 # ── prefetch ───────────────────────────────────────────────────────────────
@@ -527,10 +527,12 @@ def test_get_tool_schemas_returns_a_copy_of_all_three() -> None:
     schemas = provider.get_tool_schemas()
     assert schemas == ALL_TOOL_SCHEMAS
     assert schemas is not ALL_TOOL_SCHEMAS
+    # LLM-facing surface = the three upstream hindsight_* tools (search folded
+    # into recall; legacy hal0_memory_* names live only as dispatch aliases).
     assert {s["name"] for s in schemas} == {
-        "hal0_memory_search",
-        "hal0_memory_recall",
-        "hal0_memory_add",
+        "hindsight_recall",
+        "hindsight_retain",
+        "hindsight_reflect",
     }
 
 
@@ -670,6 +672,88 @@ def test_handle_tool_call_swallows_client_error() -> None:
     provider.initialize()
     out = json.loads(provider.handle_tool_call("hal0_memory_search", {"query": "q"}))
     assert out == {"status": "error", "error": "boom"}
+
+
+# ── new hindsight_* surface + reflect + back-compat aliases ────────────────
+
+
+def test_handle_tool_call_hindsight_recall_dispatches() -> None:
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.recall.return_value = {"items": []}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    out = json.loads(
+        provider.handle_tool_call("hindsight_recall", {"query": "q", "max_tokens": 512})
+    )
+    fake_client.recall.assert_called_once_with("q", max_tokens=512)
+    assert out == {"items": []}
+
+
+def test_handle_tool_call_hindsight_retain_dispatches_shared_by_default() -> None:
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes"
+    fake_client.add.return_value = {"status": "ok"}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    out = json.loads(provider.handle_tool_call("hindsight_retain", {"text": "fact"}))
+    fake_client.add.assert_called_once_with("fact", tags=["agent:hermes"], private=False)
+    assert out["bank"] == "shared"
+
+
+def test_hindsight_reflect_is_exposed_and_dispatches() -> None:
+    # Reflect is advertised on the LLM surface AND dispatches to a consolidated
+    # recall carrying an explicit synthesis type-hint (best-effort synthesis).
+    assert "hindsight_reflect" in {s["name"] for s in ALL_TOOL_SCHEMAS}
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.recall.return_value = {"items": [{"text": "synthesized"}]}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    out = json.loads(provider.handle_tool_call("hindsight_reflect", {"query": "topic"}))
+    assert fake_client.recall.call_count == 1
+    _, kwargs = fake_client.recall.call_args
+    assert kwargs["types"] == ["world", "experience", "observation"]
+    assert kwargs["max_tokens"] == 4096
+    assert out == {"items": [{"text": "synthesized"}]}
+
+
+def test_hindsight_reflect_missing_query_errors() -> None:
+    fake_client = Mock(spec=Hal0MemoryClient)
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    out = json.loads(provider.handle_tool_call("hindsight_reflect", {"query": "  "}))
+    assert out["status"] == "error"
+    fake_client.recall.assert_not_called()
+
+
+def test_hindsight_reflect_empty_on_transport_failure() -> None:
+    # Best-effort posture like prefetch: a transport error yields an empty
+    # envelope, never a propagating tool error that could wedge the loop.
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.recall.side_effect = Hal0MemoryClientError("boom")
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    out = json.loads(provider.handle_tool_call("hindsight_reflect", {"query": "topic"}))
+    assert out == {"status": "ok", "items": []}
+
+
+def test_legacy_tool_name_aliases_still_dispatch() -> None:
+    # Back-compat: the old hal0_memory_* names remain dispatchable even though
+    # they're no longer advertised as schemas.
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes"
+    fake_client.search.return_value = {"items": ["s"]}
+    fake_client.recall.return_value = {"items": ["r"]}
+    fake_client.add.return_value = {"status": "ok"}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    assert json.loads(provider.handle_tool_call("hal0_memory_search", {"query": "q"})) == {
+        "items": ["s"]
+    }
+    assert json.loads(provider.handle_tool_call("hal0_memory_recall", {"query": "q"})) == {
+        "items": ["r"]
+    }
+    out = json.loads(provider.handle_tool_call("hal0_memory_add", {"text": "fact"}))
+    assert out["bank"] == "shared"
 
 
 # ── on_memory_write ─────────────────────────────────────────────────────
@@ -871,42 +955,45 @@ def test_get_config_schema_declares_expected_keys() -> None:
     provider = Hal0MemoryProvider()
     schema = provider.get_config_schema()
     keys = {entry["key"] for entry in schema}
+    # M1: aligned to the upstream local_external shape — base_url + agent_id.
     assert keys == {
         "memory.hal0.base_url",
         "memory.hal0.agent_id",
-        "memory.hal0.default_visibility",
     }
     # No field is a secret — secrets are provisioned separately.
     assert all(entry["secret"] is False for entry in schema)
-    vis = next(e for e in schema if e["key"] == "memory.hal0.default_visibility")
-    assert vis["default"] == "shared"
 
 
-def test_save_config_persists_only_allowed_nonsecret_keys(tmp_path) -> None:
+def test_save_config_writes_local_external_shape(tmp_path) -> None:
+    # M1: config persists to <hermes_home>/hindsight/config.json in the upstream
+    # local_external shape, extended with hal0's dual-bank template. Secrets are
+    # dropped (only base_url + agent_id are read from values).
     provider = Hal0MemoryProvider()
     provider.save_config(
         {
-            "memory.hal0.base_url": "http://box:8080",
+            "memory.hal0.base_url": "http://box:8080/",
             "memory.hal0.agent_id": "hermes",
-            "memory.hal0.default_visibility": "private",
             "memory.hal0.api_key": "SECRET-DO-NOT-WRITE",  # must be dropped
         },
         str(tmp_path),
     )
-    written = json.loads((tmp_path / "hal0-memory.config.json").read_text())
+    written = json.loads((tmp_path / "hindsight" / "config.json").read_text())
     assert written == {
-        "memory.hal0.base_url": "http://box:8080",
-        "memory.hal0.agent_id": "hermes",
-        "memory.hal0.default_visibility": "private",
+        "mode": "local_external",
+        "api_url": "http://box:8080/api/memory",
+        "private_bank_template": "private:{agent}",
+        "shared_bank": "shared",
+        "base_url": "http://box:8080",
+        "agent_id": "hermes",
     }
-    assert "memory.hal0.api_key" not in written  # secret never persisted here
+    assert "SECRET-DO-NOT-WRITE" not in json.dumps(written)  # secret never persisted
 
 
 def test_backup_paths_includes_saved_config(tmp_path) -> None:
     provider = Hal0MemoryProvider()
     assert provider.backup_paths() == []  # nothing declared yet
     provider.save_config({"memory.hal0.agent_id": "hermes"}, str(tmp_path))
-    assert str(tmp_path / "hal0-memory.config.json") in provider.backup_paths()
+    assert str(tmp_path / "hindsight" / "config.json") in provider.backup_paths()
 
 
 def test_backup_paths_includes_spool_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:

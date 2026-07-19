@@ -190,4 +190,9 @@ tracked_files = [
     "web/src/plugins/slots.ts",
     "hermes_cli/web_server.py",
     "tools/registry.py",             # general tool registry (hal0-tools control plane)
+    # hal0-hermes-kanban (board executor bridge, R5 §7 drift-watch blind spot)
+    "hermes_cli/kanban_db.py",       # 7-table schema (tasks/task_links/task_comments/
+                                      # task_events/task_runs/task_attachments/kanban_notify_subs)
+    "plugins/kanban/dashboard/plugin_api.py",  # /api/plugins/kanban/runs* surface
+                                      # HermesBoardExecutor (board/hermes_executor.py) calls
 ]

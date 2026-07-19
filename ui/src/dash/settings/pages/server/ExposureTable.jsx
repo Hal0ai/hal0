@@ -1,4 +1,5 @@
-// SERVER ▸ Security ▸ Route exposure (D4, post-R3 surface rework).
+// SERVER ▸ Security ▸ Route exposure (D4, post-R3 surface rework; live wiring
+// landed UI-API-2).
 //
 // Read-only view of hal0's deny-by-default route-classification taxonomy
 // (src/hal0/security/exposure.py — the AuthClass table the enforcement
@@ -6,12 +7,14 @@
 //
 // The taxonomy itself (the four classes + what each means) is a stable,
 // documented contract, so it's mirrored here as a static legend that teaches
-// the model. But the LIVE per-route classification — the actual (method, path)
-// → class rows and per-class counts — is static SERVER data with NO route
-// serving it today: nothing under src/hal0/api/routes exposes RULES /
-// OPEN_ALLOWLIST over HTTP. So the concrete table is a stub-with-reason (an
-// API-lane request: GET /api/auth/exposure) rather than a hardcoded copy of
-// the backend table that would silently rot the moment a rule changes.
+// the model. The LIVE per-route classification — the actual (method, path) →
+// class rows, plus the OPEN allowlist — now comes from GET /api/auth/exposure
+// (routes/auth.py; walks the real RULES/OPEN_ALLOWLIST tuples in evaluation
+// order, so it can't silently rot the way a hardcoded copy would). That route
+// is ADMIN-gated, so a non-admin caller (or auth off with an anonymous
+// session) sees an honest permission reason instead of a fabricated table.
+
+import { useAuthExposure } from '@/api/hooks/useAuthExposure'
 
 const CLASSES = [
   {
@@ -48,20 +51,50 @@ const CLASSES = [
   },
 ]
 
-const LIVE_TABLE_REASON =
-  'Live per-route classification is not served over HTTP yet — the deny-by-default table (security/exposure.py) is static server data with no read endpoint. (API-lane request: GET /api/auth/exposure)'
+const CLASS_HUE = Object.fromEntries(CLASSES.map((c) => [c.key, c]))
+
+// `authClass` comes off the wire lowercase (AuthClass.value, e.g. "admin") —
+// the legend above keys on the uppercase taxonomy name, so normalise before
+// both the lookup and the label.
+function classChip(authClass) {
+  const upper = String(authClass || '').toUpperCase()
+  const c = CLASS_HUE[upper] || CLASS_HUE.ADMIN
+  return (
+    <span
+      className="chip mono"
+      style={{ color: c.hue, borderColor: c.line, background: c.soft, fontSize: 10, letterSpacing: '.04em' }}
+    >
+      {upper}
+    </span>
+  )
+}
+
+function permissionReason(error) {
+  if (error?.status === 401 || error?.status === 403 || error?.code === 'auth.forbidden') {
+    return 'Live per-route table requires an admin session — GET /api/auth/exposure is ADMIN-gated (log in as admin to view it).'
+  }
+  return error?.message
+    ? `Live per-route table failed to load: ${error.message}`
+    : 'Live per-route table failed to load.'
+}
 
 export function ExposureTable() {
+  const exposure = useAuthExposure()
+  const loading = exposure.isPending
+  const errored = exposure.isError
+  const rules = exposure.data?.rules ?? []
+  const allowlist = exposure.data?.open_allowlist ?? []
+
   return (
     <div className="s-section" data-testid="exposure-table">
       <h3 style={{ margin: '0 0 4px', fontSize: 13 }}>Route exposure</h3>
       <p className="desc" style={{ marginTop: 0 }}>
         The backend&apos;s deny-by-default classification table is the source of truth for how much auth
-        each route needs — read-only here. Below is the class taxonomy; the concrete per-route table
-        needs a read endpoint that does not exist yet.
+        each route needs — read-only here. Below is the class taxonomy, then the live per-route table
+        (<span className="mono">GET /api/auth/exposure</span>).
       </p>
 
-      <div className="s-panel">
+      <div className="s-panel" style={{ marginBottom: 14 }}>
         {CLASSES.map((c) => (
           <div
             key={c.key}
@@ -85,14 +118,80 @@ export function ExposureTable() {
         ))}
       </div>
 
-      <div
-        data-testid="exposure-live-stub"
-        className="mono"
-        style={{ marginTop: 10, fontSize: 10.5, color: 'var(--fg-5)', lineHeight: 1.55 }}
-        title={LIVE_TABLE_REASON}
-      >
-        ○ Live per-route table unavailable — {LIVE_TABLE_REASON}
-      </div>
+      <h4 className="mono" style={{ margin: '0 0 6px', fontSize: 11, color: 'var(--fg-4)' }}>
+        Live per-route table
+      </h4>
+
+      {loading && (
+        <div data-testid="exposure-live-loading" className="mono" style={{ fontSize: 11, color: 'var(--fg-5)', padding: '8px 2px' }}>
+          loading route table…
+        </div>
+      )}
+
+      {errored && (
+        <div
+          data-testid="exposure-live-error"
+          className="mono"
+          style={{ fontSize: 10.5, color: 'var(--warn)', padding: '8px 2px', lineHeight: 1.55 }}
+        >
+          ○ {permissionReason(exposure.error)}
+        </div>
+      )}
+
+      {!loading && !errored && (
+        <>
+          <div className="s-panel" data-testid="exposure-live-rules" style={{ marginBottom: 10 }}>
+            {rules.length === 0 && (
+              <div className="mono" style={{ fontSize: 11, color: 'var(--fg-5)', padding: '10px 14px' }}>
+                no rules reported
+              </div>
+            )}
+            {rules.map((r, i) => (
+              <div
+                key={`${r.label}-${i}`}
+                className="s-row"
+                data-testid="exposure-rule-row"
+                style={{ display: 'grid', gridTemplateColumns: '90px 90px 1fr', gap: 12, alignItems: 'center', padding: '9px 14px' }}
+              >
+                {classChip(r.auth_class)}
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-4)' }}>
+                  {(r.methods && r.methods.join('/')) || 'ANY'}
+                </span>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--fg-2)' }}>{r.label}</div>
+                  {r.pattern && (
+                    <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 2 }}>
+                      {r.pattern}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <h4 className="mono" style={{ margin: '0 0 6px', fontSize: 11, color: 'var(--fg-4)' }}>
+            OPEN allowlist ({allowlist.length})
+          </h4>
+          <div className="s-panel" data-testid="exposure-live-allowlist">
+            {allowlist.length === 0 && (
+              <div className="mono" style={{ fontSize: 11, color: 'var(--fg-5)', padding: '10px 14px' }}>
+                no allowlist entries reported
+              </div>
+            )}
+            {allowlist.map((a, i) => (
+              <div
+                key={`${a.method}-${a.path}-${i}`}
+                className="s-row mono"
+                data-testid="exposure-allowlist-row"
+                style={{ display: 'grid', gridTemplateColumns: '70px 1fr', gap: 12, padding: '7px 14px', fontSize: 11, color: 'var(--fg-3)' }}
+              >
+                <span style={{ color: 'var(--fg-5)' }}>{a.method}</span>
+                <span>{a.path}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

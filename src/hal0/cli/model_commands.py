@@ -15,10 +15,12 @@ from hal0.cli._shared import (
     _api_unreachable,
     api_delete,
     api_get,
+    api_post,
     api_put,
     die,
 )
 from hal0.cli.registry_commands import DEFAULT_REGISTRY_PATH, _do_import_backup
+from hal0.registry.import_toml import import_toml_to_sqlite
 
 app = typer.Typer(help="Manage the local model registry.")
 console = Console()
@@ -75,35 +77,15 @@ def model_list(
     console.print(table)
 
 
-@app.command("pull")
-def model_pull(
-    ref: str = typer.Argument(..., help="Curated alias (e.g. qwen3-4b) or registered model id"),
-) -> None:
-    """Download a model from Hugging Face into the local registry.
+def _poll_pull_progress(ref: str, *, done_verb: str = "Done") -> None:
+    """Poll ``/api/models/<ref>/pull/status`` every 500ms until terminal.
 
-    Starts the pull as a background job on the daemon, then polls
-    ``/api/models/<id>/pull/status`` every 500ms and prints a tqdm-style
-    progress bar until the job reaches a terminal state.
+    Shared by ``model pull`` and ``model update`` — both start a background
+    pull job under the same ``model_id`` key and want the identical
+    tqdm-style progress bar / terminal-state handling.
     """
     import time
 
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        from hal0.cli._shared import api_post
-
-        start = api_post(f"/api/models/{ref}/pull")
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    console.print(
-        f"Starting pull for [bold]{ref}[/bold] "
-        f"({start.get('hf_repo', '?')}/{start.get('hf_file', '?')})…"
-    )
-
-    # Poll status — keeps the CLI dependency footprint small. The HF
-    # tier is well within rate budget at 500ms.
     last_pct = -1
     while True:
         try:
@@ -129,16 +111,156 @@ def model_pull(
             if state == "completed":
                 sha = (s.get("sha256") or "?")[:12]
                 console.print(
-                    f"[green]Done.[/green] {ref} → {s.get('path')}  "
+                    f"[green]{done_verb}.[/green] {ref} → {s.get('path')}  "
                     f"({_fmt_size(downloaded)}, sha256 {sha}…)"
                 )
                 return
             err = s.get("error") or "(no error message)"
-            die(f"pull {state}: {err}")
+            die(f"{state}: {err}")
             return
         time.sleep(0.5)
 
 
+@app.command("pull")
+def model_pull(
+    ref: str = typer.Argument(..., help="Curated alias (e.g. qwen3-4b) or registered model id"),
+    cancel: bool = typer.Option(
+        False, "--cancel", help="Cancel an in-flight pull instead of starting one."
+    ),
+) -> None:
+    """Download a model from Hugging Face into the local registry.
+
+    Starts the pull as a background job on the daemon, then polls
+    ``/api/models/<id>/pull/status`` every 500ms and prints a tqdm-style
+    progress bar until the job reaches a terminal state. ``--cancel``
+    instead requests cancellation of whatever pull job is currently
+    tracked under this ref (POST /api/models/<id>/pull/cancel) — a no-op
+    if the job already finished.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    if cancel:
+        try:
+            job = api_post(f"/api/models/{ref}/pull/cancel")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        console.print(f"Cancel requested for [bold]{ref}[/bold] → state={job.get('state', '—')}")
+        return
+
+    try:
+        start = api_post(f"/api/models/{ref}/pull")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(
+        f"Starting pull for [bold]{ref}[/bold] "
+        f"({start.get('hf_repo', '?')}/{start.get('hf_file', '?')})…"
+    )
+    _poll_pull_progress(ref)
+
+
+@app.command("default")
+def model_default(
+    ref: str = typer.Argument(
+        ..., help="Model ref to promote/clear as its dispatcher-type default"
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Clear the default marker instead of setting it."
+    ),
+) -> None:
+    """Promote (or clear) a model as its dispatcher type's default model.
+
+    POST /api/models/<id>/default. At most one model per dispatcher type
+    (llm/embedding/reranking/…) holds the default marker — promoting one
+    demotes whichever model currently holds it.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        result = api_post(f"/api/models/{ref}/default", json={"default": not clear})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if clear:
+        console.print(f"Cleared default marker on [bold]{ref}[/bold].")
+        return
+    demoted = [m for m in (result.get("demoted") or []) if m != ref]
+    console.print(f"[bold]{ref}[/bold] is now the default.")
+    if demoted:
+        console.print(f"  [dim]demoted:[/dim] {', '.join(demoted)}")
+
+
+@app.command("update")
+def model_update(
+    ref: str | None = typer.Argument(
+        None, help="Model id to re-pull in place over its existing bytes (omit with --check)"
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Probe HuggingFace for available updates instead of re-pulling."
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Force a fresh HF probe, bypassing the 1h server-side cache (--check only).",
+    ),
+) -> None:
+    """Check for, or apply, HuggingFace updates to already-pulled models.
+
+    ``hal0 model update --check`` compares each HF-pulled model's recorded
+    sha256 against the Hub's current bytes (GET /api/models/updates/check)
+    without downloading anything. ``hal0 model update <ref>`` re-pulls that
+    model's HF file in place over its existing path (POST
+    /api/models/<id>/update), reusing the same progress-bar polling as
+    ``model pull``.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    if check:
+        try:
+            data = api_get(
+                "/api/models/updates/check", params={"refresh": "1"} if refresh else None
+            )
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        models = data.get("models") or {}
+        if not models:
+            console.print(
+                "[dim]No HF-pulled models to check (or none have a recorded sha256).[/dim]"
+            )
+            return
+        table = Table(title=f"Update check ({data.get('updates_available', 0)} available)")
+        table.add_column("ID", style="bold")
+        table.add_column("Update available")
+        table.add_column("Reason", style="dim")
+        for mid, verdict in models.items():
+            table.add_row(mid, str(verdict.get("update_available")), verdict.get("reason") or "—")
+        console.print(table)
+        return
+
+    if not ref:
+        die("model update requires a model ref, or pass --check to scan for updates.")
+        return
+
+    try:
+        start = api_post(f"/api/models/{ref}/update")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(
+        f"Starting update for [bold]{ref}[/bold] "
+        f"({start.get('hf_repo', '?')}/{start.get('hf_file', '?')})…"
+    )
+    _poll_pull_progress(ref, done_verb="Updated")
+
+
+# HAL0-SUNSET: v1.0.0 — alias for `model add`; drop the alias.
 @app.command("register", hidden=True)
 def model_register(
     model_id: str = typer.Argument(..., help="Model id, e.g. 'qwen3-4b-q4_k_m'"),
@@ -201,6 +323,7 @@ def model_show(
     console.print(table)
 
 
+# HAL0-SUNSET: v1.0.0 — alias for `slot edit --model`; drop the alias.
 @app.command("assign", hidden=True)
 def model_assign(
     ref: str = typer.Argument(..., help="Model ref to assign"),
@@ -301,7 +424,7 @@ def model_add(
     caps = ", ".join(m.get("capabilities", []) or []) or "—"
     console.print(f"  capabilities: {caps}")
     console.print(
-        f"[dim]Next: hal0 model run {mid}   (or: hal0 model assign {mid} --slot <slot>)[/dim]"
+        f"[dim]Next: hal0 model run {mid}   (or: hal0 slot edit <slot> --model {mid})[/dim]"
     )
 
 
@@ -492,5 +615,20 @@ def model_import_backup(
     CRUD). Slot selections, ``capabilities.toml``, and per-slot TOML files
     are NOT restored — v0.1.x → v0.2 is a clean break; redo slot selection
     via the bundle picker or ``hal0 slot create`` after importing.
+
+    Post-ML-1, ``registry.toml`` is a derived snapshot — the SQLite
+    registry is what every runtime reader consults, and it ignores a
+    non-empty on-disk TOML (:mod:`hal0.registry.sqlite_store` §161-163).
+    Restoring the TOML alone would silently do nothing on any box that has
+    already cut over. Chain the same idempotent ``INSERT OR IGNORE`` import
+    ``hal0 registry import-sqlite`` uses so the restored entries actually
+    become visible to ``hal0 model list`` — never overwrites a model id
+    already present in SQLite.
     """
     _do_import_backup(path, force, dest)
+    report = import_toml_to_sqlite(registry_file=dest)
+    console.print(
+        f"[green]sqlite sync[/green]: {report.imported} imported, "
+        f"{report.skipped_existing} already present, "
+        f"{report.skipped_invalid} invalid (skipped)"
+    )

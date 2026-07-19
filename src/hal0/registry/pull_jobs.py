@@ -33,6 +33,33 @@ Interface contract (the only names route handlers / callers should use):
     speed_bps(job) / eta_s(job, speed)
         Rolling-rate helpers used by the progress payload.
 
+Route-facing orchestration (the whole start/track/update/cancel surface — the
+handlers in ``routes/models.py`` are now request→call→envelope shells over these):
+
+    enqueue(request, *, model_id, run_wrapper=run_pull_with_events) -> dict
+        The ``POST /{id}/pull`` flow: in-flight dedup, FLM dispatch, source /
+        capability resolution, registry seeding, job creation + queued-snapshot
+        persist, ``pull.queued`` emit, detached scheduling. ``run_wrapper`` is
+        injected so the route can pass its module-level ``_run_pull_with_events``
+        binding — preserving the monkeypatch seam.
+    enqueue_update(request, *, model_id, hf_repo, hf_file, dest,
+                   run_wrapper=run_pull_with_events) -> dict
+        The ``POST /{id}/update`` flow (in-place re-pull over pinned ``dest``);
+        the route keeps the 404/422 validation guards (they raise API-layer
+        envelopes) and passes the resolved coords in.
+    list_all(jobs, registry) -> list[dict]
+        The ``GET /pulls`` flow: in-memory plus persisted-terminal, deduped
+        (in-memory wins), enriched, active-first sorted.
+    status(model_id, jobs, registry) -> dict
+        The ``GET /{id}/pull/status`` flow with disk-fallback.
+    cancel(model_id, jobs) -> dict
+        The ``POST /{id}/pull/cancel`` flow (set the cancel flag; idempotent).
+    delete(model_id, jobs) -> None
+        The ``DELETE /pulls/{id}`` flow (409 on active, else drop mem + disk).
+    build_stream_response(model_id, request) -> StreamingResponse
+        The ``GET /{id}/pull/stream`` SSE flow with disk-fallback + shutdown
+        short-circuit.
+
 Every function is pure of module state except for the ``request.app.state``
 side effects (``model_pull_jobs``, ``model_pull_tasks``, ``events``) they were
 already performing in the route layer — see the §3.1 Protocol seams in
@@ -44,17 +71,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 
 from hal0.registry.curated import get_curated
 from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
+    PullJobNotFound,
+    list_persisted_jobs,
     make_job,
     persist_pull_job,
     pull_job_file,
@@ -553,3 +584,349 @@ async def start_flm_pull(
         "state": job.state,
         "source": "flm",
     }
+
+
+# ── route-facing orchestration (start / track / update / cancel) ──────────────
+
+
+async def enqueue(
+    request: Request,
+    *,
+    model_id: str,
+    run_wrapper: Any = run_pull_with_events,
+) -> dict[str, object]:
+    """Start a background HuggingFace (or FLM) pull and return a job handle.
+
+    Idempotent-ish: an in-flight (``queued``/``running``) job for ``model_id``
+    is returned rather than duplicated. ``run_wrapper`` is injected so the route
+    can pass its module-level ``_run_pull_with_events`` binding, preserving the
+    monkeypatch seam; it defaults to the real wrapper for direct callers.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+
+    # Don't double-pull. A user spamming the wizard's Download button
+    # shouldn't kick off two streams against the same HF URL.
+    existing = jobs.get(model_id)
+    if existing is not None and existing.state in ("queued", "running"):
+        return {
+            "id": existing.job_id,
+            "model_id": model_id,
+            "state": existing.state,
+            "resumed": True,
+        }
+
+    # FLM/NPU tags route through the toolbox container instead of HF.
+    # The ``model:tag`` shape is the dispatch signal (HF ids never use
+    # colons), validated against the FLM probe so a stray ``foo:bar``
+    # falls through to the HF resolver and gets a clean 422.
+    from hal0.providers.flm import is_flm_tag
+
+    if is_flm_tag(model_id):
+        return await start_flm_pull(model_id, request, jobs)
+
+    # Body is optional — an empty / non-JSON request is the legacy
+    # "pull by id" path used by the wizard's Pull-against-curated row.
+    body: dict[str, Any] | None = None
+    try:
+        if int(request.headers.get("content-length") or 0) > 0:
+            body = await request.json()
+            if not isinstance(body, dict):
+                body = None
+    except Exception:
+        body = None
+
+    hf_repo, hf_file, mmproj_file, from_body = resolve_pull_source_with_body(
+        request, model_id, body
+    )
+    if from_body:
+        labels = body.get("labels") if isinstance(body, dict) else None
+        if not isinstance(labels, list):
+            labels = None
+        chat_template = body.get("chat_template") if isinstance(body, dict) else None
+        if not isinstance(chat_template, str):
+            chat_template = None
+        seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template)
+    job = make_job(model_id)
+    jobs[model_id] = job
+    # Persist the queued snapshot before returning so a status poll resolves
+    # even if the daemon restarts before the background task runs (#626).
+    persist_pull_job(job)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "pull.queued",
+            "info",
+            f"pull:{model_id}",
+            f"{model_id}: queued ({hf_repo}/{hf_file})",
+            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file},
+        )
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    registry = request.app.state.model_registry
+    # P3: route the download into the capability-grouped store layout when the
+    # capability is resolvable (body → registry → curated); None → flat fallback.
+    capability, comfyui_subdir = resolve_pull_capability(request, model_id, body)
+    schedule_pull_task(
+        request.app.state,
+        model_id,
+        run_wrapper(
+            job,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            registry=registry,
+            hf_token=hf_token,
+            event_bus=event_bus,
+            capability=capability,
+            comfyui_subdir=comfyui_subdir,
+            mmproj_file=mmproj_file,
+        ),
+    )
+    out: dict[str, object] = {
+        "id": job.job_id,
+        "model_id": model_id,
+        "state": job.state,
+        "hf_repo": hf_repo,
+        "hf_file": hf_file,
+    }
+    if mmproj_file:
+        out["mmproj_file"] = mmproj_file
+    return out
+
+
+async def enqueue_update(
+    request: Request,
+    *,
+    model_id: str,
+    hf_repo: str,
+    hf_file: str,
+    dest: str,
+    run_wrapper: Any = run_pull_with_events,
+) -> dict[str, object]:
+    """Re-pull a model's HF file over its installed bytes (in place).
+
+    The caller (route) has already validated that the model exists, carries HF
+    coordinates, and has a single-file ``dest`` to replace. Idempotent-ish: an
+    in-flight job for the id is returned rather than duplicated. ``run_wrapper``
+    is injected to preserve the ``_run_pull_with_events`` monkeypatch seam.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    in_flight = jobs.get(model_id)
+    if in_flight is not None and in_flight.state in ("queued", "running"):
+        return {
+            "id": in_flight.job_id,
+            "model_id": model_id,
+            "state": in_flight.state,
+            "resumed": True,
+        }
+
+    job = make_job(model_id)
+    jobs[model_id] = job
+    persist_pull_job(job)
+
+    registry = request.app.state.model_registry
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "pull.queued",
+            "info",
+            f"pull:{model_id}",
+            f"{model_id}: update queued ({hf_repo}/{hf_file})",
+            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file, "update": True},
+        )
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    schedule_pull_task(
+        request.app.state,
+        model_id,
+        run_wrapper(
+            job,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            registry=registry,
+            hf_token=hf_token,
+            event_bus=event_bus,
+            dest_override=dest,
+        ),
+    )
+    return {
+        "id": job.job_id,
+        "model_id": model_id,
+        "state": job.state,
+        "hf_repo": hf_repo,
+        "hf_file": hf_file,
+        "dest_path": dest,
+        "update": True,
+    }
+
+
+def list_all(jobs: dict[str, PullJob], registry: Any) -> list[dict[str, Any]]:
+    """Return all pull jobs (active in-memory + persisted terminal from disk).
+
+    Dedup: in-memory jobs win over persisted snapshots for the same model_id.
+    Entries are enriched via :func:`hal0.services.models_service.pull_entry` and
+    sorted active-first, then by ``started_at`` descending.
+    """
+    from hal0.services.models_service import pull_entry
+
+    # Start with persisted TERMINAL jobs from disk.
+    # Non-terminal snapshots (e.g. "running" from a crash) are skipped
+    # — there is no matching in-memory job to reconcile them.
+    persisted = list_persisted_jobs()
+    by_model: dict[str, dict[str, Any]] = {}
+    for p in persisted:
+        state = p.get("state")
+        if state not in ("completed", "failed", "cancelled"):
+            continue
+        mid = p.get("model_id")
+        if isinstance(mid, str) and mid:
+            by_model[mid] = p
+
+    # Overlay in-memory jobs (they win — reflect live state)
+    for mid, job in jobs.items():
+        by_model[mid] = job.as_dict()
+
+    result: list[dict[str, Any]] = [
+        pull_entry(data, mid, registry) for mid, data in by_model.items()
+    ]
+    result.sort(
+        key=lambda e: (
+            0 if e.get("state") in ("queued", "running") else 1,
+            -(e.get("started_at") or 0),
+        )
+    )
+    return result
+
+
+def status(model_id: str, jobs: dict[str, PullJob], registry: Any) -> dict[str, object]:
+    """Return the current pull job for ``model_id``, with on-disk fallback.
+
+    Falls back to the persisted store (#626) so a status poll still resolves
+    after an ``hal0-api`` restart wiped the process-local dict.
+    """
+    job = jobs.get(model_id)
+    if job is None:
+        persisted = load_persisted(model_id, registry)
+        if persisted is not None:
+            return persisted
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+    return job.as_dict()
+
+
+def cancel(model_id: str, jobs: dict[str, PullJob]) -> dict[str, object]:
+    """Request cancellation of an in-flight pull (idempotent).
+
+    Sets a cancel flag the background task observes on the next chunk boundary;
+    cancelling a terminal job is a no-op.
+    """
+    job = jobs.get(model_id)
+    if job is None:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+    if job.state in ("queued", "running"):
+        job.cancel_requested = True
+    return job.as_dict()
+
+
+def delete(model_id: str, jobs: dict[str, PullJob]) -> None:
+    """Clear a terminal pull job from memory + disk.
+
+    Raises ``Conflict`` (409) if the job is still active (queued/running), and
+    ``PullJobNotFound`` (404) if nothing was present in memory or on disk.
+    """
+    # Check in-memory first — active jobs must not be cleared
+    job = jobs.get(model_id)
+    if job is not None and job.state in ("queued", "running"):
+        from hal0.errors import Conflict
+
+        raise Conflict(
+            f"pull job for {model_id!r} is still active (state={job.state})",
+            code="pull.active",
+            details={"model_id": model_id, "state": job.state},
+        )
+
+    # Remove from in-memory dict
+    deleted_mem = jobs.pop(model_id, None) is not None
+
+    # Remove persisted file
+    deleted_disk = False
+    with contextlib.suppress(OSError):
+        p = pull_job_file(model_id)
+        if p.exists():
+            p.unlink()
+            deleted_disk = True
+
+    if not deleted_mem and not deleted_disk:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+
+
+def build_stream_response(model_id: str, request: Request) -> StreamingResponse:
+    """SSE stream of pull progress, with on-disk fallback + shutdown short-circuit.
+
+    Emits one ``data:`` frame at start, then one per progress signal (or a 5s
+    keep-alive), and a final terminal frame. When the in-memory job is absent
+    (e.g. after an ``hal0-api`` restart) it serves one terminal frame from the
+    persisted snapshot (#626) and closes.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    job = jobs.get(model_id)
+    if job is None:
+        persisted = load_persisted(model_id, request.app.state.model_registry)
+        if persisted is not None:
+            # Serve one terminal frame from the persisted snapshot so the
+            # client's SSE consumer sees the final state and can close.
+            async def _gen_persisted() -> Any:
+                yield f"data: {json.dumps(persisted)}\n\n"
+
+            return StreamingResponse(
+                _gen_persisted(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+
+    shutting_down: asyncio.Event | None = getattr(request.app.state, "shutting_down", None)
+
+    async def _gen() -> Any:
+        # Emit an immediate snapshot so SSE clients don't sit at zero
+        # while waiting for the first progress signal.
+        yield f"data: {json.dumps(job.as_dict())}\n\n"
+        while job.state in ("queued", "running"):
+            # hal0-api shutdown (issue #1225): don't leave this generator
+            # dangling open — bound the wait on the shutdown flag so uvicorn's
+            # graceful-shutdown connection drain isn't blocked by a live pull.
+            if shutting_down is not None and shutting_down.is_set():
+                break
+            event = job.progress_event
+            try:
+                await asyncio.wait_for(event.wait(), timeout=5.0)
+            except TimeoutError:
+                if shutting_down is not None and shutting_down.is_set():
+                    break
+                # Keep-alive — surfaces stuck downloads without closing
+                # the stream.
+                yield f"data: {json.dumps(job.as_dict())}\n\n"
+                continue
+            yield f"data: {json.dumps(job.as_dict())}\n\n"
+        # One terminal frame so the UI sees the final state and can close.
+        yield f"data: {json.dumps(job.as_dict())}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

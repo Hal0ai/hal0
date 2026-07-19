@@ -2257,7 +2257,7 @@ class SlotManager:
     ) -> None:
         """Reject a write that would land a second ``default=true`` per type.
 
-        SC-4 (CONTEXT.md §defaults): exactly one ``default = true`` slot
+        SC-4 (ARCHITECTURE.md §defaults): exactly one ``default = true`` slot
         is allowed per ``type``. :meth:`default_slot_for` already raises
         at routing time when two defaults slip onto disk; this guard is
         the belt to that suspenders — it refuses the offending write on
@@ -2585,10 +2585,6 @@ class SlotManager:
     async def stop_idle_monitor(self) -> None:
         """Cancel the idle-monitor task if running.  Idempotent."""
         await self._reaper.stop()
-
-    async def _idle_monitor_loop(self) -> None:
-        """See :meth:`hal0.slots.reaper.SlotReaper._loop`."""
-        await self._reaper._loop()
 
     async def _evict_timeout_for(self, slot_name: str) -> float | None:
         """See :meth:`hal0.slots.reaper.SlotReaper.evict_timeout_for`."""

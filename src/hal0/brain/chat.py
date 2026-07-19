@@ -490,10 +490,13 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "hardware_probe",
         # memory_* ride the profile's own namespace (private:hermes__hal0-brain)
         # via Hindsight, not the agent memory engine's MCP dispatcher
+        # (memory_recall added to the admin catalog in §4.3 — same
+        # exclusion rationale applies)
         "memory_add",
         "memory_search",
         "memory_list",
         "memory_delete",
+        "memory_recall",
     }
 )
 

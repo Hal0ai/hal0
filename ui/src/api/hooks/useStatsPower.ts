@@ -10,6 +10,7 @@
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet, Hal0Error } from '../client'
+import { ENDPOINTS } from '../endpoints'
 
 export interface StatsPower {
   gpu_power_w: number | null
@@ -25,14 +26,13 @@ export interface UseStatsPowerResult {
 }
 
 const POLL_MS = 5_000
-const POWER_URL = '/api/stats/power'
 
 export function useStatsPower(): UseStatsPowerResult {
   const query = useQuery<StatsPower>({
     queryKey: ['stats', 'power'],
     queryFn: async () => {
       try {
-        return await apiGet<StatsPower>(POWER_URL)
+        return await apiGet<StatsPower>(ENDPOINTS.statsPower)
       } catch (err) {
         // 404 = endpoint not yet deployed; treat as pending not crash.
         if (

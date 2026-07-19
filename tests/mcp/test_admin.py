@@ -69,6 +69,10 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             captured["calls"].append(("PUT", url, json, dict(headers or {})))
             return _MockResponse({"ok": "put"})
 
+        async def patch(self, url: str, json: Any = None, headers: Any = None) -> _MockResponse:
+            captured["calls"].append(("PATCH", url, json, dict(headers or {})))
+            return _MockResponse({"ok": "patch"})
+
     monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
     return captured
 
@@ -156,6 +160,12 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         "stack_delete",
         "profile_delete",
         "upstream_delete",
+        # §4.3 tier-a buildout: both remove a resource outright.
+        # model_pull_delete stays autonomous (clears a TERMINAL job's
+        # bookkeeping only, re-pullable); bench_queue_delete is gated
+        # (drops a pending cell before it runs).
+        "model_pull_delete",
+        "bench_queue_delete",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
@@ -515,6 +525,20 @@ def test_catalog_validation_catches_path_arg_drift(monkeypatch: pytest.MonkeyPat
         admin._validate_catalog()
 
 
+def test_catalog_validation_catches_unsupported_http_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A _REST_MAP entry whose method _call_rest can't forward (typo, or
+    a new verb nobody wired a branch for) must fail import validation —
+    this is the guard that would have caught upstream_update's PATCH
+    route shipping mapped but unforwardable, instead of the gated tool
+    surviving operator approval and raising deep in ``_call_rest``."""
+    admin._validate_catalog()  # coherent as shipped
+    monkeypatch.setitem(admin._REST_MAP, "slot_list", ("TRACE", "/api/slots"))
+    with pytest.raises(RuntimeError, match="slot_list"):
+        admin._validate_catalog()
+
+
 def test_catalog_validation_catches_description_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -524,6 +548,29 @@ def test_catalog_validation_catches_description_drift(
     monkeypatch.setattr(admin, "GATED_TOOLS", admin.GATED_TOOLS | {"ghost_tool"})
     with pytest.raises(RuntimeError, match="ghost_tool"):
         admin._validate_catalog()
+
+
+async def test_upstream_update_forwards_as_patch(
+    mock_transport: dict[str, Any],
+) -> None:
+    """upstream_update maps to a PATCH route (_REST_MAP). Regression for
+    the bug where _REST_MAP declared PATCH but _call_rest only knew
+    GET/DELETE/POST/PUT — the gated tool survived operator approval and
+    then raised ``ValueError: unsupported HTTP method`` inside the
+    executor. Exercised via _execute_tool, the same entry point the
+    approval-queue executor calls once an operator approves."""
+    result = await admin._execute_tool(
+        tool="upstream_update",
+        args={"name": "openai", "base_url": "https://api.openai.com"},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+    assert result == {"ok": "patch"}
+    method, url, body, _headers = mock_transport["calls"][-1]
+    assert method == "PATCH"
+    assert url == "http://t/api/upstreams/openai"
+    assert body == {"base_url": "https://api.openai.com"}
 
 
 def test_model_edit_and_model_update_route_to_distinct_endpoints() -> None:
@@ -700,3 +747,249 @@ async def test_dispatch_policy_bulk_memory_delete_stays_gated(queue: ApprovalQue
         policy=_policy(auto_approve=("memory_delete",)),
     )
     assert result["status"] == "pending_approval"
+
+
+# ── §4.3 tier-a buildout: rename/by-id/by-name/resolved/state/defaults, ─────
+# model default+duplicate, pulls delete, system-info, bench queue delete,
+# memory_recall, and the memory_search/memory_list read reclassification.
+
+
+def test_memory_reads_are_autonomous_read_not_write() -> None:
+    """memory_search/memory_list have always carried readOnlyHint=True —
+    the classification bucket just hadn't caught up (spec §4.3)."""
+    assert "memory_search" in admin.AUTONOMOUS_READ_TOOLS
+    assert "memory_list" in admin.AUTONOMOUS_READ_TOOLS
+    assert "memory_search" not in admin.AUTONOMOUS_WRITE_TOOLS
+    assert "memory_list" not in admin.AUTONOMOUS_WRITE_TOOLS
+
+
+def test_memory_recall_is_catalogued_as_autonomous_read() -> None:
+    """memory_recall's handler already existed in hal0.mcp.memory —
+    §4.3 adds it to the admin catalog so tools/list actually advertises
+    it (the module docstring already promised 'every tool')."""
+    assert "memory_recall" in admin.AUTONOMOUS_READ_TOOLS
+    assert admin._ANNOTATIONS["memory_recall"].readOnlyHint is True
+
+
+@pytest.mark.asyncio
+async def test_memory_recall_dispatches_through_memory_dispatcher(queue: ApprovalQueue) -> None:
+    """memory_recall bypasses REST entirely — same in-process path as
+    the other memory_* tools."""
+    dispatcher = AsyncMock(return_value={"status": "ok", "results": []})
+    result = await admin.dispatch(
+        tool="memory_recall",
+        args={"query": "what did we decide about ports"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+        memory_dispatcher=dispatcher,
+    )
+    assert result == {"status": "ok", "results": []}
+    dispatcher.assert_awaited_once_with(
+        "memory_recall", {"query": "what did we decide about ports"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_slot_by_name_and_by_id_dispatch_get(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    await admin.dispatch(
+        tool="slot_by_name",
+        args={"name": "agent"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("GET", "http://t/api/slots/by-name/agent")
+
+    await admin.dispatch(
+        tool="slot_by_id",
+        args={"slot_id": "3"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("GET", "http://t/api/slots/by-id/3")
+
+
+@pytest.mark.asyncio
+async def test_slot_resolved_and_state_dispatch_get(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    await admin.dispatch(
+        tool="slot_resolved",
+        args={"name": "agent"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("GET", "http://t/api/slots/agent/resolved")
+
+    await admin.dispatch(
+        tool="slot_state",
+        args={"name": "agent"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("GET", "http://t/api/slots/agent/state")
+
+
+@pytest.mark.asyncio
+async def test_slot_set_defaults_dispatches_patch_autonomously(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """PATCH .../defaults is autonomous-write, same blast radius class as
+    slot_edit's PUT — and exercises the generic PATCH verb support that
+    landed in Phase 0 (_REST_VERB_PAYLOAD_KWARG)."""
+    result = await admin.dispatch(
+        tool="slot_set_defaults",
+        args={"name": "agent", "ctx_size": 8192},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "patch"}
+    assert queue.list_pending() == []
+    method, url, payload, _ = mock_transport["calls"][-1]
+    assert method == "PATCH"
+    assert url == "http://t/api/slots/agent/defaults"
+    assert payload == {"ctx_size": 8192}
+
+
+@pytest.mark.asyncio
+async def test_slot_rename_is_gated(queue: ApprovalQueue, mock_transport: dict[str, Any]) -> None:
+    result = await admin.dispatch(
+        tool="slot_rename",
+        args={"name": "agent", "new_name": "steward"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+    assert mock_transport["calls"] == []
+    aid = result["approval_id"]
+    await queue.approve(aid)
+    method, url, payload, _ = mock_transport["calls"][-1]
+    assert method == "POST"
+    assert url == "http://t/api/slots/agent/rename"
+    assert payload == {"new_name": "steward"}
+
+
+@pytest.mark.asyncio
+async def test_model_set_default_and_duplicate_are_autonomous_write(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="model_set_default",
+        args={"model_id": "qwen3-4b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "post"}
+    assert queue.list_pending() == []
+    method, url, payload, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("POST", "http://t/api/models/qwen3-4b/default")
+    assert payload == {}
+
+    result = await admin.dispatch(
+        tool="model_duplicate",
+        args={"model_id": "qwen3-4b", "new_id": "qwen3-4b-cpu"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "post"}
+    assert queue.list_pending() == []
+    method, url, payload, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("POST", "http://t/api/models/qwen3-4b/duplicate")
+    assert payload == {"new_id": "qwen3-4b-cpu"}
+
+
+@pytest.mark.asyncio
+async def test_model_pull_delete_is_autonomous_write(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """Clears a TERMINAL pull job's bookkeeping only — low blast radius,
+    stays autonomous like model_pull_cancel (not gated like model_delete)."""
+    result = await admin.dispatch(
+        tool="model_pull_delete",
+        args={"model_id": "qwen3-4b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "delete"}
+    assert queue.list_pending() == []
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("DELETE", "http://t/api/models/pulls/qwen3-4b")
+
+
+@pytest.mark.asyncio
+async def test_system_info_is_autonomous_read(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "get"}
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("GET", "http://t/api/system-info")
+
+
+@pytest.mark.asyncio
+async def test_bench_queue_delete_is_gated(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="bench_queue_delete",
+        args={"item_id": "abcd1234"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+    assert mock_transport["calls"] == []
+    aid = result["approval_id"]
+    await queue.approve(aid)
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("DELETE", "http://t/api/benchmarks/queue/abcd1234")
+
+
+def test_excluded_tools_never_collide_with_the_live_catalog() -> None:
+    """EXCLUDED_TOOLS documents deliberate non-exposure (tier b, §4.3) —
+    a label landing in both tables would mean a tool is simultaneously
+    'shipped' and 'excluded', which _validate_catalog must reject."""
+    catalog = admin.AUTONOMOUS_READ_TOOLS | admin.AUTONOMOUS_WRITE_TOOLS | admin.GATED_TOOLS
+    assert set(admin.EXCLUDED_TOOLS).isdisjoint(catalog)
+    assert all(reason.strip() for reason in admin.EXCLUDED_TOOLS.values())
+
+
+def test_validate_catalog_catches_excluded_tools_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(admin.EXCLUDED_TOOLS, "slot_list", "bogus collision")
+    with pytest.raises(RuntimeError, match="slot_list"):
+        admin._validate_catalog()
