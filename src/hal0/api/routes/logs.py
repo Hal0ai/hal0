@@ -10,6 +10,20 @@ Endpoints:
         Return the last N journal entries for the named unit.
     GET /api/logs/stream?unit=<u>&level=<lvl>&since=<ts>
         SSE tail of the unit's journal output.
+
+Secret redaction (api-logs-redact)
+-----------------------------------
+
+Both endpoints proxy raw journald output. Journald lines routinely
+carry Bearer tokens, ``HAL0_BEARER_TOKEN=`` env prints, and hal0's own
+``*_KEY=``-shaped admin/client credentials in error breadcrumbs — the
+same leak shapes the MCP ``logs_tail``/``slot_logs`` tools were hardened
+against (security review MED-1). This route streamed those lines with
+zero redaction, an independent leak path surfaced by the SEC-mcp-clientid
+lane. Every line is now passed through
+:func:`hal0.api._redact.redact_log_line` — the same regex the MCP admin
+server uses (see :mod:`hal0.mcp.admin`) — before it reaches a client,
+whether via the ``lines`` array or the SSE stream.
 """
 
 from __future__ import annotations
@@ -23,6 +37,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
+from hal0.api._redact import redact_log_line
 from hal0.api.middleware.error_codes import Hal0Error
 
 router = APIRouter()
@@ -114,6 +129,11 @@ async def journalctl_sse(
     clients can ``JSON.parse`` the payload without de-quoting. Gracefully
     exits with a single ``event: error`` frame when journalctl is missing
     (CI hosts without systemd, mac dev boxes).
+
+    Each line is redacted via :func:`hal0.api._redact.redact_log_line`
+    before it's framed — this is the shared SSE helper both ``/api/logs
+    /stream`` and the slot-scoped ``/api/slots/{name}/logs/stream`` route
+    call, so both surfaces get the fix in one place.
     """
     if shutil.which("journalctl") is None:
         yield 'event: error\ndata: {"message":"journalctl unavailable"}\n\n'
@@ -145,7 +165,7 @@ async def journalctl_sse(
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if not line:
                 continue
-            yield f"data: {json.dumps(line)}\n\n"
+            yield f"data: {json.dumps(redact_log_line(line))}\n\n"
     except asyncio.CancelledError:
         raise
     finally:
@@ -218,7 +238,7 @@ async def list_logs(
         }
 
     text = stdout.decode("utf-8", errors="replace")
-    lines = [ln for ln in text.splitlines() if ln]
+    lines = [redact_log_line(ln) for ln in text.splitlines() if ln]
     return {
         "unit": unit,
         "lines": lines,

@@ -11,12 +11,20 @@ flagged this as a potential exfiltration vector — an agent that can
 gate a single ``logs_tail`` approval inherits every secret the log
 redactor doesn't yet cover.
 
-We compile a single regex covering the three highest-frequency leak
-shapes and apply it to every line the tool returns to the client.
-Redaction happens in :func:`_redact_logs_payload` after the REST call
-returns and before the dispatch envelope ships to the agent — keep the
-logic localised to this module so future patterns slot in next to the
-existing ones without touching :mod:`hal0.api.routes.logs`.
+A single regex (:data:`hal0.api._redact.LOG_SECRET_RE`) covers the
+highest-frequency leak shapes and is applied to every line the tool
+returns to the client. Redaction happens in
+:func:`_redact_logs_payload` after the REST call returns and before
+the dispatch envelope ships to the agent.
+
+api-logs-redact (Phase 1) found a second, independent leak path: the
+plain REST ``GET /api/logs`` / ``GET /api/logs/stream`` surface in
+:mod:`hal0.api.routes.logs` streamed the same journald output with
+zero redaction. Rather than duplicate the regex there, the redactor
+moved to :mod:`hal0.api._redact` (dependency-free) so both surfaces
+import the one true implementation — see that module for the pattern
+and :func:`hal0.api.routes.logs.journalctl_sse` / ``list_logs`` for
+the REST-side wiring.
 
 Transport
 ---------
@@ -135,59 +143,21 @@ from typing import Any
 import httpx
 import structlog
 
+from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
-# Compiled once at import time. Each alternative ends with a
-# ``(?P<...>...)`` capture of just the secret token; the substitution
-# function rewrites that token to ``***REDACTED***`` while leaving the
-# surrounding ``Authorization:``, ``Bearer``, ``HAL0_BEARER_TOKEN=``, or
-# ``client_id=`` prefix in place. The case-insensitive flag covers the
-# lowercase ``authorization:`` header style some clients emit, and the
-# explicit alternatives are ordered most-to-least specific so the precise
-# header form wins over the bare-``Bearer`` fallback. (Python's re
-# alternation is leftmost-wins inside a single match.)
-#
-# The ``client_id=`` alternative is belt-and-suspenders for the MCP
-# clientid-leak fix (:func:`hal0.api.mcp_mount.bearer_resolver`): that
-# resolver now stamps a 12-char SHA-256 label instead of the raw bearer,
-# so this branch shouldn't fire in practice — but if a future caller ever
-# stamps a raw key-shaped value into ``client_id`` (audit rows flow
-# through this same journald pipe and can resurface via ``logs_tail``),
-# it still gets scrubbed. Length-gated at 16 chars so it doesn't mask the
-# short, non-secret labels client_id legitimately takes today
-# (``anonymous``, the 12-hex-char hash, or a short ``X-hal0-Agent`` id).
-_LOG_SECRET_RE = re.compile(
-    r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?P<auth_token>\S+)"
-    r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?P<env_token>\S+)"
-    r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)"
-    r"|(?P<prefix_client_id>client_id=)(?P<client_id_token>[A-Za-z0-9_\-\.]{16,})",
-    re.IGNORECASE,
-)
-
-
-def _redact_log_line(line: str) -> str:
-    """Replace Bearer / HAL0_BEARER_TOKEN / long client_id secrets in
-    ``line`` with ``***REDACTED***``.
-
-    The prefix is preserved so an operator reading a redacted log still
-    sees that an Authorization header (or client_id field) was present —
-    only the token body is destroyed.
-    """
-
-    def _sub(match: re.Match[str]) -> str:
-        groups = match.groupdict()
-        if groups["prefix_auth"] is not None:
-            return f"{groups['prefix_auth']}***REDACTED***"
-        if groups["prefix_env"] is not None:
-            return f"{groups['prefix_env']}***REDACTED***"
-        if groups["prefix_client_id"] is not None:
-            return f"{groups['prefix_client_id']}***REDACTED***"
-        return f"{groups['prefix_bearer']}***REDACTED***"
-
-    return _LOG_SECRET_RE.sub(_sub, line)
+# Moved to :mod:`hal0.api._redact` (as ``redact_log_line`` /
+# ``LOG_SECRET_RE``) so ``hal0.api.routes.logs`` — the plain REST
+# ``/api/logs`` + ``/api/logs/stream`` surface, mounted on every install
+# — can reuse the exact same secret-scrubbing logic without importing
+# this module, which hard-fails at import time when the optional
+# ``mcp`` SDK isn't installed (see the "Fail-fast import" section
+# below). Re-imported here under the original private name so the rest
+# of this module (and the existing test suite, which pokes
+# ``admin._redact_log_line`` directly) is unchanged (api-logs-redact).
 
 
 # ── List-shaped REST responses → top-level dict ──────────────────────────────
