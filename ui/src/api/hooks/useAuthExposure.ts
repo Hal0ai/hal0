@@ -8,16 +8,10 @@
 //   { classes: string[],                          // the four AuthClass values
 //     rules: { label, auth_class, methods, pattern, kind }[],
 //     open_allowlist: { method, path }[] }
-//
-// NOTE (CONTRACTS lane): this route has no ENDPOINTS entry yet — endpoints.ts
-// only carries authStatus/authLogin/authLogout/authRequire/authRotate. Until
-// an `authExposure` const lands there this hook uses the literal path
-// directly; swap it for `ENDPOINTS.authExposure` once added.
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
-
-const AUTH_EXPOSURE_PATH = '/api/auth/exposure'
+import { ENDPOINTS } from '../endpoints'
 
 export interface ExposureRule {
   label: string
@@ -42,7 +36,7 @@ export interface ExposureStatus {
 export function useAuthExposure() {
   return useQuery({
     queryKey: ['auth-exposure'],
-    queryFn: () => apiGet<ExposureStatus>(AUTH_EXPOSURE_PATH),
+    queryFn: () => apiGet<ExposureStatus>(ENDPOINTS.authExposure),
     retry: false,
   })
 }
