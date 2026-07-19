@@ -46,15 +46,17 @@ def _slot(name: str, model: str, **kw) -> dict:
 
 
 def test_managed_flags_split_out_of_extra_args():
-    """-ngl / -c NEVER land in extra_args (the launch denylist rejects -ngl on
-    the screened model_extra_args segment) — they fold into the typed fields."""
+    """-ngl NEVER lands in extra_args (the launch denylist rejects -ngl on the
+    screened model_extra_args segment) — it folds into the typed field. -c is
+    stripped the same way but its value is DROPPED, not folded (a slot's own
+    context_size always wins at launch — see FoldedTune docstring)."""
     ft = compute_folded_tune(
         _slot("s", "m", ngl=30, ctx=16384, extra_args="-fa on -b 2048"),
         profile_flags="-ngl 999 -c 4096 -ub 4096",
         model_defaults=None,
     )
     assert ft.n_gpu_layers == 30  # slot beats profile's 999
-    assert ft.context_size == 16384  # slot beats profile's 4096
+    assert not hasattr(ft, "context_size")
     assert "-ngl" not in (ft.extra_args or "")
     assert "-c " not in (ft.extra_args or "") and "--ctx-size" not in (ft.extra_args or "")
     assert "-fa" in ft.extra_args and "-ub" in ft.extra_args
@@ -184,7 +186,44 @@ def test_apply_writes_with_deploy_window():
 
 def test_folded_tune_equality_drives_divergence():
     """Sanity: FoldedTune value-equality is what the divergent check compares."""
-    a = FoldedTune(extra_args="-b 2048", n_gpu_layers=1, context_size=None)
-    b = FoldedTune(extra_args="-b 2048", n_gpu_layers=1, context_size=None)
-    c = FoldedTune(extra_args="-b 512", n_gpu_layers=1, context_size=None)
+    a = FoldedTune(extra_args="-b 2048", n_gpu_layers=1)
+    b = FoldedTune(extra_args="-b 2048", n_gpu_layers=1)
+    c = FoldedTune(extra_args="-b 512", n_gpu_layers=1)
     assert a == b and a != c
+
+
+# ── ctx is launch-shadowed: no fold, no divergence key ─────────────────────────
+
+
+def test_ctx_only_divergent_slots_do_not_refuse():
+    """Slots that differ ONLY in [model].context_size must NOT refuse — a
+    slot's own ctx always wins at launch (_resolve_context_size), so the
+    model-level fold never sees it as a real disagreement. Regression for the
+    halo143 qwen3.5-0.8b refusal: qtest(ctx4096) vs smoke(ctx8192)."""
+    slots = [
+        _slot("qtest", "qwen3.5-0.8b", ctx=4096, extra_args="-fa on"),
+        _slot("smoke", "qwen3.5-0.8b", ctx=8192, extra_args="-fa on"),
+    ]
+    plan = plan_slot_flags_fold(slots, {"rocm": ""}, {"qwen3.5-0.8b": None})
+    assert not plan.refusals
+    assert plan.ok
+    assert len(plan.folds) == 1
+    fold = plan.folds[0]
+    assert set(fold.slot_names) == {"qtest", "smoke"}
+    assert "context_size" not in fold.new_defaults
+
+
+def test_fold_omits_context_size_from_defaults():
+    """Applying a fold must never write context_size into model.defaults —
+    it has no launch effect (slot ctx always wins) so writing it is an
+    unwanted clobber."""
+    plan = plan_slot_flags_fold(
+        [_slot("s", "m", ctx=16384, ngl=20, extra_args="-fa on")],
+        {"rocm": ""},
+        {"m": None},
+    )
+    reg = _FakeRegistry()
+    apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
+    assert len(reg.updates) == 1
+    _model_id, updates = reg.updates[0]
+    assert "context_size" not in updates["defaults"]
