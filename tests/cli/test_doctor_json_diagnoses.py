@@ -126,6 +126,45 @@ def test_diagnose_models_store_missing() -> None:
     assert diagnoses[0].severity == "fail"
 
 
+def test_diagnose_models_unmounted_entry() -> None:
+    """O25: a model outside every mounted root is a fail with the store-unmounted id."""
+    diagnoses = _diagnose_models(
+        dangling=[],
+        unregistered=[],
+        store_missing=False,
+        unmounted=[{"id": "brain", "path": "/mnt/ai-models/brain.gguf"}],
+        mount_roots=["/var/lib/hal0/models"],
+        effective="/var/lib/hal0/models",
+        divergence=None,
+        mount_warn=None,
+        flm_dir=__import__("pathlib").Path("/flm"),
+        writ=None,
+    )
+    ids = [d.id for d in diagnoses]
+    assert ids == ["HAL0-MODEL-STORE-UNMOUNTED"]
+    assert diagnoses[0].severity == "fail"
+    assert "/mnt/ai-models/brain.gguf" in diagnoses[0].detail
+
+
+def test_models_outside_mount_roots_flags_only_unreachable() -> None:
+    from hal0.cli.doctor_commands import _models_outside_mount_roots
+
+    local = [
+        {"id": "under", "path": "/mnt/ai-models/a.gguf"},
+        {"id": "outside", "path": "/opt/models/b.gguf"},
+        {"id": "nested", "path": "/mnt/ai-models/sub/c.gguf"},
+    ]
+    out = _models_outside_mount_roots(local, ["/mnt/ai-models"])
+    assert [m["id"] for m in out] == ["outside"]
+
+
+def test_models_outside_mount_roots_empty_roots_is_noop() -> None:
+    from hal0.cli.doctor_commands import _models_outside_mount_roots
+
+    local = [{"id": "x", "path": "/anywhere/x.gguf"}]
+    assert _models_outside_mount_roots(local, []) == []
+
+
 def test_diagnose_models_unregistered_files() -> None:
     diagnoses = _diagnose_models(
         dangling=[],

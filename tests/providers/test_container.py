@@ -279,6 +279,34 @@ class TestRenderUnit:
         assert f"Volume={custom}:{custom}:ro,z" in unit.splitlines()
         assert not any(ln.startswith("Volume=/mnt/ai-models") for ln in unit.splitlines())
 
+    def test_render_mounts_store_and_pull_root(self, monkeypatch) -> None:
+        """O25: when store != pull_root, BOTH roots render a Volume so a model
+        file under the external pull_root tree is reachable in-container."""
+        monkeypatch.setattr(
+            _container_mod,
+            "model_mount_roots",
+            lambda: ["/var/lib/hal0/models", "/mnt/ai-models"],
+        )
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("brain", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
+        assert "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" in vols
+        assert "Volume=/var/lib/hal0/models:/var/lib/hal0/models:ro,z" in vols
+
+    def test_render_dedups_store_equals_pull_root(self, monkeypatch) -> None:
+        """store == pull_root → exactly one model-store Volume (no dup)."""
+        monkeypatch.setattr(
+            _container_mod,
+            "model_mount_roots",
+            lambda: ["/mnt/ai-models"],
+        )
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("brain", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
+        assert vols == ["Volume=/mnt/ai-models:/mnt/ai-models:ro,z"]
+
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
         profile = _moe_profile()
