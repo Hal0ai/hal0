@@ -1127,6 +1127,34 @@ def _dangling_registry_entries(local: list[dict[str, Any]]) -> list[dict[str, An
     return [m for m in local if not Path(str(m["path"])).exists()]
 
 
+def _models_outside_mount_roots(
+    local: list[dict[str, Any]], mount_roots: list[str]
+) -> list[dict[str, Any]]:
+    """Registry entries whose file path is NOT under any mounted model root.
+
+    O25 guard: the slot container bind-mounts ``model_mount_roots()`` (the
+    effective ``[models].store`` PLUS ``[models].pull_root``). A registered
+    model whose absolute path lives outside *every* mounted root is unreachable
+    in-container — llama-server exits ~90ms after start and the slot flaps
+    ``error``↔``warming``, never ``ready`` (a config sets ``store`` off to the
+    side while models live under ``pull_root``). Pure — mirrors the renderer's
+    mount set, no I/O. Empty ``mount_roots`` (config unreadable) → no findings.
+    """
+    if not mount_roots:
+        return []
+    norm_roots = [os.path.normpath(r) for r in mount_roots if r]
+    out: list[dict[str, Any]] = []
+    for m in local:
+        p = str(m.get("path") or "")
+        if not p:
+            continue
+        pn = os.path.normpath(p)
+        covered = any(pn == r or pn.startswith(r.rstrip("/") + "/") for r in norm_roots)
+        if not covered:
+            out.append(m)
+    return out
+
+
 def _unregistered_store_files(
     store_dir: Path, exts: set[str], registered_paths: set[str]
 ) -> list[str]:
@@ -1148,6 +1176,8 @@ def _diagnose_models(
     dangling: list[dict[str, Any]],
     unregistered: list[str],
     store_missing: bool,
+    unmounted: list[dict[str, Any]] | None = None,
+    mount_roots: list[str] | None = None,
     effective: str,
     divergence: dict[str, str] | None,
     mount_warn: dict[str, str] | None,
@@ -1190,6 +1220,41 @@ def _diagnose_models(
                 summary=f"effective store {effective} does not exist",
                 detail=effective,
                 evidence=[Evidence(kind="file", summary=effective, data={"store_path": effective})],
+            )
+        )
+    roots_str = ", ".join(mount_roots) if mount_roots else "(none)"
+    for m in unmounted or []:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-STORE-UNMOUNTED",
+                severity="fail",
+                confidence="high",
+                summary=f"registry entry {m.get('id')} lives outside every mounted model root",
+                detail=(
+                    f"{m.get('path')} is under no mounted root ({roots_str}) — the slot "
+                    "container can't see the file; llama exits ~90ms after start (O25)"
+                ),
+                evidence=[
+                    Evidence(
+                        kind="file",
+                        summary=str(m.get("path")),
+                        data={
+                            "model_id": m.get("id"),
+                            "path": m.get("path"),
+                            "mount_roots": list(mount_roots or []),
+                        },
+                    )
+                ],
+                next_steps=[
+                    NextStep(
+                        kind="manual",
+                        label="mount the model's tree",
+                        target=(
+                            "set [models].store / [models].pull_root to cover the model path "
+                            "(or move the model under a mounted root)"
+                        ),
+                    )
+                ],
             )
         )
     for f in unregistered:
@@ -1359,6 +1424,34 @@ def doctor_models(
     elif not json_output:
         console.print(f"[green]✓[/green]  all {len(local)} registered model file(s) exist on disk.")
 
+    # 1b. Mount reachability (O25): a model file present on disk but outside
+    # every root the slot container bind-mounts (store + pull_root) is
+    # unreachable in-container — llama exits ~90ms after start. Report the
+    # present-but-unmounted entries (dangling ones are already covered above).
+    try:
+        mount_roots = cfg_paths.model_mount_roots()
+    except Exception:
+        mount_roots = []
+    dangling_paths = {str(m.get("path")) for m in dangling}
+    unmounted = [
+        m
+        for m in _models_outside_mount_roots(local, mount_roots)
+        if str(m.get("path")) not in dangling_paths
+    ]
+    if unmounted:
+        problems += len(unmounted)
+        if not json_output:
+            console.print(
+                f"[red]✗[/red]  {len(unmounted)} model file(s) live outside every mounted root "
+                f"({', '.join(mount_roots) or '(none)'}):"
+            )
+            for m in unmounted:
+                console.print(f"      {m.get('id')} → {m.get('path')}")
+            console.print(
+                "      Fix: set [models].store / [models].pull_root to cover the model path "
+                "(the slot container mounts those roots)."
+            )
+
     # 2. Store/roots agreement + unregistered files in the store.
     try:
         cfg = load_hal0_config()
@@ -1423,6 +1516,8 @@ def doctor_models(
             dangling=dangling,
             unregistered=unregistered,
             store_missing=store_missing,
+            unmounted=unmounted,
+            mount_roots=mount_roots,
             effective=effective,
             divergence=divergence,
             mount_warn=mount_warn,
