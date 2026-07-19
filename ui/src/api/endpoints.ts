@@ -27,7 +27,6 @@ export const ENDPOINTS = {
   // Latest output image proxy
   comfyuiPreview: '/api/comfyui/preview',
 
-  slotMetrics: '/api/slots/metrics',
   // GET /api/system-info (CLIENT) — hardware + features + per-RUNNER_IMAGES
   // backend state (installed | installable | unavailable). Feeds the Runtimes
   // settings page (D3) — the runner/image evidence axis.
@@ -46,8 +45,6 @@ export const ENDPOINTS = {
   // untouched; the unit is still name-keyed so the slot must be OFFLINE (409
   // while running) until the live-rename migration lands (rework §11.1).
   slotRename: (name: string) => `/api/slots/${encodeURIComponent(name)}/rename`,
-  slotStateStream: (name: string) =>
-    `/api/slots/${encodeURIComponent(name)}/state/stream`,
   slotLogsStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/logs/stream`,
   slotPull: (name: string) =>
@@ -77,7 +74,6 @@ export const ENDPOINTS = {
   modelUpdatesCheck: '/api/models/updates/check',
   modelUpdate: (id: string) => `/api/models/${encodeURIComponent(id)}/update`,
   modelScanPreview: '/api/models/scan/preview',
-  modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',
   // Issue #311: free-text HF Hub model search backing the dashboard
   // "Search HF" button. Distinct from /api/models/inspect (which
@@ -133,8 +129,6 @@ export const ENDPOINTS = {
   // /api/mcp, NOT /api/agents/mcp.  The original constant had the wrong
   // prefix which caused the Clients tab to 404 on every real install.
   agentMcpClients: '/api/mcp/clients',
-  agentMcpClient: (name: string) =>
-    `/api/mcp/clients/${encodeURIComponent(name)}`,
 
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
   // `agents` lives in the catalogue block above (one entry, used by
@@ -146,8 +140,6 @@ export const ENDPOINTS = {
   // sidebar degrades gracefully on partial deployments.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
-  agentActivity: (id: string) =>
-    `/api/agents/${encodeURIComponent(id)}/activity`,
   // Restart the systemd unit backing an agent (POST → {status, detail}).
   // Backend: hal0.api.agents.restart — only "hermes" is a known id in v0.3.
   agentRestart: (id: string) =>
@@ -160,8 +152,6 @@ export const ENDPOINTS = {
     `/api/agent/approvals/${encodeURIComponent(id)}/approve`,
   agentApprovalDeny: (id: string) =>
     `/api/agent/approvals/${encodeURIComponent(id)}/deny`,
-  // Memory list endpoint (ADR-0014, PR #736 backend surface).
-  memoryList: '/api/memory/list',
   // ── Hindsight engine admin surface (memory_admin routes) ─────────
   // Fail-soft engine card + allowlisted bank-scoped passthrough.
   memoryEngine: '/api/memory/engine',
@@ -180,18 +170,10 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/graph/subgraph`,
   memoryBankEntityGraph: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/entities/graph`,
-  memoryBankEntities: (bank: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/entities`,
-  memoryBankEntity: (bank: string, id: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/entities/${encodeURIComponent(id)}`,
-  memoryBankMemories: (bank: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/memories`,
   memoryBankDocuments: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/documents`,
   memoryBankDocument: (bank: string, id: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/documents/${encodeURIComponent(id)}`,
-  memoryBankTags: (bank: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/tags`,
   memoryBankRecall: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/recall`,
   memoryBankReflect: (bank: string) =>
@@ -210,9 +192,6 @@ export const ENDPOINTS = {
   // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
   agentMemoryStats: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/memory/stats`,
-  // Persona update — PATCH/PUT /api/agents/{agentId}/personas/{pid}.
-  agentPersonaUpdate: (agentId: string, pid: string) =>
-    `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
 
   // ── MCP host introspection ───────────────────────────────────────
   // Read-only list of hosted MCP servers (+ their tool_details), backing
@@ -451,10 +430,8 @@ export const ENDPOINTS = {
   boardBySlug: (slug: string) => `/api/board/boards/${encodeURIComponent(slug)}`,            // PATCH | DELETE ?delete=
   boardSwitch: (slug: string) => `/api/board/boards/${encodeURIComponent(slug)}/switch`,     // POST
   boardProfiles: '/api/board/profiles',      // GET
-  boardProfile: (name: string) => `/api/board/profiles/${encodeURIComponent(name)}`,         // PATCH
   boardAssignees: '/api/board/assignees',    // GET ?board=
   boardStats: '/api/board/stats',            // GET ?board=
-  boardDiagnostics: '/api/board/diagnostics',// GET
   boardWorkersActive: '/api/board/workers/active', // GET
   boardRun: (id: string) => `/api/board/runs/${encodeURIComponent(id)}`,                     // GET
   boardConfig: '/api/board/config',          // GET (read-only orchestration knobs)
