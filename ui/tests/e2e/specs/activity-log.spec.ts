@@ -171,18 +171,19 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     await page.goto('/#slots')
     const body = page.locator('[data-testid="activity-log-body"]')
     await expect(body).toBeVisible({ timeout: 6_000 })
-    // A remount between toBeVisible and evaluate leaves a detached node, and
-    // getComputedStyle on a detached node reads as "" — poll with locator
-    // re-resolution instead of a one-shot evaluate.
-    await expect
-      .poll(async () => body.evaluate((el) => getComputedStyle(el).overflowY), { timeout: 6_000 })
-      .toMatch(/^(auto|scroll)$/)
+    // SlotsView renders ActivityLog from several mutually-exclusive
+    // early-return branches (loading / empty / populated — see
+    // `useActivityStream`'s ring-cache comment in useActivity.ts) and swaps
+    // branches once the forced-mock `/api/slots` resolves, which unmounts
+    // the loading-branch pane and mounts a fresh `.act-body` DOM node. A
+    // plain `locator.evaluate()` can resolve the element a tick before that
+    // swap and read a just-detached node (every computed style reports as
+    // `''`). `toHaveCSS` re-resolves the locator on every retry, so it
+    // settles once the pane stops remounting instead of racing it.
+    await expect(body).toHaveCSS('overflow-y', /^(auto|scroll)$/)
     // A real px cap (not "none") proves the pane is bounded.
-    await expect
-      .poll(async () => {
-        const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
-        return maxH !== 'none' && parseFloat(maxH) > 0
-      }, { timeout: 6_000 })
-      .toBe(true)
+    await expect(body).not.toHaveCSS('max-height', 'none')
+    const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
+    expect(parseFloat(maxH)).toBeGreaterThan(0)
   })
 })
