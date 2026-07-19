@@ -2257,7 +2257,7 @@ class SlotManager:
     ) -> None:
         """Reject a write that would land a second ``default=true`` per type.
 
-        SC-4 (CONTEXT.md §defaults): exactly one ``default = true`` slot
+        SC-4 (ARCHITECTURE.md §defaults): exactly one ``default = true`` slot
         is allowed per ``type``. :meth:`default_slot_for` already raises
         at routing time when two defaults slip onto disk; this guard is
         the belt to that suspenders — it refuses the offending write on

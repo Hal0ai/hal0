@@ -65,7 +65,7 @@ async def get_enums(request: Request, response: Response) -> Any:
 
     - ``devices``: ordered device cards — ``{id, label, device_class,
       default_profile, legacy_backend, recommended, description}``.
-      ``gpu-rocm`` carries ``recommended: true`` (CONTEXT.md: best
+      ``gpu-rocm`` carries ``recommended: true`` (ARCHITECTURE.md: best
       throughput on Strix Halo; ``gpu-vulkan`` is the slower fallback).
     - ``backends``: DEPRECATED v0.1 ``SlotConfig.backend`` tokens.
     - ``selectable_backends``: what POST /api/slots/{name}/backend accepts.

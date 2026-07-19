@@ -1,6 +1,6 @@
 """Write-time "one default per type" validation in SlotManager (SC-4).
 
-CONTEXT.md §"defaults" pins the contract: exactly one ``default = true``
+ARCHITECTURE.md §"defaults" pins the contract: exactly one ``default = true``
 slot may exist per ``type``. :meth:`SlotManager.default_slot_for` already
 raises at routing time when two defaults slip onto disk, but nothing
 stopped ``create()`` / ``update_config()`` from writing that second
