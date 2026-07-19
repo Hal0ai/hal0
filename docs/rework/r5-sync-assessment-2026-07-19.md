@@ -13,6 +13,16 @@ cited as `path:line`. Board rows referenced are `docs/rework/REWORK_BOARD.md`._
 is open. This document does NOT re-plan merged work; it maps the *distance from sync* per
 surface and turns it into lanes.
 
+**Baseline moved since this doc was first written (from the descar→main landing handoff,
+`docs/rework/handoff-merge-followups-to-docs.md`, verified against `origin/rework/descar`
+2026-07-19):** GitHub `main` has advanced past descar's branch base — `462b28f` + #1315
+(HF update-check, merged) + **#1316 (UI-API-1 managed-arg gap CLOSED — screens on launch +
+create + a new `POST /api/models/{id}/validate` route)**. On `rework/descar`, three lanes
+this doc's scope digest lists as open are now **✔ done+CI-green**: P4-docs (`ecbdc6f6`),
+P4-rules (`fa9085d0`, CONTRIBUTING now carries anti-scar rules 1–11), §21.11 golden-paths
+(`fa9085d0` + `docs/rework/golden-paths-halo143-runbook.md`). Read the reconciliation notes
+in **§10** before acting on §1–§9 — several items below are already closed on descar/main.
+
 ---
 
 ## 0. Executive summary — the distance, per surface
@@ -52,12 +62,16 @@ surface and turns it into lanes.
   per-slot key in the apply-plan payload (backend S + UI S) (`NpuPage.jsx:99-107`).
 
 ### 1.2 Wiring (backend affordances the shipped UI is waiting on)
-- **UI-API-1 — re-scoped.** Verified: items 1–3 are ALREADY IN CODE (managed-arg screen +
-  O10 guard at `models.py:566-588`; `preferred_runner` validation + RUNNER_IMAGES on
-  system-info at `models.py:552-562`; duplicate route). True residual: **item 4 only** —
-  per-runner digest-drift + ADMIN SSE pull route (RuntimesPage ships its pull action
-  disabled-with-reason, `RuntimesPage.jsx:39-40`) plus the RunnerSupports format/arch field.
-  Board row needs the re-scope so R5 doesn't re-dispatch finished work.
+- **UI-API-1 — re-scoped, item 1 now CLOSED on main.** Verified: items 1–3 are ALREADY IN
+  CODE (managed-arg screen + O10 guard at `models.py:566-588`; `preferred_runner` validation
+  + RUNNER_IMAGES on system-info at `models.py:552-562`; duplicate route). **Item 1 (the
+  "potentially critical validation bypass") was additionally closed by #1316** — screens
+  extra_args on launch *and* create *and* ships the `POST /api/models/{id}/validate` route
+  the recommendation called for (per the descar→main landing handoff); do NOT re-spec it
+  (anti-scar: point the board row AT #1316). True residual: **item 4 only** — per-runner
+  digest-drift + ADMIN SSE pull route (RuntimesPage ships its pull action disabled-with-
+  reason, `RuntimesPage.jsx:39-40`) plus the RunnerSupports format/arch field. Board row
+  needs the re-scope so R5 doesn't re-dispatch finished work.
 - **New row UI-API-2 (auth affordances)**: SecurityPage stubs name three unowned API asks —
   `client_key_configured` on `/api/auth/status` (S), `GET /api/auth/throttle` (S),
   `POST /api/auth/keys/client` (M) (`SecurityPage.jsx:56-61`). UI lights up when they exist.
@@ -438,7 +452,70 @@ plan/board in the scope digest, but flagged here so they get a dedicated code pa
 
 ---
 
+## 10. Reconciliation with the descar→main landing (handoff fold-in)
+
+Folded from `docs/rework/handoff-merge-followups-to-docs.md` (the routing brief produced
+while landing `rework/descar` onto `main`), verified against `origin/rework/descar`.
+
+### 10.1 Items in this doc already closed on descar/main — do NOT re-dispatch
+- **UI-API-1 item 1** (managed-arg validation bypass) → closed by **#1316** (launch + create
+  + `/validate`). §1.2 updated to point at the PR.
+- **P4-docs** (§1.3/§8 "Docs additions") → **✔ `ecbdc6f6`** on descar: ARCHITECTURE/CONTEXT/
+  AGENTS collapsed to `ARCHITECTURE.md` as the single authoritative internal doc, ADR-inline.
+  The doc-additions this assessment proposes (connect-mcp/realtime auth variants, cli.mdx
+  corrections + bench section + parity-test tightening, CONTRACTS.md/endpoints.ts sweep,
+  board-hygiene edits, hermes-bump runbook) are now **follow-ups onto a merged P4-docs**, not
+  part of an open collapse lane.
+- **P4-rules** → **✔ `fa9085d0`**: CONTRIBUTING carries anti-scar rules 1–11 (the "bit-twice"
+  CI lessons landed as 10–11). New lessons from this assessment append as rule 12+ **only if
+  earned and CI-gated** — candidates: "MCP `_REST_MAP` must be route-table-pinned" (§4.1),
+  "new routes born with Pydantic bodies" (§3). One line rule + one line why; mark **(gated)**
+  only when CI enforces it.
+- **§21.11 golden-paths** → **✔ `fa9085d0`** + `golden-paths-halo143-runbook.md`. The §21.11
+  deploy remainder in the scope digest is the runbook's deploy-only half, already mapped in
+  `tests/golden_paths/__init__.py`; §6.1 `hal0.target` and §6.3 uninstaller gaps are new
+  golden-path inputs (fresh-install autostart, uninstall-cleanliness) — route them into that
+  existing map (assign a mechanism, cite the owner), don't fork a new one.
+
+### 10.2 New meld/fix item surfaced by the landing
+- **Root `AGENTS.md` resurrection** (P4-docs meld, verified): the P4-docs board row
+  (`ecbdc6f6`) records deleting `CONTEXT.md` + `AGENTS.md`, and `CONTEXT.md` is gone on
+  descar — but **`AGENTS.md` is present again at descar root** (a rebase kept the remote
+  side). Decision needed on the P4-docs row: re-delete to finish the collapse, or keep it as
+  a thin pointer to `ARCHITECTURE.md#bundled-agents-v03` — never a second content copy
+  (anti-scar rule 1, one-owner-per-fact). Board delta below.
+
+### 10.3 Delivery conventions (how the proposals in §1–§9 must be routed)
+Per the handoff's routing table and hard conventions:
+- **Board is single-writer** (the orchestrator session). This doc holds no writer token, so
+  every "proposed new board row" (§8) and status correction (§3 UI-API-1 stale, §7 R4-tails
+  cell, R1 "what remains") is a **row delta handed to the writer**, not a direct board edit.
+- **ARCHITECTURE.md is the one authoritative internal doc** — standing-decision changes
+  (e.g. §3 "accept v1.py/api factory as-is", §4.4 autogen deny-by-default policy) go inline
+  there next to the code, **no ADR tree** (rule 9).
+- **Deploy-affecting findings = both boxes** (150 privileged / 143 unprivileged), recorded
+  per box: applies to §6.1 `hal0.target`, §6.3 uninstaller, §6.2 model-store PermRow, the
+  Hermes Phase 5/6 re-runs (§7), and the ComfyUI repin (§6.2).
+- **Fix follow-ups already shipped point AT the PR** (rule: UI-API-1 item 1 → #1316), never
+  re-specced.
+
+### 10.4 Board-row deltas (for the writer)
+- `UI-API-1`: re-scope to **item 4 only**; mark item 1 done → #1316, items 2–3 done in code.
+- `P4-docs`: add a sub-note — **AGENTS.md resurrection**, decision {re-delete | pointer stub
+  to `ARCHITECTURE.md#bundled-agents-v03`}; the row's "deleted AGENTS.md" claim is currently
+  falsified by the tree.
+- `R1` checkpoint "what remains" cell + `R4` open-tails cell (host-net) + UI-D1-D3 "D4-D6
+  follow-up" note: all stale per §7/§1.3 — clear them.
+- New rows proposed in §8 (`INSTALL-target` critical, `UNINSTALL-sync`, `MCP-sync`,
+  `MCP-mem-hindsight`, `CLI-auth+verbs`, `UI-API-2`, `typed-bodies-rest`, `mock-prod-gate`,
+  `hermes-bump-runbook`, `comfyui-repin`) — hand to writer with the §-refs as their spec.
+- P2-updater-b (§9): re-scope from "build" to **scope-trim + verify + delete extra
+  mechanisms** — the pipeline is already implemented (`updater.py`, 1,918 lines).
+
+---
+
 _Graph artifacts for this assessment are committed under `graphify-out/` (report + wiki;
 raw graph.json regenerates via `graphify update .`). Findings without a board row cite
 source at the referenced `path:line`; corrections from adversarial verification are marked
-inline. Two survey claims were materially corrected during verification; none were refuted._
+inline. Two survey claims were materially corrected during verification; none were refuted.
+§10 folds in the descar→main landing handoff (2026-07-19)._
