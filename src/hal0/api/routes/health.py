@@ -97,6 +97,7 @@ async def get_status(request: Request) -> dict[str, Any]:
         _loaded_models,
         _slot_to_dict,
         _synthesize_slots_from_upstreams,
+        overlay_cached_enrichment,
     )
 
     try:
@@ -108,6 +109,11 @@ async def get_status(request: Request) -> dict[str, Any]:
         # bootstrap window), fall back to synthetic-only so /api/status
         # still serves something useful instead of 500-ing the dashboard.
         real_entries = []
+    # These entries are bare (no container probe — /api/status must stay cheap).
+    # Overlay list_slots' last-good container state so the dashboard union sees
+    # a coherent dot + metrics instead of flickering back to the FSM-only view
+    # whenever this poll beats the slower /api/slots one. Pure dict overlay.
+    real_entries = overlay_cached_enrichment(request, real_entries)
     real_names = {entry["name"] for entry in real_entries}
 
     slot_list: list[dict[str, Any]] = list(real_entries)

@@ -1501,6 +1501,11 @@ a { color: inherit; text-decoration: none; }
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+/* A slot card present but not yet enriched by the /api/slots poll (its bare
+   /api/status union twin won the interval) — pulse the metrics row so the
+   "—" placeholders read as loading rather than a real reading. Reuses the
+   `pulse` opacity keyframe. */
+.scard.pending .scard-meta { animation: pulse 1.4s ease-in-out infinite; }
 
 /* throughput sparkline */
 .spark { display: flex; align-items: flex-end; gap: 1px; height: 36px; padding: 4px 0; }
