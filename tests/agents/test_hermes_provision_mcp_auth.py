@@ -3,14 +3,17 @@
 Root problem (Phase 0 §4.2): provisioned MCP client configs — the main
 profile's ``mcp_servers.*`` overlay (:func:`hp._build_config_overlay`), the
 ``hal0-brain`` steward profile (:func:`hp._build_brain_profile_mcp_servers`),
-and the bootstrap-time health probe (:func:`hp._probe_mcp_server`, used by
-``_phase_mcp_wire`` / the ``admin_tools_list`` smoke test) — previously
-carried only ``X-hal0-Agent`` / ``X-hal0-Private`` headers, while the
-``/mcp`` mount is ADMIN-classed (``hal0.security.exposure``). The moment
-``require_auth`` is armed, every one of those calls 401s.
+the bootstrap-time health probe (:func:`hp._probe_mcp_server`, used by
+``_phase_mcp_wire`` / the ``admin_tools_list`` smoke test), and the memory
+REST shim caller (:func:`hp._mcp_memory_call`, used by
+``_phase_namespace_register``, ``_phase_brain_profile_seed``, and the
+``memory_roundtrip`` smoke test) — previously carried only ``X-hal0-Agent``
+/ ``X-hal0-Private`` headers, while both the ``/mcp`` mount and the
+``/api/memory`` prefix are ADMIN-classed (``hal0.security.exposure``). The
+moment ``require_auth`` is armed, every one of those calls 401s.
 
 The fix threads the box service identity bearer
-(:func:`hal0.service_identity.service_key`) into all three header
+(:func:`hal0.service_identity.service_key`) into all four header
 constructions — the SAME source the CLI / in-process steward self-calls
 already use (``hal0.brain.chat._self_call_headers``,
 ``hal0.cli._shared._auth_headers``), never a new key path. It's resolved
@@ -26,6 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.agents import hermes_provision as hp
@@ -230,4 +234,155 @@ def test_provisioned_mcp_config_without_bearer_401s_with_auth_on(
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
 
     resp = client.post("/mcp/admin/mcp", headers=headers, json=_initialize_body())
+    assert resp.status_code == 401
+
+
+# ── _mcp_memory_call — the /api/memory/* REST shim caller ───────────────────
+#
+# Used by _phase_namespace_register, _phase_brain_profile_seed, and the
+# memory_roundtrip smoke test — all three 401 under require_auth=1 without
+# this fix, since /api/memory is ADMIN-classed exactly like /mcp.
+
+
+def _capture_mcp_memory_call_headers(
+    monkeypatch: pytest.MonkeyPatch, *, agent_id: str = "hermes-agent", private: bool = False
+) -> Any:
+    """Call the REAL :func:`hp._mcp_memory_call` with ``urlopen`` mocked to
+    capture the ``Request`` it builds, then hand back that ``Request`` —
+    the exact headers a live call would send, not hand-authored."""
+    captured: dict[str, Any] = {}
+
+    def _fake_urlopen(req: Any, timeout: float | None = None) -> Any:
+        captured["req"] = req
+        raise OSError("stop-after-capture — header inspection only")
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    hp._mcp_memory_call(
+        "tools/call",
+        {"name": "memory_add", "arguments": {"text": "probe", "dataset": "shared"}},
+        agent_id=agent_id,
+        private=private,
+    )
+    return captured["req"]
+
+
+def test_mcp_memory_call_sends_bearer_header(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "memory-admin-key")
+    req = _capture_mcp_memory_call_headers(monkeypatch)
+    assert req.get_header("Authorization") == "Bearer memory-admin-key"
+    # Identity header is additive, not replaced.
+    assert req.get_header("X-hal0-agent") == "hermes-agent"
+
+
+def test_mcp_memory_call_omits_bearer_when_no_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
+    req = _capture_mcp_memory_call_headers(monkeypatch)
+    assert req.get_header("Authorization") is None
+
+
+def test_mcp_memory_call_bearer_re_resolves_on_rotation(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """Not frozen at call-construction time — a rotated key reaches the
+    NEXT call, same composition guarantee as the /mcp sites."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "key-before-rotation")
+    before = _capture_mcp_memory_call_headers(monkeypatch)
+    assert before.get_header("Authorization") == "Bearer key-before-rotation"
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "key-after-rotation")
+    after = _capture_mcp_memory_call_headers(monkeypatch)
+    assert after.get_header("Authorization") == "Bearer key-after-rotation"
+
+
+class _StubMemoryProvider:
+    """Minimal duck-typed stand-in for the memory provider, mirroring
+    ``tests/api/test_memory_rest_routes.py``'s ``StubWrapper`` — only the
+    ``add`` path this test drives through ``/api/memory/add``."""
+
+    async def add(
+        self,
+        *,
+        text: str,
+        dataset: str,
+        tags: list[str],
+        source: str | None,
+        metadata: dict[str, Any],
+        client_id: str | None = None,
+        document_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {"id": document_id or "id-1", "timestamp": "2026-07-19T00:00:00Z"}
+
+
+def _memory_rest_app() -> FastAPI:
+    """A bare app mounting the REAL ``/api/memory`` router behind the REAL
+    ``AuthEnforcementMiddleware`` (the same gate ``create_app()`` wires in)
+    — enough to exercise the ADMIN-classification decision without needing
+    a live Hindsight backend."""
+    from hal0.api.auth import AuthEnforcementMiddleware
+    from hal0.api.middleware import error_codes
+    from hal0.api.routes import memory as memory_routes
+
+    app = FastAPI()
+    error_codes.install(app)
+    app.add_middleware(AuthEnforcementMiddleware)
+    app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
+    app.state.memory_provider = _StubMemoryProvider()
+    return app
+
+
+def _mcp_memory_call_request_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """The exact headers a live ``_mcp_memory_call`` would send, reshaped
+    into a plain dict for replay against a real HTTP client."""
+    req = _capture_mcp_memory_call_headers(monkeypatch)
+    headers = {
+        "Content-Type": req.get_header("Content-type"),
+        "X-hal0-Agent": req.get_header("X-hal0-agent"),
+    }
+    bearer = req.get_header("Authorization")
+    if bearer:
+        headers["Authorization"] = bearer
+    return {k: v for k, v in headers.items() if v is not None}
+
+
+def test_mcp_memory_call_headers_clear_real_auth_gate_with_auth_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """Golden path: auth ON, the headers ``_mcp_memory_call`` actually
+    sends reach the real ``/api/memory/add`` route (behind the real
+    ADMIN-classification middleware) and succeed instead of 401ing."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "memory-golden-path-key")
+    headers = _mcp_memory_call_request_headers(monkeypatch)
+    assert headers["Authorization"] == "Bearer memory-golden-path-key"
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+
+    with TestClient(_memory_rest_app()) as client:
+        resp = client.post(
+            "/api/memory/add",
+            headers=headers,
+            json={"text": "probe", "dataset": "shared"},
+        )
+    assert resp.status_code == 200, resp.text
+
+
+def test_mcp_memory_call_headers_without_bearer_401s_with_auth_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """Negative control: the SAME request minus ``Authorization`` is
+    exactly the pre-fix 401 this half of the lane closes."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "memory-golden-path-key")
+    headers = _mcp_memory_call_request_headers(monkeypatch)
+    del headers["Authorization"]
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+
+    with TestClient(_memory_rest_app()) as client:
+        resp = client.post(
+            "/api/memory/add",
+            headers=headers,
+            json={"text": "probe", "dataset": "shared"},
+        )
     assert resp.status_code == 401

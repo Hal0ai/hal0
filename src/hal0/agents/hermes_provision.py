@@ -2698,9 +2698,17 @@ def _mcp_memory_call(
     Anything else returns ``{"ok": False, "error": "unsupported method"}``
     — proper MCP tool calls still need an MCP SDK client. That's tracked
     as a v0.4 cleanup (see #302 comment).
+
+    The ``/api/memory`` prefix is ADMIN-classed (security/exposure.py), so
+    once auth is on the box this call also needs a bearer — same box
+    service identity as the ``/mcp`` sites (:func:`hal0.service_identity.
+    service_key`), resolved fresh on every call so a mid-install key
+    rotation is picked up on the very next call.
     """
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
+
+    from hal0.service_identity import service_key
 
     base_url = base_url.rstrip("/")
 
@@ -2722,6 +2730,9 @@ def _mcp_memory_call(
         return {"ok": False, "error": f"unsupported method {method!r}"}
 
     headers = {"Content-Type": "application/json", "X-hal0-Agent": agent_id}
+    bearer = service_key(prefer="admin")
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     if private:
         headers["X-hal0-Private"] = "1"
     req = Request(url, data=body_bytes, headers=headers, method="POST")
