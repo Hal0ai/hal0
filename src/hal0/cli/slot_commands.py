@@ -6,7 +6,6 @@ import json as jsonlib
 from enum import StrEnum
 from typing import Any
 
-import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -22,6 +21,7 @@ from hal0.cli._shared import (
     api_post,
     api_put,
     die,
+    follow_sse_logs,
 )
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 
@@ -362,18 +362,7 @@ def slot_logs(
         return
 
     # Stream SSE — line-buffered passthrough.
-    try:
-        with httpx.stream("GET", url + f"/api/slots/{name}/logs/stream", timeout=None) as r:
-            for raw in r.iter_lines():
-                if not raw or not raw.startswith("data:"):
-                    continue
-                payload = raw[5:].strip()
-                try:
-                    console.print(jsonlib.loads(payload))
-                except ValueError:
-                    console.print(payload)
-    except (httpx.HTTPError, KeyboardInterrupt):
-        return
+    follow_sse_logs(f"/api/slots/{name}/logs/stream", console=console)
 
 
 @app.command("create")

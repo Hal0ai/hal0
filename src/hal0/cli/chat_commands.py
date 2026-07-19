@@ -41,6 +41,7 @@ import httpx
 import typer
 from rich.console import Console
 
+from hal0.cli._shared import auth_client
 from hal0.normalize.thinking import apply_thinking_policy
 from hal0.toolloop.engine import assistant_text, assistant_thinking, split_thinking
 
@@ -256,7 +257,7 @@ def chat_command(
         f"stream={session.stream} · {url}[/dim]"
     )
     console.print("[dim]/think on|off|default  ·  /clear  ·  /quit (or Ctrl-D)[/dim]")
-    with httpx.Client(timeout=120.0) as client:
+    with auth_client(timeout=120.0) as client:
         while True:
             try:
                 line = input("you> ")

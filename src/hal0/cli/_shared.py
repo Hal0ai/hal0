@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -44,6 +47,87 @@ def _auth_headers() -> dict[str, str]:
     from hal0.service_identity import service_auth_headers
 
     return service_auth_headers(prefer="admin")
+
+
+def auth_client(**kwargs: Any) -> httpx.Client:
+    """Build an ``httpx.Client`` with ``_auth_headers()`` baked into its
+    default headers, so every request issued through it — one-shot or
+    long-lived streaming — carries the CLI's discovered bearer token on
+    auth-enabled boxes. An explicit ``headers=`` kwarg is merged on top
+    (a caller-set ``Authorization`` wins over the discovered one).
+
+    Use this directly (rather than :func:`api_stream`) when a call site
+    needs a *persistent* client across several requests — e.g. ``hal0
+    chat``'s REPL loop, which reuses one client for every turn.
+    """
+    headers = dict(kwargs.pop("headers", None) or {})
+    if "Authorization" not in headers:
+        headers.update(_auth_headers())
+    return httpx.Client(headers=headers, **kwargs)
+
+
+@contextmanager
+def api_stream(
+    method: str,
+    path: str,
+    *,
+    base: str | None = None,
+    timeout: float | None = None,
+    params: dict[str, Any] | None = None,
+) -> Iterator[httpx.Response]:
+    """Open an authenticated streaming request and yield the response.
+
+    Thin wrapper over :func:`auth_client` for the CLI's one-shot SSE tails
+    (``slot logs --follow``, ``doctor logs --follow``): opens a client with
+    ``_auth_headers()`` applied, issues a streaming request, and tears both
+    down when the caller's ``with`` block exits. Mirrors ``httpx.stream()``'s
+    call shape so existing call sites barely change — swap
+    ``httpx.stream(method, url, ...)`` for ``api_stream(method, path, ...)``.
+
+    Before this helper, these SSE tails called the module-level
+    ``httpx.stream()`` directly, bypassing ``_auth_headers()`` entirely —
+    they 401'd (or silently printed the JSON error envelope as if it were
+    a log line) on auth-enabled boxes.
+    """
+    url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
+    with auth_client(timeout=timeout) as client, client.stream(method, url, params=params) as resp:
+        yield resp
+
+
+def _iter_sse_payloads(resp: httpx.Response) -> Iterator[Any]:
+    """Parse an SSE response's ``data: ...`` lines into JSON (or raw text)."""
+    for raw in resp.iter_lines():
+        if not raw or not raw.startswith("data:"):
+            continue
+        payload = raw[len("data:") :].strip()
+        try:
+            yield json.loads(payload)
+        except ValueError:
+            yield payload
+
+
+def follow_sse_logs(
+    path: str, *, console: Console, params: dict[str, object] | None = None
+) -> None:
+    """Stream an SSE log tail via :func:`api_stream` and print each line.
+
+    Shared by ``hal0 slot logs --follow`` and ``hal0 doctor logs --follow``
+    — both are line-buffered passthroughs over the same ``data: ...`` SSE
+    framing, just against different endpoints/params. Runs until the
+    connection drops or the operator hits Ctrl-C. On 401/403 (missing or
+    stale credentials on an auth-enabled box) prints one actionable line via
+    :func:`die` instead of silently echoing the JSON error envelope as if it
+    were log output.
+    """
+    try:
+        with api_stream("GET", path, timeout=None, params=params) as r:
+            if r.status_code in (401, 403):
+                die(f"not authorized ({r.status_code}) — check HAL0_ADMIN_KEY/HAL0_CLIENT_KEY.")
+                return
+            for item in _iter_sse_payloads(r):
+                console.print(item)
+    except (httpx.HTTPError, KeyboardInterrupt):
+        return
 
 
 def _api_unreachable(url: str) -> bool:
