@@ -117,6 +117,7 @@ class _Rule:
 
 _GET: frozenset[str] = frozenset({"GET", "HEAD"})
 _POST: frozenset[str] = frozenset({"POST"})
+_PUT: frozenset[str] = frozenset({"PUT"})
 
 # Ordered, first-match-wins. See the module docstring for the full design
 # rationale and hal0-rework-plan.md §23.5 for the architecture this
@@ -132,6 +133,13 @@ RULES: tuple[_Rule, ...] = (
     _Rule("dashboard bootstrap urls", _exact("/api/config/urls"), AuthClass.OPEN, _GET),
     _Rule("login", _exact("/api/auth/login"), AuthClass.OPEN, _POST),
     _Rule("auth status", _exact("/api/auth/status"), AuthClass.OPEN, _GET),
+    # Clearing your own HttpOnly session cookie is harmless and must work at
+    # any posture (the cookie is the only session end the browser has).
+    _Rule("logout", _exact("/api/auth/logout"), AuthClass.OPEN, _POST),
+    # Persist the enforcement toggle. ADMIN: only the operator may flip the
+    # posture once auth is on (while it's off the middleware isn't enforcing,
+    # so the first enable rides through — the intended "turn it on" path).
+    _Rule("auth require toggle", _exact("/api/auth/require"), AuthClass.ADMIN, _PUT),
     # ── BOOTSTRAP: installer, open only until an admin key exists ──────
     _Rule("installer", _prefix("/api/install"), AuthClass.BOOTSTRAP, None),
     # ── explicit ADMIN for FastAPI's own docs/meta routes ──────────────
@@ -275,6 +283,7 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/config/urls"),
         ("POST", "/api/auth/login"),
         ("GET", "/api/auth/status"),
+        ("POST", "/api/auth/logout"),
         # Hermes dashboard-plugin static asset proxy (kanban plugin JS/CSS
         # bundles) -- not under /api or /v1, so it hits the same
         # not-api/v1/mcp catch-all the SPA shell itself uses. No secrets:
