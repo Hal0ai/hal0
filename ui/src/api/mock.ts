@@ -53,7 +53,20 @@ function buildSlots() {
 }
 
 function buildModels() {
-  return { models: data().models ?? [] }
+  // Forced mock can't be page.route-overridden for /api/models, so a spec
+  // opts into HF-update badges via `window.__hal0MockModelUpdates.availableIds`
+  // (mirrors the __hal0MockMemoryEnabled pattern). Absent → no badges, exactly
+  // as before, so unrelated specs are unaffected.
+  const ov =
+    typeof window !== 'undefined'
+      ? (window as unknown as { __hal0MockModelUpdates?: { availableIds?: string[] } })
+          .__hal0MockModelUpdates
+      : undefined
+  const availableIds = new Set(ov?.availableIds ?? [])
+  const models = (data().models ?? []).map((m: any) =>
+    availableIds.has(m.id) ? { ...m, update_available: true } : m,
+  )
+  return { models }
 }
 
 function buildBackends() {
@@ -339,7 +352,34 @@ function buildUpdateState() {
 // renders without hammering the (absent) backend with 500-retries. A live
 // backend or a page.route override stays authoritative via networkFirst.
 function buildModelUpdatesCheck() {
-  return { checked_at: 0, checked: 0, updates_available: 0, models: {} }
+  // Mirrors buildModels' opt-in: a spec sets availableIds (+ optional
+  // checked_at) to exercise the "last checked / N available" surface.
+  const ov =
+    typeof window !== 'undefined'
+      ? (
+          window as unknown as {
+            __hal0MockModelUpdates?: { availableIds?: string[]; checked_at?: number }
+          }
+        ).__hal0MockModelUpdates
+      : undefined
+  const ids = ov?.availableIds ?? []
+  const models: Record<string, unknown> = {}
+  for (const id of ids) {
+    models[id] = {
+      hf_repo: 'org/repo',
+      hf_filename: `${id}.gguf`,
+      local_sha256: 'a'.repeat(64),
+      remote_sha256: 'b'.repeat(64),
+      update_available: true,
+      reason: null,
+    }
+  }
+  return {
+    checked_at: ov?.checked_at ?? 0,
+    checked: ids.length,
+    updates_available: ids.length,
+    models,
+  }
 }
 
 function buildAuthToken() {
