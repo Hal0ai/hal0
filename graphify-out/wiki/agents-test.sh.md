@@ -1,12 +1,12 @@
 # agents-test.sh
 
-> 3 nodes
+> 3 nodes · cohesion 1.00
 
 ## Key Concepts
 
 - **agents-test.sh** (2 connections) — `tests/harness/agents-test.sh`
-- **agents-test.sh script** (2 connections) — `tests/harness/agents-test.sh`
 - **run_scenario()** (2 connections) — `tests/harness/agents-test.sh`
+- **agents-test.sh script** (2 connections) — `tests/harness/agents-test.sh`
 
 ## Relationships
 

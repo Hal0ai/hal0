@@ -1,6 +1,6 @@
 # _ServerThread
 
-> 8 nodes
+> 8 nodes · cohesion 0.25
 
 ## Key Concepts
 
@@ -10,8 +10,8 @@
 - **._register()** (2 connections) — `tests/api/test_chat_proxy.py`
 - **.__init__()** (2 connections) — `tests/api/test_chat_proxy.py`
 - **.stop()** (2 connections) — `tests/api/test_chat_proxy.py`
-- **.run()** (1 connections) — `tests/api/test_chat_proxy.py`
 - **Runs uvicorn in a background thread for the fake hermes.** (1 connections) — `tests/api/test_chat_proxy.py`
+- **.run()** (1 connections) — `tests/api/test_chat_proxy.py`
 
 ## Relationships
 

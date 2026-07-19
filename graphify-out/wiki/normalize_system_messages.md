@@ -1,21 +1,21 @@
 # normalize_system_messages
 
-> 17 nodes
+> 17 nodes · cohesion 0.18
 
 ## Key Concepts
 
 - **normalize_system_messages()** (14 connections) — `src/hal0/normalize/messages.py`
 - **test_messages.py** (11 connections) — `tests/normalize/test_messages.py`
 - **messages.py** (2 connections) — `src/hal0/normalize/messages.py`
-- **test_non_list_passthrough()** (2 connections) — `tests/normalize/test_messages.py`
-- **test_empty_list_passthrough()** (2 connections) — `tests/normalize/test_messages.py`
-- **test_no_system_messages_no_allocation()** (2 connections) — `tests/normalize/test_messages.py`
-- **test_system_after_user_is_hoisted()** (2 connections) — `tests/normalize/test_messages.py`
 - **test_already_canonical_no_copy()** (2 connections) — `tests/normalize/test_messages.py`
-- **test_multi_system_collapses_into_single()** (2 connections) — `tests/normalize/test_messages.py`
-- **test_three_or_more_systems_still_collapse()** (2 connections) — `tests/normalize/test_messages.py`
+- **test_empty_list_passthrough()** (2 connections) — `tests/normalize/test_messages.py`
 - **test_junk_entries_preserved_as_others()** (2 connections) — `tests/normalize/test_messages.py`
+- **test_multi_system_collapses_into_single()** (2 connections) — `tests/normalize/test_messages.py`
+- **test_no_system_messages_no_allocation()** (2 connections) — `tests/normalize/test_messages.py`
+- **test_non_list_passthrough()** (2 connections) — `tests/normalize/test_messages.py`
+- **test_system_after_user_is_hoisted()** (2 connections) — `tests/normalize/test_messages.py`
 - **test_system_entry_without_content_key_still_hoists()** (2 connections) — `tests/normalize/test_messages.py`
+- **test_three_or_more_systems_still_collapse()** (2 connections) — `tests/normalize/test_messages.py`
 - **test_user_only_passthrough_with_extras()** (2 connections) — `tests/normalize/test_messages.py`
 - **Any** (1 connections)
 - **Per-request normalisation helpers that operate on the OpenAI ``messages`` array.** (1 connections) — `src/hal0/normalize/messages.py`

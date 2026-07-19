@@ -1,18 +1,18 @@
 # ProgressCoalescer
 
-> 18 nodes
+> 18 nodes · cohesion 0.14
 
 ## Key Concepts
 
 - **ProgressCoalescer** (16 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **.handle()** (5 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **._flush_now()** (4 connections) — `src/hal0/api/agents/chat_proxy.py`
+- **._delayed_flush()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **._parse_event_type()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **._schedule_flush()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
-- **._delayed_flush()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **test_coalescer_buffers_progress_then_flushes()** (3 connections) — `tests/api/test_chat_proxy.py`
-- **test_coalescer_non_progress_event_flushes_buffer_first()** (3 connections) — `tests/api/test_chat_proxy.py`
 - **test_coalescer_keeps_per_tool_id_separate()** (3 connections) — `tests/api/test_chat_proxy.py`
+- **test_coalescer_non_progress_event_flushes_buffer_first()** (3 connections) — `tests/api/test_chat_proxy.py`
 - **test_coalescer_passes_through_unparseable_frames()** (3 connections) — `tests/api/test_chat_proxy.py`
 - **.__init__()** (1 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **Server-side coalescer for ``tool.progress`` event spam.      Buffers ``tool.prog** (1 connections) — `src/hal0/api/agents/chat_proxy.py`

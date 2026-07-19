@@ -1,6 +1,6 @@
 # _seed
 
-> 19 nodes
+> 19 nodes · cohesion 0.20
 
 ## Key Concepts
 
@@ -9,13 +9,13 @@
 - **test_seed_multiplex_models.py** (7 connections) — `tests/api/test_seed_multiplex_models.py`
 - **FakeSlotManager** (4 connections) — `tests/api/test_seed_multiplex_models.py`
 - **Any** (4 connections)
-- **TestNpuTableSchema** (4 connections) — `tests/api/test_seed_multiplex_models.py`
 - **TestNonMatching** (4 connections) — `tests/api/test_seed_multiplex_models.py`
-- **.test_backend_flm_with_npu_table_seeds_canonical_tags()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
-- **.test_embed_only_seeds_embed_tag()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
-- **.test_asr_only_seeds_asr_tag()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
+- **TestNpuTableSchema** (4 connections) — `tests/api/test_seed_multiplex_models.py`
 - **.test_flm_slot_without_flags_seeds_nothing()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
 - **.test_idempotent_no_duplicate_tags()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
+- **.test_asr_only_seeds_asr_tag()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
+- **.test_backend_flm_with_npu_table_seeds_canonical_tags()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
+- **.test_embed_only_seeds_embed_tag()** (3 connections) — `tests/api/test_seed_multiplex_models.py`
 - **.__init__()** (2 connections) — `tests/api/test_seed_multiplex_models.py`
 - **.iter_configs()** (2 connections) — `tests/api/test_seed_multiplex_models.py`
 - **TestLegacyDefaultsSchema** (2 connections) — `tests/api/test_seed_multiplex_models.py`

@@ -1,23 +1,23 @@
 # _RecordingJob
 
-> 10 nodes
+> 10 nodes · cohesion 0.22
 
 ## Key Concepts
 
 - **_RecordingJob** (7 connections) — `tests/registry/test_flm_pull_progress.py`
 - **test_progress_recovers_transient_none_target_dir()** (5 connections) — `tests/registry/test_flm_pull_progress.py`
 - **test_flm_pull_progress.py** (3 connections) — `tests/registry/test_flm_pull_progress.py`
-- **PullJob** (1 connections)
-- **.__init__()** (1 connections) — `tests/registry/test_flm_pull_progress.py`
-- **._signal()** (1 connections) — `tests/registry/test_flm_pull_progress.py`
-- **Path** (1 connections)
 - **MonkeyPatch** (1 connections)
+- **Path** (1 connections)
+- **PullJob** (1 connections)
 - **Regression test for FLM pull progress recovering a transient-None target_dir.  T** (1 connections) — `tests/registry/test_flm_pull_progress.py`
 - **PullJob that snapshots (state, bytes_downloaded) on every _signal().** (1 connections) — `tests/registry/test_flm_pull_progress.py`
+- **.__init__()** (1 connections) — `tests/registry/test_flm_pull_progress.py`
+- **._signal()** (1 connections) — `tests/registry/test_flm_pull_progress.py`
 
 ## Relationships
 
-- [pull.py](pull.py.md) (2 shared connections)
+- [Model](Model.md) (2 shared connections)
 
 ## Source Files
 

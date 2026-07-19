@@ -1,6 +1,6 @@
 # hal0-podman-ro
 
-> 3 nodes
+> 3 nodes · cohesion 1.00
 
 ## Key Concepts
 

@@ -1,22 +1,22 @@
 # test_channel.py
 
-> 24 nodes
+> 24 nodes · cohesion 0.12
 
 ## Key Concepts
 
 - **test_channel.py** (9 connections) — `tests/release/test_channel.py`
 - **channel.py** (7 connections) — `src/hal0/release/channel.py`
-- **nightly_version()** (5 connections) — `src/hal0/release/channel.py`
-- **nightly_tag()** (5 connections) — `src/hal0/release/channel.py`
 - **nightlies_to_prune()** (5 connections) — `src/hal0/release/channel.py`
-- **base_version()** (4 connections) — `src/hal0/release/channel.py`
+- **nightly_tag()** (5 connections) — `src/hal0/release/channel.py`
+- **nightly_version()** (5 connections) — `src/hal0/release/channel.py`
 - **base_matches()** (4 connections) — `src/hal0/release/channel.py`
+- **base_version()** (4 connections) — `src/hal0/release/channel.py`
 - **channel_for_tag()** (3 connections) — `src/hal0/release/channel.py`
 - **test_nightly_version_and_tag()** (3 connections) — `tests/release/test_channel.py`
 - **test_nightly_version_uses_full_stamp_and_is_monotonic()** (3 connections) — `tests/release/test_channel.py`
-- **test_channel_for_tag()** (2 connections) — `tests/release/test_channel.py`
-- **test_base_version()** (2 connections) — `tests/release/test_channel.py`
 - **test_base_matches_relaxed_gate()** (2 connections) — `tests/release/test_channel.py`
+- **test_base_version()** (2 connections) — `tests/release/test_channel.py`
+- **test_channel_for_tag()** (2 connections) — `tests/release/test_channel.py`
 - **test_nightlies_to_prune_keeps_newest()** (2 connections) — `tests/release/test_channel.py`
 - **test_nightlies_to_prune_nothing_when_under_keep()** (2 connections) — `tests/release/test_channel.py`
 - **test_nightlies_to_prune_orders_by_full_numeric_stamp()** (2 connections) — `tests/release/test_channel.py`

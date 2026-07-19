@@ -1,11 +1,13 @@
 # conftest.py
 
-> 2 nodes
+> 4 nodes · cohesion 0.50
 
 ## Key Concepts
 
-- **conftest.py** (1 connections) — `tests/memory/conftest.py`
-- **Shared fixtures for the memory test suite.  ADR-0023 removed the Cognee engine,** (1 connections) — `tests/memory/conftest.py`
+- **conftest.py** (2 connections) — `tests/agents/conftest.py`
+- **_euid_root_by_default()** (2 connections) — `tests/agents/conftest.py`
+- **Shared fixtures for the hermes-provision test suite.  After the D hardened-perms** (1 connections) — `tests/agents/conftest.py`
+- **Run hermes-provision tests as if euid == 0 (the direct-write path).** (1 connections) — `tests/agents/conftest.py`
 
 ## Relationships
 
@@ -13,11 +15,11 @@
 
 ## Source Files
 
-- `tests/memory/conftest.py`
+- `tests/agents/conftest.py`
 
 ## Audit Trail
 
-- EXTRACTED: 2 (100%)
+- EXTRACTED: 6 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

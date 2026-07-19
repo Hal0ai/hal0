@@ -1,16 +1,16 @@
 # agent-chat.jsx
 
-> 7 nodes
+> 7 nodes · cohesion 0.33
 
 ## Key Concepts
 
 - **agent-chat.jsx** (7 connections) — `ui/src/dash/board/agent-chat.jsx`
-- **mdInline()** (2 connections) — `ui/src/dash/board/agent-chat.jsx`
 - **Markdown()** (2 connections) — `ui/src/dash/board/agent-chat.jsx`
+- **mdInline()** (2 connections) — `ui/src/dash/board/agent-chat.jsx`
+- **AgentChat()** (1 connections) — `ui/src/dash/board/agent-chat.jsx`
 - **Icon()** (1 connections) — `ui/src/dash/board/agent-chat.jsx`
 - **Thinking()** (1 connections) — `ui/src/dash/board/agent-chat.jsx`
 - **ToolCard()** (1 connections) — `ui/src/dash/board/agent-chat.jsx`
-- **AgentChat()** (1 connections) — `ui/src/dash/board/agent-chat.jsx`
 
 ## Relationships
 

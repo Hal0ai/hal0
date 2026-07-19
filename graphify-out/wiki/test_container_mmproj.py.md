@@ -1,12 +1,12 @@
 # test_container_mmproj.py
 
-> 15 nodes
+> 15 nodes · cohesion 0.31
 
 ## Key Concepts
 
 - **test_container_mmproj.py** (8 connections) — `tests/providers/test_container_mmproj.py`
-- **_model_info()** (7 connections) — `tests/providers/test_container_mmproj.py`
 - **_build_spec()** (7 connections) — `tests/providers/test_container_mmproj.py`
+- **_model_info()** (7 connections) — `tests/providers/test_container_mmproj.py`
 - **._load()** (7 connections) — `tests/providers/test_container_mmproj.py`
 - **_slot_cfg()** (6 connections) — `tests/providers/test_container_mmproj.py`
 - **TestContainerSpecMmproj** (5 connections) — `tests/providers/test_container_mmproj.py`

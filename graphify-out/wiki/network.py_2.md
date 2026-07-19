@@ -1,43 +1,34 @@
 # network.py
 
-> 20 nodes
+> 11 nodes · cohesion 0.25
 
 ## Key Concepts
 
-- **network.py** (11 connections) — `src/hal0/install/network.py`
-- **network_env()** (8 connections) — `src/hal0/install/network.py`
-- **detect_lan_ips()** (5 connections) — `src/hal0/install/network.py`
-- **derive_allowed_origins()** (5 connections) — `src/hal0/install/network.py`
-- **_dedupe()** (4 connections) — `src/hal0/install/network.py`
-- **resolve_hostname()** (3 connections) — `src/hal0/install/network.py`
-- **main()** (3 connections) — `src/hal0/install/network.py`
-- **_coerce_port()** (3 connections) — `src/hal0/install/network.py`
-- **_is_lan_ipv4()** (3 connections) — `src/hal0/install/network.py`
-- **_origin_of()** (3 connections) — `src/hal0/install/network.py`
-- **Network-coherence derivation for the installer / answer-file (WS-C).  One ``HAL0** (1 connections) — `src/hal0/install/network.py`
-- **Return the hostname to advertise (mDNS + origin allowlist).      Precedence: exp** (1 connections) — `src/hal0/install/network.py`
-- **Best-effort list of the host's routable LAN IPv4 addresses.      ``override`` (o** (1 connections) — `src/hal0/install/network.py`
-- **Build the WS-origin allowlist for the given bind/hostname choice.      The list** (1 connections) — `src/hal0/install/network.py`
-- **Resolve the three coherent network env vars from a bind choice.      Returns ``H** (1 connections) — `src/hal0/install/network.py`
-- **Emit ``KEY=value`` env lines for the installer to append to api.env.      Invoke** (1 connections) — `src/hal0/install/network.py`
-- **Parse a port from an int/str, falling back to the default.** (1 connections) — `src/hal0/install/network.py`
-- **True for a plausible non-loopback IPv4 dotted-quad.** (1 connections) — `src/hal0/install/network.py`
-- **Return the ``scheme://host[:port]`` origin of a URL, or None.      Tolerant of a** (1 connections) — `src/hal0/install/network.py`
-- **Order-preserving de-duplication.** (1 connections) — `src/hal0/install/network.py`
+- **network.py** (7 connections) — `src/hal0/config/network.py`
+- **derive_allowed_origins()** (6 connections) — `src/hal0/config/network.py`
+- **hostname()** (4 connections) — `src/hal0/config/network.py`
+- **bind_host()** (3 connections) — `src/hal0/config/network.py`
+- **detect_lan_ips()** (3 connections) — `src/hal0/config/network.py`
+- **_api_port()** (2 connections) — `src/hal0/config/network.py`
+- **Network-shape resolution — the single source both the systemd unit and ``hal0 se** (1 connections) — `src/hal0/config/network.py`
+- **Derive the WS/CORS origin allowlist from the bind host + hostname.      Always i** (1 connections) — `src/hal0/config/network.py`
+- **The canonical bind host — read by BOTH the unit and ``hal0 serve``.      Default** (1 connections) — `src/hal0/config/network.py`
+- **The canonical operator-facing hostname (bare, no ``.local`` suffix).      ``HAL0** (1 connections) — `src/hal0/config/network.py`
+- **Best-effort enumeration of this host's non-loopback IPv4 addresses.      Tries `** (1 connections) — `src/hal0/config/network.py`
 
 ## Relationships
 
 - [socket](socket.md) (1 shared connections)
-- [load_answers](load_answers.md) (1 shared connections)
+- [system_info_command.py](system_info_command.py.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/install/network.py`
+- `src/hal0/config/network.py`
 
 ## Audit Trail
 
-- EXTRACTED: 57 (98%)
-- INFERRED: 1 (2%)
+- EXTRACTED: 29 (97%)
+- INFERRED: 1 (3%)
 - AMBIGUOUS: 0 (0%)
 
 ---

@@ -1,6 +1,6 @@
 # test_slots_routes.py
 
-> 15 nodes
+> 15 nodes · cohesion 0.26
 
 ## Key Concepts
 
@@ -8,10 +8,10 @@
 - **_StubResponse** (9 connections) — `tests/api/test_slots_routes.py`
 - **_patch_httpx()** (8 connections) — `tests/api/test_slots_routes.py`
 - **MonkeyPatch** (5 connections)
-- **test_scrape_llama_metrics_synthesises_kv_from_slots()** (5 connections) — `tests/api/test_slots_routes.py`
-- **test_scrape_llama_metrics_prefers_native_ratio_when_present()** (5 connections) — `tests/api/test_slots_routes.py`
-- **test_scrape_llama_metrics_omits_kv_when_slots_idle()** (5 connections) — `tests/api/test_slots_routes.py`
 - **test_scrape_llama_metrics_clamps_overrun()** (5 connections) — `tests/api/test_slots_routes.py`
+- **test_scrape_llama_metrics_omits_kv_when_slots_idle()** (5 connections) — `tests/api/test_slots_routes.py`
+- **test_scrape_llama_metrics_prefers_native_ratio_when_present()** (5 connections) — `tests/api/test_slots_routes.py`
+- **test_scrape_llama_metrics_synthesises_kv_from_slots()** (5 connections) — `tests/api/test_slots_routes.py`
 - **Tests for the /api/slots route surface (container runtime).  Covers:   - list-me** (1 connections) — `tests/api/test_slots_routes.py`
 - **Minimal httpx.Response stand-in for the scrape tests.      Implements just the s** (1 connections) — `tests/api/test_slots_routes.py`
 - **Patch httpx.AsyncClient used inside slots._scrape_llama_metrics.      Routes the** (1 connections) — `tests/api/test_slots_routes.py`

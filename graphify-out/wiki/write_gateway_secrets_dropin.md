@@ -1,6 +1,6 @@
 # write_gateway_secrets_dropin
 
-> 16 nodes
+> 16 nodes · cohesion 0.12
 
 ## Key Concepts
 
@@ -26,8 +26,8 @@
 - [hermes_provision.py](hermes_provision.py.md) (5 shared connections)
 - [agent_commands.py](agent_commands.py.md) (4 shared connections)
 - [Any](Any.md) (2 shared connections)
-- [Path](Path.md) (1 shared connections)
-- [_StepCtx](_StepCtx.md) (1 shared connections)
+- [_atomic_write](_atomic_write.md) (1 shared connections)
+- [_phase_config_write](_phase_config_write.md) (1 shared connections)
 
 ## Source Files
 

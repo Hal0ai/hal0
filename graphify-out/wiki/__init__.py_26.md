@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/normalize/__init__.py`
-- **Request normalization for dispatcher-bound chat traffic (model resolution + thin** (1 connections) — `src/hal0/normalize/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/realtime/__init__.py`
+- **hal0 Realtime engine — OpenAI Realtime WebSocket surface (HP-realtime inc-1).  T** (1 connections) — `src/hal0/realtime/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/normalize/__init__.py`
+- `src/hal0/realtime/__init__.py`
 
 ## Audit Trail
 

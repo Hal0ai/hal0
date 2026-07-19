@@ -1,48 +1,51 @@
 # TestClient
 
-> 26 nodes
+> 36 nodes · cohesion 0.08
 
 ## Key Concepts
 
-- **TestClient** (15 connections)
-- **test_profiles_portable_routes.py** (10 connections) — `tests/api/test_profiles_portable_routes.py`
-- **_seed_name()** (10 connections) — `tests/api/test_profiles_portable_routes.py`
-- **TestImportCommit** (6 connections) — `tests/api/test_profiles_portable_routes.py`
-- **TestImportDryRun** (5 connections) — `tests/api/test_profiles_portable_routes.py`
-- **app()** (4 connections) — `tests/api/test_profiles_portable_routes.py`
-- **_create_custom()** (4 connections) — `tests/api/test_profiles_portable_routes.py`
-- **TestExportRoute** (4 connections) — `tests/api/test_profiles_portable_routes.py`
-- **FastAPI** (3 connections)
-- **client()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_export_seed_profile_200_valid_envelope()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_export_custom_profile_200_valid_envelope()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_dry_run_shape_and_checksum_ok()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_dry_run_collides_true_for_existing_name()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_dry_run_collides_false_for_fresh_name()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_dry_run_checksum_ok_false_when_tampered()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_commit_creates_profile()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_commit_without_name_400()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_commit_duplicate_name_409()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_commit_too_new_schema_400()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_export_then_import_under_new_name_appears_in_list()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_export_unknown_404()** (2 connections) — `tests/api/test_profiles_portable_routes.py`
-- **.test_commit_bad_envelope_400()** (2 connections) — `tests/api/test_profiles_portable_routes.py`
-- **TestRoundTripHttp** (2 connections) — `tests/api/test_profiles_portable_routes.py`
-- **Tests for the portable profile routes — export/import over HTTP.  Mirrors tests/** (1 connections) — `tests/api/test_profiles_portable_routes.py`
-- *... and 1 more nodes in this community*
+- **TestClient** (47 connections)
+- **_seed_slot_toml()** (18 connections) — `tests/api/test_slots_routes.py`
+- **test_agent_hermes_slot_name_resolves_to_agent()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_config_profile_change_drives_device_via_route()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_coresident_group_uses_device_not_legacy_names()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_emits_declared_backend_from_device()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_emits_labels_for_tool_calling_gate()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_enable_thinking_null_when_unset()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_exposes_enable_thinking_and_n_gpu_layers()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_exposes_idle_timeout_workers_llamacpp_args()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_exposes_rope_freq_base()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_llamacpp_args_none_when_server_table_absent()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_no_coresident_group_when_npu_anchor_disabled()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_omits_declared_backend_when_no_device()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_rope_freq_base_null_when_absent()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_skips_coresident_for_disabled_sibling()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_put_config_rope_freq_base_roundtrip()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_disable_offline_slot_does_not_unload()** (5 connections) — `tests/api/test_slots_routes.py`
+- **npu_trio_slot_root()** (4 connections) — `tests/api/test_slots_routes.py`
+- **coresident_group must key off device==npu, not the legacy slot names.      Deplo** (1 connections) — `tests/api/test_slots_routes.py`
+- **Disabled NPU LLM anchor → no trio markers on the sibling slots.** (1 connections) — `tests/api/test_slots_routes.py`
+- **A disabled sibling slot doesn't claim coresident membership.** (1 connections) — `tests/api/test_slots_routes.py`
+- **Lay down the NPU FLM trio (agent + stt-npu + embed-npu) on disk.** (1 connections) — `tests/api/test_slots_routes.py`
+- **A slot's enable_thinking + [model].n_gpu_layers ride along in the payload.** (1 connections) — `tests/api/test_slots_routes.py`
+- **No enable_thinking in TOML → payload reports it as null (effective OFF).** (1 connections) — `tests/api/test_slots_routes.py`
+- *... and 11 more nodes in this community*
 
 ## Relationships
 
-- [create_app](create_app.md) (1 shared connections)
+- [.json](json.md) (34 shared connections)
+- [Any](Any.md) (22 shared connections)
+- [test_slots_routes.py](test_slots_routes.py.md) (18 shared connections)
+- [FastAPI](FastAPI.md) (9 shared connections)
 
 ## Source Files
 
-- `tests/api/test_profiles_portable_routes.py`
+- `tests/api/test_slots_routes.py`
 
 ## Audit Trail
 
-- EXTRACTED: 104 (99%)
-- INFERRED: 1 (1%)
+- EXTRACTED: 181 (100%)
+- INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 
 ---

@@ -1,29 +1,29 @@
 # HermesDriver
 
-> 41 nodes
+> 41 nodes · cohesion 0.07
 
 ## Key Concepts
 
 - **HermesDriver** (35 connections) — `src/hal0/agents/hermes/driver.py`
 - **HermesUpstreamMissingError** (9 connections) — `src/hal0/agents/manager.py`
 - **driver.py** (8 connections) — `src/hal0/agents/hermes/driver.py`
-- **test_install_raises_when_not_provisioned()** (6 connections) — `tests/agents/test_hermes_wrapper.py`
 - **test_install_error_message_points_to_cli_provision()** (6 connections) — `tests/agents/test_hermes_wrapper.py`
-- **.uninstall()** (5 connections) — `src/hal0/agents/hermes/driver.py`
-- **.status()** (5 connections) — `src/hal0/agents/hermes/driver.py`
-- **Path** (5 connections)
+- **test_install_raises_when_not_provisioned()** (6 connections) — `tests/agents/test_hermes_wrapper.py`
 - **._env_file_path()** (5 connections) — `src/hal0/agents/hermes/driver.py`
 - **._load_provision()** (5 connections) — `src/hal0/agents/hermes/driver.py`
 - **._remove_context_link_outputs()** (5 connections) — `src/hal0/agents/hermes/driver.py`
 - **._remove_venv()** (5 connections) — `src/hal0/agents/hermes/driver.py`
+- **.status()** (5 connections) — `src/hal0/agents/hermes/driver.py`
+- **.uninstall()** (5 connections) — `src/hal0/agents/hermes/driver.py`
+- **Path** (5 connections)
 - **.install()** (4 connections) — `src/hal0/agents/hermes/driver.py`
 - **._provision_state_path()** (4 connections) — `src/hal0/agents/hermes/driver.py`
 - **_prober_missing()** (4 connections) — `tests/agents/test_hermes_wrapper.py`
+- **._data_dir()** (3 connections) — `src/hal0/agents/hermes/driver.py`
+- **._write_env_file()** (3 connections) — `src/hal0/agents/hermes/driver.py`
 - **_probe_systemd_unit_active()** (3 connections) — `src/hal0/agents/hermes/driver.py`
 - **_probe_tcp_port()** (3 connections) — `src/hal0/agents/hermes/driver.py`
-- **._data_dir()** (3 connections) — `src/hal0/agents/hermes/driver.py`
 - **Any** (3 connections)
-- **._write_env_file()** (3 connections) — `src/hal0/agents/hermes/driver.py`
 - **test_uninstall_is_idempotent()** (3 connections) — `tests/agents/test_hermes_wrapper.py`
 - **_probe_hermes_provisioned()** (2 connections) — `src/hal0/agents/hermes/driver.py`
 - **_probe_wrapper_installed()** (2 connections) — `src/hal0/agents/hermes/driver.py`

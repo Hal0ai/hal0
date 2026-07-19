@@ -1,6 +1,6 @@
 # hal0-systemctl
 
-> 4 nodes
+> 4 nodes · cohesion 1.00
 
 ## Key Concepts
 

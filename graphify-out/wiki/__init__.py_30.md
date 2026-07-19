@@ -1,12 +1,11 @@
 # __init__.py
 
-> 3 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (2 connections) — `src/hal0/providers/workflows/__init__.py`
-- **Canonical ComfyUI workflow templates shipped with hal0.  Each template is a JSON** (1 connections) — `src/hal0/providers/workflows/__init__.py`
-- **# NOTE: Stored as JSON (not Python dicts) so a designer can pop a workflow** (1 connections) — `src/hal0/providers/workflows/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/services/__init__.py`
+- **Companion-service management layer.  hal0 ships with (or sits next to) a set of** (1 connections) — `src/hal0/services/__init__.py`
 
 ## Relationships
 
@@ -14,11 +13,11 @@
 
 ## Source Files
 
-- `src/hal0/providers/workflows/__init__.py`
+- `src/hal0/services/__init__.py`
 
 ## Audit Trail
 
-- EXTRACTED: 4 (100%)
+- EXTRACTED: 2 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

@@ -1,31 +1,31 @@
 # memory-graph-engine.jsx
 
-> 22 nodes
+> 22 nodes · cohesion 0.12
 
 ## Key Concepts
 
 - **memory-graph-engine.jsx** (22 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **NodeDetail()** (4 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **fmtMemDate()** (3 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **degreeByType()** (3 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **fmtMemDate()** (3 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **Hovercard()** (3 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **reducedMotion()** (2 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **neighborsOf()** (2 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **reducedMotion()** (2 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **useTween()** (2 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **edgeArc()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **GraphDefs()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **makeNodeDrag()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **MEM_FACT_COLORS** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **MEM_LINK_COLORS** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **MEM_LINK_LABEL** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **MEM_FACT_COLORS** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **MG_PALETTE** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **TOPICS** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **normalizeGraph()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **shortestPath()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **pathEdges()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **edgeArc()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **shortestPath()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
+- **TOPICS** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **useForce()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **usePanZoom()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **makeNodeDrag()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 - **useSize()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
-- **GraphDefs()** (1 connections) — `ui/src/dash/memory-graph-engine.jsx`
 
 ## Relationships
 

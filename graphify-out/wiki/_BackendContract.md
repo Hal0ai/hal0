@@ -1,17 +1,17 @@
 # _BackendContract
 
-> 8 nodes
+> 8 nodes · cohesion 0.25
 
 ## Key Concepts
 
 - **_BackendContract** (13 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **test_all_fakes_implement_backend_contract()** (6 connections) — `tests/harness/integration/test_delegate_task_dispatch_matrix.py`
 - **test_delegate_dispatch_per_backend_round_trips()** (5 connections) — `tests/harness/integration/test_delegate_task_dispatch_matrix.py`
-- **.init_session()** (1 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **.cleanup()** (1 connections) — `tests/harness/integration/_delegate_fakes.py`
+- **.init_session()** (1 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **The public shape every Hermes execution backend exposes.      Kept deliberately** (1 connections) — `tests/harness/integration/_delegate_fakes.py`
-- **Per-backend smoke: the runner picks the right backend and the     output round-t** (1 connections) — `tests/harness/integration/test_delegate_task_dispatch_matrix.py`
 - **Our three fakes must claim conformance with the ABC mirror.      A regression wh** (1 connections) — `tests/harness/integration/test_delegate_task_dispatch_matrix.py`
+- **Per-backend smoke: the runner picks the right backend and the     output round-t** (1 connections) — `tests/harness/integration/test_delegate_task_dispatch_matrix.py`
 
 ## Relationships
 

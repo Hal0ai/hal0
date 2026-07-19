@@ -1,13 +1,13 @@
 # logs.py
 
-> 10 nodes
+> 10 nodes · cohesion 0.29
 
 ## Key Concepts
 
 - **logs.py** (5 connections) — `src/hal0/slots/logs.py`
 - **is_log_noise()** (4 connections) — `src/hal0/slots/logs.py`
-- **_suppress_proc()** (4 connections) — `src/hal0/slots/logs.py`
 - **read_tail()** (4 connections) — `src/hal0/slots/logs.py`
+- **_suppress_proc()** (4 connections) — `src/hal0/slots/logs.py`
 - **tail_journal()** (4 connections) — `src/hal0/slots/logs.py`
 - **journalctl-backed per-slot log access.  Extracted from ``routes/slots.py`` (P3-r** (1 connections) — `src/hal0/slots/logs.py`
 - **True for high-frequency heartbeat lines with no diagnostic value.** (1 connections) — `src/hal0/slots/logs.py`

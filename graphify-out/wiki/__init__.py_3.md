@@ -1,11 +1,12 @@
 # __init__.py
 
-> 2 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/agents/hermes/__init__.py`
-- **Hermes agent vendored sources.  Only the driver lives here now. Plugin sources t** (1 connections) — `src/hal0/agents/hermes/__init__.py`
+- **__init__.py** (2 connections) — `src/hal0/providers/workflows/__init__.py`
+- **Canonical ComfyUI workflow templates shipped with hal0.  Each template is a JSON** (1 connections) — `src/hal0/providers/workflows/__init__.py`
+- **# NOTE: Stored as JSON (not Python dicts) so a designer can pop a workflow** (1 connections) — `src/hal0/providers/workflows/__init__.py`
 
 ## Relationships
 
@@ -13,11 +14,11 @@
 
 ## Source Files
 
-- `src/hal0/agents/hermes/__init__.py`
+- `src/hal0/providers/workflows/__init__.py`
 
 ## Audit Trail
 
-- EXTRACTED: 2 (100%)
+- EXTRACTED: 4 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

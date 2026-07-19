@@ -1,238 +1,263 @@
-# Handoff — hal0 R5 drive-2 (paste-in brief for a fresh **Fable** orchestrator session)
+# Handoff — R5 drive 2: put it back together (paste-in prompt, Fable orchestrator)
 
-> **This supersedes `handoff-r5-endgame.md` as the operating brief.** The endgame handoff
-> remains the **phase-spec appendix** (its §4 Phase 0–4 breakdown is still the per-lane spec).
-> This drive-2 layers the *operating model* on top — team topology, model tiering, total
-> gitops, phase/todo tracking, the SWEEP workstream, and the release cut — and refreshes the
-> state to "Phase 0 landed." Where the two differ on **state**, this doc wins; where they differ
-> on a **lane spec**, the endgame handoff + the assessment's `path:line` evidence win.
+> **You are the R5 drive-2 orchestrator.** Phase 0 (correctness & security) is DONE and
+> merged. Your mission is the rest: wire every surface back into sync, finish the structural
+> decomposition, make the two most-touched UX flows seamless, hunt down everything
+> overlooked — dead code, stubs, dead settings, filler strings, stale names — and land it
+> all in a state **worthy of a new release**. This drive is where the rework's payoff
+> becomes visible; the bar is "better than ever", not "done enough".
 >
-> **You are Fable, the single orchestrator.** Read in order: (1) this handoff, (2)
-> `handoff-r5-endgame.md` (phase specs §4), (3) `r5-sync-assessment-2026-07-19.md` (the
-> `path:line` evidence — adversarially verified), (4) `sweep-inventory.md` (the overlooked-surface
-> backlog produced 2026-07-19), (5) `REWORK_BOARD_PROTOCOL.md` (single-writer, lane lifecycle,
-> verify/merge discipline), (6) `REWORK_BOARD.md` (live status), (7) `REWORK.md` (finish line +
-> per-lane DoD). Specs per lane: `docs/rework/hal0-specs/`.
+> **This is a ONE-session orchestration** (decision recorded §8): the board is
+> single-writer and FLAGS-own spans backend+UI, so a second session would fight over the
+> same seam. You get parallelism from **agent teams in isolated worktrees**, not from
+> parallel sessions. You ARE the board writer for this drive.
+>
+> Read in order: (1) this handoff · (2) `docs/rework/r5-sync-assessment-2026-07-19.md`
+> (the evidence base — §-refs below point into it; **re-verify `path:line` cites before
+> acting — Phase 0 moved code**) · (3) `docs/rework/sweep-inventory.md` (the SWEEP
+> discovery is ALREADY RUN — this is the adjudicated backlog, §4) · (4)
+> `docs/rework/REWORK_BOARD_PROTOCOL.md` · (5) `docs/rework/REWORK_BOARD.md` (live status) ·
+> (6) `docs/rework/REWORK.md` (finish line + DoD). Specs: `docs/rework/hal0-specs/`.
+> Supersedes `handoff-r5-endgame.md` (its Phase 0 is done; its Phases 1–4 are refined here).
 
 ---
 
-## 1. Where things stand (2026-07-19 — verify before editing, tips move)
+## 1. Base facts (verify before anything — tips move)
 
-- **Merged to `main`:** R1 (`ecdc0950`), R2/R2.1 (`6aa565b8`), R3 (`ab3e88f3`), R4 (`c91d0cf5`).
-  The finish line's hard parts (auth, slot-ids/ports, SQLite substrate, convergent installer,
-  Hermes integration) are landed.
-- **Phase 0 (Wave 0 — correctness & security) LANDED on `rework/descar`** (`1c01dbab`, board
-  `278b32a8`), pushed. Six lanes ✔: `SEC-mcp-clientid` (`5d7cd283`), `MCP-patch` (`b878ff9d`),
-  `CLI-auth` (`d55aa36d`), `mock-prod-gate` (`54ccd580`), `INSTALL-target`+model-store-PermRow+
-  uninstaller-sync (`1bb9bf70`), `SEC-hermes-mcp-cred` (`1c01dbab`). Live-validation of the
-  deploy-affecting three (target, perms, uninstaller) is **deferred to Phase 4 both-boxes**.
-- **⚠ descar is RED on γ** (Playwright): one real regression introduced by Phase 0 —
-  `activity-log.spec.ts:152 "body is a BOUNDED scroll container"` (462 pass / 1 fail / 1 flaky).
-  γ was green at `2ab6ae69`, red from `278b32a8`. Prime suspect: the `mock-prod-gate` GET-only
-  gate / fixture-split starving ActivityLog's mock rows (a sibling fix `68181bc6` already patched
-  the memory-specs for the same class). **A fix is in flight from the drive-1 session — confirm
-  it landed and descar is green before opening Phase 1.** If not landed, this is your first lane.
-- **Phase 0 residual tails (☐):** `api-logs-redact` (`/api/logs` streams raw journalctl,
-  zero redaction — same redactor as SEC-mcp-clientid), `cli-auth-streamtest` (auth-on smoke
-  tier per §5.1). Both small; fold into Phase 1's SEC/CLI collision windows.
-- **`main` advanced past descar's base:** `462b28f` + #1315 (HF update-check) + #1316 (UI-API-1
-  managed-arg gap). Any descar→main landing rebases onto **current** `origin/main`.
-- **Concurrent writers exist.** The drive-1 session pushed follow-ups (`68181bc6`) after Phase 0.
-  Before you branch anything: `git fetch origin && git log --oneline HEAD..origin/rework/descar`.
-  Fast-forward local to origin first. **You now hold the board token** once drive-1 hands off.
+- **Phase 0 merged to `rework/descar`** — six lanes: SEC-mcp-clientid `5d7cd283` · MCP-patch
+  (+ `_REST_MAP` route-sync pin) `b878ff9d` · CLI-auth (4 bypass sites + authed stream
+  helper) `d55aa36d` · mock-prod-gate (method+env gate + lazy fixtures) `54ccd580` ·
+  INSTALL-target (hal0.target + model-store PermRow + uninstaller sync) `1bb9bf70` ·
+  SEC-hermes-mcp-cred `1c01dbab`. Board updated `278b32a8`. All Phase-0 worktrees torn down —
+  **re-create scaffolding fresh.**
+- **⚠ Phase 0 shipped one regression — already root-caused + fixed.** mock-prod-gate's swap to
+  a lazy `await import('./mockFixtures')` raced React's first commit, remounting `<ActivityLog/>`
+  and reddening γ `activity-log.spec.ts:152` (bounded-scroll). Fixed `979f58e5` (eager mock
+  warm-up gated on `FORCED` — prod bundle unchanged — + a de-raced `toHaveCSS` assertion;
+  stress-verified 0 flakes). A sibling e2e fix rode the same class at `68181bc6`. **descar tip
+  after this drive-1 handoff = `4ee5b074`** (fix + docs). Re-fetch — tips move.
+- **Assessment + graph + BOTH handoffs are on `main`** via PR #1317 (`f2d82d38`); descar was
+  reconciled with main by a docs/artifact-only merge (this handoff's session) so #1318
+  (descar→main) is mergeable and CI runs again. **Before you branch:**
+  `git fetch origin && git log --oneline HEAD..origin/rework/descar` and FF local first.
+- **Phase 0 residual tails (☐, small):** `api-logs-redact` (`/api/logs` streams raw journalctl,
+  zero redaction — reuse the SEC-mcp-clientid redactor), `cli-auth-streamtest` (auth-on smoke
+  tier per §5.1). Fold into Phase 1's SEC/CLI windows.
+- **Repo version is SPLIT** — `pyproject` says **`0.9.8`**, `ui/package.json` + `ui/index.html`
+  say **`0.5.0-alpha.1`**. This is a release-cut blocker (§3 VERS-flash, §5 Phase-4 release prep):
+  reconcile to ONE real number and kill the alpha placeholder.
+- **NOT started:** Phase 1 (sync wiring) and everything after. `main` carries #1315 + #1316
+  (`POST /api/models/{id}/validate`); descar→main landings rebase onto current `origin/main`.
+- Work lands on **`rework/descar`**; it merges to main at phase boundaries.
 
-## 2. The finish line (quoted, `REWORK.md`)
+## 2. Orchestration model — max parallelism, total git/tracking discipline
 
-Complete when hal0 has: one authoritative model/config path · one Hindsight memory path · one
-tool-calling loop · one slot-config apply engine · one settings apply engine · one model-store
-resolver · one runner-image registry · SQLite-backed machine state + model metadata · stable
-slot IDs + centrally managed ports · deny-by-default auth + exposure classification · a
-convergent installer with a clear privilege seam · a small optional Hermes integration ·
-**deployment validated on the new `halo` LXC.** Operating rule: *finish the simplification,
-validate it on `halo`, merge it — don't add adjacent features.* This drive adds one clause:
-**the surface must not lie, leak, stub, or ship filler** — see the SWEEP (§6).
+**Team topology.** Dispatch lanes as parallel agent teams, each in its **own git worktree +
+branch** off current descar. Parallelize **across** the board's collision classes
+(SEC · MODEL · RUNNER · SLOT · INSTALL · HERMES · API · UI · OBS · DOCS · DEPLOY);
+**serialize within** a class. Typical steady state: 3–6 teams live at once. You (Fable)
+never build in-lane while teams are running — you dispatch, review, reconcile, merge.
+(Read-only investigators — SWEEP discovery, audits — need no worktree.)
+
+**Model tiering (mandated):**
+- **Haiku** — mechanical fan-out: grep inventories (string hunts, dead-export sweeps,
+  ENDPOINTS consolidation), docs application from a precise brief, fixture realignment.
+- **Sonnet** — standard lane builds, research/surveys, e2e authoring, board-delta drafting.
+- **Opus** — the hard code tasks: pull-orchestration extraction, `lifespan()` phase-split,
+  route-map autogen, FLAGS-own backend migration.
+- **Fable (you)** — every merge review ("X-built, Fable-reviewed + independently re-run"
+  per board discipline), adversarial verification of risky claims, cross-lane
+  reconciliation (§4b class), user-decision surfacing, board writes.
+
+Agents should emit **caveman-compressed output** (`/caveman` style: file:line tables,
+fragments, no filler) to keep your context long across the drive.
+
+**Git discipline (total management):**
+1. One lane = one worktree = one branch; lane commits stay small and typed
+   (`feat|fix|docs|refactor(scope): …`).
+2. Merge to descar ONLY after: Fable review + independently re-run **capped gate**
+   (`ruff check` + `format --check` + import smoke + sunset + named pytest targets; UI:
+   tsc + eslint + build + targeted γ). Board row gets status + merge SHA in the same push.
+3. Consolidated gate (full python + γ) before each **push wave**; push waves batch 2–4 lane
+   merges. CI red on descar = stop-the-line: fix forward before any new merge.
+4. Tear down each worktree + team branch immediately after its merge (Phase-0 pattern).
+5. Never rewrite descar history; fix forward.
+6. **descar→main is gated on a mergeable #1318** — when main advances (it did: `f2d82d38`),
+   reconcile descar with main promptly; a conflicting PR silently stops ALL Actions runs
+   (the merge-ref can't build). Watch #1318's mergeable state, not just the branch.
+
+**Tracking.** Mirror every dispatched lane as a Task (TaskCreate → in_progress at dispatch
+→ completed at merge). The board stays canonical; tasks are your live cockpit. Keep a
+phase-level task open per §5 phase; close it only when the phase's DoD bullet list is met.
+
+## 3. NEW defect lanes (user-reported, live) — with starting evidence
+
+These are user-visible regressions/rough edges observed on live boxes. Ground truth beats
+the notes below — repro first, then fix at the root.
+
+- **VERS-flash — old version number flashes before the real one loads.**
+  `ui/index.html:15,18` hardcodes `v0.5.0-alpha.1` in `<title>` + meta (matches
+  `ui/package.json:4`), and the O24 investigation used exactly this literal as the
+  stale-dist tell. **Compounding finding:** `pyproject` is at `0.9.8` while the UI is at
+  `0.5.0-alpha.1` — the version isn't just flashing, it's *inconsistent across the repo*.
+  Fix: pick the real release version (§5), build-time inject (Vite define from a single
+  source of truth) + set `document.title` from `useUpdateState` after mount; then **sweep
+  for every other hardcoded version literal** in ui/src + src/hal0 (AboutPage was already
+  converted — same class). Assessment §1.3; sweep-inventory §0/§5.
+- **NAMES-stale — slots named `primary`/`legacy` appear during reloads.** Verified sources
+  on descar: `ui/src/dash/data.jsx:64,88` (fixture slots literally named "primary" and
+  "legacy"), `ui/src/api/mockFixtures.ts:163,179,281,294` (same), `useSlots.ts:204`
+  (heuristic keyed on `name === 'primary'`), `agents-overview.jsx:144` +
+  `dashboard-redesign.jsx:172` (`slots.find(name === 'primary')` fallback selectors).
+  Phase 0's mock-prod-gate closed the *fetch-fallback* path — but if fixtures seed
+  **initial React state** (hydration-window flash) or the name-keyed heuristics pick a
+  fallback label, the gate doesn't cover it. Lane: repro the reload flash → trace which
+  path renders fixture names → replace name-literal heuristics with slot *type/role* keys
+  → ensure loading states render skeletons, never fixture rows. Add an e2e that asserts no
+  fixture slot name ever renders against a live-shaped mock.
+- **DRAWER-shape — the two most-touched surfaces must reflect the new ownership model.**
+  This is the FLAGS-own UI half, elevated to a first-class UX goal:
+  - **Slot edit drawer → the new SIMPLE shape**: slot = id/name/model/port/state
+    (spec-flags-ownership §7 slot purity). No flag/device/template surface. Editing a slot
+    should feel like renaming a socket, not tuning an engine.
+  - **Model edit drawer → the new COMPLEX shape**: flags, device, chat_template,
+    capabilities, runner, defaults all live on the model record (ModelDrawer's
+    copy-on-stamp editor from D1 is the seed — it becomes the full home).
+  - **Staff these with UI/UX-specialized agents** and hold a real bar: loading/error/empty
+    states, optimistic updates with rollback, keyboard flow, no dead controls, no
+    disabled-with-reason left where the backend now exists. These are the two surfaces
+    operators touch most — SEAMLESS is the acceptance criterion, reviewed by you against
+    the running app (`/run` + screenshots), not just specs passing.
+
+## 4. The SWEEP — overlooked, forgotten, dead (standing workstream)
+
+**Discovery is already done.** A 5-way read-only, graphify-first, model-tiered fan-out ran
+2026-07-19; the adjudicated inventory with dispositions is **`docs/rework/sweep-inventory.md`**.
+**Verdict: the platform is unusually clean post de-scar** — `ruff --select F401,F811,F841` is
+green and most historical dead-code notes are already resolved. Your job is the tail:
+**Fable adjudicates each candidate → lanes execute (Haiku mechanical / Sonnet with-logic)**.
+Every deletion lowers the scar baseline; every keep gets a `HAL0-SUNSET` stamp or an owner.
+
+Concrete yield (full tables in the inventory):
+1. **Dead code** — ~13 Python candidates (~60–90 LOC: `_idle_monitor_loop`, `_all_known_drivers`,
+   `_parse_flm_version`, a dead `dry_run` param, …) + **16 dead UI endpoint constants** in
+   `ui/src/api/endpoints.ts` (each shadowed by a live literal — 2-sources-of-truth). FE is
+   otherwise clean (apparent orphans are `main.tsx` window-globals; the "~47" count is now 64).
+2. **Two "overlooked" gems that smell like FORGOTTEN WIRE-UPS, not cruft — VERIFY, likely fix:**
+   `ports/authority.py:375 reconcile_listeners()` ("surfaces so it shows up in `/api/ports`"
+   but never called) and `config/paths.py:400 bundle_chosen_marker()` (names
+   `POST /api/bundles/{name}` + `GET /api/bundles/skip` — **neither route exists**; a whole
+   feature stubbed at the path layer). Decide implement-vs-delete with a human look.
+3. **Stubs** — codebase is clean; **1 real gap:** curated STT/TTS FirstRun picks
+   (`registry/curated.py:18`, blocked on multi-file pull shape). The rest are intentional
+   phase-gates / test fixtures. (The Hermes `reflect` gap from endgame §4.5 is NOT a
+   NotImplementedError stub — treat as Phase-3 route completion, verify the body.)
+4. **Dead settings** — 6 dead/inert (`rope_freq_base`, `workers`, single-value `runtime`
+   Literal, cognee engine value, a literal-dead `dry_run`) + an **OVERDUE** `--backend`
+   deprecation (docstring promised rename "in v0.2", tree is at 0.9.8) → fold into FLAGS-own's
+   CLI tranche. KEEP (load-bearing despite deprecated label): `[models].pull_root`, capabilities
+   `backend=` migration. Env vars: no orphans.
+5. **Filler/stale text** — 4 prod-reaching: the two `index.html` version literals (§3 VERS-flash)
+   + two `"not yet wired — placeholder"` settings pages (LibraryDownloadsPage, HealthStatsPage —
+   these ARE endgame Phase-2's "wire-or-demote the two placeholder pages"). Plus the assessment's
+   doc-vs-code drift classes (cli.mdx flags §5.5, CONTRACTS/endpoints §2).
+
+DoD for the sweep: every VERIFY row adjudicated (fixed/deleted/kept-doc with a reason); every
+prod-reaching filler fixed; every H-confidence dead symbol/const removed; overdue deprecations
+cut or sunset-stamped; version reconciled; **scar baseline strictly lower than drive start**;
+zero placeholder surfaces reachable in the shipped UI without an owner row; docs-ref ratchet green.
+
+## 5. Phases (1 → 4) with DoD
+
+### Phase 1 — Sync wiring (start immediately; ~4 parallel teams)
+From assessment §-refs; Phase-0 items are done — do not redo.
+- **MCP-sync** (API class): tier-a catalog adds (rename gated · by-id/by-name/resolved/
+  state reads · PATCH defaults · model default/duplicate · pulls list/delete · system-info
+  · bench queue delete) + `memory_recall` on admin + read/write reclassification +
+  EXCLUDED set. (Route-sync pin landed in Phase 0.) §4.3.
+- **CLI-auth+verbs** (CLI class): `hal0 auth status|rotate|require` · `slot rename` ·
+  `model default|update [--check]|pull --cancel` · `hal0 ports` · `hal0 board …` ·
+  `hal0 chat --brain` · `import-backup` SQLite chain. §5.2.
+- **UI wiring** (UI class): DuplicateModelDialog → real route · mock realignment
+  (capabilities envelope, status/update shapes, dead auth rows) · endpoints.ts/CONTRACTS
+  doc-sweep · ui-sweep-b ENDPOINTS consolidation (folds the SWEEP's 16 dead consts). §1.2/§2.
+- **Missing routes** (API class, serialize behind MCP-sync merge): `GET /api/stats/requests`
+  (rollup shape frozen client-side) · `GET /api/doctor` · `GET /api/auth/exposure`;
+  `flag-report` goes into FLAGS-own DoD, not here. §1.2.
+- **VERS-flash + NAMES-stale** (UI class) — §3 above.
+- DoD: every "API-lane request" comment in ui/src either has a live route or a board row;
+  CLI reaches every merged R3/R4 ability; admin MCP exposes tier-a; both defect lanes
+  closed with regression e2e.
+
+### Phase 2 — Structural + the seamless drawers (~4 teams; the release core)
+- **P3-routers inc 3** (API): pull-orchestration extraction (Opus) → typed bodies
+  (audit first; new routes born Pydantic; open `typed-bodies-rest` row) → **route-map
+  autogen** (Opus; settle §4.4's 3-gap addendum first). DoD: models.py ≤550 / slots.py
+  ≤800, `request.json()` = 0 in owned files, autogen live with security overlay.
+- **FLAGS-own** (MODEL+UI, the drive centerpiece): backend migration per
+  `spec-flags-ownership.md` (+ `GET /api/migrations/flag-report` in DoD) · **DRAWER-shape
+  UX push** (§3) · CLI tranche (deprecate `--provider/--hardware/--backend` — the `--backend`
+  one is OVERDUE per SWEEP §4 · delete the client-side hardware probe) · golden #5 (no
+  profile read at launch). Rides the P2-config window for migration.
+- **lifespan() split** (API, Opus): phase-split `api/__init__.py:862` (~540 lines, 44
+  `app.state` touches) + typed app.state + BootReport. Do NOT touch `create_app()` (§11 —
+  its centrality is fixture noise). Importer flips + `_probe_power` extraction + sunset
+  stamps ride this lane. §3.
+- **Settings data-seam completion** (UI): remaining pages onto typed settingsClient ·
+  **wire-or-demote the two placeholder pages** (SWEEP §5) · ESM continuation (47 → recount
+  64 window-global modules, ratchet rule) · CSS-era consolidation. §1.3.
+- DoD: routers parse→call→render only; slot/model drawers ship the new shapes seamlessly;
+  boot is phased+typed; settings pages all on the seam.
+
+### Phase 3 — Memory & Hermes finish (~2 teams + deploy window)
+- **MCP-mem-hindsight** (HERMES): rename to `hindsight_recall/retain` + implement
+  `reflect` (verify the route body first — SWEEP §3) + `local_external` config layout +
+  both parity copies + provisioner prompt. §4.5.
+- **Brain-lane relocation** (HERMES): 5 RELOCATE steps → hal0-api lifespan (pairs
+  naturally with the lifespan split — sequence after it merges). §7.
+- **Drift-watch fixture adds** + **hermes-bump runbook**. §7.
+- Deploy window: re-run Phase-5 plugin liveness + Phase-6 HP-executor first contact
+  (both-boxes). §7.
+
+### Phase 4 — Migration windows, launch, RELEASE (orchestrator-run live steps)
+- P2-memory (fixtures-rehearsed, never mutate lxc105) · P2-config (+ FLAGS-own migration
+  same window) · P2-updater-b (**verify + trim, not build** — pipeline is implemented,
+  1,918 lines) · P3-runtime-db (M5 coordination) · SLOT-B live flip (atomic) ·
+  ComfyUI repin + cpu lineage · golden-paths deploy runbook on halo143 · R5 cutover
+  (side-by-side, lxc105 rollback) · live-validate the Phase-0 deploy-affecting three
+  (target autostart, model-store perms, uninstaller), both boxes.
+- **Release prep (new, the point of the drive):** version bump proposal (reconcile the
+  `0.9.8`/`0.5.0-alpha.1` split to the real next version), CHANGELOG rewrite for the release
+  (rework story told once, scars→results), README/dashboard screenshots refresh, upgrade
+  notes (Honcho migration, slot-id flip), tag plan. Present as a reviewable package —
+  the user decides the version and pulls the trigger.
+
+## 6. Decisions owed to the user (surface at phase boundaries; none block Phase 1)
+Root `AGENTS.md` re-delete vs pointer stub · ComfyUI host-net loopback veto · updater
+nightly channel drop-vs-add · cpu-runner lineage · HP-voice/automation/context
+promote-or-defer · god-module LOC tracking yes/no · **the release version number** (§5).
+Ask **once per boundary, batched**, with a recommendation each.
+
+## 7. Conventions (unchanged, binding)
+Board single-writer (you, this drive) · one owner per fact · no ghost citations, no ADR
+tree (decisions inline in ARCHITECTURE.md) · ✔ needs merge SHA + verify evidence ·
+deploy-affecting = both boxes (150 privileged / 143 unprivileged), recorded per box ·
+capped gate on every code touch, dangling-link grep on docs · land on descar · use
+`graphify query` before grepping but filter its metrics (assessment §11: test-edge /
+cross-language / same-file noise; SlotManager is the real waist, `create_app` is not);
+re-run the semantic pass (not just `update`) if doc→code edges are needed.
+
+## 8. Why one session, not two (recorded)
+Two sessions were considered (backend/structural vs UI+sweep). Rejected: the board is
+single-writer; FLAGS-own couples the backend migration to the drawer UX in one seam; and
+merge waves interleave across classes. Parallelism comes from worktree teams under one
+orchestrator. If a second session is ever added, the clean cut is the SWEEP workstream
+(§4) on a docs/UI-only branch handing row deltas back — but default remains one.
 
 ---
 
-## 3. Operating model — how you run this drive
-
-### 3.1 Team topology (max parallelism, safe)
-- **One Fable orchestrator (you).** Single board writer. You never hand-edit lanes' worktrees;
-  you dispatch, gate, review, merge, and write the board.
-- **Worktree agent teams, 3–6 live at once.** One lane = one agent = one git worktree = one
-  branch. Parallel **across** board collision classes (SEC · MODEL · RUNNER · SLOT · INSTALL ·
-  HERMES · API · UI · OBS · DOCS · DEPLOY); **serialized within** a class (two API-router lanes
-  never edit `models.py` concurrently). This is the pattern Phase 0 proved.
-- **Worktree isolation is mandatory** for any lane that mutates files, so parallel agents never
-  collide in the tree. Read-only investigators (SWEEP discovery, audits) need no worktree.
-- **A clean second-session cut** if ever wanted: the SWEEP's docs/UI-only slices on a separate
-  branch. Not required — the single board serializes fine.
-
-### 3.2 Model tiering (the user's standing rule — follow it)
-| tier | use for |
-|------|---------|
-| **Haiku** | grep inventories, mechanical sweeps, string/filler edits, marker stamping, fixture vendoring, dead-row deletion |
-| **Sonnet** | lane builds, research, most feature/refactor work, UI wiring, settings-seam, doc lanes |
-| **Opus** | the four hardest code tasks only: **pull/update-pull extraction** (P3-routers inc 3), **`lifespan()` split** (api/__init__), **MCP route-map autogen**, **FLAGS-own migration** |
-| **Fable** | every merge review, adversarial verification, board writes, and cross-lane reconciliation |
-
-Discipline for anything non-trivial: **built (Opus/Sonnet) → Fable-reviewed → independently
-re-run** before ✔. Agents should emit **caveman-compressed** output (`/caveman` style: file:line
-tables, fragments, no filler) to keep your context long across the drive.
-
-### 3.3 Total gitops (non-negotiable)
-1. **One lane = one worktree = one branch.** Branch from current `origin/rework/descar`.
-2. **Capped gate on every code/test touch** before merge: `ruff check` + `format --check` +
-   import smoke + sunset guard + named pytest targets; UI: `tsc --noEmit` + eslint + build +
-   targeted γ. Docs-only: the dangling-link grep. (Encapsulate in `scripts/lane_verify.sh` if
-   not yet present — the plan sanctions it.)
-2. **Consolidated gate before each push wave**; **stop-the-line on any red** — no green-on-top-of-red.
-3. **Immediate worktree teardown** on merge (worktrees auto-clean if unchanged).
-4. **Every merge records: board SHA + verify evidence + a Task mirror** (see §3.4). A row is ✔
-   *only* with a merge SHA and verify evidence (protocol rule 4).
-5. **Land on `rework/descar`** (one integration branch); merge descar→main at **phase boundaries**,
-   rebased onto current `origin/main`. **Surface the descar→main checkpoint to the user** — don't
-   auto-merge a phase to main.
-6. **Deploy-affecting = both boxes** (150 privileged / 143 unprivileged), recorded per box, at Phase 4.
-
-### 3.4 Phase + todo tracking across teams
-- Mirror every lane as a **Task** (TaskCreate at dispatch → `in_progress` when the agent starts →
-  `completed` only with merge SHA + green gate). Use `addBlockedBy` to encode the deps in §4.
-- The **board is the source of truth for status**; Tasks are the live work-queue mirror so you can
-  see what's in flight across all teams at a glance. Reconcile them at every merge.
-- Keep `graphify-out/` current: `graphify update .` after code lands; re-run the **semantic pass**
-  (not just `update`) after doc changes so doc→code edges stay live for the graph MCP.
-
----
-
-## 4. Phases (specs in `handoff-r5-endgame.md §4`; this is the sequence + DoD)
-
-Each phase is independently shippable; later phases assume earlier ones. **Phase 0 is done**
-(§1). Open the SWEEP (§6) as a **standing workstream running in parallel with all phases** — its
-mechanical slices soak the Haiku/Sonnet capacity that phase lanes don't.
-
-### Phase 1 — Sync wiring (mostly S/M; lights up already-shipped surfaces)
-Close the backend↔frontend↔CLI↔MCP contract gaps. Lanes (endgame §4 Phase 1 = spec):
-`MCP-sync` (interim route-sync test now; then hand-add R3/R4 tools; `memory_recall`; EXCLUDED set),
-`CLI-auth+verbs` (`hal0 auth status|rotate|require` + slot rename / model default / model update
-[--check] / model pull --cancel / ports / board / chat --brain; fix `model import-backup`),
-`UI wiring` (DuplicateModelDialog→real route; mock-layer realignment; endpoints.ts/CONTRACTS.md
-doc-sweep; `UI-API-2` auth affordances; ui-sweep-b ENDPOINTS consolidation), the **four
-declared-but-missing routes** (`GET /api/stats/requests`, `/api/doctor`, `/api/auth/exposure`;
-`/api/migrations/flag-report` folds into the FLAGS-own DoD), plus the two Phase-0 tails
-(`api-logs-redact`, `cli-auth-streamtest`).
-**DoD:** no shipped surface references a route/verb/tool that doesn't resolve; MigrationBanner and
-the auth surfaces are live or explicitly demoted; capped gate green; contract doc-sweep clean.
-
-### Phase 2 — Structural decomposition (finish the simplification)
-`P3-routers inc 3` (**Opus**: pull/update-pull orchestration out of `models.py` → typed request
-bodies, new routes born Pydantic → **MCP route-map autogen**, its own lane, settle the §4.4 3-gap
-addendum first). `typed-bodies-rest` (24 `request.json()` sites no lane owns). Importer flips +
-`HAL0-SUNSET` stamps on the 4 one-release surfaces + retire `GET /api/slots/{name}` (lowers scar
-baseline). `api/__init__.py` god-file: **Opus** target `lifespan()` (`:862`, ~540 lines, 44
-`app.state.` touches) — phase-split + type `app.state` + BootReport; **do NOT** refactor
-`create_app()` (`:1400`, centrality is fixture noise). `FLAGS-own` (**Opus**,
-`spec-flags-ownership.md`): flags/device/chat_template → models; slots reduce to
-id/name/model/port/state; profiles copy-on-stamp; add the flag-report endpoint to the DoD; CLI
-tranche deprecates `--provider/--hardware/--backend`; rides the P2-config window. Settings
-data-seam completion (`spec-settings.md`) + UI continuation (ESM conversion, CSS-era
-consolidation, slot-modals/chrome round 2).
-**DoD:** routers only parse→call→render; one authoritative model/config path; scar baseline down;
-god-module LOC burned down per checkpoint.
-
-### Phase 3 — Memory & Hermes finish
-`MCP-mem-hindsight` (§4.5: rename `hal0_memory_*` → `hindsight_recall/retain`, **implement
-`reflect`** — route exists, body missing per SWEEP; config → `~/.hermes/hindsight/config.json`
-`local_external`; both parity-locked copies + parity test). Brain-lane relocation (5
-`RELOCATE(brain-lane)` markers into the hal0-api lifespan; marker-count test is the tripwire).
-Drift-watch blind spot (`hermes_cli/kanban_db.py` + kanban runs API + token-injection seam →
-`pyproject tracked_files`; vendor a kanban_runs fixture after the Phase-4 live pass).
-`hermes-bump-runbook` (full bump procedure).
-**DoD:** one Hindsight memory path; `reflect` implemented; brain phases run in the api lifespan;
-drift-watch covers the kanban seam.
-
-### Phase 4 — Migration windows + launch (orchestrator-run LIVE steps, NOT agents)
-Cut over on the new `halo` LXC; lxc105 stays as rollback, **never mutated**. `P2-memory`
-(Honcho→Hindsight per-workspace migrate on fresh halo143, deterministic fixtures, then ordered
-deletion), `P2-config` (capabilities.toml → derived view; sequence FLAGS-own migration here),
-`P2-updater-b` (**re-scope: verify + scope-trim + delete**, pipeline already implemented in
-`updater/updater.py`), `P3-runtime-db` (state.json → SQLite one table at a time; coordinate with
-SLOT-B M5), `SLOT-B live flip` (`@name→@id` + podman rename + M5 on real state — atomic),
-cross-repo (ComfyUI repin, cpu-runner lineage), and the **R5 cutover program** (redeploy halo143
-from descar, `doctor all`, podman-5 quadlet refresh, side-by-side, cutover plan; re-run the two
-deferred Hermes validations — Phase 5 plugin liveness, Phase 6 HP-executor first contact). Also
-**live-validate the Phase-0 deploy-affecting three** (target autostart, model-store perms,
-uninstaller) here, both boxes.
-**DoD:** halo143 deployed from descar, green `doctor all`, both-boxes validation recorded, cutover
-plan approved.
-
-### Phase 5 — Release cut (new — this is what makes it "worthy of a brand-new release")
-Only after Phases 1–4 DoDs and the SWEEP DoD (§6) are met, and descar→main is clean and green:
-- **Version-bump proposal** to the user (current `0.5.0-alpha.1` in `ui/package.json`; propose the
-  real release version — the version-flash placeholder must be gone, see SWEEP).
-- **Release-story CHANGELOG** — the R1→R5 arc as a human narrative, not a commit dump.
-- **Upgrade notes** — migration windows, config moves (`capabilities.toml`, hindsight config),
-  deprecated-verb removals, both-boxes deploy steps.
-- **Tag plan** — the `rework-R5` / release tag, who pushes (git-proxy blocks some tag pushes — the
-  user pushed R4's via thinMint; confirm the mechanism).
-- Package all four as a **go/no-go** for the user. Do not tag without explicit go.
-
----
-
-## 5. SWEEP — standing workstream for the overlooked (the user's headline ask)
-
-Runs in parallel with every phase. Backlog lives in **`sweep-inventory.md`** (produced 2026-07-19
-by a 5-way read-only discovery fan-out: dead-python · dead-ui · stubs/NotImplemented ·
-dead-settings/config · filler/placeholder strings). Pipeline:
-
-1. **Discover (Haiku/Sonnet, read-only):** the inventory — file:line, evidence, confidence, disposition.
-2. **Adjudicate (Fable):** for each candidate, confirm DELETE / IMPLEMENT / DEPRECATE(stamp
-   `HAL0-SUNSET`) / KEEP-DOC / VERIFY. A false "dead" claim is worse than an omission — every
-   deletion is grep-confirmed against src+tests first.
-3. **Apply (Haiku for mechanical, Sonnet for anything with logic):** by collision class, in
-   worktrees, capped-gate-verified, merged like any lane.
-
-**Categories (see the inventory for the concrete rows):** dead code (Python + UI), stubs /
-`NotImplementedError` / route-exists-impl-missing (notably Hermes `reflect`), dead settings /
-config keys / env vars / deprecated flags, filler / placeholder / fake user-facing strings
-(version-flash `0.5.0-alpha.1`, `change-me`, lorem, `example.com`, TODO-in-copy), forgotten
-half-migrated surfaces, doc drift.
-
-**DoD:** every prod-reaching filler string fixed; every confirmed-dead symbol/file deleted or
-sunset-stamped; every real stub either implemented or removed; the **scar ratchet baseline drops**
-to reflect the deletions and does not regress; the docs-reference ratchet stays green.
-
----
-
-## 6. Decisions still owed to the user (surface; don't guess)
-
-- **Root `AGENTS.md`:** the board says P4-docs deleted it (zero code dep); confirm it's gone or
-  keep a thin pointer stub to `ARCHITECTURE.md#bundled-agents-v03` — never a content copy.
-- **ComfyUI under host-net:** hostnet-render made the ComfyUI web UI loopback-only (was LAN :8188);
-  user veto window still open.
-- **Updater channel:** drop `nightly` from the API (CLI is stable-only) or add it to the CLI — they
-  disagree today; resolve in P2-updater-b.
-- **cpu-runner lineage:** wire `hal0-toolbox-cpu:v1` + manifest_key, or ratify vulkan-reuse with a note.
-- **HP-voice / HP-automation / HP-context:** stay ⏸ post-core, or promote any into R5?
-- **Release version number** (§4 Phase 5) and **god-module LOC burn-down tracking** per checkpoint.
-
-## 7. Conventions — do not violate (from `REWORK_BOARD_PROTOCOL.md`)
-
-1. **Board single-writer** — you hold the token; deltas from lanes, not direct edits by them.
-2. **One owner per fact** (rule 1) — grep for an existing test/row/section before adding one.
-3. **No ghost-doc citations** (rule 9) — every path/PR/file must exist; the docs-reference ratchet
-   fails on a dangling link. **No ADR tree** — decisions live inline in `ARCHITECTURE.md`.
-4. **Status legend** — ✔ only with a merge SHA + verify evidence.
-5. **Deploy-affecting = both boxes**, recorded per box.
-6. **Capped gate on every code/test touch**; docs-only = dangling-link grep. Ride board updates on
-   merge pushes.
-7. **Land on `rework/descar`**; it merges to main at phase boundaries, on user go.
-8. **Use the graph** before grepping, but **filter its metrics** — raw degree/betweenness are
-   inflated by test-edge/cross-language/same-file noise; SlotManager is the real coupling waist,
-   `create_app` is not. Re-verify `path:line` before acting on a specific finding — tips move.
-
----
-
-_Source of record: `r5-sync-assessment-2026-07-19.md` (evidence) + `sweep-inventory.md` (overlooked
-surface). Phase specs: `handoff-r5-endgame.md §4`. This drive-2 is the operating layer. Prepared
-2026-07-19 by the drive-1 orchestrator for the incoming Fable session._
+_Supersedes `handoff-r5-endgame.md` as the paste-in prompt (its evidence base —
+`r5-sync-assessment-2026-07-19.md` — remains authoritative; where notes disagree, the
+assessment's `path:line` + a fresh read of the tree win). Prepared 2026-07-19, after
+Phase 0 landed and its γ regression was fixed (descar `4ee5b074`); reconciled with the
+#1317 drive-2 handoff that landed on main._

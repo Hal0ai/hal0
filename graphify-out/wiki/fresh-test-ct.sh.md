@@ -1,17 +1,17 @@
 # fresh-test-ct.sh
 
-> 8 nodes
+> 8 nodes · cohesion 0.50
 
 ## Key Concepts
 
 - **fresh-test-ct.sh** (7 connections) — `scripts/fresh-test-ct.sh`
 - **fresh-test-ct.sh script** (6 connections) — `scripts/fresh-test-ct.sh`
-- **PVE()** (3 connections) — `scripts/fresh-test-ct.sh`
-- **log()** (3 connections) — `scripts/fresh-test-ct.sh`
 - **cleanup()** (3 connections) — `scripts/fresh-test-ct.sh`
-- **usage()** (2 connections) — `scripts/fresh-test-ct.sh`
+- **log()** (3 connections) — `scripts/fresh-test-ct.sh`
+- **PVE()** (3 connections) — `scripts/fresh-test-ct.sh`
 - **emit()** (2 connections) — `scripts/fresh-test-ct.sh`
 - **SSH()** (2 connections) — `scripts/fresh-test-ct.sh`
+- **usage()** (2 connections) — `scripts/fresh-test-ct.sh`
 
 ## Relationships
 

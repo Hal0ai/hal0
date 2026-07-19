@@ -1,14 +1,14 @@
 # fork-pi-mono.sh
 
-> 5 nodes
+> 5 nodes · cohesion 0.70
 
 ## Key Concepts
 
 - **fork-pi-mono.sh** (4 connections) — `scripts/fork-pi-mono.sh`
 - **fork-pi-mono.sh script** (4 connections) — `scripts/fork-pi-mono.sh`
+- **die()** (2 connections) — `scripts/fork-pi-mono.sh`
 - **info()** (2 connections) — `scripts/fork-pi-mono.sh`
 - **warn()** (2 connections) — `scripts/fork-pi-mono.sh`
-- **die()** (2 connections) — `scripts/fork-pi-mono.sh`
 
 ## Relationships
 

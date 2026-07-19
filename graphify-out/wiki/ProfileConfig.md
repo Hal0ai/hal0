@@ -1,65 +1,63 @@
 # ProfileConfig
 
-> 87 nodes
+> 91 nodes · cohesion 0.05
 
 ## Key Concepts
 
 - **ProfileConfig** (73 connections) — `src/hal0/config/schema.py`
-- **ProfileCatalog** (56 connections) — `src/hal0/profiles/__init__.py`
-- **Conflict** (35 connections) — `src/hal0/errors.py`
+- **resolve_profile_flags()** (44 connections) — `src/hal0/config/schema.py`
+- **_moe_profile()** (36 connections) — `tests/providers/test_container.py`
+- **_render_llama()** (26 connections) — `tests/providers/test_container.py`
+- **TestRenderUnit** (24 connections) — `tests/providers/test_container.py`
+- **test_container.py** (21 connections) — `tests/providers/test_container.py`
 - **TestProfileConfigValidation** (12 connections) — `tests/config/test_profiles.py`
-- **test_catalog.py** (12 connections) — `tests/profiles/test_catalog.py`
-- **profiles.py** (11 connections) — `src/hal0/api/routes/profiles.py`
-- **ResolvedProfile** (11 connections) — `src/hal0/profiles/__init__.py`
-- **._resolve_item()** (10 connections) — `src/hal0/profiles/__init__.py`
-- **.update()** (9 connections) — `src/hal0/profiles/__init__.py`
-- **create_profile()** (8 connections) — `src/hal0/api/routes/profiles.py`
-- **import_profile_route()** (8 connections) — `src/hal0/api/routes/profiles.py`
-- **update_profile()** (8 connections) — `src/hal0/api/routes/profiles.py`
-- **.create()** (8 connections) — `src/hal0/profiles/__init__.py`
-- **._profile_for_fit()** (7 connections) — `src/hal0/capabilities/orchestrator.py`
-- **__init__.py** (7 connections) — `src/hal0/profiles/__init__.py`
-- **.delete()** (7 connections) — `src/hal0/profiles/__init__.py`
-- **ProfileBody** (6 connections) — `src/hal0/api/routes/profiles.py`
-- **Any** (6 connections)
-- **ProfilePatch** (6 connections) — `src/hal0/profiles/__init__.py`
-- **ProfileUpdateBody** (5 connections) — `src/hal0/api/routes/profiles.py`
-- **export_profile()** (5 connections) — `src/hal0/api/routes/profiles.py`
-- **delete_profile()** (5 connections) — `src/hal0/api/routes/profiles.py`
-- **_runtime_family()** (5 connections) — `src/hal0/profiles/__init__.py`
-- **.list()** (5 connections) — `src/hal0/profiles/__init__.py`
-- **.resolve()** (5 connections) — `src/hal0/profiles/__init__.py`
-- *... and 62 more nodes in this community*
+- **_exec_line()** (12 connections) — `tests/providers/test_container.py`
+- **TestResolveProfileFlags** (11 connections) — `tests/config/test_profiles.py`
+- **resolve_gpu_group_ids()** (9 connections) — `src/hal0/providers/_gpu.py`
+- **TestResolveProfileFlags** (7 connections) — `tests/providers/test_container.py`
+- **TestUniformQuadletRender** (7 connections) — `tests/providers/test_container.py`
+- **.test_ctx_size_in_exec()** (6 connections) — `tests/providers/test_container.py`
+- **.test_json_extra_arg_preserves_quoting()** (6 connections) — `tests/providers/test_container.py`
+- **.test_model_alias_in_exec()** (6 connections) — `tests/providers/test_container.py`
+- **.test_numeric_group_add_present()** (6 connections) — `tests/providers/test_container.py`
+- **.test_profile_flags_in_exec()** (6 connections) — `tests/providers/test_container.py`
+- **.test_server_extra_args_appended()** (6 connections) — `tests/providers/test_container.py`
+- **_mtp_profile()** (5 connections) — `tests/providers/test_container.py`
+- **.test_device_passthrough()** (5 connections) — `tests/providers/test_container.py`
+- **.test_explicit_device_nodes_emitted_no_bare_dri_dir()** (5 connections) — `tests/providers/test_container.py`
+- **.test_healthcheck_targets_slot_port_not_image_default()** (5 connections) — `tests/providers/test_container.py`
+- **.test_identical_path_mount_readonly()** (5 connections) — `tests/providers/test_container.py`
+- **.test_image_and_exec_present()** (5 connections) — `tests/providers/test_container.py`
+- **.test_loopback_port_publish()** (5 connections) — `tests/providers/test_container.py`
+- *... and 66 more nodes in this community*
 
 ## Relationships
 
-- [load_profiles_config](load_profiles_config.md) (18 shared connections)
-- [resolve_profile_flags](resolve_profile_flags.md) (14 shared connections)
-- [errors.py](errors.py.md) (9 shared connections)
-- [BoardStore](BoardStore.md) (8 shared connections)
-- [_profile](_profile.md) (7 shared connections)
-- [evaluate_model_fit](evaluate_model_fit.md) (7 shared connections)
-- [_resolve_llama_scalars](_resolve_llama_scalars.md) (7 shared connections)
-- [StacksCatalog](StacksCatalog.md) (6 shared connections)
-- [record_action](record_action.md) (4 shared connections)
-- [BaseModel](BaseModel.md) (3 shared connections)
+- [ContainerProvider](ContainerProvider.md) (11 shared connections)
+- [Mount](Mount.md) (11 shared connections)
+- [ProfileCatalog](ProfileCatalog.md) (10 shared connections)
+- [TestContainerSpec](TestContainerSpec.md) (10 shared connections)
+- [_resolve_llama_scalars](_resolve_llama_scalars.md) (9 shared connections)
+- [test_mtp_override.py](test_mtp_override.py.md) (7 shared connections)
+- [save_profiles_config](save_profiles_config.md) (5 shared connections)
+- [TestFamilyDefaults](TestFamilyDefaults.md) (5 shared connections)
+- [load_profiles_config](load_profiles_config.md) (4 shared connections)
+- [_profile](_profile.md) (4 shared connections)
+- [schema.py](schema.py.md) (3 shared connections)
 - [test_slots_container_state.py](test_slots_container_state.py.md) (3 shared connections)
-- [test_installed.py](test_installed.py.md) (3 shared connections)
 
 ## Source Files
 
-- `src/hal0/api/routes/profiles.py`
-- `src/hal0/capabilities/orchestrator.py`
 - `src/hal0/config/schema.py`
-- `src/hal0/errors.py`
-- `src/hal0/profiles/__init__.py`
+- `src/hal0/providers/_gpu.py`
+- `tests/config/test_mtp_override.py`
 - `tests/config/test_profiles.py`
-- `tests/profiles/test_catalog.py`
+- `tests/providers/test_container.py`
 
 ## Audit Trail
 
-- EXTRACTED: 277 (61%)
-- INFERRED: 176 (39%)
+- EXTRACTED: 350 (70%)
+- INFERRED: 148 (30%)
 - AMBIGUOUS: 0 (0%)
 
 ---

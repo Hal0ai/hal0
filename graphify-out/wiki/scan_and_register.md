@@ -1,60 +1,53 @@
 # scan_and_register
 
-> 30 nodes
+> 22 nodes · cohesion 0.13
 
 ## Key Concepts
 
 - **scan_and_register()** (17 connections) — `src/hal0/registry/discover.py`
-- **CuratedModel** (14 connections) — `src/hal0/registry/curated.py`
-- **discover.py** (14 connections) — `src/hal0/registry/discover.py`
-- **register_candidate()** (11 connections) — `src/hal0/registry/discover.py`
+- **ModelRegistry** (14 connections)
 - **backfill_coordless()** (10 connections) — `src/hal0/registry/discover.py`
-- **_maybe_register_shard_files()** (9 connections) — `src/hal0/registry/discover.py`
-- **_match_curated()** (8 connections) — `src/hal0/registry/discover.py`
-- **Path** (8 connections)
-- **CandidateModel** (7 connections) — `src/hal0/registry/discover.py`
-- **_is_skippable()** (5 connections) — `src/hal0/registry/discover.py`
-- **_is_mmproj_sidecar()** (4 connections) — `src/hal0/registry/discover.py`
-- **_shard_key()** (4 connections) — `src/hal0/registry/discover.py`
-- **_shard_index()** (4 connections) — `src/hal0/registry/discover.py`
-- **ModelRegistry** (4 connections)
-- **._validate_deployable_source()** (2 connections) — `src/hal0/registry/curated.py`
-- **Model** (2 connections)
-- **One curated entry surfaced by the FirstRun wizard.      The wizard renders these** (1 connections) — `src/hal0/registry/curated.py`
-- **Every curated model must have a deployable source: either HF pull         coordi** (1 connections) — `src/hal0/registry/curated.py`
-- **Model discovery — scan filesystem roots and auto-register found models.  The sca** (1 connections) — `src/hal0/registry/discover.py`
-- **One discovered file ready for registry registration.** (1 connections) — `src/hal0/registry/discover.py`
-- **Return the curated entry whose ``hf_file`` equals ``filename``.** (1 connections) — `src/hal0/registry/discover.py`
-- **True for a multimodal-projector (mmproj) sidecar file.      Matched by filename** (1 connections) — `src/hal0/registry/discover.py`
-- **Return the ``(dir, stem, total)`` grouping key for a shard file, else ``None``.** (1 connections) — `src/hal0/registry/discover.py`
-- **Return the 1-based shard index encoded in ``p``'s filename, or ``None``.** (1 connections) — `src/hal0/registry/discover.py`
-- **Skip dotfiles, .tmp partials, hash-only blob names, shards, accessory dirs.** (1 connections) — `src/hal0/registry/discover.py`
-- *... and 5 more nodes in this community*
+- **test_scan_and_register_attaches_and_omits_sidecar()** (6 connections) — `tests/registry/test_discover.py`
+- **test_scan_and_register_backfills_existing_coordless_row()** (6 connections) — `tests/registry/test_discover.py`
+- **test_scan_and_register_reranker_capability()** (6 connections) — `tests/registry/test_discover.py`
+- **test_scan_and_register_idempotent()** (5 connections) — `tests/registry/test_discover.py`
+- **test_scan_and_register_missing_root_is_silent()** (5 connections) — `tests/registry/test_discover.py`
+- **test_backfill_coordless_fills_from_curated()** (4 connections) — `tests/registry/test_discover.py`
+- **test_backfill_coordless_is_idempotent()** (4 connections) — `tests/registry/test_discover.py`
+- **test_backfill_coordless_no_curated_match_left_alone()** (4 connections) — `tests/registry/test_discover.py`
+- **test_backfill_coordless_skips_rows_with_coords()** (4 connections) — `tests/registry/test_discover.py`
+- **registry()** (3 connections) — `tests/registry/test_discover.py`
+- **Repair existing registry rows that have empty HF coordinates.      A row auto-re** (1 connections) — `src/hal0/registry/discover.py`
+- **Discover candidates under ``cfg.roots`` and register the new ones.      Returns** (1 connections) — `src/hal0/registry/discover.py`
+- **End-to-end: a NON-curated reranker gguf under a scan root registers with     cap** (1 connections) — `tests/registry/test_discover.py`
+- **End-to-end: the registered main model resolves its mmproj path, and     no stand** (1 connections) — `tests/registry/test_discover.py`
+- **An existing registry row with empty coords whose on-disk filename matches     a** (1 connections) — `tests/registry/test_discover.py`
+- **A second backfill pass is a no-op once coords are present.** (1 connections) — `tests/registry/test_discover.py`
+- **A row that already carries coords is never touched, even with a curated     matc** (1 connections) — `tests/registry/test_discover.py`
+- **A coord-less row with no curated filename match is left as-is.** (1 connections) — `tests/registry/test_discover.py`
+- **End-to-end: scan_and_register repairs an existing coord-less row whose     file** (1 connections) — `tests/registry/test_discover.py`
 
 ## Relationships
 
-- [test_discover.py](test_discover.py.md) (22 shared connections)
-- [suggest_models](suggest_models.md) (2 shared connections)
-- [HaloaiModel](HaloaiModel.md) (2 shared connections)
-- [get_curated](get_curated.md) (2 shared connections)
-- [models_service.py](models_service.py.md) (2 shared connections)
-- [test_curated_pull_coords.py](test_curated_pull_coords.py.md) (2 shared connections)
-- [connect](connect.md) (2 shared connections)
-- [BaseModel](BaseModel.md) (1 shared connections)
-- [models.py](models.py.md) (1 shared connections)
-- [catalog.py](catalog.py.md) (1 shared connections)
-- [test_pull_routes.py](test_pull_routes.py.md) (1 shared connections)
-- [_guess_capability](_guess_capability.md) (1 shared connections)
+- [test_discover.py](test_discover.py.md) (19 shared connections)
+- [ModelsConfig](ModelsConfig.md) (6 shared connections)
+- [register_candidate](register_candidate.md) (5 shared connections)
+- [discover.py](discover.py.md) (4 shared connections)
+- [_match_curated](_match_curated.md) (1 shared connections)
+- [lifespan](lifespan.md) (1 shared connections)
+- [config.py](config.py.md) (1 shared connections)
+- [settings.py](settings.py.md) (1 shared connections)
+- [models_service.py](models_service.py.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/registry/curated.py`
 - `src/hal0/registry/discover.py`
+- `tests/registry/test_discover.py`
 
 ## Audit Trail
 
-- EXTRACTED: 108 (79%)
-- INFERRED: 29 (21%)
+- EXTRACTED: 70 (72%)
+- INFERRED: 27 (28%)
 - AMBIGUOUS: 0 (0%)
 
 ---

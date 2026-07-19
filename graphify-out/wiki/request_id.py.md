@@ -1,6 +1,6 @@
 # request_id.py
 
-> 4 nodes
+> 4 nodes · cohesion 0.67
 
 ## Key Concepts
 

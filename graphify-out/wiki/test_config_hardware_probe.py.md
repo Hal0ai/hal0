@@ -1,6 +1,6 @@
 # test_config_hardware_probe.py
 
-> 7 nodes
+> 7 nodes · cohesion 0.43
 
 ## Key Concepts
 

@@ -1,25 +1,24 @@
 # .handler
 
-> 4 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
-- **.handler()** (3 connections) — `tests/board/test_board_chat.py`
-- **.handler()** (3 connections) — `tests/board/test_board_chat.py`
-- **Request** (2 connections)
-- **Response** (2 connections)
+- **.handler()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **Request** (1 connections)
+- **Response** (1 connections)
 
 ## Relationships
 
-- [test_board_chat.py](test_board_chat.py.md) (2 shared connections)
+- [test_memory_admin_routes.py](test_memory_admin_routes.py.md) (1 shared connections)
 
 ## Source Files
 
-- `tests/board/test_board_chat.py`
+- `tests/api/test_memory_admin_routes.py`
 
 ## Audit Trail
 
-- EXTRACTED: 10 (100%)
+- EXTRACTED: 5 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

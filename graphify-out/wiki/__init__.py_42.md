@@ -1,10 +1,11 @@
 # __init__.py
 
-> 1 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (0 connections) — `tests/__init__.py`
+- **__init__.py** (1 connections) — `tests/harness/integration/__init__.py`
+- **δ-harness integration tests for v0.3 hermes integration.  These tests drive the** (1 connections) — `tests/harness/integration/__init__.py`
 
 ## Relationships
 
@@ -12,11 +13,11 @@
 
 ## Source Files
 
-- `tests/__init__.py`
+- `tests/harness/integration/__init__.py`
 
 ## Audit Trail
 
-- EXTRACTED: 0 (0%)
+- EXTRACTED: 2 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

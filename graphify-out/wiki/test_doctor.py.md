@@ -1,6 +1,6 @@
 # test_doctor.py
 
-> 70 nodes
+> 70 nodes · cohesion 0.07
 
 ## Key Concepts
 
@@ -10,25 +10,25 @@
 - **_exit_code()** (15 connections) — `tests/cli/test_doctor.py`
 - **doctor()** (13 connections) — `src/hal0/cli/doctor_commands.py`
 - **_locate_preflight()** (12 connections) — `src/hal0/cli/doctor_commands.py`
-- **CaptureFixture** (10 connections)
 - **_install_mock_httpx()** (10 connections) — `tests/cli/test_doctor.py`
-- **_make_stub()** (9 connections) — `tests/cli/test_doctor.py`
+- **CaptureFixture** (10 connections)
 - **_fake_ctx()** (9 connections) — `tests/cli/test_doctor.py`
-- **test_doctor_success_propagates_exit_code()** (9 connections) — `tests/cli/test_doctor.py`
+- **_make_stub()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_doctor_failure_propagates_exit_code()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_doctor_forwards_plain_flag()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_doctor_forwards_ports_option()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_doctor_sets_ports_soft_env()** (9 connections) — `tests/cli/test_doctor.py`
-- **test_toolbox_pull_reports_ok_when_all_images_reachable()** (9 connections) — `tests/cli/test_doctor.py`
-- **test_toolbox_pull_surfaces_digest_drift_without_failing()** (9 connections) — `tests/cli/test_doctor.py`
+- **test_doctor_success_propagates_exit_code()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_toolbox_pull_exits_nonzero_when_image_unreachable()** (9 connections) — `tests/cli/test_doctor.py`
+- **test_toolbox_pull_reports_ok_when_all_images_reachable()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_toolbox_pull_skips_non_ghcr_refs_with_clear_error()** (9 connections) — `tests/cli/test_doctor.py`
-- **_write_manifest()** (8 connections) — `tests/cli/test_doctor.py`
+- **test_toolbox_pull_surfaces_digest_drift_without_failing()** (9 connections) — `tests/cli/test_doctor.py`
 - **test_toolbox_pull_exits_2_when_manifest_empty()** (8 connections) — `tests/cli/test_doctor.py`
+- **_write_manifest()** (8 connections) — `tests/cli/test_doctor.py`
 - **_patch_non_editable_hal0()** (7 connections) — `tests/cli/test_doctor.py`
 - **test_toolbox_pull_invoked_subcommand_skips_preflight()** (7 connections) — `tests/cli/test_doctor.py`
 - **test_doctor_missing_script_exits_2()** (6 connections) — `tests/cli/test_doctor.py`
-- **test_locate_preflight_fhs_root_env()** (6 connections) — `tests/cli/test_doctor.py`
+- **test_locate_preflight_default_fhs_root()** (6 connections) — `tests/cli/test_doctor.py`
 - *... and 45 more nodes in this community*
 
 ## Relationships

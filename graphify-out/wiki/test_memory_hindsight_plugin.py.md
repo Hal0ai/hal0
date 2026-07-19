@@ -1,40 +1,40 @@
 # test_memory_hindsight_plugin.py
 
-> 108 nodes
+> 83 nodes · cohesion 0.03
 
 ## Key Concepts
 
 - **test_memory_hindsight_plugin.py** (100 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **_FakeHttpClient** (20 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **_FakeResponse** (16 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
 - **MonkeyPatch** (11 connections)
-- **.close()** (4 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **.__init__()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_defaults_base_url_and_agent_id()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_add_posts_expected_payload_and_headers()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_search_posts_query_and_limit()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_recall_omits_types_by_default()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_recall_includes_types_when_given()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_list_items_is_a_get_with_limit_param()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_delete_posts_ids_list()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_request_raises_on_4xx_with_status_code()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_request_falls_back_to_raw_text_on_non_json_response()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_request_wraps_non_dict_json_body()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_client_close_does_not_close_injected_client()** (3 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_resolve_base_url_prefers_override()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_resolve_base_url_falls_back_to_env()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_resolve_base_url_default()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_resolve_agent_id_prefers_override()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **test_resolve_agent_id_falls_back_to_env()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_backup_paths_includes_spool_when_configured()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_initialize_builds_client_from_env_defaults()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_initialize_reads_default_visibility_from_env()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_initialize_respects_env_overrides()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
 - **test_resolve_agent_id_default()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **.__init__()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
-- **Any** (2 connections)
-- *... and 83 more nodes in this community*
+- **test_resolve_agent_id_falls_back_to_env()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_resolve_agent_id_prefers_override()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_resolve_base_url_default()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_resolve_base_url_falls_back_to_env()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_resolve_base_url_prefers_override()** (2 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **hal0-memory Hermes plugin (canonical src copy) — hermetic unit coverage.  ``src/** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_agent_id_defaults_before_initialize()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_agent_id_reflects_client_after_initialize()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_backup_paths_includes_saved_config()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_client_error_carries_message_and_optional_status_code()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_explicit_query_supersedes_queued()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_get_config_schema_declares_expected_keys()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_get_tool_schemas_returns_a_copy_of_all_three()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_hal0_memory_provider_is_constructable_and_named()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_handle_tool_call_add_custom_tags()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_handle_tool_call_add_defaults_to_shared_bank()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_handle_tool_call_add_does_not_overwrite_existing_error_result()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- **test_handle_tool_call_add_missing_text()** (1 connections) — `tests/agents/hermes/plugins/test_memory_hindsight_plugin.py`
+- *... and 58 more nodes in this community*
 
 ## Relationships
 
-- [Hal0MemoryClient](Hal0MemoryClient.md) (6 shared connections)
-- [_client](_client.md) (1 shared connections)
+- [_FakeHttpClient](_FakeHttpClient.md) (18 shared connections)
+- [MemoryProvider](MemoryProvider.md) (2 shared connections)
 
 ## Source Files
 
@@ -42,8 +42,8 @@
 
 ## Audit Trail
 
-- EXTRACTED: 291 (99%)
-- INFERRED: 4 (1%)
+- EXTRACTED: 202 (100%)
+- INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 
 ---

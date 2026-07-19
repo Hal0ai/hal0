@@ -1,16 +1,16 @@
 # test_agent_unit_hardening.py
 
-> 7 nodes
+> 7 nodes · cohesion 0.29
 
 ## Key Concepts
 
 - **test_agent_unit_hardening.py** (6 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
-- **unit_text()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
-- **test_shipped_unit_asserts_hardening_directives()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
-- **test_readwritepaths_is_minimal_and_exact()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
-- **test_readwritepaths_exposes_no_secret_path()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
-- **test_unit_runs_as_hal0_not_root()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
 - **RATIFIED 2026-07-18 (deliverable 1) — assert the SHIPPED hal0-agent@ unit carrie** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
+- **test_readwritepaths_exposes_no_secret_path()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
+- **test_readwritepaths_is_minimal_and_exact()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
+- **test_shipped_unit_asserts_hardening_directives()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
+- **test_unit_runs_as_hal0_not_root()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
+- **unit_text()** (1 connections) — `tests/agents/hermes/test_agent_unit_hardening.py`
 
 ## Relationships
 

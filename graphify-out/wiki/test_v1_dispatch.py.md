@@ -1,17 +1,17 @@
 # test_v1_dispatch.py
 
-> 18 nodes
+> 18 nodes · cohesion 0.16
 
 ## Key Concepts
 
 - **test_v1_dispatch.py** (10 connections) — `tests/api/test_v1_dispatch.py`
 - **TestClient** (9 connections)
-- **test_v1_models_returns_empty_list_with_no_upstreams()** (3 connections) — `tests/api/test_v1_dispatch.py`
-- **test_v1_chat_completions_no_route_returns_typed_404()** (3 connections) — `tests/api/test_v1_dispatch.py`
-- **test_v1_routes_are_no_longer_501_stubs()** (3 connections) — `tests/api/test_v1_dispatch.py`
-- **test_v1_audio_speech_missing_model_returns_400()** (3 connections) — `tests/api/test_v1_dispatch.py`
 - **test_v1_audio_speech_empty_model_returns_400()** (3 connections) — `tests/api/test_v1_dispatch.py`
+- **test_v1_audio_speech_missing_model_returns_400()** (3 connections) — `tests/api/test_v1_dispatch.py`
 - **test_v1_audio_transcriptions_missing_model_returns_400()** (3 connections) — `tests/api/test_v1_dispatch.py`
+- **test_v1_chat_completions_no_route_returns_typed_404()** (3 connections) — `tests/api/test_v1_dispatch.py`
+- **test_v1_models_returns_empty_list_with_no_upstreams()** (3 connections) — `tests/api/test_v1_dispatch.py`
+- **test_v1_routes_are_no_longer_501_stubs()** (3 connections) — `tests/api/test_v1_dispatch.py`
 - **test_v1_completions_no_route_returns_typed_404()** (2 connections) — `tests/api/test_v1_dispatch.py`
 - **test_v1_embeddings_no_route_returns_typed_404()** (2 connections) — `tests/api/test_v1_dispatch.py`
 - **test_v1_models_specific_404_envelope()** (2 connections) — `tests/api/test_v1_dispatch.py`

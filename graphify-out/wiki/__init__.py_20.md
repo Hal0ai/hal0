@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/hardware/__init__.py`
-- **hal0.hardware — Hardware detection and live stats.  Split into two submodules:** (1 connections) — `src/hal0/hardware/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/installer/__init__.py`
+- **hal0.installer — Installer utilities.  Backs the install.sh post-install setup s** (1 connections) — `src/hal0/installer/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/hardware/__init__.py`
+- `src/hal0/installer/__init__.py`
 
 ## Audit Trail
 

@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/db/migrations/__init__.py`
-- **Forward-only SQL migrations for the hal0 ``db/`` foundation.  Plain ``.sql`` fil** (1 connections) — `src/hal0/db/migrations/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/__init__.py`
+- **hal0 — open-source home AI inference platform.** (1 connections) — `src/hal0/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/db/migrations/__init__.py`
+- `src/hal0/__init__.py`
 
 ## Audit Trail
 

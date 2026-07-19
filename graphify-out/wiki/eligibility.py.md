@@ -1,13 +1,13 @@
 # eligibility.py
 
-> 11 nodes
+> 11 nodes · cohesion 0.22
 
 ## Key Concepts
 
 - **eligibility.py** (5 connections) — `src/hal0/bundles/eligibility.py`
-- **_read_meminfo_gb()** (4 connections) — `src/hal0/bundles/eligibility.py`
-- **host_ram_gb()** (4 connections) — `src/hal0/bundles/eligibility.py`
 - **eligible_tiers()** (4 connections) — `src/hal0/bundles/eligibility.py`
+- **host_ram_gb()** (4 connections) — `src/hal0/bundles/eligibility.py`
+- **_read_meminfo_gb()** (4 connections) — `src/hal0/bundles/eligibility.py`
 - **reset_cache()** (2 connections) — `src/hal0/bundles/eligibility.py`
 - **Path** (1 connections)
 - **Hardware-anchored tier eligibility.  Reads ``/proc/meminfo`` once per process an** (1 connections) — `src/hal0/bundles/eligibility.py`

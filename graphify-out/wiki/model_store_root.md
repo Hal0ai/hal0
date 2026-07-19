@@ -1,6 +1,6 @@
 # model_store_root
 
-> 27 nodes
+> 27 nodes · cohesion 0.15
 
 ## Key Concepts
 
@@ -8,15 +8,15 @@
 - **_build_spec()** (10 connections) — `tests/providers/test_container_chat_template.py`
 - **TestContainerSpecChatTemplate** (9 connections) — `tests/providers/test_container_chat_template.py`
 - **test_container_chat_template.py** (8 connections) — `tests/providers/test_container_chat_template.py`
-- **_slot_cfg()** (8 connections) — `tests/providers/test_container_chat_template.py`
 - **_model_info()** (8 connections) — `tests/providers/test_container_chat_template.py`
-- **.test_slot_chat_template_emitted_in_command()** (6 connections) — `tests/providers/test_container_chat_template.py`
+- **_slot_cfg()** (8 connections) — `tests/providers/test_container_chat_template.py`
 - **.test_model_defaults_chat_template_emitted_when_no_slot_override()** (6 connections) — `tests/providers/test_container_chat_template.py`
+- **.test_slot_chat_template_emitted_in_command()** (6 connections) — `tests/providers/test_container_chat_template.py`
 - **_moe_profile()** (5 connections) — `tests/providers/test_container_chat_template.py`
-- **.test_slot_override_wins_over_model_default()** (5 connections) — `tests/providers/test_container_chat_template.py`
-- **.test_no_chat_template_flag_when_neither_set()** (5 connections) — `tests/providers/test_container_chat_template.py`
 - **.test_auto_chat_template_treated_as_none()** (5 connections) — `tests/providers/test_container_chat_template.py`
 - **.test_model_auto_chat_template_treated_as_none()** (5 connections) — `tests/providers/test_container_chat_template.py`
+- **.test_no_chat_template_flag_when_neither_set()** (5 connections) — `tests/providers/test_container_chat_template.py`
+- **.test_slot_override_wins_over_model_default()** (5 connections) — `tests/providers/test_container_chat_template.py`
 - **TestLoadSyncChatTemplate** (5 connections) — `tests/providers/test_container_chat_template.py`
 - **.test_unit_contains_chat_template_file_flag()** (4 connections) — `tests/providers/test_container_chat_template.py`
 - **Any** (3 connections)
@@ -42,7 +42,7 @@
 - [store.py](store.py.md) (1 shared connections)
 - [ComfyUIProvider](ComfyUIProvider.md) (1 shared connections)
 - [_resolve_llama_scalars](_resolve_llama_scalars.md) (1 shared connections)
-- [KokoroProvider](KokoroProvider.md) (1 shared connections)
+- [_spec_provider_for](_spec_provider_for.md) (1 shared connections)
 - [Qwen3TTSProvider](Qwen3TTSProvider.md) (1 shared connections)
 - [seed_chat_templates](seed_chat_templates.md) (1 shared connections)
 

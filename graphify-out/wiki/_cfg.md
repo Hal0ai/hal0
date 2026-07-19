@@ -1,6 +1,6 @@
 # ._cfg
 
-> 75 nodes
+> 75 nodes · cohesion 0.05
 
 ## Key Concepts
 
@@ -15,20 +15,20 @@
 - **Any** (6 connections)
 - **TestFindChildPids** (6 connections) — `tests/cli/test_agent_shim.py`
 - **TestIsReady** (6 connections) — `tests/cli/test_agent_shim.py`
-- **TestArgvParsing** (5 connections) — `tests/cli/test_agent_shim.py`
 - **AgentConfig** (5 connections)
+- **TestArgvParsing** (5 connections) — `tests/cli/test_agent_shim.py`
 - **_cfg()** (4 connections) — `tests/cli/test_agent_shim.py`
+- **_fake_pw()** (4 connections) — `tests/cli/test_agent_shim.py`
+- **test_render_context_dispatch_calls_render()** (4 connections) — `tests/cli/test_agent_shim.py`
 - **.test_skip_build_present_when_web_dist_exists()** (4 connections) — `tests/cli/test_agent_shim.py`
 - **.test_skip_build_version_agnostic_not_pinned_to_312()** (4 connections) — `tests/cli/test_agent_shim.py`
-- **.test_web_dist_resolved_to_actual_venv_python()** (4 connections) — `tests/cli/test_agent_shim.py`
 - **.test_stale_web_dist_env_replaced_with_resolved()** (4 connections) — `tests/cli/test_agent_shim.py`
 - **.test_valid_user_web_dist_env_honored()** (4 connections) — `tests/cli/test_agent_shim.py`
+- **.test_web_dist_resolved_to_actual_venv_python()** (4 connections) — `tests/cli/test_agent_shim.py`
 - **.test_main_dispatches_to_status()** (4 connections) — `tests/cli/test_agent_shim.py`
-- **test_render_context_dispatch_calls_render()** (4 connections) — `tests/cli/test_agent_shim.py`
-- **_fake_pw()** (4 connections) — `tests/cli/test_agent_shim.py`
+- **_make_parser_allowing_only_status()** (3 connections) — `tests/cli/test_agent_shim.py`
 - **.test_builtin_hermes_no_toml()** (3 connections) — `tests/cli/test_agent_shim.py`
-- **.test_toml_overrides_defaults()** (3 connections) — `tests/cli/test_agent_shim.py`
-- **.test_unknown_id_without_toml_dies()** (3 connections) — `tests/cli/test_agent_shim.py`
+- **.test_custom_id_with_toml_works()** (3 connections) — `tests/cli/test_agent_shim.py`
 - *... and 50 more nodes in this community*
 
 ## Relationships

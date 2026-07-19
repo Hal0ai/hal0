@@ -1,6 +1,6 @@
 # migrate_cognee_to_hindsight_dryrun
 
-> 9 nodes
+> 9 nodes · cohesion 0.25
 
 ## Key Concepts
 
@@ -9,8 +9,8 @@
 - **migrate.py** (2 connections) — `src/hal0/memory/migrate.py`
 - **test_dry_run_reports_zero_on_empty_store()** (2 connections) — `tests/cli/test_memory_migrate.py`
 - **test_dry_run_tolerates_null_dataset_rows()** (2 connections) — `tests/cli/test_memory_migrate.py`
-- **Path** (1 connections)
 - **Any** (1 connections)
+- **Path** (1 connections)
 - **Cognee → Hindsight migration (brain-redesign P2, [Q10]).  The platform Cognee st** (1 connections) — `src/hal0/memory/migrate.py`
 - **hal0 memory migrate --dry-run (P2). No-op on empty/stale Cognee store.** (1 connections) — `tests/cli/test_memory_migrate.py`
 

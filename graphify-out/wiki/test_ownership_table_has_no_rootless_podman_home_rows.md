@@ -1,6 +1,6 @@
 # test_ownership_table_has_no_rootless_podman_home_rows
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

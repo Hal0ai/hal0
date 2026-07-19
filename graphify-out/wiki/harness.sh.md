@@ -1,12 +1,12 @@
 # harness.sh
 
-> 3 nodes
+> 3 nodes · cohesion 1.00
 
 ## Key Concepts
 
 - **harness.sh** (2 connections) — `scripts/harness.sh`
-- **harness.sh script** (2 connections) — `scripts/harness.sh`
 - **run_tier()** (2 connections) — `scripts/harness.sh`
+- **harness.sh script** (2 connections) — `scripts/harness.sh`
 
 ## Relationships
 

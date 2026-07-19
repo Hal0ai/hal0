@@ -1,68 +1,65 @@
 # connect
 
-> 108 nodes
+> 87 nodes · cohesion 0.05
 
 ## Key Concepts
 
-- **connect()** (114 connections) — `src/hal0/db/connection.py`
-- **tx()** (38 connections) — `src/hal0/db/connection.py`
-- **Path** (13 connections)
+- **connect()** (111 connections) — `src/hal0/db/connection.py`
+- **Path** (11 connections)
 - **Path** (11 connections)
 - **test_connection.py** (9 connections) — `tests/db/test_connection.py`
 - **test_migrate_board.py** (8 connections) — `tests/db/test_migrate_board.py`
 - **_db()** (8 connections) — `tests/db/test_migrate_board.py`
 - **TestPackagedSlotsPortsMigration** (8 connections) — `tests/db/test_migrate_slots_ports.py`
-- **Path** (8 connections)
 - **Path** (7 connections)
 - **Path** (7 connections)
-- **TestCollectAndPruneOrphans** (7 connections) — `tests/registry/test_gc.py`
-- **._write_batch()** (6 connections) — `src/hal0/metrics/writer.py`
-- **_maybe_hardlink_from_blob()** (6 connections) — `src/hal0/registry/pull.py`
-- **_register_blob_after_install()** (6 connections) — `src/hal0/registry/pull.py`
-- **_copy_model_files_refcounted()** (6 connections) — `src/hal0/services/models_service.py`
+- **_write_migration()** (7 connections) — `tests/db/test_migrate.py`
 - **.test_cascade_does_not_fire_with_foreign_keys_off()** (6 connections) — `tests/db/test_connection.py`
-- **test_read.py** (6 connections) — `tests/metrics/test_read.py`
-- **test_gc.py** (6 connections) — `tests/registry/test_gc.py`
-- **_seed_model()** (6 connections) — `tests/registry/test_gc.py`
-- **.test_delete_decrements_shared_blob_refcount_without_deleting_it()** (6 connections) — `tests/registry/test_gc.py`
-- **.test_delete_repoints_canonical_blob_path_to_surviving_referent()** (6 connections) — `tests/registry/test_gc.py`
+- **TestMigrate** (6 connections) — `tests/db/test_migrate.py`
+- **.test_migration_runs_inside_one_transaction()** (6 connections) — `tests/db/test_migrate.py`
+- **_iso()** (6 connections) — `tests/metrics/test_retention.py`
+- **TestPrune** (6 connections) — `tests/metrics/test_retention.py`
 - **connection.py** (5 connections) — `src/hal0/db/connection.py`
 - **TestCascadeDelete** (5 connections) — `tests/db/test_connection.py`
 - **.test_cascade_fires_with_foreign_keys_on()** (5 connections) — `tests/db/test_connection.py`
-- *... and 83 more nodes in this community*
+- **test_migrate.py** (5 connections) — `tests/db/test_migrate.py`
+- **test_card_status_foreign_key_enforced()** (5 connections) — `tests/db/test_migrate_board.py`
+- **test_migrate_applies_version_5()** (5 connections) — `tests/db/test_migrate_board.py`
+- **.test_applies_pending_migrations_in_order()** (5 connections) — `tests/db/test_migrate.py`
+- **.test_partial_apply_only_picks_up_remaining()** (5 connections) — `tests/db/test_migrate.py`
+- **TestPackagedStoreMigration** (5 connections) — `tests/db/test_migrate.py`
+- **Path** (5 connections)
+- *... and 62 more nodes in this community*
 
 ## Relationships
 
-- [Path](Path.md) (20 shared connections)
-- [SqliteModelRegistry](SqliteModelRegistry.md) (16 shared connections)
-- [MetricsWriter](MetricsWriter.md) (7 shared connections)
-- [pull.py](pull.py.md) (6 shared connections)
-- [aggregate_hour](aggregate_hour.md) (5 shared connections)
-- [_iso](_iso.md) (5 shared connections)
-- [BoardStore](BoardStore.md) (4 shared connections)
-- [PortAuthority](PortAuthority.md) (4 shared connections)
-- [SlotIdentityStore](SlotIdentityStore.md) (4 shared connections)
+- [tx](tx.md) (22 shared connections)
+- [applied_versions](applied_versions.md) (9 shared connections)
+- [test_store_golden.py](test_store_golden.py.md) (8 shared connections)
+- [Path](Path.md) (7 shared connections)
+- [MetricsWriter](MetricsWriter.md) (4 shared connections)
+- [aggregate_hour](aggregate_hour.md) (4 shared connections)
+- [BoardStore](BoardStore.md) (3 shared connections)
 - [models_health](models_health.md) (3 shared connections)
-- [gc.py](gc.py.md) (3 shared connections)
-- [models_service.py](models_service.py.md) (3 shared connections)
+- [PortAuthority](PortAuthority.md) (3 shared connections)
+- [SlotIdentityStore](SlotIdentityStore.md) (3 shared connections)
+- [Model](Model.md) (2 shared connections)
+- [test_duplicate_refcount.py](test_duplicate_refcount.py.md) (2 shared connections)
 
 ## Source Files
 
 - `src/hal0/board/store.py`
 - `src/hal0/db/connection.py`
-- `src/hal0/metrics/writer.py`
-- `src/hal0/registry/pull.py`
-- `src/hal0/services/models_service.py`
 - `tests/db/test_connection.py`
+- `tests/db/test_migrate.py`
 - `tests/db/test_migrate_board.py`
 - `tests/db/test_migrate_slots_ports.py`
-- `tests/metrics/test_read.py`
-- `tests/registry/test_gc.py`
+- `tests/metrics/test_retention.py`
 
 ## Audit Trail
 
-- EXTRACTED: 323 (60%)
-- INFERRED: 213 (40%)
+- EXTRACTED: 279 (65%)
+- INFERRED: 153 (35%)
 - AMBIGUOUS: 0 (0%)
 
 ---

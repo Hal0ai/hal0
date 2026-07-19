@@ -1,16 +1,16 @@
 # test_memory_mm_commands.py
 
-> 7 nodes
+> 7 nodes · cohesion 0.29
 
 ## Key Concepts
 
 - **test_memory_mm_commands.py** (5 connections) — `tests/cli/test_memory_mm_commands.py`
 - **stub_api()** (2 connections) — `tests/cli/test_memory_mm_commands.py`
 - **MonkeyPatch** (1 connections)
+- **Tests for ``hal0 memory mm {list,refresh,history}``.** (1 connections) — `tests/cli/test_memory_mm_commands.py`
+- **test_mm_history()** (1 connections) — `tests/cli/test_memory_mm_commands.py`
 - **test_mm_list()** (1 connections) — `tests/cli/test_memory_mm_commands.py`
 - **test_mm_refresh()** (1 connections) — `tests/cli/test_memory_mm_commands.py`
-- **test_mm_history()** (1 connections) — `tests/cli/test_memory_mm_commands.py`
-- **Tests for ``hal0 memory mm {list,refresh,history}``.** (1 connections) — `tests/cli/test_memory_mm_commands.py`
 
 ## Relationships
 

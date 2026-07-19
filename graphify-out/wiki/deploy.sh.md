@@ -1,6 +1,6 @@
 # deploy.sh
 
-> 7 nodes
+> 7 nodes · cohesion 0.62
 
 ## Key Concepts
 

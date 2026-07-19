@@ -1,6 +1,6 @@
 # MonkeyPatch
 
-> 38 nodes
+> 38 nodes · cohesion 0.09
 
 ## Key Concepts
 
@@ -11,24 +11,24 @@
 - **TestBindHost** (6 connections) — `tests/config/test_network.py`
 - **TestDetectLanIps** (6 connections) — `tests/config/test_network.py`
 - **_hermetic_network_env()** (3 connections) — `tests/config/test_network.py`
+- **.test_empty_string_falls_back_to_default()** (2 connections) — `tests/config/test_network.py`
 - **.test_explicit_value_wins()** (2 connections) — `tests/config/test_network.py`
 - **.test_strips_whitespace()** (2 connections) — `tests/config/test_network.py`
-- **.test_empty_string_falls_back_to_default()** (2 connections) — `tests/config/test_network.py`
 - **.test_whitespace_only_falls_back_to_default()** (2 connections) — `tests/config/test_network.py`
-- **.test_env_override_wins()** (2 connections) — `tests/config/test_network.py`
-- **.test_env_local_suffix_stripped()** (2 connections) — `tests/config/test_network.py`
-- **.test_env_trailing_dots_stripped()** (2 connections) — `tests/config/test_network.py`
-- **.test_gethostname_local_suffix_stripped()** (2 connections) — `tests/config/test_network.py`
-- **.test_dots_only_falls_back_to_hal0()** (2 connections) — `tests/config/test_network.py`
-- **.test_env_whitespace_only_falls_back_to_gethostname()** (2 connections) — `tests/config/test_network.py`
-- **.test_psutil_finds_non_loopback_ipv4()** (2 connections) — `tests/config/test_network.py`
+- **.test_always_includes_loopback_and_hostname()** (2 connections) — `tests/config/test_network.py`
+- **.test_concrete_lan_bind_host_adds_lan_and_itself()** (2 connections) — `tests/config/test_network.py`
+- **.test_default_loopback_bind_excludes_lan()** (2 connections) — `tests/config/test_network.py`
+- **.test_explicit_port_overrides_env()** (2 connections) — `tests/config/test_network.py`
+- **.test_hal0_port_env_used_when_no_arg()** (2 connections) — `tests/config/test_network.py`
+- **.test_invalid_port_env_falls_back_to_default()** (2 connections) — `tests/config/test_network.py`
+- **.test_ipv6_loopback_bind_host_excludes_lan()** (2 connections) — `tests/config/test_network.py`
+- **.test_ipv6_wildcard_bind_adds_lan_but_not_bind_host_itself()** (2 connections) — `tests/config/test_network.py`
+- **.test_localhost_bind_host_excludes_lan()** (2 connections) — `tests/config/test_network.py`
+- **.test_result_is_sorted_tuple()** (2 connections) — `tests/config/test_network.py`
+- **.test_wildcard_bind_adds_lan_but_not_bind_host_itself()** (2 connections) — `tests/config/test_network.py`
 - **.test_dedupes_and_sorts()** (2 connections) — `tests/config/test_network.py`
 - **.test_falls_back_to_udp_trick_when_psutil_empty()** (2 connections) — `tests/config/test_network.py`
-- **.test_udp_fallback_filters_loopback_result()** (2 connections) — `tests/config/test_network.py`
-- **.test_returns_empty_when_all_sources_fail()** (2 connections) — `tests/config/test_network.py`
-- **.test_default_loopback_bind_excludes_lan()** (2 connections) — `tests/config/test_network.py`
-- **.test_hal0_port_env_used_when_no_arg()** (2 connections) — `tests/config/test_network.py`
-- **.test_explicit_port_overrides_env()** (2 connections) — `tests/config/test_network.py`
+- **.test_psutil_finds_non_loopback_ipv4()** (2 connections) — `tests/config/test_network.py`
 - *... and 13 more nodes in this community*
 
 ## Relationships

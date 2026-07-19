@@ -1,6 +1,6 @@
 # RequestSeam
 
-> 27 nodes
+> 27 nodes · cohesion 0.19
 
 ## Key Concepts
 
@@ -17,11 +17,11 @@
 - **.test_disabled_seam_returns_response_unwrapped()** (5 connections) — `tests/metrics/test_seam.py`
 - **TestDisabledSeam** (4 connections) — `tests/metrics/test_seam.py`
 - **.test_record_error_is_noop_when_disabled()** (4 connections) — `tests/metrics/test_seam.py`
+- **TestRecordError** (4 connections) — `tests/metrics/test_seam.py`
+- **.test_falls_back_to_exception_class_name()** (4 connections) — `tests/metrics/test_seam.py`
+- **.test_writes_ok_zero_with_error_code()** (4 connections) — `tests/metrics/test_seam.py`
 - **TestRecordNonstreaming** (4 connections) — `tests/metrics/test_seam.py`
 - **.test_call_none_writes_null_slot_and_model()** (4 connections) — `tests/metrics/test_seam.py`
-- **TestRecordError** (4 connections) — `tests/metrics/test_seam.py`
-- **.test_writes_ok_zero_with_error_code()** (4 connections) — `tests/metrics/test_seam.py`
-- **.test_falls_back_to_exception_class_name()** (4 connections) — `tests/metrics/test_seam.py`
 - **._drain()** (4 connections) — `tests/metrics/test_seam.py`
 - **_FakeClient** (3 connections) — `tests/metrics/test_seam.py`
 - **StreamingResponse** (3 connections)

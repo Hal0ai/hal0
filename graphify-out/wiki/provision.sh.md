@@ -1,12 +1,12 @@
 # provision.sh
 
-> 3 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
 - **provision.sh** (2 connections) — `packaging/proxmox/hal0-test-template/provision.sh`
-- **provision.sh script** (1 connections) — `packaging/proxmox/hal0-test-template/provision.sh`
 - **DEBIAN_FRONTEND** (1 connections) — `packaging/proxmox/hal0-test-template/provision.sh`
+- **provision.sh script** (1 connections) — `packaging/proxmox/hal0-test-template/provision.sh`
 
 ## Relationships
 

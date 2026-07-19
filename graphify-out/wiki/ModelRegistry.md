@@ -1,48 +1,55 @@
 # ModelRegistry
 
-> 26 nodes
+> 68 nodes · cohesion 0.06
 
 ## Key Concepts
 
-- **ModelRegistry** (12 connections)
-- **TestNewFieldsRoundTrip** (10 connections) — `tests/registry/test_schema_migration.py`
-- **_model()** (9 connections) — `tests/registry/test_schema_migration.py`
-- **test_schema_migration.py** (6 connections) — `tests/registry/test_schema_migration.py`
-- **TestLegacyMigration** (6 connections) — `tests/registry/test_schema_migration.py`
-- **Path** (5 connections)
-- **.test_defaults_partial_round_trip()** (5 connections) — `tests/registry/test_schema_migration.py`
-- **.test_empty_defaults_collapses()** (5 connections) — `tests/registry/test_schema_migration.py`
-- **.test_new_fields_survive_fresh_registry_instance()** (5 connections) — `tests/registry/test_schema_migration.py`
-- **.test_defaults_full_round_trip()** (4 connections) — `tests/registry/test_schema_migration.py`
-- **.test_defaults_none_not_written()** (4 connections) — `tests/registry/test_schema_migration.py`
-- **.test_metadata_none_value_stripped()** (4 connections) — `tests/registry/test_schema_migration.py`
-- **.test_legacy_entry_loads_with_defaults()** (4 connections) — `tests/registry/test_schema_migration.py`
-- **.test_legacy_update_preserves_then_adds_new_fields()** (4 connections) — `tests/registry/test_schema_migration.py`
-- **TestFreshInstanceReread** (4 connections) — `tests/registry/test_schema_migration.py`
-- **reg()** (3 connections) — `tests/registry/test_schema_migration.py`
-- **.test_backends_round_trip()** (3 connections) — `tests/registry/test_schema_migration.py`
-- **.test_metadata_context_length_round_trip()** (3 connections) — `tests/registry/test_schema_migration.py`
-- **.test_mixed_legacy_and_new_entries_coexist()** (3 connections) — `tests/registry/test_schema_migration.py`
-- **Schema-migration tests for the Phase-1 Model additions.  Covers:   * New optiona** (1 connections) — `tests/registry/test_schema_migration.py`
-- **Only some ModelDefaults fields set — others stay None.** (1 connections) — `tests/registry/test_schema_migration.py`
-- **defaults=None must not appear in the on-disk TOML at all.** (1 connections) — `tests/registry/test_schema_migration.py`
-- **All-None ModelDefaults() collapses to no on-disk section.** (1 connections) — `tests/registry/test_schema_migration.py`
-- **metadata values that are None get dropped on write (TOML has no null).** (1 connections) — `tests/registry/test_schema_migration.py`
-- **An entry with no backends/defaults keys parses fine.** (1 connections) — `tests/registry/test_schema_migration.py`
-- *... and 1 more nodes in this community*
+- **ModelRegistry** (38 connections)
+- **_model()** (28 connections) — `tests/registry/test_sqlite_store.py`
+- **RegistryError** (14 connections) — `src/hal0/registry/store.py`
+- **test_sqlite_store.py** (14 connections) — `tests/registry/test_sqlite_store.py`
+- **ModelAlreadyExists** (12 connections) — `src/hal0/registry/store.py`
+- **TestUpdate** (11 connections) — `tests/registry/test_sqlite_store.py`
+- **TestAdd** (9 connections) — `tests/registry/test_sqlite_store.py`
+- **TestEmptyRegistry** (9 connections) — `tests/registry/test_sqlite_store.py`
+- **TestModelDefaultsRoundTrip** (8 connections) — `tests/registry/test_sqlite_store.py`
+- **TestReloadAndOnChange** (8 connections) — `tests/registry/test_sqlite_store.py`
+- **TestRouteFor** (8 connections) — `tests/registry/test_sqlite_store.py`
+- **TestDefaultRegistryDir** (7 connections) — `tests/registry/test_sqlite_store.py`
+- **TestRemove** (7 connections) — `tests/registry/test_sqlite_store.py`
+- **Path** (6 connections)
+- **TestConcurrency** (6 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_update_preserves_created_at()** (6 connections) — `tests/registry/test_sqlite_store.py`
+- **TestList** (5 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_empty_defaults_collapses_to_none()** (5 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_falsy_but_set_n_gpu_layers_is_not_dropped()** (5 connections) — `tests/registry/test_sqlite_store.py`
+- **reg()** (4 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_add_duplicate_leaves_original_row_intact()** (4 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_add_duplicate_raises()** (4 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_add_persists_across_instances()** (4 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_two_instances_same_dir_no_lost_update()** (4 connections) — `tests/registry/test_sqlite_store.py`
+- **.test_full_defaults_round_trip()** (4 connections) — `tests/registry/test_sqlite_store.py`
+- *... and 43 more nodes in this community*
 
 ## Relationships
 
-- [Model](Model.md) (10 shared connections)
+- [SqliteModelRegistry](SqliteModelRegistry.md) (25 shared connections)
+- [ModelDefaults](ModelDefaults.md) (13 shared connections)
+- [Model](Model.md) (12 shared connections)
+- [ModelRegistry](ModelRegistry.md) (3 shared connections)
+- [get_curated](get_curated.md) (1 shared connections)
+- [test_duplicate_refcount.py](test_duplicate_refcount.py.md) (1 shared connections)
+- [connect](connect.md) (1 shared connections)
 
 ## Source Files
 
-- `tests/registry/test_schema_migration.py`
+- `src/hal0/registry/store.py`
+- `tests/registry/test_sqlite_store.py`
 
 ## Audit Trail
 
-- EXTRACTED: 96 (91%)
-- INFERRED: 10 (9%)
+- EXTRACTED: 276 (83%)
+- INFERRED: 58 (17%)
 - AMBIGUOUS: 0 (0%)
 
 ---

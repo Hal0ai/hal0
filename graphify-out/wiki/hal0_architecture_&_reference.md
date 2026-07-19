@@ -1,40 +1,33 @@
 # hal0 architecture & reference
 
-> 18 nodes
+> 7 nodes · cohesion 0.38
 
 ## Key Concepts
 
-- **hal0 architecture & reference** (10 connections) — `ARCHITECTURE.md`
-- **Bundled agents (v0.3)** (7 connections) — `ARCHITECTURE.md`
-- **Working in this repo** (3 connections) — `ARCHITECTURE.md`
-- **State** (2 connections) — `ARCHITECTURE.md`
-- **hal0 in one paragraph** (1 connections) — `ARCHITECTURE.md`
-- **Process model** (1 connections) — `ARCHITECTURE.md`
-- **Module layout** (1 connections) — `ARCHITECTURE.md`
-- **Key boundaries** (1 connections) — `ARCHITECTURE.md`
-- **Slot lifecycle state machine** (1 connections) — `ARCHITECTURE.md`
-- **Process model** (1 connections) — `ARCHITECTURE.md`
-- **Install & lifecycle** (1 connections) — `ARCHITECTURE.md`
-- **Surfaces** (1 connections) — `ARCHITECTURE.md`
-- **Module map** (1 connections) — `ARCHITECTURE.md`
-- **Standing decisions** (1 connections) — `ARCHITECTURE.md`
-- **Upstream pin** (1 connections) — `ARCHITECTURE.md`
-- **Issue tracker & triage** (1 connections) — `ARCHITECTURE.md`
-- **Shipping: deploy + PR workflow** (1 connections) — `ARCHITECTURE.md`
-- **See also** (1 connections) — `ARCHITECTURE.md`
+- **hal0 architecture & reference** (5 connections) — `ARCHITECTURE.md`
+- **Contributing to hal0** (3 connections) — `CONTRIBUTING.md`
+- **AGENTS.md (orientation pointer)** (2 connections) — `AGENTS.md`
+- **CLAUDE.md (repo conventions / graphify rules)** (2 connections) — `CLAUDE.md`
+- **hal0 Plan** (2 connections) — `PLAN.md`
+- **CONTEXT.md (glossary pointer)** (1 connections) — `CONTEXT.md`
+- **Anti-scar rules** (1 connections) — `CONTRIBUTING.md`
 
 ## Relationships
 
-- [README.md](README.md.md) (1 shared connections)
-- [Glossary](Glossary.md) (1 shared connections)
+- No strong cross-community connections detected
 
 ## Source Files
 
+- `AGENTS.md`
 - `ARCHITECTURE.md`
+- `CLAUDE.md`
+- `CONTEXT.md`
+- `CONTRIBUTING.md`
+- `PLAN.md`
 
 ## Audit Trail
 
-- EXTRACTED: 36 (100%)
+- EXTRACTED: 16 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

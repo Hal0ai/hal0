@@ -1,6 +1,6 @@
 # LlamaServerProvider
 
-> 55 nodes
+> 56 nodes · cohesion 0.06
 
 ## Key Concepts
 
@@ -13,30 +13,29 @@
 - **llama_server.py** (5 connections) — `src/hal0/providers/llama_server.py`
 - **ProviderInferError** (5 connections) — `src/hal0/providers/llama_server.py`
 - **MonkeyPatch** (5 connections)
-- **test_v1_images_url_response_format_writes_cache()** (5 connections) — `tests/api/test_v1_images.py`
 - **test_v1_images_b64_json_returns_inline_base64()** (5 connections) — `tests/api/test_v1_images.py`
-- **test_v1_images_provider_error_surfaces()** (5 connections) — `tests/api/test_v1_images.py`
 - **test_v1_images_cold_slot_ensure_img_before_dispatch()** (5 connections) — `tests/api/test_v1_images.py`
+- **test_v1_images_provider_error_surfaces()** (5 connections) — `tests/api/test_v1_images.py`
+- **test_v1_images_url_response_format_writes_cache()** (5 connections) — `tests/api/test_v1_images.py`
+- **test_llama_server_is_not_a_launcher()** (5 connections) — `tests/providers/test_llama_server.py`
 - **.infer()** (4 connections) — `src/hal0/providers/llama_server.py`
 - **test_v1_images_unknown_model_404()** (4 connections) — `tests/api/test_v1_images.py`
-- **test_llama_server_is_not_a_launcher()** (4 connections) — `tests/providers/test_llama_server.py`
-- **ProviderHealthError** (3 connections) — `src/hal0/providers/llama_server.py`
 - **.health()** (3 connections) — `src/hal0/providers/llama_server.py`
-- **Any** (3 connections)
 - **.parse_metrics()** (3 connections) — `src/hal0/providers/llama_server.py`
-- **test_v1_images_no_upstream_returns_envelope()** (3 connections) — `tests/api/test_v1_images.py`
-- **test_v1_images_empty_prompt_422()** (3 connections) — `tests/api/test_v1_images.py`
+- **ProviderHealthError** (3 connections) — `src/hal0/providers/llama_server.py`
+- **Any** (3 connections)
 - **test_images_cache_blocks_path_traversal()** (3 connections) — `tests/api/test_v1_images.py`
+- **test_v1_images_empty_prompt_422()** (3 connections) — `tests/api/test_v1_images.py`
+- **test_v1_images_no_upstream_returns_envelope()** (3 connections) — `tests/api/test_v1_images.py`
 - **_mock_async_response()** (3 connections) — `tests/providers/test_llama_server.py`
-- **test_health_ok_requires_both_models_and_sentinel()** (3 connections) — `tests/providers/test_llama_server.py`
-- *... and 30 more nodes in this community*
+- **test_health_empty_models_endpoint_is_not_ready()** (3 connections) — `tests/providers/test_llama_server.py`
+- *... and 31 more nodes in this community*
 
 ## Relationships
 
-- [Hal0Error](Hal0Error.md) (2 shared connections)
+- [Provider](Provider.md) (2 shared connections)
 - [v1.py](v1.py.md) (1 shared connections)
 - [KeyError](KeyError.md) (1 shared connections)
-- [Provider](Provider.md) (1 shared connections)
 - [_ArbiterSlotManager](_ArbiterSlotManager.md) (1 shared connections)
 - [errors.py](errors.py.md) (1 shared connections)
 - [Upstream](Upstream.md) (1 shared connections)
@@ -50,8 +49,8 @@
 
 ## Audit Trail
 
-- EXTRACTED: 166 (91%)
-- INFERRED: 16 (9%)
+- EXTRACTED: 168 (91%)
+- INFERRED: 17 (9%)
 - AMBIGUOUS: 0 (0%)
 
 ---

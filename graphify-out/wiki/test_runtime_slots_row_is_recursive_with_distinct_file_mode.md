@@ -1,6 +1,6 @@
 # test_runtime_slots_row_is_recursive_with_distinct_file_mode
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

@@ -1,11 +1,10 @@
 # __init__.py
 
-> 2 nodes
+> 1 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `tests/golden_paths/__init__.py`
-- **Golden-path verification harness (REWORK.md §Golden-path verification).  This pa** (1 connections) — `tests/golden_paths/__init__.py`
+- **__init__.py** (0 connections) — `tests/diagnostics/__init__.py`
 
 ## Relationships
 
@@ -13,11 +12,11 @@
 
 ## Source Files
 
-- `tests/golden_paths/__init__.py`
+- `tests/diagnostics/__init__.py`
 
 ## Audit Trail
 
-- EXTRACTED: 2 (100%)
+- EXTRACTED: 0 (0%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

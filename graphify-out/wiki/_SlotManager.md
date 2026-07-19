@@ -1,6 +1,6 @@
 # _SlotManager
 
-> 8 nodes
+> 8 nodes · cohesion 0.29
 
 ## Key Concepts
 
@@ -10,8 +10,8 @@
 - **.test_restart_background_failure_is_fail_soft()** (2 connections) — `tests/api/test_comfyui_phase4.py`
 - **.__init__()** (1 connections) — `tests/api/test_chat_normalization.py`
 - **.iter_configs()** (1 connections) — `tests/api/test_chat_normalization.py`
-- **.test_restart_returns_503_when_slot_manager_unavailable()** (1 connections) — `tests/api/test_comfyui_phase4.py`
 - **restart must use the slot-owned img runtime, not /opt/comfyui scripts.** (1 connections) — `tests/api/test_comfyui_phase4.py`
+- **.test_restart_returns_503_when_slot_manager_unavailable()** (1 connections) — `tests/api/test_comfyui_phase4.py`
 
 ## Relationships
 

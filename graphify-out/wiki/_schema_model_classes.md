@@ -1,6 +1,6 @@
 # _schema_model_classes
 
-> 8 nodes
+> 8 nodes · cohesion 0.32
 
 ## Key Concepts
 

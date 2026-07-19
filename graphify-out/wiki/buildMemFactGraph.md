@@ -1,15 +1,15 @@
 # buildMemFactGraph
 
-> 6 nodes
+> 6 nodes · cohesion 0.33
 
 ## Key Concepts
 
 - **buildMemFactGraph()** (5 connections) — `ui/src/api/mock.ts`
 - **ISO()** (4 connections) — `ui/src/api/mock.ts`
 - **buildBankTimeseries()** (3 connections) — `ui/src/api/mock.ts`
-- **MEM_FACTS** (2 connections) — `ui/src/api/mock.ts`
-- **MEM_CAUSAL** (2 connections) — `ui/src/api/mock.ts`
 - **buildBankRecall()** (2 connections) — `ui/src/api/mock.ts`
+- **MEM_CAUSAL** (2 connections) — `ui/src/api/mock.ts`
+- **MEM_FACTS** (2 connections) — `ui/src/api/mock.ts`
 
 ## Relationships
 

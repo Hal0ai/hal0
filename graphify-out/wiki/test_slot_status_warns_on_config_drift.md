@@ -1,6 +1,6 @@
 # test_slot_status_warns_on_config_drift
 
-> 3 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 

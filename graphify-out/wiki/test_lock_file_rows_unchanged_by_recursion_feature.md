@@ -1,6 +1,6 @@
 # test_lock_file_rows_unchanged_by_recursion_feature
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

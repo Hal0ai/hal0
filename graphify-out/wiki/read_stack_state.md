@@ -1,6 +1,6 @@
 # read_stack_state
 
-> 23 nodes
+> 23 nodes · cohesion 0.14
 
 ## Key Concepts
 
@@ -13,14 +13,14 @@
 - **state.py** (5 connections) — `src/hal0/stacks/state.py`
 - **TestContentHash** (5 connections) — `tests/stacks/test_drift.py`
 - **.test_round_trip()** (4 connections) — `tests/stacks/test_drift.py`
-- **.to_dict()** (3 connections) — `src/hal0/stacks/state.py`
 - **Any** (3 connections)
 - **.from_dict()** (3 connections) — `src/hal0/stacks/state.py`
+- **.to_dict()** (3 connections) — `src/hal0/stacks/state.py`
 - **Path** (2 connections)
-- **.test_read_missing_returns_none()** (2 connections) — `tests/stacks/test_drift.py`
-- **.test_corrupt_state_returns_none()** (2 connections) — `tests/stacks/test_drift.py`
-- **.test_stable_and_order_independent()** (2 connections) — `tests/stacks/test_drift.py`
 - **.test_changes_with_content()** (2 connections) — `tests/stacks/test_drift.py`
+- **.test_stable_and_order_independent()** (2 connections) — `tests/stacks/test_drift.py`
+- **.test_corrupt_state_returns_none()** (2 connections) — `tests/stacks/test_drift.py`
+- **.test_read_missing_returns_none()** (2 connections) — `tests/stacks/test_drift.py`
 - **Record ``plan``'s stack as active, fingerprinting what it wrote.          Call A** (1 connections) — `src/hal0/stacks/apply.py`
 - **Active-stack pointer + content hashing for drift detection (spec §7).  Mirrors t** (1 connections) — `src/hal0/stacks/state.py`
 - **Which stack is applied, the hash of what it wrote, and whether converge     brou** (1 connections) — `src/hal0/stacks/state.py`
@@ -30,8 +30,9 @@
 
 ## Relationships
 
-- [StackApplyEngine](StackApplyEngine.md) (9 shared connections)
+- [StackApplyEngine](StackApplyEngine.md) (7 shared connections)
 - [SlotState](SlotState.md) (2 shared connections)
+- [test_drift.py](test_drift.py.md) (2 shared connections)
 
 ## Source Files
 

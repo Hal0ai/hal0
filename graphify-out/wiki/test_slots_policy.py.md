@@ -1,6 +1,6 @@
 # test_slots_policy.py
 
-> 15 nodes
+> 15 nodes · cohesion 0.26
 
 ## Key Concepts
 
@@ -9,9 +9,9 @@
 - **FastAPI** (6 connections)
 - **_seed_slot()** (5 connections) — `tests/api/test_slots_policy.py`
 - **TestClient** (4 connections)
-- **test_create_slot_rejects_when_max_slots_reached()** (4 connections) — `tests/api/test_slots_policy.py`
-- **test_create_slot_allows_when_under_budget()** (4 connections) — `tests/api/test_slots_policy.py`
 - **test_capacity_endpoint_reports_slot_budget()** (4 connections) — `tests/api/test_slots_policy.py`
+- **test_create_slot_allows_when_under_budget()** (4 connections) — `tests/api/test_slots_policy.py`
+- **test_create_slot_rejects_when_max_slots_reached()** (4 connections) — `tests/api/test_slots_policy.py`
 - **isolated_app()** (3 connections) — `tests/api/test_slots_policy.py`
 - **isolated_client()** (3 connections) — `tests/api/test_slots_policy.py`
 - **test_next_free_port_honours_configured_range()** (3 connections) — `tests/api/test_slots_policy.py`

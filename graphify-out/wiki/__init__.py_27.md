@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/omni_router/__init__.py`
-- **Client-side OmniRouter — OpenAI tool-calling loop owned by hal0.  hal0's /v1 sur** (1 connections) — `src/hal0/omni_router/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/registry/__init__.py`
+- **hal0.registry — SQLite-backed model catalog (ML-1 pilot).  The registry is the s** (1 connections) — `src/hal0/registry/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/omni_router/__init__.py`
+- `src/hal0/registry/__init__.py`
 
 ## Audit Trail
 

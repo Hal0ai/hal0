@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/slots/npu/__init__.py`
-- **hal0.slots.npu — NPU FLM-trio shadow reconciler (P3-slots §1d).  See :mod:`hal0.** (1 connections) — `src/hal0/slots/npu/__init__.py`
+- **__init__.py** (1 connections) — `tests/agents/hermes/__init__.py`
+- **Tests for src/hal0/agents/hermes/ (Hermes agent internals).** (1 connections) — `tests/agents/hermes/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/slots/npu/__init__.py`
+- `tests/agents/hermes/__init__.py`
 
 ## Audit Trail
 

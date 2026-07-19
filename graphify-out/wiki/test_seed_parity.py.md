@@ -1,13 +1,13 @@
 # test_seed_parity.py
 
-> 4 nodes
+> 4 nodes · cohesion 0.50
 
 ## Key Concepts
 
 - **test_seed_parity.py** (3 connections) — `tests/agents/hermes_plugins/test_seed_parity.py`
-- **test_seed_file_matches_source()** (1 connections) — `tests/agents/hermes_plugins/test_seed_parity.py`
-- **test_no_unexpected_seed_files()** (1 connections) — `tests/agents/hermes_plugins/test_seed_parity.py`
 - **The installer seed MUST be a byte-identical copy of the canonical source.  Histo** (1 connections) — `tests/agents/hermes_plugins/test_seed_parity.py`
+- **test_no_unexpected_seed_files()** (1 connections) — `tests/agents/hermes_plugins/test_seed_parity.py`
+- **test_seed_file_matches_source()** (1 connections) — `tests/agents/hermes_plugins/test_seed_parity.py`
 
 ## Relationships
 

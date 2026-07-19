@@ -1,39 +1,24 @@
 # conftest.py
 
-> 14 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **conftest.py** (15 connections) — `tests/realtime/conftest.py`
-- **default_backends()** (11 connections) — `tests/realtime/conftest.py`
-- **test_auth.py** (6 connections) — `tests/realtime/test_auth.py`
-- **_app()** (5 connections) — `tests/realtime/test_auth.py`
-- **fake_chat_plain()** (3 connections) — `tests/realtime/conftest.py`
-- **fake_chat_steward()** (3 connections) — `tests/realtime/conftest.py`
-- **app()** (3 connections) — `tests/realtime/conftest.py`
-- **fake_stt()** (2 connections) — `tests/realtime/conftest.py`
-- **fake_tts()** (2 connections) — `tests/realtime/conftest.py`
-- **test_upgrade_denied_without_credentials()** (2 connections) — `tests/realtime/test_auth.py`
-- **test_upgrade_allowed_with_api_key()** (2 connections) — `tests/realtime/test_auth.py`
-- **client()** (1 connections) — `tests/realtime/conftest.py`
-- **Shared fixtures for the Realtime event-contract tests.  Fakes STT/TTS/chat at th** (1 connections) — `tests/realtime/conftest.py`
-- **Auth on the WS upgrade: CLIENT tier, KB-1 enforcement (spec §4b auth).** (1 connections) — `tests/realtime/test_auth.py`
+- **conftest.py** (1 connections) — `tests/memory/conftest.py`
+- **Shared fixtures for the memory test suite.  ADR-0023 removed the Cognee engine,** (1 connections) — `tests/memory/conftest.py`
 
 ## Relationships
 
-- [test_event_contract.py](test_event_contract.py.md) (8 shared connections)
-- [backends.py](backends.py.md) (3 shared connections)
-- [create_app](create_app.md) (2 shared connections)
+- No strong cross-community connections detected
 
 ## Source Files
 
-- `tests/realtime/conftest.py`
-- `tests/realtime/test_auth.py`
+- `tests/memory/conftest.py`
 
 ## Audit Trail
 
-- EXTRACTED: 45 (79%)
-- INFERRED: 12 (21%)
+- EXTRACTED: 2 (100%)
+- INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 
 ---

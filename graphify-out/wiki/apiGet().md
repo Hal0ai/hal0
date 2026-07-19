@@ -16,9 +16,9 @@
 - useChatTemplates() `EXTRACTED`
 - useSlotConfig() `EXTRACTED`
 - useThroughputHistory() `EXTRACTED`
+- QueueTab() `EXTRACTED`
 - RunsTab() `EXTRACTED`
 - usePullsList() `EXTRACTED`
-- QueueTab() `EXTRACTED`
 - useNpuOccupancy() `EXTRACTED`
 - useSettings() `EXTRACTED`
 - useSlotDrift() `EXTRACTED`
@@ -29,10 +29,10 @@
 - useBankDocuments() `EXTRACTED`
 
 ### contains
-- client.ts `EXTRACTED`
+- [client.ts](client.ts.md) `EXTRACTED`
 
 ### imports
-- [useBoard.ts](useBoard.ts.md) `EXTRACTED`
+- useBoard.ts `EXTRACTED`
 - [useSlots.ts](useSlots.ts.md) `EXTRACTED`
 - [useModels.ts](useModels.ts.md) `EXTRACTED`
 - useHindsight.ts `EXTRACTED`
@@ -42,7 +42,7 @@
 - useComfyui.ts `EXTRACTED`
 - useUpdates.ts `EXTRACTED`
 - useMemory.ts `EXTRACTED`
-- useLogs.ts `EXTRACTED`
+- [useLogs.ts](useLogs.ts.md) `EXTRACTED`
 - useStacks.ts `EXTRACTED`
 - useHoncho.ts `EXTRACTED`
 - useUpstreams.ts `EXTRACTED`

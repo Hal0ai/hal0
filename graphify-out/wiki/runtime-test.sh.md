@@ -1,12 +1,12 @@
 # runtime-test.sh
 
-> 3 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
 - **runtime-test.sh** (2 connections) — `tests/harness/runtime-test.sh`
-- **runtime-test.sh script** (1 connections) — `tests/harness/runtime-test.sh`
 - **cleanup_runtime()** (1 connections) — `tests/harness/runtime-test.sh`
+- **runtime-test.sh script** (1 connections) — `tests/harness/runtime-test.sh`
 
 ## Relationships
 

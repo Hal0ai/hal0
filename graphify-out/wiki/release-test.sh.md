@@ -1,15 +1,15 @@
 # release-test.sh
 
-> 12 nodes
+> 12 nodes · cohesion 0.35
 
 ## Key Concepts
 
 - **release-test.sh** (11 connections) — `scripts/release-test.sh`
 - **release-test.sh script** (6 connections) — `scripts/release-test.sh`
 - **add_row()** (5 connections) — `scripts/release-test.sh`
+- **cleanup()** (4 connections) — `scripts/release-test.sh`
 - **log_info()** (4 connections) — `scripts/release-test.sh`
 - **ssh_exec()** (4 connections) — `scripts/release-test.sh`
-- **cleanup()** (4 connections) — `scripts/release-test.sh`
 - **log_err()** (3 connections) — `scripts/release-test.sh`
 - **log_step()** (3 connections) — `scripts/release-test.sh`
 - **log_warn()** (2 connections) — `scripts/release-test.sh`

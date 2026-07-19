@@ -1,27 +1,22 @@
 # file_lock
 
-> 25 nodes
+> 20 nodes · cohesion 0.16
 
 ## Key Concepts
 
 - **file_lock()** (15 connections) — `src/hal0/config/locking.py`
 - **lock_path_for()** (6 connections) — `src/hal0/config/locking.py`
 - **test_locking.py** (6 connections) — `tests/config/test_locking.py`
-- **_hold_then_release()** (5 connections) — `tests/config/test_locking.py`
 - **_contender()** (5 connections) — `tests/config/test_locking.py`
+- **_hold_then_release()** (5 connections) — `tests/config/test_locking.py`
 - **locking.py** (4 connections) — `src/hal0/config/locking.py`
-- **test_second_process_blocks_until_first_releases()** (4 connections) — `tests/config/test_locking.py`
 - **test_reentrant_within_same_process()** (4 connections) — `tests/config/test_locking.py`
-- **TestSlotWriteLock** (4 connections) — `tests/slot_config/test_validation_and_lock.py`
-- **.test_creates_one_coarse_lock_for_the_slots_dir()** (4 connections) — `tests/slot_config/test_validation_and_lock.py`
+- **test_second_process_blocks_until_first_releases()** (4 connections) — `tests/config/test_locking.py`
 - **Path** (3 connections)
 - **test_creates_sibling_lock_file()** (3 connections) — `tests/config/test_locking.py`
-- **.test_reentrant_within_thread()** (3 connections) — `tests/slot_config/test_validation_and_lock.py`
-- **.test_defaults_to_configured_slots_dir()** (3 connections) — `tests/slot_config/test_validation_and_lock.py`
 - **_depths()** (2 connections) — `src/hal0/config/locking.py`
 - **Path** (2 connections)
 - **Any** (2 connections)
-- **Path** (2 connections)
 - **Cross-process advisory file locking for config read-modify-write (SC-10).  Sever** (1 connections) — `src/hal0/config/locking.py`
 - **Return the sibling ``.lock`` path :func:`file_lock` locks for ``target``.** (1 connections) — `src/hal0/config/locking.py`
 - **Hold an exclusive advisory lock serializing an RMW on ``target``.      Locks the** (1 connections) — `src/hal0/config/locking.py`
@@ -33,19 +28,18 @@
 ## Relationships
 
 - [CapabilitySelection](CapabilitySelection.md) (4 shared connections)
-- [write_slot_toml](write_slot_toml.md) (4 shared connections)
-- [unknown_slot_config_keys](unknown_slot_config_keys.md) (2 shared connections)
+- [write_slot_toml](write_slot_toml.md) (3 shared connections)
+- [SlotConfigStore](SlotConfigStore.md) (1 shared connections)
 
 ## Source Files
 
 - `src/hal0/config/locking.py`
 - `tests/config/test_locking.py`
-- `tests/slot_config/test_validation_and_lock.py`
 
 ## Audit Trail
 
-- EXTRACTED: 59 (70%)
-- INFERRED: 25 (30%)
+- EXTRACTED: 48 (71%)
+- INFERRED: 20 (29%)
 - AMBIGUOUS: 0 (0%)
 
 ---

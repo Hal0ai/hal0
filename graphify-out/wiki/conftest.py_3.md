@@ -1,40 +1,40 @@
 # conftest.py
 
-> 18 nodes
+> 14 nodes · cohesion 0.24
 
 ## Key Concepts
 
-- **conftest.py** (8 connections) — `tests/conftest.py`
-- **MonkeyPatch** (4 connections)
-- **app()** (4 connections) — `tests/conftest.py`
-- **client()** (4 connections) — `tests/conftest.py`
-- **tmp_hal0_home()** (4 connections) — `tests/conftest.py`
-- **_no_static_slot_seed()** (3 connections) — `tests/conftest.py`
-- **_store_not_nfs_by_default()** (3 connections) — `tests/conftest.py`
-- **_auth_dev_open_by_default()** (3 connections) — `tests/conftest.py`
-- **FastAPI** (3 connections)
-- **TestClient** (1 connections)
-- **TempPathFactory** (1 connections)
-- **Shared pytest fixtures for hal0 tests.** (1 connections) — `tests/conftest.py`
-- **Silence the lifespan's static slot-TOML seeding (flm/tts/rerank/     utility/img** (1 connections) — `tests/conftest.py`
-- **Force ``hal0.config.store.is_nfs_path`` to False for the whole suite.      ML-3'** (1 connections) — `tests/conftest.py`
-- **Force the KB-1/§1 auth middleware into dev-open for the whole suite.      ``requ** (1 connections) — `tests/conftest.py`
-- **Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.** (1 connections) — `tests/conftest.py`
-- **TestClient with lifespan executed (so app.state singletons exist).** (1 connections) — `tests/conftest.py`
-- **Set HAL0_HOME to a temporary directory for filesystem isolation.      Also opts** (1 connections) — `tests/conftest.py`
+- **conftest.py** (15 connections) — `tests/realtime/conftest.py`
+- **default_backends()** (11 connections) — `tests/realtime/conftest.py`
+- **test_auth.py** (6 connections) — `tests/realtime/test_auth.py`
+- **_app()** (5 connections) — `tests/realtime/test_auth.py`
+- **app()** (3 connections) — `tests/realtime/conftest.py`
+- **fake_chat_plain()** (3 connections) — `tests/realtime/conftest.py`
+- **fake_chat_steward()** (3 connections) — `tests/realtime/conftest.py`
+- **fake_stt()** (2 connections) — `tests/realtime/conftest.py`
+- **fake_tts()** (2 connections) — `tests/realtime/conftest.py`
+- **test_upgrade_allowed_with_api_key()** (2 connections) — `tests/realtime/test_auth.py`
+- **test_upgrade_denied_without_credentials()** (2 connections) — `tests/realtime/test_auth.py`
+- **client()** (1 connections) — `tests/realtime/conftest.py`
+- **Shared fixtures for the Realtime event-contract tests.  Fakes STT/TTS/chat at th** (1 connections) — `tests/realtime/conftest.py`
+- **Auth on the WS upgrade: CLIENT tier, KB-1 enforcement (spec §4b auth).** (1 connections) — `tests/realtime/test_auth.py`
 
 ## Relationships
 
-- [create_app](create_app.md) (1 shared connections)
+- [test_event_contract.py](test_event_contract.py.md) (8 shared connections)
+- [create_app](create_app.md) (2 shared connections)
+- [backends.py](backends.py.md) (2 shared connections)
+- [EnergyVAD](EnergyVAD.md) (1 shared connections)
 
 ## Source Files
 
-- `tests/conftest.py`
+- `tests/realtime/conftest.py`
+- `tests/realtime/test_auth.py`
 
 ## Audit Trail
 
-- EXTRACTED: 44 (98%)
-- INFERRED: 1 (2%)
+- EXTRACTED: 45 (79%)
+- INFERRED: 12 (21%)
 - AMBIGUOUS: 0 (0%)
 
 ---

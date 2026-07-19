@@ -1,6 +1,6 @@
 # memory-graph.jsx
 
-> 9 nodes
+> 9 nodes · cohesion 0.31
 
 ## Key Concepts
 
@@ -9,10 +9,10 @@
 - **DIRECTIONS** (2 connections) — `ui/src/dash/memory-graph.jsx`
 - **GraphLensed()** (2 connections) — `ui/src/dash/memory-graph.jsx`
 - **_honchoAgo()** (2 connections) — `ui/src/dash/memory-graph.jsx`
-- **MemGraphHonchoChip()** (2 connections) — `ui/src/dash/memory-graph.jsx`
 - **MemGraphExplorer()** (2 connections) — `ui/src/dash/memory-graph.jsx`
-- **FACT_TYPES** (1 connections) — `ui/src/dash/memory-graph.jsx`
+- **MemGraphHonchoChip()** (2 connections) — `ui/src/dash/memory-graph.jsx`
 - **cssEsc()** (1 connections) — `ui/src/dash/memory-graph.jsx`
+- **FACT_TYPES** (1 connections) — `ui/src/dash/memory-graph.jsx`
 
 ## Relationships
 

@@ -1,52 +1,53 @@
 # detect
 
-> 59 nodes
+> 39 nodes · cohesion 0.09
 
 ## Key Concepts
 
 - **detect()** (31 connections) — `src/hal0/registry/detect.py`
-- **_write_fixture()** (21 connections) — `tests/registry/test_gguf_header.py`
-- **_build_gguf()** (18 connections) — `tests/registry/test_gguf_header.py`
 - **Path** (17 connections)
-- **_enc_str()** (17 connections) — `tests/registry/test_gguf_header.py`
-- **test_detect.py** (12 connections) — `tests/registry/test_detect.py`
-- **Path** (12 connections)
-- **test_gguf_header.py** (10 connections) — `tests/registry/test_gguf_header.py`
+- **detect.py** (9 connections) — `src/hal0/registry/detect.py`
+- **_heuristic_only()** (9 connections) — `src/hal0/registry/detect.py`
+- **quant_from_filename()** (7 connections) — `src/hal0/registry/detect.py`
 - **TestFilenameHeuristic** (7 connections) — `tests/registry/test_detect.py`
-- **.test_truncated_mid_kv_returns_partial()** (7 connections) — `tests/registry/test_gguf_header.py`
-- **.test_chat_model_high_confidence()** (6 connections) — `tests/registry/test_detect.py`
-- **.test_chat_model_pooling_zero_is_chat()** (6 connections) — `tests/registry/test_detect.py`
-- **.test_pooling_type_nonzero_means_embed()** (6 connections) — `tests/registry/test_detect.py`
-- **.test_filename_fallback_for_embed_without_pooling()** (6 connections) — `tests/registry/test_detect.py`
 - **TestMr3ConsolidationPreservesDetectContract** (6 connections) — `tests/registry/test_detect.py`
 - **.test_chat_gguf_still_chat()** (6 connections) — `tests/registry/test_detect.py`
 - **.test_embed_gguf_still_embed()** (6 connections) — `tests/registry/test_detect.py`
-- **.test_detect_prefers_family_over_unmapped_file_type()** (6 connections) — `tests/registry/test_detect.py`
-- **.test_detect_moe_rocmfpx_umbrella()** (6 connections) — `tests/registry/test_detect.py`
-- **.test_llama_arch_with_context_length()** (6 connections) — `tests/registry/test_gguf_header.py`
-- **.test_qwen_arch_promotes_alias()** (6 connections) — `tests/registry/test_gguf_header.py`
-- **.test_pooling_type_promoted()** (6 connections) — `tests/registry/test_gguf_header.py`
-- **.test_skips_unwanted_string_kv()** (6 connections) — `tests/registry/test_gguf_header.py`
-- **.test_skips_scalar_kv()** (6 connections) — `tests/registry/test_gguf_header.py`
-- **TestRocmfpxQuant** (5 connections) — `tests/registry/test_detect.py`
-- *... and 34 more nodes in this community*
+- **_filename_capability()** (5 connections) — `src/hal0/registry/detect.py`
+- **_hf_repo_name_from_path()** (5 connections) — `src/hal0/registry/detect.py`
+- **DetectionResult** (4 connections) — `src/hal0/registry/detect.py`
+- **quant_from_file_type()** (4 connections) — `src/hal0/registry/detect.py`
+- **quant_from_rocmfpx_filename()** (4 connections) — `src/hal0/registry/detect.py`
+- **.test_reranker_is_not_emitted_by_detect()** (4 connections) — `tests/registry/test_detect.py`
+- **Path** (3 connections)
+- **.test_bge_filename_embed()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_e5_filename_embed()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_kokoro_filename()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_moonshine_filename()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_unknown_extension_returns_empty_caps()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_whisper_filename()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_bad_gguf_degrades_to_filename_heuristic()** (3 connections) — `tests/registry/test_detect.py`
+- **.test_missing_path_returns_filename_heuristic()** (3 connections) — `tests/registry/test_detect.py`
+- **TestGgufUnreadable** (2 connections) — `tests/registry/test_detect.py`
+- *... and 14 more nodes in this community*
 
 ## Relationships
 
-- [read_gguf_header](read_gguf_header.md) (12 shared connections)
-- [detect.py](detect.py.md) (9 shared connections)
-- [models_service.py](models_service.py.md) (3 shared connections)
+- [_write_fixture](_write_fixture.md) (22 shared connections)
+- [models_service.py](models_service.py.md) (4 shared connections)
+- [plan_fileset](plan_fileset.md) (2 shared connections)
+- [read_gguf_header](read_gguf_header.md) (1 shared connections)
+- [test_model_meta.py](test_model_meta.py.md) (1 shared connections)
 
 ## Source Files
 
 - `src/hal0/registry/detect.py`
 - `tests/registry/test_detect.py`
-- `tests/registry/test_gguf_header.py`
 
 ## Audit Trail
 
-- EXTRACTED: 281 (85%)
-- INFERRED: 49 (15%)
+- EXTRACTED: 132 (79%)
+- INFERRED: 36 (21%)
 - AMBIGUOUS: 0 (0%)
 
 ---

@@ -1,6 +1,6 @@
 # connect()
 
-> God node · 114 connections · `src/hal0/db/connection.py`
+> God node · 111 connections · `src/hal0/db/connection.py`
 
 **Community:** [connect](connect.md)
 
@@ -30,11 +30,6 @@
 
 ### contains
 - connection.py `EXTRACTED`
-
-### indirect_call
-- useLogsStream() `INFERRED`
-- useSlotLogsStream() `INFERRED`
-- useActivityStream() `INFERRED`
 
 ### rationale_for
 - Open one PRAGMA-configured connection to the hal0 database.      ``isolation_lev `EXTRACTED`

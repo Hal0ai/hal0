@@ -1,14 +1,14 @@
 # test_api_wiring.py
 
-> 11 nodes
+> 11 nodes · cohesion 0.24
 
 ## Key Concepts
 
 - **test_api_wiring.py** (5 connections) — `tests/omni_router/test_api_wiring.py`
 - **TestClient** (4 connections)
 - **test_app_starts_with_omni_router_attached()** (3 connections) — `tests/omni_router/test_api_wiring.py`
-- **test_chat_completions_with_omni_true_falls_back_when_no_slot_matches()** (3 connections) — `tests/omni_router/test_api_wiring.py`
 - **test_chat_completions_omni_false_unchanged()** (3 connections) — `tests/omni_router/test_api_wiring.py`
+- **test_chat_completions_with_omni_true_falls_back_when_no_slot_matches()** (3 connections) — `tests/omni_router/test_api_wiring.py`
 - **test_chat_completions_without_omni_field_unchanged()** (3 connections) — `tests/omni_router/test_api_wiring.py`
 - **Smoke tests for the OmniRouter wiring in /v1/chat/completions.  PR-16 attaches a** (1 connections) — `tests/omni_router/test_api_wiring.py`
 - **Lifespan attaches an OmniRouter to app.state.      The TestClient fixture runs t** (1 connections) — `tests/omni_router/test_api_wiring.py`

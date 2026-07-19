@@ -1,6 +1,6 @@
 # test_hermes_home_row_unchanged_by_recursion_feature
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

@@ -1,42 +1,35 @@
 # hal0 Hermes Integration Suite Design
 
-> 15 nodes
+> 9 nodes · cohesion 0.39
 
 ## Key Concepts
 
-- **hal0 Hermes Integration Suite Design** (18 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Architecture** (2 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Purpose** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Evidence and constraints** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Product outcomes** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Non-goals** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **`hal0-hermes-core`** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Kanban executor bridge** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Scheduled agent automation** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Configuration ownership** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **LXC105 migration** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Compatibility and drift management** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Optional future `hal0-context`** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Delivery sequence** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
-- **Success criteria** (1 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
+- **hal0 Hermes Integration Suite Design** (7 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
+- **hal0-hermes-core (shared authenticated transport)** (5 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
+- **hal0-memory (Hindsight memory provider)** (4 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
+- **hal0 Hermes Integration Suite Implementation Plan** (3 connections) — `docs/superpowers/plans/2026-07-18-hal0-hermes-integration-suite.md`
+- **Hermes Plugin Suite Spec (cross-cutting optionality)** (2 connections) — `docs/rework/hal0-specs/spec-plugin-suite.final.md`
+- **Platform-wide Cron/Automation Design** (2 connections) — `docs/superpowers/specs/2026-07-11-hal0-platform-cron-design.md`
+- **hal0-provider (Hermes model-provider adapter)** (2 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
+- **hal0-voice (STT/TTS slot routing adapter)** (2 connections) — `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
+- **Kanban Cron Ticker (hal0-api scheduler)** (1 connections) — `docs/superpowers/specs/2026-07-11-hal0-platform-cron-design.md`
 
 ## Relationships
 
-- [Hermes Agent official integration research for the hal0 rework](Hermes_Agent_official_integration_research_for_the_hal0_rework.md) (1 shared connections)
-- [`hal0-memory`](%60hal0-memory%60.md) (1 shared connections)
-- [`hal0-provider`](%60hal0-provider%60.md) (1 shared connections)
-- [`hal0-voice`](%60hal0-voice%60.md) (1 shared connections)
-- [Verification strategy](Verification_strategy.md) (1 shared connections)
+- No strong cross-community connections detected
 
 ## Source Files
 
+- `docs/rework/hal0-specs/spec-plugin-suite.final.md`
+- `docs/superpowers/plans/2026-07-18-hal0-hermes-integration-suite.md`
+- `docs/superpowers/specs/2026-07-11-hal0-platform-cron-design.md`
 - `docs/superpowers/specs/2026-07-18-hal0-hermes-integration-suite-design.md`
 
 ## Audit Trail
 
-- EXTRACTED: 33 (100%)
-- INFERRED: 0 (0%)
-- AMBIGUOUS: 0 (0%)
+- EXTRACTED: 20 (71%)
+- INFERRED: 6 (21%)
+- AMBIGUOUS: 2 (7%)
 
 ---
 

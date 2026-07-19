@@ -1,19 +1,19 @@
 # SlotSamples
 
-> 10 nodes
+> 10 nodes · cohesion 0.27
 
 ## Key Concepts
 
 - **SlotSamples** (11 connections) — `src/hal0/slots/ttft_samples.py`
 - **._recent()** (4 connections) — `src/hal0/slots/ttft_samples.py`
 - **.avg_ttft()** (3 connections) — `src/hal0/slots/ttft_samples.py`
-- **.first_chunk()** (2 connections) — `src/hal0/slots/ttft_samples.py`
 - **.current_ttft()** (2 connections) — `src/hal0/slots/ttft_samples.py`
+- **.first_chunk()** (2 connections) — `src/hal0/slots/ttft_samples.py`
 - **.sample_count()** (2 connections) — `src/hal0/slots/ttft_samples.py`
-- **.request_started()** (1 connections) — `src/hal0/slots/ttft_samples.py`
-- **.request_cancelled()** (1 connections) — `src/hal0/slots/ttft_samples.py`
 - **Rolling TTFT samples + inflight-request map for one slot.      Samples are ``(mo** (1 connections) — `src/hal0/slots/ttft_samples.py`
 - **Record TTFT for ``req_id``. Returns the TTFT in seconds, or         ``None`` if** (1 connections) — `src/hal0/slots/ttft_samples.py`
+- **.request_cancelled()** (1 connections) — `src/hal0/slots/ttft_samples.py`
+- **.request_started()** (1 connections) — `src/hal0/slots/ttft_samples.py`
 
 ## Relationships
 

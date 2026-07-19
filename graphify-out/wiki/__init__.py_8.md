@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/api/plugins/__init__.py`
-- **hal0-api plugin host (v0.3, PR-7).  The dashboard adopts upstream Hermes's plugi** (1 connections) — `src/hal0/api/plugins/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/api/openrouter/__init__.py`
+- **OpenRouter integration surface (Phase 0 scaffold).  This package owns hal0-api's** (1 connections) — `src/hal0/api/openrouter/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/api/plugins/__init__.py`
+- `src/hal0/api/openrouter/__init__.py`
 
 ## Audit Trail
 

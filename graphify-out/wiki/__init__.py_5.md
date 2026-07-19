@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/api/agents/__init__.py`
-- **Agent-scoped API routes (personas, chat proxy, plugin host). Submodules are impo** (1 connections) — `src/hal0/api/agents/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/agents/hermes/plugins/__init__.py`
+- **Hermes plugin sources vendored under hal0's tree.  Each subdirectory mirrors a H** (1 connections) — `src/hal0/agents/hermes/plugins/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/api/agents/__init__.py`
+- `src/hal0/agents/hermes/plugins/__init__.py`
 
 ## Audit Trail
 

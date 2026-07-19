@@ -1,6 +1,6 @@
 # inject-system-state.sh
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

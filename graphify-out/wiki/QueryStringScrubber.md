@@ -1,16 +1,16 @@
 # QueryStringScrubber
 
-> 13 nodes
+> 13 nodes · cohesion 0.18
 
 ## Key Concepts
 
 - **QueryStringScrubber** (8 connections) — `src/hal0/api/middleware/log_scrub.py`
 - **log_scrub.py** (4 connections) — `src/hal0/api/middleware/log_scrub.py`
 - **install()** (4 connections) — `src/hal0/api/middleware/log_scrub.py`
-- **test_log_scrubber_strips_query_string()** (3 connections) — `tests/api/test_chat_proxy.py`
 - **test_log_scrubber_no_query_unchanged()** (3 connections) — `tests/api/test_chat_proxy.py`
-- **.filter()** (2 connections) — `src/hal0/api/middleware/log_scrub.py`
+- **test_log_scrubber_strips_query_string()** (3 connections) — `tests/api/test_chat_proxy.py`
 - **FastAPI** (2 connections)
+- **.filter()** (2 connections) — `src/hal0/api/middleware/log_scrub.py`
 - **LogRecord** (1 connections)
 - **uvicorn access-log query-string scrubber.  DA-sec-ops MUST-FIX #3 (re-iterated b** (1 connections) — `src/hal0/api/middleware/log_scrub.py`
 - **Logging filter that strips ``?...`` from uvicorn access lines.      Applied to t** (1 connections) — `src/hal0/api/middleware/log_scrub.py`

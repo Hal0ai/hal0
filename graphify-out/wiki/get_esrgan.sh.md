@@ -1,12 +1,12 @@
 # get_esrgan.sh
 
-> 3 nodes
+> 3 nodes · cohesion 1.00
 
 ## Key Concepts
 
 - **get_esrgan.sh** (2 connections) — `installer/comfyui/scripts/get_esrgan.sh`
-- **get_esrgan.sh script** (2 connections) — `installer/comfyui/scripts/get_esrgan.sh`
 - **download_if_missing()** (2 connections) — `installer/comfyui/scripts/get_esrgan.sh`
+- **get_esrgan.sh script** (2 connections) — `installer/comfyui/scripts/get_esrgan.sh`
 
 ## Relationships
 

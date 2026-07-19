@@ -1,17 +1,16 @@
 # test_catalog_backends.py
 
-> 15 nodes
+> 14 nodes · cohesion 0.21
 
 ## Key Concepts
 
 - **test_catalog_backends.py** (7 connections) — `tests/capabilities/test_catalog_backends.py`
 - **_npu_only_hw()** (6 connections) — `tests/capabilities/test_catalog_backends.py`
-- **catalog()** (6 connections) — `tests/stacks/test_stacks_catalog.py`
+- **test_flm_probe_not_hardcoded_docker()** (5 connections) — `tests/capabilities/test_catalog_backends.py`
 - **test_npu_advertised_under_podman_only()** (5 connections) — `tests/capabilities/test_catalog_backends.py`
 - **test_npu_hidden_when_image_absent()** (5 connections) — `tests/capabilities/test_catalog_backends.py`
-- **test_flm_probe_not_hardcoded_docker()** (5 connections) — `tests/capabilities/test_catalog_backends.py`
-- **_reset_probe_cache()** (3 connections) — `tests/capabilities/test_catalog_backends.py`
 - **MonkeyPatch** (3 connections)
+- **_reset_probe_cache()** (3 connections) — `tests/capabilities/test_catalog_backends.py`
 - **Any** (2 connections)
 - **SC-2 — the NPU picker probe must honour a podman-only runtime.  ``available_back** (1 connections) — `tests/capabilities/test_catalog_backends.py`
 - **A HardwareInfo-shaped stub: NPU present, no GPUs.** (1 connections) — `tests/capabilities/test_catalog_backends.py`
@@ -28,12 +27,11 @@
 ## Source Files
 
 - `tests/capabilities/test_catalog_backends.py`
-- `tests/stacks/test_stacks_catalog.py`
 
 ## Audit Trail
 
-- EXTRACTED: 36 (75%)
-- INFERRED: 12 (25%)
+- EXTRACTED: 33 (79%)
+- INFERRED: 9 (21%)
 - AMBIGUOUS: 0 (0%)
 
 ---

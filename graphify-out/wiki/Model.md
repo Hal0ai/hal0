@@ -1,62 +1,62 @@
 # Model
 
-> 80 nodes
+> 95 nodes · cohesion 0.04
 
 ## Key Concepts
 
 - **Model** (63 connections) — `src/hal0/registry/model.py`
-- **ModelRegistry** (38 connections)
-- **ModelDefaults** (35 connections) — `src/hal0/registry/model.py`
-- **_model()** (28 connections) — `tests/registry/test_sqlite_store.py`
-- **ModelNotFound** (24 connections) — `src/hal0/registry/store.py`
-- **RegistryError** (14 connections) — `src/hal0/registry/store.py`
-- **test_sqlite_store.py** (14 connections) — `tests/registry/test_sqlite_store.py`
-- **ModelAlreadyExists** (12 connections) — `src/hal0/registry/store.py`
-- **TestUpdate** (11 connections) — `tests/registry/test_sqlite_store.py`
-- **TestEmptyRegistry** (9 connections) — `tests/registry/test_sqlite_store.py`
-- **TestAdd** (9 connections) — `tests/registry/test_sqlite_store.py`
-- **TestRouteFor** (8 connections) — `tests/registry/test_sqlite_store.py`
-- **TestReloadAndOnChange** (8 connections) — `tests/registry/test_sqlite_store.py`
-- **TestModelDefaultsRoundTrip** (8 connections) — `tests/registry/test_sqlite_store.py`
-- **TestRemove** (7 connections) — `tests/registry/test_sqlite_store.py`
-- **TestDefaultRegistryDir** (7 connections) — `tests/registry/test_sqlite_store.py`
-- **model.py** (6 connections) — `src/hal0/registry/model.py`
-- **seed_registry_from_body()** (6 connections) — `src/hal0/registry/pull_jobs.py`
-- **Path** (6 connections)
-- **.test_update_preserves_created_at()** (6 connections) — `tests/registry/test_sqlite_store.py`
-- **TestConcurrency** (6 connections) — `tests/registry/test_sqlite_store.py`
-- **TestList** (5 connections) — `tests/registry/test_sqlite_store.py`
-- **.test_empty_defaults_collapses_to_none()** (5 connections) — `tests/registry/test_sqlite_store.py`
-- **.test_falsy_but_set_n_gpu_layers_is_not_dropped()** (5 connections) — `tests/registry/test_sqlite_store.py`
-- **reg()** (4 connections) — `tests/registry/test_sqlite_store.py`
-- *... and 55 more nodes in this community*
+- **pull.py** (46 connections) — `src/hal0/registry/pull.py`
+- **_download_one()** (22 connections) — `src/hal0/registry/pull.py`
+- **Path** (21 connections)
+- **persist_pull_job()** (16 connections) — `src/hal0/registry/pull.py`
+- **run_flm_pull()** (16 connections) — `src/hal0/registry/pull.py`
+- **pull_job_file()** (15 connections) — `src/hal0/registry/pull.py`
+- **PullJob** (15 connections) — `src/hal0/registry/pull.py`
+- **FileSetPlan** (14 connections) — `src/hal0/registry/fileset.py`
+- **_run_pull_fileset()** (14 connections) — `src/hal0/registry/pull.py`
+- **FileSetEntry** (13 connections) — `src/hal0/registry/fileset.py`
+- **_tmp_dir()** (13 connections) — `src/hal0/registry/pull.py`
+- **PullError** (12 connections) — `src/hal0/registry/pull.py`
+- **_register_pulled_fileset()** (11 connections) — `src/hal0/registry/pull.py`
+- **_final_path_for_entry()** (10 connections) — `src/hal0/registry/pull.py`
+- **PullJobNotFound** (10 connections) — `src/hal0/registry/pull.py`
+- **PullFile** (9 connections) — `src/hal0/registry/pull.py`
+- **PullInvalidSource** (9 connections) — `src/hal0/registry/pull.py`
+- **_pull_jobs_dir()** (8 connections) — `src/hal0/registry/pull.py`
+- **_sanitise_id()** (8 connections) — `src/hal0/registry/pull.py`
+- **_PullCancelled** (7 connections) — `src/hal0/registry/pull.py`
+- **PullChecksumMismatch** (7 connections) — `src/hal0/registry/pull.py`
+- **PullInsufficientDisk** (7 connections) — `src/hal0/registry/pull.py`
+- **_final_path()** (6 connections) — `src/hal0/registry/pull.py`
+- **list_persisted_jobs()** (6 connections) — `src/hal0/registry/pull.py`
+- *... and 70 more nodes in this community*
 
 ## Relationships
 
-- [ModelRegistry](ModelRegistry.md) (32 shared connections)
-- [SqliteModelRegistry](SqliteModelRegistry.md) (21 shared connections)
-- [pull.py](pull.py.md) (11 shared connections)
-- [TomlModelRegistry](TomlModelRegistry.md) (9 shared connections)
-- [import_toml_to_sqlite](import_toml_to_sqlite.md) (8 shared connections)
-- [repository.py](repository.py.md) (3 shared connections)
-- [test_modality.py](test_modality.py.md) (3 shared connections)
+- [run_pull](run_pull.md) (27 shared connections)
+- [ModelRegistry](ModelRegistry.md) (27 shared connections)
+- [_pull_root](_pull_root.md) (18 shared connections)
+- [models.py](models.py.md) (6 shared connections)
+- [plan_fileset](plan_fileset.md) (5 shared connections)
+- [ModelDefaults](ModelDefaults.md) (5 shared connections)
+- [get_curated](get_curated.md) (5 shared connections)
+- [SqliteModelRegistry](SqliteModelRegistry.md) (5 shared connections)
+- [tx](tx.md) (5 shared connections)
+- [import_toml_to_sqlite](import_toml_to_sqlite.md) (4 shared connections)
+- [flm.py](flm.py.md) (4 shared connections)
 - [migrate-haloai.py](migrate-haloai.py.md) (3 shared connections)
-- [_derive_ns](_derive_ns.md) (2 shared connections)
-- [BaseModel](BaseModel.md) (2 shared connections)
-- [models_service.py](models_service.py.md) (2 shared connections)
-- [embed_references](embed_references.md) (2 shared connections)
 
 ## Source Files
 
+- `src/hal0/registry/fileset.py`
 - `src/hal0/registry/model.py`
-- `src/hal0/registry/pull_jobs.py`
-- `src/hal0/registry/store.py`
-- `tests/registry/test_sqlite_store.py`
+- `src/hal0/registry/pull.py`
+- `tests/registry/test_pull.py`
 
 ## Audit Trail
 
-- EXTRACTED: 308 (65%)
-- INFERRED: 167 (35%)
+- EXTRACTED: 368 (70%)
+- INFERRED: 156 (30%)
 - AMBIGUOUS: 0 (0%)
 
 ---

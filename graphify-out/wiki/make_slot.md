@@ -1,57 +1,60 @@
 # make_slot
 
-> 73 nodes
+> 35 nodes · cohesion 0.10
 
 ## Key Concepts
 
 - **make_slot()** (80 connections) — `tests/omni_router/conftest.py`
-- **.dispatch_tool()** (35 connections) — `tests/fixtures/hermes/contracts/plugin_context.py`
-- **make_http_client()** (31 connections) — `tests/omni_router/conftest.py`
-- **test_dispatch.py** (30 connections) — `tests/omni_router/test_dispatch.py`
 - **test_route_to_chat.py** (28 connections) — `tests/omni_router/test_route_to_chat.py`
-- **_ctx()** (18 connections) — `tests/omni_router/test_dispatch.py`
 - **validate_delegation()** (14 connections) — `src/hal0/omni_router/route_to_chat.py`
-- **test_transport_failure_returns_error_envelope()** (7 connections) — `tests/omni_router/test_dispatch.py`
-- **test_route_to_chat_happy_path()** (7 connections) — `tests/omni_router/test_route_to_chat.py`
-- **test_route_to_chat_depth_limit_enforced()** (7 connections) — `tests/omni_router/test_route_to_chat.py`
-- **test_route_to_chat_increments_depth_during_callback()** (7 connections) — `tests/omni_router/test_route_to_chat.py`
-- **test_route_to_chat_no_callback_returns_error()** (7 connections) — `tests/omni_router/test_route_to_chat.py`
-- **test_route_to_chat_non_standard_response_passed_through()** (7 connections) — `tests/omni_router/test_route_to_chat.py`
-- **test_generate_image_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_generate_image_passes_optional_size_and_n()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_edit_image_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_text_to_speech_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_text_to_speech_binary_response_returns_metadata()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_transcribe_audio_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_analyze_image_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_embed_text_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_rerank_documents_happy_path()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_upstream_5xx_returns_error_envelope()** (6 connections) — `tests/omni_router/test_dispatch.py`
-- **test_route_to_chat_target_not_found()** (6 connections) — `tests/omni_router/test_route_to_chat.py`
-- **test_route_to_chat_self_blocked()** (6 connections) — `tests/omni_router/test_route_to_chat.py`
-- *... and 48 more nodes in this community*
+- **test_filter_no_labels.py** (10 connections) — `tests/omni_router/test_filter_no_labels.py`
+- **chat_slot_has_tool_calling()** (9 connections) — `src/hal0/omni_router/filter.py`
+- **test_legacy_labels_only_still_routes_tools()** (5 connections) — `tests/omni_router/test_filter_no_labels.py`
+- **test_tool_calling_flag_alone_ships_tools_no_labels()** (5 connections) — `tests/omni_router/test_filter_no_labels.py`
+- **test_tool_calling_flag_false_suppresses_tools_even_with_label()** (5 connections) — `tests/omni_router/test_filter_no_labels.py`
+- **test_validate_depth_limit_rejected()** (4 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_npu_npu_rejected()** (4 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_target_wrong_type_rejected()** (4 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_chat_slot_has_tool_calling_prefers_model_info()** (3 connections) — `tests/omni_router/test_filter_no_labels.py`
+- **test_chat_slot_has_tool_calling_false_no_labels()** (3 connections) — `tests/omni_router/test_filter.py`
+- **test_chat_slot_has_tool_calling_false_wrong_label()** (3 connections) — `tests/omni_router/test_filter.py`
+- **test_chat_slot_has_tool_calling_true()** (3 connections) — `tests/omni_router/test_filter.py`
+- **test_validate_gpu_to_npu_allowed()** (3 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_happy_path_returns_none()** (3 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_npu_to_gpu_allowed()** (3 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_self_delegation_rejected()** (3 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_target_disabled_is_rejected()** (3 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_validate_target_missing()** (3 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_build_messages_omits_context_when_none()** (2 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_build_messages_omits_system_when_unset()** (2 connections) — `tests/omni_router/test_route_to_chat.py`
+- **test_build_messages_with_system_prompt_and_context()** (2 connections) — `tests/omni_router/test_route_to_chat.py`
+- **Return True iff the chat slot's model is allowed to see tools.      Per plan §7.** (1 connections) — `src/hal0/omni_router/filter.py`
+- *... and 10 more nodes in this community*
 
 ## Relationships
 
-- [FakeSlotManager](FakeSlotManager.md) (51 shared connections)
-- [DispatchContext](DispatchContext.md) (23 shared connections)
-- [test_router_loop.py](test_router_loop.py.md) (9 shared connections)
+- [FakeSlotManager](FakeSlotManager.md) (52 shared connections)
+- [active_tools_for](active_tools_for.md) (24 shared connections)
+- [test_router_loop.py](test_router_loop.py.md) (6 shared connections)
 - [route_to_chat.py](route_to_chat.py.md) (4 shared connections)
-- [SlotManagerLike](SlotManagerLike.md) (4 shared connections)
-- [PluginContext](PluginContext.md) (1 shared connections)
+- [test_model_meta.py](test_model_meta.py.md) (2 shared connections)
+- [OmniRouter](OmniRouter.md) (2 shared connections)
+- [RoutingHost](RoutingHost.md) (2 shared connections)
+- [Any](Any.md) (1 shared connections)
 
 ## Source Files
 
+- `src/hal0/omni_router/filter.py`
 - `src/hal0/omni_router/route_to_chat.py`
-- `tests/fixtures/hermes/contracts/plugin_context.py`
 - `tests/omni_router/conftest.py`
-- `tests/omni_router/test_dispatch.py`
+- `tests/omni_router/test_filter.py`
+- `tests/omni_router/test_filter_no_labels.py`
 - `tests/omni_router/test_route_to_chat.py`
 
 ## Audit Trail
 
-- EXTRACTED: 379 (80%)
-- INFERRED: 97 (20%)
+- EXTRACTED: 184 (86%)
+- INFERRED: 31 (14%)
 - AMBIGUOUS: 0 (0%)
 
 ---

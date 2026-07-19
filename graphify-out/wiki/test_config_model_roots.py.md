@@ -1,6 +1,6 @@
 # test_config_model_roots.py
 
-> 11 nodes
+> 11 nodes · cohesion 0.29
 
 ## Key Concepts
 
@@ -9,8 +9,8 @@
 - **isolated_client()** (4 connections) — `tests/api/test_config_model_roots.py`
 - **test_put_models_config_persists()** (3 connections) — `tests/api/test_config_model_roots.py`
 - **test_put_pull_root_persists_and_is_auto_scanned()** (3 connections) — `tests/api/test_config_model_roots.py`
-- **test_get_models_config_returns_defaults()** (2 connections) — `tests/api/test_config_model_roots.py`
 - **Path** (2 connections)
+- **test_get_models_config_returns_defaults()** (2 connections) — `tests/api/test_config_model_roots.py`
 - **test_put_models_config_relative_path_rejected()** (2 connections) — `tests/api/test_config_model_roots.py`
 - **test_put_pull_root_relative_path_rejected()** (2 connections) — `tests/api/test_config_model_roots.py`
 - **Tests for /api/config/models — GET defaults + PUT update/validate.** (1 connections) — `tests/api/test_config_model_roots.py`

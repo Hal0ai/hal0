@@ -1,12 +1,12 @@
 # _proxy_ws
 
-> 11 nodes
+> 11 nodes · cohesion 0.25
 
 ## Key Concepts
 
 - **_proxy_ws()** (11 connections) — `src/hal0/api/agents/chat_proxy.py`
-- **.close()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **events_ws()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
+- **.close()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **submit_ws()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **_pump()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **WebSocket** (3 connections)

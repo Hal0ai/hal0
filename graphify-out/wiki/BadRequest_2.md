@@ -1,6 +1,6 @@
 # BadRequest
 
-> God node · 107 connections · `src/hal0/errors.py`
+> God node · 104 connections · `src/hal0/errors.py`
 
 **Community:** [BadRequest](BadRequest.md)
 
@@ -43,7 +43,6 @@
 - .test_bad_envelope_rejected() `INFERRED`
 - test_ngl_in_extra_args_is_denied() `INFERRED`
 - test_duplicate_same_id_raises() `INFERRED`
-- test_resolve_argv_screens_model_extra_args_segment() `INFERRED`
 - test_install_rejects_bad_id_charset() `INFERRED`
 - test_resolve_blocks_link_local_url() `INFERRED`
 - test_resolve_blocks_localhost_url() `INFERRED`
@@ -52,9 +51,10 @@
 - test_resolve_argv_rejects_managed_flag_in_extra_args() `INFERRED`
 - test_resolve_argv_rejects_multiple_managed_flags_in_one_extra_args() `INFERRED`
 - test_resolve_propagates_fetch_failure_as_bad_request() `INFERRED`
+- test_resolve_rejects_empty_url() `INFERRED`
 
 ### inherits
-- [Hal0Error](Hal0Error.md) `EXTRACTED`
+- Hal0Error `EXTRACTED`
 - SsrfBlockedError `EXTRACTED`
 
 ### rationale_for

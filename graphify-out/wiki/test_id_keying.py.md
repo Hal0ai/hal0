@@ -1,6 +1,6 @@
 # test_id_keying.py
 
-> 26 nodes
+> 26 nodes · cohesion 0.20
 
 ## Key Concepts
 
@@ -9,16 +9,16 @@
 - **Path** (14 connections)
 - **_create()** (13 connections) — `tests/slots/test_id_keying.py`
 - **SlotManager** (5 connections)
-- **test_rename_rejects_running_slot()** (5 connections) — `tests/slots/test_id_keying.py`
-- **test_rename_rejects_name_collision()** (5 connections) — `tests/slots/test_id_keying.py`
-- **test_fold_identity_populates_rows_and_claims()** (5 connections) — `tests/slots/test_id_keying.py`
 - **test_bare_manager_unchanged()** (5 connections) — `tests/slots/test_id_keying.py`
+- **test_fold_identity_populates_rows_and_claims()** (5 connections) — `tests/slots/test_id_keying.py`
 - **test_inmemory_dicts_keyed_by_durable_slot_id()** (5 connections) — `tests/slots/test_id_keying.py`
 - **test_rename_does_not_rekey_caches()** (5 connections) — `tests/slots/test_id_keying.py`
+- **test_rename_rejects_name_collision()** (5 connections) — `tests/slots/test_id_keying.py`
+- **test_rename_rejects_running_slot()** (5 connections) — `tests/slots/test_id_keying.py`
 - **test_create_assigns_id_and_acquires_port()** (4 connections) — `tests/slots/test_id_keying.py`
-- **test_second_slot_never_double_claims_same_port()** (4 connections) — `tests/slots/test_id_keying.py`
 - **test_delete_releases_port_and_id()** (4 connections) — `tests/slots/test_id_keying.py`
 - **test_rename_is_pure_relabel_preserving_id()** (4 connections) — `tests/slots/test_id_keying.py`
+- **test_second_slot_never_double_claims_same_port()** (4 connections) — `tests/slots/test_id_keying.py`
 - **test_slot_id_to_name_roundtrip()** (4 connections) — `tests/slots/test_id_keying.py`
 - **test_surrogate_rebinds_to_durable_id_when_row_appears()** (4 connections) — `tests/slots/test_id_keying.py`
 - **hal0_home()** (3 connections) — `tests/slots/test_id_keying.py`

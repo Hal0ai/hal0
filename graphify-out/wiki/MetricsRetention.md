@@ -1,6 +1,6 @@
 # MetricsRetention
 
-> 14 nodes
+> 14 nodes · cohesion 0.18
 
 ## Key Concepts
 
@@ -10,11 +10,11 @@
 - **._loop()** (3 connections) — `src/hal0/metrics/retention.py`
 - **_cutoff_iso()** (2 connections) — `src/hal0/metrics/retention.py`
 - **.__init__()** (2 connections) — `src/hal0/metrics/retention.py`
-- **.start()** (2 connections) — `src/hal0/metrics/retention.py`
 - **.run_once()** (2 connections) — `src/hal0/metrics/retention.py`
+- **.start()** (2 connections) — `src/hal0/metrics/retention.py`
+- **.stop()** (1 connections) — `src/hal0/metrics/retention.py`
 - **Connection** (1 connections)
 - **Path** (1 connections)
-- **.stop()** (1 connections) — `src/hal0/metrics/retention.py`
 - **Bounded storage -- background auto-prune (plan §13.5: "never fill a user's disk"** (1 connections) — `src/hal0/metrics/retention.py`
 - **Delete rows older than each table's retention window. Returns counts deleted.** (1 connections) — `src/hal0/metrics/retention.py`
 - **Background task: prune on an interval (default every 6h).** (1 connections) — `src/hal0/metrics/retention.py`
@@ -22,7 +22,7 @@
 ## Relationships
 
 - [MetricsService](MetricsService.md) (2 shared connections)
-- [connect](connect.md) (1 shared connections)
+- [tx](tx.md) (1 shared connections)
 
 ## Source Files
 

@@ -1,6 +1,6 @@
 # ModelRegistry
 
-> 59 nodes
+> 59 nodes · cohesion 0.07
 
 ## Key Concepts
 
@@ -14,27 +14,29 @@
 - **Path** (5 connections)
 - **TestMtimeCache** (5 connections) — `tests/registry/test_store.py`
 - **.test_corrupt_file_keeps_stale_cache_warns()** (5 connections) — `tests/registry/test_store.py`
-- **TestRouteFor** (5 connections) — `tests/registry/test_store.py`
-- **.test_initial_load_with_corrupt_file_returns_empty()** (5 connections) — `tests/registry/test_store.py`
 - **.test_add_fsyncs_registry_dir()** (5 connections) — `tests/registry/test_store.py`
 - **.test_add_survives_dir_fsync_failure()** (5 connections) — `tests/registry/test_store.py`
+- **.test_initial_load_with_corrupt_file_returns_empty()** (5 connections) — `tests/registry/test_store.py`
+- **TestRouteFor** (5 connections) — `tests/registry/test_store.py`
 - **reg()** (4 connections) — `tests/registry/test_store.py`
 - **.test_add_duplicate_raises()** (4 connections) — `tests/registry/test_store.py`
-- **TestRemove** (4 connections) — `tests/registry/test_store.py`
-- **.test_remove_existing_returns_true()** (4 connections) — `tests/registry/test_store.py`
-- **.test_update_with_non_dict_raises()** (4 connections) — `tests/registry/test_store.py`
-- **.test_update_cannot_change_id()** (4 connections) — `tests/registry/test_store.py`
-- **.test_update_validation_failure_raises()** (4 connections) — `tests/registry/test_store.py`
 - **TestConcurrency** (4 connections) — `tests/registry/test_store.py`
 - **TestDefaultRegistryDir** (4 connections) — `tests/registry/test_store.py`
-- **TestPreexistingCorruption** (4 connections) — `tests/registry/test_store.py`
 - **TestParentDirFsync** (4 connections) — `tests/registry/test_store.py`
+- **TestPreexistingCorruption** (4 connections) — `tests/registry/test_store.py`
+- **TestRemove** (4 connections) — `tests/registry/test_store.py`
+- **.test_remove_existing_returns_true()** (4 connections) — `tests/registry/test_store.py`
+- **.test_update_cannot_change_id()** (4 connections) — `tests/registry/test_store.py`
+- **.test_update_validation_failure_raises()** (4 connections) — `tests/registry/test_store.py`
+- **.test_update_with_non_dict_raises()** (4 connections) — `tests/registry/test_store.py`
 - *... and 34 more nodes in this community*
 
 ## Relationships
 
-- [Model](Model.md) (18 shared connections)
-- [load_manifest](load_manifest.md) (1 shared connections)
+- [Model](Model.md) (11 shared connections)
+- [SqliteModelRegistry](SqliteModelRegistry.md) (4 shared connections)
+- [ModelRegistry](ModelRegistry.md) (3 shared connections)
+- [load_hal0_config](load_hal0_config.md) (1 shared connections)
 
 ## Source Files
 

@@ -1,13 +1,13 @@
 # hermes-sdk-diff.sh
 
-> 4 nodes
+> 4 nodes · cohesion 0.50
 
 ## Key Concepts
 
 - **hermes-sdk-diff.sh** (3 connections) — `scripts/hermes-sdk-diff.sh`
-- **hermes-sdk-diff.sh script** (1 connections) — `scripts/hermes-sdk-diff.sh`
-- **read_pin_field()** (1 connections) — `scripts/hermes-sdk-diff.sh`
 - **cleanup()** (1 connections) — `scripts/hermes-sdk-diff.sh`
+- **read_pin_field()** (1 connections) — `scripts/hermes-sdk-diff.sh`
+- **hermes-sdk-diff.sh script** (1 connections) — `scripts/hermes-sdk-diff.sh`
 
 ## Relationships
 

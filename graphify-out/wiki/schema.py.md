@@ -1,62 +1,61 @@
 # schema.py
 
-> 71 nodes
+> 66 nodes · cohesion 0.04
 
 ## Key Concepts
 
 - **schema.py** (55 connections) — `src/hal0/config/schema.py`
-- **UpstreamEntry** (11 connections) — `src/hal0/config/schema.py`
+- **BaseModel** (42 connections)
 - **TestHal0Config** (11 connections) — `tests/config/test_schema.py`
 - **SlotsConfig** (10 connections) — `src/hal0/config/schema.py`
-- **StacksConfig** (8 connections) — `src/hal0/config/schema.py`
-- **resolve_chat_template()** (6 connections) — `src/hal0/config/schema.py`
-- **UpstreamModelFilters** (5 connections) — `src/hal0/config/schema.py`
-- **MetaConfig** (5 connections) — `src/hal0/config/schema.py`
+- **ModelConfig** (9 connections) — `src/hal0/config/schema.py`
+- **ProviderEntry** (9 connections) — `src/hal0/config/schema.py`
+- **NpuConfig** (6 connections) — `src/hal0/config/schema.py`
 - **DispatcherConfig** (5 connections) — `src/hal0/config/schema.py`
+- **MetaConfig** (5 connections) — `src/hal0/config/schema.py`
 - **TelemetryConfig** (5 connections) — `src/hal0/config/schema.py`
-- **ToolPolicy** (4 connections) — `src/hal0/config/schema.py`
+- **TestModelConfig** (5 connections) — `tests/config/test_schema.py`
 - **AgentConfig** (4 connections) — `src/hal0/config/schema.py`
 - **RealtimeConfig** (4 connections) — `src/hal0/config/schema.py`
-- **test_chat_template_resolve.py** (4 connections) — `tests/config/test_chat_template_resolve.py`
+- **ToolPolicy** (4 connections) — `src/hal0/config/schema.py`
+- **TestProviderEntry** (4 connections) — `tests/config/test_schema.py`
 - **ActivityConfig** (3 connections) — `src/hal0/config/schema.py`
 - **SecurityConfig** (3 connections) — `src/hal0/config/schema.py`
-- **TestStacksConfig** (3 connections) — `tests/config/test_stacks_schema.py`
-- **.test_keyed_by_slug()** (3 connections) — `tests/config/test_stacks_schema.py`
-- **._publish_host_sane()** (2 connections) — `src/hal0/config/schema.py`
+- **test_npu_chat_default_on()** (3 connections) — `tests/config/test_schema_npu.py`
 - **._network_mode_known()** (2 connections) — `src/hal0/config/schema.py`
+- **._publish_host_sane()** (2 connections) — `src/hal0/config/schema.py`
 - **.lists_are_disjoint()** (2 connections) — `src/hal0/config/schema.py`
-- **test_slot_override_wins()** (2 connections) — `tests/config/test_chat_template_resolve.py`
-- **test_model_default_used_when_slot_absent()** (2 connections) — `tests/config/test_chat_template_resolve.py`
-- **test_auto_returns_none()** (2 connections) — `tests/config/test_chat_template_resolve.py`
+- **test_npu_config_defaults_off()** (2 connections) — `tests/config/test_schema_npu.py`
 - **.test_defaults_load_clean()** (2 connections) — `tests/config/test_schema.py`
-- *... and 46 more nodes in this community*
+- **.test_dispatcher_parallel_cap_min_1()** (2 connections) — `tests/config/test_schema.py`
+- **.test_dispatcher_timeout_must_be_positive()** (2 connections) — `tests/config/test_schema.py`
+- *... and 41 more nodes in this community*
 
 ## Relationships
 
-- [BaseModel](BaseModel.md) (12 shared connections)
-- [load_hal0_config](load_hal0_config.md) (5 shared connections)
-- [ConfigParseError](ConfigParseError.md) (5 shared connections)
-- [AgentMetadataConfig](AgentMetadataConfig.md) (4 shared connections)
-- [TestUpstreamEntry](TestUpstreamEntry.md) (4 shared connections)
-- [HonchoConfig](HonchoConfig.md) (3 shared connections)
-- [SlotConfig](SlotConfig.md) (3 shared connections)
+- [load_hal0_config](load_hal0_config.md) (11 shared connections)
+- [AgentMetadataConfig](AgentMetadataConfig.md) (8 shared connections)
+- [BrainChatConfig](BrainChatConfig.md) (7 shared connections)
+- [HonchoConfig](HonchoConfig.md) (6 shared connections)
+- [SlotConfig](SlotConfig.md) (5 shared connections)
+- [HardwareInfo](HardwareInfo.md) (4 shared connections)
+- [StackConfig](StackConfig.md) (4 shared connections)
+- [UpstreamEntry](UpstreamEntry.md) (4 shared connections)
+- [ProfileConfig](ProfileConfig.md) (3 shared connections)
 - [TestFamilyDefaults](TestFamilyDefaults.md) (2 shared connections)
-- [HardwareInfo](HardwareInfo.md) (2 shared connections)
-- [MemoryConfig](MemoryConfig.md) (2 shared connections)
-- [snapshot_live_stack](snapshot_live_stack.md) (2 shared connections)
-- [StackConfig](StackConfig.md) (2 shared connections)
+- [test_probe.py](test_probe.py.md) (2 shared connections)
+- [load_slot_config](load_slot_config.md) (2 shared connections)
 
 ## Source Files
 
 - `src/hal0/config/schema.py`
-- `tests/config/test_chat_template_resolve.py`
 - `tests/config/test_schema.py`
-- `tests/config/test_stacks_schema.py`
+- `tests/config/test_schema_npu.py`
 
 ## Audit Trail
 
-- EXTRACTED: 186 (85%)
-- INFERRED: 33 (15%)
+- EXTRACTED: 214 (84%)
+- INFERRED: 42 (16%)
 - AMBIGUOUS: 0 (0%)
 
 ---

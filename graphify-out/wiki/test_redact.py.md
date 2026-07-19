@@ -1,6 +1,6 @@
 # test_redact.py
 
-> 54 nodes
+> 54 nodes · cohesion 0.05
 
 ## Key Concepts
 
@@ -11,24 +11,24 @@
 - **_redact.py** (4 connections) — `src/hal0/api/_redact.py`
 - **isolated_client()** (4 connections) — `tests/api/test_redact.py`
 - **TestBareKeySuffix** (4 connections) — `tests/api/test_redact.py`
-- **test_is_sensitive_key_matches_documented_patterns()** (3 connections) — `tests/api/test_redact.py`
+- **TestClient** (3 connections)
 - **test_is_sensitive_key_leaves_plain_keys_alone()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_value_masks_nonempty_token()** (3 connections) — `tests/api/test_redact.py`
+- **test_is_sensitive_key_matches_documented_patterns()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_does_not_mutate_input()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_empty_sensitive_key_yields_set_false()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_list_of_scalars_passes_through()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_plain_key_passes_through_unmasked()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_scalars_returned_verbatim()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_token_key_masked_with_set_true()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_walks_lists_of_dicts()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_config_walks_nested_dicts()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_sensitive_container_masks_wholesale()** (3 connections) — `tests/api/test_redact.py`
 - **test_redact_value_empty_string_yields_set_false()** (3 connections) — `tests/api/test_redact.py`
+- **test_redact_value_masks_nonempty_token()** (3 connections) — `tests/api/test_redact.py`
 - **test_redact_value_none_yields_set_false()** (3 connections) — `tests/api/test_redact.py`
 - **test_redact_value_zero_is_treated_as_set()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_token_key_masked_with_set_true()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_plain_key_passes_through_unmasked()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_empty_sensitive_key_yields_set_false()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_does_not_mutate_input()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_walks_nested_dicts()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_walks_lists_of_dicts()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_sensitive_container_masks_wholesale()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_list_of_scalars_passes_through()** (3 connections) — `tests/api/test_redact.py`
-- **test_redact_config_scalars_returned_verbatim()** (3 connections) — `tests/api/test_redact.py`
-- **TestClient** (3 connections)
-- **test_settings_get_redacts_sensitive_keys()** (3 connections) — `tests/api/test_redact.py`
 - **test_settings_get_empty_sensitive_key_yields_set_false()** (3 connections) — `tests/api/test_redact.py`
+- **test_settings_get_redacts_sensitive_keys()** (3 connections) — `tests/api/test_redact.py`
 - *... and 29 more nodes in this community*
 
 ## Relationships

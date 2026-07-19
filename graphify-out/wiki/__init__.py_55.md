@@ -1,10 +1,10 @@
 # __init__.py
 
-> 1 nodes
+> 1 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (0 connections) — `tests/config/__init__.py`
+- **__init__.py** (0 connections) — `tests/bundles/__init__.py`
 
 ## Relationships
 
@@ -12,7 +12,7 @@
 
 ## Source Files
 
-- `tests/config/__init__.py`
+- `tests/bundles/__init__.py`
 
 ## Audit Trail
 

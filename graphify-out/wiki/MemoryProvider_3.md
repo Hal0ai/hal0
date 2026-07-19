@@ -1,49 +1,56 @@
 # MemoryProvider
 
-> 44 nodes
+> 34 nodes · cohesion 0.07
 
 ## Key Concepts
 
-- **MemoryProvider** (14 connections) — `src/hal0/memory/provider.py`
-- **Any** (11 connections)
-- **provider.py** (10 connections) — `src/hal0/memory/provider.py`
-- **.search()** (4 connections) — `src/hal0/memory/provider.py`
-- **.recall()** (4 connections) — `src/hal0/memory/provider.py`
-- **MemoryItem** (3 connections) — `src/hal0/memory/provider.py`
-- **AddResult** (3 connections) — `src/hal0/memory/provider.py`
-- **ListPage** (3 connections) — `src/hal0/memory/provider.py`
-- **DeleteResult** (3 connections) — `src/hal0/memory/provider.py`
-- **GraphStatus** (3 connections) — `src/hal0/memory/provider.py`
-- **.add()** (3 connections) — `src/hal0/memory/provider.py`
-- **.list_items()** (3 connections) — `src/hal0/memory/provider.py`
-- **.graph_status()** (3 connections) — `src/hal0/memory/provider.py`
-- **.reflect()** (3 connections) — `src/hal0/memory/provider.py`
-- **.consolidate()** (3 connections) — `src/hal0/memory/provider.py`
-- **.register_compiled()** (3 connections) — `src/hal0/memory/provider.py`
-- **Mode** (2 connections) — `src/hal0/memory/provider.py`
-- **.to_dict()** (2 connections) — `src/hal0/memory/provider.py`
-- **.to_dict()** (2 connections) — `src/hal0/memory/provider.py`
-- **.to_dict()** (2 connections) — `src/hal0/memory/provider.py`
-- **.delete()** (2 connections) — `src/hal0/memory/provider.py`
-- **.set_graph_enabled()** (2 connections) — `src/hal0/memory/provider.py`
-- **.set_rerank_enabled()** (2 connections) — `src/hal0/memory/provider.py`
-- **.to_dict()** (1 connections) — `src/hal0/memory/provider.py`
-- **.to_dict()** (1 connections) — `src/hal0/memory/provider.py`
-- *... and 19 more nodes in this community*
+- **MemoryProvider** (30 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **Any** (8 connections)
+- **test_provider_abc.py** (7 connections) — `tests/memory/test_provider_abc.py`
+- **test_concrete_providers_are_memory_providers()** (4 connections) — `tests/memory/test_provider_abc.py`
+- **memory_provider.py** (3 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.get_tool_schemas()** (3 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **test_memory_provider_roster_is_frozen()** (2 connections) — `tests/agents/hermes/test_contract_compatibility.py`
+- **.get_config_schema()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.handle_tool_call()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.initialize()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.is_available()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.on_memory_write()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.on_pre_compress()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.on_session_end()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.save_config()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.sync_turn()** (2 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **ABC** (2 connections)
+- **test_abc_optional_methods_have_safe_defaults()** (2 connections) — `tests/memory/test_provider_abc.py`
+- **.backup_paths()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.on_delegation()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.on_session_switch()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.on_turn_start()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.prefetch()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.queue_prefetch()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- **.shutdown()** (1 connections) — `tests/fixtures/hermes/contracts/memory_provider.py`
+- *... and 9 more nodes in this community*
 
 ## Relationships
 
+- [test_contract_compatibility.py](test_contract_compatibility.py.md) (3 shared connections)
 - [MemoryProvider](MemoryProvider.md) (2 shared connections)
-- [Enum](Enum.md) (1 shared connections)
+- [Hal0MemoryProvider](Hal0MemoryProvider.md) (2 shared connections)
+- [Hal0MemoryClient](Hal0MemoryClient.md) (1 shared connections)
+- [Dispatcher](Dispatcher.md) (1 shared connections)
+- [HindsightProvider](HindsightProvider.md) (1 shared connections)
+- [PgVectorProvider](PgVectorProvider.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/memory/provider.py`
+- `tests/agents/hermes/test_contract_compatibility.py`
+- `tests/fixtures/hermes/contracts/memory_provider.py`
+- `tests/memory/test_provider_abc.py`
 
 ## Audit Trail
 
-- EXTRACTED: 109 (98%)
-- INFERRED: 2 (2%)
+- EXTRACTED: 83 (87%)
+- INFERRED: 12 (13%)
 - AMBIGUOUS: 0 (0%)
 
 ---

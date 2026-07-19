@@ -1,12 +1,12 @@
 # run-as-hal0.sh
 
-> 3 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
 - **run-as-hal0.sh** (2 connections) — `installer/lib/run-as-hal0.sh`
-- **run-as-hal0.sh script** (1 connections) — `installer/lib/run-as-hal0.sh`
 - **hal0_ensure_runas()** (1 connections) — `installer/lib/run-as-hal0.sh`
+- **run-as-hal0.sh script** (1 connections) — `installer/lib/run-as-hal0.sh`
 
 ## Relationships
 

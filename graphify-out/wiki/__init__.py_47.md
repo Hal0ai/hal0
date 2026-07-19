@@ -1,10 +1,10 @@
 # __init__.py
 
-> 1 nodes
+> 1 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (0 connections) — `tests/api/__init__.py`
+- **__init__.py** (0 connections) — `src/hal0/comfyui/__init__.py`
 
 ## Relationships
 
@@ -12,7 +12,7 @@
 
 ## Source Files
 
-- `tests/api/__init__.py`
+- `src/hal0/comfyui/__init__.py`
 
 ## Audit Trail
 

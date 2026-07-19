@@ -1,6 +1,6 @@
 # test_catalog_npu_stt.py
 
-> 10 nodes
+> 10 nodes · cohesion 0.27
 
 ## Key Concepts
 

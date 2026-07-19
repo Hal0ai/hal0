@@ -1,13 +1,13 @@
 # config.sh
 
-> 4 nodes
+> 4 nodes · cohesion 0.50
 
 ## Key Concepts
 
 - **config.sh** (3 connections) — `installer/bench/config.sh`
-- **config.sh script** (1 connections) — `installer/bench/config.sh`
 - **BACKENDS** (1 connections) — `installer/bench/config.sh`
 - **CTX_CONFIGS** (1 connections) — `installer/bench/config.sh`
+- **config.sh script** (1 connections) — `installer/bench/config.sh`
 
 ## Relationships
 

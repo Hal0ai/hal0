@@ -50,17 +50,17 @@
 - [FakeUpstreamRegistry](FakeUpstreamRegistry.md) `INFERRED`
 - Slot `INFERRED`
 - FakeModelRegistry `INFERRED`
-- [_RecordingSlotManager](_RecordingSlotManager.md) `INFERRED`
+- _RecordingSlotManager `INFERRED`
 - UpstreamUnavailable `INFERRED`
 - [_ArbiterSlotManager](_ArbiterSlotManager.md) `INFERRED`
 - NoRouteFound `INFERRED`
-- FakeSnap `INFERRED`
+- [FakeSnap](FakeSnap.md) `INFERRED`
 - [FakeContainerProvider](FakeContainerProvider.md) `INFERRED`
 - [SlotLoading](SlotLoading.md) `INFERRED`
 - SlotReaper `INFERRED`
 - [FakeSlotManager](FakeSlotManager.md) `INFERRED`
 - RecordingOrchestrator `INFERRED`
-- ReaperHost `INFERRED`
+- [ReaperHost](ReaperHost.md) `INFERRED`
 - [_FakeSlotManager](_FakeSlotManager.md) `INFERRED`
 
 ---

@@ -1,20 +1,20 @@
 # test_apply_commit.py
 
-> 14 nodes
+> 14 nodes · cohesion 0.30
 
 ## Key Concepts
 
 - **test_apply_commit.py** (7 connections) — `tests/stacks/test_apply_commit.py`
 - **.test_failed_commit_rolls_back()** (7 connections) — `tests/stacks/test_apply_commit.py`
-- **_write_slot()** (6 connections) — `tests/stacks/test_apply_commit.py`
 - **_stack()** (6 connections) — `tests/stacks/test_apply_commit.py`
 - **.test_commit_writes_after()** (6 connections) — `tests/stacks/test_apply_commit.py`
+- **_write_slot()** (6 connections) — `tests/stacks/test_apply_commit.py`
 - **.test_commit_is_idempotent()** (5 connections) — `tests/stacks/test_apply_commit.py`
-- **_read()** (4 connections) — `tests/stacks/test_apply_commit.py`
 - **StackSlotEntry** (4 connections)
+- **_read()** (4 connections) — `tests/stacks/test_apply_commit.py`
 - **TestCommit** (4 connections) — `tests/stacks/test_apply_commit.py`
-- **_slots_dir()** (3 connections) — `tests/stacks/test_apply_commit.py`
 - **Path** (3 connections)
+- **_slots_dir()** (3 connections) — `tests/stacks/test_apply_commit.py`
 - **TestRollback** (3 connections) — `tests/stacks/test_apply_commit.py`
 - **MonkeyPatch** (1 connections)
 - **Unit tests for StackApplyEngine.apply_config() — atomic commit + rollback.  Targ** (1 connections) — `tests/stacks/test_apply_commit.py`

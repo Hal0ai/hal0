@@ -1,6 +1,6 @@
 # apply_capability
 
-> 9 nodes
+> 9 nodes · cohesion 0.28
 
 ## Key Concepts
 

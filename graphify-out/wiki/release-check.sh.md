@@ -1,15 +1,15 @@
 # release-check.sh
 
-> 6 nodes
+> 6 nodes · cohesion 0.60
 
 ## Key Concepts
 
 - **release-check.sh** (5 connections) — `scripts/release-check.sh`
 - **release-check.sh script** (5 connections) — `scripts/release-check.sh`
-- **info()** (2 connections) — `scripts/release-check.sh`
-- **warn()** (2 connections) — `scripts/release-check.sh`
 - **fail()** (2 connections) — `scripts/release-check.sh`
+- **info()** (2 connections) — `scripts/release-check.sh`
 - **step()** (2 connections) — `scripts/release-check.sh`
+- **warn()** (2 connections) — `scripts/release-check.sh`
 
 ## Relationships
 

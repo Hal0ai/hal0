@@ -1,6 +1,6 @@
 # test_features_health.py
 
-> 11 nodes
+> 11 nodes · cohesion 0.25
 
 ## Key Concepts
 

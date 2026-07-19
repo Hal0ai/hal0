@@ -1,6 +1,6 @@
 # graphForBank
 
-> 10 nodes
+> 10 nodes · cohesion 0.20
 
 ## Key Concepts
 
@@ -9,17 +9,17 @@
 - **buildBankStats()** (4 connections) — `ui/src/api/mock.ts`
 - **buildMemEntityGraph()** (3 connections) — `ui/src/api/mock.ts`
 - **buildMemFactGraphRoute()** (3 connections) — `ui/src/api/mock.ts`
-- **buildBigMemFactGraph()** (2 connections) — `ui/src/api/mock.ts`
-- **MEM_BANKS** (2 connections) — `ui/src/api/mock.ts`
 - **buildBankOperations()** (2 connections) — `ui/src/api/mock.ts`
+- **buildBigMemFactGraph()** (2 connections) — `ui/src/api/mock.ts`
 - **buildDenseFactGraph()** (2 connections) — `ui/src/api/mock.ts`
 - **buildMemEntityGraphRoute()** (2 connections) — `ui/src/api/mock.ts`
+- **MEM_BANKS** (2 connections) — `ui/src/api/mock.ts`
 
 ## Relationships
 
 - [mock.ts](mock.ts.md) (10 shared connections)
-- [buildMemFactGraph](buildMemFactGraph.md) (2 shared connections)
 - [buildBankSubgraphRoute](buildBankSubgraphRoute.md) (2 shared connections)
+- [buildMemFactGraph](buildMemFactGraph.md) (2 shared connections)
 
 ## Source Files
 

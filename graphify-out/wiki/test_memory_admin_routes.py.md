@@ -1,6 +1,6 @@
 # test_memory_admin_routes.py
 
-> 34 nodes
+> 34 nodes · cohesion 0.16
 
 ## Key Concepts
 
@@ -11,24 +11,24 @@
 - **test_unconfirmed_bank_delete_preview_failsoft_when_stats_unreachable()** (7 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_unconfirmed_bank_delete_returns_stats_preview()** (5 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_banks_list_forwards_and_returns_payload()** (4 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_directives_get_shape_guard()** (4 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_engine_aggregator_reports_version_features_and_bank_count()** (4 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_graph_forwards_query_params()** (4 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_recall_post_passes_body_through()** (4 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_reflect_post_forwards()** (4 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_recall_shape_drift_maps_to_502()** (4 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_reflect_post_forwards()** (4 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_reflect_shape_drift_maps_to_502()** (4 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_directives_get_shape_guard()** (4 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_upstream_4xx_maps_to_same_status_with_engine_error_code()** (4 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_upstream_5xx_maps_to_502()** (4 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_engine_aggregator_reports_version_features_and_bank_count()** (4 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_banks_503_when_memory_disabled()** (3 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_entities_graph_min_count_param()** (3 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_timeseries_maps_to_memories_timeseries()** (3 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_memories_list_maps_paths_and_params()** (3 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_bank_create_put_and_delete_forward()** (3 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_operation_retry_and_consolidate_forward()** (3 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_mental_model_refresh_forwards()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_banks_503_when_memory_disabled()** (3 connections) — `tests/api/test_memory_admin_routes.py`
 - **test_document_delete_and_reprocess_forward()** (3 connections) — `tests/api/test_memory_admin_routes.py`
-- **test_upstream_unreachable_maps_to_503()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_engine_aggregator_fail_soft_when_unreachable()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_engine_aggregator_when_memory_disabled()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_engine_route_mounted_on_create_app()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_entities_graph_min_count_param()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_memories_list_maps_paths_and_params()** (3 connections) — `tests/api/test_memory_admin_routes.py`
+- **test_mental_model_refresh_forwards()** (3 connections) — `tests/api/test_memory_admin_routes.py`
 - *... and 9 more nodes in this community*
 
 ## Relationships

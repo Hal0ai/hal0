@@ -1,20 +1,19 @@
 # comfyui-arbiter-v3.spec.ts
 
-> 5 nodes
+> 5 nodes · cohesion 0.50
 
 ## Key Concepts
 
 - **comfyui-arbiter-v3.spec.ts** (7 connections) — `ui/tests/e2e/specs/comfyui-arbiter-v3.spec.ts`
-- **comfyV2Status()** (2 connections) — `ui/tests/e2e/specs/comfyui-arbiter-v3.spec.ts`
 - **comfyV2Idle()** (2 connections) — `ui/tests/e2e/specs/comfyui-arbiter-v3.spec.ts`
+- **comfyV2Status()** (2 connections) — `ui/tests/e2e/specs/comfyui-arbiter-v3.spec.ts`
 - **gotoImageTab()** (1 connections) — `ui/tests/e2e/specs/comfyui-arbiter-v3.spec.ts`
 - **openQueue()** (1 connections) — `ui/tests/e2e/specs/comfyui-arbiter-v3.spec.ts`
 
 ## Relationships
 
-- [apiMock.ts](apiMock.ts.md) (1 shared connections)
+- [apiMock.ts](apiMock.ts.md) (2 shared connections)
 - [json](json_2.md) (1 shared connections)
-- [test](test.md) (1 shared connections)
 
 ## Source Files
 

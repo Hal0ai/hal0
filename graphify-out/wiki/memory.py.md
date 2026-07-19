@@ -1,51 +1,60 @@
 # memory.py
 
-> 30 nodes
+> 66 nodes · cohesion 0.07
 
 ## Key Concepts
 
-- **memory.py** (15 connections) — `src/hal0/mcp/memory.py`
-- **MemorySchemaError** (13 connections) — `src/hal0/mcp/memory.py`
-- **Any** (10 connections)
-- **_resolve_dataset()** (9 connections) — `src/hal0/mcp/memory.py`
-- **_memory_add()** (9 connections) — `src/hal0/mcp/memory.py`
-- **_memory_search()** (8 connections) — `src/hal0/mcp/memory.py`
-- **_memory_recall()** (8 connections) — `src/hal0/mcp/memory.py`
-- **_optional()** (7 connections) — `src/hal0/mcp/memory.py`
-- **_normalise_tags()** (7 connections) — `src/hal0/mcp/memory.py`
-- **make_dispatcher()** (7 connections) — `src/hal0/mcp/memory.py`
-- **_require()** (6 connections) — `src/hal0/mcp/memory.py`
-- **_memory_list()** (6 connections) — `src/hal0/mcp/memory.py`
-- **_memory_delete()** (5 connections) — `src/hal0/mcp/memory.py`
-- **build_server()** (5 connections) — `src/hal0/mcp/memory.py`
-- **_scrub_detail()** (3 connections) — `src/hal0/mcp/memory.py`
-- **_iso_now()** (2 connections) — `src/hal0/mcp/memory.py`
-- **Exception** (1 connections)
-- **FastMCP** (1 connections)
-- **hal0 memory MCP server — Hindsight-backed long-term memory tools.  By design, me** (1 connections) — `src/hal0/mcp/memory.py`
-- **Raised when a memory tool call's args don't match the tool schema.** (1 connections) — `src/hal0/mcp/memory.py`
-- **Tags may arrive as None, list, or stringified CSV (some MCP clients     don't sp** (1 connections) — `src/hal0/mcp/memory.py`
-- **Thin shim around :func:`hal0.memory.namespace.resolve_write_dataset`     that re** (1 connections) — `src/hal0/mcp/memory.py`
-- **memory_add(text, dataset?, tags?, metadata?, document_id?)     → {id, timestamp,** (1 connections) — `src/hal0/mcp/memory.py`
-- **memory_search(query, limit=10, dataset="shared"|list, tags=[],** (1 connections) — `src/hal0/mcp/memory.py`
-- **memory_list(dataset="shared", cursor=null, limit=50) → {items, next_cursor}.** (1 connections) — `src/hal0/mcp/memory.py`
-- *... and 5 more nodes in this community*
+- **memory.py** (32 connections) — `src/hal0/api/routes/memory.py`
+- **Any** (17 connections)
+- **Request** (16 connections)
+- **update_graph_config()** (15 connections) — `src/hal0/api/routes/memory.py`
+- **set_memory_provider()** (13 connections) — `src/hal0/api/routes/memory.py`
+- **memory_add()** (12 connections) — `src/hal0/api/routes/memory.py`
+- **Hal0Error** (12 connections)
+- **_wrapper()** (12 connections) — `src/hal0/api/routes/memory.py`
+- **memory_delete()** (11 connections) — `src/hal0/api/routes/memory.py`
+- **memory_recall()** (11 connections) — `src/hal0/api/routes/memory.py`
+- **memory_search()** (11 connections) — `src/hal0/api/routes/memory.py`
+- **_read_json_body()** (11 connections) — `src/hal0/api/routes/memory.py`
+- **memory_list()** (10 connections) — `src/hal0/api/routes/memory.py`
+- **MemoryNamespaceInvalid** (10 connections) — `src/hal0/api/routes/memory.py`
+- **_agent_id()** (9 connections) — `src/hal0/api/routes/memory.py`
+- **graph_status()** (9 connections) — `src/hal0/api/routes/memory.py`
+- **_is_private()** (8 connections) — `src/hal0/api/routes/memory.py`
+- **retry_failed_extractions()** (8 connections) — `src/hal0/api/routes/memory.py`
+- **set_honcho_sync_timer()** (8 connections) — `src/hal0/api/routes/memory.py`
+- **honcho_stats()** (7 connections) — `src/hal0/api/routes/memory.py`
+- **honcho_sync_status()** (7 connections) — `src/hal0/api/routes/memory.py`
+- **.hindsight_client()** (7 connections) — `src/hal0/memory/hindsight_provider.py`
+- **_augment_build_counters()** (6 connections) — `src/hal0/api/routes/memory.py`
+- **_enabled_llm_slots()** (6 connections) — `src/hal0/api/routes/memory.py`
+- **MemoryAgentIdInvalid** (6 connections) — `src/hal0/api/routes/memory.py`
+- *... and 41 more nodes in this community*
 
 ## Relationships
 
-- [MemoryNamespaceError](MemoryNamespaceError.md) (3 shared connections)
-- [MemoryDispatcher](MemoryDispatcher.md) (1 shared connections)
-- [RealtimeSession](RealtimeSession.md) (1 shared connections)
-- [FakeMemoryProvider](FakeMemoryProvider.md) (1 shared connections)
+- [MemoryNamespaceError](MemoryNamespaceError.md) (11 shared connections)
+- [load_hal0_config](load_hal0_config.md) (7 shared connections)
+- [MigrateState](MigrateState.md) (7 shared connections)
+- [memory_admin.py](memory_admin.py.md) (6 shared connections)
+- [systemd.py](systemd.py.md) (5 shared connections)
+- [BadRequest](BadRequest.md) (4 shared connections)
+- [HindsightProvider](HindsightProvider.md) (3 shared connections)
+- [record_action](record_action.md) (2 shared connections)
+- [lifespan](lifespan.md) (1 shared connections)
+- [BoardStore](BoardStore.md) (1 shared connections)
+- [MemoryGraphConfig](MemoryGraphConfig.md) (1 shared connections)
+- [apply_extraction_slot](apply_extraction_slot.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/mcp/memory.py`
+- `src/hal0/api/routes/memory.py`
+- `src/hal0/memory/hindsight_provider.py`
 
 ## Audit Trail
 
-- EXTRACTED: 119 (89%)
-- INFERRED: 15 (11%)
+- EXTRACTED: 311 (88%)
+- INFERRED: 44 (12%)
 - AMBIGUOUS: 0 (0%)
 
 ---

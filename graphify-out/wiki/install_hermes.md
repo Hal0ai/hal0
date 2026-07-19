@@ -1,6 +1,6 @@
 # install_hermes
 
-> 25 nodes
+> 25 nodes · cohesion 0.08
 
 ## Key Concepts
 
@@ -11,12 +11,12 @@
 - **bootstrap_cli()** (5 connections) — `src/hal0/agents/hermes_provision.py`
 - **InstallStep** (4 connections) — `src/hal0/agents/hermes_provision.py`
 - **_step_changed()** (4 connections) — `src/hal0/agents/hermes_provision.py`
-- **StaleDropinCleanupResult** (3 connections) — `src/hal0/agents/hermes_provision.py`
 - **OwnershipReconcileResult** (3 connections) — `src/hal0/agents/hermes_provision.py`
-- **.step()** (2 connections) — `src/hal0/agents/hermes_provision.py`
-- **.failed()** (2 connections) — `src/hal0/agents/hermes_provision.py`
-- **.mutated()** (2 connections) — `src/hal0/agents/hermes_provision.py`
+- **StaleDropinCleanupResult** (3 connections) — `src/hal0/agents/hermes_provision.py`
 - **.converged()** (2 connections) — `src/hal0/agents/hermes_provision.py`
+- **.mutated()** (2 connections) — `src/hal0/agents/hermes_provision.py`
+- **.step()** (2 connections) — `src/hal0/agents/hermes_provision.py`
+- **.failed()** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **.ok()** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **Outcome of :func:`cleanup_stale_agent_dropins`.** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **Remove stale hal0-agent@ drop-in fragments the template doesn't ship.      Scans** (1 connections) — `src/hal0/agents/hermes_provision.py`
@@ -33,11 +33,11 @@
 ## Relationships
 
 - [hermes_provision.py](hermes_provision.py.md) (10 shared connections)
-- [Path](Path.md) (5 shared connections)
+- [Path](Path.md) (4 shared connections)
 - [Any](Any.md) (4 shared connections)
-- [_StepCtx](_StepCtx.md) (2 shared connections)
-- [useSlots](useSlots.md) (1 shared connections)
+- [_phase_config_write](_phase_config_write.md) (2 shared connections)
 - [agent_commands.py](agent_commands.py.md) (1 shared connections)
+- [test_hermes_provision.py](test_hermes_provision.py.md) (1 shared connections)
 
 ## Source Files
 
@@ -45,8 +45,8 @@
 
 ## Audit Trail
 
-- EXTRACTED: 71 (97%)
-- INFERRED: 2 (3%)
+- EXTRACTED: 71 (99%)
+- INFERRED: 1 (1%)
 - AMBIGUOUS: 0 (0%)
 
 ---

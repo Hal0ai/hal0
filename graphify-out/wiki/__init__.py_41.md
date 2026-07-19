@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/upstreams/__init__.py`
-- **hal0.upstreams — External and local routing targets.  An Upstream is one HTTP en** (1 connections) — `src/hal0/upstreams/__init__.py`
+- **__init__.py** (1 connections) — `tests/golden_paths/__init__.py`
+- **Golden-path verification harness (REWORK.md §Golden-path verification).  This pa** (1 connections) — `tests/golden_paths/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/upstreams/__init__.py`
+- `tests/golden_paths/__init__.py`
 
 ## Audit Trail
 

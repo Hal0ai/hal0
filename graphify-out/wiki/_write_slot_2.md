@@ -1,6 +1,6 @@
 # _write_slot
 
-> 7 nodes
+> 7 nodes · cohesion 0.67
 
 ## Key Concepts
 
@@ -8,8 +8,8 @@
 - **test_loaded_slot.py** (5 connections) — `tests/slots/test_loaded_slot.py`
 - **Path** (5 connections)
 - **test_loaded_slot_returns_typed_slot()** (5 connections) — `tests/slots/test_loaded_slot.py`
-- **test_resolve_for_request_returns_default_loaded_slot()** (4 connections) — `tests/slots/test_loaded_slot.py`
 - **test_resolve_for_request_applies_label_overlay()** (4 connections) — `tests/slots/test_loaded_slot.py`
+- **test_resolve_for_request_returns_default_loaded_slot()** (4 connections) — `tests/slots/test_loaded_slot.py`
 - **test_route_for_request_keeps_name_compatibility()** (4 connections) — `tests/slots/test_loaded_slot.py`
 
 ## Relationships

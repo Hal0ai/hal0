@@ -1,52 +1,43 @@
 # test_npu_swap_status.py
 
-> 50 nodes
+> 19 nodes · cohesion 0.15
 
 ## Key Concepts
 
 - **test_npu_swap_status.py** (27 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **fetch_npu_swap_status()** (26 connections) — `src/hal0/dispatcher/npu_swap_status.py`
-- **_container_npu_cfg()** (19 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **_slot_manager()** (18 connections) — `tests/dispatcher/test_npu_swap_status.py`
 - **test_no_npu_slot_means_no_swap()** (6 connections) — `tests/dispatcher/test_npu_swap_status.py`
 - **test_swap_in_progress_with_gpu_peers_present()** (6 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **_make_slot()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
 - **Any** (5 connections)
-- **test_disabled_npu_slot_ignored()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_no_slot_manager_means_all_none_settled()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_starting_means_swap_in_progress()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_pulling_means_swap_in_progress()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_warming_means_swap_in_progress()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_unloading_means_swap_in_progress()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_ready_means_settled()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_serving_means_settled()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_idle_means_settled()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_offline_means_settled()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_error_means_settled()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_via_runtime_field_also_uses_container_path()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_empty_slot_model_default_means_no_to_model()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_missing_model_section_means_no_to_model()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **_noncontainer_npu_cfg()** (4 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **test_swap_status_endpoint_observes_npu_slot()** (5 connections) — `tests/dispatcher/test_npu_swap_status.py`
 - **_gpu_slot()** (4 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **_noncontainer_npu_cfg()** (4 connections) — `tests/dispatcher/test_npu_swap_status.py`
 - **test_noncontainer_npu_slot_settled_with_to_model()** (4 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- **test_container_status_raises_degrades_to_settled()** (4 connections) — `tests/dispatcher/test_npu_swap_status.py`
-- *... and 25 more nodes in this community*
+- **test_swap_status_endpoint_returns_default_shape()** (3 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **MonkeyPatch** (1 connections)
+- **npu_swap_status: container slot lifecycle state drives the swap signal.  ``fetch** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **Legacy/unmigrated NPU record → no live container to observe.      The snapshot i** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **Non-NPU peer slots don't affect the swap signal.** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **Build a Slot-like mock whose .state is a real SlotState enum value.** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **GET /api/npu/swap-status returns the shape even with no NPU configured.** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **When a container NPU LLM slot is configured and its lifecycle state is     trans** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **Slot config for a legacy/unmigrated (non-container) NPU LLM slot.** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
+- **Nothing configured → all-None settled snapshot.** (1 connections) — `tests/dispatcher/test_npu_swap_status.py`
 
 ## Relationships
 
-- [NpuSwapStatus](NpuSwapStatus.md) (8 shared connections)
-- [_make_slot](_make_slot.md) (4 shared connections)
-- [npu_occupancy](npu_occupancy.md) (1 shared connections)
-- [._post](_post.md) (1 shared connections)
+- [_container_npu_cfg](_container_npu_cfg.md) (19 shared connections)
+- [fetch_npu_swap_status](fetch_npu_swap_status.md) (8 shared connections)
+- [SlotState](SlotState.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/dispatcher/npu_swap_status.py`
 - `tests/dispatcher/test_npu_swap_status.py`
 
 ## Audit Trail
 
-- EXTRACTED: 180 (82%)
-- INFERRED: 40 (18%)
+- EXTRACTED: 73 (94%)
+- INFERRED: 5 (6%)
 - AMBIGUOUS: 0 (0%)
 
 ---

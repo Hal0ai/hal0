@@ -1,6 +1,6 @@
 # _register
 
-> 19 nodes
+> 19 nodes · cohesion 0.25
 
 ## Key Concepts
 
@@ -10,8 +10,8 @@
 - **_patch_tree_fetch()** (7 connections) — `tests/api/test_models_updates.py`
 - **MonkeyPatch** (7 connections)
 - **test_list_models_flag_self_heals_after_sha_refresh()** (6 connections) — `tests/api/test_models_updates.py`
-- **test_check_reports_updates_and_reasons()** (5 connections) — `tests/api/test_models_updates.py`
 - **test_check_is_ttl_cached_until_refresh()** (5 connections) — `tests/api/test_models_updates.py`
+- **test_check_reports_updates_and_reasons()** (5 connections) — `tests/api/test_models_updates.py`
 - **test_list_models_merges_update_available_flag()** (5 connections) — `tests/api/test_models_updates.py`
 - **test_update_pins_dest_to_existing_path()** (4 connections) — `tests/api/test_models_updates.py`
 - **test_update_returns_in_flight_job_instead_of_duplicating()** (4 connections) — `tests/api/test_models_updates.py`
@@ -20,9 +20,9 @@
 - **Any** (1 connections)
 - **Path** (1 connections)
 - **Tests for the model HF-update surface.  Covers:   * ``GET /api/models/updates/ch** (1 connections) — `tests/api/test_models_updates.py`
+- **Applying an update rewrites metadata.sha256; the badge must clear on     the nex** (1 connections) — `tests/api/test_models_updates.py`
 - **POST a registry row whose file exists on disk; return its path.** (1 connections) — `tests/api/test_models_updates.py`
 - **Replace the route's tree fetch with a canned map; record call args.** (1 connections) — `tests/api/test_models_updates.py`
-- **Applying an update rewrites metadata.sha256; the badge must clear on     the nex** (1 connections) — `tests/api/test_models_updates.py`
 
 ## Relationships
 

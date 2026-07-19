@@ -1,16 +1,16 @@
 # test_restart_errored_slot.py
 
-> 14 nodes
+> 14 nodes · cohesion 0.26
 
 ## Key Concepts
 
 - **test_restart_errored_slot.py** (7 connections) — `tests/slots/test_restart_errored_slot.py`
 - **_drive_into_error()** (7 connections) — `tests/slots/test_restart_errored_slot.py`
 - **test_restart_from_error_survives_a_hanging_terminate()** (7 connections) — `tests/slots/test_restart_errored_slot.py`
-- **test_restart_from_error_reaches_ready()** (6 connections) — `tests/slots/test_restart_errored_slot.py`
 - **test_restart_from_error_does_not_short_circuit()** (6 connections) — `tests/slots/test_restart_errored_slot.py`
-- **SlotManager** (4 connections)
+- **test_restart_from_error_reaches_ready()** (6 connections) — `tests/slots/test_restart_errored_slot.py`
 - **FakeContainerProvider** (4 connections)
+- **SlotManager** (4 connections)
 - **Path** (3 connections)
 - **MonkeyPatch** (1 connections)
 - **Restarting an ERROR slot must run the full stop→create→load, not wedge.  Issue #** (1 connections) — `tests/slots/test_restart_errored_slot.py`
@@ -21,7 +21,8 @@
 
 ## Relationships
 
-- [FakeContainerProvider](FakeContainerProvider.md) (2 shared connections)
+- [conftest.py](conftest.py.md) (1 shared connections)
+- [FakeContainerProvider](FakeContainerProvider.md) (1 shared connections)
 
 ## Source Files
 

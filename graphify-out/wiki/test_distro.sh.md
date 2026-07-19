@@ -1,14 +1,14 @@
 # test_distro.sh
 
-> 5 nodes
+> 5 nodes · cohesion 0.90
 
 ## Key Concepts
 
 - **test_distro.sh** (4 connections) — `tests/installer/test_distro.sh`
 - **test_distro.sh script** (4 connections) — `tests/installer/test_distro.sh`
 - **want()** (4 connections) — `tests/installer/test_distro.sh`
-- **ok()** (3 connections) — `tests/installer/test_distro.sh`
 - **bad()** (3 connections) — `tests/installer/test_distro.sh`
+- **ok()** (3 connections) — `tests/installer/test_distro.sh`
 
 ## Relationships
 

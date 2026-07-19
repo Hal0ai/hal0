@@ -1,6 +1,6 @@
 # seed_static_slots
 
-> 19 nodes
+> 19 nodes · cohesion 0.20
 
 ## Key Concepts
 
@@ -10,10 +10,10 @@
 - **_fake_installer_root()** (7 connections) — `tests/install/test_static_seeds.py`
 - **test_seed_static_slots_missing_source_logs_and_continues()** (5 connections) — `tests/install/test_static_seeds.py`
 - **test_seed_static_slots_copies_all_missing()** (4 connections) — `tests/install/test_static_seeds.py`
-- **test_seed_static_slots_skips_existing()** (4 connections) — `tests/install/test_static_seeds.py`
-- **test_seed_static_slots_idempotent_second_run_noop()** (4 connections) — `tests/install/test_static_seeds.py`
 - **test_seed_static_slots_creates_dest_dir()** (4 connections) — `tests/install/test_static_seeds.py`
 - **test_seed_static_slots_default_args_seed_real_tree()** (4 connections) — `tests/install/test_static_seeds.py`
+- **test_seed_static_slots_idempotent_second_run_noop()** (4 connections) — `tests/install/test_static_seeds.py`
+- **test_seed_static_slots_skips_existing()** (4 connections) — `tests/install/test_static_seeds.py`
 - **test_static_seed_slots_matches_shipped_files()** (3 connections) — `tests/install/test_static_seeds.py`
 - **static_seeds.py** (2 connections) — `src/hal0/install/static_seeds.py`
 - **Path** (1 connections)

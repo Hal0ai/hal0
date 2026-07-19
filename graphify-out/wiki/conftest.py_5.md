@@ -1,23 +1,24 @@
 # conftest.py
 
-> 2 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
-- **conftest.py** (1 connections) — `tests/providers/conftest.py`
-- **Provider-suite fixtures.** (1 connections) — `tests/providers/conftest.py`
+- **conftest.py** (2 connections) — `tests/openwebui/conftest.py`
+- **pytest_configure()** (2 connections) — `tests/openwebui/conftest.py`
+- **Pytest marker registration for the openwebui subtree.  The ``integration`` marke** (1 connections) — `tests/openwebui/conftest.py`
 
 ## Relationships
 
-- No strong cross-community connections detected
+- [planner.py](planner.py.md) (1 shared connections)
 
 ## Source Files
 
-- `tests/providers/conftest.py`
+- `tests/openwebui/conftest.py`
 
 ## Audit Trail
 
-- EXTRACTED: 2 (100%)
+- EXTRACTED: 5 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

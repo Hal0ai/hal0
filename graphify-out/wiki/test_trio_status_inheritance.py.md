@@ -1,6 +1,6 @@
 # test_trio_status_inheritance.py
 
-> 22 nodes
+> 22 nodes · cohesion 0.18
 
 ## Key Concepts
 
@@ -9,12 +9,12 @@
 - **StatusMapSlotManager** (7 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **_anchor_cfg()** (6 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **Path** (6 connections)
-- **_StubSlot** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **Any** (4 connections)
+- **_StubSlot** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
+- **test_disabled_npu_selection_not_inherited()** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
+- **test_non_npu_selection_keeps_own_status()** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **test_npu_selection_inherits_anchor_status()** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **test_offline_anchor_propagates_offline()** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
-- **test_non_npu_selection_keeps_own_status()** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
-- **test_disabled_npu_selection_not_inherited()** (4 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **_stub_catalog()** (3 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **test_npu_selection_without_anchor_stays_offline()** (3 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **_no_spawn_context_refresh()** (2 connections) — `tests/capabilities/test_trio_status_inheritance.py`
@@ -22,10 +22,10 @@
 - **.__init__()** (2 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **.iter_configs()** (2 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **.status()** (2 connections) — `tests/capabilities/test_trio_status_inheritance.py`
-- **.__init__()** (1 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **#733: capability status for npu-device selections served by the FLM trio.  The e** (1 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **Keep get_state hermetic — no hardware probe, no registry scan.** (1 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 - **status() answers from a per-slot map; unknown slots are offline.** (1 connections) — `tests/capabilities/test_trio_status_inheritance.py`
+- **.__init__()** (1 connections) — `tests/capabilities/test_trio_status_inheritance.py`
 
 ## Relationships
 

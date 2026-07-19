@@ -1,6 +1,6 @@
 # distro.sh
 
-> 10 nodes
+> 10 nodes · cohesion 0.31
 
 ## Key Concepts
 
@@ -11,9 +11,9 @@
 - **distro_id_like()** (2 connections) — `installer/lib/distro.sh`
 - **pkg_install_cmd()** (2 connections) — `installer/lib/distro.sh`
 - **python_venv_hint()** (2 connections) — `installer/lib/distro.sh`
-- **distro.sh script** (1 connections) — `installer/lib/distro.sh`
-- **pkg_mgr()** (1 connections) — `installer/lib/distro.sh`
 - **distro_family()** (1 connections) — `installer/lib/distro.sh`
+- **pkg_mgr()** (1 connections) — `installer/lib/distro.sh`
+- **distro.sh script** (1 connections) — `installer/lib/distro.sh`
 
 ## Relationships
 

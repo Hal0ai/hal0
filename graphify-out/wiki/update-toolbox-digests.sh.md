@@ -1,6 +1,6 @@
 # update-toolbox-digests.sh
 
-> 6 nodes
+> 6 nodes · cohesion 0.47
 
 ## Key Concepts
 

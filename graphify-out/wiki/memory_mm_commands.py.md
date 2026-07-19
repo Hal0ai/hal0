@@ -1,14 +1,14 @@
 # memory_mm_commands.py
 
-> 9 nodes
+> 9 nodes · cohesion 0.31
 
 ## Key Concepts
 
 - **memory_mm_commands.py** (6 connections) — `src/hal0/cli/memory_mm_commands.py`
 - **_require_api()** (6 connections) — `src/hal0/cli/memory_mm_commands.py`
+- **mm_history_cmd()** (5 connections) — `src/hal0/cli/memory_mm_commands.py`
 - **mm_list_cmd()** (5 connections) — `src/hal0/cli/memory_mm_commands.py`
 - **mm_refresh_cmd()** (5 connections) — `src/hal0/cli/memory_mm_commands.py`
-- **mm_history_cmd()** (5 connections) — `src/hal0/cli/memory_mm_commands.py`
 - **``hal0 memory mm`` — mental-model admin (list / refresh / history).** (1 connections) — `src/hal0/cli/memory_mm_commands.py`
 - **List a bank's mental models.** (1 connections) — `src/hal0/cli/memory_mm_commands.py`
 - **Trigger a refresh of a mental model (async).** (1 connections) — `src/hal0/cli/memory_mm_commands.py`

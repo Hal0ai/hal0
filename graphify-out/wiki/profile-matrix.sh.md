@@ -1,14 +1,14 @@
 # profile-matrix.sh
 
-> 5 nodes
+> 5 nodes · cohesion 0.70
 
 ## Key Concepts
 
 - **profile-matrix.sh** (4 connections) — `installer/bench/profile-matrix.sh`
 - **profile-matrix.sh script** (4 connections) — `installer/bench/profile-matrix.sh`
-- **usage()** (2 connections) — `installer/bench/profile-matrix.sh`
-- **run_sweep()** (2 connections) — `installer/bench/profile-matrix.sh`
 - **has_cell()** (2 connections) — `installer/bench/profile-matrix.sh`
+- **run_sweep()** (2 connections) — `installer/bench/profile-matrix.sh`
+- **usage()** (2 connections) — `installer/bench/profile-matrix.sh`
 
 ## Relationships
 

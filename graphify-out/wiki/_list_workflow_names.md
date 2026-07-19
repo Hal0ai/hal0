@@ -1,14 +1,14 @@
 # _list_workflow_names
 
-> 10 nodes
+> 10 nodes · cohesion 0.22
 
 ## Key Concepts
 
 - **_list_workflow_names()** (6 connections) — `src/hal0/api/routes/comfyui.py`
 - **_find_workflow()** (5 connections) — `src/hal0/api/routes/comfyui.py`
-- **_comfyui_workflows_dir()** (4 connections) — `src/hal0/api/routes/comfyui.py`
 - **_comfyui_data_dir()** (4 connections) — `src/hal0/api/routes/comfyui.py`
 - **comfyui_workflows()** (4 connections) — `src/hal0/api/routes/comfyui.py`
+- **_comfyui_workflows_dir()** (4 connections) — `src/hal0/api/routes/comfyui.py`
 - **Primary workflow directory — env override for tests; default is the bind-mount p** (1 connections) — `src/hal0/api/routes/comfyui.py`
 - **Root of the ComfyUI data directory (for fallback user/default/workflows path).** (1 connections) — `src/hal0/api/routes/comfyui.py`
 - **Locate <name>.json, trying primary then user/default fallback. None if absent.** (1 connections) — `src/hal0/api/routes/comfyui.py`
@@ -17,9 +17,7 @@
 
 ## Relationships
 
-- [comfyui.py](comfyui.py.md) (5 shared connections)
-- [Any](Any.md) (2 shared connections)
-- [comfyui_switchover](comfyui_switchover.md) (1 shared connections)
+- [comfyui.py](comfyui.py.md) (8 shared connections)
 
 ## Source Files
 

@@ -1,36 +1,50 @@
 # conftest.py
 
-> 13 nodes
+> 16 nodes · cohesion 0.14
 
 ## Key Concepts
 
-- **conftest.py** (6 connections) — `tests/api/conftest.py`
-- **isolated_app_client()** (5 connections) — `tests/api/conftest.py`
-- **isolated_client()** (4 connections) — `tests/api/conftest.py`
-- **_reset_hal0_composite_model_cache()** (3 connections) — `tests/api/conftest.py`
-- **_hermetic_port_listeners()** (3 connections) — `tests/api/conftest.py`
-- **TestClient** (2 connections)
-- **FastAPI** (2 connections)
+- **conftest.py** (16 connections) — `tests/slots/conftest.py`
+- **test_health_probe_cfg.py** (5 connections) — `tests/slots/test_health_probe_cfg.py`
+- **container_stub()** (4 connections) — `tests/slots/conftest.py`
+- **test_container_readiness_check_passes_slot_cfg()** (4 connections) — `tests/slots/test_health_probe_cfg.py`
+- **test_probe_health_passes_slot_cfg()** (4 connections) — `tests/slots/test_health_probe_cfg.py`
+- **pytest_configure()** (3 connections) — `tests/slots/conftest.py`
+- **slot_root()** (3 connections) — `tests/slots/conftest.py`
+- **FakeContainerProvider** (2 connections)
+- **Path** (2 connections)
 - **MonkeyPatch** (1 connections)
-- **Shared pytest fixtures for ``tests/api/`` — module-level state isolation.  The c** (1 connections) — `tests/api/conftest.py`
-- **Clear ``_HAL0_MODEL_CACHE`` before and after every api test.** (1 connections) — `tests/api/conftest.py`
-- **TestClient whose lifespan resolves paths under tmp_hal0_home.** (1 connections) — `tests/api/conftest.py`
-- **Like isolated_client, but also yields the app for state inspection.** (1 connections) — `tests/api/conftest.py`
-- **Blind the port registry to the HOST's real sockets.      hal0.ports counts live** (1 connections) — `tests/api/conftest.py`
+- **Path** (1 connections)
+- **Pytest fixtures and marker registration for the slots subtree.  Phase E (#687):** (1 connections) — `tests/slots/conftest.py`
+- **Replace the process-wide ContainerProvider with the in-memory fake.      SlotMan** (1 connections) — `tests/slots/conftest.py`
+- **Yield the slots-config root and ensure a sample slot exists on disk.** (1 connections) — `tests/slots/conftest.py`
+- **Register the integration marker so --strict-markers stays clean.      The integr** (1 connections) — `tests/slots/conftest.py`
+- **The manager's health probes pass the slot config to the provider.  ``ContainerPr** (1 connections) — `tests/slots/test_health_probe_cfg.py`
 
 ## Relationships
 
-- [create_app](create_app.md) (2 shared connections)
-- [lifespan](lifespan.md) (1 shared connections)
+- [FakeContainerProvider](FakeContainerProvider.md) (3 shared connections)
+- [SlotManager](SlotManager.md) (3 shared connections)
+- [test_disabled_capability_slot_is_not_woken](test_disabled_capability_slot_is_not_woken.md) (1 shared connections)
+- [test_adopted_slot_eviction.py](test_adopted_slot_eviction.py.md) (1 shared connections)
+- [compute_config_drift](compute_config_drift.md) (1 shared connections)
+- [test_fail_watcher.py](test_fail_watcher.py.md) (1 shared connections)
+- [test_fail_watcher_warming.py](test_fail_watcher_warming.py.md) (1 shared connections)
+- [test_pressure_eviction.py](test_pressure_eviction.py.md) (1 shared connections)
+- [test_pulling_serving_idle.py](test_pulling_serving_idle.py.md) (1 shared connections)
+- [test_restart_errored_slot.py](test_restart_errored_slot.py.md) (1 shared connections)
+- [Path](Path.md) (1 shared connections)
+- [planner.py](planner.py.md) (1 shared connections)
 
 ## Source Files
 
-- `tests/api/conftest.py`
+- `tests/slots/conftest.py`
+- `tests/slots/test_health_probe_cfg.py`
 
 ## Audit Trail
 
-- EXTRACTED: 28 (90%)
-- INFERRED: 3 (10%)
+- EXTRACTED: 48 (96%)
+- INFERRED: 2 (4%)
 - AMBIGUOUS: 0 (0%)
 
 ---

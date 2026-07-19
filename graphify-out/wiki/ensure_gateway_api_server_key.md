@@ -1,13 +1,13 @@
 # ensure_gateway_api_server_key
 
-> 8 nodes
+> 8 nodes · cohesion 0.25
 
 ## Key Concepts
 
 - **ensure_gateway_api_server_key()** (7 connections) — `src/hal0/agents/hermes_provision.py`
 - **_read_secrets_env()** (4 connections) — `src/hal0/agents/hermes_provision.py`
-- **_is_strong_api_server_key()** (3 connections) — `src/hal0/agents/hermes_provision.py`
 - **ApiServerKeyResult** (3 connections) — `src/hal0/agents/hermes_provision.py`
+- **_is_strong_api_server_key()** (3 connections) — `src/hal0/agents/hermes_provision.py`
 - **True iff ``value`` is a real, cryptographically-strong gateway key.** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **Parse ``KEY=VALUE`` lines from the secrets vault (best-effort read).** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **Outcome of :func:`ensure_gateway_api_server_key`.      ``outcome`` is ``"generat** (1 connections) — `src/hal0/agents/hermes_provision.py`
@@ -16,9 +16,9 @@
 ## Relationships
 
 - [hermes_provision.py](hermes_provision.py.md) (4 shared connections)
-- [Path](Path.md) (1 shared connections)
-- [_StepCtx](_StepCtx.md) (1 shared connections)
+- [_phase_config_write](_phase_config_write.md) (1 shared connections)
 - [probe.py](probe.py.md) (1 shared connections)
+- [Path](Path.md) (1 shared connections)
 
 ## Source Files
 

@@ -1,15 +1,15 @@
 # FastAPI
 
-> 20 nodes
+> 20 nodes · cohesion 0.10
 
 ## Key Concepts
 
 - **FastAPI** (11 connections)
 - **test_list_merges_real_and_synthetic()** (8 connections) — `tests/api/test_slots_routes.py`
 - **test_list_real_wins_on_name_collision()** (8 connections) — `tests/api/test_slots_routes.py`
+- **test_state_stream_emits_sse_event_shape()** (7 connections) — `tests/api/test_slots_routes.py`
 - **test_state_stream_emits_transition_event()** (7 connections) — `tests/api/test_slots_routes.py`
 - **test_state_stream_subscriber_cleaned_up_on_close()** (7 connections) — `tests/api/test_slots_routes.py`
-- **test_state_stream_emits_sse_event_shape()** (7 connections) — `tests/api/test_slots_routes.py`
 - **test_synthetic_composite_slot_offline_when_nothing_loaded()** (7 connections) — `tests/api/test_slots_routes.py`
 - **test_synthetic_composite_slot_serving_when_model_loaded()** (7 connections) — `tests/api/test_slots_routes.py`
 - **test_lifespan_registers_no_pseudo_upstream_for_the_composite()** (6 connections) — `tests/api/test_slots_routes.py`

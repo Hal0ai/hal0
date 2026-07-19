@@ -1,12 +1,12 @@
 # TestRenderCancel
 
-> 5 nodes
+> 5 nodes · cohesion 0.40
 
 ## Key Concepts
 
 - **TestRenderCancel** (3 connections) — `tests/api/test_comfyui_phase4.py`
-- **.test_cancel_posts_clear_and_interrupt_returns_202()** (3 connections) — `tests/api/test_comfyui_phase4.py`
 - **.test_cancel_is_fail_soft_when_comfyui_unreachable()** (3 connections) — `tests/api/test_comfyui_phase4.py`
+- **.test_cancel_posts_clear_and_interrupt_returns_202()** (3 connections) — `tests/api/test_comfyui_phase4.py`
 - **cancel must POST {base}/queue?clear=true AND {base}/interrupt.** (1 connections) — `tests/api/test_comfyui_phase4.py`
 - **Network errors must still return 202 (fail-soft).** (1 connections) — `tests/api/test_comfyui_phase4.py`
 

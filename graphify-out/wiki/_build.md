@@ -1,6 +1,6 @@
 # _build
 
-> 12 nodes
+> 12 nodes · cohesion 0.23
 
 ## Key Concepts
 
@@ -8,8 +8,8 @@
 - **test_memory_degraded_status.py** (6 connections) — `tests/api/test_memory_degraded_status.py`
 - **test_status_memory_degraded_true_for_pgvector_fallback()** (4 connections) — `tests/api/test_memory_degraded_status.py`
 - **test_status_exposes_memory_degraded_field()** (3 connections) — `tests/api/test_memory_degraded_status.py`
-- **test_status_memory_degraded_none_when_disabled()** (3 connections) — `tests/api/test_memory_degraded_status.py`
 - **test_status_memory_degraded_false_for_real_provider()** (3 connections) — `tests/api/test_memory_degraded_status.py`
+- **test_status_memory_degraded_none_when_disabled()** (3 connections) — `tests/api/test_memory_degraded_status.py`
 - **TestClient** (2 connections)
 - **#613 — /api/status must expose memory_degraded for operator visibility.  Verifie** (1 connections) — `tests/api/test_memory_degraded_status.py`
 - **/api/status always carries a memory_degraded field.** (1 connections) — `tests/api/test_memory_degraded_status.py`

@@ -1,6 +1,6 @@
 # test_recursive_glob_does_not_alter_non_recursive_rows
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

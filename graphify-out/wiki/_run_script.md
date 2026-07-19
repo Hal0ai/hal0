@@ -1,6 +1,6 @@
 # _run_script
 
-> 9 nodes
+> 9 nodes · cohesion 0.28
 
 ## Key Concepts
 
@@ -8,8 +8,8 @@
 - **test_fetch_dryrun.py** (4 connections) — `tests/comfyui/test_fetch_dryrun.py`
 - **test_esrgan_dryrun()** (3 connections) — `tests/comfyui/test_fetch_dryrun.py`
 - **test_sdxl_precision_dryrun()** (3 connections) — `tests/comfyui/test_fetch_dryrun.py`
-- **Path** (1 connections)
 - **CompletedProcess** (1 connections)
+- **Path** (1 connections)
 - **#872: Real (non-mock) smoke tests for flag-form fetch scripts.  Runs get_esrgan.** (1 connections) — `tests/comfyui/test_fetch_dryrun.py`
 - **get_esrgan.sh --dry-run exits 0 and mentions upscale_models.** (1 connections) — `tests/comfyui/test_fetch_dryrun.py`
 - **get_sdxl.sh --precision fp16 --dry-run exits 0 and mentions checkpoints/loras/va** (1 connections) — `tests/comfyui/test_fetch_dryrun.py`

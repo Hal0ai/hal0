@@ -1,6 +1,6 @@
 # .to_openai_tool
 
-> 3 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
@@ -10,7 +10,7 @@
 
 ## Relationships
 
-- [OmniRouter](OmniRouter.md) (1 shared connections)
+- [tools_by_name](tools_by_name.md) (1 shared connections)
 - [run_tool_loop](run_tool_loop.md) (1 shared connections)
 
 ## Source Files

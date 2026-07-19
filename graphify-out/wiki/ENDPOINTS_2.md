@@ -7,24 +7,24 @@
 ## Connections by Relation
 
 ### contains
-- endpoints.ts `EXTRACTED`
+- [endpoints.ts](endpoints.ts.md) `EXTRACTED`
 
 ### imports
-- [useBoard.ts](useBoard.ts.md) `EXTRACTED`
+- useBoard.ts `EXTRACTED`
 - [useSlots.ts](useSlots.ts.md) `EXTRACTED`
 - [useModels.ts](useModels.ts.md) `EXTRACTED`
 - chrome.jsx `EXTRACTED`
 - useHindsight.ts `EXTRACTED`
 - [useAgents.ts](useAgents.ts.md) `EXTRACTED`
-- [stacks.jsx](stacks.jsx.md) `EXTRACTED`
+- stacks.jsx `EXTRACTED`
 - slot-modals.jsx `EXTRACTED`
-- models.jsx `EXTRACTED`
+- [models.jsx](models.jsx.md) `EXTRACTED`
 - useSettings.ts `EXTRACTED`
 - useComfyui.ts `EXTRACTED`
 - useUpdates.ts `EXTRACTED`
 - notifications.jsx `EXTRACTED`
 - useMemory.ts `EXTRACTED`
-- useLogs.ts `EXTRACTED`
+- [useLogs.ts](useLogs.ts.md) `EXTRACTED`
 - useStacks.ts `EXTRACTED`
 - useHoncho.ts `EXTRACTED`
 - useUpstreams.ts `EXTRACTED`
@@ -37,21 +37,21 @@
 - useSlotEdit() `EXTRACTED`
 - useSlotRestart() `EXTRACTED`
 - useSlotLoad() `EXTRACTED`
+- usePullJob() `EXTRACTED`
 - useSlotSwap() `EXTRACTED`
 - useSlotUnload() `EXTRACTED`
-- usePullJob() `EXTRACTED`
 - useSlotConfig() `EXTRACTED`
-- useClearPullJob() `EXTRACTED`
 - useModelUpdate() `EXTRACTED`
-- useSlotLogsStream() `EXTRACTED`
-- useModelUpdateAll() `EXTRACTED`
-- useUpdateTask() `EXTRACTED`
-- useCapabilityApply() `EXTRACTED`
-- useSecretSet() `EXTRACTED`
-- useUpdateJob() `EXTRACTED`
-- NotificationBell() `EXTRACTED`
+- useClearPullJob() `EXTRACTED`
 - useAddComment() `EXTRACTED`
 - useBoardChat() `EXTRACTED`
+- useDecomposeTask() `EXTRACTED`
+- useSpecifyTask() `EXTRACTED`
+- useUpdateTask() `EXTRACTED`
+- useCapabilityApply() `EXTRACTED`
+- useSlotLogsStream() `EXTRACTED`
+- useModelUpdateAll() `EXTRACTED`
+- useSecretSet() `EXTRACTED`
 
 ---
 

@@ -1,15 +1,15 @@
 # BackendInvocation
 
-> 8 nodes
+> 8 nodes · cohesion 0.32
 
 ## Key Concepts
 
-- **Any** (5 connections)
 - **BackendInvocation** (5 connections) — `tests/harness/integration/_delegate_fakes.py`
+- **Any** (5 connections)
+- **.execute()** (3 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **.execute()** (3 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **.execute()** (3 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **.__init__()** (3 connections) — `tests/harness/integration/_delegate_fakes.py`
-- **.execute()** (3 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **.execute()** (2 connections) — `tests/harness/integration/_delegate_fakes.py`
 - **One ``execute()`` call captured for assertions.** (1 connections) — `tests/harness/integration/_delegate_fakes.py`
 
@@ -18,8 +18,8 @@
 - [DelegateTaskSpec](DelegateTaskSpec.md) (2 shared connections)
 - [_BackendContract](_BackendContract.md) (1 shared connections)
 - [_delegate_fakes.py](_delegate_fakes.py.md) (1 shared connections)
-- [FakeLocalBackend](FakeLocalBackend.md) (1 shared connections)
 - [FakeDockerBackend](FakeDockerBackend.md) (1 shared connections)
+- [FakeLocalBackend](FakeLocalBackend.md) (1 shared connections)
 - [FakeBackendResult](FakeBackendResult.md) (1 shared connections)
 
 ## Source Files

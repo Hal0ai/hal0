@@ -1,22 +1,21 @@
 # board-chat-tool-use-v3.spec.ts
 
-> 8 nodes
+> 8 nodes · cohesion 0.29
 
 ## Key Concepts
 
 - **board-chat-tool-use-v3.spec.ts** (9 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
-- **sse()** (2 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
 - **mockChat()** (2 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
+- **sse()** (2 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
+- **GATED_FRAMES** (1 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
 - **gotoBoardAndWait()** (1 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
 - **openChat()** (1 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
 - **send()** (1 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
 - **toolCard()** (1 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
-- **GATED_FRAMES** (1 connections) — `ui/tests/e2e/specs/board-chat-tool-use-v3.spec.ts`
 
 ## Relationships
 
-- [apiMock.ts](apiMock.ts.md) (1 shared connections)
-- [test](test.md) (1 shared connections)
+- [apiMock.ts](apiMock.ts.md) (2 shared connections)
 
 ## Source Files
 

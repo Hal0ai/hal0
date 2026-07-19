@@ -1,6 +1,6 @@
 # chat_proxy.py
 
-> 31 nodes
+> 31 nodes · cohesion 0.11
 
 ## Key Concepts
 
@@ -8,15 +8,15 @@
 - **_hermes_rpc()** (9 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **require_browser_auth()** (7 connections) — `src/hal0/api/agents/_auth.py`
 - **session_create()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
-- **session_resume()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **session_history()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
-- **_load_embed_token()** (5 connections) — `src/hal0/api/agents/chat_proxy.py`
+- **session_resume()** (6 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **_hermes_base_url()** (5 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **_hermes_ws_url()** (5 connections) — `src/hal0/api/agents/chat_proxy.py`
+- **_load_embed_token()** (5 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **Any** (5 connections)
 - **session_handshake()** (5 connections) — `src/hal0/api/agents/chat_proxy.py`
-- **_runtime_json_path()** (4 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **_outbound_headers()** (4 connections) — `src/hal0/api/agents/chat_proxy.py`
+- **_runtime_json_path()** (4 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **_hermes_host()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **_hermes_port()** (3 connections) — `src/hal0/api/agents/chat_proxy.py`
 - **Request** (3 connections)

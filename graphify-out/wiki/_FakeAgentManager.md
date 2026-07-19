@@ -1,6 +1,6 @@
 # _FakeAgentManager
 
-> 13 nodes
+> 13 nodes · cohesion 0.15
 
 ## Key Concepts
 
@@ -8,8 +8,8 @@
 - **test_enforce_single_pick_noop_when_only_hermes_installed()** (3 connections) — `tests/cli/test_agent_install_hermes.py`
 - **test_install_hermes_refuses_when_incumbent_present_without_switch()** (3 connections) — `tests/cli/test_agent_install_hermes.py`
 - **test_install_hermes_switch_uninstalls_incumbent_before_provisioning()** (3 connections) — `tests/cli/test_agent_install_hermes.py`
-- **test_enforce_single_pick_noop_when_nothing_installed()** (2 connections) — `tests/cli/test_agent_install_hermes.py`
 - **test_enforce_single_pick_dies_on_incumbent_without_switch()** (2 connections) — `tests/cli/test_agent_install_hermes.py`
+- **test_enforce_single_pick_noop_when_nothing_installed()** (2 connections) — `tests/cli/test_agent_install_hermes.py`
 - **test_enforce_single_pick_uninstalls_incumbent_with_switch()** (2 connections) — `tests/cli/test_agent_install_hermes.py`
 - **.__init__()** (1 connections) — `tests/cli/test_agent_install_hermes.py`
 - **.installed_names()** (1 connections) — `tests/cli/test_agent_install_hermes.py`

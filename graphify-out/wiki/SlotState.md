@@ -1,69 +1,63 @@
 # SlotState
 
-> 138 nodes
+> 76 nodes · cohesion 0.06
 
 ## Key Concepts
 
 - **SlotState** (105 connections) — `src/hal0/slots/state.py`
-- **.create()** (29 connections) — `src/hal0/slots/manager.py`
-- **.update_config()** (24 connections) — `src/hal0/slots/manager.py`
-- **.load()** (23 connections) — `src/hal0/slots/manager.py`
-- **Any** (22 connections)
-- **._transition()** (22 connections) — `src/hal0/slots/manager.py`
-- **.status()** (22 connections) — `src/hal0/slots/manager.py`
-- **_cfg_to_dict()** (20 connections) — `src/hal0/slots/_cfg_helpers.py`
-- **._resolve_alias()** (20 connections) — `src/hal0/slots/manager.py`
-- **._key()** (20 connections) — `src/hal0/slots/manager.py`
-- **.rename()** (20 connections) — `src/hal0/slots/manager.py`
-- **.state()** (18 connections) — `src/hal0/slots/manager.py`
-- **._current_state()** (16 connections) — `src/hal0/slots/manager.py`
-- **.delete()** (15 connections) — `src/hal0/slots/manager.py`
-- **._load_slot_config()** (15 connections) — `src/hal0/slots/manager.py`
-- **._maybe_adopt_running_slot()** (15 connections) — `src/hal0/slots/manager.py`
-- **container_provider()** (14 connections) — `src/hal0/providers/container.py`
-- **.unload()** (14 connections) — `src/hal0/slots/manager.py`
-- **._ensure_known()** (13 connections) — `src/hal0/slots/manager.py`
-- **_cfg_port()** (12 connections) — `src/hal0/slots/_cfg_helpers.py`
-- **_model_default()** (12 connections) — `src/hal0/slots/_cfg_helpers.py`
-- **._config_file()** (11 connections) — `src/hal0/slots/manager.py`
-- **.restart()** (11 connections) — `src/hal0/slots/manager.py`
-- **._maybe_load_config()** (11 connections) — `src/hal0/slots/manager.py`
-- **._await_ready()** (11 connections) — `src/hal0/slots/manager.py`
-- *... and 113 more nodes in this community*
+- **_RecordingSlotManager** (31 connections) — `tests/dispatcher/test_serving_integration.py`
+- **UpstreamUnavailable** (27 connections) — `src/hal0/dispatcher/router.py`
+- **test_serving_integration.py** (27 connections) — `tests/dispatcher/test_serving_integration.py`
+- **_make_dispatcher()** (22 connections) — `tests/dispatcher/test_serving_integration.py`
+- **MockTransport** (19 connections)
+- **_RecordingContainerSlotManager** (15 connections) — `tests/dispatcher/test_serving_integration.py`
+- **SlotLoadFailed** (13 connections) — `src/hal0/dispatcher/router.py`
+- **_slot_call()** (13 connections) — `tests/dispatcher/test_serving_integration.py`
+- **.in_flight_count()** (12 connections) — `tests/dispatcher/test_serving_integration.py`
+- **_RecordingCtx** (11 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_gates_slot_in_loading_state()** (9 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_container_slot_network_error_releases_serving()** (8 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_dead_port_raises_upstream_unavailable_single_try()** (8 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_error_state_raises_slot_load_failed()** (8 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_releases_serving_on_network_error()** (8 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_streaming_dead_port_raises_upstream_unavailable()** (8 connections) — `tests/dispatcher/test_serving_integration.py`
+- **_container_slot_call()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_backend_aware_load_failure_raises_slot_load_failed_immediately()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_container_slot_call_enters_and_exits_serving()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_container_slot_streaming_holds_serving_until_drain()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_error_state_is_not_slot_loading()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_passes_through_ready_states()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_remote_connect_error_raises_upstream_unavailable()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- **test_forward_remote_protocol_error_raises_upstream_unavailable()** (7 connections) — `tests/dispatcher/test_serving_integration.py`
+- *... and 51 more nodes in this community*
 
 ## Relationships
 
-- [SlotManager](SlotManager.md) (68 shared connections)
-- [SlotConfigError](SlotConfigError.md) (60 shared connections)
-- [write_slot_toml](write_slot_toml.md) (12 shared connections)
-- [_RecordingSlotManager](_RecordingSlotManager.md) (11 shared connections)
-- [SlotConfig](SlotConfig.md) (9 shared connections)
-- [Dispatcher](Dispatcher.md) (8 shared connections)
-- [WatchdogHost](WatchdogHost.md) (8 shared connections)
-- [_reconcile_device_profile](_reconcile_device_profile.md) (6 shared connections)
-- [compute_config_drift](compute_config_drift.md) (5 shared connections)
-- [StackApplyEngine](StackApplyEngine.md) (5 shared connections)
+- [Dispatcher](Dispatcher.md) (17 shared connections)
+- [SlotConfigError](SlotConfigError.md) (15 shared connections)
+- [UpstreamCall](UpstreamCall.md) (11 shared connections)
+- [_ArbiterSlotManager](_ArbiterSlotManager.md) (8 shared connections)
+- [slot](slot.md) (7 shared connections)
+- [SlotLoading](SlotLoading.md) (6 shared connections)
 - [_slot](_slot.md) (5 shared connections)
-- [Any](Any.md) (4 shared connections)
+- [arbiter.py](arbiter.py.md) (4 shared connections)
+- [SlotManager](SlotManager.md) (3 shared connections)
+- [SlotInterface](SlotInterface.md) (3 shared connections)
+- [ReaperHost](ReaperHost.md) (3 shared connections)
+- [StackApplyEngine](StackApplyEngine.md) (3 shared connections)
 
 ## Source Files
 
-- `src/hal0/api/routes/slots.py`
-- `src/hal0/providers/container.py`
-- `src/hal0/providers/flm.py`
-- `src/hal0/slots/_cfg_helpers.py`
-- `src/hal0/slots/config_write.py`
+- `src/hal0/dispatcher/router.py`
 - `src/hal0/slots/manager.py`
-- `src/hal0/slots/npu/trio.py`
 - `src/hal0/slots/state.py`
-- `src/hal0/slots/watchdog.py`
+- `tests/dispatcher/test_serving_integration.py`
 - `tests/slots/test_dispatchable_ready_set_single_source.py`
-- `tests/slots/test_state_transitions.py`
 
 ## Audit Trail
 
-- EXTRACTED: 679 (75%)
-- INFERRED: 229 (25%)
+- EXTRACTED: 371 (74%)
+- INFERRED: 132 (26%)
 - AMBIGUOUS: 0 (0%)
 
 ---

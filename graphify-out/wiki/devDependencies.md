@@ -1,39 +1,33 @@
 # devDependencies
 
-> 35 nodes
+> 17 nodes · cohesion 0.12
 
 ## Key Concepts
 
 - **devDependencies** (12 connections) — `ui/package.json`
-- **scripts** (9 connections) — `ui/package.json`
-- **package.json** (8 connections) — `ui/package.json`
-- **dependencies** (8 connections) — `ui/package.json`
-- **allowScripts** (2 connections) — `ui/package.json`
-- **name** (1 connections) — `ui/package.json`
-- **private** (1 connections) — `ui/package.json`
-- **version** (1 connections) — `ui/package.json`
-- **type** (1 connections) — `ui/package.json`
-- **dev** (1 connections) — `ui/package.json`
-- **build** (1 connections) — `ui/package.json`
-- **preview** (1 connections) — `ui/package.json`
-- **typecheck** (1 connections) — `ui/package.json`
-- **lint** (1 connections) — `ui/package.json`
-- **test:e2e** (1 connections) — `ui/package.json`
-- **test:e2e:ui** (1 connections) — `ui/package.json`
-- **test:e2e:install** (1 connections) — `ui/package.json`
-- **@fontsource-variable/geist** (1 connections) — `ui/package.json`
-- **@fontsource/jetbrains-mono** (1 connections) — `ui/package.json`
-- **@tanstack/react-query** (1 connections) — `ui/package.json`
-- **d3-force** (1 connections) — `ui/package.json`
-- **react-dom** (1 connections) — `ui/package.json`
-- **zustand** (1 connections) — `ui/package.json`
-- **@playwright/test** (1 connections) — `ui/package.json`
+- **eslint** (2 connections) — `ui/package.json`
+- **globals** (2 connections) — `ui/package.json`
+- **tailwindcss** (2 connections) — `ui/package.json`
+- **@tailwindcss/vite** (2 connections) — `ui/package.json`
+- **@types/d3-force** (2 connections) — `ui/package.json`
+- **@types/react** (2 connections) — `ui/package.json`
+- **@types/react-dom** (2 connections) — `ui/package.json`
+- **typescript** (2 connections) — `ui/package.json`
+- **eslint** (1 connections) — `ui/package.json`
+- **globals** (1 connections) — `ui/package.json`
+- **tailwindcss** (1 connections) — `ui/package.json`
 - **@tailwindcss/vite** (1 connections) — `ui/package.json`
-- *... and 10 more nodes in this community*
+- **@types/d3-force** (1 connections) — `ui/package.json`
+- **@types/react** (1 connections) — `ui/package.json`
+- **@types/react-dom** (1 connections) — `ui/package.json`
+- **typescript** (1 connections) — `ui/package.json`
 
 ## Relationships
 
-- [react](react.md) (1 shared connections)
+- [package.json](package.json.md) (1 shared connections)
+- [@playwright/test](%40playwright-test.md) (1 shared connections)
+- [vite](vite.md) (1 shared connections)
+- [@vitejs/plugin-react](%40vitejs-plugin-react.md) (1 shared connections)
 
 ## Source Files
 
@@ -41,7 +35,7 @@
 
 ## Audit Trail
 
-- EXTRACTED: 69 (100%)
+- EXTRACTED: 36 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

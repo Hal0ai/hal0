@@ -1,6 +1,6 @@
 # hal0-agentenv
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 

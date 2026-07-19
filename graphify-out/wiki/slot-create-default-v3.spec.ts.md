@@ -1,21 +1,20 @@
 # slot-create-default-v3.spec.ts
 
-> 7 nodes
+> 7 nodes · cohesion 0.29
 
 ## Key Concepts
 
 - **slot-create-default-v3.spec.ts** (8 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
-- **openCreateModal()** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
-- **seedModels()** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
-- **openCreateModalWithDefaults()** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
 - **CHAT_DEFAULT** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
 - **CHAT_OTHER** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
 - **EMBED_MODEL** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
+- **openCreateModal()** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
+- **openCreateModalWithDefaults()** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
+- **seedModels()** (1 connections) — `ui/tests/e2e/specs/slot-create-default-v3.spec.ts`
 
 ## Relationships
 
-- [apiMock.ts](apiMock.ts.md) (1 shared connections)
-- [test](test.md) (1 shared connections)
+- [apiMock.ts](apiMock.ts.md) (2 shared connections)
 
 ## Source Files
 

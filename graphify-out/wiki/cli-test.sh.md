@@ -1,15 +1,15 @@
 # cli-test.sh
 
-> 6 nodes
+> 6 nodes · cohesion 0.60
 
 ## Key Concepts
 
 - **cli-test.sh** (5 connections) — `tests/harness/cli-test.sh`
 - **cli-test.sh script** (5 connections) — `tests/harness/cli-test.sh`
-- **run_row()** (2 connections) — `tests/harness/cli-test.sh`
-- **run_doctor_row()** (2 connections) — `tests/harness/cli-test.sh`
-- **run_update_check_row()** (2 connections) — `tests/harness/cli-test.sh`
 - **run_capabilities_migrate_dry_row()** (2 connections) — `tests/harness/cli-test.sh`
+- **run_doctor_row()** (2 connections) — `tests/harness/cli-test.sh`
+- **run_row()** (2 connections) — `tests/harness/cli-test.sh`
+- **run_update_check_row()** (2 connections) — `tests/harness/cli-test.sh`
 
 ## Relationships
 

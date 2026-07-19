@@ -1,6 +1,6 @@
 # _fake_bundled_agent_manager
 
-> 5 nodes
+> 5 nodes · cohesion 0.40
 
 ## Key Concepts
 

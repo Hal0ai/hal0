@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/install/__init__.py`
-- **Install-time orchestration helpers (FirstRun v2).** (1 connections) — `src/hal0/install/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/mcp/__init__.py`
+- **hal0 MCP server surface (Phase 8 — Agents v0.2).  This package exposes two Strea** (1 connections) — `src/hal0/mcp/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/install/__init__.py`
+- `src/hal0/mcp/__init__.py`
 
 ## Audit Trail
 

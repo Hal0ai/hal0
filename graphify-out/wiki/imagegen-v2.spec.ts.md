@@ -1,6 +1,6 @@
 # imagegen-v2.spec.ts
 
-> 5 nodes
+> 5 nodes · cohesion 0.60
 
 ## Key Concepts
 
@@ -12,9 +12,8 @@
 
 ## Relationships
 
+- [apiMock.ts](apiMock.ts.md) (2 shared connections)
 - [json](json_2.md) (2 shared connections)
-- [apiMock.ts](apiMock.ts.md) (1 shared connections)
-- [test](test.md) (1 shared connections)
 
 ## Source Files
 

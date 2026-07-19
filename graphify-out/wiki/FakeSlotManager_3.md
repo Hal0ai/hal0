@@ -1,6 +1,6 @@
 # FakeSlotManager
 
-> 19 nodes
+> 19 nodes · cohesion 0.18
 
 ## Key Concepts
 
@@ -9,20 +9,20 @@
 - **test_npu_phase2_embed_enable_end_to_end()** (6 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **test_npu_phase2_integration.py** (5 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **Any** (4 connections)
-- **.set_configs()** (3 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **.create()** (3 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.set_configs()** (3 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **.update_config()** (3 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.iter_configs()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.load()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.restart()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.status()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.swap()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.unload()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **_no_spawn_context_refresh()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **MonkeyPatch** (2 connections)
-- **.iter_configs()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
-- **.status()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
-- **.load()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
-- **.unload()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
-- **.swap()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
-- **.restart()** (2 connections) — `tests/capabilities/test_npu_phase2_integration.py`
-- **.__init__()** (1 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **.__init__()** (1 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 - **NPU Phase 2 — end-to-end smoke for the trio-driven embed path.  Drives ``Capabil** (1 connections) — `tests/capabilities/test_npu_phase2_integration.py`
+- **.__init__()** (1 connections) — `tests/capabilities/test_npu_phase2_integration.py`
 
 ## Relationships
 

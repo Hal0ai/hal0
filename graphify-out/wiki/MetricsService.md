@@ -1,6 +1,6 @@
 # MetricsService
 
-> 29 nodes
+> 29 nodes · cohesion 0.08
 
 ## Key Concepts
 
@@ -17,8 +17,8 @@
 - **.start()** (2 connections) — `src/hal0/metrics/aggregator.py`
 - **service.py** (2 connections) — `src/hal0/metrics/service.py`
 - **.start()** (2 connections) — `src/hal0/metrics/service.py`
-- **Path** (1 connections)
 - **.stop()** (1 connections) — `src/hal0/metrics/aggregator.py`
+- **Path** (1 connections)
 - **Background task: aggregate the most recently completed hour, on interval.** (1 connections) — `src/hal0/metrics/aggregator.py`
 - **Aggregate the last fully-elapsed hour. Returns rows written.** (1 connections) — `src/hal0/metrics/aggregator.py`
 - **_env_bool()** (1 connections) — `src/hal0/metrics/config.py`
@@ -28,7 +28,7 @@
 - **Operator-tunable knobs for the OBS-1 metrics core.      Every field has a shippe** (1 connections) — `src/hal0/metrics/config.py`
 - **Best-effort read of ``[metrics]`` from hal0.toml. Never raises.** (1 connections) — `src/hal0/metrics/config.py`
 - **Resolve :class:`MetricsSettings` from TOML (best-effort) + env overrides.      P** (1 connections) — `src/hal0/metrics/config.py`
-- **SlotManager** (1 connections)
+- **.stop()** (1 connections) — `src/hal0/metrics/service.py`
 - *... and 4 more nodes in this community*
 
 ## Relationships

@@ -17,7 +17,7 @@
 - [store.py](store.py.md) `EXTRACTED`
 
 ### inherits
-- _SpyStore `EXTRACTED`
+- [_SpyStore](_SpyStore.md) `EXTRACTED`
 
 ### method
 - ._write() `EXTRACTED`

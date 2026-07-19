@@ -1,6 +1,6 @@
 # proxy_board_events
 
-> 13 nodes
+> 13 nodes · cohesion 0.21
 
 ## Key Concepts
 
@@ -23,7 +23,7 @@
 - [provision_comfyui_downloads](provision_comfyui_downloads.md) (2 shared connections)
 - [record_action](record_action.md) (1 shared connections)
 - [BoardStore](BoardStore.md) (1 shared connections)
-- [SlotState](SlotState.md) (1 shared connections)
+- [SlotManager](SlotManager.md) (1 shared connections)
 
 ## Source Files
 

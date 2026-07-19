@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/services/__init__.py`
-- **Companion-service management layer.  hal0 ships with (or sits next to) a set of** (1 connections) — `src/hal0/services/__init__.py`
+- **__init__.py** (1 connections) — `src/hal0/updater/__init__.py`
+- **hal0.updater — Atomic self-update with cosign-verified releases.  Implements `ha** (1 connections) — `src/hal0/updater/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/services/__init__.py`
+- `src/hal0/updater/__init__.py`
 
 ## Audit Trail
 

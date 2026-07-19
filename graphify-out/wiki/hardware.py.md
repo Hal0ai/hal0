@@ -1,6 +1,6 @@
 # hardware.py
 
-> 54 nodes
+> 63 nodes · cohesion 0.06
 
 ## Key Concepts
 
@@ -11,34 +11,33 @@
 - **get_hardware()** (9 connections) — `src/hal0/api/routes/hardware.py`
 - **_npu_status()** (9 connections) — `src/hal0/api/routes/hardware.py`
 - **system_info_endpoint()** (9 connections) — `src/hal0/api/routes/hardware.py`
+- **_SnapStub** (9 connections) — `tests/api/test_hardware_routes.py`
 - **_local_live_stats()** (8 connections) — `src/hal0/api/routes/hardware.py`
 - **stats_hardware()** (8 connections) — `src/hal0/api/routes/hardware.py`
+- **_fake_request()** (7 connections) — `tests/api/test_hardware_routes.py`
+- **test_cached_snapshot_concurrent_stale_polls_no_wedge()** (7 connections) — `tests/api/test_hardware_routes.py`
+- **test_cached_snapshot_stale_returns_cached_and_refreshes_in_background()** (7 connections) — `tests/api/test_hardware_routes.py`
 - **_gpu_sample()** (6 connections) — `src/hal0/api/routes/hardware.py`
-- **reprobe_hardware()** (6 connections) — `src/hal0/api/routes/hardware.py`
+- **_per_slot_memory()** (6 connections) — `src/hal0/api/routes/hardware.py`
 - **_proxy_upstream_endpoint()** (6 connections) — `src/hal0/api/routes/hardware.py`
 - **_refresh_snapshot_cache()** (6 connections) — `src/hal0/api/routes/hardware.py`
-- **_per_slot_memory()** (6 connections) — `src/hal0/api/routes/hardware.py`
+- **reprobe_hardware()** (6 connections) — `src/hal0/api/routes/hardware.py`
 - **stats_slots()** (6 connections) — `src/hal0/api/routes/hardware.py`
-- **_backend_state()** (6 connections) — `src/hal0/api/routes/hardware.py`
-- **_platform_label()** (5 connections) — `src/hal0/api/routes/hardware.py`
-- **_snapshot_lock()** (5 connections) — `src/hal0/api/routes/hardware.py`
+- **test_cached_snapshot_fresh_hits_no_extra_probe()** (6 connections) — `tests/api/test_hardware_routes.py`
 - **_background_revalidate()** (5 connections) — `src/hal0/api/routes/hardware.py`
+- **_snapshot_lock()** (5 connections) — `src/hal0/api/routes/hardware.py`
+- **test_cached_snapshot_coalesces_concurrent_polls()** (5 connections) — `tests/api/test_hardware_routes.py`
 - **_clear_in_flight()** (4 connections) — `src/hal0/api/routes/hardware.py`
-- **stats_endpoint()** (4 connections) — `src/hal0/api/routes/hardware.py`
-- **system_stats_endpoint()** (4 connections) — `src/hal0/api/routes/hardware.py`
-- **models_health_endpoint()** (4 connections) — `src/hal0/api/routes/hardware.py`
 - **_local_image_repos()** (4 connections) — `src/hal0/api/routes/hardware.py`
-- **_npu_residency_util()** (3 connections) — `src/hal0/api/routes/hardware.py`
-- *... and 29 more nodes in this community*
+- *... and 38 more nodes in this community*
 
 ## Relationships
 
-- [HardwareInfo](HardwareInfo.md) (11 shared connections)
-- [images](images.md) (3 shared connections)
-- [ConfigParseError](ConfigParseError.md) (2 shared connections)
-- [sample](sample.md) (1 shared connections)
+- [HardwareInfo](HardwareInfo.md) (16 shared connections)
+- [sample](sample.md) (5 shared connections)
+- [images](images.md) (4 shared connections)
 - [flm.py](flm.py.md) (1 shared connections)
-- [SlotState](SlotState.md) (1 shared connections)
+- [SlotManager](SlotManager.md) (1 shared connections)
 - [npu_occupancy](npu_occupancy.md) (1 shared connections)
 - [build_per_slot](build_per_slot.md) (1 shared connections)
 - [slots.py](slots.py.md) (1 shared connections)
@@ -49,12 +48,11 @@
 
 - `src/hal0/api/routes/hardware.py`
 - `tests/api/test_hardware_routes.py`
-- `tests/api/test_system_info_route.py`
 
 ## Audit Trail
 
-- EXTRACTED: 204 (89%)
-- INFERRED: 24 (11%)
+- EXTRACTED: 240 (91%)
+- INFERRED: 24 (9%)
 - AMBIGUOUS: 0 (0%)
 
 ---

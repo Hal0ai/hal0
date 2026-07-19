@@ -1,6 +1,6 @@
 # FakeMemoryProvider
 
-> 42 nodes
+> 42 nodes · cohesion 0.06
 
 ## Key Concepts
 
@@ -13,33 +13,32 @@
 - **RecallProvider** (4 connections) — `tests/mcp/test_memory_recall_tool.py`
 - **test_memory_recall_tool_dispatches()** (4 connections) — `tests/mcp/test_memory_recall_tool.py`
 - **_hindsight_factory()** (4 connections) — `tests/memory/test_provider_contract.py`
-- **MemoryProvider** (3 connections)
 - **._allowed()** (3 connections) — `tests/memory/fakes.py`
 - **_pgvector_factory()** (3 connections) — `tests/memory/test_provider_contract.py`
-- **_now()** (2 connections) — `tests/memory/fakes.py`
 - **.add()** (2 connections) — `tests/memory/fakes.py`
-- **.search()** (2 connections) — `tests/memory/fakes.py`
 - **.list_items()** (2 connections) — `tests/memory/fakes.py`
+- **.search()** (2 connections) — `tests/memory/fakes.py`
+- **_now()** (2 connections) — `tests/memory/fakes.py`
 - **_fake_factory()** (2 connections) — `tests/memory/test_provider_contract.py`
-- **test_pgvector_conforms()** (2 connections) — `tests/memory/test_provider_contract.py`
 - **test_hindsight_conforms_to_contract()** (2 connections) — `tests/memory/test_provider_contract.py`
+- **test_pgvector_conforms()** (2 connections) — `tests/memory/test_provider_contract.py`
 - **client()** (2 connections) — `tests/memory/test_recall_route.py`
-- **.recall()** (1 connections) — `tests/mcp/test_memory_recall_tool.py`
 - **MCP memory_recall tool (P2).** (1 connections) — `tests/mcp/test_memory_recall_tool.py`
-- **.__init__()** (1 connections) — `tests/memory/fakes.py`
+- **.recall()** (1 connections) — `tests/mcp/test_memory_recall_tool.py`
 - **.delete()** (1 connections) — `tests/memory/fakes.py`
 - **.graph_status()** (1 connections) — `tests/memory/fakes.py`
+- **.__init__()** (1 connections) — `tests/memory/fakes.py`
+- **.set_graph_enabled()** (1 connections) — `tests/memory/fakes.py`
 - *... and 17 more nodes in this community*
 
 ## Relationships
 
-- [HindsightProvider](HindsightProvider.md) (2 shared connections)
-- [PgVectorProvider](PgVectorProvider.md) (2 shared connections)
+- [MemoryProvider](MemoryProvider.md) (2 shared connections)
 - [test_hindsight_provider.py](test_hindsight_provider.py.md) (2 shared connections)
 - [memory.py](memory.py.md) (1 shared connections)
 - [test_board_dispatch.py](test_board_dispatch.py.md) (1 shared connections)
-- [Hal0MemoryClient](Hal0MemoryClient.md) (1 shared connections)
-- [Hal0MemoryProvider](Hal0MemoryProvider.md) (1 shared connections)
+- [HindsightProvider](HindsightProvider.md) (1 shared connections)
+- [PgVectorProvider](PgVectorProvider.md) (1 shared connections)
 
 ## Source Files
 
@@ -50,7 +49,7 @@
 
 ## Audit Trail
 
-- EXTRACTED: 107 (91%)
+- EXTRACTED: 105 (91%)
 - INFERRED: 11 (9%)
 - AMBIGUOUS: 0 (0%)
 

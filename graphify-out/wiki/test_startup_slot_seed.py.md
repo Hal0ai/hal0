@@ -1,6 +1,6 @@
 # test_startup_slot_seed.py
 
-> 10 nodes
+> 10 nodes · cohesion 0.24
 
 ## Key Concepts
 

@@ -1,56 +1,42 @@
 # Any
 
-> 27 nodes
+> 16 nodes · cohesion 0.12
 
 ## Key Concepts
 
-- **Any** (13 connections)
-- **.snapshot()** (12 connections) — `src/hal0/slot_view/__init__.py`
-- **__init__.py** (11 connections) — `src/hal0/slot_view/__init__.py`
-- **loaded_model_names_from_slots()** (11 connections) — `src/hal0/slot_view/__init__.py`
-- **SlotViewAggregator** (9 connections) — `src/hal0/slot_view/__init__.py`
-- **_resolve_container_provider()** (5 connections) — `src/hal0/slot_view/__init__.py`
-- **_metrics_view()** (5 connections) — `src/hal0/slot_view/__init__.py`
-- **TestLoadedModelNamesFromSlots** (5 connections) — `tests/slot_view/test_aggregator.py`
-- **SlotMetricsView** (4 connections) — `src/hal0/slot_view/__init__.py`
-- **SlotView** (4 connections) — `src/hal0/slot_view/__init__.py`
-- **.test_junk_entries_skipped()** (4 connections) — `tests/slot_view/test_aggregator.py`
-- **._safe_configs()** (3 connections) — `src/hal0/slot_view/__init__.py`
-- **._safe_per_slot_mem()** (3 connections) — `src/hal0/slot_view/__init__.py`
-- **._safe_metrics()** (3 connections) — `src/hal0/slot_view/__init__.py`
-- **.test_dispatchable_ready_set_counts()** (3 connections) — `tests/slot_view/test_aggregator.py`
-- **.to_dict()** (2 connections) — `src/hal0/slot_view/__init__.py`
-- **.to_dict()** (2 connections) — `src/hal0/slot_view/__init__.py`
-- **.__init__()** (2 connections) — `src/hal0/slot_view/__init__.py`
-- **.test_empty_input()** (2 connections) — `tests/slot_view/test_aggregator.py`
-- **slot_view — stateless read-model aggregation for the slots dashboard (issue #698** (1 connections) — `src/hal0/slot_view/__init__.py`
-- **Card-shaped live metrics for one slot (``slot.metrics.*`` on the wire).** (1 connections) — `src/hal0/slot_view/__init__.py`
-- **One row of the ``GET /api/slots`` response, typed.      ``payload`` carries the** (1 connections) — `src/hal0/slot_view/__init__.py`
-- **Model ids currently served by dispatchable slots.      Derives the loaded set fr** (1 connections) — `src/hal0/slot_view/__init__.py`
-- **Injected provider or the process-wide real one (lazy import).** (1 connections) — `src/hal0/slot_view/__init__.py`
-- **Eagerly compose the full ``/api/slots`` read model.      Constructor deps mirror** (1 connections) — `src/hal0/slot_view/__init__.py`
-- *... and 2 more nodes in this community*
+- **Any** (44 connections)
+- **test_delete_forwards_force_query_param()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_legacy_fields_still_present()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_lifespan_hydrate_keeps_explicit_hal0_upstream()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_list_slots_omits_labels_when_none_declared()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_state_stream_404_on_unknown_slot()** (6 connections) — `tests/api/test_slots_routes.py`
+- **test_json_serialisation_roundtrips()** (5 connections) — `tests/api/test_slots_routes.py`
+- **container_stub()** (3 connections) — `tests/api/test_slots_routes.py`
+- **.__init__()** (2 connections) — `tests/api/test_slots_routes.py`
+- **v0.1.x clients consuming /api/slots see every legacy key unchanged.** (1 connections) — `tests/api/test_slots_routes.py`
+- **Labels list is omitted (not empty) when the slot config has no     ``model.label** (1 connections) — `tests/api/test_slots_routes.py`
+- **The enriched body must be valid JSON (no exotic types leaked).** (1 connections) — `tests/api/test_slots_routes.py`
+- **An explicit upstreams.toml entry for ``hal0`` survives startup unchanged.      O** (1 connections) — `tests/api/test_slots_routes.py`
+- **Patch ``container_provider()`` with a stateful fake; yield its state.      The f** (1 connections) — `tests/api/test_slots_routes.py`
+- **DELETE ?force=true binds + forwards to the manager and echoes ``forced``.      '** (1 connections) — `tests/api/test_slots_routes.py`
+- **The SSE endpoint must 404 on an unknown slot (Team I gap #2).      Per the gap b** (1 connections) — `tests/api/test_slots_routes.py`
 
 ## Relationships
 
-- [container_enrichment](container_enrichment.md) (4 shared connections)
-- [FakeUpstreams](FakeUpstreams.md) (4 shared connections)
-- [SlotState](SlotState.md) (4 shared connections)
-- [_slot](_slot.md) (4 shared connections)
-- [config_enrichment](config_enrichment.md) (3 shared connections)
-- [serialize_slot](serialize_slot.md) (3 shared connections)
-- [slots.py](slots.py.md) (2 shared connections)
-- [test_dispatchable_ready_set_single_source.py](test_dispatchable_ready_set_single_source.py.md) (1 shared connections)
+- [.json](json.md) (22 shared connections)
+- [TestClient](TestClient.md) (22 shared connections)
+- [test_slots_routes.py](test_slots_routes.py.md) (8 shared connections)
+- [FastAPI](FastAPI.md) (8 shared connections)
+- [create_app](create_app.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/slot_view/__init__.py`
-- `tests/slot_view/test_aggregator.py`
+- `tests/api/test_slots_routes.py`
 
 ## Audit Trail
 
-- EXTRACTED: 98 (88%)
-- INFERRED: 13 (12%)
+- EXTRACTED: 90 (99%)
+- INFERRED: 1 (1%)
 - AMBIGUOUS: 0 (0%)
 
 ---

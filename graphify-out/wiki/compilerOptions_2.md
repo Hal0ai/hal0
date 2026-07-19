@@ -1,20 +1,22 @@
 # compilerOptions
 
-> 11 nodes
+> 13 nodes · cohesion 0.15
 
 ## Key Concepts
 
 - **compilerOptions** (9 connections) — `ui/tsconfig.node.json`
 - **tsconfig.node.json** (2 connections) — `ui/tsconfig.node.json`
-- **target** (1 connections) — `ui/tsconfig.node.json`
-- **lib** (1 connections) — `ui/tsconfig.node.json`
-- **module** (1 connections) — `ui/tsconfig.node.json`
-- **skipLibCheck** (1 connections) — `ui/tsconfig.node.json`
-- **moduleResolution** (1 connections) — `ui/tsconfig.node.json`
+- **lib** (2 connections) — `ui/tsconfig.node.json`
+- **include** (2 connections) — `ui/tsconfig.node.json`
+- **vite.config.ts** (1 connections) — `ui/tsconfig.node.json`
 - **allowSyntheticDefaultImports** (1 connections) — `ui/tsconfig.node.json`
-- **strict** (1 connections) — `ui/tsconfig.node.json`
+- **module** (1 connections) — `ui/tsconfig.node.json`
+- **moduleResolution** (1 connections) — `ui/tsconfig.node.json`
 - **noEmit** (1 connections) — `ui/tsconfig.node.json`
-- **include** (1 connections) — `ui/tsconfig.node.json`
+- **skipLibCheck** (1 connections) — `ui/tsconfig.node.json`
+- **strict** (1 connections) — `ui/tsconfig.node.json`
+- **target** (1 connections) — `ui/tsconfig.node.json`
+- **ES2023** (1 connections) — `ui/tsconfig.node.json`
 
 ## Relationships
 
@@ -26,7 +28,7 @@
 
 ## Audit Trail
 
-- EXTRACTED: 20 (100%)
+- EXTRACTED: 24 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 

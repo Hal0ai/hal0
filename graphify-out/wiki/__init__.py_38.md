@@ -1,11 +1,11 @@
 # __init__.py
 
-> 2 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (1 connections) — `src/hal0/system/__init__.py`
-- **System-level privileged seams (P3-perms).** (1 connections) — `src/hal0/system/__init__.py`
+- **__init__.py** (1 connections) — `tests/agents/hermes/plugins/__init__.py`
+- **Tests for src/hal0/agents/hermes/plugins/ (canonical Hermes plugin sources).** (1 connections) — `tests/agents/hermes/plugins/__init__.py`
 
 ## Relationships
 
@@ -13,7 +13,7 @@
 
 ## Source Files
 
-- `src/hal0/system/__init__.py`
+- `tests/agents/hermes/plugins/__init__.py`
 
 ## Audit Trail
 

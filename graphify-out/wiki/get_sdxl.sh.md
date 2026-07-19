@@ -1,15 +1,15 @@
 # get_sdxl.sh
 
-> 6 nodes
+> 6 nodes · cohesion 0.47
 
 ## Key Concepts
 
 - **get_sdxl.sh** (5 connections) — `installer/comfyui/scripts/get_sdxl.sh`
 - **download_if_missing()** (3 connections) — `installer/comfyui/scripts/get_sdxl.sh`
-- **get_sdxl.sh script** (2 connections) — `installer/comfyui/scripts/get_sdxl.sh`
 - **_require_hf()** (2 connections) — `installer/comfyui/scripts/get_sdxl.sh`
-- **HF_HUB_ENABLE_HF_TRANSFER** (1 connections) — `installer/comfyui/scripts/get_sdxl.sh`
+- **get_sdxl.sh script** (2 connections) — `installer/comfyui/scripts/get_sdxl.sh`
 - **HF_HOME** (1 connections) — `installer/comfyui/scripts/get_sdxl.sh`
+- **HF_HUB_ENABLE_HF_TRANSFER** (1 connections) — `installer/comfyui/scripts/get_sdxl.sh`
 
 ## Relationships
 

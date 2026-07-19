@@ -1,6 +1,6 @@
 # _profile
 
-> 37 nodes
+> 38 nodes · cohesion 0.09
 
 ## Key Concepts
 
@@ -12,32 +12,34 @@
 - **parse_envelope()** (6 connections) — `src/hal0/profiles/portable.py`
 - **.test_duplicate_name_raises_conflict()** (6 connections) — `tests/profiles/test_portable.py`
 - **_checksum()** (5 connections) — `src/hal0/profiles/portable.py`
-- **Any** (5 connections)
 - **export_envelope()** (5 connections) — `src/hal0/profiles/portable.py`
-- **TestVerifyChecksum** (5 connections) — `tests/profiles/test_portable.py`
+- **Any** (5 connections)
 - **.test_too_new_schema_rejected()** (5 connections) — `tests/profiles/test_portable.py`
+- **TestVerifyChecksum** (5 connections) — `tests/profiles/test_portable.py`
 - **ProfileEnvelope** (4 connections) — `src/hal0/profiles/portable.py`
 - **verify_checksum()** (4 connections) — `src/hal0/profiles/portable.py`
-- **.test_export_import_round_trips_fields()** (4 connections) — `tests/profiles/test_portable.py`
 - **TestExportEnvelope** (4 connections) — `tests/profiles/test_portable.py`
 - **TestImportProfile** (4 connections) — `tests/profiles/test_portable.py`
 - **.test_bad_envelope_rejected()** (4 connections) — `tests/profiles/test_portable.py`
-- **TestRoundTrip** (2 connections) — `tests/profiles/test_portable.py`
+- **.test_export_import_round_trips_fields()** (4 connections) — `tests/profiles/test_portable.py`
 - **.test_envelope_shape()** (2 connections) — `tests/profiles/test_portable.py`
-- **.test_profile_body_has_expected_fields()** (2 connections) — `tests/profiles/test_portable.py`
 - **.test_exclude_none_drops_unset_optional_fields()** (2 connections) — `tests/profiles/test_portable.py`
-- **.test_intact_checksum_verifies()** (2 connections) — `tests/profiles/test_portable.py`
-- **.test_tampered_body_fails()** (2 connections) — `tests/profiles/test_portable.py`
+- **.test_profile_body_has_expected_fields()** (2 connections) — `tests/profiles/test_portable.py`
+- **TestRoundTrip** (2 connections) — `tests/profiles/test_portable.py`
 - **.test_checksum_is_deterministic_and_ignores_exported_at()** (2 connections) — `tests/profiles/test_portable.py`
-- *... and 12 more nodes in this community*
+- **.test_checksum_is_field_order_independent()** (2 connections) — `tests/profiles/test_portable.py`
+- **.test_intact_checksum_verifies()** (2 connections) — `tests/profiles/test_portable.py`
+- *... and 13 more nodes in this community*
 
 ## Relationships
 
-- [ProfileConfig](ProfileConfig.md) (7 shared connections)
 - [BadRequest](BadRequest.md) (6 shared connections)
+- [ProfileConfig](ProfileConfig.md) (4 shared connections)
 - [errors.py](errors.py.md) (2 shared connections)
 - [hal0.sh](hal0.sh.md) (1 shared connections)
-- [BaseModel](BaseModel.md) (1 shared connections)
+- [profiles.py](profiles.py.md) (1 shared connections)
+- [ProfileCatalog](ProfileCatalog.md) (1 shared connections)
+- [BoardStore](BoardStore.md) (1 shared connections)
 
 ## Source Files
 
@@ -46,7 +48,7 @@
 
 ## Audit Trail
 
-- EXTRACTED: 123 (90%)
+- EXTRACTED: 124 (90%)
 - INFERRED: 14 (10%)
 - AMBIGUOUS: 0 (0%)
 

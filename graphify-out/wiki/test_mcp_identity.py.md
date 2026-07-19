@@ -1,6 +1,6 @@
 # test_mcp_identity.py
 
-> 16 nodes
+> 16 nodes · cohesion 0.18
 
 ## Key Concepts
 
@@ -8,14 +8,14 @@
 - **patch_request()** (10 connections) — `tests/api/test_mcp_identity.py`
 - **test_private_write_lands_in_agent_namespace()** (4 connections) — `tests/api/test_mcp_identity.py`
 - **_fake_request()** (3 connections) — `tests/api/test_mcp_identity.py`
-- **test_client_id_from_agent_header()** (2 connections) — `tests/api/test_mcp_identity.py`
-- **test_client_id_anonymous_when_header_absent()** (2 connections) — `tests/api/test_mcp_identity.py`
 - **test_client_id_anonymous_outside_request()** (2 connections) — `tests/api/test_mcp_identity.py`
-- **test_client_id_rejects_private_prefix()** (2 connections) — `tests/api/test_mcp_identity.py`
+- **test_client_id_anonymous_when_header_absent()** (2 connections) — `tests/api/test_mcp_identity.py`
+- **test_client_id_from_agent_header()** (2 connections) — `tests/api/test_mcp_identity.py`
 - **test_client_id_rejects_malformed()** (2 connections) — `tests/api/test_mcp_identity.py`
+- **test_client_id_rejects_private_prefix()** (2 connections) — `tests/api/test_mcp_identity.py`
 - **test_private_resolver_reads_header()** (2 connections) — `tests/api/test_mcp_identity.py`
-- **Request** (1 connections)
 - **MonkeyPatch** (1 connections)
+- **Request** (1 connections)
 - **Tests for #317 — MCP caller identity via the ``X-hal0-Agent`` header.  Before th** (1 connections) — `tests/api/test_mcp_identity.py`
 - **Minimal Starlette Request exposing the given headers.** (1 connections) — `tests/api/test_mcp_identity.py`
 - **Return a setter that points the MCP request context at fake headers.** (1 connections) — `tests/api/test_mcp_identity.py`

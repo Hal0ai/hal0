@@ -1,27 +1,27 @@
 # FakeDelegateRunner
 
-> 18 nodes
+> 18 nodes · cohesion 0.16
 
 ## Key Concepts
 
 - **FakeDelegateRunner** (24 connections) — `tests/harness/integration/_delegate_runner.py`
 - **_delegate_runner.py** (11 connections) — `tests/harness/integration/_delegate_runner.py`
 - **.run_delegate_task()** (8 connections) — `tests/harness/integration/_delegate_runner.py`
-- **TaskResult** (5 connections) — `tests/harness/integration/_delegate_runner.py`
 - **._build_backend()** (5 connections) — `tests/harness/integration/_delegate_runner.py`
+- **TaskResult** (5 connections) — `tests/harness/integration/_delegate_runner.py`
 - **._assemble_envelope()** (4 connections) — `tests/harness/integration/_delegate_runner.py`
 - **._assemble_final_response()** (4 connections) — `tests/harness/integration/_delegate_runner.py`
 - **DelegateTrace** (3 connections) — `tests/harness/integration/_delegate_runner.py`
 - **.register_backend()** (2 connections) — `tests/harness/integration/_delegate_runner.py`
-- **.__init__()** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **BackendFactory** (1 connections)
+- **.__init__()** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **In-process orchestration harness for δ-tier ``delegate_task`` tests.  Why a cust** (1 connections) — `tests/harness/integration/_delegate_runner.py`
-- **One row in delegate_task's results array.** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **Everything the harness recorded for a single delegate_task call.      The runner** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **Simulated delegate_task dispatcher.      Usage:          runner = FakeDelegateRu** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **Execute one delegate_task call covering ``tasks``.          Returns the trace +** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **Serialise the per-task results in upstream's envelope shape.          Reference:** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 - **Compose the assistant message the parent would emit after the         delegate_t** (1 connections) — `tests/harness/integration/_delegate_runner.py`
+- **One row in delegate_task's results array.** (1 connections) — `tests/harness/integration/_delegate_runner.py`
 
 ## Relationships
 

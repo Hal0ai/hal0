@@ -1,6 +1,6 @@
 # useToastStore.ts
 
-> 10 nodes
+> 10 nodes · cohesion 0.24
 
 ## Key Concepts
 
@@ -9,10 +9,10 @@
 - **queryClient.ts** (2 connections) — `ui/src/lib/queryClient.ts`
 - **queryClient** (2 connections) — `ui/src/lib/queryClient.ts`
 - **installToastGlobal()** (2 connections) — `ui/src/stores/useToastStore.ts`
-- **ToastKind** (1 connections) — `ui/src/stores/useToastStore.ts`
-- **Toast** (1 connections) — `ui/src/stores/useToastStore.ts`
-- **ToastState** (1 connections) — `ui/src/stores/useToastStore.ts`
 - **timers** (1 connections) — `ui/src/stores/useToastStore.ts`
+- **Toast** (1 connections) — `ui/src/stores/useToastStore.ts`
+- **ToastKind** (1 connections) — `ui/src/stores/useToastStore.ts`
+- **ToastState** (1 connections) — `ui/src/stores/useToastStore.ts`
 - **useToastStore** (1 connections) — `ui/src/stores/useToastStore.ts`
 
 ## Relationships

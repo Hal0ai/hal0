@@ -1,6 +1,6 @@
 # _FakeSlotManager
 
-> 7 nodes
+> 7 nodes · cohesion 0.38
 
 ## Key Concepts
 

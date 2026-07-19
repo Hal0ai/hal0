@@ -1,19 +1,21 @@
 # arbiter.py
 
-> 18 nodes
+> 20 nodes · cohesion 0.12
 
 ## Key Concepts
 
 - **arbiter.py** (13 connections) — `src/hal0/slots/arbiter.py`
-- **GpuMode** (7 connections) — `src/hal0/slots/arbiter.py`
-- **GpuInferenceMode** (7 connections) — `src/hal0/slots/arbiter.py`
 - **ArbiterPinned** (7 connections) — `src/hal0/slots/arbiter.py`
+- **GpuInferenceMode** (7 connections) — `src/hal0/slots/arbiter.py`
+- **GpuMode** (7 connections) — `src/hal0/slots/arbiter.py`
 - **test_guard_dispatch_blocks_img_slot_in_llm_mode()** (6 connections) — `tests/slots/test_gpu_arbiter.py`
 - **GpuImgNotReady** (5 connections) — `src/hal0/slots/arbiter.py`
 - **test_restore_blocked_when_pinned_unless_force()** (5 connections) — `tests/slots/test_gpu_arbiter.py`
 - **_comfyui_base_url()** (4 connections) — `src/hal0/slots/arbiter.py`
 - **_comfyui_free()** (4 connections) — `src/hal0/slots/arbiter.py`
 - **_comfyui_queue_counts()** (4 connections) — `src/hal0/slots/arbiter.py`
+- **Hal0Error** (4 connections)
+- **StrEnum** (1 connections)
 - **GpuArbiter — exclusive llm/img GPU group arbitration (spec §7, Phase D).  Strix** (1 connections) — `src/hal0/slots/arbiter.py`
 - **Operational ComfyUI HTTP base (mirrors api/routes/comfyui.py).      Duplicated o** (1 connections) — `src/hal0/slots/arbiter.py`
 - **Best-effort ``POST /free`` — drop ComfyUI's models from GTT.      True on a 200;** (1 connections) — `src/hal0/slots/arbiter.py`
@@ -28,12 +30,10 @@
 - [GpuArbiter](GpuArbiter.md) (10 shared connections)
 - [FakeManager](FakeManager.md) (9 shared connections)
 - [SlotState](SlotState.md) (4 shared connections)
-- [Hal0Error](Hal0Error.md) (3 shared connections)
+- [GpuImageMode](GpuImageMode.md) (2 shared connections)
 - [_ArbiterSlotManager](_ArbiterSlotManager.md) (2 shared connections)
 - [errors.py](errors.py.md) (1 shared connections)
 - [Enum](Enum.md) (1 shared connections)
-- [GpuImageMode](GpuImageMode.md) (1 shared connections)
-- [die](die.md) (1 shared connections)
 
 ## Source Files
 
@@ -42,8 +42,8 @@
 
 ## Audit Trail
 
-- EXTRACTED: 57 (81%)
-- INFERRED: 13 (19%)
+- EXTRACTED: 62 (83%)
+- INFERRED: 13 (17%)
 - AMBIGUOUS: 0 (0%)
 
 ---

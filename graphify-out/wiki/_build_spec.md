@@ -1,18 +1,18 @@
 # _build_spec
 
-> 14 nodes
+> 14 nodes · cohesion 0.31
 
 ## Key Concepts
 
 - **_build_spec()** (8 connections) — `tests/providers/test_container_vision_toggle.py`
 - **test_container_vision_toggle.py** (7 connections) — `tests/providers/test_container_vision_toggle.py`
-- **_slot_cfg()** (6 connections) — `tests/providers/test_container_vision_toggle.py`
 - **_model_info()** (6 connections) — `tests/providers/test_container_vision_toggle.py`
+- **_slot_cfg()** (6 connections) — `tests/providers/test_container_vision_toggle.py`
 - **TestVisionToggleGatesMmproj** (6 connections) — `tests/providers/test_container_vision_toggle.py`
 - **.test_default_on_emits_mmproj()** (5 connections) — `tests/providers/test_container_vision_toggle.py`
 - **.test_vision_false_suppresses_mmproj()** (5 connections) — `tests/providers/test_container_vision_toggle.py`
-- **.test_vision_true_emits_mmproj()** (4 connections) — `tests/providers/test_container_vision_toggle.py`
 - **.test_no_sidecar_no_mmproj_regardless()** (4 connections) — `tests/providers/test_container_vision_toggle.py`
+- **.test_vision_true_emits_mmproj()** (4 connections) — `tests/providers/test_container_vision_toggle.py`
 - **_moe_profile()** (3 connections) — `tests/providers/test_container_vision_toggle.py`
 - **Any** (3 connections)
 - **Per-slot `vision` toggle gates the --mmproj emit (#901).  The container provider** (1 connections) — `tests/providers/test_container_vision_toggle.py`

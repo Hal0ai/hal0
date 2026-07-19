@@ -1,33 +1,48 @@
 # TestClient
 
-> 10 nodes
+> 26 nodes · cohesion 0.16
 
 ## Key Concepts
 
-- **TestClient** (5 connections)
-- **isolated_client()** (3 connections) — `tests/api/test_settings_apply.py`
-- **test_get_apply_plan_returns_full_registry()** (3 connections) — `tests/api/test_settings_apply.py`
-- **test_put_settings_response_includes_apply_plan()** (3 connections) — `tests/api/test_settings_apply.py`
-- **test_put_settings_apply_plan_flattens_nested_keys()** (3 connections) — `tests/api/test_settings_apply.py`
-- **test_put_settings_response_preserves_existing_top_level_shape()** (3 connections) — `tests/api/test_settings_apply.py`
-- **The dashboard fetches this once on mount. The shape has to     carry every key t** (1 connections) — `tests/api/test_settings_apply.py`
-- **The PUT response carries ``_hal0.apply_plan`` so the success     toast can rende** (1 connections) — `tests/api/test_settings_apply.py`
-- **A nested body touching a service-restart key surfaces that key in     the plan's** (1 connections) — `tests/api/test_settings_apply.py`
-- **The existing PUT contract (response is the merged config     dict at the top lev** (1 connections) — `tests/api/test_settings_apply.py`
+- **TestClient** (15 connections)
+- **test_profiles_portable_routes.py** (10 connections) — `tests/api/test_profiles_portable_routes.py`
+- **_seed_name()** (10 connections) — `tests/api/test_profiles_portable_routes.py`
+- **TestImportCommit** (6 connections) — `tests/api/test_profiles_portable_routes.py`
+- **TestImportDryRun** (5 connections) — `tests/api/test_profiles_portable_routes.py`
+- **app()** (4 connections) — `tests/api/test_profiles_portable_routes.py`
+- **_create_custom()** (4 connections) — `tests/api/test_profiles_portable_routes.py`
+- **TestExportRoute** (4 connections) — `tests/api/test_profiles_portable_routes.py`
+- **client()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **FastAPI** (3 connections)
+- **.test_export_custom_profile_200_valid_envelope()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_export_seed_profile_200_valid_envelope()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_commit_creates_profile()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_commit_duplicate_name_409()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_commit_too_new_schema_400()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_commit_without_name_400()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_dry_run_checksum_ok_false_when_tampered()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_dry_run_collides_false_for_fresh_name()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_dry_run_collides_true_for_existing_name()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_dry_run_shape_and_checksum_ok()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_export_then_import_under_new_name_appears_in_list()** (3 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_export_unknown_404()** (2 connections) — `tests/api/test_profiles_portable_routes.py`
+- **.test_commit_bad_envelope_400()** (2 connections) — `tests/api/test_profiles_portable_routes.py`
+- **TestRoundTripHttp** (2 connections) — `tests/api/test_profiles_portable_routes.py`
+- **Tests for the portable profile routes — export/import over HTTP.  Mirrors tests/** (1 connections) — `tests/api/test_profiles_portable_routes.py`
+- *... and 1 more nodes in this community*
 
 ## Relationships
 
-- [test_settings_apply.py](test_settings_apply.py.md) (5 shared connections)
 - [create_app](create_app.md) (1 shared connections)
 
 ## Source Files
 
-- `tests/api/test_settings_apply.py`
+- `tests/api/test_profiles_portable_routes.py`
 
 ## Audit Trail
 
-- EXTRACTED: 23 (96%)
-- INFERRED: 1 (4%)
+- EXTRACTED: 104 (99%)
+- INFERRED: 1 (1%)
 - AMBIGUOUS: 0 (0%)
 
 ---

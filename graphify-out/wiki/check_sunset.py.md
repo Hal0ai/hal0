@@ -1,14 +1,14 @@
 # check_sunset.py
 
-> 7 nodes
+> 7 nodes · cohesion 0.57
 
 ## Key Concepts
 
 - **check_sunset.py** (6 connections) — `scripts/check_sunset.py`
 - **main()** (5 connections) — `scripts/check_sunset.py`
+- **overdue_markers()** (3 connections) — `scripts/check_sunset.py`
 - **_py_files()** (3 connections) — `scripts/check_sunset.py`
 - **scar_count()** (3 connections) — `scripts/check_sunset.py`
-- **overdue_markers()** (3 connections) — `scripts/check_sunset.py`
 - **current_version()** (2 connections) — `scripts/check_sunset.py`
 - **_fmt()** (2 connections) — `scripts/check_sunset.py`
 

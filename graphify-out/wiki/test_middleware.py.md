@@ -1,14 +1,14 @@
 # test_middleware.py
 
-> 14 nodes
+> 14 nodes · cohesion 0.21
 
 ## Key Concepts
 
 - **test_middleware.py** (7 connections) — `tests/api/test_middleware.py`
 - **_make_test_app()** (5 connections) — `tests/api/test_middleware.py`
 - **TestClient** (4 connections)
-- **test_unhandled_exception_returns_envelope()** (4 connections) — `tests/api/test_middleware.py`
 - **test_hal0_error_envelope()** (4 connections) — `tests/api/test_middleware.py`
+- **test_unhandled_exception_returns_envelope()** (4 connections) — `tests/api/test_middleware.py`
 - **test_request_id_added()** (3 connections) — `tests/api/test_middleware.py`
 - **test_request_id_echoed()** (3 connections) — `tests/api/test_middleware.py`
 - **FastAPI** (2 connections)

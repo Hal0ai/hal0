@@ -1,6 +1,6 @@
 # run_benchmarks.sh
 
-> 6 nodes
+> 6 nodes · cohesion 0.40
 
 ## Key Concepts
 
@@ -8,8 +8,8 @@
 - **run_benchmarks.sh script** (2 connections) — `installer/bench/run_benchmarks.sh`
 - **usage()** (2 connections) — `installer/bench/run_benchmarks.sh`
 - **gpu_slots_active()** (1 connections) — `installer/bench/run_benchmarks.sh`
-- **restore_slots()** (1 connections) — `installer/bench/run_benchmarks.sh`
 - **MODELS** (1 connections) — `installer/bench/run_benchmarks.sh`
+- **restore_slots()** (1 connections) — `installer/bench/run_benchmarks.sh`
 
 ## Relationships
 

@@ -1,14 +1,14 @@
 # useTweaksStore.ts
 
-> 8 nodes
+> 8 nodes · cohesion 0.29
 
 ## Key Concepts
 
 - **useTweaksStore.ts** (7 connections) — `ui/src/stores/useTweaksStore.ts`
 - **TweaksState** (2 connections) — `ui/src/stores/useTweaksStore.ts`
 - **TweaksStore** (2 connections) — `ui/src/stores/useTweaksStore.ts`
-- **DEFAULTS** (1 connections) — `ui/src/stores/useTweaksStore.ts`
 - **APPEARANCE_KEYS** (1 connections) — `ui/src/stores/useTweaksStore.ts`
+- **DEFAULTS** (1 connections) — `ui/src/stores/useTweaksStore.ts`
 - **loadPersisted()** (1 connections) — `ui/src/stores/useTweaksStore.ts`
 - **persist()** (1 connections) — `ui/src/stores/useTweaksStore.ts`
 - **useTweaksStore** (1 connections) — `ui/src/stores/useTweaksStore.ts`

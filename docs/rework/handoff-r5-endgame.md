@@ -1,5 +1,10 @@
 # Handoff — hal0 R5 endgame (paste-in brief for a new session)
 
+> **SUPERSEDED (2026-07-19, after Phase 0 landed @ `278b32a8`):** the active paste-in
+> prompt is now **`docs/rework/handoff-r5-drive2.md`** — Phase 0 below is done; Phases 1–4
+> are refined there with the drive-2 orchestration model. This file remains as the
+> phase-rationale record; the assessment stays the evidence base.
+
 > **You are picking up the final phase of the hal0 rework (R5 — surface + launch).**
 > R1–R4 are merged. This brief turns the sync assessment into an executable, phased plan
 > with verify gates, board deltas, and the decisions still owed to the user. Read in this

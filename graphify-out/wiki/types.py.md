@@ -1,6 +1,6 @@
 # types.py
 
-> 17 nodes
+> 17 nodes · cohesion 0.15
 
 ## Key Concepts
 
@@ -11,13 +11,13 @@
 - **conftest.py** (4 connections) — `tests/mcp/conftest.py`
 - **.get()** (2 connections) — `tests/api/test_models_pull_capability.py`
 - **test_body_capability_wins()** (2 connections) — `tests/api/test_models_pull_capability.py`
-- **test_registry_capability_used_when_no_body()** (2 connections) — `tests/api/test_models_pull_capability.py`
 - **test_curated_capability_and_subdir_fallback()** (2 connections) — `tests/api/test_models_pull_capability.py`
+- **test_registry_capability_used_when_no_body()** (2 connections) — `tests/api/test_models_pull_capability.py`
 - **test_unknown_model_returns_none()** (2 connections) — `tests/api/test_models_pull_capability.py`
 - **_install_stub()** (2 connections) — `tests/mcp/conftest.py`
 - **Shared types for the hal0 Hermes transport.** (1 connections) — `src/hal0/agents/hermes/core/types.py`
-- **.__init__()** (1 connections) — `tests/api/test_models_pull_capability.py`
 - **_resolve_pull_capability — capability + comfyui_subdir for a pull (P3).  The hel** (1 connections) — `tests/api/test_models_pull_capability.py`
+- **.__init__()** (1 connections) — `tests/api/test_models_pull_capability.py`
 - **_has_real_mcp()** (1 connections) — `tests/mcp/conftest.py`
 - **Test fixtures for the hal0.mcp package.  The MCP server modules (:mod:`hal0.mcp.** (1 connections) — `tests/mcp/conftest.py`
 - **Insert a minimal ``mcp.server.fastmcp`` stub into sys.modules.      Installed at** (1 connections) — `tests/mcp/conftest.py`

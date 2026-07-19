@@ -1,17 +1,17 @@
 # useBannerStore.ts
 
-> 9 nodes
+> 9 nodes · cohesion 0.22
 
 ## Key Concepts
 
 - **useBannerStore.ts** (8 connections) — `ui/src/stores/useBannerStore.ts`
-- **BannerKind** (1 connections) — `ui/src/stores/useBannerStore.ts`
-- **BannerScope** (1 connections) — `ui/src/stores/useBannerStore.ts`
+- **BANNER_CATALOG** (1 connections) — `ui/src/stores/useBannerStore.ts`
 - **BannerAction** (1 connections) — `ui/src/stores/useBannerStore.ts`
 - **BannerEntry** (1 connections) — `ui/src/stores/useBannerStore.ts`
-- **BANNER_CATALOG** (1 connections) — `ui/src/stores/useBannerStore.ts`
-- **CATALOG_BY_ID** (1 connections) — `ui/src/stores/useBannerStore.ts`
+- **BannerKind** (1 connections) — `ui/src/stores/useBannerStore.ts`
+- **BannerScope** (1 connections) — `ui/src/stores/useBannerStore.ts`
 - **BannerState** (1 connections) — `ui/src/stores/useBannerStore.ts`
+- **CATALOG_BY_ID** (1 connections) — `ui/src/stores/useBannerStore.ts`
 - **useBannerStore** (1 connections) — `ui/src/stores/useBannerStore.ts`
 
 ## Relationships

@@ -1,13 +1,13 @@
 # eslint.config.js
 
-> 4 nodes
+> 4 nodes · cohesion 0.50
 
 ## Key Concepts
 
 - **eslint.config.js** (3 connections) — `ui/eslint.config.js`
-- **here** (1 connections) — `ui/eslint.config.js`
 - **collectDashGlobals()** (1 connections) — `ui/eslint.config.js`
 - **dashGlobals** (1 connections) — `ui/eslint.config.js`
+- **here** (1 connections) — `ui/eslint.config.js`
 
 ## Relationships
 

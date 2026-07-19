@@ -1,13 +1,13 @@
 # test_models_catalogue.py
 
-> 6 nodes
+> 6 nodes · cohesion 0.47
 
 ## Key Concepts
 
 - **test_models_catalogue.py** (4 connections) — `tests/api/test_models_catalogue.py`
 - **TestClient** (3 connections)
-- **test_catalogue_returns_split_shape()** (2 connections) — `tests/api/test_models_catalogue.py`
 - **test_catalogue_pullable_has_hf_coordinates()** (2 connections) — `tests/api/test_models_catalogue.py`
+- **test_catalogue_returns_split_shape()** (2 connections) — `tests/api/test_models_catalogue.py`
 - **test_catalogue_upstream_has_owned_by()** (2 connections) — `tests/api/test_models_catalogue.py`
 - **Route test for /api/models/catalogue.  Asserts the shape the UI's Models view de** (1 connections) — `tests/api/test_models_catalogue.py`
 

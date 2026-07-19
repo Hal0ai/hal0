@@ -1,6 +1,6 @@
 # regress.py
 
-> 11 nodes
+> 11 nodes · cohesion 0.27
 
 ## Key Concepts
 
@@ -9,8 +9,8 @@
 - **Flag** (4 connections) — `src/hal0/bench/regress.py`
 - **_provenance_key()** (4 connections) — `src/hal0/bench/regress.py`
 - **_metric()** (3 connections) — `src/hal0/bench/regress.py`
-- **Any** (2 connections)
 - **_median()** (2 connections) — `src/hal0/bench/regress.py`
+- **Any** (2 connections)
 - **regress.py — regression detection (DESIGN §11).  Cheap and dumb on purpose (no M** (1 connections) — `src/hal0/bench/regress.py`
 - **One flagged cell (DESIGN §11 output → ``bench.regression`` journal event     + b** (1 connections) — `src/hal0/bench/regress.py`
 - **The environment provenance that, if unchanged, makes a drop a genuine     regres** (1 connections) — `src/hal0/bench/regress.py`

@@ -1,50 +1,40 @@
 # write_openwebui_env
 
-> 48 nodes
+> 15 nodes · cohesion 0.18
 
 ## Key Concepts
 
 - **write_openwebui_env()** (18 connections) — `src/hal0/openwebui/env_writer.py`
-- **test_env_writer.py** (13 connections) — `tests/openwebui/test_env_writer.py`
-- **Path** (10 connections)
-- **_parse_env()** (9 connections) — `tests/openwebui/test_env_writer.py`
 - **env_writer.py** (6 connections) — `src/hal0/openwebui/env_writer.py`
-- **test_webui_auth_is_always_false_by_default()** (6 connections) — `tests/openwebui/test_env_writer.py`
-- **test_trusted_email_header_via_explicit_override()** (6 connections) — `tests/openwebui/test_env_writer.py`
-- **write_env_atomic()** (5 connections) — `src/hal0/config/env.py`
-- **test_write_openwebui_env_writes_all_prewired_keys()** (5 connections) — `tests/openwebui/test_env_writer.py`
-- **test_overrides_replace_defaults()** (5 connections) — `tests/openwebui/test_env_writer.py`
-- **test_override_none_deletes_default()** (5 connections) — `tests/openwebui/test_env_writer.py`
-- **test_write_openwebui_env_includes_voice_callmode_keys()** (5 connections) — `tests/openwebui/test_env_writer.py`
-- **test_enable_persistent_config_is_false()** (5 connections) — `tests/openwebui/test_env_writer.py`
-- **_default_path()** (4 connections) — `src/hal0/openwebui/env_writer.py`
 - **default_openwebui_env()** (4 connections) — `src/hal0/openwebui/env_writer.py`
-- **test_write_openwebui_env_defaults_to_paths_resolver()** (4 connections) — `tests/openwebui/test_env_writer.py`
-- **test_override_non_string_raises()** (4 connections) — `tests/openwebui/test_env_writer.py`
-- **test_atomic_write_no_orphan_tmp()** (4 connections) — `tests/openwebui/test_env_writer.py`
-- **env.py** (3 connections) — `src/hal0/config/env.py`
-- **_quote_value()** (3 connections) — `src/hal0/config/env.py`
+- **_default_path()** (4 connections) — `src/hal0/openwebui/env_writer.py`
 - **_load_write_env_atomic()** (3 connections) — `src/hal0/openwebui/env_writer.py`
-- **Path** (3 connections)
 - **main()** (3 connections) — `src/hal0/openwebui/env_writer.py`
+- **Path** (3 connections)
 - **test_default_openwebui_env_returns_fresh_copy()** (3 connections) — `tests/openwebui/test_env_writer.py`
-- **MonkeyPatch** (2 connections)
-- *... and 23 more nodes in this community*
+- **OpenWebUI environment file writer.  write_openwebui_env() produces /etc/hal0/ope** (1 connections) — `src/hal0/openwebui/env_writer.py`
+- **Resolve the default openwebui.env path without importing hal0.config.      Mirro** (1 connections) — `src/hal0/openwebui/env_writer.py`
+- **Return a fresh copy of the prewired defaults.      Returns a new dict each call** (1 connections) — `src/hal0/openwebui/env_writer.py`
+- **Write the OpenWebUI environment file atomically.      Args:         path:      D** (1 connections) — `src/hal0/openwebui/env_writer.py`
+- **CLI entry: ``python -m hal0.openwebui.env_writer``.      Writes the prewired env** (1 connections) — `src/hal0/openwebui/env_writer.py`
+- **Load ``hal0.config.env.write_env_atomic`` without triggering     ``hal0.config._** (1 connections) — `src/hal0/openwebui/env_writer.py`
+- **Mutating one returned dict must not affect subsequent calls.** (1 connections) — `tests/openwebui/test_env_writer.py`
 
 ## Relationships
 
+- [test_env_writer.py](test_env_writer.py.md) (11 shared connections)
+- [write_env_atomic](write_env_atomic.md) (1 shared connections)
 - [test_prewire_smoke.py](test_prewire_smoke.py.md) (1 shared connections)
 
 ## Source Files
 
-- `src/hal0/config/env.py`
 - `src/hal0/openwebui/env_writer.py`
 - `tests/openwebui/test_env_writer.py`
 
 ## Audit Trail
 
-- EXTRACTED: 136 (84%)
-- INFERRED: 25 (16%)
+- EXTRACTED: 37 (73%)
+- INFERRED: 14 (27%)
 - AMBIGUOUS: 0 (0%)
 
 ---

@@ -1,6 +1,6 @@
 # test_slot_verb_aliases.py
 
-> 14 nodes
+> 14 nodes · cohesion 0.16
 
 ## Key Concepts
 

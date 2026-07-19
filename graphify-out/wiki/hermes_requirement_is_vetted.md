@@ -1,13 +1,13 @@
 # hermes_requirement_is_vetted
 
-> 8 nodes
+> 8 nodes · cohesion 0.25
 
 ## Key Concepts
 
 - **hermes_requirement_is_vetted()** (5 connections) — `src/hal0/agents/hermes_provision.py`
-- **_hermes_requirement_line()** (4 connections) — `src/hal0/agents/hermes_provision.py`
-- **hermes_requirement_floor()** (4 connections) — `src/hal0/agents/hermes_provision.py`
 - **hermes_pinned_ref()** (4 connections) — `src/hal0/agents/hermes_provision.py`
+- **hermes_requirement_floor()** (4 connections) — `src/hal0/agents/hermes_provision.py`
+- **_hermes_requirement_line()** (4 connections) — `src/hal0/agents/hermes_provision.py`
 - **The single active ``hermes-agent`` requirement line (comments skipped).** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **The ``>=X.Y.Z`` version floor of a requirement line, or ``None``.      ``None``** (1 connections) — `src/hal0/agents/hermes_provision.py`
 - **The git commit/tag a requirement pins to, or ``None`` for a version spec.** (1 connections) — `src/hal0/agents/hermes_provision.py`

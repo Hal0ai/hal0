@@ -1,16 +1,16 @@
 # get_ltx2.sh
 
-> 7 nodes
+> 7 nodes · cohesion 0.43
 
 ## Key Concepts
 
 - **get_ltx2.sh** (6 connections) — `installer/comfyui/scripts/get_ltx2.sh`
-- **get_ltx2.sh script** (3 connections) — `installer/comfyui/scripts/get_ltx2.sh`
 - **download_if_missing()** (3 connections) — `installer/comfyui/scripts/get_ltx2.sh`
+- **get_ltx2.sh script** (3 connections) — `installer/comfyui/scripts/get_ltx2.sh`
 - **_require_hf()** (2 connections) — `installer/comfyui/scripts/get_ltx2.sh`
 - **usage()** (2 connections) — `installer/comfyui/scripts/get_ltx2.sh`
-- **HF_HUB_ENABLE_HF_TRANSFER** (1 connections) — `installer/comfyui/scripts/get_ltx2.sh`
 - **HF_HOME** (1 connections) — `installer/comfyui/scripts/get_ltx2.sh`
+- **HF_HUB_ENABLE_HF_TRANSFER** (1 connections) — `installer/comfyui/scripts/get_ltx2.sh`
 
 ## Relationships
 

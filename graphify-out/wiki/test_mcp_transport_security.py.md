@@ -1,6 +1,6 @@
 # test_mcp_transport_security.py
 
-> 28 nodes
+> 28 nodes · cohesion 0.12
 
 ## Key Concepts
 
@@ -19,16 +19,16 @@
 - **test_unconfigured_host_still_rejected()** (3 connections) — `tests/api/test_mcp_transport_security.py`
 - **Request** (2 connections)
 - **test_default_is_localhost_only()** (2 connections) — `tests/api/test_mcp_transport_security.py`
+- **test_explicit_origins_override_derivation()** (2 connections) — `tests/api/test_mcp_transport_security.py`
 - **test_extra_hosts_added_and_origins_derived()** (2 connections) — `tests/api/test_mcp_transport_security.py`
 - **test_wildcard_disables_protection()** (2 connections) — `tests/api/test_mcp_transport_security.py`
-- **test_explicit_origins_override_derivation()** (2 connections) — `tests/api/test_mcp_transport_security.py`
 - **Glue layer that mounts the hal0 admin + memory MCP servers on the FastAPI app.** (1 connections) — `src/hal0/api/mcp_mount.py`
-- **Extract a bearer token from the Authorization header, if present.** (1 connections) — `src/hal0/api/mcp_mount.py`
-- **Build the MCP transport's DNS-rebinding allowlist from the env.      FastMCP aut** (1 connections) — `src/hal0/api/mcp_mount.py`
 - **Return the Starlette ``Request`` for the in-flight MCP tool call.      The MCP S** (1 connections) — `src/hal0/api/mcp_mount.py`
 - **Return ``(raw_bearer, client_id)`` for the current MCP request.      Wired into** (1 connections) — `src/hal0/api/mcp_mount.py`
 - **Return ``client_id`` for the current MCP request (issue #317).      Identity com** (1 connections) — `src/hal0/api/mcp_mount.py`
 - **Return whether the calling client toggled ``--private`` mode.      Read from the** (1 connections) — `src/hal0/api/mcp_mount.py`
+- **Build + mount the admin and (optionally) memory MCP sub-apps.      Called once f** (1 connections) — `src/hal0/api/mcp_mount.py`
+- **Extract a bearer token from the Authorization header, if present.** (1 connections) — `src/hal0/api/mcp_mount.py`
 - *... and 3 more nodes in this community*
 
 ## Relationships

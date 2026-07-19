@@ -1,6 +1,6 @@
 # slots-wireup-v3.spec.ts
 
-> 3 nodes
+> 3 nodes · cohesion 0.67
 
 ## Key Concepts
 
@@ -10,8 +10,7 @@
 
 ## Relationships
 
-- [apiMock.ts](apiMock.ts.md) (1 shared connections)
-- [test](test.md) (1 shared connections)
+- [apiMock.ts](apiMock.ts.md) (2 shared connections)
 
 ## Source Files
 

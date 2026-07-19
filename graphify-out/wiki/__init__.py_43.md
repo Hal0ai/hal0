@@ -1,10 +1,11 @@
 # __init__.py
 
-> 1 nodes
+> 2 nodes · cohesion 1.00
 
 ## Key Concepts
 
-- **__init__.py** (0 connections) — `tests/activity/__init__.py`
+- **__init__.py** (1 connections) — `tests/mcp/__init__.py`
+- **hal0 MCP server unit tests (Phase 8 — Agents v0.2).** (1 connections) — `tests/mcp/__init__.py`
 
 ## Relationships
 
@@ -12,11 +13,11 @@
 
 ## Source Files
 
-- `tests/activity/__init__.py`
+- `tests/mcp/__init__.py`
 
 ## Audit Trail
 
-- EXTRACTED: 0 (0%)
+- EXTRACTED: 2 (100%)
 - INFERRED: 0 (0%)
 - AMBIGUOUS: 0 (0%)
 
