@@ -969,6 +969,11 @@ def _resolve_llm(request: Request) -> LlmFn:
     headers = _self_call_headers(request, prefer="client")
 
     async def _primary_completion(body: dict[str, Any]) -> dict[str, Any]:
+        tried_model = body.get("model")
+        if not isinstance(tried_model, str) or not tried_model:
+            # Nothing to dispatch to — short-circuit before the self-call so an
+            # empty resolution doesn't burn a network round trip just to fail.
+            return {"error": _unrouteable_model_error(tried_model or "(no model set)")}
         async with httpx.AsyncClient(timeout=timeout_s) as http:
             try:
                 resp = await http.post(
@@ -977,7 +982,20 @@ def _resolve_llm(request: Request) -> LlmFn:
                     headers=headers or None,
                 )
             except httpx.HTTPError as exc:
+                # Genuine transport failure (connection refused, DNS, timeout —
+                # the box's own /v1 never answered). Kept distinguishable from
+                # the unrouteable-model case below: this text always says
+                # "transport failure", the other never does.
                 return {"error": f"primary slot transport failure: {exc}"}
+            if resp.status_code == 404:
+                # Unrouteable: the resolver chain (hal0/<slot> -> agent) found
+                # no loaded slot to serve `tried_model`, so the self /v1 call
+                # 404s with dispatch.no_route — a CONFIGURATION gap, not a
+                # transport failure. Surface actionable guidance instead of
+                # the raw dispatch envelope (finding: docs/rework/
+                # r4-stage-validation.md "steward config note" — a fresh box
+                # with [brain_chat] model="" 404s with no path forward).
+                return {"error": _unrouteable_model_error(tried_model)}
         if not (200 <= resp.status_code < 300):
             return {"error": f"primary slot HTTP {resp.status_code}: {resp.text[:300]}"}
         try:
@@ -986,6 +1004,29 @@ def _resolve_llm(request: Request) -> LlmFn:
             return {"error": "primary slot returned non-JSON"}
 
     return _primary_completion
+
+
+def _unrouteable_model_error(tried_model: str) -> str:
+    """Actionable text for a 404/no-slot dispatch failure (unrouteable model).
+
+    Replaces the raw ``dispatch.no_route`` transport envelope with guidance
+    an operator can act on directly: which model id the steward tried, and
+    the two ways to fix it (load a slot, or point the config at one that IS
+    loaded). See the fresh-box finding this closes: docs/rework/
+    r4-stage-validation.md "steward config note" — ``[brain_chat] model=""``
+    still drives the ``hal0/brain`` -> ``agent`` resolver chain (see
+    :mod:`hal0.normalize.resolver`), but when neither slot is loaded the
+    chat dead-ends with no indication of what to do.
+    """
+    return (
+        f"the hal0-brain chat could not route to a model — {tried_model!r} has no "
+        "loaded slot behind it. Fix: load a `brain` or `agent` inference slot "
+        "from the dashboard's Slots panel (either backs the steward via the "
+        "resolver's hal0/brain -> agent chain), or set [brain_chat] model in "
+        "hal0.toml to a slot that IS loaded. A slot serving the steward needs "
+        "at least 8k context — the hal0-brain system prompt alone is ~7.3k "
+        "tokens."
+    )
 
 
 # ── SSE framing helpers ─────────────────────────────────────────────────────
@@ -1247,6 +1288,7 @@ __all__ = [
     "_split_thinking",
     "_surfaced_tool_schemas",
     "_tool_schemas",
+    "_unrouteable_model_error",
     "run_board_chat",
     "run_brain_chat",
 ]
