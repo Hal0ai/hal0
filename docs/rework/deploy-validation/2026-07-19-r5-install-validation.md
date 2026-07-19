@@ -301,6 +301,56 @@ Mechanism: `apply_fold_plan` folds `existing ⊕ profile/slot fold` and **writes
 
 ---
 
+## 150 BRAIN-FLAGS SPLIT + SLOT-B id-flip dry-run — stamp r5v3
+
+### 150 brain-flags split (EXECUTED + verified)
+**DB rows (2):** (1) new model **`hal0-brain-fpx8-agent-brain`** in hal0.db — SAME weights path (refcount share), `defaults.extra_args="-fa on -dev Vulkan0 --no-webui --metrics"`, `n_gpu_layers=999`, `context_size=None`. (2) `brain.toml [model].default` → `hal0-brain-fpx8-agent-brain`. Agent stays on `hal0-brain-fpx8-agent` (minimal).
+- brain AFTER: `… --alias hal0-brain-fpx8-agent-brain --ctx-size 64000 -fa on -dev Vulkan0 --no-webui --metrics --jinja -ngl 999 --chat-template-file …` — has `--no-webui`✓ `--metrics`✓ Vulkan0✓ -ngl 999✓ ctx 64000✓, **no batch micro-tune** (`-b`/`-ub`/`--threads`)✓.
+- agent AFTER: UNCHANGED — `… -fa on -dev Vulkan0 --jinja -ngl 999` (still on base model).
+- Migrator recheck 150: `folds=2 refusals=0 ok=True` (both manual models single-slot now; no refusals).
+
+### SLOT-B M5 id-flip — SCOPE + STATIC DRY-RUN on 143 (NO apply)
+Migrator = `src/hal0/slots/migrate_id_keying.py::migrate_slot_id_keying`. **No pure dry-run mode** — `RecordingSlotArtifactOps` only stubs the systemd/podman ops; the TOML/state file moves are REAL. So the plan below is **statically computed** (read-only), NOT executed.
+
+**Current identity scheme (143):**
+- Config TOMLs: **ALL 11 NAME-KEYED** (`<name>.toml`, `toml.id=None`).
+- state.json: **name-keyed dirs** (`<name>/state.json`), `slot_id=None` (8 present; flm/img/utility have none).
+- Quadlet `.container` units: **none on disk** (slots offline; regen on load). No podman slot containers running.
+- **Identity store (hal0.db `slot` table) is ALREADY id-populated** by Increment-A's non-destructive fold — ids pre-assigned & stable, so the destructive migrator **reuses** them (no new minting): agent=1, brain=2, embed=3, flm=4, img=5, rerank=6, tts=7, utility=8, vision=9, qtest=11, smoke-test=12 (id 10 gap = a prior/deleted slot; harmless).
+
+**Computed rename plan — 11 slots, 4 artefacts each** (name→id):
+`agent→1, brain→2, embed→3, flm→4, img→5, rerank→6, tts→7, utility→8, vision→9, qtest→11, smoke-test→12`. Per slot: `<name>.toml→<id>.toml`; `<name>/state.json→<id>/state.json` (+ adds `slot_id`, preserves `name`); `hal0-slot@<name>.container→hal0-slot@<id>.container` (+ daemon-reload regens `hal0-slot@<id>.service`); podman `hal0-slot-<name>→hal0-slot-<id>`. Order: deterministic TOML-stem-sorted; per slot write-id-toml → unlink-name-toml → move-state → rename-unit → rename-container.
+
+**Atomicity / idempotency / rollback:**
+- **Idempotent** (by design): marker = TOML `id` at `<id>.toml`; re-run rolls forward to byte-identical result, including half-migrated trees (stranded state.json reconciled).
+- **Atomicity is PER-FILE only** (tmp+`os.replace` for toml & state.json) — NOT one transaction across a slot's 4 artefacts or across slots. A crash mid-slot leaves a partial; recovery is **roll-FORWARD via re-run**, there is **no built-in rollback/undo**.
+- **File-rename only** — state.json stays a file (SQLite move is a later lane / migration 006).
+
+**Risks / gating:**
+1. **Requires downtime.** Not wired into lifespan; flipping the layout under a live (still name-keyed) runtime breaks its view + risks the API reconciling mid-flip and recreating name-keyed artefacts. → **STOP hal0-api + all `hal0-slot@*` units first.**
+2. **Backup gap.** The existing pre-canonicalize backup covers `/etc/hal0/slots` + hal0.db but **NOT `/var/lib/hal0/slots` state dirs nor `/etc/containers/systemd` quadlets**. Take a FRESH backup of those before the live flip (no rollback path otherwise).
+3. **Live unit/container rename is best-effort + untested on hardware** (`pragma: no cover`). With slots **offline** (current 143 state — no quadlets, no containers), `rename_unit`/`rename_container` are effective **no-ops** (nothing to move/rename) — so an offline rehearsal exercises only the TOML+state moves, NOT the live systemd/podman rename path. To rehearse those, load ≥1 slot first (generate a quadlet+container), then flip; record which path was exercised.
+4. Half-apply is safe to recover (idempotent re-run) but never leave it half-applied under a running API.
+
+**Recommendation:** rehearse on 143 in a downtime window — stop API+slot units, fresh-backup state dirs+quadlets, run migrator (offline = TOML/state only; or load one slot to also exercise unit/podman rename), then daemon-reload + restart + verify slots resolve by-id (units `@<id>`, state.json `slot_id` set, `hal0 slot list` shows id + preserved name). Idempotent, so re-run clears any partial. NOT executed here.
+
+---
+
+## SLOT-B ID-FLIP 143 — LIVE ATTEMPT → SPLIT-BRAIN → RESTORED (stamp idflip1)
+
+**Outcome: the M5 id-flip is INCOMPATIBLE with the deployed 0.9.8 (name-keyed) runtime. Flip applied cleanly offline, but the API re-created name-keyed artefacts on restart → split-brain. Restored from backup; 143 back to clean 11/11 name-keyed. BLOCK the live flip until the id-keyed runtime ships. Do NOT run on 150.** Transcript: `/tmp/hal0-deploy/idflip-143-idflip1.log`.
+
+1. **Backup** → `/var/lib/hal0/backups/pre-idflip-143-idflip1/` (state dirs + quadlets + TOMLs + hal0.db, 20 files, all sha256'd; hal0.db `8347e2…`). Counts verified vs source.
+2. **Downtime**: hal0-api stopped (inactive, 8080 down), no slot units, no slot containers.
+3. **Migrator** (`migrate_slot_id_keying`, `RecordingSlotArtifactOps` — file moves real, systemd/podman recorded-only): **exit 0, 11 slots flipped** name→id (agent→1, brain→2, embed→3, flm→4, img→5, rerank→6, tts→7, utility→8, vision→9, qtest→11, smoke-test→12; skipped 0).
+4. **Layout verify (offline): CLEAN** — `/etc/hal0/slots/` all `<id>.toml` (no name-keyed), state.json `slot_id`+`name` set, split model refs survived (brain→`qwen3.5-0.8b-brain`, qtest→`qwen3.5-0.8b`), hal0.db slot table consistent.
+5. **Restart hal0-api → SPLIT-BRAIN (the blocker):** health 200 but the running **0.9.8 runtime RE-CREATED name-keyed artefacts** — `agent/brain/flm/img/rerank/tts/utility.toml` + a `brain/` state dir — alongside the id-keyed ones. `hal0 slot list` showed **18 runners** (11 id-keyed all `error` + 7 re-seeded name-keyed); `doctor` = "Runners 10/18 healthy — errored: 1,2,3,6,7,9,11,12". **Root cause:** the deployed runtime is still **name-keyed** and re-seeds name-keyed slots on boot; it does NOT consume the id-keyed layout (exactly the migrator docstring's warning — it "flips the layout the still-name-keyed runtime reads"). The id-keyed runtime that consumes `<id>.toml` is a LATER, not-yet-deployed version.
+6. **Restore (wedged → restore per instruction):** stopped API; restored `/etc/hal0/slots`, `/var/lib/hal0/slots`, and `hal0.db` from the step-1 backup (hal0.db sha identical); restart → **health 200, `hal0 slot list` = 11 name-keyed slots (no id rows, no split-brain), Runners 11/11 healthy, split model refs intact.** Fully recovered.
+
+**GATE FINDING:** M5 id-flip must NOT be applied on the 0.9.8 name-keyed runtime — it produces split-brain (id-keyed layout orphaned + name-keyed re-seeded). The migration is code-complete but requires the id-keyed runtime (the version whose SlotManager reads `<id>.toml`/`<id>/state.json` and does NOT re-seed name-keyed). Sequencing: **deploy the id-keyed runtime FIRST, then run the flip** — not the reverse. The offline file-flip mechanics themselves work perfectly (clean, idempotent, splits preserved); the incompatibility is purely runtime-version sequencing. **Do NOT attempt on 150** (same 0.9.8 runtime). 143 left in its original healthy name-keyed state.
+
+---
+
 ## Overall verdict
 - **471c365a is SHIP-READY on the podman-4.9.3 / privileged substrate (150):** clean 141s install, all exercised core phases green — O12 rootful seam, uniform `PodmanArgs=` render, hermes convergence markers + non-rotated key, `/api/health` 200, services enabled for autostart, prior failed slot healed.
 - **NOT validated on the podman-5.7 / unprivileged substrate (143):** blocked by a **box-environment** keyring-quota exhaustion (B1) — not a hal0 code defect. The installer correctly refused, but exposed two installer gaps: **M2** (misleading keyctl remedy; no keyring-quota diagnosis) and **M3** (GPU gid gate false-passes on a gid/name collision).
