@@ -21,15 +21,6 @@ requires an explicit switch, which atomically tears down the existing agent
 before installing the new one. That invariant keeps the platform's behaviour
 unambiguous — there's always exactly one agent answering.
 
-The one exception is **Turnstone**, a self-hosted orchestration platform that
-hal0 can bundle *alongside* Hermes. Because it runs its own server on a
-distinct loopback port (`127.0.0.1:9129`) and never contends for the dashboard
-chat role, Hermes and Turnstone may be installed together — installing Turnstone
-does not tear Hermes down. Every other pairing still follows single-pick.
-Turnstone routes all inference through hal0-api's OpenAI-compatible gateway,
-mounts hal0's memory and admin tools over MCP, and grades each tool call with an
-LLM judge before it runs. Install it with `hal0 agent install turnstone`.
-
 The agent runs as a systemd template unit, `hal0-agent@<id>.service` (so Hermes
 is `hal0-agent@hermes`). It runs as the unprivileged **`hal0`** system user the
 installer creates, under a tight sandbox: no new privileges, a read-only system
