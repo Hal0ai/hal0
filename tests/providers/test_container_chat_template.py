@@ -103,13 +103,14 @@ class TestLlamaLaunchPlanChatTemplate:
         )
         assert "--chat-template-file" not in plan.command
 
-    def test_chat_template_override_in_extra_args_wins(self) -> None:
-        """A manual ``--chat-template-file`` in [server].extra_args overrides the
-        resolved one. normalize_argv dedups to a single flag whose value is the
-        extra_args override (last-wins) — the documented precedence, now without
-        the confusing duplicate."""
+    def test_chat_template_typed_segment_wins_over_tune_duplicate(self) -> None:
+        """FLAGS-own: chat_template is a TYPED model field resolved into the
+        ``chat_template`` segment, which sits AFTER ``model_extra_args``. So a
+        redundant ``--chat-template-file`` smuggled into the model's freeform
+        ``defaults.extra_args`` is deduped away and the typed resolution wins
+        (the operator sets the typed chat_template, not a raw flag)."""
         tmpl_path = "/mnt/ai-models/chat-templates/llama3.jinja"
-        override = "/mnt/ai-models/chat-templates/override.jinja"
+        smuggled = "/mnt/ai-models/chat-templates/override.jinja"
         plan = _llama_launch_plan(
             image="img:latest",
             port=8095,
@@ -117,13 +118,13 @@ class TestLlamaLaunchPlanChatTemplate:
             flags_str="",
             devices=[],
             group_ids=[],
-            extra_args=f"--chat-template-file {override}",
+            model_defaults={"extra_args": f"--chat-template-file {smuggled}"},
             chat_template_path=tmpl_path,
         )
         cmd = plan.command
         assert cmd.count("--chat-template-file") == 1
         idx = cmd.index("--chat-template-file")
-        assert cmd[idx + 1] == override
+        assert cmd[idx + 1] == tmpl_path  # typed resolution wins, smuggled deduped
 
 
 # ── container_spec integration tests ─────────────────────────────────────────

@@ -70,43 +70,45 @@ def test_jinja_defaults_true_and_none_both_mean_on():
         assert "--jinja" in _extra_args(scalars), jinja_val
 
 
-def test_jinja_never_injected_for_embedding_profile():
-    """embed/rerank profiles never carried --jinja even pre-ML-5 — the
-    capability injection must not regress that (llama-server's --jinja is a
-    chat-completions feature, meaningless in --embedding mode)."""
-    embed_profile = _rocm_profile(flags="--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap")
-    scalars = _resolve_llama_scalars({"name": "s"}, _plain_model(), embed_profile)
-    assert "--jinja" not in _extra_args(scalars)
-    assert "--jinja" not in scalars["flags_str"]
-
-
-def test_jinja_never_injected_for_reranking_profile():
-    rerank_profile = _rocm_profile(flags="--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap")
-    scalars = _resolve_llama_scalars({"name": "s"}, _plain_model(), rerank_profile)
+def test_jinja_never_injected_for_embedding_model():
+    """embed/rerank never gets --jinja (llama-server's --jinja is a chat-
+    completions feature, meaningless in --embedding mode). FLAGS-own: the mode
+    marker now rides the MODEL's materialized tune (defaults.extra_args), not a
+    live profile flag string, so the injection reads it from there."""
+    model = _plain_model(defaults={"extra_args": "--embedding -fa on -b 8192 --no-mmap"})
+    scalars = _resolve_llama_scalars({"name": "s"}, model, _rocm_profile())
     assert "--jinja" not in _extra_args(scalars)
 
 
-def test_no_seed_profile_flags_carry_jinja_anymore():
-    """The profile segment itself (flags_str) never carries --jinja post
-    ML-5 — it's injected into the model_defaults segment instead."""
+def test_jinja_never_injected_for_reranking_model():
+    model = _plain_model(defaults={"extra_args": "--reranking -fa on -b 8192 --no-mmap"})
+    scalars = _resolve_llama_scalars({"name": "s"}, model, _rocm_profile())
+    assert "--jinja" not in _extra_args(scalars)
+
+
+def test_flags_str_is_empty_post_flags_own():
+    """FLAGS-own: the profile flag string never reaches launch — the resolver
+    hands back an empty flags_str; the model's materialized tune is the whole
+    story (jinja/mtp land in the model_defaults segment, not flags_str)."""
     scalars = _resolve_llama_scalars({"name": "s"}, _plain_model(), _rocm_profile())
-    assert "--jinja" not in scalars["flags_str"]
+    assert scalars["flags_str"] == ""
 
 
-# ── mtp: runner-gated, not profile-gated ──────────────────────────────────────
+# ── mtp: runner-gated, injected into the MODEL tune ───────────────────────────
 
 
-def test_mtp_bundle_absent_by_default_even_for_tagged_model_on_rocm():
-    """profile.mtp is inert; AUTO only fires via the registry tag AND
-    runner.supports.mtp — a tagged model on a plain (non-mtp-tuned) rocm
-    profile still speculates now (mtp moved OFF the profile entirely)."""
+def test_mtp_bundle_present_for_tagged_model_on_rocm():
+    """profile.mtp is inert; AUTO fires via the registry tag AND
+    runner.supports.mtp. FLAGS-own: the bundle is injected into the MODEL tune
+    (model_defaults.extra_args), computed from the model-resolved mtp, not a
+    profile flag string."""
     scalars = _resolve_llama_scalars({"name": "s"}, _mtp_tagged_model(), _rocm_profile())
-    assert "--spec-type draft-mtp" in scalars["flags_str"]
+    assert "--spec-type draft-mtp" in _extra_args(scalars)
 
 
 def test_mtp_bundle_absent_for_untagged_model():
     scalars = _resolve_llama_scalars({"name": "s"}, _plain_model(), _rocm_profile())
-    assert "--spec-type" not in scalars["flags_str"]
+    assert "--spec-type" not in _extra_args(scalars)
 
 
 def test_mtp_bundle_absent_on_cuda_runner_even_for_tagged_model():
@@ -114,32 +116,28 @@ def test_mtp_bundle_absent_on_cuda_runner_even_for_tagged_model():
     MTP drafting (RUNNER_IMAGES["cuda"].supports.mtp is False) — a tagged
     model on a cuda-backed profile does NOT speculate under AUTO."""
     scalars = _resolve_llama_scalars({"name": "s"}, _mtp_tagged_model(), _cuda_profile())
-    assert "--spec-type" not in scalars["flags_str"]
+    assert "--spec-type" not in _extra_args(scalars)
 
 
 def test_slot_mtp_true_forces_bundle_even_on_cuda():
     scalars = _resolve_llama_scalars({"name": "s", "mtp": True}, _plain_model(), _cuda_profile())
-    assert "--spec-type draft-mtp" in scalars["flags_str"]
+    assert "--spec-type draft-mtp" in _extra_args(scalars)
 
 
-# ── full precedence chain: runner < profile < family(arch) < model < slot ────
+# ── model tune drives -ngl; slot/profile inert ───────────────────────────────
 
 
-def test_precedence_chain_ngl_slot_beats_everything():
-    """-ngl set at profile, model_defaults (via the n_gpu_layers field), and
-    slot [model].n_gpu_layers all disagree -- the slot override must win in
-    the final resolved argv (normalize_argv/resolve_argv last-wins).
-
-    The model tier sets -ngl via the schema field ``n_gpu_layers`` (trusted
-    ``model_defaults`` segment), NOT via ``extra_args``: ``-ngl`` is a managed
-    flag, so a model ``extra_args`` carrying it is now rejected at launch just
-    like a slot's ``[server].extra_args`` (see test_argv.py)."""
-    profile = _rocm_profile(flags="-ngl 10 -fa on")
+def test_model_default_ngl_wins_slot_and_profile_inert():
+    """FLAGS-own: profile ``-ngl`` and slot ``[model].n_gpu_layers`` are inert —
+    only the model's typed ``defaults.n_gpu_layers`` (trusted ``model_defaults``
+    segment) reaches the final resolved argv. (The migrator folds a slot's
+    effective -ngl into the model, so 'the model owns it' holds.)"""
+    profile = _rocm_profile(flags="-ngl 10 -fa on")  # inert
     model = _plain_model(
         defaults={"extra_args": "", "n_gpu_layers": 20},
         architecture="gemma3",  # exercises the family-defaults tier too
     )
-    slot_cfg = {"name": "s", "model": {"n_gpu_layers": 30}}
+    slot_cfg = {"name": "s", "model": {"n_gpu_layers": 30}}  # inert
     scalars = _resolve_llama_scalars(slot_cfg, model, profile)
     segments = _llama_argv_segments(
         port=8080,
@@ -149,7 +147,7 @@ def test_precedence_chain_ngl_slot_beats_everything():
         slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
     )
     resolved = resolve_argv(segments)
-    assert resolved.argv[resolved.argv.index("-ngl") + 1] == "30"
+    assert resolved.argv[resolved.argv.index("-ngl") + 1] == "20"  # model, not slot 30/profile 10
 
 
 def test_precedence_chain_family_beats_profile_but_loses_to_model_extra_args():

@@ -21,23 +21,34 @@ def _profile() -> ProfileConfig:
 
 
 def test_detail_dedups_and_attributes_provenance() -> None:
+    # FLAGS-own: the profile flags + slot extra_args are inert — the model owns
+    # the tune (defaults.extra_args). A within-tune duplicate -b still dedups
+    # last-wins and is attributed to the ``model_extra_args`` segment.
     cfg = {
         "profile": "p",
         "port": 8101,
         "model": {"default": "m", "context_size": 4096},
-        "server": {"extra_args": "-b 8192"},  # overrides the profile's -b
+        "server": {"extra_args": "-b 512"},  # inert
     }
-    with patch("hal0.providers.container._resolve_profile", return_value=_profile()):
+    model_info = {
+        "_model_key": "m",
+        "path": "m",  # matches the registry-miss minimal shape (--model value)
+        "defaults": {"extra_args": "-b 512 -b 8192"},  # materialized model tune
+    }
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=_profile()),
+        patch("hal0.providers.container._best_effort_model_info", return_value=model_info),
+    ):
         detail = resolved_argv_detail_for_slot(cfg)
 
     assert detail is not None
     assert detail["argv"][0] == "img:1"
-    # -b deduped to one occurrence, extra_args value wins
+    # -b deduped to one occurrence, last (model tune) value wins
     assert detail["argv"].count("-b") == 1
     assert detail["removed"] == 1
 
     prov = {p["flag"]: p for p in detail["provenance"]}
-    assert prov["-b"]["source"] == "extra_args"
+    assert prov["-b"]["source"] == "model_extra_args"
     assert prov["-b"]["value"] == "8192"
     # --jinja is the default-on runner capability injection (§7.1a / ML-5) —
     # it's folded into the model-defaults extra_args string, which now rides

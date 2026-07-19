@@ -133,9 +133,18 @@ class ModelConfig(BaseModel):
             "4096 default (chat@4096 incident, 2026-06-15)."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # This slot [model].n_gpu_layers no longer reaches the launch argv; the
+    # migrator folds a slot's effective -ngl into its model's
+    # ``defaults.n_gpu_layers`` (trusted, managed-flag) field. Field stays for
+    # round-trip until the sunset ratchet drops it.
     n_gpu_layers: int = Field(
         default=-1,
-        description="Number of layers to offload to GPU.  -1 means all.",
+        description=(
+            "Number of layers to offload to GPU.  -1 means all. INERT at launch "
+            "(flags own by models): the migrator folds this into the model's "
+            "defaults.n_gpu_layers; it no longer reaches the argv chain."
+        ),
     )
     rope_freq_base: float = Field(
         default=0.0,
@@ -237,14 +246,19 @@ class ServerConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
+    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # This slot [server].extra_args no longer reaches the launch argv chain;
+    # the migrator folds a slot's effective tune into its model's
+    # ``defaults.extra_args`` (the screened ``model_extra_args`` segment). Kept
+    # for round-trip until the sunset ratchet drops it.
     extra_args: str | None = Field(
         default=None,
         description=(
-            "Freeform llama-server CLI passthrough.  Tokenised via shlex and "
-            "appended last in the launch argv; hal0.slots.argv.normalize_argv "
-            "then collapses cross-source duplicates last-wins, so a flag set here "
-            "overrides the same flag from the profile / model defaults "
-            "(append-list flags like --lora / --draft-model / --override-kv are kept)."
+            "Freeform llama-server CLI passthrough. INERT at launch (flags own "
+            "by models): no longer tokenised into the argv chain. The migrator "
+            "folds a slot's effective tune into the bound model's "
+            "defaults.extra_args, where hal0.slots.argv still screens it against "
+            "the §21.7 managed-arg denylist. Retained for TOML round-trip."
         ),
     )
     env: dict[str, str] | None = Field(
@@ -390,19 +404,20 @@ class SlotConfig(BaseModel):
             "See providers.container._effective_mtp and build_mtp_flag_bundle."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # This slot-level parallelism knob no longer reaches the launch argv; the
+    # migrator folds an effective ``--parallel N`` (plus ``--kv-unified`` when
+    # N>1) into the bound model's ``defaults.extra_args``. Kept for round-trip
+    # until the sunset ratchet drops it.
     parallel: int | None = Field(
         default=None,
         ge=1,
         description=(
             "Per-slot llama-server sequence slots (--parallel / -np) for continuous "
-            "batching: concurrent requests share the once-loaded weights instead of "
-            "serializing through a single sequence and thrashing one prompt cache. "
-            "None = inherit the profile flags (today: 1). When >1, --kv-unified is "
-            "emitted alongside so --ctx-size stays a SHARED pool (each request may "
-            "use up to the full context) instead of being silently split to ctx/N "
-            "per slot. Interactive slots want low N (per-stream speed ~= 1/N); agent "
-            "fan-in slots want 4-8 (bench-gated). See "
-            "providers.container._effective_parallel."
+            "batching. INERT at launch (flags own by models): no longer emitted to "
+            "the argv chain. The migrator folds an effective --parallel N (and "
+            "--kv-unified when N>1) into the bound model's defaults.extra_args. "
+            "Retained for TOML round-trip."
         ),
     )
     chat_template: str | None = Field(
@@ -1027,6 +1042,11 @@ class ProfileConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
+    # HAL0-SUNSET: v1.0.0 — images belong to RUNNERS (spec-flags-ownership §7).
+    # The profile.image pin is the last crosscutting image layer; ML-4 already
+    # directs image out of profiles (RUNNER_IMAGES[runner], digest-pinned). This
+    # field is an expiring pin honored by container._resolve_image_ref until the
+    # Runtimes-panel flow retires it. Left required to keep profiles.toml valid.
     image: str = Field(
         ...,
         description="Container image ref, e.g. ghcr.io/hal0ai/…:rocm-7.2.4-rocmfp4-server.",

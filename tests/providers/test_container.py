@@ -69,23 +69,33 @@ def _render_llama(
     publish_host="127.0.0.1",
 ):
     """Test shim mirroring the deleted ``_render_unit`` scalar shim, producing
-    Quadlet text: build the llama launch plan, then render it."""
+    Quadlet text: build the llama launch plan, then render it.
+
+    FLAGS-own: the profile ``flags_str`` and slot ``extra_args`` no longer reach
+    launch — a model owns its tune. So this shim now routes both into the
+    model's materialized ``defaults.extra_args`` (the surviving ``model_extra_args``
+    launch segment), i.e. it simulates a STAMPED model. That keeps these render
+    tests exercising the exact tune-emission + Exec= quoting path they always
+    did, just through the one channel that survives.
+    """
     # Resolve through the container module so tests patching
     # ``hal0.providers.container.resolve_gpu_device_paths`` take effect (mirrors
     # the deleted ``_render_unit`` shim, which resolved it there).
     devices = (
         device_paths if device_paths is not None else _container_mod.resolve_gpu_device_paths()
     )
+    merged_tune = " ".join(p for p in ((flags_str or "").strip(), (extra_args or "").strip()) if p)
     plan = _llama_launch_plan(
         image=image,
         port=port,
         model_path=model_path,
-        flags_str=flags_str,
+        flags_str="",  # inert now
         devices=list(devices),
         group_ids=[str(g) for g in resolve_gpu_group_ids()],
         context_size=context_size,
-        extra_args=extra_args,
+        extra_args=None,  # inert now
         model_alias=model_alias,
+        model_defaults={"extra_args": merged_tune} if merged_tune else None,
     )
     return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
 
@@ -609,7 +619,9 @@ class TestContainerSpec:
         assert argv[argv.index("--ctx-size") + 1] == "32768"
 
     def test_expected_argv_emits_config_drift_watched_flag_spellings(self) -> None:
-        """#863: drift watches exact argv spellings, so renderer renames must fail."""
+        """#863: drift watches exact argv spellings, so renderer renames must fail.
+        FLAGS-own: -b/-ub now ride the model's materialized defaults.extra_args
+        (the profile flag segment is gone), so the model carries them here."""
         provider = self._provider()
         with patch(
             "hal0.providers.container._resolve_profile",
@@ -617,7 +629,7 @@ class TestContainerSpec:
         ):
             argv = provider.expected_argv(
                 _slot_cfg(model={"default": "chadrock-35b-ace-saber", "context_size": 131072}),
-                _model_info(),
+                _model_info(defaults={"extra_args": "-b 512 -ub 512"}),
             )
 
         assert argv is not None
@@ -664,9 +676,11 @@ class TestLoadSync:
         assert any("restart" in c for c in cmds), f"restart not in {cmds}"
         assert (tmp_path / "test.service").exists()
 
-    def test_load_sync_threads_ctx_size_and_extra_args(self, tmp_path: Path) -> None:
-        """load_sync must pull context_size + [server].extra_args off the slot
-        cfg and bake them into the rendered unit."""
+    def test_load_sync_threads_ctx_size_and_model_tune(self, tmp_path: Path) -> None:
+        """load_sync bakes the slot ``context_size`` (base --ctx-size, still
+        slot-resolved) AND the MODEL's materialized ``defaults.extra_args`` into
+        the rendered unit. FLAGS-own: a slot ``[server].extra_args`` is inert —
+        the model owns the tune, so the override-kv rides ``model_info.defaults``."""
         profile = _moe_profile()
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
@@ -691,14 +705,19 @@ class TestLoadSync:
                     "port": 8095,
                     "profile": "rocm",
                     "model": {"default": "model", "context_size": 131072},
-                    "server": {"extra_args": "--override-kv k=bool:false"},
+                    "server": {"extra_args": "--override-kv IGNORED=bool:true"},  # inert
                 },
-                {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
+                {
+                    "path": "/mnt/ai-models/model.gguf",
+                    "_model_key": "model",
+                    "defaults": {"extra_args": "--override-kv k=bool:false"},
+                },
             )
 
         unit = unit_file.read_text()
-        assert "--ctx-size 131072" in unit
-        assert "--override-kv k=bool:false" in unit
+        assert "--ctx-size 131072" in unit  # slot context_size still reaches base
+        assert "--override-kv k=bool:false" in unit  # model tune reaches launch
+        assert "IGNORED=bool:true" not in unit  # slot extra_args inert
 
     def test_load_sync_advertises_model_id_alias(self, tmp_path: Path) -> None:
         """load_sync must pass the registry model id (model_info._model_key)
@@ -991,29 +1010,35 @@ class TestFamilyDefaults:
         assert argv[argv.index("-ctv") + 1] == "f16"
         assert "--cache-reuse" in argv and argv[argv.index("--cache-reuse") + 1] == "0"
 
-    def test_non_gemma_on_q8_profile_keeps_q8(self) -> None:
-        """A qwen model on the same profile is untouched — no family entry."""
+    def test_non_gemma_gets_no_family_kv_leak(self) -> None:
+        """A qwen model has no FAMILY_DEFAULTS entry, so no family KV is forced.
+        FLAGS-own: the profile's -ctk q8_0 is inert (the model owns its tune),
+        and this registry-miss model carries none — so no -ctk leaks in, and
+        crucially the gemma family f16 does NOT leak onto a non-family model."""
         profile = _moe_profile()
         cfg = {"profile": "rocm", "port": 8095, "model": {"default": "qwen3-27b"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
-        assert argv[argv.index("-ctk") + 1] == "q8_0"
-        assert "f16" not in argv
+        assert "-ctk" not in argv  # profile q8_0 inert; no model/family KV here
+        assert "f16" not in argv  # no gemma family leak
 
-    def test_slot_extra_args_still_beats_family(self) -> None:
-        """A hand-authored [server].extra_args overrides the family default."""
+    def test_slot_extra_args_is_inert_family_wins(self) -> None:
+        """FLAGS-own: a slot [server].extra_args no longer beats the family
+        default — it is inert. The gemma family f16 KV wins; a model that truly
+        wants q4_0 carries it in its own defaults.extra_args (migrator-folded)."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
             "port": 8095,
             "model": {"default": "gemma-4-12b-it"},
-            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},
+            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},  # inert
         }
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
-        assert argv[argv.index("-ctk") + 1] == "q4_0"  # slot override wins over family
+        assert argv[argv.index("-ctk") + 1] == "f16"  # family wins, slot inert
+        assert "q4_0" not in argv
 
     def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
         """The vulkan seed ships minimal flags with NO forced KV quant.

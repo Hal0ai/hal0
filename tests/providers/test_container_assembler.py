@@ -94,37 +94,39 @@ def _ngl(command: list[str]) -> str | None:
     return command[command.index("-ngl") + 1] if "-ngl" in command else None
 
 
-def test_ngl_in_extra_args_is_denied() -> None:
-    """§21.7: ``-ngl`` is a managed flag (schema's ``[model].n_gpu_layers`` is
-    the sanctioned channel) — ``[server].extra_args`` may not smuggle it, so
-    this now raises instead of silently winning precedence."""
+def test_ngl_in_model_extra_args_is_denied() -> None:
+    """§21.7 (FLAGS-own): the managed-arg denylist is PRESERVED on the model's
+    materialized tune. ``-ngl`` is managed (the typed ``defaults.n_gpu_layers``
+    is the sanctioned channel) — a model's free-form ``defaults.extra_args`` may
+    not smuggle it, so the screened ``model_extra_args`` segment raises."""
     with pytest.raises(BadRequest) as exc_info:
         _llama_launch_plan(
             image="i:1",
             port=8095,
             model_path="/m.gguf",
-            flags_str="-ngl 10",
+            flags_str="",
             devices=[],
             group_ids=[],
-            model_defaults={"n_gpu_layers": 20},
-            slot_n_gpu_layers=30,
-            extra_args="-ngl 40",
+            model_defaults={"extra_args": "-ngl 40"},
         )
     assert exc_info.value.code == "slot.managed_arg_denied"
 
 
-def test_ngl_precedence_slot_beats_model_default() -> None:
+def test_slot_ngl_is_inert_model_default_wins() -> None:
+    """FLAGS-own: the slot ``[model].n_gpu_layers`` no longer reaches launch —
+    the model's typed ``defaults.n_gpu_layers`` is the sole -ngl source (the
+    migrator folds a slot's effective -ngl into the model)."""
     plan = _llama_launch_plan(
         image="i:1",
         port=8095,
         model_path="/m.gguf",
-        flags_str="-ngl 10",
+        flags_str="-ngl 10",  # inert profile flag
         devices=[],
         group_ids=[],
         model_defaults={"n_gpu_layers": 20},
-        slot_n_gpu_layers=30,
+        slot_n_gpu_layers=30,  # inert slot override
     )
-    assert _ngl(plan.command) == "30"
+    assert _ngl(plan.command) == "20"  # model default, not slot 30 nor profile 10
 
 
 def test_ngl_precedence_model_default_beats_profile() -> None:
@@ -148,66 +150,43 @@ def _parval(command: list[str]) -> str | None:
     return None
 
 
-def test_parallel_none_inherits_profile() -> None:
+def test_slot_parallel_is_inert() -> None:
+    """FLAGS-own: the slot ``parallel`` knob no longer reaches launch. A model
+    that wants continuous batching carries ``--parallel N`` (+ ``--kv-unified``)
+    in its own ``defaults.extra_args`` (the migrator folds it there)."""
     plan = _llama_launch_plan(
         image="i:1",
         port=8095,
         model_path="/m.gguf",
-        flags_str="-fa on --parallel 1",
+        flags_str="-fa on --parallel 1",  # inert profile flag
         devices=[],
         group_ids=[],
-        slot_parallel=None,
+        slot_parallel=8,  # inert slot override
     )
-    assert _parval(plan.command) == "1"  # profile's value untouched
+    assert _parval(plan.command) is None  # neither profile's 1 nor slot's 8
     assert "--kv-unified" not in plan.command
 
 
-def test_parallel_slot_overrides_profile_and_adds_kv_unified() -> None:
+def test_parallel_from_model_extra_args_emits_kv_unified() -> None:
+    """The model's OWN tune drives batching now: a folded ``--parallel N`` in
+    ``defaults.extra_args`` reaches launch (and its authored ``--kv-unified``)."""
     plan = _llama_launch_plan(
         image="i:1",
         port=8095,
         model_path="/m.gguf",
-        flags_str="-fa on --parallel 1",
+        flags_str="",
         devices=[],
         group_ids=[],
-        slot_parallel=8,
+        model_defaults={"extra_args": "-fa on --parallel 8 --kv-unified"},
     )
     assert _parval(plan.command) == "8"
-    # deduped to one occurrence across the -np/--parallel alias
-    assert plan.command.count("--parallel") + plan.command.count("-np") == 1
-    assert "--kv-unified" in plan.command  # N>1 → unified pool
+    assert "--kv-unified" in plan.command
 
 
-def test_parallel_one_emits_no_kv_unified() -> None:
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="-fa on",
-        devices=[],
-        group_ids=[],
-        slot_parallel=1,
-    )
-    assert _parval(plan.command) == "1"
-    assert "--kv-unified" not in plan.command
-
-
-def test_parallel_extra_args_wins_over_slot() -> None:
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="--parallel 1",
-        devices=[],
-        group_ids=[],
-        slot_parallel=8,
-        extra_args="-np 2",
-    )
-    assert _parval(plan.command) == "2"  # hand-authored extra_args is highest precedence
-    assert plan.command.count("--parallel") + plan.command.count("-np") == 1
-
-
-def test_model_default_extra_args_emitted_and_overridable() -> None:
+def test_model_default_extra_args_emitted_slot_extra_args_inert() -> None:
+    """The model's ``defaults.extra_args`` reaches launch (screened
+    model_extra_args segment). FLAGS-own: a slot ``[server].extra_args`` is
+    inert and can NOT override a model default anymore."""
     plan = _llama_launch_plan(
         image="i:1",
         port=8095,
@@ -216,12 +195,12 @@ def test_model_default_extra_args_emitted_and_overridable() -> None:
         devices=[],
         group_ids=[],
         model_defaults={"extra_args": "--rope-scaling linear --foo 1"},
-        extra_args="--foo 2",  # slot extra_args overrides a model default
+        extra_args="--foo 2",  # inert slot extra_args — does NOT win
     )
     assert "--rope-scaling" in plan.command
     assert plan.command[plan.command.index("--rope-scaling") + 1] == "linear"
     assert plan.command.count("--foo") == 1
-    assert plan.command[plan.command.index("--foo") + 1] == "2"
+    assert plan.command[plan.command.index("--foo") + 1] == "1"  # model's, slot inert
 
 
 # ── 3. cpu profile gets no GPU devices / GIDs ─────────────────────────────────
