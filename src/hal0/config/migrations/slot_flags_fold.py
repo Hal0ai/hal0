@@ -32,12 +32,26 @@ Design:
   plan, write nothing). Callers opt in to writes explicitly.
 
 Managed-flag split: the effective tune's ``-ngl``/``--n-gpu-layers`` folds to
-the TYPED ``defaults.n_gpu_layers`` and ``-c``/``--ctx-size`` to
-``defaults.context_size`` (both trusted, managed fields), NOT into
+the TYPED ``defaults.n_gpu_layers`` (a trusted, managed field), NOT into
 ``defaults.extra_args`` — because ``extra_args`` rides the screened
 ``model_extra_args`` launch segment where ``-ngl`` is a §21.7 managed-arg
 denylist violation. The remainder (``-fa``, ``-b/-ub``, ``--threads``, KV-quant,
 ``--parallel``/``--kv-unified``, …) becomes ``defaults.extra_args``.
+
+``-c``/``--ctx-size`` is deliberately DROPPED, not folded. At launch a slot's
+own ``[model].context_size`` always wins over ``model.defaults.context_size``
+(:func:`hal0.providers.container._resolve_context_size` returns the explicit
+slot value whenever it is set, before the model default is ever consulted;
+``ContainerProvider.container_spec`` also passes the resolved ``context_size``
+into the ``base`` argv segment directly — ``model.defaults.context_size``
+never even reaches ``_llama_argv_segments``). So a slot's ctx is
+launch-shadowed by design: folding it into ``defaults`` would write a value
+with no launch effect, and comparing on it would refuse migrations for slots
+that only disagree on their own context window (e.g. a qtest slot at ctx4096
+vs a smoke slot at ctx8192 sharing one model). ``--ctx-size``/``-c`` tokens
+are still stripped out of the merged stream before it becomes ``extra_args``
+(they're still on the §21.7 denylist), the extracted value is just discarded
+instead of returned.
 """
 
 from __future__ import annotations
@@ -64,12 +78,17 @@ class FoldedTune:
     """The materialized tune a slot contributes to its model's ``defaults``.
 
     Value-equality is what the divergent-share check and the idempotence check
-    compare on, so this is a frozen dataclass with the three fold outputs.
+    compare on, so this is a frozen dataclass with the fold outputs that
+    actually affect launch. ``context_size`` is deliberately NOT one of them:
+    a slot's own ``[model].context_size`` always wins over
+    ``model.defaults.context_size`` at launch (see module docstring /
+    :func:`hal0.providers.container._resolve_context_size`), so folding it in
+    would be launch-inert and comparing on it would spuriously refuse slots
+    that only diverge on their own context window.
     """
 
     extra_args: str | None
     n_gpu_layers: int | None
-    context_size: int | None
 
     def as_defaults_updates(self) -> dict[str, Any]:
         """The ``defaults`` sub-keys this fold sets (omitting ``None``)."""
@@ -78,8 +97,6 @@ class FoldedTune:
             out["extra_args"] = self.extra_args
         if self.n_gpu_layers is not None:
             out["n_gpu_layers"] = self.n_gpu_layers
-        if self.context_size is not None:
-            out["context_size"] = self.context_size
         return out
 
 
@@ -187,12 +204,15 @@ def compute_folded_tune(
                        <  slot typed -ngl  <  slot extra_args (+ parallel)
                        <  slot typed -ctx
 
-    then splits the managed flags (``-ngl``/``-c``) OUT of the text into the
-    typed ``n_gpu_layers``/``context_size`` outputs (they cannot ride
-    ``extra_args`` — the launch denylist rejects ``-ngl`` on the screened
-    ``model_extra_args`` segment) and leaves the rest as ``extra_args``. The
-    model's own existing ``defaults`` participate (they are already the model's
-    tune) so re-running is a no-op.
+    then splits ``-ngl`` OUT of the text into the typed ``n_gpu_layers`` output
+    (it cannot ride ``extra_args`` — the launch denylist rejects ``-ngl`` on the
+    screened ``model_extra_args`` segment) and leaves the rest as
+    ``extra_args``. ``-c``/``--ctx-size`` is also stripped out of the text
+    (same denylist) but its value is discarded rather than folded — a slot's
+    own context_size always wins at launch, so the model-level value is
+    launch-irrelevant (see module docstring). The model's own existing
+    ``defaults`` participate (they are already the model's tune) so re-running
+    is a no-op.
     """
     md = model_defaults if isinstance(model_defaults, Mapping) else {}
 
@@ -220,7 +240,6 @@ def compute_folded_tune(
     merged = normalize_argv(stream).argv
 
     ngl: int | None = None
-    ctx: int | None = None
     remainder: list[str] = []
     i = 0
     while i < len(merged):
@@ -233,15 +252,17 @@ def compute_folded_tune(
                 remainder.extend([tok, merged[i + 1]])
             elif canon == _NGL_CANON:
                 ngl = num
-            else:
-                ctx = num
+            # canon == _CTX_CANON: still stripped out of the text (§21.7
+            # denylist), but the value is discarded — a slot's own ctx always
+            # wins at launch, so it never becomes part of the fold (see
+            # module docstring / FoldedTune docstring).
             i += 2
             continue
         remainder.append(tok)
         i += 1
 
     extra_args = " ".join(shlex.quote(t) for t in remainder) if remainder else None
-    return FoldedTune(extra_args=extra_args, n_gpu_layers=ngl, context_size=ctx)
+    return FoldedTune(extra_args=extra_args, n_gpu_layers=ngl)
 
 
 def _merge_new_defaults(existing: Mapping[str, Any] | None, folded: FoldedTune) -> dict[str, Any]:

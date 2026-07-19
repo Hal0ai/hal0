@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -268,6 +269,63 @@ def _synthesize_slots_from_upstreams(
     )
 
 
+# ── /api/status enrichment mirror ────────────────────────────────────────────
+# The fast /api/status poll serialises slots via _slot_to_dict only — it must
+# NOT run the heavy per-slot container probe (systemctl is-active + /health)
+# that list_slots' aggregator does, or it loses its cheap-liveness role. But the
+# dashboard unions /api/status with /api/slots, and a status-only entry arrives
+# bare (container_status null → a downgraded dot + zeroed metrics), so it
+# flickers whenever it wins a poll that the slow /api/slots lost. As a cheap
+# bridge, list_slots caches the enrichment it already computed and get_status
+# overlays the last-good values (no extra syscalls) onto its bare entries within
+# a short TTL. Mirrors the client-side reconcileEnrichment carry-forward.
+_STATUS_ENRICH_TTL_S = 30.0
+
+
+def _cache_slot_enrichment(request: Request, dicts: list[dict[str, Any]]) -> None:
+    """Stash list_slots' freshly-probed container state for /api/status reuse."""
+    store = getattr(request.app.state, "slot_enrich_cache", None)
+    if store is None:
+        store = {}
+        request.app.state.slot_enrich_cache = store
+    now = time.monotonic()
+    for d in dicts:
+        name = d.get("name")
+        if not name or d.get("_synthetic") or d.get("container_status") is None:
+            continue
+        store[name] = {
+            "container_status": d.get("container_status"),
+            "container_health": d.get("container_health"),
+            "metrics": d.get("metrics"),
+            "ts": now,
+        }
+
+
+def overlay_cached_enrichment(
+    request: Request, entries: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fill bare /api/status entries with list_slots' last-good enrichment.
+
+    Only touches entries that lack their own ``container_status`` and only when
+    the cached probe is within :data:`_STATUS_ENRICH_TTL_S`. Never runs a
+    syscall — a pure dict overlay — so /api/status keeps its cheap-poll
+    contract while its slot cards stop flickering in the dashboard union.
+    """
+    store = getattr(request.app.state, "slot_enrich_cache", {}) or {}
+    now = time.monotonic()
+    for e in entries:
+        if e.get("container_status") is not None:
+            continue
+        cached = store.get(e.get("name"))
+        if not cached or now - cached["ts"] > _STATUS_ENRICH_TTL_S:
+            continue
+        e["container_status"] = cached["container_status"]
+        e["container_health"] = cached["container_health"]
+        if cached.get("metrics") is not None and not e.get("metrics"):
+            e["metrics"] = cached["metrics"]
+    return entries
+
+
 # ── list / create ──────────────────────────────────────────────────────────
 
 
@@ -297,7 +355,9 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
         last_used_model=getattr(state, "last_used_model", {}),
         slot_pull_jobs=getattr(state, "slot_pull_jobs", {}),
     )
-    return [view.to_dict() for view in await aggregator.snapshot()]
+    dicts = [view.to_dict() for view in await aggregator.snapshot()]
+    _cache_slot_enrichment(request, dicts)
+    return dicts
 
 
 # The slot port allocator (pool resolution, claim collection, next-free,

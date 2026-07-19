@@ -151,6 +151,12 @@ export interface Slot {
   // that fronts every chat model. These are NOT loadable/unloadable/
   // deletable slots, so `useSlots()` filters them out of the slot grid
   // and `useEndpoints()` surfaces them in the sidebar instead.
+  /** True once the heavy /api/slots aggregator has stamped live container
+   *  state onto this entry — or once reconcileEnrichment carried the last-good
+   *  enrichment forward across a dropped poll. Bare /api/status union entries
+   *  read false; the InferencePane gates a "pending" style off this so a card
+   *  doesn't flash zeroed metrics while a slow /api/slots poll is in flight. */
+  _enriched?: boolean
   /** True for synthetic upstream-backed entries (composite endpoints). */
   _synthetic?: boolean
   /** Operator-facing explanation of why this entry isn't a real slot. */
@@ -331,30 +337,54 @@ async function fetchSlotsUnion(): Promise<Slot[]> {
 const ENRICH_TTL_MS = 30_000
 const lastGoodEnrichment = new Map<
   string,
-  { container_status: unknown; container_health: unknown; ts: number }
+  {
+    container_status: unknown
+    container_health: unknown
+    model: unknown
+    metrics: unknown
+    ts: number
+  }
 >()
+
+// A slot is "enriched" once the /api/slots aggregator has stamped its live
+// container probe onto it. /api/status union entries arrive bare (FSM state
+// only, container_status null).
+function isEnriched(s: Slot): boolean {
+  return s.container_status != null
+}
 
 function reconcileEnrichment(slots: Slot[]): Slot[] {
   const now = Date.now()
   return slots.map((s) => {
     if (s._synthetic) return s
-    if (s.container_status != null) {
+    if (isEnriched(s)) {
+      // Fresh authoritative data — snapshot it (including model + metrics, so a
+      // subsequent dropped poll can carry the whole card forward, not just the
+      // container dot) and trust it verbatim even when it reads offline/idle.
       lastGoodEnrichment.set(s.name, {
         container_status: s.container_status,
         container_health: (s as { container_health?: unknown }).container_health,
+        model: s.model,
+        metrics: s.metrics,
         ts: now,
       })
-      return s
+      return { ...s, _enriched: true }
     }
     const lg = lastGoodEnrichment.get(s.name)
     if (lg && now - lg.ts <= ENRICH_TTL_MS) {
+      // Bare entry won a poll that /api/slots lost — carry the last-good
+      // enrichment forward so the card holds its dot + model + metrics instead
+      // of degrading to a downgraded state and zeroed tok/s for one interval.
       return {
         ...s,
         container_status: lg.container_status,
         container_health: lg.container_health,
+        model: s.model || (lg.model as string | undefined) || s.model,
+        metrics: lg.metrics ?? s.metrics,
+        _enriched: true,
       } as Slot
     }
-    return s
+    return { ...s, _enriched: false }
   })
 }
 
