@@ -29,6 +29,8 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const [makeDefault, setMakeDefault] = useStateC(false);
   const [submitErr, setSubmitErr] = useStateC(null);
 
+  const models = useMemoC(() => localModels(modelsQuery.data), [modelsQuery.data]);
+
   useEffectC(() => {
     if (open) {
       setName(defaults.name || "");
@@ -39,7 +41,25 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const models = useMemoC(() => localModels(modelsQuery.data), [modelsQuery.data]);
+  // Preselect the selected/derived type's default model — but only once the
+  // models list has actually loaded (modelsQuery.data can still be pending
+  // when `open` flips true, so this can't live in the reset effect above).
+  // Models list rows carry `default: bool` (the per-type marker set via
+  // POST /api/models/{id}/default), so opening "New slot" for a known type
+  // (e.g. the empty-slot-card "Configure" flow, which prefills
+  // `defaults.type`) starts on the operator's chosen default instead of a
+  // blank picker. Guarded on `!modelId` so it never overrides an explicit
+  // `defaults.model` (already applied above) or a model the operator has
+  // since picked themselves.
+  useEffectC(() => {
+    if (!open || defaults.model || modelId) return;
+    const targetType = defaults.type || "";
+    if (!targetType) return;
+    const typeDefault = models.find((m) => m.type === targetType && m.default);
+    if (typeDefault) setModelId(typeDefault.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, models]);
+
   const selModel = useMemoC(() => models.find((m) => m.id === modelId) || null, [models, modelId]);
   const device = selModel ? deviceFromModel(selModel) : null;
   const hue = device ? deviceHue(device) : null;
