@@ -11,6 +11,10 @@ import { SettingsShell } from './settings/SettingsShell.jsx'
 // view off the Tweaks-panel demo toggle. Real ESM imports (like SettingsShell).
 import { MigrationBanner } from './migration/MigrationBanner.jsx'
 import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
+// O19: app-shell auth gate. Renders the login view in place of the app when
+// enforcement is on and the session is anonymous; a no-op on open boxes (the
+// shipped default). Real ESM import, like SettingsShell above.
+import { AuthGate } from './auth/AuthGate.jsx'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -505,7 +509,9 @@ const hal0QueryClient = window.Hal0QueryClient;
 ReactDOM.createRoot(document.getElementById("root")).render(
   <Hal0QueryClientProvider client={hal0QueryClient}>
     <BannerProvider>
-      <App />
+      <AuthGate>
+        <App />
+      </AuthGate>
     </BannerProvider>
   </Hal0QueryClientProvider>
 );
