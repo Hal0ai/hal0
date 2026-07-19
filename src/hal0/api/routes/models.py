@@ -180,7 +180,15 @@ async def scan_preview(request: Request) -> dict[str, Any]:
     extensions = {e.lower() for e in cfg.models.file_extensions}
 
     preview = _svc.preview_scan_rows(raw_paths, recursive, extensions)
-    return {"preview": preview, "count": len(preview)}
+
+    # Drift view: existing registry rows whose backing file is now absent.
+    # Surfaced so the operator/UI can see what a `{"prune": true}` scan would
+    # remove BEFORE committing. ``referenced`` flags rows a slot/stack still
+    # points at — those are protected from prune (repair, don't delete).
+    registry = request.app.state.model_registry
+    missing = _svc.missing_registry_rows(registry)
+
+    return {"preview": preview, "count": len(preview), "missing": missing}
 
 
 @router.post("/scan")
@@ -193,7 +201,11 @@ async def scan_models(request: Request) -> dict[str, Any]:
     * **Legacy / empty body** — walk the configured ``[models].roots`` and
       auto-register every new candidate via the discover module. Each
       added model fires a ``model.registered`` event with
-      ``source='scan'``.
+      ``source='scan'``. Pass ``{"prune": true}`` to also reconcile the
+      registry: rows whose backing file is missing on disk are removed
+      (each firing a ``model.pruned`` event) UNLESS the id is referenced by
+      a slot or stack, in which case it is reported under
+      ``missing_referenced`` for repair rather than deleted.
 
     * **``{"rows": [...]}``** — commit pre-vetted preview rows. Each row
       may carry user-edited ``backends`` / ``capabilities`` / ``defaults``
@@ -201,7 +213,8 @@ async def scan_models(request: Request) -> dict[str, Any]:
       detection output for that path. User overrides always win — that's
       the whole point of the preview round-trip.
 
-    Returns ``{added, skipped, scanned_roots}`` in both modes so the UI's
+    Returns ``{added, skipped, scanned_roots}`` in both modes (plus
+    ``pruned`` / ``missing_referenced`` on the auto-scan path) so the UI's
     toast-render path is unchanged.
     """
     registry = request.app.state.model_registry
@@ -215,8 +228,9 @@ async def scan_models(request: Request) -> dict[str, Any]:
     if isinstance(rows, list) and rows:
         return await _svc.commit_scan_rows(rows, registry, event_bus)
 
+    prune = bool(body.get("prune", False)) if isinstance(body, dict) else False
     cfg = load_hal0_config()
-    return await _svc.auto_scan_and_register(registry, cfg.models, event_bus)
+    return await _svc.auto_scan_and_register(registry, cfg.models, event_bus, prune=prune)
 
 
 @router.post("/add-from-path", status_code=201)

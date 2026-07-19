@@ -10,6 +10,7 @@ from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import (
     backfill_coordless,
     find_candidates,
+    prune_missing,
     register_candidate,
     scan_and_register,
 )
@@ -448,3 +449,110 @@ def test_scan_and_register_backfills_existing_coordless_row(
     row = registry.get(mid)
     assert row.hf_repo == "Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF"
     assert row.hf_filename == fname
+
+
+# ── prune_missing / reconcile ──────────────────────────────────────────────
+
+
+def test_prune_missing_removes_unprotected_missing_row(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """A row whose backing file no longer exists and is NOT referenced by any
+    slot/stack is removed from the registry and reported under 'pruned'."""
+    gone = tmp_path / "deleted-model-q4.gguf"
+    gone.write_bytes(b"x" * 64)
+    registry.add(Model(id="gone", path=str(gone.resolve()), capabilities=["chat"]))
+    gone.unlink()  # weights deleted from disk → row is now stale
+
+    result = prune_missing(registry, protected_ids=set())
+    assert result["pruned"] == ["gone"]
+    assert result["missing_referenced"] == []
+    assert result["kept"] == 0
+    assert not registry.has("gone")
+
+
+def test_prune_missing_protects_referenced_missing_row(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """A row whose file is missing but whose id is in protected_ids is NOT
+    removed — it is reported under 'missing_referenced' for repair instead."""
+    gone = tmp_path / "slot-model-q4.gguf"
+    gone.write_bytes(b"x" * 64)
+    registry.add(Model(id="slot-model", path=str(gone.resolve()), capabilities=["chat"]))
+    gone.unlink()
+
+    result = prune_missing(registry, protected_ids={"slot-model"})
+    assert result["pruned"] == []
+    assert result["missing_referenced"] == ["slot-model"]
+    assert result["kept"] == 0
+    # Still present — functional drift the operator must repair, not delete.
+    assert registry.has("slot-model")
+
+
+def test_prune_missing_leaves_present_rows(tmp_path: Path, registry: ModelRegistry) -> None:
+    """A row whose backing file still exists is untouched and counts as kept —
+    even when its size_bytes metadata is 0 (stale meta is not authoritative)."""
+    live = tmp_path / "live-model-q4.gguf"
+    live.write_bytes(b"x" * 64)
+    # size_bytes intentionally 0 (stale metadata) — must NOT trigger a prune.
+    registry.add(Model(id="live", path=str(live.resolve()), size_bytes=0, capabilities=["chat"]))
+
+    result = prune_missing(registry, protected_ids=set())
+    assert result["pruned"] == []
+    assert result["missing_referenced"] == []
+    assert result["kept"] == 1
+    assert registry.has("live")
+
+
+def test_prune_missing_dry_run_does_not_remove(tmp_path: Path, registry: ModelRegistry) -> None:
+    """dry_run reports what would be pruned without mutating the registry."""
+    gone = tmp_path / "dry-model-q4.gguf"
+    gone.write_bytes(b"x" * 64)
+    registry.add(Model(id="dry", path=str(gone.resolve()), capabilities=["chat"]))
+    gone.unlink()
+
+    result = prune_missing(registry, protected_ids=set(), dry_run=True)
+    assert result["pruned"] == ["dry"]
+    assert registry.has("dry")  # unchanged
+
+
+def test_scan_and_register_prune_true_prunes_and_returns_new_keys(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """scan_and_register(prune=True) folds prune results into its return under
+    'pruned'/'missing_referenced' and removes the unprotected stale row."""
+    root = tmp_path / "models"
+    root.mkdir()
+    # A live model that stays registered on-disk.
+    live = root / "qwen3-4b-instruct-q4_k_m.gguf"
+    live.write_bytes(b"y" * 128)
+    # A stale row whose file was deleted.
+    gone = root / "old-model-q4.gguf"
+    gone.write_bytes(b"z" * 64)
+    registry.add(Model(id="stale", path=str(gone.resolve()), capabilities=["chat"]))
+    gone.unlink()
+
+    cfg = ModelsConfig(roots=[str(root)])
+    result = scan_and_register(registry, cfg, prune=True, protected_ids=set())
+    assert "pruned" in result and "missing_referenced" in result
+    assert result["pruned"] == ["stale"]
+    assert result["missing_referenced"] == []
+    assert not registry.has("stale")
+
+
+def test_scan_and_register_default_does_not_prune(tmp_path: Path, registry: ModelRegistry) -> None:
+    """Default (prune=False) never removes stale rows and returns empty
+    'pruned'/'missing_referenced' so the return shape stays stable."""
+    root = tmp_path / "models"
+    root.mkdir()
+    gone = root / "old-model-q4.gguf"
+    gone.write_bytes(b"z" * 64)
+    registry.add(Model(id="stale", path=str(gone.resolve()), capabilities=["chat"]))
+    gone.unlink()
+
+    cfg = ModelsConfig(roots=[str(root)])
+    result = scan_and_register(registry, cfg)
+    assert result["pruned"] == []
+    assert result["missing_referenced"] == []
+    # Stale row is left alone — add-only behavior preserved by default.
+    assert registry.has("stale")

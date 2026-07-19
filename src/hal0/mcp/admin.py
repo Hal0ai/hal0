@@ -332,9 +332,12 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
 # (reversible, scoped, low blast radius).
 AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
     {
-        # Model. model_scan only ADDS registry entries for files already
-        # on disk (reversible via model_delete); model_pull_cancel stops
-        # an in-flight download the agent (or operator) started.
+        # Model. model_scan ADDS registry entries for files on disk
+        # (reversible via model_delete); with prune=true it also removes
+        # rows whose file is missing on disk — but slot/stack-referenced
+        # rows are protected and only reported, never auto-deleted, so the
+        # blast radius stays low. model_pull_cancel stops an in-flight
+        # download the agent (or operator) started.
         "model_swap",
         "model_assign",
         "model_edit",
@@ -648,6 +651,18 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "Exact .gguf filename in the repo (from model_inspect)",
             },
             "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
+        },
+    },
+    "model_scan": {
+        "properties": {
+            "prune": {
+                "type": "boolean",
+                "description": (
+                    "Also remove registry rows whose file is missing on disk; "
+                    "slot/stack-referenced rows are protected and only reported "
+                    "(missing_referenced), never deleted. Default false = add-only."
+                ),
+            },
         },
     },
     "model_swap": {
@@ -1608,7 +1623,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Args: name=SLOT name (not the model!), model=registered model id."
     ),
     "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
-    "model_scan": "Walk the configured model roots + store and register newly-found files.",
+    "model_scan": (
+        "Walk the configured model roots + store and register newly-found files. "
+        "Pass prune=true to also remove registry rows whose file is missing on disk "
+        "(slot/stack-referenced rows are protected and only reported)."
+    ),
     "model_pull_cancel": "Cancel an in-flight model pull job.",
     "model_pull_delete": (
         "Clear a TERMINAL pull job's record from memory + disk (409s if still queued/running)."

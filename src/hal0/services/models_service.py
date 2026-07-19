@@ -19,6 +19,7 @@ that land first.
 from __future__ import annotations
 
 import contextlib
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ from hal0.model_meta import classify
 from hal0.registry.detect import DetectionResult, detect
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
+
+log = logging.getLogger(__name__)
 
 # ── model-id classification (pure) ────────────────────────────────────────────
 
@@ -430,15 +433,26 @@ async def auto_scan_and_register(
     registry: Any,
     models_cfg: Any,
     event_bus: Any | None,
+    *,
+    prune: bool = False,
 ) -> dict[str, Any]:
     """Walk the configured ``[models].roots`` and auto-register new candidates.
 
     The empty-body branch of ``POST /api/models/scan``: every newly discovered
     file fires a ``model.registered`` event with ``source='scan'``.
-    """
-    from hal0.registry.discover import scan_and_register
 
-    result = scan_and_register(registry, models_cfg)
+    ``prune=True`` also reconciles the registry (:func:`hal0.registry.discover
+    .prune_missing`): rows whose backing file is missing on disk are removed
+    — each firing a ``model.pruned`` event — UNLESS the id is referenced by a
+    slot or stack (:func:`hal0.registry.discover.referenced_model_ids`), in
+    which case it is reported under ``missing_referenced`` for repair rather
+    than deleted. The ``pruned``/``missing_referenced`` result keys are always
+    present (both ``[]`` when ``prune`` is False).
+    """
+    from hal0.registry.discover import referenced_model_ids, scan_and_register
+
+    protected_ids = referenced_model_ids() if prune else set()
+    result = scan_and_register(registry, models_cfg, prune=prune, protected_ids=protected_ids)
     if event_bus is not None:
         for mid in result.get("added", []):
             try:
@@ -457,7 +471,45 @@ async def auto_scan_and_register(
                     "source": "scan",
                 },
             )
+        # Best-effort: surface pruned rows as a distinct event so the UI /
+        # audit trail records the reconcile (mirrors model.registered).
+        for mid in result.get("pruned", []):
+            with contextlib.suppress(Exception):
+                await event_bus.emit(
+                    "model.pruned",
+                    "info",
+                    f"model:{mid}",
+                    f"{mid}: pruned (scan — backing file missing)",
+                    data={"id": mid, "source": "scan"},
+                )
     return result
+
+
+def missing_registry_rows(registry: Any) -> list[dict[str, Any]]:
+    """Registry rows whose backing file is now absent on disk — drift preview.
+
+    Surfaced by ``POST /api/models/scan/preview`` so the operator/UI can see
+    what a ``{"prune": true}`` scan would remove BEFORE committing.
+    ``referenced`` flags rows a slot/stack still points at — those are
+    protected from prune (repair, don't delete); see
+    :func:`hal0.registry.discover.referenced_model_ids`.
+    """
+    from hal0.registry.discover import referenced_model_ids
+
+    missing: list[dict[str, Any]] = []
+    try:
+        referenced = referenced_model_ids()
+        for m in registry.list():
+            try:
+                present = Path(m.path).exists()
+            except OSError:
+                present = False
+            if present:
+                continue
+            missing.append({"id": m.id, "path": m.path, "referenced": m.id in referenced})
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("models.scan_preview_missing_failed err=%s", exc)
+    return missing
 
 
 def preview_scan_rows(
