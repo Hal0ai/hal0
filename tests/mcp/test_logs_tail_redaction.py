@@ -44,6 +44,13 @@ from hal0.mcp.approval_queue import ApprovalQueue
             "raw fallback: Bearer abcDEF123_-.tok still gets masked",
             "raw fallback: Bearer ***REDACTED*** still gets masked",
         ),
+        (
+            # Belt-and-suspenders for the MCP clientid-leak fix: a
+            # key-shaped value stamped into client_id (should never
+            # happen post-fix, but defense in depth) still gets scrubbed.
+            "mcp.tool.invoked client_id=abcdefghijklmnopqrstuvwxyz0123456789 tool=slot_list",
+            "mcp.tool.invoked client_id=***REDACTED*** tool=slot_list",
+        ),
     ],
 )
 def test_redact_log_line_masks_known_secret_shapes(raw: str, expected: str) -> None:
@@ -54,6 +61,15 @@ def test_redact_log_line_passes_through_safe_content() -> None:
     """No false positives on lines that don't carry secrets."""
     line = "[12:00:00] hal0.api.startup version=0.2.0a2"
     assert admin._redact_log_line(line) == line
+
+
+def test_redact_log_line_does_not_mask_short_client_id_labels() -> None:
+    """The hashed client_id label (12 hex chars) and short agent ids stay
+    visible — only long, key-shaped ``client_id=`` values are secrets."""
+    line = "mcp.tool.invoked client_id=1a2b3c4d5e6f tool=slot_list outcome=ok"
+    assert admin._redact_log_line(line) == line
+    line2 = "mcp.tool.invoked client_id=anonymous tool=slot_list outcome=ok"
+    assert admin._redact_log_line(line2) == line2
 
 
 def test_redact_logs_payload_walks_lines_array() -> None:
