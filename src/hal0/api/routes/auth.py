@@ -9,6 +9,9 @@ Mounted at ``/api/auth`` in ``create_app()``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Literal
+
 import structlog
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
@@ -22,6 +25,7 @@ from hal0.api.auth import (
 )
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.errors import BadRequest, TooManyRequests, Unauthorized
+from hal0.service_identity import rotate_api_env_key
 
 log = structlog.get_logger(__name__)
 
@@ -34,6 +38,10 @@ class LoginRequest(BaseModel):
 
 class RequireAuthRequest(BaseModel):
     require_auth: bool
+
+
+class RotateKeyRequest(BaseModel):
+    tier: Literal["admin", "client"] = "admin"
 
 
 def _client_ip(request: Request) -> str:
@@ -133,6 +141,86 @@ async def set_require_auth(body: RequireAuthRequest, request: Request) -> dict[s
     request.app.state.hal0_config = cfg
     log.info("hal0.auth.require_toggled", require_auth=body.require_auth)
     return {"require_auth": body.require_auth, "applies_live": True}
+
+
+@router.post("/rotate")
+async def rotate_key(body: RotateKeyRequest, request: Request) -> dict[str, object]:
+    """Rotate the ``admin`` or ``client`` box key. ADMIN-gated, status-only.
+
+    Mints a fresh ``secrets.token_urlsafe(32)`` key, writes it atomically into
+    ``/etc/hal0/api.env`` (same-dir tmpfile + ``os.replace``, existing owner
+    preserved, mode forced to a never-world-readable ``0640``), and updates the
+    running process' ``os.environ`` so the auth layer honours it on the very
+    next request — **live, no restart** (``restart_required: false``). See
+    :func:`hal0.service_identity.rotate_api_env_key`.
+
+    ADMIN gating is enforced by the exposure middleware
+    (:mod:`hal0.security.exposure` classifies ``POST /api/auth/rotate`` ADMIN),
+    exactly like ``PUT /api/auth/require``: while enforcement is OFF the box is
+    trusted-LAN-open by the operator's own posture, so the call rides through;
+    once auth is ON only an admin session/bearer reaches this route.
+
+    Response is **status only** — ``{tier, rotated_at, key_len, fingerprint,
+    applies_live, restart_required, session_preserved, note}``. The key VALUE
+    is never returned, logged, or revealed anywhere; retrieve it out-of-band
+    from ``/etc/hal0/api.env`` on the box. ``fingerprint`` is a one-way
+    sha256 prefix that proves which key is live without exposing it.
+
+    Admin self-rotation: the caller's *browser session cookie* is HMAC-signed
+    independently of the admin key (minted by ``agents/_auth.py``), so it stays
+    valid across a rotation — the dashboard operator is NOT locked out
+    (``session_preserved`` for the admin tier). Bearer/API clients using the
+    OLD key stop working immediately and must switch to the new key.
+
+    Brute-force guard: metered by the shared per-IP login limiter (``login``
+    reuses the same ``app.state.login_limiter``) BEFORE any work happens.
+    """
+    limiter = getattr(request.app.state, "login_limiter", None)
+    if limiter is not None:
+        client_ip = _client_ip(request)
+        if not limiter.allow(client_ip):
+            log.warning("hal0.auth.rotate_rate_limited", client=client_ip)
+            raise TooManyRequests(
+                "too many rotate attempts; slow down and retry shortly",
+                code="auth.rate_limited",
+                details={"retry_after_s": int(limiter.retry_after(client_ip)) + 1},
+            )
+
+    tier = body.tier
+    # status = {tier, key_len, fingerprint} — NEVER the key value.
+    status_only = rotate_api_env_key(tier)
+    rotated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    # Only the fingerprint / length are logged — never the key itself.
+    log.info(
+        "hal0.auth.key_rotated",
+        tier=tier,
+        fingerprint=status_only["fingerprint"],
+        key_len=status_only["key_len"],
+    )
+
+    if tier == "admin":
+        note = (
+            "New admin key written to /etc/hal0/api.env — retrieve it there; it is never "
+            "shown in the dashboard. Your browser session stays signed in (cookie-based); "
+            "bearer/API clients must switch to the new key."
+        )
+        session_preserved = True
+    else:
+        note = (
+            "New client key written to /etc/hal0/api.env — retrieve it there; it is never "
+            "shown in the dashboard. Clients using the old client key must switch to it."
+        )
+        # A client-key rotation never touches the operator's admin session.
+        session_preserved = True
+
+    return {
+        **status_only,
+        "rotated_at": rotated_at,
+        "applies_live": True,
+        "restart_required": False,
+        "session_preserved": session_preserved,
+        "note": note,
+    }
 
 
 @router.get("/status")
