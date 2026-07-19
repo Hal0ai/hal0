@@ -300,6 +300,11 @@ async def create_model(request: Request) -> dict[str, Any]:
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")
+    # Screen launch-affecting fields at CREATE time too (UI-API-1 item 1): PUT
+    # already screened, but create wrote straight to the registry, so a row
+    # born with an extra_args that smuggles --port/--model/… would only fail at
+    # launch (or silently rebind the slot). Same helper the PUT/validate paths use.
+    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
     try:
         model = Model(**body)
     except (TypeError, ValueError) as exc:
@@ -321,6 +326,29 @@ async def create_model(request: Request) -> dict[str, Any]:
             },
         )
     return _model_to_dict(model)
+
+
+@router.post("/validate")
+async def validate_model_write(request: Request) -> dict[str, Any]:
+    """Dry-run screen of a model create/edit body — no registry write (UI-API-1).
+
+    The dashboard's Model drawer POSTs a candidate ``{defaults, preferred_runner}``
+    here before saving, so a managed-arg smuggle (e.g. ``--port`` in
+    ``defaults.extra_args``) or an unknown ``preferred_runner`` is surfaced inline
+    instead of only at the eventual save (or, worse, at launch). Returns
+    ``{"ok": true}`` on a clean body; a violation raises the SAME typed envelope
+    (``slot.managed_arg_denied`` / ``model.extra_args_unparseable`` /
+    ``model.extra_args_json_quoting`` / ``model.unknown_runner``) the create and
+    PUT paths raise, so the drawer renders one error path.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
+    return {"ok": True}
 
 
 @router.get("/pulls")
@@ -549,42 +577,12 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
-    # Validate a writable ``preferred_runner`` (UI-API-1 item 2): the field is
-    # a key into hal0.runners.RUNNER_IMAGES. Reject an unknown key at SAVE time
-    # so the drawer's runner-override dropdown can never persist a value the
-    # launcher would silently skip. ``None``/"" clears the preference (valid).
-    if "preferred_runner" in body:
-        pr = body["preferred_runner"]
-        if pr is not None and (not isinstance(pr, str) or pr not in _RUNNER_IMAGES):
-            raise BadRequest(
-                f"preferred_runner {pr!r} is not a known runner key",
-                code="model.unknown_runner",
-                details={"preferred_runner": pr, "available": sorted(_RUNNER_IMAGES)},
-            )
-
-    # Screen defaults.extra_args against the managed-arg denylist at SAVE
-    # time. Launch already rejects loudly (slot.managed_arg_denied), so this
-    # is defense-in-depth/UX for non-dashboard clients: fail the write with
-    # the same envelope instead of persisting a tune that can never load.
-    defaults = body.get("defaults")
-    if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
-        import shlex
-
-        from hal0.slots.argv import _deny_managed_flags
-
-        # O10 guard (spec §3 JSON-token integrity): catch a bare double-quoted
-        # JSON value the shell would eat BEFORE the denylist/parse checks so
-        # the operator gets the actionable "single-quote it" message.
-        _svc.screen_extra_args_json(defaults["extra_args"], segment="model defaults.extra_args")
-
-        try:
-            tokens = shlex.split(defaults["extra_args"])
-        except ValueError as exc:
-            raise BadRequest(
-                f"defaults.extra_args is not parseable as a flag string: {exc}",
-                code="model.extra_args_unparseable",
-            ) from exc
-        _deny_managed_flags(tokens, segment="model defaults.extra_args")
+    # Validate the launch-affecting fields (preferred_runner + defaults.extra_args)
+    # at SAVE time (UI-API-1 items 1/2). Shared with create + /validate so the
+    # three paths never drift; screens preferred_runner against RUNNER_IMAGES and
+    # defaults.extra_args against the managed-arg denylist (fails the write with
+    # the same envelope the launch path raises).
+    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
 
     # Snapshot the pre-update model so we can diff the field set the
     # client actually changed (vs the wire-format keys, which may include
