@@ -156,6 +156,11 @@ RULES: tuple[_Rule, ...] = (
     _Rule("openapi schema", _exact("/api/openapi.json"), AuthClass.ADMIN, _GET),
     _Rule("swagger oauth2 redirect", _exact("/docs/oauth2-redirect"), AuthClass.ADMIN, _GET),
     # ── CLIENT: /v1 inference + writer surface (rest of /v1/*) ─────────
+    # Realtime WS (HP-realtime inc-1): a spoken inference surface, CLIENT like
+    # chat. Pinned by name before the generic /v1 rule so the Settings Security
+    # page + exposure CI resolve it to an explicit "realtime" rule (the generic
+    # /v1 prefix below would already classify it CLIENT; this documents intent).
+    _Rule("realtime ws (inference)", _prefix("/v1/realtime"), AuthClass.CLIENT, None),
     _Rule("v1 inference/writer", _prefix("/v1"), AuthClass.CLIENT, None),
     # ── CLIENT: explicit read-only introspection GETs ──────────────────
     _Rule("models list/introspection (GET)", _prefix("/api/models"), AuthClass.CLIENT, _GET),

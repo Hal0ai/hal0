@@ -1,0 +1,203 @@
+---
+title: Talk to the box (Realtime voice)
+description: Point an OpenAI-Realtime client at hal0's WS /v1/realtime endpoint — server-VAD turn-taking, a generic chat leg with client-side MCP tools, and the hal0-brain steward leg that drives the box by voice.
+sidebar:
+  order: 47
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 exposes an **OpenAI-Realtime WebSocket** endpoint at
+`ws://<hal0-host>:8080/v1/realtime`. Any client that speaks the OpenAI
+Realtime wire protocol — including the LocalAI Go demo
+(`github.com/localai-org/localai-realtime-demo`) — can hold a spoken,
+barge-in conversation with the box: it transcribes your speech, runs one
+of hal0's chat legs, and streams synthesized audio back.
+
+Audio is **pcm16 mono @ 24 kHz** both directions (the demo's default and
+kokoro's native output — no resampling). The endpoint reuses hal0's
+existing STT and TTS slots, one of its LLM legs, and its normal
+tool-security posture — it is **not** a second policy surface.
+
+<Aside type="caution" title="No built-in auth by default">
+Like the rest of `/v1`, the Realtime endpoint is **CLIENT-tier** and, on
+the stock trusted-LAN posture, accepts every upgrade. With
+`HAL0_REQUIRE_AUTH=1` set, pass a client key as `?api_key=` on the WS URL
+(or an `Authorization: Bearer` header). Run the box on a trusted LAN or
+behind your own proxy.
+</Aside>
+
+## Prerequisites
+
+<Steps>
+
+1. A **loaded STT slot** (e.g. a moonshine ASR slot) and a **loaded TTS
+   slot** (kokoro). Point the endpoint at them in config (below).
+
+2. For the steward leg: the **hal0-brain** steward enabled
+   (`[brain_chat] enabled = true`, the default).
+
+3. For client-side tools: an `mcp-remote` bridge (see
+   [Drive the box with tools](#drive-the-box-with-tools)).
+
+</Steps>
+
+## Configure the endpoint
+
+The `[realtime]` section names which loaded slots serve audio and tunes
+the server VAD. All keys are optional; defaults shown:
+
+```toml
+[realtime]
+enabled = true
+sample_rate = 24000        # fixed pcm16 rate, both directions
+stt_model = ""             # loaded STT slot/model id (empty → session chat model)
+tts_model = "kokoro"       # loaded TTS slot/model id
+tts_voice = ""             # empty → the tts slot's own default voice
+
+# Server VAD (energy-threshold, in-process, CPU). Tune for your mic/room.
+vad_energy_threshold = 0.02  # normalized RMS (0–1); raise if it triggers on noise
+vad_silence_ms = 500         # trailing silence that ends a turn
+vad_min_speech_ms = 200      # shorter voiced blips are ignored (cough/click)
+
+# Voice-bounded approval wait for gated steward tools (see below).
+approval_wait_s = 20.0
+```
+
+<Aside type="note" title="Server VAD ships day one">
+hal0's turn detection is a zero-dependency **energy-threshold VAD** that
+runs in-process — no extra model, no slot. The stock Go demo hardcodes
+`turn_detection: {type: server_vad}` and never sends a manual commit, so
+it works against this endpoint out of the box. Clients that prefer manual
+turns can set `turn_detection: null` in `session.update` and drive
+`input_audio_buffer.commit` / `response.create` themselves.
+</Aside>
+
+## Two legs, selected by `model`
+
+The session's `model` picks how tools work:
+
+| `model` on the WS URL / `session.update` | Leg | Tools |
+|---|---|---|
+| any generic model id (e.g. `agent`) | **plain** — streamed `/v1/chat/completions` | **client-side** MCP (below) |
+| `hal0-brain` | **steward** — the hal0-brain platform steward | **server-side**, full kb-security posture |
+
+### Generic leg + client-side tools
+
+The client declares tools in `session.update`; hal0's chat leg only
+*emits* the function call, and the **client** executes it (the demo's
+native stdio-MCP path). hal0 sends
+`response.function_call_arguments.done`; the client runs the tool and
+returns the result via `conversation.item.create` + `response.create`.
+
+```jsonc
+// session.update the client sends
+{
+  "type": "session.update",
+  "session": {
+    "model": "agent",
+    "turn_detection": { "type": "server_vad" },
+    "tools": [ /* function definitions the client will execute */ ]
+  }
+}
+```
+
+### Steward leg — drive the box by voice
+
+Set `model: "hal0-brain"` and the session runs the **hal0-brain steward**
+over a loopback `POST /api/brain/chat`. Tools (load a slot, pull a model,
+check hardware, move a board card) run **server-side** with hal0's exact
+tool-security posture — read-only by default, approval-gated writes,
+audit trail. No client tool config needed.
+
+```jsonc
+{ "type": "session.update", "session": { "model": "hal0-brain",
+    "turn_detection": { "type": "server_vad" } } }
+```
+
+<Aside type="note" title="Gated tools don't cause dead air">
+When the steward hits an approval-gated tool it would normally block up
+to 5 minutes. In a voice session hal0 instead **speaks a bounded notice**
+("that action needs your approval — check the bell") and ends the turn
+after `approval_wait_s` (default 20s). Approve it at the dashboard bell
+(`/api/agent/approvals`) and ask again.
+</Aside>
+
+## Drive the box with tools
+
+The stock demo reaches tools over **stdio MCP**, but hal0's admin tools
+are an **HTTP-mounted** server at `/mcp/admin`. Bridge the two with
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) — a stdio↔HTTP
+adapter the demo can spawn like any stdio MCP server.
+
+<Steps>
+
+1. **Widen the host allowlist on the hal0 box.** The MCP mount is
+   localhost-only by default (DNS-rebinding protection). Set this in the
+   box's API env (`/etc/hal0/api.env`) and restart:
+
+   ```bash
+   HAL0_MCP_ALLOWED_HOSTS=hal0.local:8080,hal0.local:*
+   ```
+
+   The single value `*` disables the protection entirely (LAN-only
+   deployments). See [Connect an MCP client](/guides/connect-mcp/) for
+   detail.
+
+2. **Point the demo's `mcpServers` map at an `mcp-remote` bridge** to
+   `http://<hal0-host>:8080/mcp/admin`. Identity flows on the
+   **`X-hal0-Agent`** header; add an `Authorization: Bearer <admin-key>`
+   header only if `HAL0_REQUIRE_AUTH=1` is set on the box.
+
+   ```jsonc
+   {
+     "mcpServers": {
+       "hal0-admin": {
+         "command": "npx",
+         "args": [
+           "-y", "mcp-remote",
+           "http://hal0.local:8080/mcp/admin",
+           "--header", "X-hal0-Agent:voice-demo"
+           // if auth on, also: "--header", "Authorization:Bearer <ADMIN_KEY>"
+         ]
+       }
+     }
+   }
+   ```
+
+3. **Run the demo** with that MCP config and a generic `-model` (the
+   client-side-tools path). Gated admin tools return `pending_approval`
+   inline; the model narrates it and you resolve it at the dashboard bell.
+
+</Steps>
+
+<Aside type="tip" title="Steward vs client-side tools">
+The **steward leg** (`-model hal0-brain`, no MCP config) is the simplest
+"control the box" path — one policy source, zero client setup. Use the
+**client-side MCP** bridge above when you want to bring your own tools or
+mix hal0-admin with other MCP servers in one session.
+</Aside>
+
+## Events
+
+hal0 accepts `session.update`, `input_audio_buffer.append`,
+`input_audio_buffer.commit`, `response.create`, `response.cancel`, and
+`conversation.item.create`. It emits `session.created` / `session.updated`,
+`input_audio_buffer.speech_started` / `speech_stopped` (server VAD),
+`conversation.item.input_audio_transcription.completed`, `response.created`,
+`response.output_audio_transcript.delta`, `response.output_audio.delta`,
+`response.function_call_arguments.done` (generic leg), `response.done`, and
+`error`. `response.cancel` aborts the in-flight turn (barge-in), discards
+buffered audio, and returns `response.done` with `status: cancelled`.
+Unimplemented events (`input_audio_buffer.clear`,
+`conversation.item.delete` / `.truncate`) return a typed `error`, never a
+disconnect.
+
+## Roadmap
+
+Streaming STT (incremental transcripts via the moonshine streaming
+container) and a realtime-native TTS backend are follow-ups: the curated
+`moonshine-small-streaming-en` and `vibevoice-realtime-0.5b` models are
+upstream-routed catalogue entries not yet wired as locally-pullable slots.
+Today's endpoint uses the batch STT and single-blob TTS slots, framed for
+the wire.

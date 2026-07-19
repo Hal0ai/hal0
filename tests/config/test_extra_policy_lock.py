@@ -95,6 +95,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "ToolPolicy": "forbid",
     "ActivityConfig": "forbid",
     "BrainChatConfig": "forbid",
+    # [realtime] — the WS /v1/realtime tunables (HP-realtime inc-1). Forbid: a
+    # leaf table, a typo'd key must fail loudly at load.
+    "RealtimeConfig": "forbid",
     # [security] — the auth-enforcement toggle (O19). Forbid: a typo'd key in
     # a SECURITY table must fail loudly, never silently no-op.
     "SecurityConfig": "forbid",
