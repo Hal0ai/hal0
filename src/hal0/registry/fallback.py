@@ -45,6 +45,14 @@ SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
     "image": "image",
 }
 
+#: Inverse of :data:`SLOT_TYPE_TO_CAPABILITY` — a registry ``capability``
+#: (chat/embed/rerank/asr/tts/image) to the dispatcher-vocab type
+#: (:func:`hal0.services.models_service.dispatch_type`) that the per-type
+#: ``Model.default`` marker is keyed on. Used by :func:`fallback_local_model`
+#: to check whether a servable candidate is ITS type's default before
+#: falling back to the name-similarity/size heuristic.
+_CAPABILITY_TO_DISPATCH_TYPE: dict[str, str] = {v: k for k, v in SLOT_TYPE_TO_CAPABILITY.items()}
+
 # ── Diffusion / non-text fallback guard (#940 hardening) ──────────────────
 #
 # discover._guess_capability defaults any unrecognised gguf to "chat", so
@@ -190,6 +198,15 @@ def fallback_local_model(capability: str, configured_id: str = "") -> Model | No
 
     Selection order (a text slot wants a look-alike of its configured id,
     not merely the biggest model on the box):
+      0. **Type default** — when a model of ``capability``'s dispatcher type
+         (:data:`_CAPABILITY_TO_DISPATCH_TYPE`) carries the per-type
+         ``Model.default`` marker (set via
+         :func:`hal0.services.models_service.set_model_type_default`) AND is
+         itself servable (same capability/diffusion/on-disk screen as every
+         other candidate here), it wins outright — an operator's explicit
+         default beats any heuristic. A set-but-unservable default (missing
+         file, wrong/mislabelled type) is simply not in the candidate pool,
+         so this step silently falls through to the heuristic below.
       1. **Name similarity** — the candidate sharing the most leading
          hyphen tokens with ``configured_id`` (e.g. ``gemma-4-12b-it`` →
          ``gemma-4-12b-it-ud-q4-k-xl``). Ties broken by larger size, then id.
@@ -227,6 +244,31 @@ def fallback_local_model(capability: str, configured_id: str = "") -> Model | No
         candidates.append(m)
     if not candidates:
         return None
+
+    # Step 0: an explicit per-type default wins outright when it's among the
+    # already-screened (capability + non-diffusion + on-disk) candidates —
+    # i.e. it's actually servable. A default that's unset, or set on a model
+    # that isn't servable, silently falls through to the heuristic below.
+    target_type = _CAPABILITY_TO_DISPATCH_TYPE.get(capability)
+    if target_type is not None:
+        try:
+            from hal0.services.models_service import dispatch_type
+        except ImportError:
+            dispatch_type = None  # type: ignore[assignment]
+        if dispatch_type is not None:
+            defaults = [
+                m
+                for m in candidates
+                if getattr(m, "default", False)
+                and dispatch_type(
+                    getattr(m, "id", ""), capabilities=getattr(m, "capabilities", None)
+                )
+                == target_type
+            ]
+            if defaults:
+                defaults.sort(key=lambda m: getattr(m, "id", ""))
+                return defaults[0]
+
     config_tokens = id_tokens(configured_id)
 
     def _shared_leading(m: Any) -> int:
