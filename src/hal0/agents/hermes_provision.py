@@ -848,15 +848,28 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
 # ── Phase D: home_init ──────────────────────────────────────────────────────
 
 
+#: The ``.hal0-managed`` stamp. Its foreign-home-DETECTION role died with the
+#: adopt/capture path, but one contract is still live: the agent manager's
+#: uninstall gate (``manager._safe_to_remove_data_dir``) refuses to ``rmtree``
+#: a converged home that lacks this marker, so a user's pre-existing
+#: ``~/.hermes``-style tree is never nuked. Every hal0 write path into
+#: HERMES_HOME must therefore keep stamping it, or uninstall goes inert.
+_HAL0_MANAGED_MARKER = ".hal0-managed"
+
+
 def mark_home_managed_if_owned(hermes_home: Path) -> bool:
-    """Ensure ``hermes_home`` exists and report it claimable (retired shim).
+    """Ensure ``hermes_home`` exists and stamp it hal0-managed.
 
     The adopt/capture path is gone (hal0 owns HERMES_HOME by construction), so
-    this no longer distinguishes a "foreign" tree — it just makes the directory
-    and returns ``True``. Kept as an importable seam for the hal0-api lifespan,
-    which calls it before seeding default personas.
+    this no longer distinguishes a "foreign" tree — it makes the directory and
+    stamps :data:`_HAL0_MANAGED_MARKER` so the manager's uninstall gate keeps
+    recognising the home as hal0's to remove. Kept as an importable seam for
+    the hal0-api lifespan, which calls it before seeding default personas.
     """
     hermes_home.mkdir(parents=True, exist_ok=True)
+    marker = hermes_home / _HAL0_MANAGED_MARKER
+    if not marker.exists():
+        marker.touch()
     return True
 
 
@@ -889,6 +902,13 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
         if not d.exists():
             created = True
         d.mkdir(parents=True, exist_ok=True)
+
+    # Stamp the managed marker (uninstall-gate contract — see
+    # _HAL0_MANAGED_MARKER). Convergent: only counts as a change once.
+    marker = hermes_home / _HAL0_MANAGED_MARKER
+    if not marker.exists():
+        marker.touch()
+        created = True
 
     # No chown-back (§7.4 F.7): the tree is created as hal0 (the CLI drops
     # provisioning to hal0 before this pipeline) under the setgid /var/lib/hal0,
