@@ -16,13 +16,14 @@ Lanes: hal0-memory, hal0-provider, hal0-voice, hal0-hermes-executor,
 hal0-hermes-automation, plus the cross-cutting security checklist (item 4).
 """
 
+import re
 import tomllib
 from inspect import signature
 from pathlib import Path
 
 import pytest
 
-from tests.fixtures.hermes.contracts import api_surface, config_defaults
+from tests.fixtures.hermes.contracts import api_surface, config_defaults, kanban_runs
 from tests.fixtures.hermes.contracts.memory_loader import (
     MEMORY_PLUGIN_SUBDIR,
     _ProviderCollector,
@@ -251,6 +252,60 @@ def test_automation_jobs_routes_are_frozen() -> None:
     )
 
 
+# ── lane: hal0-hermes-kanban (board executor bridge, KB-5) ────────────────
+# R5 §7 "drift-watch blind spot": hal0.board.hermes_executor.HermesBoardExecutor
+# dispatches board attempts to the Hermes kanban plugin's run ledger, and
+# hal0.agents.hermes_provision provisions the kanban DB schema — neither
+# surface was in tracked_files/contract fixtures until this lane.
+
+
+def test_kanban_db_table_roster_is_frozen() -> None:
+    # The 7-table schema hal0's kanban_db_init provisioning phase
+    # (hal0.agents.hermes_provision._phase_kanban_db_init) checks for.
+    assert {
+        "tasks",
+        "task_links",
+        "task_comments",
+        "task_events",
+        "task_runs",
+        "task_attachments",
+        "kanban_notify_subs",
+    } == kanban_runs.KANBAN_DB_TABLES
+
+
+def test_kanban_runs_routes_present() -> None:
+    # Routes HermesBoardExecutor.inspect()/.reconcile() read today (both GET
+    # {WORKER_BASE_PATH}/{run_id}).
+    assert ("get", "/runs/{run_id}") in kanban_runs.KANBAN_RUNS_ROUTES
+    assert kanban_runs.KANBAN_PLUGIN_MOUNT_PREFIX == "/api/plugins/kanban"
+
+
+def test_kanban_runs_creation_and_cancel_routes_are_a_known_gap() -> None:
+    # KNOWN GAP (see kanban_runs.py module docstring + the hermes-bump
+    # runbook): HermesBoardExecutor.dispatch()/.cancel() call
+    # POST {WORKER_BASE_PATH} and POST {WORKER_BASE_PATH}/{run_id}/cancel,
+    # but the pinned upstream kanban plugin has neither route — only
+    # POST /dispatch (batch auto-dispatch) and POST /runs/{run_id}/terminate.
+    # This test is a canary: if a future Hermes bump adds either route, THIS
+    # ASSERTION STARTS FAILING — that is a signal to extend
+    # KANBAN_RUNS_ROUTES and re-check the executor bridge, not to delete the
+    # test. Do not "fix" this by adding the routes to the fixture without
+    # re-verifying upstream source.
+    assert ("post", "/runs") not in kanban_runs.KANBAN_RUNS_ROUTES
+    assert ("post", "/runs/{run_id}/cancel") not in kanban_runs.KANBAN_RUNS_ROUTES
+    assert ("post", "/runs/{run_id}/terminate") in kanban_runs.KANBAN_RUNS_ROUTES
+
+
+def test_dashboard_session_token_injection_format_is_frozen() -> None:
+    # hal0.board._TOKEN_RE / hal0.board.hermes_executor._TOKEN_RE both harvest
+    # this exact shape from the dashboard's ungated bootstrap HTML.
+    token_re = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"([^"]+)"')
+    rendered = kanban_runs.SESSION_TOKEN_INJECTION_TEMPLATE.format(token="tok-123")
+    match = token_re.search(rendered)
+    assert match is not None
+    assert match.group(1) == "tok-123"
+
+
 # ── SECURITY CHECKLIST (board fold, lxc105 — item 4) ───────────────────────
 
 
@@ -325,6 +380,8 @@ def test_sdk_diff_tracks_full_adapter_contract_surface() -> None:
         "hermes_cli/plugins.py",
         "hermes_cli/config.py",
         "hermes_cli/auth.py",
+        "hermes_cli/kanban_db.py",
+        "plugins/kanban/dashboard/plugin_api.py",
     }
     missing = required - tracked
     assert not missing, f"drift-watch missing contract surfaces: {sorted(missing)}"
