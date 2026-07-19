@@ -200,7 +200,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // (the tag flips installed=true).
   const refreshFlmModels = React.useCallback(() => {
     fetch('/api/slots/flm/models').then(r => r.json()).then(d => {
-      setFlmModels(d.models || d || []);
+      // Defensive: an empty/degraded payload ({} from a proxy or an API
+      // hiccup) must never leave a non-array here — flmModels.filter on an
+      // object crashed the entire slots view behind the error boundary (C7d).
+      const models = Array.isArray(d?.models) ? d.models : Array.isArray(d) ? d : [];
+      setFlmModels(models);
     }).catch(() => {});
   }, []);
   React.useEffect(() => {
