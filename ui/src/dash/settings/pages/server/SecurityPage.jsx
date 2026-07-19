@@ -4,17 +4,17 @@
 // exposes today. The ONE auth surface is GET /api/auth/status (routes/auth.py):
 //   { auth_required, has_admin_key, tier } — posture booleans, never a value.
 //
-// So this page shows STATUS ONLY. It never renders a key, a fingerprint, or a
-// throttle counter — because the endpoint returns none of those. Everything the
-// R3 canvas draws that /api/auth/status can't back (client-key set/unset, the
-// admin-key fingerprint + last-rotated, live login-throttle counts, key
-// rotation, the per-route exposure table) is surfaced as disabled-with-reason —
-// each an explicit API-lane request — rather than fabricated. Assumed
-// ADMIN-gated: a browser HMAC session is admin-equivalent (spec §22 / KB-1).
+// So this page shows STATUS ONLY. It never renders a key VALUE. Key rotation is
+// real (POST /api/auth/rotate) and returns status-only fields — after a rotate
+// the admin-key row shows the returned fingerprint + rotated-at (never the
+// value). What /api/auth/status still can't back (client-key set/unset, live
+// login-throttle counts, the per-route exposure table) stays surfaced as
+// disabled-with-reason. Assumed ADMIN-gated: a browser HMAC session is
+// admin-equivalent (spec §22 / KB-1).
 //
-// Files: this page + RotateKeyDialog.jsx (type-to-confirm + one-time reveal,
-// gated on the missing rotation route) + ExposureTable.jsx (static class
-// taxonomy + stub-with-reason for the live table). Un-disabled in SettingsNav.
+// Files: this page + RotateKeyDialog.jsx (type-to-confirm → POST /api/auth/
+// rotate; shows fingerprint/rotated_at, never the value) + ExposureTable.jsx
+// (static class taxonomy + stub-with-reason for the live table).
 
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSetRequireAuth, useLogout } from '@/api/hooks/useAuthActions'
@@ -65,6 +65,9 @@ export function SecurityPage() {
   const setRequireAuth = useSetRequireAuth()
   const logout = useLogout()
   const [rotateOpen, setRotateOpen] = useStateS(false)
+  // Last rotation result per tier (status-only: { fingerprint, rotated_at }).
+  // Never a key value — the endpoint never returns one.
+  const [lastRotated, setLastRotated] = useStateS(null)
 
   const s = auth.data
   const loading = auth.isPending
@@ -189,7 +192,11 @@ export function SecurityPage() {
         <KeyRow
           testid="security-key-admin"
           name="admin key"
-          gates="gates every ADMIN route"
+          gates={
+            lastRotated
+              ? `fingerprint ${lastRotated.fingerprint} · rotated ${lastRotated.rotated_at}`
+              : 'gates every ADMIN route'
+          }
           state={adminState}
           action={
             <button
@@ -245,7 +252,12 @@ export function SecurityPage() {
       {/* ── route exposure (static taxonomy + stub-with-reason) ─────── */}
       <ExposureTable />
 
-      <RotateKeyDialog open={rotateOpen} tier="admin" onClose={() => setRotateOpen(false)} />
+      <RotateKeyDialog
+        open={rotateOpen}
+        tier="admin"
+        onRotated={(r) => setLastRotated({ fingerprint: r.fingerprint, rotated_at: r.rotated_at })}
+        onClose={() => setRotateOpen(false)}
+      />
     </div>
   )
 }

@@ -58,7 +58,7 @@ from typing import Any
 import httpx
 
 from hal0.config import store as model_store_module
-from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
+from hal0.config.paths import DEFAULT_MODEL_STORE, model_mount_roots, model_store_root
 from hal0.config.schema import family_flags, resolve_chat_template, resolve_profile_flags
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
@@ -905,12 +905,16 @@ def _llama_launch_plan(
     # and preview render byte-identical commands.
     command = resolve_argv(segments).argv
 
-    # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
-    # default aligned with the write side — see hal0.config.store).
-    # Mounted identical-path, read-only, via the shared `mount_for` factory
-    # (ML-3) — which omits the SELinux relabel on NFS (chcon ENOTSUP there)
-    # instead of unconditionally appending ``:z``.
-    model_store = model_store_root()
+    # Model-store roots (honours [models].store / HAL0_MODEL_STORE AND
+    # [models].pull_root — the external tree registry paths point at, e.g.
+    # /mnt/ai-models). Mounting ONLY the effective store left model files under
+    # pull_root unreachable → llama exits ~90ms after start → slot flaps
+    # error↔warming (rework O25). Each root is mounted identical-path,
+    # read-only, via the shared `mount_for` factory (ML-3) — which omits the
+    # SELinux relabel on NFS (chcon ENOTSUP there) instead of unconditionally
+    # appending ``:z``. `model_mount_roots()` dedups equal/nested roots so
+    # store==pull_root renders exactly ONE Volume.
+    model_stores = model_mount_roots()
 
     return RuntimeLaunchPlan(
         image=image,
@@ -918,7 +922,7 @@ def _llama_launch_plan(
         # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
         # operators can tune the runtime without forking the image.
         env=dict(env) if env else {},
-        mounts=[model_store_module.mount_for(model_store, read_only=True)],
+        mounts=[model_store_module.mount_for(root, read_only=True) for root in model_stores],
         devices=list(devices),
         group_add=list(group_ids),
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],

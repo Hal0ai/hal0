@@ -121,6 +121,14 @@ _APPROVAL_PING_EVERY_S = 15.0
 # tool calls.
 _MAX_COMPLETION_TOKENS = 4096
 
+# Pre-flight context estimate: ~4 chars/token (the standard GPT-family rule of
+# thumb) plus a small per-message overhead for the role/formatting tokens the
+# chat template adds. Deliberately rough — it only gates the pre-flight check
+# (which fires BEFORE a guaranteed 400 exceed_context), so an approximate
+# ceiling beats an exact tokenizer round-trip on every turn.
+_CHARS_PER_TOKEN = 4
+_MSG_TOKEN_OVERHEAD = 4
+
 # The slot the steward drives. Points at the dedicated `brain` slot (the
 # hal0-brain profile's default model) — the resolver's generalized chain
 # (`hal0/<slot>` → (<slot>, agent)) falls back to the `agent` slot when no
@@ -1036,6 +1044,68 @@ def _sse(obj: dict[str, Any]) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
+# ── pre-flight context guard ─────────────────────────────────────────────────
+#
+# The steward's system prompt alone is ~7.3k tokens; a brain slot loaded at a
+# small context window (e.g. the on-box `chat@4096` incident, or a slot whose
+# ctx drifted below the config) 400s the completion with `exceed_context`
+# AFTER the round-trip has been paid for. Estimate the assembled prompt against
+# the resolved slot's context_length and emit the documented `error` frame with
+# an actionable fix instead of burning the round-trip.
+
+
+def _estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
+    """Rough token estimate for the assembled prompt (chars/4 + per-msg overhead)."""
+    total = 0
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, str):
+            total += len(content) // _CHARS_PER_TOKEN
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total += len(part["text"]) // _CHARS_PER_TOKEN
+        total += _MSG_TOKEN_OVERHEAD
+    return total
+
+
+async def _resolved_context_length(request: Request, model: Any) -> int | None:
+    """Context window of the slot ``model`` resolves to, or None when unknown.
+
+    Best-effort: reuses the same ``LiveSlotResolver`` inputs the /v1 path uses
+    (``hal0/<slot>`` → live slot). Returns None for a non-virtual model, an
+    unresolvable name, or any lookup failure — the pre-check then simply does
+    not fire (never blocks a valid chat).
+    """
+    if not isinstance(model, str) or not model:
+        return None
+    try:
+        from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
+        from hal0.normalize.resolver import LiveSlotResolver
+
+        views = await _normalize_slot_views(request)
+        resolver = LiveSlotResolver(
+            slot_views_provider=lambda: views,
+            loaded_models_provider=lambda: _normalize_loaded_models(request),
+        )
+        res = await resolver.resolve(model)
+    except Exception:
+        return None
+    if res is None or not res.context_length:
+        return None
+    return int(res.context_length)
+
+
+def _context_exceeded_error(prompt_tokens: int, context_length: int, model: Any) -> str:
+    """Actionable text for the pre-flight context-overflow guard."""
+    return (
+        f"the assembled prompt (~{prompt_tokens} tokens) exceeds the resolved slot's "
+        f"context window ({context_length} tokens) for {model!r} — the completion would "
+        "400 with exceed_context. Fix: raise [model].context_size on the backing slot and "
+        "reload it, or point [brain_chat] model at a slot with a larger context window."
+    )
+
+
 # ── outbound message framing (O18) ──────────────────────────────────────────
 #
 # Chat templates with a user-query guard (e.g. qwen3.5's `multi_step_tool`,
@@ -1122,6 +1192,20 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
         "messages": messages,
         "max_tokens": int(payload.get("max_tokens") or _MAX_COMPLETION_TOKENS),
     }
+
+    # Pre-flight context guard: if the assembled prompt already exceeds the
+    # resolved slot's context window, the completion is a guaranteed 400
+    # exceed_context — surface the actionable error frame instead of burning
+    # the round-trip (the steward system prompt alone is ~7.3k tokens).
+    ctx_len = await _resolved_context_length(request, model)
+    if ctx_len:
+        prompt_tokens = _estimate_prompt_tokens(messages)
+        if prompt_tokens > ctx_len:
+            yield _sse(
+                {"type": "error", "message": _context_exceeded_error(prompt_tokens, ctx_len, model)}
+            )
+            yield _sse({"type": "done"})
+            return
 
     dispatch_fn = functools.partial(_dispatch_round, request, client, board)
     try:

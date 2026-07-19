@@ -191,6 +191,7 @@ def test_representative_admin_routes_are_admin() -> None:
         ("GET", "/api/settings"),
         ("POST", "/api/secrets/{name}"),
         ("GET", "/api/secrets"),
+        ("POST", "/api/auth/rotate"),
     ]
     for method, path in admin_examples:
         assert classify(method, path) is AuthClass.ADMIN, f"{method} {path} should be ADMIN"

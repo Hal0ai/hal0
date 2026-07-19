@@ -1,24 +1,23 @@
-// SERVER ▸ Security ▸ Rotate key dialog (D4, post-R3 surface rework).
+// SERVER ▸ Security ▸ Rotate key dialog (D4 → key-rotation lane).
 //
-// The rotate flow, built honestly against a backend that does NOT exist yet:
-// there is no key-rotation route in src/hal0/api (only GET /api/auth/status +
-// POST /api/auth/login). So the destructive confirm is disabled-with-reason —
-// an API-lane request (POST /api/auth/keys/{tier}/rotate) — while the whole
-// interaction (blunt breakage warning + type-to-confirm gate + one-time reveal
-// contract) is fully wired for when it lands.
+// Wired to the real POST /api/auth/rotate (routes/auth.py). The endpoint mints
+// a fresh box key, writes it into /etc/hal0/api.env (0640, never world-
+// readable), and applies it live in-process — no restart. It returns STATUS
+// ONLY: { tier, rotated_at, key_len, fingerprint, applies_live,
+// restart_required, session_preserved, note }.
 //
-// Two non-negotiables the copy encodes:
-//   1. The confirm is blunt about breakage — rotating the admin key logs out
-//      every client using the current one, the moment you rotate.
-//   2. The new value is shown ONCE for copy, then never again and never stored
-//      in the dashboard (status-only surface — see SecurityPage.jsx). Until the
-//      endpoint exists there is nothing to reveal; the reveal panel is the
-//      contract for the value the future response returns, never a fabrication.
+// Two non-negotiables the copy + code encode:
+//   1. The confirm is blunt about breakage — rotating a key logs out every
+//      client using the old one the moment you rotate. Type-to-confirm gate so
+//      a rotate is never a reflexive click.
+//   2. The new value is NEVER shown. Unlike a classic "reveal once" flow, hal0
+//      never sends the key over the wire: the operator retrieves it out-of-band
+//      from /etc/hal0/api.env on the box. We surface the fingerprint (a one-way
+//      hash prefix) so they can VERIFY which key is live — never the value.
+
+import { useRotateKey } from '@/api/hooks/useAuthActions'
 
 const { useState: useStateK, useEffect: useEffectK } = React
-
-const ROTATE_DISABLED_REASON =
-  'Key rotation is not wired yet — no rotation route exists (only /api/auth/status + /api/auth/login). (API-lane request: POST /api/auth/keys/{tier}/rotate)'
 
 // The phrase the operator must type, per tier. Blunt + specific so a rotate is
 // never a reflexive click.
@@ -26,56 +25,90 @@ function confirmPhrase(tier) {
   return `rotate ${tier}`
 }
 
-export function RotateKeyDialog({ open, tier = 'admin', onClose }) {
+export function RotateKeyDialog({ open, tier = 'admin', onClose, onRotated }) {
   const [typed, setTyped] = useStateK('')
-  // Reveal state is the contract for a real rotation response; with no endpoint
-  // it never populates. Kept so the one-time-reveal surface is exercised the
-  // moment the route lands (revealed === the value returned once by rotate).
-  const [revealed] = useStateK(null)
+  const [result, setResult] = useStateK(null)
+  const rotate = useRotateKey()
 
   useEffectK(() => {
-    if (open) setTyped('')
+    if (open) {
+      setTyped('')
+      setResult(null)
+      rotate.reset()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, tier])
 
   if (!open) return null
 
   const phrase = confirmPhrase(tier)
   const phraseOk = typed.trim() === phrase
-  // Even a correctly-typed phrase can't rotate: the endpoint is absent.
-  const canRotate = false
+  const pending = rotate.isPending
+  const canRotate = phraseOk && !pending && result == null
+
+  const doRotate = () => {
+    if (!canRotate) return
+    rotate.mutate(tier, {
+      onSuccess: (data) => {
+        setResult(data)
+        onRotated?.(data)
+      },
+    })
+  }
+
+  const errText = rotate.isError
+    ? rotate.error?.code === 'auth.rate_limited'
+      ? 'Too many rotate attempts — slow down and retry shortly.'
+      : rotate.error?.message || 'Rotation failed. Check the server logs.'
+    : null
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      eyebrow={<span style={{ color: 'var(--err)' }}>Destructive · breaks existing clients</span>}
-      title={`Rotate ${tier} key?`}
+      eyebrow={
+        result ? (
+          <span style={{ color: 'var(--ok)' }}>Rotated · old {tier} key is now dead</span>
+        ) : (
+          <span style={{ color: 'var(--err)' }}>Destructive · breaks existing clients</span>
+        )
+      }
+      title={result ? `${tier} key rotated` : `Rotate ${tier} key?`}
       width={460}
       foot={
-        <>
-          <span />
-          <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-            <button className="btn ghost sm" data-testid="rotate-cancel" onClick={onClose}>Cancel</button>
-            <button
-              className="btn sm"
-              data-testid="rotate-confirm"
-              disabled={!canRotate}
-              title={!canRotate ? ROTATE_DISABLED_REASON : undefined}
-              onClick={onClose}
-              style={{ background: 'var(--err-soft)', borderColor: 'var(--err-line)', color: 'var(--err)' }}
-            >
-              Rotate key
+        result ? (
+          <>
+            <span />
+            <button className="btn sm" data-testid="rotate-done" onClick={onClose}>
+              Done
             </button>
-          </span>
-        </>
+          </>
+        ) : (
+          <>
+            <span />
+            <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+              <button className="btn ghost sm" data-testid="rotate-cancel" onClick={onClose}>Cancel</button>
+              <button
+                className="btn sm"
+                data-testid="rotate-confirm"
+                disabled={!canRotate}
+                onClick={doRotate}
+                style={{ background: 'var(--err-soft)', borderColor: 'var(--err-line)', color: 'var(--err)' }}
+              >
+                {pending ? 'Rotating…' : 'Rotate key'}
+              </button>
+            </span>
+          </>
+        )
       }
     >
-      {revealed == null ? (
+      {result == null ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <p style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--fg-2)', margin: 0 }}>
-            Every client using the current {tier} key stops working the moment you rotate. You&apos;ll get
-            the new key <b>once</b> — copy it before closing; it is never shown again and never stored in
-            the dashboard.
+            Every client using the current {tier} key stops working the moment you rotate. The new key
+            is written to <span className="mono">/etc/hal0/api.env</span> on the box and applied live —
+            it is <b>never shown in the dashboard</b>. Retrieve it there; a browser session stays signed
+            in (cookie-based).
           </p>
 
           <label className="mono" style={{ fontSize: 11, color: 'var(--fg-4)' }}>
@@ -99,27 +132,39 @@ export function RotateKeyDialog({ open, tier = 'admin', onClose }) {
             }}
           />
 
-          <div
-            data-testid="rotate-blocked-reason"
-            className="mono"
-            style={{ fontSize: 10.5, color: 'var(--fg-5)', lineHeight: 1.55, borderTop: '1px solid var(--line)', paddingTop: 10 }}
-          >
-            ○ {ROTATE_DISABLED_REASON}
-          </div>
+          {errText && (
+            <div data-testid="rotate-error" className="mono err" style={{ fontSize: 10.5, lineHeight: 1.55 }}>
+              {errText}
+            </div>
+          )}
         </div>
       ) : (
-        // One-time reveal — reached only after a real rotation returns a value.
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0 }}>
-            New {tier} key — shown once. Copy it now; it is never shown again.
+        // Status-only result — fingerprint + rotated_at + the re-auth notice.
+        // There is NO value here by design; the key never traverses the wire.
+        <div data-testid="rotate-result" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            <div>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--fg-5)' }}>fingerprint</div>
+              <div data-testid="rotate-fingerprint" className="mono" style={{ fontSize: 13, color: 'var(--ok)' }}>
+                {result.fingerprint}
+              </div>
+            </div>
+            <div>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--fg-5)' }}>rotated</div>
+              <div data-testid="rotate-rotated-at" className="mono" style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
+                {result.rotated_at}
+              </div>
+            </div>
+            <div>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--fg-5)' }}>applied</div>
+              <div className="mono" style={{ fontSize: 11.5, color: result.restart_required ? 'var(--warn)' : 'var(--ok)' }}>
+                {result.restart_required ? 'restart required' : 'live · no restart'}
+              </div>
+            </div>
+          </div>
+          <p data-testid="rotate-note" style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--fg-2)', margin: 0 }}>
+            {result.note}
           </p>
-          <code
-            data-testid="rotate-revealed-once"
-            className="mono"
-            style={{ padding: '10px 12px', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 6, fontSize: 12.5, wordBreak: 'break-all' }}
-          >
-            {revealed}
-          </code>
         </div>
       )}
     </Modal>

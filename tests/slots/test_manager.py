@@ -184,6 +184,11 @@ async def test_route_for_request_label_filter_drops_default(slot_root: Path) -> 
 async def test_route_for_request_returns_none_when_nothing_matches(
     slot_root: Path,
 ) -> None:
+    # Drop the fixture's sample chat slot: it is llm-shaped (llama-server +
+    # [model], no explicit type) and now heals to type="llm" on load (O23), so
+    # leaving it in place would make "llm" routing match. This test asserts the
+    # no-match path, so only the non-llm embedding slot must exist.
+    (slot_root / "chat.toml").unlink()
     _write_typed_slot(slot_root, "a", slot_type="embedding", port=8082)
     sm = SlotManager()
     assert await sm.route_for_request("llm") is None
