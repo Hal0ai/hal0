@@ -22,7 +22,7 @@
 // is flat-merged wholesale, so we start from the stored defaults and override
 // only the keys we surface (emptying an input deletes just that key).
 
-import { useModelUpdate, useAddModelFromPath, useModelSetDefault } from '@/api/hooks/useModels'
+import { useModelUpdate, useModelSetDefault, useModelDuplicate } from '@/api/hooks/useModels'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
@@ -245,12 +245,21 @@ function DivergenceDiff({ diff, profileName, onReset }) {
 }
 
 // ─── DuplicateModelDialog — duplicate for a second device (1dup) ─────────────
-// Weights are refcounted (no re-download); the new row is stamped with the
-// device's template and named sensibly. Uses add-from-path against the same
-// on-disk weights when a path is known; otherwise flags the missing endpoint.
+// Wired to the real POST /api/models/{id}/duplicate route (UI-API-1,
+// models.py:674 `duplicate_model`): weights are refcounted (no re-download,
+// no byte copy) and the new row copies the source's metadata/defaults/
+// capabilities/backends. Picking a device template stamps that profile's
+// flags into the new row's defaults server-side (copy-not-layer — the
+// profile itself is never mutated).
 function DuplicateModelDialog({ open, onClose, model, profiles }) {
-  const add = useAddModelFromPath();
+  const duplicate = useModelDuplicate();
   const [pick, setPick] = useStateMD("");
+  const [newId, setNewId] = useStateMD("");
+  // Tracks whether the operator has hand-edited the id field so the
+  // suggested-id effect below stops clobbering their typing once they start
+  // (same "don't stomp user input" convention as the flags-stamp confirm).
+  const [idTouched, setIdTouched] = useStateMD(false);
+  const [err, setErr] = useStateMD(null);
   // Device-flavoured templates the operator can stamp the duplicate with.
   const devProfiles = useMemoMD(() => {
     const all = Array.isArray(profiles) ? profiles : [];
@@ -265,28 +274,54 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
     }
     return out;
   }, [profiles]);
-  useEffectMD(() => { if (open) setPick(devProfiles[0]?.name || ""); }, [open, devProfiles]);
-  if (!open || !model) return null;
-  const path = model.path;
-  const onConfirm = async () => {
+  useEffectMD(() => {
+    if (open) {
+      setPick(devProfiles[0]?.name || "");
+      setIdTouched(false);
+      setErr(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, model?.id, devProfiles]);
+
+  // Suggested new_id: `<source id>-<device class or profile name>`, re-derived
+  // as the template pick changes unless the operator has typed their own.
+  const suggestedId = useMemoMD(() => {
+    if (!model) return "";
     const prof = (profiles || []).find((p) => p.name === pick);
-    if (!path) {
-      window.__hal0Toast && window.__hal0Toast(
-        "Duplicate needs a copy-model endpoint (weights are refcounted) — not wired yet.", "warn",
-      );
-      onClose();
+    const suffix = prof ? (profileDeviceClass(prof) || prof.name) : "copy";
+    return `${model.id}-${suffix}`;
+  }, [model, profiles, pick]);
+  useEffectMD(() => {
+    if (open && !idTouched) setNewId(suggestedId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, suggestedId, idTouched]);
+
+  if (!open || !model) return null;
+
+  const trimmedId = newId.trim();
+  const idInvalid = !trimmedId || trimmedId === model.id;
+
+  const onConfirm = async () => {
+    if (duplicate.isPending) return; // guard against double-submit
+    if (idInvalid) {
+      setErr("pick a new model id, different from the source");
       return;
     }
-    const suffix = prof ? `-${(profileDeviceClass(prof) || prof.name)}` : "-copy";
+    setErr(null);
     try {
-      await add.mutateAsync({
-        path,
-        name: `${model.longName || model.name || model.id}${suffix ? ` (${prof?.name || "copy"})` : ""}`,
+      const result = await duplicate.mutateAsync({
+        id: model.id,
+        new_id: trimmedId,
+        profile: pick || undefined,
       });
-      window.__hal0Toast && window.__hal0Toast(`Duplicated ${model.longName || model.id}`, "ok");
+      window.__hal0Toast && window.__hal0Toast(`Duplicated → ${result?.id || trimmedId}`, "ok");
       onClose();
     } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(`Duplicate failed — ${e?.message || "see logs"}`, "err");
+      // Server 409s on a taken id, 404s on an unknown profile/source — surface
+      // the envelope message inline (RenameSlotDialog's pattern) AND toast.
+      const msg = e?.message || "duplicate failed — see logs";
+      setErr(msg);
+      window.__hal0Toast && window.__hal0Toast(`Duplicate failed — ${msg}`, "err");
     }
   };
   return (
@@ -295,11 +330,11 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
       onCancel={onClose}
       onConfirm={onConfirm}
       title={`Duplicate ${model.longName || model.name || model.id}?`}
-      confirmLabel={add.isPending ? "Duplicating…" : "Duplicate & open"}
+      confirmLabel={duplicate.isPending ? "Duplicating…" : "Duplicate"}
       message={
         <span>
-          A new model row shares the same weights (refcounted — no re-download) and is stamped
-          with the device's template. You can tune its flags independently.
+          A new model row shares the same weights (refcounted — no re-download) and can be
+          stamped with a device template. You can tune its flags independently.
           <br /><br />
           <span className="mono" style={{ fontSize: 11, color: "var(--fg-3)" }}>device template</span>
           <select
@@ -309,10 +344,22 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
             onChange={(e) => setPick(e.target.value)}
             style={{ width: "100%", marginTop: 6 }}
           >
+            <option value="">— no template —</option>
             {devProfiles.map((p) => (
               <option key={p.name} value={p.name}>{p.name}{p.intent ? ` · ${p.intent}` : ""}</option>
             ))}
           </select>
+          <div style={{ marginTop: 10 }}>
+            <span className="mono" style={{ fontSize: 11, color: "var(--fg-3)" }}>new model id</span>
+            <input
+              className="input mono"
+              data-testid="model-duplicate-id"
+              value={newId}
+              onChange={(e) => { setNewId(e.target.value); setIdTouched(true); }}
+              style={{ width: "100%", marginTop: 6 }}
+            />
+          </div>
+          {err && <div className="err" data-testid="model-duplicate-error" style={{ marginTop: 8 }}>{err}</div>}
         </span>
       }
     />

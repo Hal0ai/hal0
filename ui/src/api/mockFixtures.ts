@@ -33,11 +33,20 @@ function buildStatus() {
   const memoryOff =
     typeof window !== 'undefined' &&
     (window as unknown as { __hal0MockMemoryEnabled?: boolean }).__hal0MockMemoryEnabled === false
+  // Mirrors the real GET /api/status envelope (health.py:get_status) exactly —
+  // no `hostname` key (that was dead: nothing in the client ever reads
+  // status.hostname; hardware comes from a dedicated /api/hardware call and
+  // /api/status always reports `hardware: null`). `name`/`version`/`status`/
+  // `upstreams`/`memory_degraded` were previously missing entirely.
   return {
-    hostname: d.host?.name ?? 'halo-strix.local',
-    hardware: d.host ?? null,
+    name: 'hal0',
+    version: '0.3.0-alpha.1',
+    status: 'ok',
+    hardware: null,
     slots: d.slots ?? [],
+    upstreams: [],
     memory_enabled: !memoryOff,
+    memory_degraded: memoryOff ? null : false,
   }
 }
 
@@ -81,15 +90,67 @@ function buildBackends() {
   }
 }
 
+// Mirrors the real GET /api/capabilities envelope exactly (orchestrator.py
+// get_state / catalogs_by_slot / catalog.available_backends) — the old
+// `{capabilities:{chat,embed,voice,img,npu}}` shape was the pre-orchestrator
+// envelope and doesn't match what CapabilityOrchestrator ships, so
+// Voice/ImageGen e2e rendered empty catalogs in forced-mock. Real shape:
+// {backends:[...], catalogs:{embed:{embed,rerank}, voice:{stt,tts},
+// img:{img}, vision:{vision}}, selections: same nesting with the live
+// {device,backend,provider,model,enabled,slot,status} row per child}.
+function capabilityRow(device: string, provider: string, model: string | null, slot: string, status: string) {
+  return { device, backend: device, provider, model, enabled: !!model, slot, status }
+}
+
 function buildCapabilities() {
-  // Capabilities-toml rollup. Mock just lists the design's groups.
   return {
-    capabilities: {
-      chat: { provider: 'llamacpp:rocm', model: 'qwen3.6-27b-mtp-q4_k_m' },
-      embed: { provider: 'llamacpp:rocm', model: 'nomic-embed-text-v1.5' },
-      voice: { provider: 'kokoro', model: 'kokoro-v1' },
-      img: { provider: 'sdcpp:rocm', model: 'sd-turbo' },
-      npu: { provider: 'flm:npu', model: 'gemma3:1b' },
+    backends: [
+      { id: 'gpu-rocm', label: 'GPU · ROCm', short: 'ROCm', provider: 'llamacpp', multiplex: false },
+      { id: 'gpu-vulkan', label: 'GPU · Vulkan', short: 'Vulkan', provider: 'llamacpp', multiplex: false },
+      { id: 'npu', label: 'NPU', short: 'NPU', provider: 'flm', multiplex: true },
+      { id: 'cpu', label: 'CPU', short: 'CPU', provider: 'llamacpp', multiplex: false },
+    ],
+    catalogs: {
+      embed: {
+        embed: [
+          { id: 'nomic-embed-text-v1.5', capabilities: ['embed'], size_gb: 0.14, backends: [{ id: 'gpu-vulkan', provider: 'llama-server', downloaded: true, pullable: true }, { id: 'cpu', provider: 'llama-server', downloaded: true, pullable: true }] },
+        ],
+        rerank: [
+          { id: 'bge-reranker-v2-m3', capabilities: ['rerank'], size_gb: 0.56, backends: [{ id: 'gpu-vulkan', provider: 'llama-server', downloaded: true, pullable: true }] },
+        ],
+      },
+      voice: {
+        stt: [
+          { id: 'whisper-large-v3', capabilities: ['stt'], size_gb: 1.5, backends: [{ id: 'npu', provider: 'flm', downloaded: true, pullable: true }] },
+        ],
+        tts: [
+          { id: 'kokoro-v1', capabilities: ['tts'], size_gb: 0.3, backends: [{ id: 'cpu', provider: 'kokoro', downloaded: true, pullable: true }] },
+        ],
+      },
+      img: {
+        img: [
+          { id: 'sd-turbo', capabilities: ['image'], size_gb: 2.1, backends: [{ id: 'gpu-rocm', provider: 'sdcpp', downloaded: true, pullable: true }] },
+        ],
+      },
+      vision: {
+        vision: [],
+      },
+    },
+    selections: {
+      embed: {
+        embed: capabilityRow('gpu-vulkan', 'llama-server', 'nomic-embed-text-v1.5', 'embed', 'serving'),
+        rerank: capabilityRow('', '', null, 'embed-rerank', 'offline'),
+      },
+      voice: {
+        stt: capabilityRow('npu', 'flm', 'whisper-large-v3', 'stt', 'serving'),
+        tts: capabilityRow('cpu', 'kokoro', 'kokoro-v1', 'tts', 'serving'),
+      },
+      img: {
+        img: capabilityRow('gpu-rocm', 'sdcpp', 'sd-turbo', 'img', 'offline'),
+      },
+      vision: {
+        vision: capabilityRow('', '', null, 'vision', 'offline'),
+      },
     },
   }
 }
@@ -345,8 +406,22 @@ function buildUpdateState() {
   // render against current-ish release strings. Tests override via the
   // window seam above; the literals here are only used in dev. Keep the
   // pair in sync with pyproject.toml's version when bumping major.
+  // `revoked`/`revoked_reason`/`revoked_version` mirror the real
+  // GET /api/updates/state envelope (updater.py:update_state) — previously
+  // absent here, which left the revocation banner untestable in forced-mock
+  // (a spec had nothing to flip via __hal0UpdateStateOverride). Default
+  // unrevoked so existing render paths are unaffected; a spec exercising the
+  // banner sets `{revoked: true, revoked_reason, revoked_version}` via the
+  // override seam.
   return {
-    hal0: { current: '0.3.0-alpha.1', available: '0.3.0-alpha.2', channel: 'stable' },
+    hal0: {
+      current: '0.3.0-alpha.1',
+      available: '0.3.0-alpha.2',
+      channel: 'stable',
+      revoked: false,
+      revoked_reason: '',
+      revoked_version: null,
+    },
     flm: { current: 'v0.9.42', source: 'manual-deb' },
     autoCheck: true,
   }
@@ -384,17 +459,6 @@ function buildModelUpdatesCheck() {
     updates_available: ids.length,
     models,
   }
-}
-
-function buildAuthToken() {
-  return {
-    token_masked: 'hal0-•••••••••••••••••••••••••••••••••',
-    issued: '2026-04-12',
-  }
-}
-
-function buildAllowedOrigins() {
-  return { origins: ['http://halo-strix.local:8081', 'http://localhost:5174'] }
 }
 
 function buildSecrets() {
@@ -1086,8 +1150,6 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   npuOccupancy: buildNpuOccupancy,
   journal: buildJournal,
   updatesState: buildUpdateState,
-  authToken: buildAuthToken,
-  authAllowedOrigins: buildAllowedOrigins,
   secrets: buildSecrets,
   metaEnums: buildMetaEnums,
   profiles: buildProfiles,

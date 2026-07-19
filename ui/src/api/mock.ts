@@ -89,8 +89,6 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/npu\/occupancy$/, key: 'npuOccupancy' },
   { re: /^\/api\/journal$/, key: 'journal' },
   { re: /^\/api\/updates\/state$/, key: 'updatesState' },
-  { re: /^\/api\/auth\/token$/, key: 'authToken' },
-  { re: /^\/api\/auth\/allowed-origins$/, key: 'authAllowedOrigins' },
   { re: /^\/api\/secrets$/, key: 'secrets' },
   { re: /^\/api\/meta\/enums$/, key: 'metaEnums', networkFirst: true },
   { re: /^\/api\/profiles$/, key: 'profiles', networkFirst: true },
