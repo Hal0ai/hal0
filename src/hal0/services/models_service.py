@@ -1128,6 +1128,54 @@ def screen_extra_args_json(raw: str, *, segment: str = "extra_args") -> None:
             ) from None
 
 
+def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> None:
+    """Validate the launch-affecting fields of a model create/update/validate body.
+
+    Raises :class:`~hal0.errors.BadRequest` on the first violation, with the same
+    envelope the launch path and the dashboard key on. Shared by
+    ``POST /api/models``, ``PUT /api/models/{id}`` and ``POST /api/models/validate``
+    so the three can never drift (UI-API-1 item 1). Screens:
+
+    * ``preferred_runner`` — must be a known ``RUNNER_IMAGES`` key, or ``None``/""
+      to clear the preference. Only checked when ``runner_images`` is supplied.
+    * ``defaults.extra_args`` — shell-quoting integrity (O10) then the managed-arg
+      denylist (§21.7), so a smuggled ``--model``/``--host``/``--port``/
+      ``--ctx-size``/``-ngl``/``--alias`` fails at SAVE with the same
+      ``slot.managed_arg_denied`` code the launcher raises, instead of persisting
+      a row that can never load (or silently rebinds a slot).
+    """
+    from hal0.errors import BadRequest
+
+    if runner_images is not None and "preferred_runner" in body:
+        pr = body["preferred_runner"]
+        if pr is not None and (not isinstance(pr, str) or pr not in runner_images):
+            raise BadRequest(
+                f"preferred_runner {pr!r} is not a known runner key",
+                code="model.unknown_runner",
+                details={"preferred_runner": pr, "available": sorted(runner_images)},
+            )
+
+    defaults = body.get("defaults")
+    if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
+        import shlex
+
+        from hal0.slots.argv import _deny_managed_flags
+
+        seg = "model defaults.extra_args"
+        # O10 guard (spec §3): catch a bare double-quoted JSON value the shell
+        # would eat BEFORE the denylist/parse checks so the operator gets the
+        # actionable "single-quote it" message.
+        screen_extra_args_json(defaults["extra_args"], segment=seg)
+        try:
+            tokens = shlex.split(defaults["extra_args"])
+        except ValueError as exc:
+            raise BadRequest(
+                f"defaults.extra_args is not parseable as a flag string: {exc}",
+                code="model.extra_args_unparseable",
+            ) from exc
+        _deny_managed_flags(tokens, segment=seg)
+
+
 # ── duplicate a model row (UI-API-1 item 3) ───────────────────────────────────
 #
 # Study note (spec deliverable): a model's *weights* live on disk at

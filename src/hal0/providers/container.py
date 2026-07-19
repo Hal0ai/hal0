@@ -817,14 +817,23 @@ def _llama_argv_segments(
     # Model-registry defaults: shlex-split extra_args + `-ngl <n>` from
     # defaults.n_gpu_layers. rope_freq_base is intentionally NOT emitted
     # (reachable via extra_args only — see ModelDefaults deprecation note).
-    md_tokens: list[str] = []
+    #
+    # The free-form ``defaults.extra_args`` is caller-supplied, so it rides its
+    # own ``model_extra_args`` segment which ``resolve_argv`` screens against
+    # the managed-arg denylist (argv.UNTRUSTED_SEGMENT_LABELS) — a model whose
+    # extra_args smuggles ``--port``/``--model``/… fails loudly at launch, not
+    # silently redirected. The ``-ngl`` derived from the schema field
+    # ``defaults.n_gpu_layers`` is hal0-computed and legitimately sets a managed
+    # flag, so it stays in the TRUSTED ``model_defaults`` segment.
+    md_extra_tokens: list[str] = []
+    md_ngl_tokens: list[str] = []
     if model_defaults:
         md_extra = model_defaults.get("extra_args")
         if md_extra and str(md_extra).strip():
-            md_tokens += shlex.split(str(md_extra))
+            md_extra_tokens += shlex.split(str(md_extra))
         md_ngl = model_defaults.get("n_gpu_layers")
         if md_ngl is not None:
-            md_tokens += ["-ngl", str(int(md_ngl))]
+            md_ngl_tokens += ["-ngl", str(int(md_ngl))]
 
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
@@ -850,7 +859,8 @@ def _llama_argv_segments(
     return [
         ("base", base),
         ("profile", profile_tokens),
-        ("model_defaults", md_tokens),
+        ("model_extra_args", md_extra_tokens),
+        ("model_defaults", md_ngl_tokens),
         ("chat_template", chat_tokens),
         ("mmproj", mmproj_tokens),
         ("slot_overrides", slot_override_tokens),
