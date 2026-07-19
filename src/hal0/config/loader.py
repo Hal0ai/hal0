@@ -309,6 +309,16 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
     if isinstance(model_section, dict):
         out["model"] = model_section
 
+    # Heal-on-load (O23): a type-less, llm-shaped slot defaults to type="llm"
+    # so hal0/<slot> aliases resolve on boxes whose TOML predates the seeded
+    # type key. Skip when raw carries an [image] table (image-gen slot) — that
+    # table lands in ``extra`` here, so guard on ``raw`` explicitly (the
+    # comfyui provider guards it too).
+    from hal0.slots._cfg_helpers import heal_missing_llm_type
+
+    if not isinstance(raw.get("image"), dict):
+        heal_missing_llm_type(out)
+
     # Anything not already hoisted (sibling tables like [defaults],
     # [server], [npu], [image]; and, in the legacy shape, stray top-level
     # scalars) lands in `extra` so we don't lose it on round-trip.

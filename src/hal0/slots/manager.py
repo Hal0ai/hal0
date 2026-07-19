@@ -43,7 +43,13 @@ from hal0.slot_config import (
     slot_write_lock,
     write_slot_toml,
 )
-from hal0.slots._cfg_helpers import _cfg_port, _cfg_provider, _cfg_to_dict, _model_default
+from hal0.slots._cfg_helpers import (
+    _cfg_port,
+    _cfg_provider,
+    _cfg_to_dict,
+    _model_default,
+    heal_missing_llm_type,
+)
 from hal0.slots.config_write import (
     _base_profile_for_backend,
     _cfg_effective_backend,
@@ -2743,6 +2749,11 @@ class SlotManager:
                 data[_k] = _v
         if "name" not in data:
             data["name"] = slot_name
+        # Heal-on-load (O23): a type-less, llm-shaped slot (a [model] table
+        # served by llama-server) defaults to type="llm" so hal0/<slot> aliases
+        # resolve on boxes whose brain/agent TOML predates the seeded type key.
+        if heal_missing_llm_type(data):
+            log.info("slot.type_healed_llm", extra={"slot": slot_name})
         if cache_key is not None:
             self._cfg_cache[cache_id] = (
                 cache_key[0],

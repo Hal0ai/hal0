@@ -65,9 +65,43 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     return ""
 
 
+def heal_missing_llm_type(data: dict[str, Any]) -> bool:
+    """Default a type-less, llm-shaped slot config to ``type="llm"`` in place.
+
+    A chat/llm slot TOML that predates the seed fix (O23) can ship WITHOUT an
+    explicit ``type``. ``hal0_llm_slot_views`` hard-filters ``type != "llm"``,
+    so such a slot never enters the ``LiveSlotResolver`` views and
+    ``hal0/<slot>`` aliases fail to resolve — the steward is down by default
+    (live: ``brain.toml`` lacked ``type``). Heal-on-load so existing boxes
+    self-correct without a hand edit.
+
+    Infers llm from the llm-shaped signal: a ``[model]`` table served by
+    ``llama-server`` (the default provider) with no image-gen ``[image]``
+    table. Explicit types (``image``/``tts``/``reranking``/``embed``…) are
+    always respected — the heal only fires when ``type`` is absent/empty.
+    Returns True iff it mutated ``data``. Operates on the flat, ``[slot]``-
+    hoisted dict shape (``[model]``/``[image]`` still nested).
+    """
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("type") or "").strip():
+        return False
+    if not isinstance(data.get("model"), dict):
+        return False
+    # An [image] table (or the comfyui provider) marks an image-gen slot.
+    if isinstance(data.get("image"), dict):
+        return False
+    provider = str(data.get("provider") or "llama-server").strip().lower()
+    if provider not in ("", "llama-server"):
+        return False
+    data["type"] = "llm"
+    return True
+
+
 __all__ = [
     "_cfg_port",
     "_cfg_provider",
     "_cfg_to_dict",
     "_model_default",
+    "heal_missing_llm_type",
 ]
