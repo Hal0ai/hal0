@@ -4751,6 +4751,16 @@ def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, b
     os.replace(tmp, path)
     with contextlib.suppress(OSError):
         path.chmod(0o600)
+    # Born-hal0 even on a root-run bootstrap (O16a): normally the CLI drops to
+    # hal0 before this pipeline, so runtime.json is born hal0:hal0. But a
+    # bootstrap invoked directly as root (no drop) would strand a root:root 0600
+    # runtime.json inside the hal0-owned HERMES_HOME — which the User=hal0
+    # chat-proxy then can't READ (embed token lost) AND uninstall can't rmtree
+    # (→ the O16 partial-removal). chown it to hal0 so the tree stays uniformly
+    # service-owned. Best-effort: no hal0 account (dev) → left as-is.
+    if os.geteuid() == 0:
+        with contextlib.suppress(OSError, KeyError):
+            os.chown(path, pwd.getpwnam("hal0").pw_uid, grp.getgrnam("hal0").gr_gid)
     return path, True
 
 
