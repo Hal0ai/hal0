@@ -757,6 +757,23 @@ def _format_url(base_url: str, template: str, path_args: dict[str, str]) -> str:
     return base_url.rstrip("/") + template.format(**path_args)
 
 
+#: HTTP methods ``_call_rest`` knows how to forward, mapped to the httpx
+#: kwarg that carries the payload (``params`` for query-string verbs,
+#: ``json`` for body verbs). ``_validate_catalog`` checks every
+#: ``_REST_MAP`` entry's method against this table at import time so an
+#: unsupported method (e.g. a typo'd verb, or a route added with a method
+#: nobody wired a branch for) fails loudly at import instead of surviving
+#: operator approval and raising deep inside a gated tool call — see
+#: upstream_update's PATCH route, which shipped mapped but unforwardable.
+_REST_VERB_PAYLOAD_KWARG: dict[str, str] = {
+    "GET": "params",
+    "DELETE": "params",
+    "POST": "json",
+    "PUT": "json",
+    "PATCH": "json",
+}
+
+
 async def _call_rest(
     *,
     base_url: str,
@@ -784,17 +801,15 @@ async def _call_rest(
     # transports without re-issuing tokens.
     headers["X-Requested-With"] = "XMLHttpRequest"
 
+    if method not in _REST_VERB_PAYLOAD_KWARG:
+        raise ValueError(f"unsupported HTTP method: {method}")
+    payload_kwarg = _REST_VERB_PAYLOAD_KWARG[method]
+    call_kwargs: dict[str, Any] = {"headers": headers}
+    call_kwargs[payload_kwarg] = (payload or None) if payload_kwarg == "params" else (payload or {})
+
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
-        if method == "GET":
-            response = await client.get(url, params=payload or None, headers=headers)
-        elif method == "DELETE":
-            response = await client.delete(url, params=payload or None, headers=headers)
-        elif method == "POST":
-            response = await client.post(url, json=payload or {}, headers=headers)
-        elif method == "PUT":
-            response = await client.put(url, json=payload or {}, headers=headers)
-        else:
-            raise ValueError(f"unsupported HTTP method: {method}")
+        verb = getattr(client, method.lower())
+        response = await verb(url, **call_kwargs)
 
     if response.status_code >= 400:
         try:
@@ -1577,13 +1592,18 @@ def _validate_catalog() -> None:
             f"extra: {sorted(set(TOOL_DESCRIPTIONS) - catalog)}"
         )
 
-    for tool, (_method, template) in _REST_MAP.items():
+    for tool, (method, template) in _REST_MAP.items():
         placeholders = set(re.findall(r"{(\w+)}", template))
         declared = set(_PATH_ARGS.get(tool, ()))
         if placeholders != declared:
             problems.append(
                 f"{tool}: _PATH_ARGS {sorted(declared)} != template placeholders "
                 f"{sorted(placeholders)}"
+            )
+        if method not in _REST_VERB_PAYLOAD_KWARG:
+            problems.append(
+                f"{tool}: _REST_MAP method {method!r} unsupported by _call_rest "
+                f"(supported: {sorted(_REST_VERB_PAYLOAD_KWARG)})"
             )
 
     # Param hints must reference real catalog tools, and every 'required'

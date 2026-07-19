@@ -69,6 +69,10 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             captured["calls"].append(("PUT", url, json, dict(headers or {})))
             return _MockResponse({"ok": "put"})
 
+        async def patch(self, url: str, json: Any = None, headers: Any = None) -> _MockResponse:
+            captured["calls"].append(("PATCH", url, json, dict(headers or {})))
+            return _MockResponse({"ok": "patch"})
+
     monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
     return captured
 
@@ -515,6 +519,20 @@ def test_catalog_validation_catches_path_arg_drift(monkeypatch: pytest.MonkeyPat
         admin._validate_catalog()
 
 
+def test_catalog_validation_catches_unsupported_http_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A _REST_MAP entry whose method _call_rest can't forward (typo, or
+    a new verb nobody wired a branch for) must fail import validation —
+    this is the guard that would have caught upstream_update's PATCH
+    route shipping mapped but unforwardable, instead of the gated tool
+    surviving operator approval and raising deep in ``_call_rest``."""
+    admin._validate_catalog()  # coherent as shipped
+    monkeypatch.setitem(admin._REST_MAP, "slot_list", ("TRACE", "/api/slots"))
+    with pytest.raises(RuntimeError, match="slot_list"):
+        admin._validate_catalog()
+
+
 def test_catalog_validation_catches_description_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -524,6 +542,29 @@ def test_catalog_validation_catches_description_drift(
     monkeypatch.setattr(admin, "GATED_TOOLS", admin.GATED_TOOLS | {"ghost_tool"})
     with pytest.raises(RuntimeError, match="ghost_tool"):
         admin._validate_catalog()
+
+
+async def test_upstream_update_forwards_as_patch(
+    mock_transport: dict[str, Any],
+) -> None:
+    """upstream_update maps to a PATCH route (_REST_MAP). Regression for
+    the bug where _REST_MAP declared PATCH but _call_rest only knew
+    GET/DELETE/POST/PUT — the gated tool survived operator approval and
+    then raised ``ValueError: unsupported HTTP method`` inside the
+    executor. Exercised via _execute_tool, the same entry point the
+    approval-queue executor calls once an operator approves."""
+    result = await admin._execute_tool(
+        tool="upstream_update",
+        args={"name": "openai", "base_url": "https://api.openai.com"},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+    assert result == {"ok": "patch"}
+    method, url, body, _headers = mock_transport["calls"][-1]
+    assert method == "PATCH"
+    assert url == "http://t/api/upstreams/openai"
+    assert body == {"base_url": "https://api.openai.com"}
 
 
 def test_model_edit_and_model_update_route_to_distinct_endpoints() -> None:
