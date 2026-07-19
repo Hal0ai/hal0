@@ -21,6 +21,34 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.0.0] — unreleased (R5 · the rework release)
+
+The R5 rework puts the platform back together as a genuine 1.0: memory and
+Hermes finished, dead surface swept, launch flags re-homed onto **models**, the
+boot path split into named observable phases, and the installer hardened against
+real-world hosts (validated live on privileged/podman-4.9.3 and
+unprivileged/podman-5.7 substrates — clean install and in-place upgrade, exit 0).
+Full operator walkthrough: `docs/hal0-install-migration-guide.html`.
+
+### Highlights
+- **FLAGS-own — flags belong to models.** Launch flags, device, and chat-template now live on the model; a slot is just `(id, name, model, port, state)`. Profiles became copy-on-stamp templates. The argv resolver stops reading profile/slot overrides at launch; `model.defaults` carries the materialized tune. The managed-arg denylist now also screens a model's `defaults.extra_args` (closing a bypass where a denied flag reached the container).
+- **Memory is Hindsight-only.** Honcho removed. Tools renamed to the upstream surface — `hindsight_recall` / `hindsight_retain` / `hindsight_reflect` (old `hal0_memory_*` kept as aliases); `reflect` implemented; config moved to `~/.hermes/hindsight/config.json` (`local_external`).
+- **Hermes brain-lane relocated into the api boot lifespan** — persona seed + identity/brain-profile registration + self-report now run on every restart (the one hook fresh/update/dev share), reached in-process rather than over loopback HTTP.
+- **Install & runtime hardening** — accurate container-runtime preflight diagnostics (keyring-quota exhaustion surfaced instead of a misleading nesting/keyctl message); GPU group resolution derives the render GID from the device node's owner (not the group name); slot units emit `StartLimit*` in `[Unit]` so restart limiting applies; Hermes gateway install drops to the `hal0` user (no stray root-owned `~/.hermes`); `hal0 agent status --json` emits real JSON; `reconcile_listeners` wired into `/api/ports`.
+- **Vulkan is the default for shared-APU models** — benchmark-backed (RADV +40% prefill / +16% gen / −30% TTFT vs ROCm on Strix Halo).
+- **Boot split into 14 named, observable phases** with a typed `BootState`; drift-watch fixtures + a `hermes-bump` runbook added.
+
+### Breaking
+- **Launch flags/device/chat-template moved off slots onto models.** Existing slot TOMLs with those fields still load (config is `extra="allow"`) and are ignored at launch until you run the fold migrator — but the slot-level surface is deprecated and `HAL0-SUNSET`-stamped for removal.
+- **Honcho removed** as a memory engine; **`hal0_memory_*` tools renamed** to `hindsight_*` (aliases retained this release).
+- Deprecated surfaces machine-stamped `HAL0-SUNSET: v1.0.0` for scheduled removal: the `--backend` flag (use `--provider`), `SlotConfig.runtime`/`workers`, the `cognee` engine literal, and several legacy CLI aliases.
+
+### Migrations
+- **Upgrade in place** — re-run the installer (or `hal0 update`); it is idempotent + non-destructive and never clobbers existing config. No reinstall.
+- **Honcho → Hindsight** (only boxes that ran Honcho): `hal0 memory migrate --from honcho --to hindsight` before upgrading. Boxes already on Hindsight are a no-op.
+- **Slot-flag fold** (operator-run): the migrator folds slot tunes into model defaults; it **refuses the whole run** (no partial write) if slots share a model with divergent tunes — resolve each shared model (canonicalize or split) first. Dry-run by default; back up `hal0.db` + slot dirs before applying.
+- **Slot id-keying** (operator-run, optional): `hal0 slot migrate-id-keying` in a downtime window (takes a pre-flight backup). The runtime reads either layout; the flip is deliberate and reversible.
+
 ## [0.9.8] — 2026-07-13
 
 Turnstone lands as a second heavyweight bundled agent alongside Hermes and
