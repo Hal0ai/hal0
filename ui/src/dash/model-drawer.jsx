@@ -349,6 +349,11 @@ function ModelDrawer({ open, onClose, model }) {
   // Local UI state.
   const [dupOpen, setDupOpen] = useStateMD(false);
   const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
+  // Per-type default: `model` is a SNAPSHOT captured when the drawer opened
+  // (models.jsx passes the selected row), so the invalidation-driven list
+  // refetch never reaches this prop. Track the POST response as the local
+  // authority so the badge flips live; null = defer to the snapshot.
+  const [defaultOverride, setDefaultOverride] = useStateMD(null);
 
   useEffectMD(() => {
     if (open && model) {
@@ -368,6 +373,7 @@ function ModelDrawer({ open, onClose, model }) {
       setChatTemplate(init.chat_template ?? "auto");
       setMtp(triFromDefault(init.mtp));
       setJinja(triFromDefault(init.jinja));
+      setDefaultOverride(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, model?.id]);
@@ -458,14 +464,16 @@ function ModelDrawer({ open, onClose, model }) {
   };
 
   // Per-type default marker toggle. Server-side single chokepoint enforces
-  // "one default per type" (promoting demotes the current holder); we just
-  // fire the mutation and let the models-query invalidation refresh badges.
-  const isTypeDefault = !!model.default;
+  // "one default per type" (promoting demotes the current holder). The list's
+  // badges refresh via the models-query invalidation; THIS drawer's badge
+  // flips from the POST response (the `model` prop is an open-time snapshot).
+  const isTypeDefault = defaultOverride ?? !!model.default;
   const typeLabel = model.type || "type";
   const onToggleDefault = async () => {
     const next = !isTypeDefault;
     try {
       const res = await setDefault.mutateAsync({ id: model.id, default: next });
+      setDefaultOverride(typeof res.default === "boolean" ? res.default : next);
       window.__hal0Toast && window.__hal0Toast(
         next
           ? `${model.longName || model.id} is now the ${res.type} default` +
