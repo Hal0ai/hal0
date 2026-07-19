@@ -997,6 +997,45 @@ if [[ -f "${PODMAN_FWD_UNIT_SRC}" ]]; then
     info "wrote ${PODMAN_FWD_UNIT_DST}"
 fi
 
+# Legacy slot-unit cleanup (R3 quadlet migration). Pre-quadlet installs
+# shipped a static hal0-slot@.service template (+ per-slot drop-ins). Static
+# units in /etc/systemd/system SHADOW podman's generator units, so a leftover
+# template breaks every quadlet slot with "Failed to load environment files"
+# (halo150 Phase-2 finding: the generator accepted hal0-slot@qtest.container
+# and produced the service, but the docker-era template won the name).
+# Convergent: remove if present, no-op otherwise.
+LEGACY_SLOT_UNIT="${UNIT_DIR}/hal0-slot@.service"
+if [[ -f "${LEGACY_SLOT_UNIT}" ]]; then
+    rm -f "${LEGACY_SLOT_UNIT}"
+    info "removed legacy static ${LEGACY_SLOT_UNIT} (shadowed quadlet generator units)"
+fi
+for LEGACY_SLOT_DROPIN in "${UNIT_DIR}"/hal0-slot@*.service.d; do
+    if [[ -d "${LEGACY_SLOT_DROPIN}" ]]; then
+        rm -rf "${LEGACY_SLOT_DROPIN}"
+        info "removed legacy slot drop-in ${LEGACY_SLOT_DROPIN}"
+    fi
+done
+
+# Stale hal0-agent@ drop-in cleanup (RATIFIED 2026-07-18, halo150 O3). systemd
+# merges EVERY *.conf under hal0-agent@<id>.service.d/, so a drop-in an OLD
+# installer left behind still applies after the current template overwrites
+# override.conf. A stale `ConfigurationDirectory=` fragment brick-loops the unit
+# with status=241/CONFIGURATION_DIRECTORY (the current template ships no such
+# directive). Convergent: remove non-shipped fragments carrying that directive,
+# report each, no-op on a clean box. `override.conf` (the shipped drop-in) is
+# rewritten from the template below and never removed here.
+for AGENT_DROPIN_DIR in "${UNIT_DIR}"/hal0-agent@*.service.d; do
+    [[ -d "${AGENT_DROPIN_DIR}" ]] || continue
+    for AGENT_DROPIN in "${AGENT_DROPIN_DIR}"/*.conf; do
+        [[ -f "${AGENT_DROPIN}" ]] || continue
+        [[ "$(basename "${AGENT_DROPIN}")" == "override.conf" ]] && continue
+        if grep -q "ConfigurationDirectory=" "${AGENT_DROPIN}" 2>/dev/null; then
+            rm -f "${AGENT_DROPIN}"
+            info "removed stale agent drop-in ${AGENT_DROPIN} (241/CONFIGURATION_DIRECTORY class)"
+        fi
+    done
+done
+
 # hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
 # generic per-agent runner; the drop-in pins hermes-specific env.
 # Lay them down whether or not bootstrap has been run — the shim's
@@ -1236,6 +1275,38 @@ PYEOF
             warn "${SYSTEMCTL_SUDOERS_SRC} not found — systemctl sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #5 (O12): hal0-podman-ro covers READ-ONLY podman
+    # introspection (image presence today) against ROOT's podman store — the
+    # store slots actually populate via Quadlet, NOT hal0-api's own rootless
+    # store. Narrow + hardcoded (no shell, no wildcards, no operator-supplied
+    # podman flags) — see the wrapper source.
+    PODMAN_RO_SRC="${REPO_ROOT}/installer/wrappers/hal0-podman-ro"
+    if [[ -f "${PODMAN_RO_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${PODMAN_RO_SRC}" "${LIB_DIR}/bin/hal0-podman-ro"
+        info "wrote ${LIB_DIR}/bin/hal0-podman-ro"
+    else
+        warn "${PODMAN_RO_SRC} not found — podman introspection seam helper not installed"
+    fi
+
+    # sudoers grant for the podman introspection seam. Real installs only;
+    # visudo-validate before activating so a malformed drop-in can never wedge
+    # sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        PODMAN_RO_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-podman-ro"
+        PODMAN_RO_SUDOERS_DST="/etc/sudoers.d/hal0-podman-ro"
+        if [[ -f "${PODMAN_RO_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${PODMAN_RO_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${PODMAN_RO_SUDOERS_SRC}" "${PODMAN_RO_SUDOERS_DST}"
+                info "wrote ${PODMAN_RO_SUDOERS_DST}"
+            else
+                warn "${PODMAN_RO_SUDOERS_SRC} failed visudo check — podman introspection sudoers grant not installed"
+            fi
+        else
+            warn "${PODMAN_RO_SUDOERS_SRC} not found — podman introspection sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi
@@ -1243,6 +1314,24 @@ fi
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload"
+fi
+
+# AppArmor preflight for podman on unconfined LXC (RATIFIED 2026-07-18,
+# halo150 R4). A privileged LXC with `apparmor.profile: unconfined` cannot load
+# podman's default AppArmor profile, so `podman run` dies with exit 243
+# ("install profile containers-default apparmor") and NO slot ever starts. The
+# convergent fix writes `[containers] apparmor_profile="unconfined"` to
+# /etc/containers/containers.conf and retries — detected from the podman SMOKE
+# FAILURE (not OS/LXC sniffing), idempotent, unit-tested against recorded fakes
+# (see src/hal0/agents/containers_apparmor.py). Runs the shared, tested Python
+# module via the FHS venv so bash and Python never diverge.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1 \
+    && [[ -x "${VENV_DIR}/bin/python" ]]; then
+    if "${VENV_DIR}/bin/python" -m hal0.agents.containers_apparmor; then
+        :
+    else
+        warn "podman apparmor preflight could not resolve the profile-load failure — slots may not start; see the detail above"
+    fi
 fi
 
 # Kick off a background pull of the OpenWebUI image so the unit start

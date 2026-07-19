@@ -485,10 +485,13 @@ def _make_parser_allowing_only_status() -> Any:
 
 
 class TestIsReady:
-    """``_is_ready`` accepts 2xx AND auth-challenges (401/403) as 'reachable'.
+    """``_is_ready`` accepts 2xx AND any HTTP error response as 'reachable'.
 
-    The hermes dashboard auth-gates ``/api/*``; an auth response still proves
-    the socket is open, so the shim must sd_notify READY rather than loop.
+    The hermes dashboard auth-gates ``/api/*`` (401/403) and moves routes
+    between releases (/health 404'd on the 0.18.x pin — halo150 O3, which
+    start-timeout crash-looped the unit): ANY HTTP response proves the
+    socket is open and serving, so the shim must sd_notify READY rather
+    than loop. Only connection-level failures mean "not ready".
     """
 
     @staticmethod
@@ -509,7 +512,7 @@ class TestIsReady:
 
     @pytest.mark.parametrize(
         ("code", "expected"),
-        [(401, True), (403, True), (404, False), (500, False)],
+        [(401, True), (403, True), (404, True), (500, True)],
     )
     def test_http_error_codes(self, code: int, expected: bool) -> None:
         import urllib.error

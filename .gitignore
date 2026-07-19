@@ -103,6 +103,7 @@ graphify-out/*.json
 # OS
 Thumbs.db
 .claude/worktrees/
+.claude/design-import/
 .claude/wip.json
 graphify-out/cost.json
 graphify-out/cache/

@@ -273,3 +273,21 @@ def test_upstreams_serialize_redacts_api_key_if_present() -> None:
     assert out["auth_value_env"] == "OPENROUTER_API_KEY"  # env-var NAME, not value
     assert out["api_key"] == {"value": "***REDACTED***", "set": True}
     assert out["models"] == []
+
+
+class TestBareKeySuffix:
+    """halo150 O9: hal0's own auth keys must mask — bare _KEY suffix."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["HAL0_ADMIN_KEY", "HAL0_CLIENT_KEY", "admin_key", "hmac_key", "KEY"],
+    )
+    def test_key_suffix_is_sensitive(self, name):
+        assert is_sensitive_key(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        ["KEY_ROTATION_DAYS", "KEYBOARD_LAYOUT", "MONKEY_PATCH", "HAL0_PORT"],
+    )
+    def test_non_secret_key_words_stay_clear(self, name):
+        assert is_sensitive_key(name) is False

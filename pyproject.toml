@@ -112,8 +112,20 @@ quote-style = "double"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
+# Environment-dependent markers (P4-tests, pulled forward from R5): tag tests
+# that shell out to a real host facility the *default* pytest run never
+# guarantees (a container runtime, a live systemd/journald, outbound
+# network). CI always runs the full unmarked suite unchanged — these exist
+# so a LOCAL capped verify can opt out with
+# `-m "not podman and not systemd and not network"` instead of avoiding
+# whole files/dirs (tests/api hanging on a slow/absent podman or journalctl
+# probe was the recurring local-only pain point). A future CI tier split can
+# reuse the same markers; do not repurpose them for anything else.
 markers = [
   "slow: tests that take >1s wall-clock (engine-contract fixtures, etc.)",
+  "podman: needs a real container runtime (podman/docker) reachable on the host",
+  "systemd: needs a live systemd/journald (systemctl, journalctl)",
+  "network: needs outbound network access (registry pulls, live HTTP endpoints)",
 ]
 
 [tool.mypy]

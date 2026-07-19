@@ -18,6 +18,7 @@ import pytest
 
 from hal0.agents.personas import Persona, PersonaApproval, save_persona
 from hal0.api.routes import board_chat as bc
+from hal0.config.schema import BrainChatConfig
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -33,6 +34,9 @@ def _fake_request(**state: Any) -> Any:
         "memory_dispatcher": None,
         "self_api_base_url": "http://testserver",
         "brain_persona_root": Path("/nonexistent-personas-root"),
+        # This file exercises the admin/gated dispatch paths directly, so it
+        # opts out of the shipped read-only default (spec-kb23 §4b).
+        "hal0_config": SimpleNamespace(brain_chat=BrainChatConfig(read_only=False)),
     }
     defaults.update(state)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(**defaults)), headers={})

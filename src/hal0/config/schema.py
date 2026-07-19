@@ -2673,7 +2673,11 @@ class BrainChatConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     enabled: bool = True
-    read_only: bool = False
+    # Ships TRUE (KB-2/3): the steward answers and reads state out of the box,
+    # but every mutating / admin-write tool is refused server-side until an
+    # operator explicitly opts in with [brain_chat] read_only=false. Safe
+    # default over convenient default — the widening path is one config line.
+    read_only: bool = True
     # Empty → persona preferred_model (hal0/brain). Set to a virtual slot model
     # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
     # explicit per-request ``model`` in the chat body still wins over this.

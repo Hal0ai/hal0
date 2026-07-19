@@ -6,6 +6,12 @@ handlers plus a per-``RUNNER_IMAGES`` local install-state classifier; these
 tests cover the fold + the podman-absent degrade path (this dev sandbox has
 no podman, so every backend should report ``"unavailable"`` rather than
 raising or lying about "installable").
+
+O12: ``_local_image_repos`` now routes through
+:mod:`hal0.providers.podman_introspect` (the rootful ``hal0-podman-ro`` seam,
+falling back to a rootless read) instead of hand-rolling a bare ``podman
+images`` call; the route surfaces which store served the read as
+``podman_context``.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from hal0.api.routes.hardware import _backend_state, _image_repo, _local_image_repos
+from hal0.providers.podman_introspect import PodmanImagesResult
 from hal0.security.exposure import AuthClass, classify
 
 
@@ -22,10 +29,11 @@ def test_system_info_route_folds_hardware_features_backends(
     resp = isolated_client.get("/api/system-info")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"hardware", "features", "backends"}
+    assert set(body) == {"hardware", "features", "backends", "podman_context"}
     assert isinstance(body["hardware"], dict)
     assert isinstance(body["features"], dict)
     assert isinstance(body["backends"], dict)
+    assert body["podman_context"] in ("rootful", "rootless", "unavailable")
     # every RUNNER_IMAGES key is present with the expected shape.
     from hal0.runners import RUNNER_IMAGES
 
@@ -34,6 +42,26 @@ def test_system_info_route_folds_hardware_features_backends(
         assert entry["state"] in ("installed", "installable", "unavailable")
         assert entry["image"]
         assert entry["device_class"] == RUNNER_IMAGES[key].device_class
+
+
+def test_system_info_backends_expose_runner_supports_metadata(
+    isolated_client: TestClient,
+) -> None:
+    """UI-API-1 item 2: each backend exposes the runner registry's per-runner
+    capability metadata (runtime_family, backend, and the typed launch-support
+    gates) so the model drawer can filter to compatible runners."""
+    from hal0.runners import RUNNER_IMAGES
+
+    body = isolated_client.get("/api/system-info").json()
+    for key, entry in body["backends"].items():
+        runner = RUNNER_IMAGES[key]
+        assert entry["runtime_family"] == runner.runtime_family
+        assert entry["backend"] == runner.backend
+        assert entry["supports"] == {
+            "mtp": runner.supports.mtp,
+            "jinja": runner.supports.jinja,
+            "mmproj": runner.supports.mmproj,
+        }
 
 
 def test_system_info_matches_hardware_and_features_endpoints(
@@ -63,6 +91,40 @@ def test_backends_degrade_to_unavailable_without_podman(
     monkeypatch.setattr(hw_mod, "_local_image_repos", lambda: None)
     body = isolated_client.get("/api/system-info").json()
     assert all(entry["state"] == "unavailable" for entry in body["backends"].values())
+    assert body["podman_context"] == "unavailable"
+
+
+def test_system_info_surfaces_rootful_podman_context(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """O12: when the rootful seam serves the read, the route says so — the
+    UI/caller can trust the backend states came from the store slots use."""
+    import hal0.api.routes.hardware as hw_mod
+
+    monkeypatch.setattr(
+        hw_mod,
+        "_local_image_repos",
+        lambda: PodmanImagesResult(repos=set(), context="rootful"),
+    )
+    body = isolated_client.get("/api/system-info").json()
+    assert body["podman_context"] == "rootful"
+
+
+def test_system_info_surfaces_rootless_podman_context(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """O12: when the seam wasn't usable and the read fell back to hal0-api's
+    OWN store, the route flags that too — a "rootless" context may disagree
+    with what's actually installed for slots."""
+    import hal0.api.routes.hardware as hw_mod
+
+    monkeypatch.setattr(
+        hw_mod,
+        "_local_image_repos",
+        lambda: PodmanImagesResult(repos=set(), context="rootless"),
+    )
+    body = isolated_client.get("/api/system-info").json()
+    assert body["podman_context"] == "rootless"
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────────

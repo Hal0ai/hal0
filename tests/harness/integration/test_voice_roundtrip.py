@@ -43,6 +43,7 @@ STT_MODEL = os.environ.get("HAL0_VOICE_STT_MODEL", "whisper-v3:turbo")
 _LIVE_URL = os.environ.get("HAL0_VOICE_LIVE_URL")
 
 
+@pytest.mark.network
 @pytest.mark.skipif(not _LIVE_URL, reason="set HAL0_VOICE_LIVE_URL to run the live round-trip")
 def test_voice_roundtrip_live() -> None:
     import httpx

@@ -13,12 +13,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.mark.systemd
 def test_logs_happy_path_returns_lines_and_count(client: TestClient) -> None:
     """GET /api/logs?unit=... returns the lines+count shape.
 
     On hosts without journalctl the route returns an empty list plus a
     hint — still a 200, still the expected shape — so the dashboard's
     "no logs available" rendering path is exercised consistently.
+
+    P4-tests: whenever journalctl IS on PATH the route shells out to it
+    for real (see ``hal0.api.routes.logs``) — genuinely systemd-dependent,
+    not mocked. Marked so a local capped verify can skip a slow/misbehaving
+    local journalctl with ``-m "not systemd"``.
     """
     r = client.get("/api/logs", params={"unit": "hal0-api"})
     assert r.status_code == 200, r.text
@@ -83,6 +89,7 @@ def test_logs_n_out_of_range_returns_envelope(client: TestClient) -> None:
     assert "fields" in body["error"]["details"]
 
 
+@pytest.mark.systemd
 def test_logs_stream_returns_sse_content_type(client: TestClient) -> None:
     """GET /api/logs/stream sets the SSE content-type even without journalctl.
 
@@ -90,6 +97,12 @@ def test_logs_stream_returns_sse_content_type(client: TestClient) -> None:
     journalctl the generator emits a single ``event: error`` frame and
     returns. We assert content-type + that the response body contains
     the error frame.
+
+    P4-tests: this test's own precondition is "journalctl absent" (the
+    presence check below skips it otherwise, since `-f` would block on
+    follow) — still fundamentally systemd/journald-coupled, so it carries
+    the marker for local capped-verify exclusion alongside the other
+    real-journalctl test in this file.
     """
     if shutil.which("journalctl") is not None:
         pytest.skip("journalctl is installed; the stream would block on follow")

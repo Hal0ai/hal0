@@ -5,10 +5,8 @@
 // `useSlots` mutation hooks — no toast-only stubs survive in this file.
 
 import {
-  useSlotCreate,
   useSlotEdit,
   useSlotDefaults,
-  useSlotDelete,
   useSlotImagePull,
   useSlotRestart,
   useSlotLoad,
@@ -70,273 +68,9 @@ function compatibleModels(models, { type, backend }) {
 }
 
 // ─── Create-slot modal ──────────────────────────────────────────
-function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
-  // Shared form-state hook (useForm): values + touched/submitted + isDirty (the
-  // unsaved-changes guard) + a reset that re-derives from `defaults` when the
-  // modal (re)opens. Field setters are thin wrappers so the JSX stays intact.
-  const f = useForm({
-    deriveInitial: () => ({
-      name: defaults.name || "",
-      type: defaults.type || "llm",
-      profile: defaults.profile || "",
-      model: "",
-      makeDefault: false,
-    }),
-    resetKey: `${open ? "o" : "c"}:${JSON.stringify(defaults)}`,
-  });
-  const { name, type, profile, model, makeDefault } = f.values;
-  const setName = (val) => f.set("name", val);
-  // UI-21: changing Type must clear the selected model — a model compatible
-  // with the old type is almost always incompatible with the new one, and the
-  // stale id would otherwise ride into the create body. Use setValues so both
-  // fields flip in one update (mark type touched to match f.set semantics).
-  const setType = (val) => { f.setValues(v => ({ ...v, type: val, model: "" })); f.touch("type"); };
-  const setProfile = (val) => f.set("profile", val);
-  const setModel = (val) => f.set("model", val);
-  const setMakeDefault = (val) => f.set("makeDefault", val);
-  const [submitErr, setSubmitErr] = useStateSM(null);
-  // UI: dirty-close confirms through the shared ConfirmDialog (state-driven)
-  // instead of window.confirm. Every dismiss path (Cancel, ✕, Esc, backdrop)
-  // funnels through requestClose below.
-  const [discardOpen, setDiscardOpen] = useStateSM(false);
-
-  const createMut = useSlotCreate();
-  const hwQuery = useHardware();
-  const modelsQuery = useModels();
-  const profilesQuery = useProfiles();
-  // Slot type vocabulary — meta-driven (GET /api/meta/enums, static fallback
-  // when absent) instead of the old hardcoded <option> list.
-  const enums = useMetaEnums();
-
-  useEffectSM(() => { if (open) { setSubmitErr(null); setDiscardOpen(false); } }, [open]);
-
-  const requestClose = () => {
-    if (f.isDirty) { setDiscardOpen(true); return; }
-    onClose();
-  };
-
-  // validation — slot collision uses the live slot list passed in from
-  // the SlotsView (useSlots data), not HAL0_DATA.
-  const existing = (existingSlots || []).map(s => s.name);
-  const nameCollision = existing.includes(name);
-  const nameInvalid = name && !/^[a-z][a-z0-9-]{0,30}$/.test(name);
-  const nameError = nameCollision ? "name already in use" : nameInvalid ? "lowercase + dashes only" : null;
-
-  const allProfiles = profilesQuery.data ?? [];
-  // Compatible models: filter by type AND the selected profile's backend so
-  // rocmfp4 models are hidden on non-rocm profiles (was type-only — the gap
-  // UI-3 closes). Before a profile is picked, backend is undefined → rocmfp4
-  // models stay hidden, the safe default.
-  const selBackend = allProfiles.find(p => p.name === profile)?.backend;
-  const compatible = compatibleModels(modelsQuery.data, { type, backend: selBackend });
-
-  const canSave = !!name && !nameError && !createMut.isPending && !!profile;
-
-  async function onCreateClick() {
-    setSubmitErr(null);
-    const body = {
-      name,
-      type,
-      runtime: "container",
-      profile,
-      // Derive device from the selected profile's explicit `backend` field
-      // (authoritative ROCm-vs-Vulkan selector) with device_class as the
-      // fallback for non-GPU profiles:
-      //   backend "vulkan" → "gpu-vulkan"; backend "rocm" → "gpu-rocm"
-      //   else by device_class: npu → "npu", cpu → "cpu",
-      //                         img → "gpu-rocm" (ComfyUI, ROCm-only for now),
-      //                         gpu/other → "gpu-rocm"
-      device: (() => {
-        const meta = allProfiles.find(p => p.name === profile);
-        if (meta?.backend === "vulkan") return "gpu-vulkan";
-        if (meta?.backend === "rocm") return "gpu-rocm";
-        const dc = meta?.device_class || "gpu";
-        if (dc === "npu") return "npu";
-        if (dc === "cpu") return "cpu";
-        return "gpu-rocm";
-      })(),
-      ...(model ? { model } : {}),
-      ...(makeDefault ? { default: true } : {}),
-    };
-    try {
-      await createMut.mutateAsync(body);
-      window.__hal0Toast && window.__hal0Toast(`Slot "${name}" created`, "ok");
-      onClose();
-    } catch (err) {
-      setSubmitErr(err?.message || "create failed");
-    }
-  }
-
-  return (
-    <>
-    <Modal
-      open={open}
-      onClose={requestClose}
-      eyebrow="Slots · new"
-      title="Create slot"
-      width={640}
-      foot={
-        <>
-          <span>
-            {submitErr
-              ? <span style={{color: "var(--err)"}}>{submitErr}</span>
-              : "capabilities.toml will be written on save."}
-          </span>
-          <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={requestClose}>Cancel</button>
-            <button
-              className="btn sm"
-              onClick={onCreateClick}
-              disabled={!canSave}
-            >{createMut.isPending ? "Creating…" : "Create slot"}</button>
-          </span>
-        </>
-      }
-    >
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Name <span className="req">*</span></span>
-          <span className="sub">bare · kebab-case · unique across the host</span>
-        </div>
-        <div className="form-ctl">
-          <input
-            className="input mono"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="coder-large"
-            autoFocus
-          />
-          {nameError && <div className="err">{nameError}</div>}
-          {!nameError && name && <div className="ok">✓ available</div>}
-        </div>
-      </div>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Type <span className="req">*</span></span>
-          <span className="sub">drives the model filter + OmniRouter tool</span>
-        </div>
-        <div className="form-ctl">
-          <select className="input mono" value={type} onChange={e => setType(e.target.value)}>
-            {/* keep an out-of-vocab persisted type selectable */}
-            {type && !enums.slot_types.includes(type) && <option value={type}>{type}</option>}
-            {enums.slot_types.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </div>
-      </div>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Profile <span className="req">*</span></span>
-          <span className="sub">image + bench-tuned flags for this slot</span>
-        </div>
-        <div className="form-ctl">
-          <select
-            className="input mono"
-            value={profile}
-            onChange={e => setProfile(e.target.value)}
-          >
-            <option value="">— select a profile</option>
-            {allProfiles.map(p => (
-              <option key={p.name} value={p.name}>
-                {p.name} · {p.image ? p.image.split(':').pop() : '—'}
-              </option>
-            ))}
-          </select>
-          {!profile && <div className="hint" style={{color: "var(--warn)"}}>Profile required for container slots.</div>}
-        </div>
-      </div>
-
-      {/* Image preview (v0.9.5). Read-only in create mode — shows the
-          profile's image (or DEFAULT_ROCMFPX_IMAGE if the profile omits one).
-          Image override is available in the EditSlotDrawer instead. */}
-      {(() => {
-        const profMeta = (profilesQuery.data ?? []).find(p => p.name === profile);
-        const img = profMeta?.image || "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5";
-        return (
-          <div className="form-row">
-            <div className="form-lbl">
-              <span>Image</span>
-              <span className="sub">from profile</span>
-            </div>
-            <div className="form-ctl">
-              <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-3)", fontSize: 12, wordBreak: "break-all"}}>
-                {img}
-              </span>
-            </div>
-          </div>
-        );
-      })()}
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Model</span>
-          <span className="sub">filtered to compatible · {compatible.length} match{compatible.length !== 1 ? "es" : ""}</span>
-        </div>
-        <div className="form-ctl">
-          <select className="input mono" value={model} onChange={e => setModel(e.target.value)}>
-            <option value="">— Select later (slot saves in `empty` state)</option>
-            {compatible.map(m => (
-              <option key={m.id} value={m.id}>
-                {m.longName} · {m.size} {m.installed ? "· on disk" : "· will pull"}
-              </option>
-            ))}
-          </select>
-          {model && (() => {
-            // UI-6: real size-vs-RAM check, reusing the same parseSizeGB test
-            // the InlineSwapPopover uses (data.jsx global). The old branch
-            // rendered an unconditional "fits" claim regardless of model size.
-            const selM = compatible.find(m => m.id === model);
-            if (!selM) return null;
-            const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
-            const fits = ramFreeGb > parseSizeGB(selM.size);
-            return fits
-              ? <div className="ok">✓ fits in available memory ({ramFreeGb} GB free)</div>
-              : <div className="hint" style={{color: "var(--warn)"}}>⚠ may not fit — {selM.size} model vs {ramFreeGb} GB free</div>;
-          })()}
-        </div>
-      </div>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Port (auto-assigned)</span>
-          <span className="sub">child process port hal0 will allocate</span>
-        </div>
-        <div className="form-ctl">
-          {/* The create body intentionally omits `port` — hal0 allocates the
-              next free slot port server-side (_next_free_slot_port). Showing a
-              client-guessed number here implied a value the POST never sends
-              and the backend need not honour, so we state the behaviour
-              instead of fabricating a specific port. */}
-          <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-4)", fontSize: 12}}>auto · assigned on save</span>
-        </div>
-      </div>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Default for type {type}?</span>
-          <span className="sub">flips `default = true`; demotes the current one</span>
-        </div>
-        <div className="form-ctl">
-          <label className="checkbox-row">
-            <input type="checkbox" checked={makeDefault} onChange={e => setMakeDefault(e.target.checked)} />
-            <span>Set as default</span>
-          </label>
-        </div>
-      </div>
-
-    </Modal>
-    <ConfirmDialog
-      open={discardOpen}
-      onCancel={() => setDiscardOpen(false)}
-      onConfirm={() => { setDiscardOpen(false); onClose(); }}
-      title="Discard unsaved changes?"
-      message="The new slot has not been created — closing now discards what you entered."
-      confirmLabel="Discard"
-    />
-    </>
-  );
-}
+// Decomposed (D2) into dash/slots/CreateSlotModal.jsx — the create flow is now
+// a pure instance: pick a model (it carries tune/device/runner) + name it. The
+// old profile/image/device fields moved to the model drawer.
 
 // ─── Edit-slot drawer ───────────────────────────────────────────
 // Cheap client-side guard for the freeform extra_args field: catch the one
@@ -361,7 +95,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // them; render the drawer shell with a sentinel slot instead.
   const editMut = useSlotEdit();
   const defaultsMut = useSlotDefaults();
-  const deleteMut = useSlotDelete();
+  // Delete + rename are owned by their extracted dialogs (D2 decomposition):
+  // dash/slots/DeleteSlotDialog.jsx and dash/slots/RenameSlotDialog.jsx.
+  const [renameOpen, setRenameOpen] = useStateSM(false);
   const restartMut = useSlotRestart();
   const swapMut = useSlotSwap();
   const profilesQuery = useProfiles();
@@ -753,24 +489,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
     );
   }
 
-  async function onDeleteConfirm() {
-    setSubmitErr(null);
-    try {
-      await deleteMut.mutateAsync(slot.name);
-      window.__hal0Toast && window.__hal0Toast(`Slot "${slot.name}" deleted`, "ok");
-      setDelOpen(false);
-      onClose();
-    } catch (err) {
-      setDelOpen(false);
-      setSubmitErr(err?.message || "delete failed");
-    }
-  }
-
   // `saving` gates the Save button on the fast config writes only — the
   // restart is fired in the background (see onSaveClick) and must not keep the
   // drawer in a blocked "Saving…" state for the whole model-load.
   const saving = editMut.isPending || defaultsMut.isPending;
-  const deleting = deleteMut.isPending;
 
   // Instant-apply enable/disable for the drawer header toggle. Mirrors the
   // card's onToggleEnabled — fire the PUT, toast the result, and let the slots
@@ -894,25 +616,27 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <>
           <button
             className="btn danger sm"
-            disabled={deleting}
+            data-testid="slot-delete-open"
             onClick={() => setDelOpen(true)}
-          >{Icons.unload} {deleting ? "Deleting…" : "Delete slot"}</button>
+          >{Icons.unload} Delete slot</button>
           <span style={{display: "inline-flex", gap: 8, alignItems: "center"}}>
             {submitErr && <span style={{color: "var(--err)", fontSize: 11}}>{submitErr}</span>}
             <button className="btn ghost sm" onClick={requestClose}>Cancel</button>
             <button
               className="btn sm"
-              disabled={saving || deleting}
+              disabled={saving}
               onClick={onSaveClick}
             >{saving ? "Saving…" : "Save"}</button>
           </span>
         </>
       }
     >
-      {/* Image + port + state strip — read-only. */}
+      {/* Identity strip — read-only: stable slot id, PortAuthority-assigned
+          port, and state. The id is the API key for debugging (stable across a
+          rename); the port is display-only (assigned by PortAuthority). */}
       <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
-        <ReadOnlyStrip k="image" v={slot.image ? slot.image.split(':').pop() : slot.profile || "—"} />
-        <ReadOnlyStrip k="port" v={`:${slot.port || "—"}`} />
+        <ReadOnlyStrip k="slot_id" v={<span data-testid="slot-id-readonly">{(slot.id != null ? slot.id : slot.slot_id) != null ? `#${slot.id != null ? slot.id : slot.slot_id}` : "—"}</span>} />
+        <ReadOnlyStrip k="port · PortAuthority" v={<span data-testid="slot-port-readonly" title="assigned by PortAuthority">{`:${slot.port || "—"}`}</span>} />
         <ReadOnlyStrip k="state" v={<span className={stateChipClass(slot)}>{slot.state}</span>} />
       </div>
 
@@ -924,8 +648,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       <FieldGroup label="Slot" hint="this instance">
       <div className="form-row">
-        <div className="form-lbl"><span>Name</span><span className="sub">seeded slots can't be renamed</span></div>
-        <div className="form-ctl"><input className="input mono" value={slot.name} disabled /></div>
+        <div className="form-lbl"><span>Name</span><span className="sub">a display label · the stable slot_id never changes</span></div>
+        <div className="form-ctl" style={{display: "flex", gap: 8, alignItems: "center"}}>
+          <input className="input mono" value={slot.name} disabled style={{flex: 1}} />
+          <button className="btn ghost sm" data-testid="slot-rename-open" onClick={() => setRenameOpen(true)}>Rename…</button>
+        </div>
       </div>
 
       <div className="form-row">
@@ -1640,21 +1367,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
       </div>
       </details>
     </Drawer>
-    <ConfirmDialog
+    <DeleteSlotDialog
       open={delOpen}
-      onCancel={() => setDelOpen(false)}
-      onConfirm={onDeleteConfirm}
-      title={`Delete slot ${slot.name}?`}
-      message={
-        <span>
-          This removes the slot <span className="mono" style={{color: "var(--fg)"}}>{slot.name}</span> and
-          its <span className="mono">capabilities.toml</span> config. The container is stopped and the
-          slot is gone from the host.
-        </span>
-      }
-      confirmLabel={deleting ? "Deleting…" : "Delete slot"}
-      destructive
-      typeToConfirm={slot.name}
+      slot={slot}
+      onClose={() => setDelOpen(false)}
+      onDeleted={onClose}
+    />
+    <RenameSlotDialog
+      open={renameOpen}
+      slot={slot}
+      onClose={() => setRenameOpen(false)}
     />
     <ConfirmDialog
       open={discardOpen}
@@ -2187,4 +1909,5 @@ function ErrorSlotCardBanner({ slot, message }) {
   );
 }
 
-Object.assign(window, { CreateSlotModal, EditSlotDrawer, InlineSwapPopover, EmptySlotCard, ErrorSlotCardBanner, SlotLogsDrawer });
+// CreateSlotModal is now dash/slots/CreateSlotModal.jsx (D2 decomposition).
+Object.assign(window, { EditSlotDrawer, InlineSwapPopover, EmptySlotCard, ErrorSlotCardBanner, SlotLogsDrawer });

@@ -35,10 +35,8 @@ from hal0.registry.pull import (
 from hal0.registry.pull import persist_pull_job as _persist_pull_job
 from hal0.registry.pull import pull_job_file as _pull_job_file
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
+from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
-from hal0.upstreams.filters import apply_filters
-from hal0.upstreams.huggingface import fetch_repo as _fetch_hf_repo
-from hal0.upstreams.huggingface import normalise_repo_slug as _normalise_hf_repo
 
 # See slots.py for the writer-gate rationale.
 
@@ -84,6 +82,11 @@ _eta_for_entry = _svc.eta_for_entry
 _hf_repo_for_model = _svc.hf_repo_for_model
 _suggest_id_from_path = _svc.suggest_id_from_path
 
+# Runner-key registry (UI-API-1 item 2): the set of valid ``preferred_runner``
+# keys the model PUT validates against. Bound here so the handler reads as a
+# thin membership check.
+_RUNNER_IMAGES = _runner_images_registry
+
 # Pull-job orchestration bindings (P3-routers §J → hal0.registry.pull_jobs).
 _load_persisted_pull_job = _pull_jobs.load_persisted
 _reconcile_persisted_pull_job = _pull_jobs.reconcile_persisted
@@ -106,190 +109,15 @@ async def list_models(request: Request) -> dict[str, Any]:
     Local registry entries (a real file on disk) win on id collision —
     the upstream might still advertise the id, but the user has the
     bytes locally and that's the truth. Each row carries ``installed``
-    so the UI can render an installed/advertised badge.
+    so the UI can render an installed/advertised badge. The three-source
+    aggregation lives in :func:`hal0.services.models_service.list_all`.
     """
-    registry = request.app.state.model_registry
-    upstreams = request.app.state.upstreams
-    cache = getattr(request.app.state, "model_cache", {})
-    now = int(time.time())
-    data: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    filtered = 0
-    # Last HF update-check snapshot (populated by /api/models/updates/check;
-    # never fetched on this hot path). The flag is recomputed against the
-    # row's CURRENT metadata.sha256 rather than replayed from the snapshot,
-    # so applying an update clears the badge on the next poll without
-    # waiting for the check TTL to expire.
-    update_checks: dict[str, Any] = {}
-    _upd_state = getattr(request.app.state, "model_update_state", None)
-    if isinstance(_upd_state, dict):
-        update_checks = _upd_state.get("models") or {}
-    for entry in registry.list():
-        dumped = _model_to_dict(entry)
-        dumped["installed"] = True
-        chk = update_checks.get(entry.id)
-        if isinstance(chk, dict):
-            remote_sha = chk.get("remote_sha256")
-            local_sha = (entry.metadata or {}).get("sha256")
-            dumped["update_available"] = bool(
-                isinstance(remote_sha, str)
-                and remote_sha
-                and isinstance(local_sha, str)
-                and local_sha
-                and remote_sha != local_sha.lower()
-            )
-        dumped.setdefault("object", "model")
-        dumped.setdefault("created", now)
-        dumped.setdefault("owned_by", "local")
-        dumped["type"] = _dispatch_type(
-            dumped.get("id", ""), capabilities=dumped.get("capabilities")
-        )
-        # ComfyUI discriminator + category for the dashboard's dedicated
-        # image-gen surface. Path-derived so it self-heals rows an older pull
-        # mis-tagged (capabilities=["chat"], backends=[]) with no migration:
-        # any model whose bytes live under the ComfyUI models tree — or that
-        # already carries the comfyui backend — is owned_by "comfyui" and
-        # advertises its subdir as ``comfyui_category``. The UI groups the
-        # image-gen surface on this, not on the (possibly stale) capability.
-        _cat = _comfyui_category(dumped.get("path"))
-        _bes = list(dumped.get("backends") or [])
-        if _cat is not None or "comfyui" in _bes:
-            dumped["owned_by"] = "comfyui"
-            if "comfyui" not in _bes:
-                _bes.append("comfyui")
-                dumped["backends"] = _bes
-            if _cat is not None:
-                dumped["comfyui_category"] = _cat
-        data.append(dumped)
-        seen.add(entry.id)
-    # "Don't surface invisible models": the composite ``hal0``/npu upstream
-    # advertises FLM slot-default tags via /v1/models even when the weights are
-    # not on disk, so they used to leak into the catalog as available-but-
-    # uninstalled rows. The dedicated FLM probe below is the authoritative
-    # source (it re-adds the INSTALLED ones with the right npu shape), so drop
-    # every FLM-servable tag from the generic upstream advertisement. The probe
-    # is module-cached, so the second call in the injector below is O(1).
-    flm_skip: set[str] = set()
-    try:
-        from hal0.providers.flm import flm_served_models as _flm_probe
-
-        for _fm in _flm_probe():
-            _tag = _fm.get("tag")
-            if isinstance(_tag, str) and _tag:
-                flm_skip.add(_tag)
-                flm_skip.add(_tag.replace(":", "-") + "-FLM")
-    except Exception:
-        # Probe unavailable (no flm binary / dev host) — nothing to skip.
-        pass
-    for u in upstreams.list():
-        # Slot-backed entries serve LOCAL models: the composite ``hal0``
-        # aggregate (kind="slot") and container slots (kind="remote" with
-        # slot_name) advertise ids that live on this host's disk — labeling
-        # them origin="upstream" put local slot models in the Models page
-        # Upstream tab whenever the advertised id differed from the registry
-        # id (raw GGUF casing vs normalized alias). Only genuine remotes
-        # contribute upstream rows here.
-        if u.kind != "remote" or u.slot_name:
-            continue
-        if not getattr(u, "enabled", True) or not getattr(u, "advertise_models", True):
-            continue
-        try:
-            ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
-            cache[u.name] = ids
-        except Exception:
-            ids = []
-        # Same operator curation as /v1/models — the Models page is a
-        # discovery surface, so per-upstream filters apply here too
-        # (dispatch stays unfiltered; hidden models remain addressable).
-        ids = apply_filters(ids, getattr(u, "model_filters", None))
-        for mid in ids:
-            if mid in seen:
-                continue
-            if _is_alias(mid):
-                filtered += 1
-                continue
-            # FLM-servable tag advertised before its weights are pulled — the
-            # dedicated probe below re-adds the installed ones. Skip here so an
-            # un-pulled FLM model never shows as an available upstream row.
-            if mid in flm_skip:
-                continue
-            seen.add(mid)
-            data.append(
-                {
-                    "id": mid,
-                    "name": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": u.name,
-                    "upstream": u.name,
-                    "installed": False,
-                    # Explicit origin (WS-13): advertised by a remote
-                    # provider's /v1/models, never on this host's disk.
-                    # Clients should prefer this over inferring from
-                    # installed+upstream.
-                    "origin": "upstream",
-                    # Upstream-only rows have no local path → "pulled"
-                    # by the path-shape rule (issue #220). The
-                    # blessed bucket is reserved for files actually
-                    # laid out under the blessed recipe tree.
-                    "ns": "pulled",
-                    # Upstream rows carry no capabilities; classify from
-                    # the id so W7 still counts embed/rerank/voice/img.
-                    "type": _dispatch_type(mid),
-                }
-            )
-    # Installed FLM/NPU models — surfaced straight from the host-flm probe so
-    # the NPU slot pickers can select any model on disk, not just the one a slot
-    # already defaults to (the composite ``hal0`` upstream advertises only slot
-    # defaults, so without this only the configured npu model appeared). The id
-    # uses the ``<tag>-FLM`` convention so the dashboard maps it to the
-    # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
-    # popover derive type/device without requiring a registry entry.
-    try:
-        from hal0.providers.flm import flm_served_models
-
-        for fm in flm_served_models():
-            if not fm.get("installed"):
-                continue
-            mid = fm["tag"].replace(":", "-") + "-FLM"
-            if mid in seen:
-                continue
-            seen.add(mid)
-            caps = list(fm.get("capabilities") or [])
-            # FLM chat tags are chat-first even when multimodal (gemma4 also
-            # advertises ``stt``); pick chat as the primary role so they land
-            # in the NPU chat picker, not under stt.
-            primary = "chat" if "chat" in caps else (caps[0] if caps else "chat")
-            # The NPU slot pickers (ui/dash/slots.jsx) gate on the FLM-seed
-            # shape: ``isFlmModel`` needs backend=="flm" / upstream=="npu", and
-            # ``modelSlotType`` needs the DISPATCHER vocabulary (chat→llm,
-            # embed→embedding, stt→transcription) — not the W7 type vocab. Match
-            # that shape exactly so probe-sourced models are selectable.
-            data.append(
-                {
-                    "id": mid,
-                    "name": mid,
-                    "object": "model",
-                    "created": now,
-                    "owned_by": "flm",
-                    "upstream": "npu",
-                    "backend": "flm",
-                    "installed": True,
-                    # FLM rows carry upstream="npu" for the slot pickers but
-                    # are installed host-side — explicitly local (WS-13).
-                    "origin": "local",
-                    "ns": "pulled",
-                    "type": _FLM_DISPATCH_TYPE.get(primary, "llm"),
-                    "capability": primary,
-                    "capabilities": caps,
-                    "device": "npu",
-                }
-            )
-    except Exception:
-        # Probe unavailable (no flm binary / dev host) — skip silently; the
-        # rest of the catalog still renders.
-        pass
-    return {"models": data, "count": len(data), "filtered_aliases": filtered}
+    return await _svc.list_all(
+        registry=request.app.state.model_registry,
+        upstreams=request.app.state.upstreams,
+        cache=getattr(request.app.state, "model_cache", {}),
+        update_state=getattr(request.app.state, "model_update_state", None),
+    )
 
 
 @router.get("/catalogue")
@@ -432,12 +260,10 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
     ``[models].roots`` we trust the operator owns the path; when it's
     elsewhere we still allow it (the operator can point anywhere they
     have read access to).
-    """
-    from hal0.registry.detect import detect
-    from hal0.registry.discover import _normalise_id
-    from hal0.registry.model import Model
-    from hal0.registry.store import ModelAlreadyExists
 
+    Detection + derivation + registry write + event emit live in
+    :func:`hal0.services.models_service.add_from_path`.
+    """
     registry = request.app.state.model_registry
     try:
         body = await request.json()
@@ -445,112 +271,8 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-
-    raw_path = body.get("path")
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise BadRequest("'path' must be a non-empty absolute path string")
-
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        raise BadRequest(
-            f"'path' must be absolute (got {raw_path!r})",
-            code="model.path_relative",
-        )
-    if not path.exists() or not path.is_file():
-        raise BadRequest(
-            f"path {str(path)!r} is not a readable file",
-            code="model.path_missing",
-            details={"path": str(path)},
-        )
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path
-
-    # Enforce the same extension allow-list the scan walker uses so
-    # accidentally pointing at a tokenizer.json or a README.md fails
-    # loudly rather than landing in the registry.
-    cfg = load_hal0_config()
-    allowed_exts = {e.lower() for e in cfg.models.file_extensions}
-    if resolved.suffix.lower() not in allowed_exts:
-        raise BadRequest(
-            f"file extension {resolved.suffix!r} not in [models].file_extensions",
-            code="model.unsupported_format",
-            details={"path": str(resolved), "allowed": sorted(allowed_exts)},
-        )
-
-    detection = detect(resolved)
-    raw_labels = body.get("labels")
-    if isinstance(raw_labels, list) and raw_labels:
-        capabilities = [str(c) for c in raw_labels if isinstance(c, str) and c.strip()]
-    else:
-        capabilities = list(detection.suggested_capabilities) or ["chat"]
-
-    raw_id = body.get("id")
-    if isinstance(raw_id, str) and raw_id.strip():
-        model_id = raw_id.strip()
-    else:
-        # Prefer the detector's suggested_name (post-GGUF arch+param sniff)
-        # falling back to the slug of the stem so two paths to the same
-        # file land on the same id as the auto-scan would.
-        model_id = _normalise_id(detection.suggested_name or resolved.stem)
-
-    raw_name = body.get("name")
-    if isinstance(raw_name, str) and raw_name.strip():
-        display_name = raw_name.strip()
-    else:
-        display_name = detection.suggested_name or resolved.stem
-
-    overwrite = bool(body.get("overwrite", False))
-
-    try:
-        size_bytes = resolved.stat().st_size
-    except OSError:
-        size_bytes = 0
-
-    metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
-    if detection.context_length is not None:
-        metadata["context_length"] = detection.context_length
-
-    try:
-        model = Model(
-            id=model_id,
-            name=display_name,
-            path=str(resolved),
-            size_bytes=size_bytes,
-            quant=detection.quant,
-            capabilities=capabilities,
-            backends=list(detection.suggested_backends),
-            metadata=metadata,
-        )
-    except (TypeError, ValueError) as exc:
-        raise BadRequest(f"invalid Model payload: {exc}") from exc
-
-    if overwrite and registry.has(model_id):
-        registry.remove(model_id)
-
-    try:
-        registry.add(model)
-    except ModelAlreadyExists as exc:
-        # Convert to the structured envelope shape (409) so the UI can
-        # branch on the code rather than the message text.
-        raise exc
-
     event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "model.registered",
-            "info",
-            f"model:{model.id}",
-            f"{model.id}: registered (add-from-path)",
-            data={
-                "id": model.id,
-                "backends": list(model.backends),
-                "capabilities": list(model.capabilities),
-                "source": "add-from-path",
-            },
-        )
-    return _model_to_dict(model)
+    return await _svc.add_from_path(body, registry=registry, event_bus=event_bus)
 
 
 @router.post("", status_code=201)
@@ -827,6 +549,43 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
+    # Validate a writable ``preferred_runner`` (UI-API-1 item 2): the field is
+    # a key into hal0.runners.RUNNER_IMAGES. Reject an unknown key at SAVE time
+    # so the drawer's runner-override dropdown can never persist a value the
+    # launcher would silently skip. ``None``/"" clears the preference (valid).
+    if "preferred_runner" in body:
+        pr = body["preferred_runner"]
+        if pr is not None and (not isinstance(pr, str) or pr not in _RUNNER_IMAGES):
+            raise BadRequest(
+                f"preferred_runner {pr!r} is not a known runner key",
+                code="model.unknown_runner",
+                details={"preferred_runner": pr, "available": sorted(_RUNNER_IMAGES)},
+            )
+
+    # Screen defaults.extra_args against the managed-arg denylist at SAVE
+    # time. Launch already rejects loudly (slot.managed_arg_denied), so this
+    # is defense-in-depth/UX for non-dashboard clients: fail the write with
+    # the same envelope instead of persisting a tune that can never load.
+    defaults = body.get("defaults")
+    if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
+        import shlex
+
+        from hal0.slots.argv import _deny_managed_flags
+
+        # O10 guard (spec §3 JSON-token integrity): catch a bare double-quoted
+        # JSON value the shell would eat BEFORE the denylist/parse checks so
+        # the operator gets the actionable "single-quote it" message.
+        _svc.screen_extra_args_json(defaults["extra_args"], segment="model defaults.extra_args")
+
+        try:
+            tokens = shlex.split(defaults["extra_args"])
+        except ValueError as exc:
+            raise BadRequest(
+                f"defaults.extra_args is not parseable as a flag string: {exc}",
+                code="model.extra_args_unparseable",
+            ) from exc
+        _deny_managed_flags(tokens, segment="model defaults.extra_args")
+
     # Snapshot the pre-update model so we can diff the field set the
     # client actually changed (vs the wire-format keys, which may include
     # unchanged values). Without this the footer's "changed X, Y" toast
@@ -856,6 +615,67 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             data={"id": model.id, "changed_fields": changed},
         )
     return _model_to_dict(model)
+
+
+@router.post("/{model_id}/duplicate", status_code=201)
+async def duplicate_model(model_id: str, request: Request) -> dict[str, Any]:
+    """Duplicate a registry row so two rows reference the SAME weights.
+
+    Body::
+
+        {
+          "new_id":  "qwen3-4b-cpu",    # required — the new registry id
+          "profile": "cpu-tune"          # optional — stamp this profile's flags
+        }                                #            into the new row's defaults
+
+    The new row copies the source's metadata/defaults/capabilities/backends and
+    shares its ``path`` — NO byte copy. When the source is a pulled model with
+    ``model_file`` rows, those are replicated under the new id and each shared
+    blob's refcount is bumped, so a later delete of either row never orphans
+    bytes the other still uses (see
+    :func:`hal0.services.models_service.duplicate_model`). Optionally stamps a
+    profile's flags into the new row's ``defaults.extra_args`` (copy-not-layer;
+    the profile is never mutated — spec-flags-ownership §3).
+
+    Errors:
+      * ``404 model.not_found`` — ``model_id`` (source) not registered.
+      * ``404 profiles.not_found`` — ``profile`` given but unknown.
+      * ``409 model.already_exists`` — ``new_id`` already taken.
+      * ``400 validation.invalid`` — ``new_id`` missing / equal to the source.
+    """
+    registry = request.app.state.model_registry
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+
+    new_id = body.get("new_id")
+    if not isinstance(new_id, str):
+        raise BadRequest("'new_id' must be a string", code="validation.invalid")
+    profile = body.get("profile")
+    if profile is not None and not isinstance(profile, str):
+        raise BadRequest("'profile' must be a string when set", code="validation.invalid")
+
+    result = _svc.duplicate_model(registry, source_id=model_id, new_id=new_id, profile=profile)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.registered",
+            "info",
+            f"model:{result['id']}",
+            f"{result['id']}: registered (duplicate of {model_id})",
+            data={
+                "id": result["id"],
+                "backends": list(result.get("backends") or []),
+                "capabilities": list(result.get("capabilities") or []),
+                "source": "duplicate",
+                "duplicated_from": model_id,
+            },
+        )
+    return result
 
 
 # ── DELETE + cascade ───────────────────────────────────────────────────────
@@ -1210,12 +1030,12 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
 # ── HuggingFace inspect (POST /api/models/inspect) ────────────────────────────
 
 
-# In-process TTL cache keyed by normalised HF repo id. Storing the whole
-# response shape (variants + tags + metadata) keeps repeat Inspect clicks
-# on the same modal session free; the 5 minute TTL is short enough that
-# a freshly-uploaded quant lands within one render.
-_INSPECT_TTL_SECONDS = 300
-_INSPECT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+# The repo-coordinate resolution + TTL cache + Hub fetch moved to
+# ``hal0.services.models_service`` (P3-routers §J). The cache binding is
+# re-exported so ``tests/api/test_models_routes.py`` can still reset it via
+# ``routes.models._INSPECT_CACHE.clear()``.
+_INSPECT_TTL_SECONDS = _svc.INSPECT_TTL_SECONDS
+_INSPECT_CACHE = _svc.INSPECT_CACHE
 
 
 @router.post("/inspect")
@@ -1239,7 +1059,8 @@ async def inspect_model(request: Request) -> dict[str, Any]:
 
     Cached for ~5 minutes per repo. HF unreachable / 5xx → ``502``
     with ``hf.unreachable`` / ``hf.upstream_error``. Repo missing →
-    ``404`` with ``hf.repo_not_found``.
+    ``404`` with ``hf.repo_not_found``. Resolution + cache + fetch live in
+    :func:`hal0.services.models_service.inspect_hf_repo`.
     """
     try:
         body = await request.json()
@@ -1247,35 +1068,7 @@ async def inspect_model(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-
-    repo_input = body.get("hf_repo")
-    if not isinstance(repo_input, str) or not repo_input.strip():
-        repo_input = body.get("hf_url")
-    if not isinstance(repo_input, str) or not repo_input.strip():
-        raise BadRequest(
-            "either 'hf_repo' (org/name) or 'hf_url' is required",
-            code="hf.bad_request",
-        )
-
-    repo = _normalise_hf_repo(repo_input)
-    if "/" not in repo:
-        raise BadRequest(
-            f"'{repo_input}' is not a valid org/name HF repo coordinate",
-            code="hf.bad_request",
-            details={"input": repo_input},
-        )
-
-    now = time.time()
-    cached = _INSPECT_CACHE.get(repo)
-    if cached is not None and now - cached[0] < _INSPECT_TTL_SECONDS:
-        payload = dict(cached[1])
-        payload["repo"] = repo
-        payload["cached"] = True
-        return payload
-
-    result = await _fetch_hf_repo(repo)
-    _INSPECT_CACHE[repo] = (now, result)
-    return {"repo": repo, "cached": False, **result}
+    return await _svc.inspect_hf_repo(body)
 
 
 @router.post("/{model_id}/pull/cancel")

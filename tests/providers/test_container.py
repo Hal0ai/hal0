@@ -423,9 +423,11 @@ class TestRenderUnit:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
-        lines = unit.splitlines()
-        assert "SecurityOpt=apparmor=unconfined" in lines
-        assert "SecurityOpt=seccomp=unconfined" in lines
+        # Uniform render (O8+O11): security opts ride PodmanArgs= on every
+        # substrate — native SecurityOpt= keys are deliberately not emitted.
+        assert "--security-opt apparmor=unconfined" in unit
+        assert "--security-opt seccomp=unconfined" in unit
+        assert "SecurityOpt=" not in unit
 
     def test_model_arg_in_exec(self) -> None:
         profile = _moe_profile()
@@ -469,9 +471,10 @@ class TestRenderUnit:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
-        lines = unit.splitlines()
+        # Uniform render: numeric GIDs ride PodmanArgs=--group-add (O8+O11).
         for gid in resolve_gpu_group_ids():
-            assert f"GroupAdd={gid}" in lines, f"GID {gid} not a GroupAdd= line: {lines}"
+            assert f"--group-add {gid}" in unit, f"GID {gid} missing: {unit}"
+        assert "GroupAdd=" not in unit
 
 
 # ── ContainerProvider.container_spec ─────────────────────────────────────────
@@ -1001,3 +1004,28 @@ class TestFamilyDefaults:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
         assert "q8_0" not in argv  # basic seed forces no KV quant
+
+
+class TestUniformQuadletRender:
+    """halo150/143 O8+O11: ONE render for every substrate — no version branch.
+
+    Native AutoRemove=/GroupAdd=/SecurityOpt= keys are deliberately never
+    emitted: 4.x generators hard-fail the conversion on them, and the native
+    render's systemd lifecycle broke on unprivileged podman-5-in-LXC
+    (netavark /run/user/0/netns teardown race) while the PodmanArgs render
+    ran healthy on both validation boxes.
+    """
+
+    def _rendered(self) -> str:
+        return _render_llama("qtest", "img:latest", 18081, "/models/m.gguf", "-fa on")
+
+    def test_no_native_5x_keys_ever(self):
+        text = self._rendered()
+        assert "AutoRemove" not in text
+        assert "GroupAdd=" not in text
+        assert "SecurityOpt=" not in text
+
+    def test_gpu_groups_ride_podman_args(self):
+        text = self._rendered()
+        if "--group-add" in text:
+            assert "PodmanArgs=" in text

@@ -107,7 +107,7 @@ def test_voice_wire_surfaces_seam_failure_as_fail(monkeypatch: pytest.MonkeyPatc
             raise AssertionError("config-set should not run after a secrets failure")
 
     state = hp.BootstrapState(hermes_home="/tmp/hh", agent_id="hermes-agent")
-    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=_IO()))
+    out = hp._phase_voice_wire(hp._StepCtx(state=state, io=_IO()))
     assert out.status == hp.PhaseStatus.FAIL
     assert "secrets env write" in out.reason
 

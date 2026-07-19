@@ -25,6 +25,7 @@ from typing import Any
 from hal0.model_meta import classify
 from hal0.registry.detect import DetectionResult, detect
 from hal0.registry.model import _derive_ns
+from hal0.upstreams.filters import apply_filters
 
 # ── model-id classification (pure) ────────────────────────────────────────────
 
@@ -600,3 +601,590 @@ async def cascade_delete_model(
     with contextlib.suppress(OSError):
         pull_job_file(model_id).unlink(missing_ok=True)
     return bool(removed)
+
+
+# ── catalog aggregation (GET /api/models) ─────────────────────────────────────
+
+
+async def list_all(
+    *, registry: Any, upstreams: Any, cache: dict[str, Any], update_state: Any
+) -> dict[str, Any]:
+    """Aggregate models from the local registry + every configured upstream.
+
+    Local registry entries (real files on disk) win on id collision; each row
+    carries ``installed`` so the UI can render an installed/advertised badge.
+    Folds in three sources: registry rows (with a per-row ``update_available``
+    recomputed against the row's CURRENT ``metadata.sha256`` from the last
+    ``/updates/check`` snapshot in ``update_state``), genuine-remote upstream
+    advertisements (operator-filtered, FLM-servable tags dropped so un-pulled
+    NPU tags never show as available), and the host FLM probe's INSTALLED tags
+    shaped for the NPU slot pickers. ``cache`` is the shared ``model_cache``
+    dict and is populated in place with each upstream's fetched ids.
+
+    Returns ``{"models": [...], "count": int, "filtered_aliases": int}``.
+    """
+    import time
+
+    now = int(time.time())
+    data: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    filtered = 0
+    # Last HF update-check snapshot (populated by /api/models/updates/check;
+    # never fetched on this hot path). The flag is recomputed against the
+    # row's CURRENT metadata.sha256 rather than replayed from the snapshot,
+    # so applying an update clears the badge on the next poll without
+    # waiting for the check TTL to expire.
+    update_checks: dict[str, Any] = {}
+    if isinstance(update_state, dict):
+        update_checks = update_state.get("models") or {}
+    for entry in registry.list():
+        dumped = model_to_dict(entry)
+        dumped["installed"] = True
+        chk = update_checks.get(entry.id)
+        if isinstance(chk, dict):
+            remote_sha = chk.get("remote_sha256")
+            local_sha = (entry.metadata or {}).get("sha256")
+            dumped["update_available"] = bool(
+                isinstance(remote_sha, str)
+                and remote_sha
+                and isinstance(local_sha, str)
+                and local_sha
+                and remote_sha != local_sha.lower()
+            )
+        dumped.setdefault("object", "model")
+        dumped.setdefault("created", now)
+        dumped.setdefault("owned_by", "local")
+        dumped["type"] = dispatch_type(
+            dumped.get("id", ""), capabilities=dumped.get("capabilities")
+        )
+        # ComfyUI discriminator + category for the dashboard's dedicated
+        # image-gen surface. Path-derived so it self-heals rows an older pull
+        # mis-tagged (capabilities=["chat"], backends=[]) with no migration:
+        # any model whose bytes live under the ComfyUI models tree — or that
+        # already carries the comfyui backend — is owned_by "comfyui" and
+        # advertises its subdir as ``comfyui_category``. The UI groups the
+        # image-gen surface on this, not on the (possibly stale) capability.
+        _cat = comfyui_category(dumped.get("path"))
+        _bes = list(dumped.get("backends") or [])
+        if _cat is not None or "comfyui" in _bes:
+            dumped["owned_by"] = "comfyui"
+            if "comfyui" not in _bes:
+                _bes.append("comfyui")
+                dumped["backends"] = _bes
+            if _cat is not None:
+                dumped["comfyui_category"] = _cat
+        data.append(dumped)
+        seen.add(entry.id)
+    # "Don't surface invisible models": the composite ``hal0``/npu upstream
+    # advertises FLM slot-default tags via /v1/models even when the weights are
+    # not on disk, so they used to leak into the catalog as available-but-
+    # uninstalled rows. The dedicated FLM probe below is the authoritative
+    # source (it re-adds the INSTALLED ones with the right npu shape), so drop
+    # every FLM-servable tag from the generic upstream advertisement. The probe
+    # is module-cached, so the second call in the injector below is O(1).
+    flm_skip: set[str] = set()
+    try:
+        from hal0.providers.flm import flm_served_models as _flm_probe
+
+        for _fm in _flm_probe():
+            _tag = _fm.get("tag")
+            if isinstance(_tag, str) and _tag:
+                flm_skip.add(_tag)
+                flm_skip.add(_tag.replace(":", "-") + "-FLM")
+    except Exception:
+        # Probe unavailable (no flm binary / dev host) — nothing to skip.
+        pass
+    for u in upstreams.list():
+        # Slot-backed entries serve LOCAL models: the composite ``hal0``
+        # aggregate (kind="slot") and container slots (kind="remote" with
+        # slot_name) advertise ids that live on this host's disk — labeling
+        # them origin="upstream" put local slot models in the Models page
+        # Upstream tab whenever the advertised id differed from the registry
+        # id (raw GGUF casing vs normalized alias). Only genuine remotes
+        # contribute upstream rows here.
+        if u.kind != "remote" or u.slot_name:
+            continue
+        if not getattr(u, "enabled", True) or not getattr(u, "advertise_models", True):
+            continue
+        try:
+            ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
+            cache[u.name] = ids
+        except Exception:
+            ids = []
+        # Same operator curation as /v1/models — the Models page is a
+        # discovery surface, so per-upstream filters apply here too
+        # (dispatch stays unfiltered; hidden models remain addressable).
+        ids = apply_filters(ids, getattr(u, "model_filters", None))
+        for mid in ids:
+            if mid in seen:
+                continue
+            if is_alias(mid):
+                filtered += 1
+                continue
+            # FLM-servable tag advertised before its weights are pulled — the
+            # dedicated probe below re-adds the installed ones. Skip here so an
+            # un-pulled FLM model never shows as an available upstream row.
+            if mid in flm_skip:
+                continue
+            seen.add(mid)
+            data.append(
+                {
+                    "id": mid,
+                    "name": mid,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": u.name,
+                    "upstream": u.name,
+                    "installed": False,
+                    # Explicit origin (WS-13): advertised by a remote
+                    # provider's /v1/models, never on this host's disk.
+                    # Clients should prefer this over inferring from
+                    # installed+upstream.
+                    "origin": "upstream",
+                    # Upstream-only rows have no local path → "pulled"
+                    # by the path-shape rule (issue #220). The
+                    # blessed bucket is reserved for files actually
+                    # laid out under the blessed recipe tree.
+                    "ns": "pulled",
+                    # Upstream rows carry no capabilities; classify from
+                    # the id so W7 still counts embed/rerank/voice/img.
+                    "type": dispatch_type(mid),
+                }
+            )
+    # Installed FLM/NPU models — surfaced straight from the host-flm probe so
+    # the NPU slot pickers can select any model on disk, not just the one a slot
+    # already defaults to (the composite ``hal0`` upstream advertises only slot
+    # defaults, so without this only the configured npu model appeared). The id
+    # uses the ``<tag>-FLM`` convention so the dashboard maps it to the
+    # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
+    # popover derive type/device without requiring a registry entry.
+    try:
+        from hal0.providers.flm import flm_served_models
+
+        for fm in flm_served_models():
+            if not fm.get("installed"):
+                continue
+            mid = fm["tag"].replace(":", "-") + "-FLM"
+            if mid in seen:
+                continue
+            seen.add(mid)
+            caps = list(fm.get("capabilities") or [])
+            # FLM chat tags are chat-first even when multimodal (gemma4 also
+            # advertises ``stt``); pick chat as the primary role so they land
+            # in the NPU chat picker, not under stt.
+            primary = "chat" if "chat" in caps else (caps[0] if caps else "chat")
+            # The NPU slot pickers (ui/dash/slots.jsx) gate on the FLM-seed
+            # shape: ``isFlmModel`` needs backend=="flm" / upstream=="npu", and
+            # ``modelSlotType`` needs the DISPATCHER vocabulary (chat→llm,
+            # embed→embedding, stt→transcription) — not the W7 type vocab. Match
+            # that shape exactly so probe-sourced models are selectable.
+            data.append(
+                {
+                    "id": mid,
+                    "name": mid,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "flm",
+                    "upstream": "npu",
+                    "backend": "flm",
+                    "installed": True,
+                    # FLM rows carry upstream="npu" for the slot pickers but
+                    # are installed host-side — explicitly local (WS-13).
+                    "origin": "local",
+                    "ns": "pulled",
+                    "type": FLM_DISPATCH_TYPE.get(primary, "llm"),
+                    "capability": primary,
+                    "capabilities": caps,
+                    "device": "npu",
+                }
+            )
+    except Exception:
+        # Probe unavailable (no flm binary / dev host) — skip silently; the
+        # rest of the catalog still renders.
+        pass
+    return {"models": data, "count": len(data), "filtered_aliases": filtered}
+
+
+# ── add-by-path (POST /api/models/add-from-path) ──────────────────────────────
+
+
+async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) -> dict[str, Any]:
+    """Register a single already-downloaded model file by absolute path.
+
+    Detection + id/name/capability derivation + registry write + the
+    ``model.registered`` emit for the dashboard's "Add by path" flow. The
+    file must already exist on disk and be readable by this process — no
+    network, no copy. Raises the typed 4xx envelope subclasses on bad input:
+
+      * ``BadRequest`` ``validation.invalid`` — body ``path`` missing/wrong.
+      * ``BadRequest`` ``model.path_relative`` — path not absolute.
+      * ``BadRequest`` ``model.path_missing`` — file absent / unreadable.
+      * ``BadRequest`` ``model.unsupported_format`` — extension not allowed.
+      * ``ModelAlreadyExists`` (409) — id registered and ``overwrite=false``.
+
+    Returns the serialised model dict (:func:`model_to_dict`).
+    """
+    from hal0.config.loader import load_hal0_config
+    from hal0.errors import BadRequest
+    from hal0.registry.discover import _normalise_id
+    from hal0.registry.model import Model
+
+    raw_path = body.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise BadRequest("'path' must be a non-empty absolute path string")
+
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise BadRequest(
+            f"'path' must be absolute (got {raw_path!r})",
+            code="model.path_relative",
+        )
+    if not path.exists() or not path.is_file():
+        raise BadRequest(
+            f"path {str(path)!r} is not a readable file",
+            code="model.path_missing",
+            details={"path": str(path)},
+        )
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+
+    # Enforce the same extension allow-list the scan walker uses so
+    # accidentally pointing at a tokenizer.json or a README.md fails
+    # loudly rather than landing in the registry.
+    cfg = load_hal0_config()
+    allowed_exts = {e.lower() for e in cfg.models.file_extensions}
+    if resolved.suffix.lower() not in allowed_exts:
+        raise BadRequest(
+            f"file extension {resolved.suffix!r} not in [models].file_extensions",
+            code="model.unsupported_format",
+            details={"path": str(resolved), "allowed": sorted(allowed_exts)},
+        )
+
+    detection = detect(resolved)
+    raw_labels = body.get("labels")
+    if isinstance(raw_labels, list) and raw_labels:
+        capabilities = [str(c) for c in raw_labels if isinstance(c, str) and c.strip()]
+    else:
+        capabilities = list(detection.suggested_capabilities) or ["chat"]
+
+    raw_id = body.get("id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        model_id = raw_id.strip()
+    else:
+        # Prefer the detector's suggested_name (post-GGUF arch+param sniff)
+        # falling back to the slug of the stem so two paths to the same
+        # file land on the same id as the auto-scan would.
+        model_id = _normalise_id(detection.suggested_name or resolved.stem)
+
+    raw_name = body.get("name")
+    if isinstance(raw_name, str) and raw_name.strip():
+        display_name = raw_name.strip()
+    else:
+        display_name = detection.suggested_name or resolved.stem
+
+    overwrite = bool(body.get("overwrite", False))
+
+    try:
+        size_bytes = resolved.stat().st_size
+    except OSError:
+        size_bytes = 0
+
+    metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
+    if detection.context_length is not None:
+        metadata["context_length"] = detection.context_length
+
+    try:
+        model = Model(
+            id=model_id,
+            name=display_name,
+            path=str(resolved),
+            size_bytes=size_bytes,
+            quant=detection.quant,
+            capabilities=capabilities,
+            backends=list(detection.suggested_backends),
+            metadata=metadata,
+        )
+    except (TypeError, ValueError) as exc:
+        raise BadRequest(f"invalid Model payload: {exc}") from exc
+
+    if overwrite and registry.has(model_id):
+        registry.remove(model_id)
+
+    # ModelAlreadyExists (409) propagates to the typed envelope unchanged.
+    registry.add(model)
+
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.registered",
+            "info",
+            f"model:{model.id}",
+            f"{model.id}: registered (add-from-path)",
+            data={
+                "id": model.id,
+                "backends": list(model.backends),
+                "capabilities": list(model.capabilities),
+                "source": "add-from-path",
+            },
+        )
+    return model_to_dict(model)
+
+
+# ── HuggingFace inspect (POST /api/models/inspect) ────────────────────────────
+
+# In-process TTL cache keyed by normalised HF repo id. Storing the whole
+# response shape (variants + tags + metadata) keeps repeat Inspect clicks
+# on the same modal session free; the 5 minute TTL is short enough that
+# a freshly-uploaded quant lands within one render.
+INSPECT_TTL_SECONDS = 300
+INSPECT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+async def inspect_hf_repo(body: dict[str, Any]) -> dict[str, Any]:
+    """Inspect a HuggingFace repo and return pullable variants + metadata.
+
+    Accepts ``{"hf_repo": "org/name"}`` or the dashboard's older ``{"hf_url":
+    ...}`` alias; normalises the coordinate, serves a ~5-minute per-repo TTL
+    cache, and otherwise fetches from the Hub. Raises ``BadRequest``
+    (``hf.bad_request``) on a missing/invalid coordinate; HF unreachable / 5xx
+    / 404 surface as the typed ``hf.*`` envelopes raised by the fetch layer.
+    """
+    import time
+
+    from hal0.errors import BadRequest
+    from hal0.upstreams.huggingface import fetch_repo, normalise_repo_slug
+
+    repo_input = body.get("hf_repo")
+    if not isinstance(repo_input, str) or not repo_input.strip():
+        repo_input = body.get("hf_url")
+    if not isinstance(repo_input, str) or not repo_input.strip():
+        raise BadRequest(
+            "either 'hf_repo' (org/name) or 'hf_url' is required",
+            code="hf.bad_request",
+        )
+
+    repo = normalise_repo_slug(repo_input)
+    if "/" not in repo:
+        raise BadRequest(
+            f"'{repo_input}' is not a valid org/name HF repo coordinate",
+            code="hf.bad_request",
+            details={"input": repo_input},
+        )
+
+    now = time.time()
+    cached = INSPECT_CACHE.get(repo)
+    if cached is not None and now - cached[0] < INSPECT_TTL_SECONDS:
+        payload = dict(cached[1])
+        payload["repo"] = repo
+        payload["cached"] = True
+        return payload
+
+    result = await fetch_repo(repo)
+    INSPECT_CACHE[repo] = (now, result)
+    return {"repo": repo, "cached": False, **result}
+
+
+# ── O10 guard: bare double-quoted JSON eaten by shell semantics ───────────────
+#
+# spec-flags-ownership §3 "JSON-token integrity": editable flag text carrying a
+# JSON value (e.g. ``--chat-template-kwargs '{"enable_thinking":false}'``) must
+# survive shlex-splitting intact to reach the runner. A common operator mistake
+# is to omit the surrounding SINGLE quotes:
+#
+#     --chat-template-kwargs {"enable_thinking":false}     # WRONG
+#
+# ``shlex.split`` then treats the double quotes as shell quoting and strips them,
+# yielding the token ``{enable_thinking:false}`` — no longer valid JSON, and the
+# runner rejects it (or worse, silently mis-parses). This guard catches exactly
+# that shape at SAVE time (model PUT + any slot-config writer that opts in) and
+# tells the operator to single-quote the JSON value, rather than letting a tune
+# that can never load through to launch. It runs BEFORE the managed-arg denylist
+# so the more actionable quoting message wins.
+
+
+def screen_extra_args_json(raw: str, *, segment: str = "extra_args") -> None:
+    """Reject ``raw`` when a bare double-quoted JSON value was eaten by the shell.
+
+    Detection (deliberately narrow — warning-level UX, one precise cause):
+    a ``shlex``-split token that *starts with* ``{`` but is NOT valid JSON,
+    while the RAW string contains the substring ``{"`` (proof a
+    double-quoted JSON object was typed). That combination only arises when
+    shell quote-stripping removed the JSON's own double quotes — a correctly
+    single-quoted ``'{"…":…}'`` survives as a token that IS valid JSON and is
+    never flagged.
+
+    Raises :class:`~hal0.errors.BadRequest` (``model.extra_args_json_quoting``)
+    with a message telling the operator to single-quote the value. A ``raw``
+    that does not shlex-parse at all is left for the caller's own
+    unparseable-string handling (this guard only inspects a clean token
+    list).
+    """
+    import json
+    import shlex
+
+    from hal0.errors import BadRequest
+
+    if not raw or not raw.strip():
+        return
+    if '{"' not in raw:
+        # No double-quoted JSON object present at all — nothing this guard
+        # is responsible for. (A single-quoted JSON value shlex-splits to a
+        # token that still literally contains ``{"``, so the correctly
+        # quoted case is NOT short-circuited here — it is passed through and
+        # accepted below because its token parses as valid JSON.)
+        return
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        # Unparseable as a whole — the caller (model PUT) raises its own
+        # ``model.extra_args_unparseable``; don't double-report.
+        return
+    for tok in tokens:
+        if not tok.startswith("{"):
+            continue
+        try:
+            json.loads(tok)
+        except ValueError:
+            raise BadRequest(
+                f"{segment} contains a JSON value whose double quotes were "
+                f"stripped by shell parsing (got token {tok!r}). Wrap the "
+                "JSON in SINGLE quotes so it survives intact, e.g. "
+                "--chat-template-kwargs '{\"enable_thinking\":false}'",
+                code="model.extra_args_json_quoting",
+                details={"segment": segment, "token": tok},
+            ) from None
+
+
+# ── duplicate a model row (UI-API-1 item 3) ───────────────────────────────────
+#
+# Study note (spec deliverable): a model's *weights* live on disk at
+# ``Model.path``; the store's refcount lives in the ``store_blob`` table, keyed
+# by sha256, with one ``model_file`` row per (model_id, rel) referencing a blob
+# (``hal0.registry.gc`` / ``hal0.db.repository``). Duplicating therefore copies
+# METADATA only — the new row shares the SAME ``path`` (no byte copy) — and,
+# when the source carries ``model_file`` rows (pulled models do; hand-registered
+# ones do not), replicates them under the new id and bumps each blob's refcount,
+# exactly as a same-sha pull does (``pull._register_blob_after_install`` /
+# ``_maybe_hardlink_from_blob``). That keeps ``store_blob.refcount`` honest so a
+# later delete of either row never orphans bytes the other still uses.
+
+
+def _copy_model_files_refcounted(db_path: Any, *, source_id: str, new_id: str) -> int:
+    """Replicate ``source_id``'s ``model_file`` rows under ``new_id``, bumping
+    each referenced blob's refcount. Returns the number of files replicated.
+
+    No-op (returns 0) when the source has no ``model_file`` rows — the common
+    case for hand-registered single-file models, which are tracked only by
+    ``Model.path`` and have no blob accounting. Byte content is never touched:
+    the new rows point at the SAME ``dest`` as the source.
+    """
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+
+    copied = 0
+    with connect(db_path) as conn:
+        rows = repository.list_model_files(conn, source_id)
+        if not rows:
+            return 0
+        with tx(conn):
+            for row in rows:
+                sha256 = row.get("sha256")
+                repository.insert_model_file(
+                    conn,
+                    model_id=new_id,
+                    rel=row["rel"],
+                    dest=row.get("dest"),
+                    size_bytes=row.get("size_bytes"),
+                    sha256=sha256,
+                    lfs=bool(row["lfs"]) if row.get("lfs") is not None else None,
+                    role=row.get("role"),
+                    shard_index=row.get("shard_index"),
+                )
+                # Bump the shared blob's refcount so the new row is a real
+                # referent — mirrors the same-sha pull path. Only when a blob
+                # row actually exists for this sha (non-LFS rows carry none).
+                if sha256 and repository.get_blob(conn, sha256) is not None:
+                    repository.bump_blob_ref(conn, sha256)
+                copied += 1
+    return copied
+
+
+def duplicate_model(
+    registry: Any,
+    *,
+    source_id: str,
+    new_id: str,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Create a new registry row referencing the SAME weights as ``source_id``.
+
+    Copies the source's metadata/defaults/capabilities/backends into a new
+    ``Model`` keyed by ``new_id`` (same ``path`` — NO byte copy), replicates
+    its ``model_file`` rows with refcount bumps (:func:`_copy_model_files_refcounted`),
+    and — when ``profile`` is given — stamps that profile's flags into the new
+    row's ``defaults.extra_args`` (and records the pointer in
+    ``defaults.profile``), exactly as the drawer's copy-not-layer stamp does.
+
+    Raises:
+        ModelNotFound: ``source_id`` is not registered.
+        ModelAlreadyExists: ``new_id`` is already taken.
+        BadRequest: ``new_id`` empty, or equal to ``source_id``.
+        NotFound (profiles.not_found): ``profile`` given but unknown.
+    """
+    from hal0.errors import BadRequest
+    from hal0.registry.model import Model, ModelDefaults
+
+    if not new_id or not new_id.strip():
+        raise BadRequest("'new_id' must be a non-empty model id", code="validation.invalid")
+    new_id = new_id.strip()
+    if new_id == source_id:
+        raise BadRequest(
+            "'new_id' must differ from the source model id",
+            code="validation.invalid",
+            details={"model_id": source_id},
+        )
+
+    source = registry.get(source_id)  # raises ModelNotFound
+
+    dumped = source.model_dump(mode="python")
+    dumped["id"] = new_id
+
+    # Optional profile stamp: materialise the profile's flag text into the new
+    # row's editable defaults (copy-not-layer — the profile is never mutated).
+    if profile:
+        from hal0.profiles import ProfileCatalog
+
+        resolved = ProfileCatalog().resolve(profile)  # raises NotFound if unknown
+        existing_defaults = dumped.get("defaults") or {}
+        if not isinstance(existing_defaults, dict):
+            existing_defaults = {}
+        existing_defaults = dict(existing_defaults)
+        existing_defaults["profile"] = profile
+        existing_defaults["extra_args"] = resolved.flags
+        dumped["defaults"] = existing_defaults
+
+    new_model = Model.model_validate(dumped)
+    # Normalise an all-None defaults table back to None so the row matches a
+    # freshly-created one (mirrors _model_to_toml's "collapse when empty").
+    if new_model.defaults is not None and new_model.defaults == ModelDefaults():
+        new_model = new_model.model_copy(update={"defaults": None})
+
+    registry.add(new_model)  # raises ModelAlreadyExists if new_id is taken
+
+    db_path = getattr(registry, "db_path", None)
+    files_copied = 0
+    try:
+        files_copied = _copy_model_files_refcounted(db_path, source_id=source_id, new_id=new_id)
+    except Exception:  # pragma: no cover - defensive
+        # The registry row is the source of truth for "does this model exist";
+        # a blob-accounting hiccup must not leave the duplicate half-created.
+        # Roll the row back and re-raise so the caller returns a clean error.
+        with contextlib.suppress(Exception):
+            registry.remove(new_id)
+        raise
+
+    out = model_to_dict(new_model)
+    out["duplicated_from"] = source_id
+    out["files_refcounted"] = files_copied
+    return out

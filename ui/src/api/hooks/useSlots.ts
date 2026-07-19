@@ -439,6 +439,21 @@ export function useSlotCreate() {
 }
 
 /**
+ * Rename a slot's display label. POST /api/slots/{name}/rename — body
+ * { new_name }. The stable numeric slot id is preserved (a rename is a pure
+ * relabel), but the systemd unit is still name-keyed so the slot must be
+ * OFFLINE — the backend returns a typed error while running (rework §11.1).
+ */
+export function useSlotRename() {
+  const invalidate = useSlotsInvalidator()
+  return useMutation({
+    mutationFn: ({ name, new_name }: { name: string; new_name: string }) =>
+      slotPost(ENDPOINTS.slotRename(name), { new_name }),
+    onSuccess: invalidate,
+  })
+}
+
+/**
  * Edit a slot. PUT /api/slots/{name}/config — body is a partial
  * SlotConfig (shallow merged into the existing TOML). Use
  * `useSlotDefaults` when the caller only needs to update keys inside the

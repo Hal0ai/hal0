@@ -1,25 +1,18 @@
-"""Unit tests for :mod:`hal0.agents.hermes_provision` (issue #238).
+"""Unit tests for :mod:`hal0.agents.hermes_provision`.
 
-The scaffold lands with no-op phase stubs; these tests pin the
-state-machine invariants downstream slices rely on:
+Pins the linear ``install_hermes`` installer + its step bodies:
 
-* Every phase runs in declared order.
-* Successful runs produce a checkpoint with every phase marked ``ok``.
-* Re-runs are no-ops (every phase is skipped because checkpoints exist).
-* ``--repair`` forces re-execution of every phase.
-* ``--skip-phase`` records ``skip`` for the named phase.
-* The state file round-trips through ``BootstrapState.load`` ↔
-  ``BootstrapState.save`` losslessly.
-
-Phase ordering matters because downstream phases consume earlier
-phases' outputs (env_probe → config_write → mcp_wire). A regression
-that re-orders or drops a phase here surfaces before the integration
-slice notices.
+* the full pipeline runs every step to ok/skip and writes a last-run report;
+* a failing step surfaces in ``report.failed`` and ``bootstrap_cli`` maps it to
+  a non-zero exit;
+* each step body (preflight / install / home_init / env_probe / config_write /
+  mcp_wire / context_link / gateway_secrets_wire / voice_wire / smoke / …) plus
+  the surviving pure helpers (python resolve, requirement floor, config overlay,
+  slot resolvers, gateway drop-in) behave as specified.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import subprocess
@@ -35,255 +28,49 @@ from ._hermes_fakes import fake_hermes_run
 
 
 @pytest.fixture
-def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
-    """Seed a :class:`BootstrapState` rooted in ``tmp_path``.
+def install_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Sandbox every host path constant under tmp_path; return (hermes_home, venv)."""
+    from ._hermes_fakes import sandbox_hermes_paths
 
-    Path CONSTANTS are redirected here (they intentionally stay
-    module-level per #702); behavioural IO is faked via the companion
-    ``pipeline_io`` fixture's :class:`hp.PhaseIO` instead of
-    monkeypatching module globals.
-    """
-    var_lib = tmp_path / "var" / "lib" / "hal0"
-    var_lib.mkdir(parents=True)
-    venv = var_lib / "venvs" / "hermes"
-    hermes_home = var_lib / "agents" / "hermes"
-    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)  # /tmp may be tmpfs with little headroom
-    monkeypatch.setattr(
-        hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
-    )
-    monkeypatch.setattr(
-        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
-    )
-    # #437 gateway_secrets_wire: redirect the SYSTEM drop-in dir under
-    # tmp_path so a pipeline run never touches the live /etc/systemd/system
-    # — even when the test runner is root.
-    _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
-    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
-    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf")
-    # Foreign-gateway preflight scans user systemd dirs; point them at an empty
-    # tmp dir so a run on a real host (which may have a live hermes-gateway) stays
-    # hermetic. The pipeline_io `run` seam also stubs systemctl is-active/pgrep.
-    monkeypatch.setattr(hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),))
-    return hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
+    return sandbox_hermes_paths(hp, tmp_path, monkeypatch)
 
 
 @pytest.fixture
-def pipeline_io() -> hp.PhaseIO:
-    """The IO seam bundle for pipeline-level runs (#702).
+def install_fake_io() -> hp.InstallIO:
+    """Deterministic InstallIO for a full hermetic install_hermes run."""
+    from ._hermes_fakes import install_io
 
-    The real preflight + install phases reach for ``/var/lib/hal0/*``,
-    spawn ``python -m venv``, and HTTP-poke ``127.0.0.1:8080``; the
-    config/mcp/memory phases would block on real urlopens. Fake every
-    seam through ``PhaseIO`` so the orchestrator's behaviour is what's
-    under test, not the LXC.
+    return install_io(hp)
 
-    ``run`` intercepts ONLY ``systemctl daemon-reload`` (the live-systemd
-    action the gateway phase would issue). Everything else — env_probe's
-    ``systemd-detect-virt``, smoke-test exec — passes through to the real
-    subprocess so those phases behave as before.
-    """
-    real_run = subprocess.run
 
-    class _NoopCompleted:
-        returncode = 0
-        stdout = ""
-        stderr = ""
+# ── install_hermes: the linear pipeline ──────────────────────────────────────
 
-    class _InactiveCompleted:
-        returncode = 3
-        stdout = "inactive\n"
-        stderr = ""
 
-    class _NoMatchCompleted:
-        returncode = 1
-        stdout = ""
-        stderr = ""
-
-    def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
-        head = list(argv[:2]) if isinstance(argv, (list, tuple)) else []
-        if head == ["systemctl", "daemon-reload"]:
-            return _NoopCompleted()
-        # Foreign-gateway preflight probes — stub them so a run on a real host
-        # (which may have a live system hermes-gateway) doesn't false-positive.
-        if head == ["systemctl", "is-active"]:
-            return _InactiveCompleted()
-        if isinstance(argv, (list, tuple)) and argv and argv[0] == "pgrep":
-            return _NoMatchCompleted()
-        return real_run(argv, *a, **kw)
-
-    def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
-        (v / "bin").mkdir(parents=True, exist_ok=True)
-        (v / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
-        (v / "bin" / "hermes").chmod(0o755)
-
-    return hp.PhaseIO(
-        http_get=lambda *_a, **_kw: 200,
-        fetch_slots=lambda: [],
-        fetch_model_contexts=lambda: {},
-        probe_mcp_server=lambda _url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
-        mcp_memory_call=lambda *_a, **_kw: {"ok": True, "result": {"items": [], "id": "x"}},
-        install_venv=_fake_install,
-        run=_guarded_run,
+def test_install_hermes_marks_every_step_ok_or_skip(
+    tmp_path: Path, install_target: tuple[Path, Path], install_fake_io: hp.InstallIO
+) -> None:
+    home, venv = install_target
+    report = hp.install_hermes(
+        hermes_home=home,
+        venv=venv,
+        agent_id="hermes-agent",
+        io=install_fake_io,
+        state_root=tmp_path / "state",
     )
+    assert report.ok, report.failed
+    for step in report.steps:
+        assert step.status in {"ok", "skip"}, f"{step.name}: {step.status}"
 
 
-def test_phase_names_in_planned_order() -> None:
-    """The planned phases stay in the documented order.
-
-    Mirrors `docs/internal/hermes-bootstrap-plan-2026-05-23.md` §3 +
-    PR-3's persona_seed insertion — if a slice re-orders or drops a
-    phase, this guard catches it before the integration scenario
-    notices.
-    """
-    expected = (
-        "preflight",
-        "install",
-        "env_probe",
-        "home_init",
-        # #432: install_artifacts writes the manager seed + driver env +
-        # runtime.json right after $HERMES_HOME exists and before mcp_wire
-        # reads the seed allow-list.
-        "install_artifacts",
-        # PR-3 (v0.3): persona_seed inserted before config_write so the
-        # first render carries the active persona's system_prompt
-        # prelude (Phase 7) on the same pass that lands chat_slots.
-        "persona_seed",
-        "config_write",
-        "mcp_wire",
-        "context_link",
-        "namespace_register",
-        "brain_profile_seed",
-        "brain_profile_mcp_wire",
-        "model_automap",
-        "voice_wire",
-        # (ownership_reconcile removed — §7.4 F.7: born hal0:hal0, nothing to
-        # reconcile.)
-        # #437 (SYSTEM scope): the gateway secrets drop-in lands after
-        # voice_wire (which may write the vault it references) and before
-        # smoke_tests.
-        "gateway_secrets_wire",
-        "smoke_tests",
-        "self_report",
-    )
-    assert expected == hp.PHASE_NAMES
-
-
-def test_run_marks_every_phase_ok_on_fresh(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
+def test_install_hermes_writes_last_run_report(
+    tmp_path: Path, install_target: tuple[Path, Path], install_fake_io: hp.InstallIO
 ) -> None:
-    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    # voice_wire legitimately returns SKIP when no STT/TTS slots are
-    # configured (most CI envs); gateway_secrets_wire SKIPs when the test
-    # runner is non-root (can't write /etc/systemd/system). Accept both
-    # OK and SKIP for those phases.
-    # #432: install_artifacts SKIPs under the pytest sandbox guard when the
-    # /etc seed/env paths aren't monkeypatched (same posture as
-    # gateway_secrets_wire); its write path is covered by
-    # test_hermes_provision_install_artifacts.py.
-    skip_ok = {"voice_wire", "gateway_secrets_wire", "install_artifacts"}
-    for name in hp.PHASE_NAMES:
-        status = result.phases[name]["status"]
-        allowed = {hp.PhaseStatus.OK.value} | (
-            {hp.PhaseStatus.SKIP.value} if name in skip_ok else set()
-        )
-        assert status in allowed, f"{name}: unexpected {status}"
-    assert result.failed == []
-
-
-def test_state_file_written_and_round_trips(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    state_file = tmp_path / "provision.json"
-    assert state_file.exists()
-    loaded = hp.BootstrapState.load(tmp_path)
-    assert loaded is not None
-    assert loaded.schema_version == hp.SCHEMA_VERSION
-    assert set(loaded.phases.keys()) >= set(hp.PHASE_NAMES)
-    assert loaded.completed_at is not None
-
-
-def test_rerun_is_noop_when_all_phases_ok(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    # All phases skipped because their checkpoint is already ok — no always_run
-    # phase remains after the ownership_reconcile removal (§7.4 F.7).
-    assert set(second.skipped) == set(hp.PHASE_NAMES)
-    assert second.failed == []
-
-
-def test_repair_flag_forces_rerun(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    second = hp.run(
-        state_root=tmp_path, initial_state=state_with_tmp_paths, repair=True, io=pipeline_io
-    )
-    # Repair re-runs everything → nothing was skipped via checkpoint.
-    assert second.skipped == []
-    # voice_wire legitimately returns SKIP when no STT/TTS slots exist;
-    # gateway_secrets_wire SKIPs when the test runner is non-root (can't
-    # write /etc/systemd/system). Accept both OK and SKIP for those phases
-    # (same posture as the fresh-run test above).
-    # #432: install_artifacts SKIPs under the pytest sandbox guard when the
-    # /etc seed/env paths aren't monkeypatched (same posture as
-    # gateway_secrets_wire); its write path is covered by
-    # test_hermes_provision_install_artifacts.py.
-    skip_ok = {"voice_wire", "gateway_secrets_wire", "install_artifacts"}
-    for name in hp.PHASE_NAMES:
-        status = second.phases[name]["status"]
-        allowed = {hp.PhaseStatus.OK.value} | (
-            {hp.PhaseStatus.SKIP.value} if name in skip_ok else set()
-        )
-        assert status in allowed, f"{name}: unexpected {status}"
-
-
-def test_skip_phase_records_skip_reason(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    result = hp.run(
-        state_root=tmp_path,
-        initial_state=state_with_tmp_paths,
-        skip_phases=("voice_wire", "smoke_tests"),
-        io=pipeline_io,
-    )
-    assert result.phases["voice_wire"]["status"] == hp.PhaseStatus.SKIP.value
-    assert result.phases["voice_wire"]["reason"] == "--skip-phase"
-    assert result.phases["smoke_tests"]["status"] == hp.PhaseStatus.SKIP.value
-    # Other phases run as normal.
-    assert result.phases["preflight"]["status"] == hp.PhaseStatus.OK.value
-
-
-def test_dry_run_skips_state_persistence(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, dry_run=True, io=pipeline_io)
-    assert not (tmp_path / "provision.json").exists()
-
-
-def test_load_returns_none_when_state_file_missing(tmp_path: Path) -> None:
-    assert hp.BootstrapState.load(tmp_path) is None
-
-
-def test_load_returns_none_when_state_file_corrupt(tmp_path: Path) -> None:
-    (tmp_path / "provision.json").write_text("not-json")
-    assert hp.BootstrapState.load(tmp_path) is None
-
-
-def test_phase_result_to_dict_includes_optional_fields() -> None:
-    r = hp.PhaseResult(
-        status=hp.PhaseStatus.OK,
-        details={"k": "v"},
-        hash="abc",
-        reason=None,
-    )
-    out = r.to_dict()
-    assert out["status"] == "ok"
-    assert out["hash"] == "abc"
-    assert out["details"] == {"k": "v"}
-    assert "reason" not in out  # None reasons omitted
+    home, venv = install_target
+    sr = tmp_path / "state"
+    hp.install_hermes(hermes_home=home, venv=venv, io=install_fake_io, state_root=sr)
+    data = json.loads((sr / "provision.json").read_text())
+    assert set(data["phases"]) >= {name for name, _ in hp._INSTALL_STEPS}
+    assert data["completed_at"] is not None
 
 
 def test_content_hash_is_stable_and_collision_free() -> None:
@@ -292,87 +79,107 @@ def test_content_hash_is_stable_and_collision_free() -> None:
     c = hp.content_hash("foo", "baz")
     assert a == b
     assert a != c
-    # Stable across the str/bytes split.
     d = hp.content_hash(b"foo", "bar")
     assert d == a
 
 
-def test_failed_phase_surfaces_in_result_and_blocks_completion(
+def test_failed_step_surfaces_and_blocks_ok(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    state_with_tmp_paths: hp.BootstrapState,
-    pipeline_io: hp.PhaseIO,
+    install_target: tuple[Path, Path],
+    install_fake_io: hp.InstallIO,
 ) -> None:
-    def _failing(_ctx: hp.PhaseContext) -> hp.PhaseResult:
+    """A failing step surfaces in report.failed and flips report.ok False."""
+
+    def _boom(_ctx: hp._StepCtx) -> hp.PhaseResult:
         return hp.PhaseResult(status=hp.PhaseStatus.FAIL, reason="forced")
 
-    new_phases = [
-        dataclasses.replace(p, fn=_failing) if p.name == "env_probe" else p for p in hp.PHASES
-    ]
-    monkeypatch.setattr(hp, "PHASES", new_phases)
+    patched = tuple((n, _boom if n == "env_probe" else fn) for n, fn in hp._INSTALL_STEPS)
+    monkeypatch.setattr(hp, "_INSTALL_STEPS", patched)
+    home, venv = install_target
+    report = hp.install_hermes(
+        hermes_home=home,
+        venv=venv,
+        io=install_fake_io,
+        state_root=tmp_path / "state",
+    )
+    assert "env_probe" in report.failed
+    assert report.ok is False
+    # The last-run report records the failure so `agent status` shows it.
+    data = json.loads((tmp_path / "state" / "provision.json").read_text())
+    assert data["phases"]["env_probe"]["status"] == "fail"
+    assert data["completed_at"] is None
 
-    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    assert "env_probe" in result.failed
-    assert result.state.completed_at is None
-    assert any("env_probe" in e for e in result.state.errors)
 
-
-def test_cli_entry_returns_zero_on_success(
+def test_bootstrap_cli_returns_zero_on_success(
     tmp_path: Path,
-    state_with_tmp_paths: hp.BootstrapState,
     monkeypatch: pytest.MonkeyPatch,
-    pipeline_io: hp.PhaseIO,
+    install_target: tuple[Path, Path],
+    install_fake_io: hp.InstallIO,
 ) -> None:
-    # bootstrap_cli doesn't take an initial_state kwarg directly — wrap
-    # `run` so the test still threads the tmp-rooted state through.
-    real_run = hp.run
+    home, venv = install_target
+    real = hp.install_hermes
 
-    def _wrapped(**kwargs: Any) -> hp.RunResult:
-        kwargs.setdefault("initial_state", state_with_tmp_paths)
-        kwargs.setdefault("io", pipeline_io)
-        return real_run(**kwargs)
+    def _wrapped(**kw: Any) -> hp.InstallReport:
+        kw.setdefault("hermes_home", home)
+        kw.setdefault("venv", venv)
+        kw.setdefault("io", install_fake_io)
+        return real(**kw)
 
-    monkeypatch.setattr(hp, "run", _wrapped)
+    monkeypatch.setattr(hp, "install_hermes", _wrapped)
     rc = hp.bootstrap_cli(
-        repair=False,
-        dry_run=False,
-        skip_phases=(),
-        verbose=False,
-        state_root=tmp_path,
+        repair=False, dry_run=False, skip_phases=(), verbose=False, state_root=tmp_path / "state"
     )
     assert rc == 0
 
 
-def test_cli_entry_returns_one_on_failure(
+def test_bootstrap_cli_returns_one_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    state_with_tmp_paths: hp.BootstrapState,
-    pipeline_io: hp.PhaseIO,
+    install_target: tuple[Path, Path],
+    install_fake_io: hp.InstallIO,
 ) -> None:
-    def _failing(_ctx: hp.PhaseContext) -> hp.PhaseResult:
+    home, venv = install_target
+
+    def _boom(_ctx: hp._StepCtx) -> hp.PhaseResult:
         return hp.PhaseResult(status=hp.PhaseStatus.FAIL, reason="boom")
 
-    new_phases = [
-        dataclasses.replace(p, fn=_failing) if p.name == "preflight" else p for p in hp.PHASES
-    ]
-    monkeypatch.setattr(hp, "PHASES", new_phases)
+    patched = tuple((n, _boom if n == "preflight" else fn) for n, fn in hp._INSTALL_STEPS)
+    monkeypatch.setattr(hp, "_INSTALL_STEPS", patched)
+    real = hp.install_hermes
 
-    real_run = hp.run
+    def _wrapped(**kw: Any) -> hp.InstallReport:
+        kw.setdefault("hermes_home", home)
+        kw.setdefault("venv", venv)
+        kw.setdefault("io", install_fake_io)
+        return real(**kw)
 
-    def _wrapped(**kwargs: Any) -> hp.RunResult:
-        kwargs.setdefault("initial_state", state_with_tmp_paths)
-        kwargs.setdefault("io", pipeline_io)
-        return real_run(**kwargs)
-
-    monkeypatch.setattr(hp, "run", _wrapped)
+    monkeypatch.setattr(hp, "install_hermes", _wrapped)
     rc = hp.bootstrap_cli(
-        repair=False,
-        dry_run=False,
-        skip_phases=(),
-        verbose=False,
-        state_root=tmp_path,
+        repair=False, dry_run=False, skip_phases=(), verbose=False, state_root=tmp_path / "state"
     )
     assert rc == 1
+
+
+def test_bootstrap_cli_dry_run_skips_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_target: tuple[Path, Path],
+    install_fake_io: hp.InstallIO,
+) -> None:
+    home, venv = install_target
+    real = hp.install_hermes
+
+    def _wrapped(**kw: Any) -> hp.InstallReport:
+        kw.setdefault("hermes_home", home)
+        kw.setdefault("venv", venv)
+        kw.setdefault("io", install_fake_io)
+        return real(**kw)
+
+    monkeypatch.setattr(hp, "install_hermes", _wrapped)
+    sr = tmp_path / "state"
+    hp.bootstrap_cli(repair=False, dry_run=True, skip_phases=(), verbose=False, state_root=sr)
+    assert not (sr / "provision.json").exists()
 
 
 # ── #240 phase impls — preflight / install / home_init ──────────────────────
@@ -388,8 +195,8 @@ def test_preflight_passes_when_inputs_meet_minimums(
     # real $HERMES_HOME, and the default points at the live /var/lib/hal0/.hermes.
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(var_lib / ".hermes"))
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
-    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
-    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["python_version"]
     assert out.details["daemon_http_status"] == 200
@@ -403,8 +210,8 @@ def test_preflight_fails_on_unreachable_daemon(
     state = hp.BootstrapState(
         venv=str(var_lib / "venvs" / "hermes"), hermes_home=str(var_lib / ".hermes")
     )
-    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 0)
-    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    io = hp.InstallIO(http_get=lambda *_a, **_kw: 0)
+    out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
     assert "daemon unreachable" in (out.reason or "")
 
@@ -412,13 +219,13 @@ def test_preflight_fails_on_unreachable_daemon(
 def test_preflight_fails_on_var_lib_not_writable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+    io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
     state = hp.BootstrapState(venv=str(tmp_path / "nope" / "venvs" / "hermes"))
     # /var/lib (nearest existing ancestor of the default $HERMES_HOME) isn't
     # writable to a normal user — stub the probe so the test is deterministic
     # regardless of the runner's uid (CI may run as root).
     monkeypatch.setattr(hp, "path_is_writable", lambda _p: False)
-    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
     assert "not writable" in (out.reason or "")
 
@@ -436,7 +243,7 @@ def test_preflight_fails_when_hermes_home_unwritable_but_var_lib_ok(
     hermes_home.mkdir()  # exists, "owned by root" → unwritable to us
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
-    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+    io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
 
     real = hp.path_is_writable
     monkeypatch.setattr(
@@ -444,7 +251,7 @@ def test_preflight_fails_when_hermes_home_unwritable_but_var_lib_ok(
         "path_is_writable",
         lambda p: False if str(p) == str(hermes_home) else real(p),
     )
-    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
     assert "not writable" in (out.reason or "")
     assert str(hermes_home) in (out.reason or "")
@@ -460,35 +267,33 @@ def test_path_is_writable_probes_real_filesystem(tmp_path: Path) -> None:
     assert hp.path_is_writable(writable / "deep" / "nested" / "venv") is True
 
 
-def test_home_init_creates_layout_with_marker(tmp_path: Path) -> None:
+def test_home_init_creates_layout(tmp_path: Path) -> None:
     hermes_home = tmp_path / "hermes_home"
     state = hp.BootstrapState(hermes_home=str(hermes_home))
-    out = hp._phase_home_init(hp.context_for("home_init", state))
+    out = hp._phase_home_init(hp._StepCtx(state=state))
     assert out.status == hp.PhaseStatus.OK
+    assert out.details["changed"] is True
     assert hermes_home.is_dir()
-    assert (hermes_home / ".hal0-managed").is_file()
     for sub in ("memories", "skills", "plugins/memory", "plugins/model-providers", "logs"):
         assert (hermes_home / sub).is_dir()
 
 
-def test_home_init_idempotent_on_managed_dir(tmp_path: Path) -> None:
-    hermes_home = tmp_path / "hermes_home"
-    state = hp.BootstrapState(hermes_home=str(hermes_home))
-    hp._phase_home_init(hp.context_for("home_init", state))
-    marker_before = (hermes_home / ".hal0-managed").read_text()
-    out2 = hp._phase_home_init(hp.context_for("home_init", state))
-    assert out2.status == hp.PhaseStatus.OK
-    assert (hermes_home / ".hal0-managed").read_text() == marker_before
+def test_home_init_converges_on_second_run(tmp_path: Path) -> None:
+    """The adopt/marker claim is retired — home_init is a pure convergent mkdir.
 
-
-def test_home_init_refuses_to_clobber_non_managed_dir(tmp_path: Path) -> None:
+    A re-run over an existing layout reports changed=False (no dir created) and
+    never refuses a pre-existing populated home (capture/adopt gone)."""
     hermes_home = tmp_path / "user_hermes"
     hermes_home.mkdir()
-    (hermes_home / "config.yaml").write_text("# user file")
+    (hermes_home / "config.yaml").write_text("# operator file")
     state = hp.BootstrapState(hermes_home=str(hermes_home))
-    out = hp._phase_home_init(hp.context_for("home_init", state))
-    assert out.status == hp.PhaseStatus.FAIL
-    assert "not hal0-managed" in (out.reason or "")
+    first = hp._phase_home_init(hp._StepCtx(state=state))
+    assert first.status == hp.PhaseStatus.OK
+    assert first.details["changed"] is True  # created the standard subdirs
+    second = hp._phase_home_init(hp._StepCtx(state=state))
+    assert second.status == hp.PhaseStatus.OK
+    assert second.details["changed"] is False
+    assert (hermes_home / "config.yaml").read_text() == "# operator file"
 
 
 def test_install_phase_skips_venv_when_binary_exists(
@@ -511,21 +316,20 @@ def test_install_phase_skips_venv_when_binary_exists(
     def _no_install(*args: Any, **kwargs: Any) -> None:
         called.append(args)
 
-    out = hp._phase_install(
-        hp.context_for("install", state, io=hp.PhaseIO(install_venv=_no_install))
-    )
+    out = hp._phase_install(hp._StepCtx(state=state, io=hp.InstallIO(install_venv=_no_install)))
     assert out.status == hp.PhaseStatus.OK
+    # Venv binary already present → the venv build is skipped entirely.
     assert called == []
-    # Canonical `hermes` is a real file; `hal0-hermes` is a back-compat
-    # symlink to it (#437 wrapper consolidation).
+    # Canonical `hermes` wrapper is installed (the hal0-hermes back-compat
+    # symlink is retired).
     assert hermes_cli_dst.is_file()
-    assert wrapper_dst.is_symlink()
-    assert wrapper_dst.resolve() == hermes_cli_dst.resolve()
-    # PR-1-bundle: the legacy hal0 model-provider plugin is no longer
-    # copied — it hardcoded an :8000 base_url that has no listener and
-    # the composite ``hal0`` upstream in hal0.api supersedes it.
-    assert not (hermes_home / "plugins" / "model-providers" / "hal0").exists()
+    assert not wrapper_dst.exists()
+    # Both shipped plugin trees dir-drop: hal0-memory to plugins/, hal0-provider
+    # to its model-providers/hal0 target (its seed landed with the HP-provider
+    # lane, so the missing-source skip path no longer triggers in-tree).
     assert (hermes_home / "plugins" / "hal0-memory" / "__init__.py").is_file()
+    assert (hermes_home / "plugins" / "model-providers" / "hal0" / "__init__.py").is_file()
+    assert not any("hal0-provider" in s for s in out.details.get("plugins_skipped", []))
 
 
 def test_install_phase_runs_venv_install_when_binary_missing(
@@ -547,9 +351,7 @@ def test_install_phase_runs_venv_install_when_binary_missing(
         (v / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
         (v / "bin" / "hermes").chmod(0o755)
 
-    out = hp._phase_install(
-        hp.context_for("install", state, io=hp.PhaseIO(install_venv=_fake_install))
-    )
+    out = hp._phase_install(hp._StepCtx(state=state, io=hp.InstallIO(install_venv=_fake_install)))
     assert out.status == hp.PhaseStatus.OK
     assert install_calls == [venv]
 
@@ -599,8 +401,8 @@ def test_preflight_fails_actionably_when_no_supported_python(
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
     monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
     monkeypatch.setattr(hp, "_uv_available", lambda *a, **k: None)
-    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
-    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
     assert "3.11-3.13" in (out.reason or "")
     assert "deadsnakes" in (out.reason or "")
@@ -620,8 +422,8 @@ def test_preflight_passes_when_uv_can_provision_python(
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
     monkeypatch.setattr(hp, "_resolve_supported_python", lambda *a, **k: None)
     monkeypatch.setattr(hp, "_uv_available", lambda *a, **k: "/usr/local/bin/uv")
-    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
-    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
+    out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["uv_python_fallback"] is True
 
@@ -872,7 +674,7 @@ def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_pa
 
 def test_env_probe_writes_snapshot_to_hermes_home(tmp_path: Path) -> None:
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
-    out = hp._phase_env_probe(hp.context_for("env_probe", state))
+    out = hp._phase_env_probe(hp._StepCtx(state=state))
     assert out.status == hp.PhaseStatus.OK
     snap = Path(out.details["snapshot_path"])
     assert snap.exists()
@@ -1163,12 +965,12 @@ def test_config_write_renders_role_slots_from_live_state(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: list(_ROLE_SLOTS),
         fetch_model_contexts=lambda: {},
         run=fake_hermes_run(),
     )
-    out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["delegation_model"] == "hermes-4-14b-q5km"
     assert out.details["auxiliary_utility_model"] == "qwen3-zero-coder-v2-0.8b-f16"
@@ -1280,15 +1082,17 @@ def test_config_write_phase_writes_yaml_idempotently(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
-    out1 = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    out1 = hp._phase_config_write(hp._StepCtx(state=state, io=io))
     assert out1.status == hp.PhaseStatus.OK
     cfg = Path(out1.details["config_path"])
     assert cfg.exists()
     first_hash = out1.hash
     # Re-run is idempotent: config set re-writes the same values + the YAML
     # merge is a no-op, so the on-disk file (and its hash) is unchanged.
-    out2 = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    out2 = hp._phase_config_write(hp._StepCtx(state=state, io=io))
     assert out2.status == hp.PhaseStatus.OK
     assert out2.details["list_merge_changed"] is False
     assert out2.hash == first_hash
@@ -1309,8 +1113,10 @@ def test_config_write_phase_applies_overrides(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
-    out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     cfg = Path(out.details["config_path"]).read_text()
     assert "999" in cfg
@@ -1330,8 +1136,10 @@ def test_config_write_records_fallbacks_for_placeholder_primary_and_default_mcp(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
-    out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     sites = {f["site"] for f in out.details["fallbacks"]}
     assert sites == {"primary_slot", "mcp_servers"}
@@ -1341,21 +1149,19 @@ def test_config_write_records_no_fallbacks_when_inputs_live(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
-    # A persisted mcp_wire checkpoint from a previous run.
-    state.phases["mcp_wire"] = {
-        "status": "ok",
-        "details": {"rendered_servers": hp._default_mcp_servers()},
-    }
+    # mcp_wire runs before config_write in the linear pipeline; its live probe
+    # result is threaded via output_of (formerly a cross-run checkpoint).
+    prior = {"mcp_wire": {"rendered_servers": hp._default_mcp_servers()}}
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: list(_ROLE_SLOTS),
         fetch_model_contexts=lambda: {},
         run=fake_hermes_run(),
     )
-    out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io, _prior=prior))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["fallbacks"] == []
 
@@ -1443,11 +1249,11 @@ def test_mcp_wire_phase_returns_ok_with_tools_when_servers_respond(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = hp.BootstrapState()
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1", "t2"], "error": None}
     )
     monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
-    out = hp._phase_mcp_wire(hp.context_for("mcp_wire", state, io=io))
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["servers"]["hal0-admin"]["status"] == "ok"
     assert out.details["servers"]["hal0-admin"]["tool_count"] == 2
@@ -1459,7 +1265,7 @@ def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = hp.BootstrapState()
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         probe_mcp_server=lambda url, **_kw: {
             "ok": False,
             "tools": [],
@@ -1467,7 +1273,7 @@ def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
         }
     )
     monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
-    out = hp._phase_mcp_wire(hp.context_for("mcp_wire", state, io=io))
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
     # Still OK — degraded is a warning, not a phase-blocker per ADR-0013.
     assert out.status == hp.PhaseStatus.OK
     assert out.details["servers"]["hal0-admin"]["status"] == "degraded"
@@ -1506,8 +1312,8 @@ def test_namespace_register_registers_card_on_happy_path(
             return {"ok": True, "result": {"id": "mem_abc"}}
         return {"ok": True, "result": {}}
 
-    io = hp.PhaseIO(mcp_memory_call=_fake_mcp)
-    out = hp._phase_namespace_register(hp.context_for("namespace_register", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=_fake_mcp)
+    out = hp._phase_namespace_register(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["registered"] is True
     assert out.details["memory_id"] == "mem_abc"
@@ -1534,8 +1340,8 @@ def test_namespace_register_refreshes_existing_card(
             return {"ok": True, "result": {"id": "new_mem_id"}}
         return {"ok": True, "result": {}}
 
-    io = hp.PhaseIO(mcp_memory_call=_fake_mcp)
-    out = hp._phase_namespace_register(hp.context_for("namespace_register", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=_fake_mcp)
+    out = hp._phase_namespace_register(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["refreshed_existing"] is True
 
@@ -1571,8 +1377,8 @@ def test_brain_profile_seed_registers_card_under_profile_agent_id() -> None:
             return {"ok": True, "result": {"id": "brain_mem"}}
         return {"ok": True, "result": {}}
 
-    io = hp.PhaseIO(mcp_memory_call=_fake_mcp)
-    out = hp._phase_brain_profile_seed(hp.context_for("brain_profile_seed", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=_fake_mcp)
+    out = hp._phase_brain_profile_seed(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["registered"] is True
     assert out.details["agent_id"] == "hermes__hal0-brain"
@@ -1589,8 +1395,8 @@ def test_brain_profile_seed_continues_on_mcp_failure() -> None:
             return {"ok": True, "result": {"items": []}}
         return {"ok": False, "error": "hal0-memory unreachable"}
 
-    io = hp.PhaseIO(mcp_memory_call=_fake_mcp)
-    out = hp._phase_brain_profile_seed(hp.context_for("brain_profile_seed", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=_fake_mcp)
+    out = hp._phase_brain_profile_seed(hp._StepCtx(state=state, io=io))
     # Warn-as-OK: the phase never blocks bootstrap on the memory layer.
     assert out.status == hp.PhaseStatus.OK
     assert out.details["registered"] is False
@@ -1605,7 +1411,7 @@ def _brain_profile_state(tmp_path: Path) -> Any:
 
 def test_brain_profile_mcp_wire_skips_when_profile_absent(tmp_path: Path) -> None:
     state = _brain_profile_state(tmp_path)
-    out = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    out = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["wired"] is False  # upstream owns profile creation
 
@@ -1626,7 +1432,7 @@ def test_brain_profile_mcp_wire_merges_and_preserves_upstream_keys(tmp_path: Pat
         ),
         encoding="utf-8",
     )
-    out = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    out = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["wired"] is True and out.details["changed"] is True
 
@@ -1648,9 +1454,9 @@ def test_brain_profile_mcp_wire_is_idempotent(tmp_path: Path) -> None:
     cfg = hp._brain_profile_config_path(state)
     cfg.parent.mkdir(parents=True)
     cfg.write_text("model:\n  default: agent\n", encoding="utf-8")
-    first = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    first = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state))
     assert first.details["changed"] is True
-    second = hp._phase_brain_profile_mcp_wire(hp.context_for("brain_profile_mcp_wire", state))
+    second = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state))
     # Already-correct box: no rewrite, so its comments/formatting survive.
     assert second.details["wired"] is True and second.details["changed"] is False
 
@@ -1660,8 +1466,8 @@ def test_namespace_register_continues_on_mcp_failure(
 ) -> None:
     """ADR-0013: registry failure logs + continues; bootstrap doesn't block."""
     state = hp.BootstrapState()
-    io = hp.PhaseIO(mcp_memory_call=lambda *a, **kw: {"ok": False, "error": "connection refused"})
-    out = hp._phase_namespace_register(hp.context_for("namespace_register", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=lambda *a, **kw: {"ok": False, "error": "connection refused"})
+    out = hp._phase_namespace_register(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["registered"] is False
     assert any("memory_add" in w for w in out.details["warnings"])
@@ -1679,10 +1485,10 @@ def test_mcp_wire_phase_skips_server_not_in_allowlist(
         "_load_agent_allowlist",
         lambda *_a, **_kw: {"hal0-admin": {"builtin": True}},
     )
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None}
     )
-    out = hp._phase_mcp_wire(hp.context_for("mcp_wire", state, io=io))
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["servers"]["hal0-memory"]["status"] == "skipped_by_allowlist"
     assert out.details["servers"]["hal0-admin"]["status"] == "ok"
@@ -1722,13 +1528,13 @@ def test_context_link_renders_all_three_files(
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-such-skills")
     # Context-link consults /api/slots when wiring HERMES.md's primary
     # block; fake the seams so the test stays offline + deterministic.
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: [],
         fetch_model_contexts=lambda: {},
         http_get=lambda *_a, **_kw: 0,
     )
 
-    out = hp._phase_context_link(hp.context_for("context_link", state, io=io))
+    out = hp._phase_context_link(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert (hermes_home / "SOUL.md").exists()
     assert (etc / "HERMES.md").exists()
@@ -1788,7 +1594,7 @@ def test_context_link_falls_back_when_soul_render_fails(
     monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)  # STATE.md target (#473)
     monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", tmp_path / "etc" / "hal0" / "agent-skills")
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-skills")
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: [],
         fetch_model_contexts=lambda: {},
         http_get=lambda *_a, **_kw: 0,
@@ -1800,7 +1606,7 @@ def test_context_link_falls_back_when_soul_render_fails(
         return "ok"
 
     monkeypatch.setattr(hp, "_render_template", _explode)
-    out = hp._phase_context_link(hp.context_for("context_link", state, io=io))
+    out = hp._phase_context_link(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     soul = (hermes_home / "SOUL.md").read_text()
     assert "hal0 admin agent" in soul
@@ -1809,84 +1615,15 @@ def test_context_link_falls_back_when_soul_render_fails(
     assert any(f["site"] == "soul_md" for f in out.details["fallbacks"])
 
 
-# ── #245 phase impls — model_automap + voice_wire ───────────────────────────
-
-
-def test_model_automap_writes_aliases_from_chat_slots(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    hermes_home = tmp_path / "hh"
-    hermes_home.mkdir()
-    state = hp.BootstrapState(hermes_home=str(hermes_home))
-    # Pre-render config.yaml so model_automap has something to rewrite.
-    (hermes_home / "config.yaml").write_text("model:\n  default: p\n", encoding="utf-8")
-    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
-    # PR-1-bundle: real ``/api/slots`` payload uses ``type=="llm"`` for
-    # chat slots, NOT ``capability=="chat"``. The pre-fix filter looked
-    # at ``kind`` first and let the synthetic ``capability`` field through;
-    # the post-fix filter is type-first to match the live shape.
-    io = hp.PhaseIO(
-        fetch_slots=lambda: [
-            {
-                "name": "primary",
-                "type": "llm",
-                "model_id": "qwen3:8b",
-                "backend_url": "http://127.0.0.1:8001/v1",
-                "state": "ready",
-            },
-            {
-                "name": "coder",
-                "type": "llm",
-                "model_id": "qwen-coder",
-                "backend_url": "http://127.0.0.1:8002/v1",
-                "state": "ready",
-            },
-        ],
-        fetch_model_contexts=lambda: {},
-        run=fake_hermes_run(),
-    )
-    monkeypatch.setattr(
-        hp,
-        "_resolve_primary_slot",
-        lambda **_kw: {"model": "p", "base_url": "u", "context_length": 8000},
-    )
-    out = hp._phase_model_automap(hp.context_for("model_automap", state, io=io))
-    assert out.status == hp.PhaseStatus.OK
-    rendered = (hermes_home / "config.yaml").read_text()
-    assert "coder" in out.details["aliases_written"]
-    assert "primary" in out.details["aliases_written"]
-    # config set wrote the model_aliases.* keys into the config.
-    assert "qwen-coder" in rendered
-
-
-def test_model_automap_idempotent_hash_skip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    hermes_home = tmp_path / "hh"
-    hermes_home.mkdir()
-    state = hp.BootstrapState(hermes_home=str(hermes_home))
-    (hermes_home / "config.yaml").write_text("model:\n  default: p\n", encoding="utf-8")
-    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
-    monkeypatch.setattr(
-        hp,
-        "_resolve_primary_slot",
-        lambda **_kw: {"model": "p", "base_url": "u", "context_length": 8000},
-    )
-    out1 = hp._phase_model_automap(hp.context_for("model_automap", state, io=io))
-    out2 = hp._phase_model_automap(hp.context_for("model_automap", state, io=io))
-    # config set is idempotent: re-applying the same keys leaves a byte-identical
-    # config, so both runs report the same content hash.
-    assert out1.status == hp.PhaseStatus.OK
-    assert out1.hash == out2.hash
+# ── voice_wire ─────────────────────────────────────────────────────────────
 
 
 def test_voice_wire_skips_when_no_voice_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
-    io = hp.PhaseIO(fetch_slots=lambda: [])
-    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    io = hp.InstallIO(fetch_slots=lambda: [])
+    out = hp._phase_voice_wire(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.SKIP
 
 
@@ -1928,11 +1665,11 @@ def test_voice_wire_finds_local_tts_and_transcription_slots(
         },
     ]
     state = hp.BootstrapState(hermes_home=str(hermes_home))
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: slots,
         fetch_model_contexts=lambda: {},
     )
-    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    out = hp._phase_voice_wire(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK, (
         f"expected OK but got {out.status!r}: {out.reason!r} — "
         "voice_wire skipped local tts/transcription slots (kind='local' bug)"
@@ -1986,11 +1723,11 @@ def test_voice_wire_provisions_stt_for_npu_trio_facade(
         },
     ]
     state = hp.BootstrapState(hermes_home=str(hermes_home))
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: slots,
         fetch_model_contexts=lambda: {},
     )
-    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    out = hp._phase_voice_wire(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK, (
         f"expected OK but got {out.status!r}: {out.reason!r} — "
         "voice_wire skipped NPU-trio stt facade (offline state bug)"
@@ -2049,11 +1786,11 @@ def test_voice_wire_does_not_provision_stt_when_npu_anchor_is_not_ready(
         },
     ]
     state = hp.BootstrapState(hermes_home=str(hermes_home))
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: slots,
         fetch_model_contexts=lambda: {},
     )
-    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    out = hp._phase_voice_wire(hp._StepCtx(state=state, io=io))
     # TTS is ready so we get OK (not SKIP), but STT must be absent.
     assert out.status in (hp.PhaseStatus.OK, hp.PhaseStatus.SKIP)
     if secrets_env.exists():
@@ -2078,7 +1815,7 @@ def test_smoke_tests_phase_runs_each_probe_collecting_results(
     monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
-    out = hp._phase_smoke_tests(hp.context_for("smoke_tests", state))
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["failures"] == []
     assert set(out.details["results"].keys()) == {
@@ -2101,7 +1838,7 @@ def test_smoke_tests_phase_records_failures_without_blocking(
     monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
-    out = hp._phase_smoke_tests(hp.context_for("smoke_tests", state))
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
     assert out.status == hp.PhaseStatus.OK  # diagnostic — not a blocker
     assert len(out.details["failures"]) == 2
     assert any("wrapper_ready" in f for f in out.details["failures"])
@@ -2111,10 +1848,9 @@ def test_self_report_writes_summary_memory_and_handles_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
-    state.phases["smoke_tests"] = {
-        "status": "ok",
-        "details": {"failures": ["chat_completions: 503"]},
-    }
+    # smoke_tests runs immediately before self_report; its rollup arrives via
+    # output_of (formerly a same-run checkpoint need).
+    prior = {"smoke_tests": {"failures": ["chat_completions: 503"]}}
     # Pre-render config so primary alias gets picked up.
     (tmp_path / "hh").mkdir()
     (tmp_path / "hh" / "config.yaml").write_text("model:\n  default: qwen3:8b\n", encoding="utf-8")
@@ -2124,8 +1860,8 @@ def test_self_report_writes_summary_memory_and_handles_failure(
         captured.append((method, params))
         return {"ok": True, "result": {"id": "mem_xyz"}}
 
-    io = hp.PhaseIO(mcp_memory_call=_fake_mcp)
-    out = hp._phase_self_report(hp.context_for("self_report", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=_fake_mcp)
+    out = hp._phase_self_report(hp._StepCtx(state=state, io=io, _prior=prior))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["published"] is True
     assert out.details["summary_id"] == "mem_xyz"
@@ -2140,8 +1876,8 @@ def test_self_report_continues_when_memory_unreachable(
 ) -> None:
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
     (tmp_path / "hh").mkdir()
-    io = hp.PhaseIO(mcp_memory_call=lambda *a, **kw: {"ok": False, "error": "connection refused"})
-    out = hp._phase_self_report(hp.context_for("self_report", state, io=io))
+    io = hp.InstallIO(mcp_memory_call=lambda *a, **kw: {"ok": False, "error": "connection refused"})
+    out = hp._phase_self_report(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["published"] is False
     assert "refused" in out.details["warning"]
@@ -2175,16 +1911,29 @@ class _FakeSystemctl:
 
 def _patch_dropin_to_tmp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Path, _FakeSystemctl, hp.PhaseIO]:
-    """Point the gateway drop-in dir at tmp_path + fake systemctl + root euid."""
+) -> tuple[Path, _FakeSystemctl, hp.InstallIO]:
+    """Point the gateway drop-in dir at tmp_path + fake systemctl + root euid.
+
+    Hermeticity (orchestrator note): the step also calls
+    ``ensure_gateway_api_server_key``, which reads the REAL secrets vault
+    (``HERMES_SECRETS_ENV``) and would key-gen + write it on a bare CI runner
+    (host mutation + an extra seam call). Stub it to a stable "present" result
+    so these drop-in tests never touch the host vault — the API-key wiring is
+    covered hermetically by test_hermes_security_deliverables.py and the
+    double-run convergence test."""
     dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
     dropin_file = dropin_dir / "10-hal0-secrets.conf"
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", dropin_dir)
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", dropin_file)
+    monkeypatch.setattr(
+        hp,
+        "ensure_gateway_api_server_key",
+        lambda: hp.ApiServerKeyResult(outcome="present", key_len=43),
+    )
     # Pretend we're root so the phase doesn't SKIP on the non-root guard.
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
     fake = _FakeSystemctl()
-    return dropin_file, fake, hp.PhaseIO(run=fake.run)
+    return dropin_file, fake, hp.InstallIO(run=fake.run)
 
 
 def test_gateway_secrets_wire_writes_dropin(
@@ -2193,7 +1942,7 @@ def test_gateway_secrets_wire_writes_dropin(
     dropin_file, fake, io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
     state = hp.BootstrapState()
 
-    out = hp._phase_gateway_secrets_wire(hp.context_for("gateway_secrets_wire", state, io=io))
+    out = hp._phase_gateway_secrets_wire(hp._StepCtx(state=state, io=io))
 
     assert out.status == hp.PhaseStatus.OK
     assert dropin_file.exists()
@@ -2216,13 +1965,13 @@ def test_gateway_secrets_wire_idempotent(tmp_path: Path, monkeypatch: pytest.Mon
     dropin_file, fake, io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
     state = hp.BootstrapState()
 
-    first = hp._phase_gateway_secrets_wire(hp.context_for("gateway_secrets_wire", state, io=io))
+    first = hp._phase_gateway_secrets_wire(hp._StepCtx(state=state, io=io))
     assert first.status == hp.PhaseStatus.OK
     mtime_after_first = dropin_file.stat().st_mtime_ns
     body_after_first = dropin_file.read_text(encoding="utf-8")
     assert fake.calls == [["systemctl", "daemon-reload"]]
 
-    second = hp._phase_gateway_secrets_wire(hp.context_for("gateway_secrets_wire", state, io=io))
+    second = hp._phase_gateway_secrets_wire(hp._StepCtx(state=state, io=io))
     assert second.status == hp.PhaseStatus.OK
     # Identical hash, file untouched, NO second daemon-reload (hash-skip).
     assert second.hash == first.hash
@@ -2242,6 +1991,13 @@ def test_gateway_secrets_wire_routes_through_seam_non_root(
     # Override the root euid the helper set — emulate a non-root provision.
     monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(hp, "_HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-systemctl")
+    # Hermetic vault: the phase also runs ensure_gateway_api_server_key, whose
+    # outcome must not depend on the host's real /var/lib/hal0 state (on a bare
+    # CI runner a missing vault triggers key-gen → an extra merge-secrets seam
+    # call). A strong key on disk → outcome "present", no write.
+    vault = tmp_path / "hermes.env"
+    vault.write_text(f"API_SERVER_KEY={'k' * 43}\n", encoding="utf-8")
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
 
     seam_calls: list[tuple[list[str], Any]] = []
 
@@ -2256,7 +2012,7 @@ def test_gateway_secrets_wire_routes_through_seam_non_root(
     monkeypatch.setattr(hp.subprocess, "run", _fake_run)
     state = hp.BootstrapState()
 
-    out = hp._phase_gateway_secrets_wire(hp.context_for("gateway_secrets_wire", state, io=io))
+    out = hp._phase_gateway_secrets_wire(hp._StepCtx(state=state, io=io))
 
     assert out.status == hp.PhaseStatus.OK
     assert out.details["daemon_reload"] is True
@@ -2292,7 +2048,7 @@ def test_gateway_secrets_wire_refuses_real_etc_dropin_under_pytest(
         raise AssertionError("phase invoked systemctl against the real bus")
 
     out = hp._phase_gateway_secrets_wire(
-        hp.context_for("gateway_secrets_wire", hp.BootstrapState(), io=hp.PhaseIO(run=_boom))
+        hp._StepCtx(state=hp.BootstrapState(), io=hp.InstallIO(run=_boom))
     )
 
     assert out.status == hp.PhaseStatus.SKIP
@@ -2388,31 +2144,19 @@ def test_write_gateway_secrets_dropin_refuses_real_etc_under_pytest(
     assert res.reason is not None and "pytest" in res.reason.lower()
 
 
-# ── #437 — canonical home / wrapper consolidation ───────────────────────────
+# ── canonical home / wrapper ────────────────────────────────────────────────
 
 
 def test_bootstrap_default_home_is_dot_hermes() -> None:
-    # The default the fresh bootstrap + provision.json checkpoints embed
-    # must be the NORMAL hermes default `/var/lib/hal0/.hermes`, not the
-    # legacy `agents/hermes` location (otherwise --repair re-claims the
-    # old path via _claim_hermes_home).
+    # The default install target is the NORMAL hermes default `/var/lib/hal0/.hermes`.
     assert hp.BootstrapState().hermes_home == "/var/lib/hal0/.hermes"
 
 
-def test_fresh_run_stamps_marker_under_dot_hermes_home(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    # state_with_tmp_paths roots hermes_home under tmp; assert the
-    # .hal0-managed marker lands under the configured (dot-shaped) home.
-    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-    assert result.failed == []
-    marker = Path(state_with_tmp_paths.hermes_home) / ".hal0-managed"
-    assert marker.is_file()
-
-
-def test_install_phase_installs_both_wrappers(
+def test_install_phase_installs_canonical_wrapper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Only the canonical /usr/local/bin/hermes is installed — the hal0-hermes
+    back-compat symlink is retired."""
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
@@ -2425,20 +2169,15 @@ def test_install_phase_installs_both_wrappers(
 
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(tmp_path / "hh"))
     out = hp._phase_install(
-        hp.context_for("install", state, io=hp.PhaseIO(install_venv=lambda *a, **kw: None))
+        hp._StepCtx(state=state, io=hp.InstallIO(install_venv=lambda *a, **kw: None))
     )
 
     assert out.status == hp.PhaseStatus.OK
-    # Canonical `hermes` on PATH is a real executable file.
     assert hermes_cli_dst.is_file()
     assert os.access(hermes_cli_dst, os.X_OK)
-    # `hal0-hermes` is a back-compat symlink to it (executable via target).
-    assert wrapper_dst.is_symlink()
-    assert wrapper_dst.resolve() == hermes_cli_dst.resolve()
-    assert os.access(wrapper_dst, os.X_OK)
-    # Details record both entry points.
+    assert not wrapper_dst.exists()  # no back-compat symlink
     assert out.details["hermes_cli"] == str(hermes_cli_dst)
-    assert out.details["wrapper"] == str(wrapper_dst)
+    assert "wrapper" not in out.details
 
 
 # ── installer-root resolution (editable vs non-editable FHS install) ──────────
@@ -2473,103 +2212,3 @@ def test_resolve_installer_root_falls_back_to_fhs_current(tmp_path):
 
     got = hp._resolve_installer_root(module_file=mod, prefix=str(venv))
     assert got == fhs / "current"
-
-
-# ── capture / --adopt / fatal-abort (pipeline level) ─────────────────────────
-#
-# The claim guard used to be cosmetic: run-all meant a claim FAIL was recorded
-# but config_write/context_link still clobbered the foreign config. These pin
-# the fatal-abort behaviour + the --adopt capture path end-to-end.
-
-
-def _seed_foreign_home(hermes_home: Path) -> tuple[bytes, bytes]:
-    """Populate hermes_home as a foreign (unmarked) install; return original bytes."""
-    hermes_home.mkdir(parents=True, exist_ok=True)
-    cfg = hermes_home / "config.yaml"
-    soul = hermes_home / "SOUL.md"
-    cfg.write_bytes(b"operator: hand-written\nmodel:\n  default: their-model\n")
-    soul.write_bytes(b"# Operator SOUL\nDo not clobber me.\n")
-    (hermes_home / ".env").write_text(
-        "TELEGRAM_BOT_TOKEN=live-tg\nDISCORD_TOKEN=live-dc\nRANDOM_UNRELATED=keep\n"
-    )
-    return cfg.read_bytes(), soul.read_bytes()
-
-
-def test_foreign_home_without_adopt_aborts_and_preserves_files(
-    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, pipeline_io: hp.PhaseIO
-) -> None:
-    hermes_home = Path(state_with_tmp_paths.hermes_home)
-    cfg_before, soul_before = _seed_foreign_home(hermes_home)
-
-    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, io=pipeline_io)
-
-    # Fatal abort at install's claim guard: run stopped, exit non-zero.
-    assert result.aborted is True
-    assert "install" in result.failed
-    assert result.state.phases["install"].get("fatal") is True
-    # Every phase after the fatal one is recorded skipped with the abort reason.
-    assert result.state.phases["config_write"]["status"] == hp.PhaseStatus.SKIP.value
-    assert "aborted" in result.state.phases["config_write"]["reason"]
-    # The foreign config.yaml + SOUL.md are byte-identical — never clobbered.
-    assert (hermes_home / "config.yaml").read_bytes() == cfg_before
-    assert (hermes_home / "SOUL.md").read_bytes() == soul_before
-    # No hal0 marker was stamped (the home stays unclaimed).
-    assert not (hermes_home / hp._HAL0_MANAGED_MARKER).exists()
-
-
-def test_foreign_home_without_adopt_cli_exit_nonzero(
-    tmp_path: Path,
-    state_with_tmp_paths: hp.BootstrapState,
-    pipeline_io: hp.PhaseIO,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _seed_foreign_home(Path(state_with_tmp_paths.hermes_home))
-    real_run = hp.run
-
-    def _wrapped(**kwargs: Any) -> hp.RunResult:
-        kwargs.setdefault("initial_state", state_with_tmp_paths)
-        kwargs.setdefault("io", pipeline_io)
-        return real_run(**kwargs)
-
-    monkeypatch.setattr(hp, "run", _wrapped)
-    rc = hp.bootstrap_cli(
-        repair=False, adopt=False, dry_run=False, skip_phases=(), verbose=False, state_root=tmp_path
-    )
-    assert rc == 1
-
-
-def test_foreign_home_with_adopt_backs_up_imports_and_proceeds(
-    tmp_path: Path,
-    state_with_tmp_paths: hp.BootstrapState,
-    pipeline_io: hp.PhaseIO,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    hermes_home = Path(state_with_tmp_paths.hermes_home)
-    cfg_before, soul_before = _seed_foreign_home(hermes_home)
-    vault = tmp_path / "vault" / "hermes.env"
-    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
-
-    result = hp.run(
-        state_root=tmp_path, initial_state=state_with_tmp_paths, adopt=True, io=pipeline_io
-    )
-
-    # No abort — the run proceeds through every phase.
-    assert result.aborted is False
-    assert "install" not in result.failed
-    # Marker stamped so the home is now hal0-managed.
-    assert (hermes_home / hp._HAL0_MANAGED_MARKER).is_file()
-    # Full-tree backup sibling created.
-    backups = list(hermes_home.parent.glob(f"{hermes_home.name}.pre-hal0-*"))
-    assert len(backups) == 1
-    assert (backups[0] / "config.yaml").read_bytes() == cfg_before
-    # Sidecar snapshots preserve the operator's originals in place.
-    assert (hermes_home / "config.yaml.pre-hal0").read_bytes() == cfg_before
-    assert (hermes_home / "SOUL.md.pre-hal0").read_bytes() == soul_before
-    # Recognized tokens imported into the vault; unrelated key skipped.
-    vault_body = vault.read_text()
-    assert "TELEGRAM_BOT_TOKEN=live-tg" in vault_body
-    assert "DISCORD_TOKEN=live-dc" in vault_body
-    assert "RANDOM_UNRELATED" not in vault_body
-    # The adopt details are surfaced in the install checkpoint.
-    adopted = result.state.phases["install"]["details"]["adopted"]
-    assert adopted["tokens_imported"] == ["DISCORD_TOKEN", "TELEGRAM_BOT_TOKEN"]

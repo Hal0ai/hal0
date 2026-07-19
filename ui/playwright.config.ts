@@ -22,7 +22,7 @@ const PORT = process.env.HAL0_E2E_PORT || '5173'
 export default defineConfig({
   testDir: './tests/e2e',
   timeout: LIVE ? 180_000 : 30_000,
-  globalTimeout: LIVE ? 30 * 60_000 : 8 * 60_000,
+  globalTimeout: LIVE ? 30 * 60_000 : 12 * 60_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

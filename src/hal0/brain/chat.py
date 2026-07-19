@@ -766,9 +766,10 @@ def _resolve_tool(
 def _brain_chat_config(request: Request) -> Any:
     """The ``[brain_chat]`` config off app.state, or defaults.
 
-    Falls back to a fresh ``BrainChatConfig()`` (enabled, not read-only, 8
-    rounds, 300 s) when app.state carries no ``hal0_config`` — so bare test
-    apps and older configs behave exactly as before.
+    Falls back to a fresh ``BrainChatConfig()`` (enabled, READ-ONLY, 8
+    rounds, 300 s) when app.state carries no ``hal0_config`` — a bare app
+    gets the shipped safe default; mutation harnesses opt in explicitly
+    with ``read_only=False`` (spec-kb23 §4b).
     """
     from hal0.config.schema import BrainChatConfig
 

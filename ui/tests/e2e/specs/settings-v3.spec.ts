@@ -27,7 +27,7 @@ const SECTIONS = [
   'Agents / Brain',
   'Health & Stats',
   'Storage', 'Memory',
-  'Doctor', 'Updates', 'Advanced', 'About',
+  'Doctor', 'Updates', 'Runtimes', 'Advanced', 'About',
   'Secrets',
 ]
 
@@ -53,9 +53,11 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Updates')
   })
 
-  test('no Runtime section remains (#687 Phase E)', async ({ page }) => {
+  test('no legacy "Runtime" section remains (#687 Phase E)', async ({ page }) => {
     await page.goto('/#settings')
-    await expect(page.locator('.settings-nav .nav-item', { hasText: 'Runtime' })).toHaveCount(0)
+    // The old singular "Runtime" page is gone; the new D3 "Runtimes" evidence
+    // page is a different section (exact-match so it isn't caught here).
+    await expect(page.locator('.settings-nav .nav-item', { hasText: /^Runtime$/ })).toHaveCount(0)
   })
 
   // ML-4-unblocked pages (R5 data seam): both mount without a runtime error

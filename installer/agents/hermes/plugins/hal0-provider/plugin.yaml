@@ -1,0 +1,10 @@
+# hal0-provider model-provider plugin manifest.
+#
+# Advertises the local hal0-api as an OpenAI-compatible inference provider
+# (chat_completions transport) with live /v1/models discovery and restart-free
+# role aliases. Registers under `name: hal0` at plugins/model-providers/hal0/.
+
+name: hal0
+kind: provider
+version: 1.0.0
+description: hal0 ProviderProfile — pins chat + aux slots to the local hal0-api (chat_completions, live discovery).

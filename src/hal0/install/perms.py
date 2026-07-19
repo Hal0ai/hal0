@@ -175,6 +175,22 @@ def ownership_table(
             optional=False,
             role="slots/ (+ *.toml)",
         ),
+        # *.lock siblings — advisory RMW locks (config/locking.py) created on
+        # demand by WHOEVER writes first. A root-run install that touches the
+        # slot store leaves e.g. slots.lock root:root and the hal0-run API can
+        # then never open it (halo150 Phase-2 finding: POST /api/slots 500 on
+        # a fresh box; doctor perms --fix missed it because no row covered
+        # lock files). 0664: owner+group writable — root and hal0 both hold
+        # the flock across the seam.
+        PermRow(
+            etc,
+            etc_owner,
+            etc_group,
+            etc_dir_mode,
+            glob="*.lock",
+            child_mode=0o664,
+            role="/etc/hal0 *.lock (advisory RMW locks)",
+        ),
         # agents/ is the dashboard-only Hermes world — pinned root:root (#843),
         # under the flip too: the API only reads it.
         PermRow(paths.agents_config_dir(), "root", "root", 0o755, role="agents/"),
@@ -186,6 +202,25 @@ def ownership_table(
             0o2775,
             optional=False,
             role="/var/lib/hal0 (state root)",
+        ),
+        # *.lock siblings under the state root — same root-run-install hazard
+        # as the /etc/hal0 lock row above. `.first-run.lock` needs its own row:
+        # pathlib glob's `*` never matches a leading dot.
+        PermRow(
+            var_lib,
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.lock",
+            child_mode=0o664,
+            role="/var/lib/hal0 *.lock (advisory RMW locks)",
+        ),
+        PermRow(
+            paths.var_lib() / ".first-run.lock",
+            state_owner,
+            service_group,
+            0o664,
+            role=".first-run.lock",
         ),
         PermRow(
             paths.var_lib() / ".hermes",

@@ -6,6 +6,11 @@
 // still part of the window-globals shim (see ui/src/main.tsx); this is the
 // first real import in this file.
 import { SettingsShell } from './settings/SettingsShell.jsx'
+// D5 (post-R3 surface rework): flag-migration surfaces. MigrationBanner is the
+// live (endpoint-dormant) banner; MigrationResolveHost opens the resolution
+// view off the Tweaks-panel demo toggle. Real ESM imports (like SettingsShell).
+import { MigrationBanner } from './migration/MigrationBanner.jsx'
+import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -361,6 +366,11 @@ function App() {
             {/* Phase D8: self-renders while the GPU arbiter reports image
                 mode (/api/comfyui/status arbiter.mode === "img"). */}
             <GpuImageModeBanner />
+            {/* D5: self-renders only when the flag-migration report is non-empty
+                (endpoint pending → dormant today). The resolution-view host
+                sits alongside it, opening off the demo banner's Resolve event. */}
+            <MigrationBanner />
+            <MigrationResolveHost />
             <BannerStack scope="global" route={route} />
           </div>
           <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>

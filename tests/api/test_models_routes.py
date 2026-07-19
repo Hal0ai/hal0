@@ -647,3 +647,61 @@ def test_disabled_or_filtered_remote_curates_api_models(
     assert "anthropic/claude-haiku:free" not in rows  # exclude wins
     assert "nvidia/nemotron-70b" not in rows  # not included
     assert "mistral/mistral-large" not in rows  # disabled upstream
+
+
+def test_update_model_rejects_managed_args_in_extra_args(
+    inspect_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Save-time §21.7 screen: a managed flag in defaults.extra_args fails the
+    PUT with the same envelope launch would raise, instead of persisting a
+    tune that can never load."""
+    fp = Path(tmp_hal0_home) / "screened.gguf"
+    fp.write_bytes(b"\x00" * 8)
+    inspect_client.post("/api/models", json={"id": "screened", "path": str(fp)})
+
+    r = inspect_client.put(
+        "/api/models/screened",
+        json={"defaults": {"extra_args": "--port 9999 -fa on"}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+
+    # Clean tune still saves.
+    ok = inspect_client.put(
+        "/api/models/screened",
+        json={"defaults": {"extra_args": "-fa on -b 512"}},
+    )
+    assert ok.status_code == 200, ok.text
+
+
+# ── O10 guard: screen_extra_args_json (pure) ──────────────────────────────────
+
+
+def test_screen_extra_args_json_rejects_shell_stripped_json() -> None:
+    """Bare double-quoted JSON whose quotes shlex strips is rejected with the
+    single-quote guidance (spec §3 JSON-token integrity)."""
+    from hal0.errors import BadRequest
+    from hal0.services.models_service import screen_extra_args_json
+
+    with pytest.raises(BadRequest) as exc:
+        screen_extra_args_json('--chat-template-kwargs {"enable_thinking":false}')
+    assert exc.value.code == "model.extra_args_json_quoting"
+    # The message points at single-quoting.
+    assert "SINGLE" in str(exc.value) or "single" in str(exc.value)
+
+
+def test_screen_extra_args_json_accepts_single_quoted_json() -> None:
+    """Correctly single-quoted JSON survives shlex-splitting and passes."""
+    from hal0.services.models_service import screen_extra_args_json
+
+    # No exception.
+    screen_extra_args_json("--chat-template-kwargs '{\"enable_thinking\":false}'")
+
+
+def test_screen_extra_args_json_ignores_non_json_flags() -> None:
+    """A tune with no JSON object is untouched by the guard."""
+    from hal0.services.models_service import screen_extra_args_json
+
+    screen_extra_args_json("-fa on -b 512 --threads 8")
+    screen_extra_args_json("")
+    screen_extra_args_json("   ")

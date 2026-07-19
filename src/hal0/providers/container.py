@@ -558,12 +558,30 @@ def _render_quadlet_from_plan(
         "[Container]",
         f"Image={plan.image}",
         f"ContainerName={container_name}",
-        # Quadlet always auto-removes on stop (the old ``--rm``). ``LogDriver=none``
-        # keeps conmon→journal the single sink so ``journalctl -u`` isn't double-fed
-        # (podman's own journald driver would tag a second copy — the old B3 note).
-        "AutoRemove=yes",
+        # ``LogDriver=none`` keeps conmon→journal the single sink so
+        # ``journalctl -u`` isn't double-fed (podman's own journald driver
+        # would tag a second copy — the old B3 note).
         "LogDriver=none",
     ]
+    # ── ONE quadlet render for every substrate (halo150/143 O8+O11) ──────
+    # DELIBERATE: no native AutoRemove=/GroupAdd=/SecurityOpt= keys and no
+    # podman-version branch. Rationale, proven on real hardware 2026-07-18:
+    #   * 4.x generators HARD-FAIL the conversion on those keys (halo150,
+    #     podman 4.9.3 — the lxc105 live-reference substrate) → no unit.
+    #   * The native render's systemd lifecycle breaks on unprivileged
+    #     podman-5-in-LXC (halo143, 5.7): netavark teardown races
+    #     /run/user/0/netns and the unit exits 5, while the SAME container
+    #     runs clean under manual podman run — the unit shape, not the
+    #     flags, is the problem. The compat render ran healthy there.
+    #   * ``PodmanArgs=`` is the documented, version-stable escape hatch and
+    #     is semantically identical for --group-add/--security-opt.
+    # AutoRemove/--rm is dropped everywhere: stop-cleanup rides the generated
+    # unit's own cidfile ExecStopPost rm; crash-path auto-remove hid failure
+    # logs and fed the netns race. One render = one behavior to validate
+    # (both-boxes policy). If a future podman makes native keys strictly
+    # better, reintroduce them fleet-wide with hardware evidence, not a
+    # version sniff.
+    compat_args: list[str] = []
     if plan.network_mode:
         lines.append(f"Network={plan.network_mode}")
     # Explicit device nodes (podman won't recurse /dev/dri, #674); CDI names
@@ -572,11 +590,13 @@ def _render_quadlet_from_plan(
         lines.append(f"AddDevice={dev}")
     # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
     for gid in plan.group_add:
-        lines.append(f"GroupAdd={gid}")
+        compat_args += ["--group-add", str(gid)]
     for cap in plan.cap_add:
         lines.append(f"AddCapability={cap}")
     for opt in plan.security_opt:
-        lines.append(f"SecurityOpt={opt}")
+        compat_args += ["--security-opt", str(opt)]
+    if compat_args:
+        lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in compat_args))
     # Read-only + SELinux ``:z`` are first-class Mount flags; render_quadlet omits
     # the relabel on NFS sources (chcon ENOTSUP there).
     for mount in plan.mounts:

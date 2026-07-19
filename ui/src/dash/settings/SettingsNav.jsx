@@ -17,7 +17,11 @@ export const NAV_GROUPS = [
     title: "SERVER",
     items: [
       { id: "general", label: "General" },
-      { id: "security", label: "Security", disabled: true, disabledReason: "coming with the auth lane (spec §1)" },
+      // D4 (post-R3 surface rework): un-disabled — the auth surface landed
+      // (GET /api/auth/status). The page is status-only and flags every
+      // missing affordance (rotation, client-key set, throttle counts,
+      // per-route exposure table) as an API-lane request in-place.
+      { id: "security", label: "Security" },
     ],
   },
   {
@@ -66,6 +70,9 @@ export const NAV_GROUPS = [
     items: [
       { id: "doctor", label: "Doctor" },
       { id: "updates", label: "Updates" },
+      // D3 (post-R3 surface rework): runner/image evidence page. Grouped here
+      // with Updates as the system & updates axis, far from the model editors.
+      { id: "runtimes", label: "Runtimes" },
       { id: "advanced", label: "Advanced" },
       { id: "about", label: "About" },
     ],

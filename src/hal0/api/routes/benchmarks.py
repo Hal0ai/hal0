@@ -27,9 +27,10 @@ from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.bench import control, evalrun
 from hal0.bench.planner import (
     DEFAULT_API,
@@ -196,8 +197,9 @@ def get_plan(suite: str | None = None) -> dict[str, Any]:
     suites = load_suites(SUITE_DIR)
     if suite:
         if suite not in suites:
-            raise HTTPException(
-                status_code=404, detail=f"unknown suite {suite!r} (looked in {SUITE_DIR})"
+            raise NotFound(
+                f"unknown suite {suite!r} (looked in {SUITE_DIR})",
+                code="bench.unknown_suite",
             )
         target_suites = [suites[suite]]
     else:
@@ -271,7 +273,7 @@ def get_cells(
 def get_history(cell_key: str | None = None, model: str | None = None) -> dict[str, Any]:
     """Time series for trend charts (decode t/s over time)."""
     if not cell_key and not model:
-        raise HTTPException(status_code=400, detail="cell_key or model is required")
+        raise BadRequest("cell_key or model is required", code="bench.missing_filter")
     store = _store()
     rows = store.history(cell_key=cell_key, model=model)
     # Trend charts need ts/decode_ts_med (+ prefill) per point; drop the bulky
@@ -328,7 +330,7 @@ def get_run(run_id: str) -> dict[str, Any]:
     store = _store()
     record = next((r for r in store.iter_records() if r.get("run_id") == run_id), None)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
+        raise NotFound(f"unknown run_id: {run_id}", code="bench.unknown_run")
     record = dict(record)
     artifacts_dir = store.artifacts_root / run_id
     record["artifacts_files"] = (
@@ -409,15 +411,17 @@ def post_queue(body: dict[str, Any]) -> dict[str, Any]:
     model = body.get("model")
     kind = body.get("kind")
     if not suite and not model:
-        raise HTTPException(status_code=400, detail="body.suite or body.model is required")
+        raise BadRequest("body.suite or body.model is required", code="bench.invalid_envelope")
     if kind not in (None, "eval"):
-        raise HTTPException(status_code=400, detail=f"unknown queue kind {kind!r} (only 'eval')")
+        raise BadRequest(
+            f"unknown queue kind {kind!r} (only 'eval')", code="bench.invalid_envelope"
+        )
     if kind == "eval" and not model:
-        raise HTTPException(status_code=400, detail="kind='eval' requires body.model")
+        raise BadRequest("kind='eval' requires body.model", code="bench.invalid_envelope")
     if suite:
         suites = load_suites(SUITE_DIR)
         if suite not in suites:
-            raise HTTPException(status_code=404, detail=f"unknown suite {suite!r}")
+            raise NotFound(f"unknown suite {suite!r}", code="bench.unknown_suite")
     # Optional per-model run shape: lanes (compare backends) + configs (flag grid)
     # + kind ("eval" routes the item to the agentic tool-calling eval instead of
     # a lane sweep — the dashboard's Tool Bench).
@@ -458,7 +462,7 @@ def post_control(body: dict[str, Any]) -> dict[str, Any]:
         {"start": "running", "pause": "paused", "stop": "stopped"}.get(action) if action else None
     )
     if action and state is None:
-        raise HTTPException(status_code=400, detail=f"bad action {action!r} (start|pause|stop)")
+        raise BadRequest(f"bad action {action!r} (start|pause|stop)", code="bench.bad_action")
     return control.set_control(state=state, exclusive=body.get("exclusive"))
 
 
