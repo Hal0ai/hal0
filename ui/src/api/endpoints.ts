@@ -109,8 +109,10 @@ export const ENDPOINTS = {
   // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
   statsPower: '/api/stats/power',
   // Dashboard-redesign Requests widget: dispatcher-side /v1 rollup
-  // (req/min, p50/p95, per-endpoint counts over 60s). NEW endpoint —
-  // useRequestsRollup fails soft to "—" until it ships.
+  // (req/min, p50/p95, per-endpoint counts over 60s). Live
+  // (src/hal0/api/routes/hardware.py); useRequestsRollup still fails soft
+  // to "—" on 404/network error as a defensive floor, not because the
+  // route is missing.
   statsRequests: '/api/stats/requests',
   // W6: agent approvals SSE stream (polled list hook is primary; SSE for future).
   agentApprovalsStream: '/api/agent/approvals/events',
@@ -134,10 +136,11 @@ export const ENDPOINTS = {
   // `agents` lives in the catalogue block above (one entry, used by
   // both the bundled-list and sidebar surfaces). The remaining
   // endpoints under this block are surfaces the SidebarAgentBlock
-  // calls — most are NEW in v0.3 and may 404 against an older
-  // hal0-api; the consuming hooks fall back to "—" and console.warn
-  // once when a particular path returns 404 / network error so the
-  // sidebar degrades gracefully on partial deployments.
+  // calls — all live (src/hal0/api/agents/personas.py,
+  // src/hal0/api/agents/restart.py, src/hal0/api/routes/approvals.py).
+  // Consuming hooks still fall back to "—" and console.warn once on a
+  // 404/network error so the sidebar degrades gracefully on partial
+  // deployments, but that's a defensive floor, not the expected state.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
   // Restart the systemd unit backing an agent (POST → {status, detail}).
@@ -242,7 +245,8 @@ export const ENDPOINTS = {
   // Status only — never key values. Client-key status, admin-key fingerprint,
   // last-rotated, and login-throttle counters are NOT reported by this route
   // (D4 flags them as API-lane requests); the page shows disabled-with-reason
-  // rather than fabricating them. There is no key-rotation route either.
+  // rather than fabricating them. Key rotation IS live — see `authRotate`
+  // below (POST /api/auth/rotate) — this route just doesn't report it.
   authStatus: '/api/auth/status',
   // POST /api/auth/login (OPEN) — body { key }; on success mints the HttpOnly
   // session cookie and returns { ok, tier }. Wrong key → 401 auth.invalid_key;
@@ -261,6 +265,12 @@ export const ENDPOINTS = {
   // { tier, rotated_at, key_len, fingerprint, applies_live, restart_required,
   // session_preserved, note } — NEVER the key value. Rate-limited (429).
   authRotate: '/api/auth/rotate',
+  // GET /api/auth/exposure (ADMIN) — serializes RULES + OPEN_ALLOWLIST from
+  // security/exposure.py: the live per-(method,path) deny-by-default
+  // classification table + per-class counts. Backs the Settings ▸ Security
+  // exposure table (ExposureTable.jsx currently ships a stub-with-reason —
+  // wiring it to this route is a separate lane's follow-up).
+  authExposure: '/api/auth/exposure',
 
   // ── Flag-migration report (D5 migration-resolve) ─────────────────
   // GET /api/migrations/flag-report — MISSING today (API-lane request). The
@@ -271,12 +281,12 @@ export const ENDPOINTS = {
   migrationFlagReport: '/api/migrations/flag-report',
 
   // ── Doctor diagnoses (D6 diagnostics panel) ──────────────────────
-  // GET /api/doctor — MISSING today (API-lane request): `hal0 doctor` emits
-  // typed Diagnosis objects (HAL0-* id / severity / evidence / next_steps —
-  // src/hal0/diagnostics.py) but only over the CLI/--json path; there is no
-  // HTTP route yet. The DiagnosisPanel renders the generic shape and, until
-  // the route lands, synthesises one informational Diagnosis from the live
-  // GET /api/system-info hardware evidence (see useDiagnoses.ts).
+  // GET /api/doctor — LIVE (src/hal0/api/routes/doctor.py): composes the
+  // same typed Diagnosis objects (HAL0-* id / severity / evidence /
+  // next_steps — src/hal0/diagnostics.py) `hal0 doctor verify --json`
+  // prints, over HTTP. ADMIN-classified (aggregates ADMIN-only subsystem
+  // detail). useDiagnoses.ts still synthesises a fallback Diagnosis from
+  // GET /api/system-info pending the hook switching over to this route.
   doctor: '/api/doctor',
 
   // ── System health (honest degraded probe) ───────────────────────
@@ -436,6 +446,6 @@ export const ENDPOINTS = {
   boardRun: (id: string) => `/api/board/runs/${encodeURIComponent(id)}`,                     // GET
   boardConfig: '/api/board/config',          // GET (read-only orchestration knobs)
   boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
-  boardEvents: '/api/board/events',          // WS ?token=&since=&board=&tenant=
+  boardEvents: '/api/board/events',          // WS ?since=&board= (local BoardStore poll — no token/tenant, see board_ws.py)
   boardChat: '/api/board/chat',              // POST (SSE)
 } as const
