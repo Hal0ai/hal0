@@ -39,7 +39,7 @@ approvals_app = typer.Typer(help="Manage agent approval requests (gated destruct
 app.add_typer(approvals_app, name="approvals")
 
 # Bootstrap sub-sub-app — ``hal0 agent bootstrap hermes`` runs the
-# Hermes provisioning state machine (v0.3 Phase 10 stream).
+# Hermes provisioning (linear convergent install_hermes since inc-2).
 bootstrap_app = typer.Typer(help="Run bundled-agent bootstrap pipelines (Phase 10).")
 app.add_typer(bootstrap_app, name="bootstrap")
 
@@ -1111,12 +1111,12 @@ def bootstrap_hermes(
     repair: bool = typer.Option(
         False,
         "--repair",
-        help="Re-run every phase regardless of checkpoint state (forces full rerun).",
+        help="Force every step to re-run its writes (root: also reconciles ownership).",
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Run phases but don't persist provision.json.",
+        help="Run the pass but don't persist the provision.json report.",
     ),
     skip_phase: list[str] = typer.Option(
         [],
@@ -1130,7 +1130,7 @@ def bootstrap_hermes(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
 ) -> None:
-    """Run the Hermes-Agent bootstrap state machine."""
+    """Run the Hermes-Agent install — one linear convergent pass."""
     # Late import keeps the CLI startup snappy on hosts where the
     # hermes_provision module's downstream slices grow heavier deps.
     import os as _os
@@ -1156,7 +1156,7 @@ def bootstrap_hermes(
 def agent_status(
     name: str = typer.Argument("hermes", help="Bundled agent name (default: hermes)."),
 ) -> None:
-    """Pretty-print the agent's provision.json checkpoint."""
+    """Pretty-print the agent's last provision report (provision.json snapshot)."""
     import json as _json
     from pathlib import Path
 
@@ -1264,13 +1264,13 @@ def agent_reprovision(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Re-run the bootstrap state machine idempotently.
+    """Re-run the convergent install idempotently.
 
     Wrapper over ``hal0 agent bootstrap hermes`` that's name-stable
     across v0.4 agents (only flag the difference: this is the
-    "re-converge" verb, not the "first install" verb). Phases that
-    already produced their on-disk artefacts are skipped; phases whose
-    inputs drifted re-run.
+    "re-converge" verb, not the "first install" verb). Steps whose
+    on-disk artefacts already match are skipped; steps whose inputs
+    drifted re-run.
     """
     if name != "hermes":
         die(f"reprovision currently only supports `hermes`; got {name!r}.")

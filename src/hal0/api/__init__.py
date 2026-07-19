@@ -116,6 +116,9 @@ from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
 from hal0.api.routes import (
+    realtime as realtime_routes,
+)
+from hal0.api.routes import (
     secrets as secrets_routes,
 )
 from hal0.api.routes import (
@@ -1444,6 +1447,9 @@ def create_app() -> FastAPI:
     # header — keeping that probe auth-free preserves SDK compatibility.
     app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
     app.include_router(v1.router, prefix="/v1", tags=["v1"])
+    # WS /v1/realtime — OpenAI Realtime surface (HP-realtime inc-1). CLIENT tier
+    # (exposure.py "realtime ws" row); reaches STT/TTS/chat over loopback only.
+    app.include_router(realtime_routes.router, prefix="/v1", tags=["realtime"])
 
     # /api/install drives the first-run wizard. Auth was removed
     # so these endpoints are open; the installer surface is admin-only by

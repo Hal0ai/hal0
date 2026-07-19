@@ -92,10 +92,11 @@ its own prior chain-of-thought back to the model as context bloat.
 `hal0 setup` has no further subcommands — it's a flags-only entry point.
 Without `--auto` it runs an interactive Rich TUI stepping through
 storage → extensions → main slot → agent → NPU → review → install. With
-`--auto` it always provisions a `chat` slot (port 8081) unless one already
-exists, adds a `coder` slot (port 8082) only if an agent-kind extension is
-enabled, and seeds capability defaults from the hardware probe — no model
-pull at install time if `--no-pull` is set.
+`--auto` it always provisions an `agent` slot (port 8081) — the chat
+capability's slot, named `agent` per ADR-0023 — unless one already exists,
+adds a `coder` slot (port 8082) only if an agent-kind extension is enabled,
+and seeds capability defaults from the hardware probe — no model pull at
+install time if `--no-pull` is set.
 
 It runs in-process when the daemon isn't up yet (fresh install), or posts to
 `POST /api/install/apply` when `hal0-api` is already running, so re-running
@@ -153,7 +154,7 @@ profile. To pick a different profile by name, edit the slot afterwards from
 the dashboard's slot drawer, which does expose a profile picker.
 
 ```sh
-hal0 slot create primary --model qwen3-4b-q4_k_m
+hal0 slot create agent --model qwen3-4b-q4_k_m
 hal0 slot create embed --type embedding --model bge-m3 --port 8090 --ctx-size 8192
 hal0 slot create stt --type transcription --provider moonshine --model moonshine-base
 ```
@@ -453,7 +454,6 @@ completion.
 | Command | Purpose | Key options |
 |---|---|---|
 | `agent bootstrap hermes` | Run the Hermes-Agent bootstrap state machine. | `--repair`, `--dry-run`, `--skip-phase` (repeatable), `--offline`, `--verbose`/`-v` |
-| `agent bootstrap turnstone` | Bootstrap Turnstone (renders `config.toml` → hal0-api `/v1` + the live models DB; coexists with Hermes). | `--repair`, `--adopt`, `--dry-run`, `--skip-phase` (repeatable), `--verbose`/`-v` |
 
 ### `hal0 agent personas`
 

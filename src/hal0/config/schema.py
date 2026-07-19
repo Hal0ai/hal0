@@ -2794,6 +2794,56 @@ class SecurityConfig(BaseModel):
     )
 
 
+class RealtimeConfig(BaseModel):
+    """``[realtime]`` — the OpenAI-Realtime WebSocket surface (HP-realtime inc-1).
+
+    Tunes the ``WS /v1/realtime`` endpoint: which local slots serve STT/TTS, the
+    fixed pcm16 sample rate, the in-process energy-VAD thresholds (server-VAD
+    turn detection — user decision 1), the output audio frame size, and the
+    voice-bounded approval wait.
+
+    ``enabled`` is a hard kill switch. ``sample_rate`` is fixed at 24 kHz for the
+    MVP (matches the demo client's ``-sample-rate 24000`` and kokoro's native
+    pcm output — no resample either direction). ``stt_model`` / ``tts_model`` /
+    ``tts_voice`` name the loaded slots the gateway calls over loopback (empty
+    ``stt_model``/``tts_model`` falls back to the session's chat model, empty
+    ``tts_voice`` lets the tts slot's own default apply).
+
+    VAD (``vad_*``): a zero-dependency energy-RMS detector (the venv has no
+    onnxruntime/webrtcvad/silero; adding them would pull a heavy dep + an
+    unpullable multi-file model — spec §2d). ``vad_energy_threshold`` is
+    normalized RMS (0-1); ``vad_silence_ms`` of trailing silence ends a turn;
+    a segment shorter than ``vad_min_speech_ms`` of voiced audio is treated as
+    noise and does not fire a turn. A silero backend can replace it in
+    increment 2 without touching these knobs' meaning.
+
+    ``approval_wait_s`` bounds how long a gated steward tool may leave the voice
+    session silent before the assistant speaks a "still waiting — approve at the
+    bell" notice and ends the turn (the brain's own SSE would otherwise block up
+    to 300s — spec §2b / user decision 3). ``frame_ms`` is the output audio
+    frame size (``response.output_audio.delta`` granularity).
+
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table — a typo'd key
+    must fail loudly at load, never silently no-op.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    enabled: bool = True
+    sample_rate: int = Field(default=24000, ge=8000, le=48000)
+    default_model: str = ""
+    stt_model: str = ""
+    tts_model: str = "kokoro"
+    tts_voice: str = ""
+    vad_energy_threshold: float = Field(default=0.02, ge=0.0, le=1.0)
+    vad_silence_ms: int = Field(default=500, ge=50, le=10000)
+    vad_min_speech_ms: int = Field(default=200, ge=0, le=10000)
+    vad_window_ms: int = Field(default=20, ge=5, le=100)
+    frame_ms: int = Field(default=20, ge=5, le=200)
+    approval_wait_s: float = Field(default=20.0, gt=0, le=300.0)
+    max_buffer_seconds: float = Field(default=30.0, gt=0, le=600.0)
+
+
 class Hal0Config(BaseModel):
     """Top-level hal0.toml pydantic model.
 
@@ -2817,6 +2867,7 @@ class Hal0Config(BaseModel):
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
 
 
 # ── Shipped seed-data shims (P3-schema, spec Part A) ──────────────────────────

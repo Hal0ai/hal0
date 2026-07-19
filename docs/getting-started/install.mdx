@@ -95,7 +95,7 @@ For a full production deployment, use the bootstrap script above.
    pre-flight checks, installs podman + the Python venv, builds the
    dashboard, writes config and systemd units, runs first-run setup
    (`hal0 setup --auto --no-pull --no-extensions`) to scaffold empty
-   capability slots (`chat`, `embed`, `rerank`, `stt`, `tts`, `vision`,
+   capability slots (`agent`, `embed`, `rerank`, `stt`, `tts`, `vision`,
    plus `coder` when an agent extension is on) — each wired with a
    device, profile, and port but no model assigned — and starts the API.
 
