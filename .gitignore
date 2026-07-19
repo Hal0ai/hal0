@@ -97,22 +97,19 @@ tests/release-gate-report.json
 # local-only; kept out of public history so no IP scrubbing is needed.
 docs/internal/
 
-# knowledge graph JSON outputs — local-only, regenerated + served to Hermes
-graphify-out/*.json
-
 # OS
 Thumbs.db
 .claude/worktrees/
 .claude/design-import/
 .claude/wip.json
-graphify-out/cost.json
-graphify-out/cache/
-graphify-out/graph.html
-graphify-out/.graphify_*
-graphify-out/.rebuild.lock
 
-# knowledge graph — local-only, regenerated + served to Hermes via graphify MCP on CT105 (not committed; was 100k-line PR churn)
-graphify-out/
+# knowledge graph — curated artifacts ARE committed (GRAPH_REPORT.md, wiki/, manifest.json);
+# raw graph.json + caches/backups stay local-only (regenerate with `graphify update .`;
+# committing graph.json was 100k-line PR churn)
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
+!graphify-out/manifest.json
+!graphify-out/wiki/
 .claude/branch-status.json
 
 # never track node_modules anywhere (incl. symlinks)
