@@ -1,9 +1,10 @@
 """Log endpoints (mounted under /api/logs).
 
-Tail and stream journald entries for hal0's systemd units. The slot
-routes already do an SSE journalctl tail (see ``slots.py``'s
-``/api/slots/{name}/logs/stream``); the SSE generator is factored here
-into ``journalctl_sse()`` so both surfaces share one implementation.
+Tail and stream journald entries for hal0's systemd units. (The slot
+routes do a SEPARATE SSE journalctl tail — see ``slots.py``'s
+``/api/slots/{name}/logs/stream``, backed by :mod:`hal0.slots.logs` —
+not this module's ``journalctl_sse()``; the two don't currently share
+an implementation, despite the similarity.)
 
 Endpoints:
     GET /api/logs?unit=<u>&n=<N>&since=<ts>&level=<lvl>
@@ -131,9 +132,12 @@ async def journalctl_sse(
     (CI hosts without systemd, mac dev boxes).
 
     Each line is redacted via :func:`hal0.api._redact.redact_log_line`
-    before it's framed — this is the shared SSE helper both ``/api/logs
-    /stream`` and the slot-scoped ``/api/slots/{name}/logs/stream`` route
-    call, so both surfaces get the fix in one place.
+    before it's framed. NOTE: despite this module's file-level docstring,
+    the slot-scoped ``/api/slots/{name}/logs/stream`` route does NOT call
+    this generator — it has its own independent journalctl plumbing in
+    :mod:`hal0.slots.logs` (``tail_journal``/``read_tail``), which does
+    not redact and is unaffected by this fix. Only ``/api/logs`` and
+    ``/api/logs/stream`` (this module) get the api-logs-redact fix.
     """
     if shutil.which("journalctl") is None:
         yield 'event: error\ndata: {"message":"journalctl unavailable"}\n\n'
