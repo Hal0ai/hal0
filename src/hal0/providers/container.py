@@ -485,6 +485,83 @@ def _slot_publish_host() -> str:
         return "127.0.0.1"
 
 
+def _slot_network_mode() -> str:
+    """Live ``[slots].network_mode`` — the box-default podman network mode.
+
+    Deploy-time configuration, NOT runtime substrate probing: an operator (or
+    the installer) sets this to ``host`` on netns-limited substrates
+    (unprivileged podman-in-LXC, where bridge netns teardown races — see
+    docs/rework/podman-unprivileged-findings.md) so every slot renders
+    ``Network=host``. The renderer never sniffs podman/LXC itself.
+
+    Empty (the default) means "bridge + loopback PublishPort" — today's
+    behaviour, unchanged. Read fresh each render so a Settings change lands on
+    the next slot (re)start. Fail-soft to "" so a malformed hal0.toml never
+    wedges a slot start (and never silently widens exposure).
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        return (load_hal0_config().slots.network_mode or "").strip()
+    except Exception:
+        log.warning("container.network_mode_load_failed", exc_info=True)
+        return ""
+
+
+# ── host-net loopback fence (podman-unprivileged-findings.md, Issue 1) ───────
+# The slot process's listen-address flags. Under BRIDGE networking the LAN
+# fence is the ``PublishPort=127.0.0.1:<port>:<port>`` pin and the process
+# correctly binds ``0.0.0.0`` inside its own netns. Under ``Network=host``
+# there is NO publish, so the bind itself must be the fence — every backend
+# templates its listen address as one of these flags.
+_BIND_FLAGS = ("--host", "--listen")
+_LAN_BIND = "0.0.0.0"
+_LOOPBACK_BIND = "127.0.0.1"
+
+
+def _loopback_fence_command(command: list[str]) -> list[str]:
+    """Flip any ``0.0.0.0`` bind in *command* to loopback (host-net fence).
+
+    THE single chokepoint coupling ``Network=host`` to a loopback process bind
+    (podman-unprivileged-findings.md, Issue 1, operator-validated on halo143):
+    under host networking there is no ``PublishPort=127.0.0.1:…`` fencing the
+    raw slot port off the LAN, so an unflipped ``--host 0.0.0.0`` would bind the
+    CT's LAN IP and expose the unauthenticated slot port. Applied uniformly to
+    EVERY backend's plan, so a host-net plan can never render a 0.0.0.0 bind
+    regardless of which provider built the argv:
+
+      * llama-server / FLM / Kokoro / Qwen3-TTS template ``--host 0.0.0.0``
+        (two argv tokens);
+      * ComfyUI templates ``--listen 0.0.0.0`` inside a ``bash -lc`` payload
+        string (one token).
+
+    Both the split-token and embedded-in-a-shell-string forms (and the inline
+    ``--host=0.0.0.0`` form) are rewritten. hal0-api, sharing the CT netns,
+    still reaches the slot at ``127.0.0.1:<port>`` — dispatch is unchanged.
+    Bridge-mode plans never call this.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        tok = command[i]
+        # Split-token form: `--host 0.0.0.0` / `--listen 0.0.0.0`.
+        if tok in _BIND_FLAGS and i + 1 < n and command[i + 1] == _LAN_BIND:
+            out.append(tok)
+            out.append(_LOOPBACK_BIND)
+            i += 2
+            continue
+        # Inline `--host=0.0.0.0` and shell-payload `--listen 0.0.0.0`
+        # embedded inside a single token (ComfyUI's bash -lc string).
+        rewritten = tok
+        for flag in _BIND_FLAGS:
+            rewritten = rewritten.replace(f"{flag}={_LAN_BIND}", f"{flag}={_LOOPBACK_BIND}")
+            rewritten = rewritten.replace(f"{flag} {_LAN_BIND}", f"{flag} {_LOOPBACK_BIND}")
+        out.append(rewritten)
+        i += 1
+    return out
+
+
 # Health-check tuning: poll GET /health on the slot port.
 _HEALTH_POLL_INTERVAL_S = 2.0
 _HEALTH_TIMEOUT_S = 180.0
@@ -521,6 +598,7 @@ def _render_quadlet_from_plan(
     plan: RuntimeLaunchPlan,
     *,
     publish_host: str = "127.0.0.1",
+    network_mode_default: str = "",
 ) -> str:
     """Render a Podman Quadlet ``.container`` unit from a launch plan.
 
@@ -545,8 +623,25 @@ def _render_quadlet_from_plan(
                         (``PublishPort=<host>:<port>:<port>``). Defaults to
                         ``127.0.0.1`` (loopback); ``load_sync`` widens it from
                         the live ``[slots].publish_host``.
+        network_mode_default:
+                        Box-default podman network mode from
+                        ``[slots].network_mode`` (deploy-time config, threaded
+                        in by ``_render_quadlet_text``). Used ONLY when the
+                        plan does not itself pin a mode — a provider that
+                        REQUIRES host net (ComfyUI) always wins. When the
+                        effective mode is ``host`` this couples two things in
+                        one place: ``Network=host`` + no ``PublishPort`` (the
+                        publish would be a no-op), and the process bind is
+                        flipped to loopback (:func:`_loopback_fence_command`)
+                        so the raw slot port is never LAN-exposed
+                        (podman-unprivileged-findings.md, Issue 1).
     """
     container_name = slot_container_name(instance_token)
+    # Effective network mode: an explicit per-plan mode (e.g. ComfyUI's
+    # required ``host``) wins; otherwise the deploy-time box default. This is a
+    # PURE function of (plan, params) — the config value is resolved upstream
+    # in _render_quadlet_text, never sniffed here.
+    effective_network_mode = plan.network_mode or network_mode_default
 
     lines: list[str] = [
         "# hal0 container slot — generated by ContainerProvider (Podman Quadlet).",
@@ -582,8 +677,8 @@ def _render_quadlet_from_plan(
     # better, reintroduce them fleet-wide with hardware evidence, not a
     # version sniff.
     compat_args: list[str] = []
-    if plan.network_mode:
-        lines.append(f"Network={plan.network_mode}")
+    if effective_network_mode:
+        lines.append(f"Network={effective_network_mode}")
     # Explicit device nodes (podman won't recurse /dev/dri, #674); CDI names
     # (nvidia.com/gpu=all) pass through the same key.
     for dev in plan.devices:
@@ -606,7 +701,7 @@ def _render_quadlet_from_plan(
     # Publish derived from plan.port (declarative). Skipped under host networking
     # where port publishing is meaningless. ``publish_host`` defaults to loopback;
     # an operator widens it via [slots].publish_host.
-    if plan.port and plan.network_mode != "host":
+    if plan.port and effective_network_mode != "host":
         lines.append(f"PublishPort={publish_host}:{plan.port}:{plan.port}")
     # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK on a
     # hardcoded port; the slot runs on its own port, so override it declaratively.
@@ -638,7 +733,17 @@ def _render_quadlet_from_plan(
     # let systemd strip the inner quotes → invalid JSON → slot never starts
     # (regression #, pinned by tests/providers/test_container.py).
     if plan.command:
-        lines.append("Exec=" + " ".join(shlex.quote(t) for t in plan.command))
+        # host-net LAN fence (coupled to Network=host above): with no
+        # PublishPort to pin the port to loopback, the process bind IS the
+        # fence — flip 0.0.0.0 → 127.0.0.1 for EVERY backend so a host-net plan
+        # can never render a 0.0.0.0 bind. Bridge mode keeps 0.0.0.0 (the
+        # 127.0.0.1 PublishPort pins it). See podman-unprivileged-findings.md.
+        command = (
+            _loopback_fence_command(plan.command)
+            if effective_network_mode == "host"
+            else plan.command
+        )
+        lines.append("Exec=" + " ".join(shlex.quote(t) for t in command))
 
     # Restart=always lets systemd own crash recovery (the old hand-rendered
     # Restart=no forced the manager to reap+restart every failed slot). The
@@ -1397,6 +1502,7 @@ class ContainerProvider(Provider):
             token,
             plan,
             publish_host=_slot_publish_host(),
+            network_mode_default=_slot_network_mode(),
         )
 
     def load_sync(
@@ -1823,6 +1929,7 @@ def resolved_argv_detail_for_slot(
 
 __all__ = [
     "ContainerProvider",
+    "_loopback_fence_command",
     "_render_quadlet_from_plan",
     "_spec_provider_for",
     "container_provider",

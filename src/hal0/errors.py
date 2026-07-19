@@ -94,6 +94,30 @@ class BadRequest(Hal0Error):
     status = 400
 
 
+class MultiStatus(Hal0Error):
+    """207 — the operation partially succeeded; ``details`` enumerates what did
+    not complete and why.
+
+    Use when a mutation is best-effort across several resources and some
+    sub-operations failed while others succeeded — the caller needs an honest
+    per-item breakdown rather than an all-or-nothing 2xx/5xx. The canonical
+    case is an uninstall that removed most of an agent's tree but hit entries
+    the service user can't delete (e.g. root-owned files): report a 207 with the
+    residual paths instead of a bare 500.
+
+    Example::
+
+        raise MultiStatus(
+            "uninstall incomplete",
+            code="agent.uninstall_incomplete",
+            details={"removed": True, "residual": [{"path": ..., "reason": ...}]},
+        )
+    """
+
+    code = "resource.partial"
+    status = 207
+
+
 class Unauthorized(Hal0Error):
     """401 — no valid credentials presented.
 
@@ -220,6 +244,7 @@ __all__ = [
     "Conflict",
     "Forbidden",
     "Hal0Error",
+    "MultiStatus",
     "NotFound",
     "TooManyRequests",
     "Unauthorized",

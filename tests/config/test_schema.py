@@ -404,6 +404,17 @@ class TestHal0Config:
             SlotsConfig(port_range_start=8090, port_range_end=8085)
         assert "port_range_end" in str(ei.value)
 
+    def test_slots_network_mode_default_is_bridge(self) -> None:
+        assert SlotsConfig().network_mode == ""
+
+    def test_slots_network_mode_accepts_host(self) -> None:
+        assert SlotsConfig(network_mode="host").network_mode == "host"
+
+    def test_slots_network_mode_rejects_unknown(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            SlotsConfig(network_mode="bridge")
+        assert "network_mode" in str(ei.value)
+
     def test_extra_allow_keeps_unknown_keys(self) -> None:
         c = Hal0Config.model_validate({"future_section": {"foo": 1}})
         # extra='allow' keeps the unknown table.

@@ -256,6 +256,58 @@ def test_flip_makes_state_root_service_owned(tmp_hal0_home: str) -> None:
     assert (hermes.owner, hermes.group, hermes.mode) == ("hal0", "hal0", 0o700)
 
 
+def test_runtime_slots_and_registry_are_service_owned(tmp_hal0_home: str) -> None:
+    """O13: the /var/lib/hal0 runtime slots/ + registry/ trees must be declared.
+
+    install.sh births them root:root; the User=hal0 daemon writes
+    ``slots/<id>/state.json`` and the registry into them, so a fresh box that
+    only chowned the top-level state root left the slots degrading to ``error``.
+    Both must appear as non-optional, setgid, service-owned rows so
+    ``doctor perms`` audits AND ``--fix`` heals them.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    var_lib = paths.var_lib()
+
+    slots = rows[var_lib / "slots"]
+    assert (slots.owner, slots.group, slots.mode) == ("hal0", "hal0", 0o2775)
+    assert slots.optional is False
+    # a pre-existing root-owned per-slot dir is healed via the glob.
+    assert slots.glob == "*"
+    assert slots.child_mode == 0o2775
+    # NB: distinct from the /etc/hal0/slots CONFIG dir row.
+    assert (var_lib / "slots") != paths.slots_config_dir()
+
+    registry = rows[var_lib / "registry"]
+    assert (registry.owner, registry.group, registry.mode) == ("hal0", "hal0", 0o2775)
+    assert registry.optional is False
+
+
+def test_runtime_slots_row_heals_root_owned_tree(tmp_hal0_home: str) -> None:
+    """O13 heal path: a root-owned runtime slots/ tree is planned as drift.
+
+    Mirrors the fresh-install symptom — slots/ + a per-slot dir land root:root —
+    and asserts the table's plan reports both as ``drift`` (so ``commit`` would
+    chown them to hal0) rather than silently leaving them unhealed as before.
+    """
+    var_lib = paths.var_lib()
+    slots = var_lib / "slots"
+    (slots / "agent").mkdir(parents=True)
+
+    def _root_observe(p: Path) -> perms.PermObservation:
+        # Everything the plan touches reads back root:root 0755 (the install-time
+        # birth state) so the runtime-slots rows register as drift.
+        return perms.PermObservation(
+            path=p, exists=p.exists(), owner="root", group="root", mode=0o755
+        )
+
+    rows = [r for r in perms.ownership_table() if r.target == slots]
+    assert rows, "runtime slots row must be present in the table"
+    pl = perms.plan(rows, observe_fn=_root_observe)
+    drifted = {d.path for d in pl.drifted}
+    assert slots in drifted
+    assert slots / "agent" in drifted  # the glob expanded onto the per-slot dir
+
+
 def test_ownership_table_has_no_rootless_podman_home_rows(tmp_hal0_home: str) -> None:
     """O12: the 9e07c0d3 ``.config``/``.local`` rootless-HOME rows are gone.
 

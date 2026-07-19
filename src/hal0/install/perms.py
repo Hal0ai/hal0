@@ -229,6 +229,39 @@ def ownership_table(
             0o700,
             role="HERMES_HOME",
         ),
+        # slots/ (runtime slot state) — the per-slot working dirs +
+        # ``<slot>/state.json`` the User=hal0 daemon writes at load time.
+        # install.sh `mkdir -p ${VAR_DIR}/slots` creates it root:root at
+        # install (born under root's umask), but hal0-api runs as hal0 and must
+        # create ``slots/<id>/`` + write state.json there — a root:root slots/
+        # leaves every slot unable to persist state and they degrade to
+        # ``error`` on a fresh box (O13). The previous table only covered the
+        # /etc/hal0/slots *config* dir (slots_config_dir above), NOT this
+        # runtime state tree, so `doctor perms --fix` never healed it. setgid
+        # 2775 (mirrors the benchmarks/ row) so state files inherit the shared
+        # hal0 group; the glob heals any pre-existing root-owned per-slot dir.
+        PermRow(
+            var_lib / "slots",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*",
+            child_mode=0o2775,
+            optional=False,
+            role="slots/ (runtime slot state)",
+        ),
+        # registry/ — the model registry, also born root:root from the same
+        # install.sh mkdir and also written by the User=hal0 daemon. Same O13
+        # birth-ownership class as slots/ above; heal the dir (its files are
+        # then born hal0 by the daemon, so no glob row for them).
+        PermRow(
+            var_lib / "registry",
+            state_owner,
+            service_group,
+            0o2775,
+            optional=False,
+            role="registry/ (model registry)",
+        ),
         # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
         # User=hal0 unit needs to traverse INTO its own home without being able
         # to enumerate siblings. Was repaired ad hoc by hermes_provision's late

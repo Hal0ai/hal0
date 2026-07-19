@@ -503,6 +503,18 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
+# O13: the runtime state trees (slots/, registry/) are born root:root from the
+# mkdir above, but hal0-api runs User=hal0 and must create slots/<id>/state.json
+# + write the registry there. Left root:root, every slot degrades to `error` on
+# a fresh box. The `doctor perms --fix` backstop (Service start) also heals these
+# via their OwnershipStore rows (src/hal0/install/perms.py), but chown here so
+# they're born correct before the daemon's first touch. Prod-only + hal0-gated:
+# the service user doesn't exist in dev mode.
+if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
+    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" 2>/dev/null || true
+    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" 2>/dev/null || true
+fi
+
 # Production (FHS, #495) ships the source tree into the versioned dir
 # ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
 # `hal0 update` can atomically swap `current` to a new versioned tree.
@@ -625,6 +637,13 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
 else
     ui_spinner_run "Installing hal0 from ${REPO_ROOT}" \
         "${PIP}" install "${REPO_ROOT}"
+    # Same-version --source git re-run: pip sees the version satisfied and
+    # SKIPS, leaving OLD code in the venv (halo143 finding, 2026-07-19). The
+    # refresh must gate on tree contents, not the version string — force the
+    # hal0 code reinstall; deps were just resolved by the line above so
+    # --no-deps keeps this fast and offline-safe.
+    ui_spinner_run "Refreshing hal0 code in venv" \
+        "${PIP}" install --force-reinstall --no-deps "${REPO_ROOT}"
 fi
 
 if [[ ! -x "${HAL0_BIN}" ]]; then

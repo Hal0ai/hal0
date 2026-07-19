@@ -223,6 +223,49 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
 LlmFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
+# ── internal self-HTTP auth (O17) ───────────────────────────────────────────
+#
+# Every call the steward makes back to the box's OWN API (/v1 completion, the
+# platform self-API, the admin-MCP hops) must carry a bearer on an auth-enabled
+# box (the default on non-loopback binds) — otherwise `/v1` and `/api/*` reject
+# it with `auth.required` and the steward is dead out of the box. Precedence:
+# forward the CALLER's inbound Authorization when the request carries one; else
+# present the box service identity from `hal0.service_identity` (env → api.env,
+# the SAME seam the CLI uses). `prefer` picks the least-privilege tier for the
+# surface — "client" for the /v1 inference call, "admin" for the platform/admin
+# surfaces that include slot mutations and per-slot reads. Key values are never
+# logged or echoed.
+
+
+def _inbound_bearer(request: Request) -> str | None:
+    """The caller's bearer token (sans ``Bearer `` prefix), or ``None``."""
+    raw = request.headers.get("Authorization", "") or ""
+    return raw.removeprefix("Bearer ").strip() or None
+
+
+def _self_call_headers(request: Request, *, prefer: str) -> dict[str, str]:
+    """Authorization for one internal self-HTTP call (forward-caller, else service)."""
+    raw = request.headers.get("Authorization", "") or ""
+    if raw.strip():
+        return {"Authorization": raw}
+    from hal0.service_identity import service_auth_headers
+
+    return service_auth_headers(prefer=prefer)
+
+
+def _self_call_bearer(request: Request, *, prefer: str) -> str | None:
+    """Bearer token for an internal call that takes a bare token (admin dispatch).
+
+    Forwards the caller's inbound token when present; else the box service key.
+    """
+    inbound = _inbound_bearer(request)
+    if inbound is not None:
+        return inbound
+    from hal0.service_identity import service_key
+
+    return service_key(prefer=prefer)
+
+
 # ── tool definitions (1:1 with the audited board mutations) ─────────────────
 
 
@@ -549,7 +592,9 @@ async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]
     queue = getattr(request.app.state, "approval_queue", None)
     if queue is None:
         return {"error": f"{name}: admin tools unavailable (no approval queue)"}
-    bearer = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None
+    # O17: forward the caller's bearer; else fall back to the box admin
+    # identity so the admin-MCP self-hops authenticate on an auth-on box.
+    bearer = _self_call_bearer(request, prefer="admin")
     base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
     return await admin.dispatch(
         tool=name,
@@ -657,10 +702,15 @@ def _resolve_platform_tool(name: str, args: dict[str, Any]) -> tuple[str | None,
     return None, "", False
 
 
-async def _platform_request(http: httpx.AsyncClient, method: str, path: str) -> Any:
+async def _platform_request(
+    http: httpx.AsyncClient,
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+) -> Any:
     """One self-HTTP call, mapped to a tool-result the loop can step against."""
     try:
-        resp = await http.request(method, path)
+        resp = await http.request(method, path, headers=headers or None)
     except httpx.HTTPError as exc:
         return {"error": f"platform API unreachable: {exc}"}
     if resp.status_code >= 400:
@@ -688,9 +738,13 @@ async def _dispatch_platform_tool(
     if owns:
         base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
         http = httpx.AsyncClient(base_url=base.rstrip("/"), timeout=60.0)
+    # O17: the platform surface spans CLIENT reads (list_slots) AND ADMIN ops
+    # (get_slot, slot load/unload/restart) — present the admin identity so the
+    # whole surface authenticates; the caller's own bearer wins when inbound.
+    headers = _self_call_headers(request, prefer="admin")
     try:
         if not mutating:
-            return await _platform_request(http, method, path)
+            return await _platform_request(http, method, path, headers)
         async with record_action(
             request,
             category="platform",
@@ -698,7 +752,7 @@ async def _dispatch_platform_tool(
             target=args.get("name"),
             message=f"chat:{name}",
         ) as rec:
-            result = await _platform_request(http, method, path)
+            result = await _platform_request(http, method, path, headers)
             rec.after = result if isinstance(result, dict) else {"result": result}
             return result
     finally:
@@ -908,11 +962,20 @@ def _resolve_llm(request: Request) -> LlmFn:
 
     base_url = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
     timeout_s = _brain_chat_config(request).completion_timeout_s
+    # O17: /v1/chat/completions is CLIENT-gated when auth is on (the default on
+    # non-loopback binds). Without a bearer the slot 401s `auth.required` and
+    # the steward is dead out of the box. Forward the caller's inbound bearer;
+    # else present the box service identity at the least-privilege CLIENT tier.
+    headers = _self_call_headers(request, prefer="client")
 
     async def _primary_completion(body: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=timeout_s) as http:
             try:
-                resp = await http.post(f"{base_url.rstrip('/')}/v1/chat/completions", json=body)
+                resp = await http.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=body,
+                    headers=headers or None,
+                )
             except httpx.HTTPError as exc:
                 return {"error": f"primary slot transport failure: {exc}"}
         if not (200 <= resp.status_code < 300):
@@ -930,6 +993,45 @@ def _resolve_llm(request: Request) -> LlmFn:
 
 def _sse(obj: dict[str, Any]) -> str:
     return f"data: {json.dumps(obj)}\n\n"
+
+
+# ── outbound message framing (O18) ──────────────────────────────────────────
+#
+# Chat templates with a user-query guard (e.g. qwen3.5's `multi_step_tool`,
+# which 500s with "No user query found in messages") reject a completion
+# request that carries no user-role turn. Two shapes tripped this:
+#   1) a client POSTing the singular `{"message": "..."}` convenience field,
+#      which the old framing dropped — leaving a SYSTEM-ONLY turn; and
+#   2) any `messages` list that arrives without a user turn.
+# `_frame_messages` reconciles both into a template-safe first round: system
+# prompt first (seeded only when the client didn't send its own), the singular
+# `message` folded in as a trailing user turn, and a guaranteed user-role
+# entry. The tool loop only ever APPENDS assistant + `role: tool` messages
+# between rounds (see toolloop/engine.run_tool_loop), so this user turn
+# persists — no continuation round can regress to zero user-role entries, and
+# the trailing `role: tool` shape continuation rounds carry is what such
+# templates expect after a tool result.
+
+
+def _frame_messages(payload: dict[str, Any], system_prompt: str) -> list[dict[str, Any]]:
+    """Build the first-round messages list, guaranteed template-safe (O18)."""
+    messages: list[dict[str, Any]] = [
+        m for m in (payload.get("messages") or []) if isinstance(m, dict)
+    ]
+    # Accept the singular `message` field as a trailing user turn — the
+    # dashboard sends `messages`, but curl/tests/other clients POST
+    # {"message": "..."} and it must not be silently dropped.
+    singular = payload.get("message")
+    if isinstance(singular, str) and singular.strip():
+        messages.append({"role": "user", "content": singular})
+    # Seed the system prompt unless the client leads with its own.
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": system_prompt})
+    # Guarantee at least one user-role turn so the request never lands as a
+    # system-only (or assistant/tool-tail-only) turn that the template rejects.
+    if not any(m.get("role") == "user" for m in messages):
+        messages.append({"role": "user", "content": ""})
+    return messages
 
 
 def _surfaced_tool_names(request: Request) -> frozenset[str]:
@@ -962,11 +1064,9 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     llm = _resolve_llm(request)
     board = payload.get("board")
     system_prompt, default_model = _resolve_profile(request)
-    messages: list[dict[str, Any]] = list(payload.get("messages") or [])
-    # Seed the system prompt unless the client sent its own — the model needs
-    # the lane vocabulary and the read-before-write rule to act on the board.
-    if not messages or not (isinstance(messages[0], dict) and messages[0].get("role") == "system"):
-        messages.insert(0, {"role": "system", "content": system_prompt})
+    # Frame the messages template-safely (system seed + a guaranteed user turn,
+    # accepting the singular `message` field) — see _frame_messages / O18.
+    messages = _frame_messages(payload, system_prompt)
 
     tools = _surfaced_tool_schemas(request)
     # Model precedence: an explicit per-request model wins; then — because the
@@ -1138,6 +1238,7 @@ __all__ = [
     "_dispatch_platform_tool",
     "_dispatch_tool",
     "_extract_tool_calls",
+    "_frame_messages",
     "_is_read_tool",
     "_parse_text_tool_calls",
     "_resolve_platform_tool",
