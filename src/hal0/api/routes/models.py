@@ -617,6 +617,62 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     return _model_to_dict(model)
 
 
+@router.post("/{model_id}/default")
+async def set_model_default(model_id: str, request: Request) -> dict[str, Any]:
+    """Promote or clear a model's per-type default marker.
+
+    Body (optional)::
+
+        {"default": true}    # promote — demotes the current holder of this type
+        {"default": false}   # clear — the type is left with NO default
+
+    ``default`` defaults to ``true`` when the body is empty/omitted, so a bare
+    POST is "set as default". The single-holder invariant (at most one default
+    model per dispatcher type) is enforced in ONE place —
+    :func:`hal0.services.models_service.set_model_type_default` — which this
+    route and the slot-create wiring both call. Promotion is atomic + idempotent
+    (re-promoting the current holder is a no-op).
+
+    Emits ``model.updated`` with ``changed_fields=["default"]`` for the target
+    and each demoted peer so the footer ticker + Models poll refresh.
+
+    Errors:
+      * ``404 model.not_found`` — ``model_id`` not registered.
+    """
+    registry = request.app.state.model_registry
+    # Body is optional — a bare POST means "set as default".
+    default = True
+    try:
+        if int(request.headers.get("content-length") or 0) > 0:
+            body = await request.json()
+            if isinstance(body, dict) and "default" in body:
+                default = bool(body["default"])
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+
+    try:
+        result = _svc.set_model_type_default(registry, model_id, default=default)
+    except Exception as exc:  # ModelNotFound → typed 404 envelope
+        from hal0.registry.store import ModelNotFound
+
+        if isinstance(exc, ModelNotFound):
+            raise NotFound(f"model {model_id!r} not found", code="model.not_found") from None
+        raise
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None and result["changed"]:
+        touched = [result["model_id"], *result["demoted"]]
+        for mid in touched:
+            await event_bus.emit(
+                "model.updated",
+                "info",
+                f"model:{mid}",
+                f"{mid}: updated (default)",
+                data={"id": mid, "changed_fields": ["default"]},
+            )
+    return result
+
+
 @router.post("/{model_id}/duplicate", status_code=201)
 async def duplicate_model(model_id: str, request: Request) -> dict[str, Any]:
     """Duplicate a registry row so two rows reference the SAME weights.

@@ -225,6 +225,26 @@ class Model(BaseModel):
         ),
     )
 
+    default: bool = Field(
+        default=False,
+        description=(
+            "Per-type default marker: True marks this model as THE default "
+            "model for its dispatcher type (llm/embedding/reranking/… — the "
+            "axis derived from id+capabilities by "
+            "hal0.services.models_service.dispatch_type). At most ONE model per "
+            "type may carry this; the single-holder invariant is enforced "
+            "server-side by "
+            "hal0.services.models_service.set_model_type_default (the one "
+            "chokepoint that promotes/demotes), NOT by this field's validator. "
+            "Distinct from the SLOT-level `default` flag (SC-4, "
+            "config_write.check_default_uniqueness): that picks the default "
+            "SLOT of a type for routing; this picks the default MODEL. Persists "
+            "in the registry row's ``extra`` JSON blob (repository "
+            "_DEFAULT_EXTRA_KEY) — no schema migration, same fold as "
+            "capability_flags/modalities_override."
+        ),
+    )
+
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description=(

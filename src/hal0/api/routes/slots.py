@@ -402,6 +402,14 @@ async def create_slot(request: Request) -> dict[str, object]:
             code="slot.name_required",
         )
 
+    # "Set as default" from the create modal: a top-level ``default: true`` here
+    # means "promote this slot's MODEL as its type's default" (the model-layer
+    # marker), NOT the SC-4 slot-level default flag. Pop it out of the slot body
+    # before persistence so it neither lands in the slot TOML nor triggers the
+    # slot-level uniqueness guard — the promotion happens post-create through
+    # the models_service chokepoint (see below). Absent/false = no change.
+    make_default = bool(body.pop("default", False))
+
     # [slots] policy is read from the live config on every create, so a PUT
     # /api/settings change applies to the next creation without a restart.
     slots_cfg = getattr(getattr(request.app.state, "hal0_config", None), "slots", None)
@@ -444,7 +452,38 @@ async def create_slot(request: Request) -> dict[str, object]:
     ) as _rec:
         snap = await sm.create(name, body)
         _rec.after = {"config": body}
-    return _slot_to_dict(snap, request)
+
+    out = _slot_to_dict(snap, request)
+
+    # Post-create model-default promotion. The slot is the primary object and is
+    # already persisted — a promotion failure (unresolved / unregistered model,
+    # e.g. a "will pull" pick or an FLM tag) must NOT 500 the create. Route
+    # through the SAME single chokepoint the dedicated endpoint uses so the
+    # demote logic is never duplicated. Report the outcome on the response so
+    # the UI can surface a soft warning if it didn't take.
+    if make_default:
+        from hal0.services import models_service as _models_svc
+
+        model_sect = body.get("model")
+        model_id = model_sect.get("default") if isinstance(model_sect, dict) else None
+        registry = getattr(request.app.state, "model_registry", None)
+        if not model_id or registry is None:
+            out["default_promotion"] = {
+                "promoted": False,
+                "reason": "no model bound to the slot to promote",
+            }
+        else:
+            try:
+                result = _models_svc.set_model_type_default(registry, model_id, default=True)
+                out["default_promotion"] = {"promoted": True, **result}
+            except Exception as exc:  # ModelNotFound / registry hiccup — fail soft
+                out["default_promotion"] = {
+                    "promoted": False,
+                    "model_id": model_id,
+                    "reason": str(exc),
+                }
+
+    return out
 
 
 # ── id-keyed lookups + rename (rework §11.1) ─────────────────────────────────
