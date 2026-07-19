@@ -308,6 +308,170 @@ def test_runtime_slots_row_heals_root_owned_tree(tmp_hal0_home: str) -> None:
     assert slots / "agent" in drifted  # the glob expanded onto the per-slot dir
 
 
+# ── O13 follow-up: recursion into slots/<id>/state.json (r4-stage-validation) ─
+
+
+def test_runtime_slots_row_is_recursive_with_distinct_file_mode(tmp_hal0_home: str) -> None:
+    """The declared slots/ row must recurse and give files their own mode.
+
+    Guards the exact regression the O13 follow-up finding described: a bare
+    single-level glob heals ``slots/<id>/`` but never reaches
+    ``slots/<id>/state.json`` one level deeper.
+    """
+    rows = [r for r in perms.ownership_table() if r.target == paths.var_lib() / "slots"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.recursive is True
+    assert row.glob == "*"
+    assert row.child_mode == 0o2775  # dirs
+    assert row.child_file_mode == 0o600  # files — matches write_state_atomic's mkstemp birth mode
+
+
+def test_nested_state_json_two_levels_deep_plans_as_drift_and_heals(tmp_hal0_home: str) -> None:
+    """A root-owned ``slots/<id>/state.json`` two levels deep is audited AND fixed.
+
+    This is the concrete O13 follow-up repro: the per-slot dir is already
+    healed by the shallow glob, but a root-owned ``state.json`` inside it (left
+    over from a root-run install/reinstall, before the hal0 daemon ever wrote
+    through it) was previously invisible to both ``plan()`` and ``commit()``.
+
+    ``commit()`` resolves owner/group names to real uid/gid via pwd/grp (only
+    the chown/chmod syscalls themselves are seamed), so this row is built
+    directly with the CURRENT test user/group — matching the ``_me()`` pattern
+    the other commit tests in this file use — decoupling the recursion/heal
+    mechanics under test here from ``ownership_table()``'s service-user flip
+    logic (that wiring is covered separately by
+    ``test_runtime_slots_row_is_recursive_with_distinct_file_mode``). This also
+    keeps the test valid when run as root, where ``service_user="root"``
+    would otherwise take the byte-identical root-era table path.
+    """
+    owner, group = _me()
+    var_lib = paths.var_lib()
+    slots = var_lib / "slots"
+    slot_dir = slots / "agent"
+    slot_dir.mkdir(parents=True)
+    state_file = slot_dir / "state.json"
+    state_file.write_text('{"state": "error"}\n')
+    os.chmod(state_file, 0o644)  # simulate a root-born file (mode aside from owner)
+
+    row = perms.PermRow(
+        slots,
+        owner,
+        group,
+        0o2775,
+        glob="*",
+        child_mode=0o2775,
+        child_file_mode=0o600,
+        recursive=True,
+        optional=False,
+        role="slots/ (test)",
+    )
+
+    def _root_observe(p: Path) -> perms.PermObservation:
+        return perms.PermObservation(
+            path=p, exists=p.exists(), owner="root", group="root", mode=0o755
+        )
+
+    pl = perms.plan([row], observe_fn=_root_observe)
+    drifted = {d.path for d in pl.drifted}
+    assert slots in drifted
+    assert slot_dir in drifted
+    assert state_file in drifted, "nested state.json must be reachable by plan(), not just the dir"
+
+    # confirm the declared target for the file diff is the FILE mode, not the dir mode
+    file_diff = next(d for d in pl.diffs if d.path == state_file)
+    assert file_diff.mode == 0o600
+    assert file_diff.owner == owner
+    assert file_diff.group == group
+
+    # --fix: commit() must actually chown/chmod the nested file, not just the dir.
+    chown_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+    changed = perms.commit(
+        pl,
+        chown=lambda p, u, g: chown_calls.append((p, u, g)),
+        chmod=lambda p, m: chmod_calls.append((p, m)),
+    )
+    assert state_file in changed
+    assert slot_dir in changed
+    assert slots in changed
+    assert (str(state_file), 0o600) in chmod_calls
+
+
+def test_recursive_glob_does_not_alter_non_recursive_rows(tmp_hal0_home: str) -> None:
+    """Auditing the recursion feature: every OTHER glob row stays single-level.
+
+    ``recursive`` defaults False and only the slots/ row opts in — this locks
+    that in so future edits don't silently widen the lock-file / .hermes /
+    secrets/agents / benchmarks glob rows to walk nested subdirectories.
+    """
+    table = perms.ownership_table(service_user="hal0")
+    non_recursive_glob_rows = [
+        r for r in table if r.glob is not None and r.target != paths.var_lib() / "slots"
+    ]
+    assert non_recursive_glob_rows, "expected at least one non-slots glob row to audit"
+    for row in non_recursive_glob_rows:
+        assert row.recursive is False, row.label
+        assert row.child_file_mode is None, row.label
+
+
+def test_lock_file_rows_unchanged_by_recursion_feature(tmp_hal0_home: str) -> None:
+    """Regression: the etc/ + var_lib *.lock rows keep their exact pre-change shape."""
+    table = perms.ownership_table(service_user="hal0")
+    etc = paths.etc()
+    var_lib = paths.var_lib()
+
+    etc_lock_rows = [r for r in table if r.target == etc and r.glob == "*.lock"]
+    assert len(etc_lock_rows) == 1
+    assert etc_lock_rows[0].child_mode == 0o664
+    assert etc_lock_rows[0].recursive is False
+
+    var_lib_lock_rows = [r for r in table if r.target == var_lib and r.glob == "*.lock"]
+    assert len(var_lib_lock_rows) == 1
+    assert var_lib_lock_rows[0].child_mode == 0o664
+    assert var_lib_lock_rows[0].recursive is False
+
+
+def test_hermes_home_row_unchanged_by_recursion_feature(tmp_hal0_home: str) -> None:
+    """Regression: the .hermes row (no glob at all) is untouched."""
+    table = perms.ownership_table(service_user="hal0")
+    hermes_rows = [r for r in table if r.target == paths.var_lib() / ".hermes"]
+    assert len(hermes_rows) == 1
+    row = hermes_rows[0]
+    assert (row.owner, row.group, row.mode) == ("hal0", "hal0", 0o700)
+    assert row.glob is None
+    assert row.recursive is False
+    assert row.child_file_mode is None
+
+
+def test_registry_files_get_explicit_rows_matching_each_writer(tmp_hal0_home: str) -> None:
+    """registry/ is flat: its 3 known files get explicit rows, not a recursive glob.
+
+    Each mode matches that file's actual writer (see the comment above the
+    registry rows in ownership_table): registry.toml born via the same
+    tempfile.mkstemp atomic-write path as hal0.toml (0600); registry.toml.lock
+    matches the *.lock cross-process-shared convention (0664); hal0.db matches
+    sqlite3.connect's birth mode (0644).
+    """
+    table = perms.ownership_table(service_user="hal0")
+    by_target = {r.target: r for r in table}
+    var_lib = paths.var_lib()
+
+    toml_row = by_target[var_lib / "registry" / "registry.toml"]
+    assert (toml_row.owner, toml_row.group, toml_row.mode) == ("hal0", "hal0", 0o600)
+
+    lock_row = by_target[var_lib / "registry" / "registry.toml.lock"]
+    assert (lock_row.owner, lock_row.group, lock_row.mode) == ("hal0", "hal0", 0o664)
+
+    db_row = by_target[var_lib / "registry" / "hal0.db"]
+    assert (db_row.owner, db_row.group, db_row.mode) == ("hal0", "hal0", 0o644)
+
+    # all optional: these files don't exist until the registry is first used.
+    assert toml_row.optional is True
+    assert lock_row.optional is True
+    assert db_row.optional is True
+
+
 def test_ownership_table_has_no_rootless_podman_home_rows(tmp_hal0_home: str) -> None:
     """O12: the 9e07c0d3 ``.config``/``.local`` rootless-HOME rows are gone.
 
