@@ -659,6 +659,15 @@ def _render_quadlet_from_plan(
         "",
         "[Unit]",
         f"Description=hal0 container inference slot ({instance_token})",
+        # StartLimit*= are [Unit]-section directives (systemd.unit(5)), not
+        # [Service]. Quadlet passes [Unit] through verbatim to the generated
+        # unit, so they belong here — emitting them under [Service] makes
+        # systemd log "Unknown key" and SILENTLY DROP them, disabling the
+        # slot's restart rate-limiting (install-validation m2, halo150,
+        # 2026-07-19). Restart=/RestartSec= stay in [Service] below — those
+        # ARE Service-section keys.
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
         "",
         "[Container]",
         f"Image={plan.image}",
@@ -757,15 +766,14 @@ def _render_quadlet_from_plan(
 
     # Restart=always lets systemd own crash recovery (the old hand-rendered
     # Restart=no forced the manager to reap+restart every failed slot). The
-    # StartLimit caps match the manager-driven behaviour it replaces.
+    # StartLimit caps (emitted in [Unit] above — systemd.unit(5), not
+    # [Service]) match the manager-driven behaviour it replaces.
     lines.extend(
         [
             "",
             "[Service]",
             "Restart=always",
             "RestartSec=3",
-            "StartLimitIntervalSec=300",
-            "StartLimitBurst=5",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",

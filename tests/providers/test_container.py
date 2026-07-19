@@ -504,6 +504,24 @@ class TestRenderUnit:
         # Quadlet owns crash recovery now (was the hand-rendered Restart=no).
         assert "Restart=always" in unit.splitlines()
 
+    def test_startlimit_keys_land_in_unit_section_not_service(self) -> None:
+        """StartLimit*= are systemd.unit(5) [Unit] directives, not [Service].
+
+        Emitting them under [Service] makes systemd log "Unknown key" and
+        silently drop them, disabling the slot's restart rate-limiting
+        (install-validation m2, halo150, 2026-07-19). Assert they render in
+        the [Unit] block and never leak into [Service].
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit_section, _, remainder = unit.partition("[Container]")
+        service_section = remainder.partition("[Service]")[2].partition("[Install]")[0]
+        assert "StartLimitIntervalSec=300" in unit_section
+        assert "StartLimitBurst=5" in unit_section
+        assert "StartLimitIntervalSec" not in service_section
+        assert "StartLimitBurst" not in service_section
+
     def test_numeric_group_add_present(self) -> None:
         """GroupAdd= must use numeric GIDs (toolbox images lack group names)."""
         from hal0.providers._gpu import resolve_gpu_group_ids
