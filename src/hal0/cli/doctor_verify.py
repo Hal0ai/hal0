@@ -26,7 +26,6 @@ at the very end; it is also runnable standalone anytime via ``hal0 doctor --veri
 from __future__ import annotations
 
 import socket
-from dataclasses import dataclass
 from typing import Any
 
 from rich.console import Console
@@ -34,193 +33,35 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+# Pure classifiers (Check, check_*, build_checks, overall_status) live in
+# hal0.health_report — the single owner shared with GET /api/doctor
+# (api/routes/doctor.py can't import hal0.cli, same layering direction
+# hal0.diagnostics already enforces). Re-exported here unchanged so every
+# existing ``dv.check_api(...)`` / ``dv.build_checks(...)`` call site (this
+# module's own render/orchestration code below, plus tests/cli/
+# test_doctor_verify.py) keeps working without edits.
+from hal0.health_report import (
+    _FAIL,
+    _PASS,
+    _WARN,
+    Check,
+    _url_host,
+    build_checks,
+    check_api,
+    check_capabilities,
+    check_dns,
+    check_hermes,
+    check_memory,
+    check_openwebui,
+    check_runners,
+    overall_status,
+)
+
 # ── canonical help links (static — the "what next" footer) ────────────────────
 FIRST_RUN_GUIDE_URL = "https://hal0.dev/first-run-guide"
 DOCS_URL = "https://hal0.dev/docs/"
 DISCORD_URL = "https://discord.gg/7M4y6dcUyq"
 WEBSITE_URL = "https://hal0.dev"
-
-# Status vocabulary. A "fail" row that is also ``critical`` renders red and
-# drives the overall verdict; a plain "fail"/"warn" is amber and never blocks.
-_PASS = "pass"
-_WARN = "warn"
-_FAIL = "fail"
-
-
-@dataclass(frozen=True)
-class Check:
-    """One report-card row.
-
-    ``critical`` marks the two install-defining conditions (no reachable URL,
-    zero healthy runners). A critical ``fail`` is the only thing that flips the
-    overall verdict to "critical"; every other ``fail``/``warn`` is advisory.
-    """
-
-    key: str
-    label: str
-    status: str  # _PASS | _WARN | _FAIL
-    detail: str
-    critical: bool = False
-
-
-# ── per-check classifiers (pure — take parsed JSON, return a Check) ────────────
-
-
-def check_api(health: dict[str, Any] | None) -> Check:
-    """API/dashboard reachable — the anchor critical (no reachable URL)."""
-    if health is None:
-        return Check(
-            "api",
-            "Dashboard / API",
-            _FAIL,
-            "unreachable — start it with `hal0 serve`",
-            critical=True,
-        )
-    version = health.get("version") if isinstance(health, dict) else None
-    detail = f"serving (v{version})" if version else "serving"
-    return Check("api", "Dashboard / API", _PASS, detail)
-
-
-def check_dns(urls: dict[str, Any] | None) -> Check:
-    """mDNS/.local resolvability of the advertised host (warn-only).
-
-    A ``.local`` name that does not resolve is common on bridged LXC / VLANs
-    where multicast is filtered — a heads-up (use the LAN IP), never a blocker.
-    """
-    host = _url_host(urls.get("api")) if isinstance(urls, dict) else None
-    if not host:
-        return Check("dns", "mDNS (.local)", _WARN, "no host advertised yet")
-    if not host.endswith(".local"):
-        # A plain IP / real DNS name — nothing mDNS-specific to verify.
-        return Check("dns", "Hostname", _PASS, f"{host} (no mDNS needed)")
-    try:
-        socket.gethostbyname(host)
-    except OSError:
-        return Check(
-            "dns",
-            "mDNS (.local)",
-            _WARN,
-            f"{host} does not resolve here (multicast filtered? use the LAN IP)",
-        )
-    return Check("dns", "mDNS (.local)", _PASS, f"{host} resolves")
-
-
-def check_runners(system: dict[str, Any] | None) -> Check:
-    """Runner slots healthy — the second critical (zero healthy slots).
-
-    Sourced from ``/api/health/system`` → ``checks.slot_manager`` which already
-    walks ``SlotManager.list()`` and reports the total + the errored slot names.
-    """
-    if system is None:
-        return Check("runners", "Runners", _FAIL, "health/system unreachable", critical=True)
-    sm = (system.get("checks") or {}).get("slot_manager") if isinstance(system, dict) else None
-    if not isinstance(sm, dict) or "slots" not in sm:
-        return Check("runners", "Runners", _FAIL, "slot manager not wired", critical=True)
-    total = int(sm.get("slots") or 0)
-    errored = list(sm.get("errored") or [])
-    healthy = total - len(errored)
-    if healthy <= 0:
-        detail = "no healthy runner slots" if total else "no runner slots configured yet"
-        return Check("runners", "Runners", _FAIL, detail, critical=True)
-    if errored:
-        return Check(
-            "runners",
-            "Runners",
-            _WARN,
-            f"{healthy}/{total} healthy — errored: {', '.join(errored)}",
-        )
-    return Check("runners", "Runners", _PASS, f"{healthy}/{total} slot(s) healthy")
-
-
-def check_capabilities(capabilities: dict[str, Any] | None) -> Check:
-    """Capability slots (embed/voice/img) configured — advisory."""
-    if capabilities is None:
-        return Check("capabilities", "Capability slots", _WARN, "unreachable")
-    selections = capabilities.get("selections") if isinstance(capabilities, dict) else None
-    if not isinstance(selections, dict) or not selections:
-        return Check("capabilities", "Capability slots", _WARN, "none configured")
-    active = [k for k, v in selections.items() if v]
-    if not active:
-        return Check("capabilities", "Capability slots", _WARN, "none active")
-    return Check(
-        "capabilities",
-        "Capability slots",
-        _PASS,
-        f"{len(active)} active: {', '.join(sorted(active))}",
-    )
-
-
-def check_memory(memory: dict[str, Any] | None) -> Check:
-    """Hindsight memory engine + banks — advisory (memory is optional)."""
-    if memory is None:
-        return Check("memory", "Hindsight / banks", _WARN, "memory admin unreachable")
-    if not isinstance(memory, dict) or memory.get("engine") is None:
-        return Check("memory", "Hindsight / banks", _PASS, "disabled (no memory engine)")
-    if not memory.get("reachable"):
-        return Check("memory", "Hindsight / banks", _WARN, "engine enabled but :9177 unreachable")
-    banks = memory.get("banks_total")
-    detail = f"reachable — {banks} bank(s)" if banks is not None else "reachable"
-    return Check("memory", "Hindsight / banks", _PASS, detail)
-
-
-def _service_check(services: dict[str, Any] | None, sid: str, label: str) -> Check:
-    """Shared classifier for the two companion services (OWUI, Hermes)."""
-    if services is None:
-        return Check(sid, label, _WARN, "services health unreachable")
-    entries = services.get("services") if isinstance(services, dict) else None
-    entry = (
-        next((s for s in entries if isinstance(s, dict) and s.get("id") == sid), None)
-        if isinstance(entries, list)
-        else None
-    )
-    if entry is None:
-        return Check(sid, label, _WARN, "not reported")
-    if entry.get("up"):
-        return Check(sid, label, _PASS, str(entry.get("detail") or "up"))
-    return Check(sid, label, _WARN, str(entry.get("detail") or "down"))
-
-
-def check_openwebui(services: dict[str, Any] | None) -> Check:
-    return _service_check(services, "openwebui", "OpenWebUI")
-
-
-def check_hermes(services: dict[str, Any] | None) -> Check:
-    return _service_check(services, "hermes", "Hermes")
-
-
-def build_checks(
-    *,
-    health: dict[str, Any] | None,
-    urls: dict[str, Any] | None,
-    system: dict[str, Any] | None,
-    capabilities: dict[str, Any] | None,
-    memory: dict[str, Any] | None,
-    services: dict[str, Any] | None,
-) -> list[Check]:
-    """Compose the full ordered check suite from the fetched payloads (pure)."""
-    return [
-        check_api(health),
-        check_dns(urls),
-        check_runners(system),
-        check_capabilities(capabilities),
-        check_memory(memory),
-        check_openwebui(services),
-        check_hermes(services),
-    ]
-
-
-def overall_status(checks: list[Check]) -> str:
-    """Roll the rows up to ``ok`` | ``warn`` | ``critical``.
-
-    ``critical`` iff any critical row failed (the only blocking-*looking* state,
-    though even this never raises during auto-run). ``warn`` if any non-critical
-    fail/warn is present. ``ok`` when every row passed.
-    """
-    if any(c.status == _FAIL and c.critical for c in checks):
-        return "critical"
-    if any(c.status in (_FAIL, _WARN) for c in checks):
-        return "warn"
-    return "ok"
 
 
 # ── rendering ──────────────────────────────────────────────────────────────────
@@ -231,18 +72,6 @@ _BADGE = {
     _FAIL: "[red]✖ FAIL[/red]",
 }
 _CRIT_BADGE = "[bold red]✖ FAIL[/bold red]"
-
-
-def _url_host(url: Any) -> str | None:
-    """Extract the bare hostname from an ``http(s)://host[:port]`` URL."""
-    if not isinstance(url, str) or "://" not in url:
-        return None
-    rest = url.split("://", 1)[1]
-    hostport = rest.split("/", 1)[0]
-    if hostport.startswith("["):  # IPv6 literal
-        end = hostport.find("]")
-        return hostport[1:end] if end > 0 else hostport
-    return hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
 
 
 def _lan_ip() -> str | None:

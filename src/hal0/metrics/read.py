@@ -244,4 +244,57 @@ def models_health(
     return {"models": rows_out}
 
 
-__all__ = ["models_health", "stats_summary", "system_stats"]
+def requests_rollup(
+    db_path: Path | str | None = None,
+    *,
+    window_s: int = 60,
+) -> dict[str, Any]:
+    """``GET /api/stats/requests`` payload: near-real-time throughput/latency.
+
+    Short window (default 60s) -- the dashboard's live "requests" card, not
+    the longer ``stats_summary()`` rollup. ``endpoints`` is keyed by resolved
+    ``model_id``: ``request_metric`` carries no per-HTTP-route ``path``
+    column (only ``model_id``/``runner``/``device``/``modality``, and the
+    latter three land NULL until the modalities-split lane populates them --
+    see ``002_metrics.sql``), so ``model_id`` is the one real per-request
+    dimension available today. Never fabricated: with zero rows in the
+    window, counts are honest zeros and percentiles are ``null`` (no samples
+    to compute over).
+    """
+    now = datetime.now(UTC)
+    start = now - timedelta(seconds=window_s)
+    out: dict[str, Any] = {
+        "window_s": window_s,
+        "req_per_min": 0.0,
+        "p50_ms": None,
+        "p95_ms": None,
+        "endpoints": [],
+        "errors": 0,
+        "dedupe": False,
+    }
+    with connect(db_path) as conn:
+        rows = _safe_query(
+            conn,
+            "SELECT model_id, total_ms, ok FROM request_metric WHERE ts >= ?",
+            (start.isoformat(),),
+        )
+    if rows:
+        total = len(rows)
+        out["req_per_min"] = round(total / (window_s / 60), 2)
+        latencies = [r["total_ms"] for r in rows if r["total_ms"] is not None]
+        out["p50_ms"] = _percentile(latencies, 0.50)
+        out["p95_ms"] = _percentile(latencies, 0.95)
+        out["errors"] = sum(1 for r in rows if not r["ok"])
+
+        counts: dict[str, int] = {}
+        for r in rows:
+            key = r["model_id"] or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        out["endpoints"] = [
+            {"path": k, "count": v}
+            for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        ]
+    return out
+
+
+__all__ = ["models_health", "requests_rollup", "stats_summary", "system_stats"]

@@ -9,6 +9,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
+from pydantic import BaseModel
 
 try:
     import psutil as _psutil
@@ -700,6 +701,47 @@ async def stats_endpoint(
     return await asyncio.to_thread(
         metrics_read.stats_summary, path, window=window, model_id=model_id, runner=runner
     )
+
+
+class RequestsEndpointCount(BaseModel):
+    path: str
+    count: int
+
+
+class RequestsRollup(BaseModel):
+    """``GET /api/stats/requests`` -- frozen client shape, see
+    ``ui/src/api/hooks/useRequestsRollup.ts``."""
+
+    window_s: int
+    req_per_min: float | None
+    p50_ms: float | None
+    p95_ms: float | None
+    endpoints: list[RequestsEndpointCount]
+    errors: int | None
+    dedupe: bool = False
+
+
+@router.get("/stats/requests", response_model=RequestsRollup)
+async def stats_requests_endpoint(request: Request, window_s: int = 60) -> RequestsRollup:
+    """``GET /api/stats/requests`` -- dispatcher-side rollup over the last
+    ``window_s`` seconds (default 60, matching the dashboard's "requests &
+    latency" card -- see ``useRequestsRollup.ts``).
+    """
+    from hal0.metrics import read as metrics_read
+
+    service = getattr(request.app.state, "metrics_service", None)
+    path = service.writer.db_path if service is not None else None
+    payload = await asyncio.to_thread(metrics_read.requests_rollup, path, window_s=window_s)
+
+    # Single-flight dedupe signal (Tier 3 coalescing) -- best-effort: any key
+    # currently in-flight on the dispatcher's coalescing group. Optional in
+    # the frozen client shape; absence of a dispatcher just reads as False.
+    dispatcher = getattr(request.app.state, "dispatcher", None)
+    single_flight = getattr(dispatcher, "_single_flight", None) if dispatcher is not None else None
+    if single_flight is not None:
+        payload["dedupe"] = bool(single_flight.in_flight_keys())
+
+    return RequestsRollup(**payload)
 
 
 @router.get("/system-stats")

@@ -25,6 +25,7 @@ from hal0.api.auth import (
 )
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.errors import BadRequest, TooManyRequests, Unauthorized
+from hal0.security.exposure import OPEN_ALLOWLIST, RULES, AuthClass
 from hal0.service_identity import rotate_api_env_key
 
 log = structlog.get_logger(__name__)
@@ -42,6 +43,25 @@ class RequireAuthRequest(BaseModel):
 
 class RotateKeyRequest(BaseModel):
     tier: Literal["admin", "client"] = "admin"
+
+
+class ExposureRule(BaseModel):
+    label: str
+    auth_class: str
+    methods: list[str] | None = None
+    pattern: str | None = None
+    kind: str = "custom"
+
+
+class ExposureAllowlistEntry(BaseModel):
+    method: str
+    path: str
+
+
+class ExposureResponse(BaseModel):
+    classes: list[str]
+    rules: list[ExposureRule]
+    open_allowlist: list[ExposureAllowlistEntry]
 
 
 def _client_ip(request: Request) -> str:
@@ -240,6 +260,41 @@ async def status(request: Request) -> dict[str, object]:
         "has_admin_key": has_admin_key(),
         "tier": principal.tier,
     }
+
+
+@router.get("/exposure", response_model=ExposureResponse)
+async def exposure() -> ExposureResponse:
+    """Serialize the deny-by-default route classification table.
+
+    Live per-(method, path)-rule view of :mod:`hal0.security.exposure`'s
+    ``RULES`` + ``OPEN_ALLOWLIST`` — the Settings ▸ Security page's route
+    exposure table (``ExposureTable.jsx``) is a stub-with-reason until this
+    route exists; ``exposure.py``'s own module docstring names this
+    consumer. ADMIN-gated (see the rule for this route in ``exposure.py``):
+    the full rule table is itself a map of the API's whole auth posture.
+
+    Never fabricated — walks the real ``RULES`` tuple in evaluation order,
+    so a widening/narrowing PR to the table shows up here immediately with
+    no separate copy to keep in sync.
+    """
+    rules = [
+        ExposureRule(
+            label=rule.label,
+            auth_class=rule.auth_class.value,
+            methods=sorted(rule.methods) if rule.methods else None,
+            pattern=getattr(rule.match, "pattern", None),
+            kind=getattr(rule.match, "kind", "custom"),
+        )
+        for rule in RULES
+    ]
+    allowlist = [
+        ExposureAllowlistEntry(method=method, path=path) for method, path in sorted(OPEN_ALLOWLIST)
+    ]
+    return ExposureResponse(
+        classes=[c.value for c in AuthClass],
+        rules=rules,
+        open_allowlist=allowlist,
+    )
 
 
 __all__ = ["router"]

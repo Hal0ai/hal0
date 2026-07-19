@@ -68,6 +68,7 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     comfyui,
     dashboard_layout,
+    doctor,
     hardware,
     health,
     hf,
@@ -1486,6 +1487,10 @@ def create_app() -> FastAPI:
     #   dashboard_layout.router → GET/PUT /api/user/dashboard-layout (file-backed)
     app.include_router(throughput.router, prefix="/api", tags=["stats"])
     app.include_router(power.router, prefix="/api", tags=["stats"])
+    # GET /api/doctor — doctor verdict feed (D6 diagnostics panel). GET
+    # /api/stats/requests (dispatcher rollup, D5 requests card) lives on
+    # hardware.router above -- already mounted at prefix="/api".
+    app.include_router(doctor.router, prefix="/api", tags=["doctor"])
     app.include_router(services_health.router, prefix="/api/services", tags=["services"])
     # Services management page (registry-driven detail + lifecycle + mDNS):
     #   services_routes.router → GET /api/services, POST /api/services/{id}/action,
