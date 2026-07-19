@@ -6,9 +6,9 @@ post-stamp, because the model's materialized flags text is the whole tune.
 
 The CURRENT launch path does NOT yet satisfy that: by the ML-5 design the
 llama-server argv still layers a live ``profile`` segment (from a live profile
-resolve) UNDER the model's ``model_defaults`` segment — see
+resolve) UNDER the model's stamped ``model_extra_args`` segment — see
 ``hal0.providers.container._llama_argv_segments``' documented precedence
-``base < profile < model_defaults < … < extra_args``. This increment is the
+``base < profile < model_extra_args < model_defaults < … < extra_args``. This increment is the
 ADDITIVE backend (increment 1); ripping out the profile layer is increment-2
 migration-window work.
 
@@ -23,7 +23,7 @@ Increment-2 work items (delta from the §7 target):
      container load path (image resolution stays; flag layering goes).
   3. Delete the slot ``slot_overrides``/``extra_args`` flag segments per §2.
   4. Flip THIS test to assert the ``profile`` segment is absent / empty and the
-     stamped ``model_defaults`` text is the sole tune source.
+     stamped ``model_extra_args`` text is the sole tune source.
 """
 
 from __future__ import annotations
@@ -68,12 +68,16 @@ def test_stamped_model_still_layers_a_live_profile_segment_at_launch() -> None:
     # profile participated at launch, not just the stamp).
     prov = {p.flag: p.source for p in resolved.provenance}
     assert prov.get("-fa") == "profile"
-    assert prov.get("-b") == "model_defaults"
+    # The stamped tune's -b comes from the model's free-form extra_args, which
+    # now rides its own screened ``model_extra_args`` segment (split out from
+    # ``model_defaults`` — see slots.argv.UNTRUSTED_SEGMENT_LABELS). -b is not a
+    # managed flag, so it passes screening; precedence is unchanged.
+    assert prov.get("-b") == "model_extra_args"
 
 
 def test_stamped_model_defaults_win_over_profile_on_flag_collision() -> None:
     """When the stamp and the live profile set the SAME flag, the model tune
-    wins (``model_defaults`` sits above ``profile`` in the precedence chain) —
+    wins (``model_extra_args`` sits above ``profile`` in the precedence chain) —
     the closest current behaviour gets to 'the model owns its tune'."""
     segments = _llama_argv_segments(
         port=8081,
@@ -86,4 +90,4 @@ def test_stamped_model_defaults_win_over_profile_on_flag_collision() -> None:
     idx = resolved.argv.index("-b")
     assert resolved.argv[idx + 1] == "2048"
     prov = {p.flag: p.source for p in resolved.provenance}
-    assert prov.get("-b") == "model_defaults"
+    assert prov.get("-b") == "model_extra_args"
