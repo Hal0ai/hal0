@@ -41,6 +41,10 @@ export interface ApiModelRaw {
    * one recorded at pull time. Merged server-side into /api/models rows;
    * absent until a check has run or for rows without HF provenance. */
   update_available?: boolean
+  /** True when this model is THE default for its dispatcher type (per-type
+   * marker — at most one holder per type, enforced server-side). Drives the
+   * Models list / drawer "default" badge + the Set/Remove-default affordance. */
+  default?: boolean
   // ── Legacy HAL0_DATA mock shape (data.jsx fixtures / mock.ts 404
   // fallback). Real /api/models rows never carry these; the normalizer
   // tolerates them so mock mode keeps working through the same code path.

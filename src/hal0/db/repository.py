@@ -47,6 +47,14 @@ _CONTEXT_LENGTH_KEY = "context_length"
 _CAPABILITY_FLAGS_EXTRA_KEY = "_capability_flags"
 _MODALITIES_OVERRIDE_EXTRA_KEY = "_modalities_override"
 
+#: Per-type default marker (:attr:`hal0.registry.model.Model.default`) also
+#: rides the ``extra`` blob under a reserved key rather than getting its own
+#: column — the single-holder invariant is enforced in Python (the
+#: models_service chokepoint), so an indexed column would buy nothing. Only
+#: written when True; a missing key reads back as False, so pre-existing rows
+#: round-trip as non-default with no migration.
+_DEFAULT_EXTRA_KEY = "_default"
+
 #: Columns of the `model` table, in the order INSERT/UPDATE statements bind
 #: them. Kept as a tuple (not re-derived from a dict each call) so
 #: SqliteModelRegistry can build parameterized SQL generically.
@@ -138,6 +146,9 @@ def model_to_row(
         metadata[_CAPABILITY_FLAGS_EXTRA_KEY] = capability_flags
     if model.modalities_override is not None:
         metadata[_MODALITIES_OVERRIDE_EXTRA_KEY] = [m.value for m in model.modalities_override]
+    # Per-type default marker — only stamped when set (see _DEFAULT_EXTRA_KEY).
+    if model.default:
+        metadata[_DEFAULT_EXTRA_KEY] = True
     extra_json = json.dumps(metadata, separators=(",", ":")) if metadata else None
 
     ts = updated_at or now_iso()
@@ -370,6 +381,7 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     modalities_override = (
         list(raw_modalities_override) if isinstance(raw_modalities_override, list) else None
     )
+    default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
 
     defaults_kwargs = {col: row[col] for col in _DEFAULTS_COLUMNS}
     # NOTE: `n_gpu_layers`/`context_size` can legitimately be 0, which is
@@ -396,5 +408,6 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         capability_flags=capability_flags,
         modalities_override=modalities_override,
         defaults=defaults,
+        default=default,
         metadata=metadata,
     )

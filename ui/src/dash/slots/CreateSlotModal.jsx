@@ -153,11 +153,11 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
       </div>
 
-      {/* Default for type */}
+      {/* Default for type — promotes the picked MODEL as its type's default */}
       <div className="form-row" style={{ marginTop: 8 }}>
         <div className="form-lbl">
           <span>default for {selModel?.type || "type"}?</span>
-          <span className="sub">flips `default = true`; demotes the current one</span>
+          <span className="sub">makes this model the {selModel?.type || "type"} default; demotes the current one</span>
         </div>
         <div className="form-ctl">
           <label className="checkbox-row">

@@ -22,7 +22,7 @@
 // is flat-merged wholesale, so we start from the stored defaults and override
 // only the keys we surface (emptying an input deletes just that key).
 
-import { useModelUpdate, useAddModelFromPath } from '@/api/hooks/useModels'
+import { useModelUpdate, useAddModelFromPath, useModelSetDefault } from '@/api/hooks/useModels'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
@@ -322,6 +322,7 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 function ModelDrawer({ open, onClose, model }) {
   const update = useModelUpdate();
+  const setDefault = useModelSetDefault();
   const templates = useChatTemplates(open);
   const profilesQuery = useProfiles();
   const enums = useMetaEnums();
@@ -456,6 +457,27 @@ function ModelDrawer({ open, onClose, model }) {
     });
   };
 
+  // Per-type default marker toggle. Server-side single chokepoint enforces
+  // "one default per type" (promoting demotes the current holder); we just
+  // fire the mutation and let the models-query invalidation refresh badges.
+  const isTypeDefault = !!model.default;
+  const typeLabel = model.type || "type";
+  const onToggleDefault = async () => {
+    const next = !isTypeDefault;
+    try {
+      const res = await setDefault.mutateAsync({ id: model.id, default: next });
+      window.__hal0Toast && window.__hal0Toast(
+        next
+          ? `${model.longName || model.id} is now the ${res.type} default` +
+              (res.demoted && res.demoted.length ? ` (demoted ${res.demoted.join(", ")})` : "")
+          : `Removed ${model.longName || model.id} as the ${res.type} default`,
+        "ok",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Default change failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
   const dirty =
     name !== (model.name || "") ||
     !sameSet(types, splitModelTags(model.tags).selected) ||
@@ -561,6 +583,31 @@ function ModelDrawer({ open, onClose, model }) {
                   className={"mdl-chip" + (on ? " on" : "")} onClick={() => toggleType(tag)}>{tag}</button>
               );
             })}
+          </div>
+        </div>
+
+        {/* ── Per-type default marker (Set / Remove) ── */}
+        <div className="form-row">
+          <div className="form-lbl">
+            <span>default for {typeLabel}</span>
+            <span className="sub">the model this type falls back to · one per type</span>
+          </div>
+          <div className="form-ctl" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {isTypeDefault ? (
+              <span className="tag" data-testid="model-default-badge"
+                style={{ color: "var(--ok)", borderColor: "var(--ok)", background: "var(--bg-2)", fontFamily: "var(--jbm)", fontSize: 9, letterSpacing: ".05em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, border: "1px solid var(--ok)" }}>
+                ✓ {typeLabel} default
+              </span>
+            ) : (
+              <span className="tag" data-testid="model-default-none"
+                style={{ color: "var(--fg-4)", borderColor: "var(--line)", background: "var(--bg-2)", fontFamily: "var(--jbm)", fontSize: 9, letterSpacing: ".05em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, border: "1px solid var(--line)" }}>
+                not the default
+              </span>
+            )}
+            <button type="button" className="btn ghost sm" data-testid="model-default-toggle"
+              onClick={onToggleDefault} disabled={setDefault.isPending}>
+              {setDefault.isPending ? "Saving…" : isTypeDefault ? "Remove default" : "Set as default"}
+            </button>
           </div>
         </div>
 

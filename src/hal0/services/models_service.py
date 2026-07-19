@@ -101,6 +101,78 @@ def dispatch_type(model_id: str = "", capabilities: Any = None) -> str:
     return MODALITY_TO_SLOT_TYPE.get(modality, "llm")
 
 
+# ── per-type default marker (single-holder chokepoint) ────────────────────────
+#
+# THE one place the "at most one default MODEL per type" invariant is enforced.
+# Both the dedicated route (POST /api/models/{id}/default) and the slot-create
+# wiring (routes/slots.create_slot, when the body carries ``default: true``)
+# funnel through here — no demote logic is duplicated anywhere else. "type" is
+# the dispatcher-vocab slot type (:func:`dispatch_type`) derived from the
+# model's id + capabilities: the same axis the create modal surfaces as
+# ``selModel.type``. This is the MODEL default; it is orthogonal to the SLOT
+# default (SC-4 :func:`hal0.slots.config_write.check_default_uniqueness`).
+
+
+def set_model_type_default(
+    registry: Any,
+    model_id: str,
+    *,
+    default: bool = True,
+) -> dict[str, Any]:
+    """Promote (``default=True``) or clear (``default=False``) a model's per-type default.
+
+    Promote: mark ``model_id`` as its type's default, atomically demoting any
+    OTHER model of the SAME type that currently holds the flag. Idempotent —
+    re-promoting the current holder is a no-op that still demotes stray peers
+    (self-healing if two ever slipped onto disk).
+
+    Clear: drop ``model_id``'s flag without promoting anything; the type is
+    left with NO default.
+
+    Returns a summary ``{"model_id", "type", "default", "demoted": [...],
+    "changed": bool}``. Raises ``ModelNotFound`` when ``model_id`` is absent
+    (propagated from ``registry.get``).
+    """
+    target = registry.get(model_id)  # raises ModelNotFound
+    target_type = dispatch_type(target.id, capabilities=target.capabilities)
+    currently = bool(getattr(target, "default", False))
+    demoted: list[str] = []
+
+    if default:
+        # Demote every same-type peer that still carries the flag. Runs even
+        # when the target is already default so a duplicate holder is cleaned
+        # up (single-holder is a hard invariant, not a hope).
+        for m in registry.list():
+            if m.id == model_id:
+                continue
+            if not bool(getattr(m, "default", False)):
+                continue
+            if dispatch_type(m.id, capabilities=m.capabilities) != target_type:
+                continue
+            registry.update(m.id, {"default": False})
+            demoted.append(m.id)
+        if not currently:
+            registry.update(model_id, {"default": True})
+        return {
+            "model_id": model_id,
+            "type": target_type,
+            "default": True,
+            "demoted": demoted,
+            "changed": (not currently) or bool(demoted),
+        }
+
+    # Clear (unset) — no promotion.
+    if currently:
+        registry.update(model_id, {"default": False})
+    return {
+        "model_id": model_id,
+        "type": target_type,
+        "default": False,
+        "demoted": [],
+        "changed": currently,
+    }
+
+
 def comfyui_category(path: Any) -> str | None:
     """ComfyUI models subdir for a path under ``.../comfyui/models/<subdir>/``.
 
@@ -1149,6 +1221,11 @@ def duplicate_model(
 
     dumped = source.model_dump(mode="python")
     dumped["id"] = new_id
+    # A duplicate must never silently inherit the source's per-type default
+    # flag — that would create two default holders of the same type (the
+    # single-holder invariant lives on the set path, not on copy). The new row
+    # starts non-default; promote it explicitly via set_model_type_default.
+    dumped["default"] = False
 
     # Optional profile stamp: materialise the profile's flag text into the new
     # row's editable defaults (copy-not-layer — the profile is never mutated).

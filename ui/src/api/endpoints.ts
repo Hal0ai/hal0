@@ -67,6 +67,10 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // Per-type default MODEL marker: POST {default:true} promotes (demoting the
+  // current holder of the type), {default:false} clears. Server enforces the
+  // single-holder invariant in one chokepoint.
+  modelSetDefault: (id: string) => `/api/models/${encodeURIComponent(id)}/default`,
   // HF update check + in-place update. Check is GET (TTL-cached server-side,
   // ?refresh=1 forces); update re-pulls the row's hf_repo/hf_filename over
   // its installed path and reports through the standard pull job surface.

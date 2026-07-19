@@ -156,6 +156,16 @@ RULES: tuple[_Rule, ...] = (
         AuthClass.ADMIN,
         _POST,
     ),
+    # Set/clear a model's per-type default marker (POST /api/models/{id}/default)
+    # — a registry mutation. Explicitly ADMIN, matching every other model
+    # mutation; the generic "models mutations" rule below would already catch it,
+    # but pinning it by name documents the intent (same pattern as duplicate).
+    _Rule(
+        "model set-default (POST)",
+        _prefix("/api/models"),
+        AuthClass.ADMIN,
+        _POST,
+    ),
     _Rule("models mutations", _prefix("/api/models"), AuthClass.ADMIN, None),
     _Rule("slots list (GET, exact)", _exact("/api/slots"), AuthClass.CLIENT, _GET),
     _Rule("slots (everything else)", _prefix("/api/slots"), AuthClass.ADMIN, None),
