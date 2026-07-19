@@ -100,11 +100,15 @@ MANAGED_ARGS_DENYLIST: frozenset[str] = frozenset(
 
 # Segment labels whose tokens are free-form / caller-supplied rather than
 # hal0-computed, and therefore must be screened against
-# ``MANAGED_ARGS_DENYLIST`` before they're merged in. Currently just
-# ``[server].extra_args`` (``container._llama_argv_segments``' last segment);
-# a future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
+# ``MANAGED_ARGS_DENYLIST`` before they're merged in:
+#   * ``extra_args``       — a slot's ``[server].extra_args``.
+#   * ``model_extra_args`` — a model's ``defaults.extra_args`` (the registry
+#     row's free-form launcher flags; NOT the schema-computed ``-ngl`` from
+#     ``defaults.n_gpu_layers``, which rides the trusted ``model_defaults``
+#     segment — see ``container._llama_argv_segments``).
+# A future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
 # rewrite) adds its own label here so it rides the same guard.
-UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset({"extra_args"})
+UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset({"extra_args", "model_extra_args"})
 
 
 @dataclass(frozen=True)

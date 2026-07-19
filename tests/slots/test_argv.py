@@ -356,6 +356,27 @@ def test_resolve_argv_only_screens_untrusted_labels() -> None:
     assert "-ngl" in res.argv
 
 
+def test_resolve_argv_screens_model_extra_args_segment() -> None:
+    """A model's free-form ``defaults.extra_args`` (the ``model_extra_args``
+    segment) is caller-supplied, so a managed flag smuggled through it must be
+    rejected at launch — the gap where an ``extra_args`` with ``--port`` reached
+    the container only because the model-defaults segment wasn't screened."""
+    segments = [*_BASE_SEGMENTS, ("model_extra_args", ["--flash-attn", "on", "--port", "9999"])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.code == "slot.managed_arg_denied"
+    assert "--port" in exc_info.value.message
+
+
+def test_resolve_argv_does_not_screen_trusted_model_defaults_ngl() -> None:
+    """The ``-ngl`` hal0 computes from the schema field ``defaults.n_gpu_layers``
+    rides the trusted ``model_defaults`` segment and must NOT be rejected, even
+    though ``--n-gpu-layers`` is a managed flag."""
+    segments = [*_BASE_SEGMENTS, ("model_defaults", ["-ngl", "20"])]
+    res = resolve_argv(segments)  # must not raise
+    assert "-ngl" in res.argv
+
+
 def test_managed_args_denylist_covers_expected_flags() -> None:
     expected = frozenset({"--model", "--ctx-size", "--host", "--port", "--n-gpu-layers", "--alias"})
     assert expected == MANAGED_ARGS_DENYLIST

@@ -126,12 +126,17 @@ def test_slot_mtp_true_forces_bundle_even_on_cuda():
 
 
 def test_precedence_chain_ngl_slot_beats_everything():
-    """-ngl set at profile, model_defaults (via family + extra_args), and
+    """-ngl set at profile, model_defaults (via the n_gpu_layers field), and
     slot [model].n_gpu_layers all disagree -- the slot override must win in
-    the final resolved argv (normalize_argv/resolve_argv last-wins)."""
+    the final resolved argv (normalize_argv/resolve_argv last-wins).
+
+    The model tier sets -ngl via the schema field ``n_gpu_layers`` (trusted
+    ``model_defaults`` segment), NOT via ``extra_args``: ``-ngl`` is a managed
+    flag, so a model ``extra_args`` carrying it is now rejected at launch just
+    like a slot's ``[server].extra_args`` (see test_argv.py)."""
     profile = _rocm_profile(flags="-ngl 10 -fa on")
     model = _plain_model(
-        defaults={"extra_args": "-ngl 20", "n_gpu_layers": None},
+        defaults={"extra_args": "", "n_gpu_layers": 20},
         architecture="gemma3",  # exercises the family-defaults tier too
     )
     slot_cfg = {"name": "s", "model": {"n_gpu_layers": 30}}
