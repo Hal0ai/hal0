@@ -319,6 +319,74 @@ def test_uninstall_with_no_artifacts_returns_false(
     assert removed is False
 
 
+def test_uninstall_reports_residual_on_permission_error(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O16: an rmtree that can't remove a root-owned entry degrades honestly.
+
+    The User=hal0 service can't ``rmtree`` a root-owned file inside HERMES_HOME
+    (the O16 repro — a root-run bootstrap or old root-clobbering installer). uid
+    tricks aren't unit-testable, so simulate it: a fake ``rmtree`` invokes the
+    ``onexc`` callback with a ``PermissionError`` for one blocked entry. The
+    manager must raise :class:`AgentUninstallIncompleteError` carrying the
+    residual — NOT let the exception propagate as a bare 500 — after removing
+    everything else it could (the seed TOML was already unlinked).
+    """
+    manager.install("hermes")
+    home = _seed_managed_home(manager, "hermes")
+    state_dir = _seed_state_dir(manager, "hermes")
+    blocked = home / "runtime.json"
+    blocked.write_text("{}\n")
+
+    def _fake_rmtree(path: Path, *, onexc=None) -> None:  # type: ignore[no-untyped-def]
+        # data_dir removal hits the blocked root-owned entry; state_dir is clean.
+        if Path(path) == home and onexc is not None:
+            onexc(None, str(blocked), PermissionError(13, "Permission denied"))
+
+    monkeypatch.setattr(mgr_mod.shutil, "rmtree", _fake_rmtree)
+
+    # seed unlink is real + succeeds before the rmtree failure.
+    assert manager._config_path("hermes").exists()
+
+    with pytest.raises(mgr_mod.AgentUninstallIncompleteError) as excinfo:
+        manager.uninstall("hermes")
+
+    err = excinfo.value
+    assert err.had_artifacts is True
+    assert any(str(blocked) == r["path"] for r in err.residual)
+    assert any("PermissionError" in r["reason"] for r in err.residual)
+    # The removable artifacts were still cleaned up best-effort.
+    assert not manager._config_path("hermes").exists()
+    # state_dir's rmtree was clean (onexc not fired) so it contributes no residual.
+    assert all("provision" not in r["path"] for r in err.residual)
+    _ = state_dir
+
+
+def test_uninstall_unmanaged_home_is_left_intact_not_a_failure(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    """O16 gate: refusing an UNMANAGED tree is correct, not a partial failure.
+
+    A HERMES_HOME lacking the ``.hal0-managed`` marker is a user's pre-existing
+    tree hal0 doesn't own — the marker gate leaves it in place. That must NOT
+    raise AgentUninstallIncompleteError (it's not a removal FAILURE), and the
+    call still reports the agent was present.
+    """
+    manager.install("hermes")
+    home = manager._data_dir("hermes")
+    home.mkdir(parents=True, exist_ok=True)  # NO .hal0-managed marker
+    (home / "user-data.txt").write_text("mine\n")
+
+    removed = manager.uninstall("hermes")  # must not raise
+
+    assert removed is True
+    assert home.exists(), "unmanaged tree must be left intact"
+    assert (home / "user-data.txt").exists()
+
+
 def test_installed_names_includes_orphan_data_dir(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],

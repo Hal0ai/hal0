@@ -70,6 +70,37 @@ class AgentAlreadyInstalledError(AgentError):
     to atomically swap."""
 
 
+class AgentUninstallIncompleteError(AgentError):
+    """Uninstall removed some artifacts but could not remove others.
+
+    The canonical trigger is root-owned entries inside an otherwise
+    hal0-managed tree (e.g. a ``runtime.json`` written by a root-run bootstrap,
+    or files from an old root-clobbering installer): the User=hal0 API service
+    cannot ``rmtree`` them, so ``shutil.rmtree`` raises ``PermissionError``.
+    Before this class, that exception propagated uncaught through the DELETE
+    route and became a bare 500 (O16). Now the manager degrades honestly —
+    removing everything it can, best-effort — and raises this with the residual
+    paths + reasons so the route can surface a typed 207 partial-removal.
+
+    ``had_artifacts`` mirrors the normal :meth:`AgentManager.uninstall` return
+    (did the call find anything to remove?) so the route's status string stays
+    honest even on the partial path.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        residual: list[dict[str, str]],
+        had_artifacts: bool,
+    ) -> None:
+        self.agent_name = name
+        self.residual = residual
+        self.had_artifacts = had_artifacts
+        summary = "; ".join(f"{r['path']} ({r['reason']})" for r in residual)
+        super().__init__(f"uninstall of {name!r} incomplete — could not remove: {summary}")
+
+
 class HermesUpstreamMissingError(AgentError):
     """Raised by the Hermes driver when the hal0-owned ``hal0-hermes``
     wrapper is not installed or not functional. The
@@ -121,6 +152,11 @@ _AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes"}
 # place (rather than removed) as the seam a future script-installed
 # bundled agent would register itself into.
 _SCRIPT_INSTALLED_AGENTS: frozenset[str] = frozenset()
+
+
+def _removal_failure(path: Path, exc: BaseException) -> dict[str, str]:
+    """Render an unremovable path + its cause for partial-uninstall reporting."""
+    return {"path": str(path), "reason": f"{type(exc).__name__}: {exc}"}
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -383,6 +419,14 @@ class AgentManager:
         still-populated tree), then seed, then data dir, then state
         dir. A failure in one step doesn't abort the rest; the operator
         gets the most-thorough teardown the manager can deliver.
+
+        Every removal is guarded (O16): a ``PermissionError`` on a
+        root-owned entry inside a hal0-managed tree — which the User=hal0
+        service cannot ``rmtree`` — used to propagate uncaught through the
+        DELETE route as a bare 500. Now such failures are collected and the
+        method raises :class:`AgentUninstallIncompleteError` with the residual
+        paths, after removing everything else it could, so the surface can
+        report an honest partial removal.
         """
         if name not in BUNDLED_AGENTS:
             raise AgentNotFoundError(
@@ -409,21 +453,34 @@ class AgentManager:
             # swallow so the on-disk cleanup below always runs.
             pass
 
+        residual: list[dict[str, str]] = []
+
         toml_path = self._config_path(name)
         if toml_path.exists():
-            toml_path.unlink()
+            try:
+                toml_path.unlink()
+            except OSError as exc:
+                residual.append(_removal_failure(toml_path, exc))
 
+        # data dir — gated by the .hal0-managed marker. Refusing an UNMANAGED
+        # tree (no marker) is correct behaviour, NOT a failure: it's a user's
+        # pre-existing ~/.hermes-style tree hal0 doesn't own, so it's left in
+        # place silently (distinct from the O16 permission failure below).
         data_dir = self._data_dir(name)
         if data_dir.exists() and self._safe_to_remove_data_dir(name, data_dir):
-            shutil.rmtree(data_dir)
+            residual.extend(self._rmtree_collecting(data_dir))
 
         # State dir last — see #346. Removed atomically with the seed +
         # data dir so ``hal0 agent status hermes`` doesn't keep
         # rendering a green provision.json table after uninstall.
         state_dir = self._state_dir(name)
         if state_dir.exists():
-            shutil.rmtree(state_dir)
+            residual.extend(self._rmtree_collecting(state_dir))
 
+        if residual:
+            raise AgentUninstallIncompleteError(
+                name, residual=residual, had_artifacts=had_artifacts
+            )
         return had_artifacts
 
     def switch(self, name: str, *, bearer_token: str | None = None) -> AgentRecord:
@@ -465,6 +522,25 @@ class AgentManager:
         if name not in _AGENT_HOME_SUBDIR:
             return True
         return (data_dir / _HAL0_MANAGED_MARKER).exists()
+
+    @staticmethod
+    def _rmtree_collecting(path: Path) -> list[dict[str, str]]:
+        """``shutil.rmtree`` that removes what it can and reports what it can't.
+
+        Returns a list of ``{"path", "reason"}`` for every entry the service
+        user could not remove (e.g. root-owned files → ``PermissionError``).
+        Uses the ``onexc`` callback so rmtree does NOT raise mid-walk — it keeps
+        going and deletes every removable sibling, giving the operator the
+        most-thorough partial teardown (O16). An empty list means a clean sweep.
+        """
+        failures: list[dict[str, str]] = []
+
+        def _onexc(_func: object, failed_path: str, exc: BaseException) -> None:
+            failures.append(_removal_failure(Path(failed_path), exc))
+
+        # onexc (3.12+) is the current rmtree failure callback; runtime is 3.12.
+        shutil.rmtree(path, onexc=_onexc)
+        return failures
 
     def _state_dir(self, name: str) -> Path:
         """Per-agent bootstrap state dir (provision.json + logs).

@@ -476,6 +476,69 @@ def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
     )
 
 
+def test_provision_via_uv_sanitizes_leaked_root_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O15: uv must not inherit a leaked HOME=/root.
+
+    On a py3.14-only host the provision drops to hal0 and takes the uv fallback;
+    with HOME=/root inherited, uv tried to open /root/uv.toml and failed
+    "Permission denied" → bootstrap failed. The subprocess env must force HOME
+    to the hal0 home and pin UV_CACHE_DIR under the state root so uv never
+    reaches into /root.
+    """
+    monkeypatch.setenv("HOME", "/root")  # the leak
+
+    envs: list[dict[str, str] | None] = []
+
+    class _Result:
+        stdout = "/var/lib/hal0/python/cpython-3.13/bin/python3.13\n"
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> _Result:
+            envs.append(env)
+            return _Result()
+
+    out = hp._provision_python_via_uv(
+        prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+        runner=_Runner,
+    )
+    assert out == "/var/lib/hal0/python/cpython-3.13/bin/python3.13"
+    assert envs, "uv must have been invoked"
+    for e in envs:
+        assert e is not None
+        # HOME is forced off /root to the resolved hal0 home (or the state-root
+        # fallback when the hal0 account is absent, as in CI).
+        assert e["HOME"] != "/root"
+        assert e["HOME"] == hp._hal0_service_home()
+        assert e["UV_CACHE_DIR"] == str(hp.UV_CACHE_DIR)
+        assert e["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR)
+
+
+def test_install_venv_sanitizes_leaked_root_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O15 (same leak class): venv + pip subprocesses also get a sane HOME."""
+    monkeypatch.setenv("HOME", "/root")
+    envs: list[dict[str, str] | None] = []
+
+    class _Runner:
+        @staticmethod
+        def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> None:
+            envs.append(env)
+
+    hp._install_venv(
+        tmp_path / "venv",
+        tmp_path / "requirements.txt",
+        runner=_Runner,
+        python_resolver=lambda: "/usr/bin/python3.12",
+    )
+    assert envs, "venv/pip must have been invoked"
+    assert all(e is not None and e["HOME"] == hp._hal0_service_home() for e in envs)
+    assert all(e is not None and e["HOME"] != "/root" for e in envs)
+
+
 def test_provision_via_uv_creates_install_dir_world_traversable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -547,7 +610,7 @@ def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -
 
     class _Runner:
         @staticmethod
-        def run(argv: list[str], check: bool) -> None:
+        def run(argv: list[str], check: bool, env: dict[str, str] | None = None) -> None:
             calls.append(argv)
 
     hp._install_venv(
@@ -564,7 +627,7 @@ def test_install_venv_keeps_supported_venv(tmp_path: Path) -> None:
 
     class _Runner:
         @staticmethod
-        def run(argv: list[str], check: bool) -> None:
+        def run(argv: list[str], check: bool, env: dict[str, str] | None = None) -> None:
             calls.append(argv)
 
     hp._install_venv(
