@@ -704,8 +704,23 @@ ui_step "Dashboard UI"
 
 UI_DIR="${REPO_ROOT}/ui"
 UI_DIST="${UI_DIR}/dist"
-if [[ -f "${UI_DIST}/index.html" ]]; then
-    info "ui/dist already built — left alone"
+# Staleness gate (same class as the venv same-version trap): "dist exists"
+# is NOT "dist is current" — a bare index.html check kept the FIRST build a
+# box ever produced alive through every later redeploy, silently serving an
+# old dashboard. Stamp the built dist with the ui/ tree hash and skip only
+# on an exact match; no git / no stamp → rebuild (safe default).
+_ui_tree_hash=""
+if command -v git >/dev/null 2>&1; then
+    _ui_tree_hash="$(git -C "${REPO_ROOT}" rev-parse HEAD:ui 2>/dev/null || true)"
+fi
+_ui_dist_current=0
+if [[ -f "${UI_DIST}/index.html" && -n "${_ui_tree_hash}" \
+      && -f "${UI_DIST}/.hal0-build-stamp" \
+      && "$(cat "${UI_DIST}/.hal0-build-stamp" 2>/dev/null)" == "${_ui_tree_hash}" ]]; then
+    _ui_dist_current=1
+fi
+if [[ "${_ui_dist_current}" -eq 1 ]]; then
+    info "ui/dist already built for this ui/ tree (${_ui_tree_hash:0:12}) — left alone"
 elif command -v npm >/dev/null 2>&1; then
     # ui/package.json pins vite ^6.0.3 + @tailwindcss/vite ^4.2.2, both of
     # which need a modern Node; `command -v npm` alone doesn't catch a Node
@@ -738,6 +753,7 @@ elif command -v npm >/dev/null 2>&1; then
                 bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund" \
             && ui_spinner_run "Building dashboard (npm run build)" \
                 bash -c "cd '${UI_DIR}' && npm run build"; then
+            [[ -n "${_ui_tree_hash}" ]] && printf '%s\n' "${_ui_tree_hash}" > "${UI_DIST}/.hal0-build-stamp"
             info "wrote ${UI_DIST}"
         else
             warn "dashboard build failed — the API still serves; the UI at :${HAL0_PORT}/ will 404 until you build it"
