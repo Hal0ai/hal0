@@ -165,10 +165,16 @@ function useAttentionItems() {
 function QuickActions({ slots, onGo }) {
   const urls = useConfigUrls()
 
-  // "restart agent": the default chat slot (falls back to a slot literally
-  // named agent/primary). Label carries the real name so the button is honest.
+  // "restart agent": the default CHAT slot. `isDefault` alone isn't enough —
+  // every group's representative slot (embed, rerank, tts, img, …) can also
+  // carry `isDefault: true`, so filter by role (group/type) first or this
+  // could target the wrong slot depending on array order. Name literals
+  // (agent/primary) are a last-resort fallback for sparse responses only.
+  // Label carries the real name so the button stays honest either way.
   const agentSlot =
-    slots.find((s) => s.isDefault) ||
+    slots.find((s) => s.isDefault && (s.group === 'chat' || s.type === 'llm')) ||
+    slots.find((s) => s.group === 'chat' && s.type === 'llm') ||
+    slots.find((s) => s.type === 'llm') ||
     slots.find((s) => s.name === 'agent' || s.name === 'primary') ||
     null
 

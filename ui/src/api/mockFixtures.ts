@@ -160,6 +160,13 @@ function buildProfiles() {
       quant: 'FP4',
       tps: 52.8,
       rtf: null,
+      // `used_by` cross-references slot NAMEs from HAL0_DATA.slots
+      // (data.jsx) — kept in sync with that array's fixture names on
+      // purpose. This module only ever loads behind the mock-prod-gate
+      // (dynamic import, dead-code-eliminated from prod builds — see the
+      // file header), so these names can never render against a live
+      // backend; see data.jsx's NAMES-stale guard comment for the render
+      // path proof.
       used_by: ['primary', 'embed', 'rerank'],
     },
     {
