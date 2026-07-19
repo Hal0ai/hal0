@@ -243,6 +243,69 @@ def model_store_root() -> str:
     return str(store_root())
 
 
+def _covers(ancestor: str, descendant: str) -> bool:
+    """True iff *ancestor* is *descendant* or a path-ancestor of it.
+
+    Purely lexical (``normpath`` + component compare) — no symlink resolution,
+    so an identical-path bind mount stays identical-path. ``/a`` covers ``/a``
+    and ``/a/b`` but not ``/ab``.
+    """
+    a = os.path.normpath(str(ancestor))
+    d = os.path.normpath(str(descendant))
+    if a == d:
+        return True
+    try:
+        Path(d).relative_to(Path(a))
+        return True
+    except ValueError:
+        return False
+
+
+def model_mount_roots() -> list[str]:
+    """Model-store roots a slot container must bind-mount, deduped.
+
+    The renderer historically mounted only :func:`model_store_root` (the
+    effective ``[models].store``). But registry file paths are absolute and can
+    live under ``[models].pull_root`` — a *distinct* external tree (e.g.
+    ``/mnt/ai-models``) — even when ``store`` points elsewhere. Mounting only
+    ``store`` then leaves the model file unreachable in-container and the slot
+    flaps ``error``↔``warming`` (rework O25). This returns every configured
+    model root (effective store + ``pull_root``) so both are reachable.
+
+    Deduped lexically: an exact duplicate, or a root nested under another kept
+    root, collapses to the covering ancestor — ``store==pull_root`` renders ONE
+    mount, and a nested pair renders only the outer root.
+    """
+    roots: list[str] = [model_store_root()]
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        pull_root = (load_hal0_config().models.pull_root or "").strip()
+        if pull_root:
+            roots.append(pull_root)
+    except Exception:
+        pass
+
+    # Normalise + exact-dedup, order-preserving (normpath collapses trailing
+    # slashes so a mutual-cover tie between "/a" and "/a/" can't drop both).
+    seen: list[str] = []
+    for r in roots:
+        s = str(r).strip()
+        if not s:
+            continue
+        s = os.path.normpath(s)
+        if s not in seen:
+            seen.append(s)
+
+    # Drop any root covered by a *different* kept root (equal or nested).
+    result: list[str] = []
+    for r in seen:
+        if any(other != r and _covers(other, r) for other in seen):
+            continue
+        result.append(r)
+    return result
+
+
 def default_flm_models_dir() -> str:
     """Return FLM's default model cache (/var/lib/hal0/.config/flm/models).
 
