@@ -260,6 +260,7 @@ def model_update(
     _poll_pull_progress(ref, done_verb="Updated")
 
 
+# HAL0-SUNSET: v0.10.0 — alias for `model add`; drop the alias.
 @app.command("register", hidden=True)
 def model_register(
     model_id: str = typer.Argument(..., help="Model id, e.g. 'qwen3-4b-q4_k_m'"),
@@ -322,6 +323,7 @@ def model_show(
     console.print(table)
 
 
+# HAL0-SUNSET: v0.10.0 — alias for `slot edit --model`; drop the alias.
 @app.command("assign", hidden=True)
 def model_assign(
     ref: str = typer.Argument(..., help="Model ref to assign"),
