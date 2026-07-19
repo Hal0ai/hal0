@@ -128,27 +128,38 @@ from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 # Compiled once at import time. Each alternative ends with a
 # ``(?P<...>...)`` capture of just the secret token; the substitution
 # function rewrites that token to ``***REDACTED***`` while leaving the
-# surrounding ``Authorization:``, ``Bearer``, or ``HAL0_BEARER_TOKEN=``
-# prefix in place. The case-insensitive flag covers the lowercase
-# ``authorization:`` header style some clients emit, and the explicit
-# alternatives are ordered most-to-least specific so the precise header
-# form wins over the bare-``Bearer`` fallback. (Python's re alternation
-# is leftmost-wins inside a single match.)
+# surrounding ``Authorization:``, ``Bearer``, ``HAL0_BEARER_TOKEN=``, or
+# ``client_id=`` prefix in place. The case-insensitive flag covers the
+# lowercase ``authorization:`` header style some clients emit, and the
+# explicit alternatives are ordered most-to-least specific so the precise
+# header form wins over the bare-``Bearer`` fallback. (Python's re
+# alternation is leftmost-wins inside a single match.)
+#
+# The ``client_id=`` alternative is belt-and-suspenders for the MCP
+# clientid-leak fix (:func:`hal0.api.mcp_mount.bearer_resolver`): that
+# resolver now stamps a 12-char SHA-256 label instead of the raw bearer,
+# so this branch shouldn't fire in practice — but if a future caller ever
+# stamps a raw key-shaped value into ``client_id`` (audit rows flow
+# through this same journald pipe and can resurface via ``logs_tail``),
+# it still gets scrubbed. Length-gated at 16 chars so it doesn't mask the
+# short, non-secret labels client_id legitimately takes today
+# (``anonymous``, the 12-hex-char hash, or a short ``X-hal0-Agent`` id).
 _LOG_SECRET_RE = re.compile(
     r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?P<auth_token>\S+)"
     r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?P<env_token>\S+)"
-    r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)",
+    r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)"
+    r"|(?P<prefix_client_id>client_id=)(?P<client_id_token>[A-Za-z0-9_\-\.]{16,})",
     re.IGNORECASE,
 )
 
 
 def _redact_log_line(line: str) -> str:
-    """Replace Bearer / HAL0_BEARER_TOKEN secrets in ``line`` with
-    ``***REDACTED***``.
+    """Replace Bearer / HAL0_BEARER_TOKEN / long client_id secrets in
+    ``line`` with ``***REDACTED***``.
 
     The prefix is preserved so an operator reading a redacted log still
-    sees that an Authorization header was present — only the token
-    body is destroyed.
+    sees that an Authorization header (or client_id field) was present —
+    only the token body is destroyed.
     """
 
     def _sub(match: re.Match[str]) -> str:
@@ -157,6 +168,8 @@ def _redact_log_line(line: str) -> str:
             return f"{groups['prefix_auth']}***REDACTED***"
         if groups["prefix_env"] is not None:
             return f"{groups['prefix_env']}***REDACTED***"
+        if groups["prefix_client_id"] is not None:
+            return f"{groups['prefix_client_id']}***REDACTED***"
         return f"{groups['prefix_bearer']}***REDACTED***"
 
     return _LOG_SECRET_RE.sub(_sub, line)

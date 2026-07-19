@@ -28,6 +28,7 @@ headers off that request at call time, mirroring the REST surface in
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 
@@ -144,6 +145,22 @@ def _current_mcp_request() -> Request | None:
     return request if isinstance(request, Request) else None
 
 
+def _bearer_label(bearer: str) -> str:
+    """Derive a non-secret ``client_id`` label from a raw bearer token.
+
+    The label is a SHA-256 prefix, never the bearer itself — the returned
+    value is stamped into the audit trail (:func:`hal0.mcp.admin._audit`)
+    which feeds journald, and journald entries are readable via
+    ``/api/logs`` and support bundles. A raw admin/client key surviving in
+    ``client_id`` there would be a live, replayable credential (and one
+    the redactor regexes — keyed on header/config *names*, not on
+    arbitrary ``client_id=...`` log fields — can't catch). The hash is
+    stable per-key (same key -> same label across calls) without being
+    reversible.
+    """
+    return hashlib.sha256(bearer.encode()).hexdigest()[:12]
+
+
 def bearer_resolver() -> tuple[str | None, str]:
     """Return ``(raw_bearer, client_id)`` for the current MCP request.
 
@@ -151,12 +168,18 @@ def bearer_resolver() -> tuple[str | None, str]:
     ``Authorization`` header off the live MCP request context; falls back
     to ``(None, "anonymous")`` outside of an MCP request — useful for
     direct dispatcher calls in tests.
+
+    ``client_id`` (element 1) is derived from the bearer via
+    :func:`_bearer_label` — a hashed label, NOT the raw token. Callers
+    that need the actual bearer for auth read element 0; nothing should
+    ever treat element 1 as a credential. See :func:`_bearer_label` for
+    why (issue: raw bearer stamped into journald as client_id).
     """
     request = _current_mcp_request()
     if request is None:
         return None, "anonymous"
     bearer = _resolve_bearer(request)
-    return bearer, bearer or "anonymous"
+    return bearer, _bearer_label(bearer) if bearer else "anonymous"
 
 
 def client_id_resolver() -> str:
