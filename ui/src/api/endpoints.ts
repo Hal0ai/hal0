@@ -276,6 +276,12 @@ export const ENDPOINTS = {
   // [security].require_auth enforcement toggle. Applies live (no restart).
   // Refuses enabling with no admin key configured (400 auth.no_admin_key).
   authRequire: '/api/auth/require',
+  // POST /api/auth/rotate (ADMIN) — body { tier: 'admin'|'client' }; mints a
+  // fresh box key, writes it to /etc/hal0/api.env (0640, never world-readable),
+  // and applies it live in-process (no restart). Returns STATUS ONLY —
+  // { tier, rotated_at, key_len, fingerprint, applies_live, restart_required,
+  // session_preserved, note } — NEVER the key value. Rate-limited (429).
+  authRotate: '/api/auth/rotate',
 
   // ── Flag-migration report (D5 migration-resolve) ─────────────────
   // GET /api/migrations/flag-report — MISSING today (API-lane request). The

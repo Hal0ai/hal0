@@ -18,12 +18,41 @@ export interface RequireAuthResponse {
   applies_live: boolean
 }
 
+export type KeyTier = 'admin' | 'client'
+
+/** Status-only rotation result — NEVER carries the key value. */
+export interface RotateKeyResponse {
+  tier: KeyTier
+  rotated_at: string
+  key_len: number
+  fingerprint: string
+  applies_live: boolean
+  restart_required: boolean
+  session_preserved: boolean
+  note: string
+}
+
 /** PUT /api/auth/require — flip the persisted [security].require_auth toggle. */
 export function useSetRequireAuth() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (require_auth: boolean) =>
       apiPut<RequireAuthResponse>(ENDPOINTS.authRequire, { require_auth }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['auth-status'] }),
+  })
+}
+
+/**
+ * POST /api/auth/rotate — mint + persist a fresh box key for `tier`.
+ *
+ * The response is status-only (fingerprint + rotated_at + notices); it NEVER
+ * carries the key value. We invalidate 'auth-status' so the posture (and the
+ * admin-key set/unset pip) re-reads after a rotation.
+ */
+export function useRotateKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (tier: KeyTier) => apiPost<RotateKeyResponse>(ENDPOINTS.authRotate, { tier }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['auth-status'] }),
   })
 }
