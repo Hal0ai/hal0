@@ -2775,9 +2775,13 @@ class SecurityConfig(BaseModel):
     Resolution precedence (see :func:`hal0.api.auth.require_auth_enabled`):
     the ``HAL0_REQUIRE_AUTH`` env var wins over this persisted value, which
     in turn wins over the OFF default.
+
+    ``extra="forbid"`` (P3-schema Part C leaf-table policy, same as
+    ``[brain_chat]``): a typo'd key in the SECURITY section must fail loudly
+    at load, never silently no-op an enforcement toggle.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     require_auth: bool | None = Field(
         default=None,

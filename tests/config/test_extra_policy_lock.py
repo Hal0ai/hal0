@@ -95,6 +95,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "ToolPolicy": "forbid",
     "ActivityConfig": "forbid",
     "BrainChatConfig": "forbid",
+    # [security] — the auth-enforcement toggle (O19). Forbid: a typo'd key in
+    # a SECURITY table must fail loudly, never silently no-op.
+    "SecurityConfig": "forbid",
 }
 
 
