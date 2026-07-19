@@ -133,6 +133,46 @@ class TestSnapshot:
         stack = snapshot_live_stack(registry=reg)
         assert not any(e.slot == "tts" for e in stack.slots)
 
+    def test_id_keyed_slot_captured_under_real_name(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        # P3-runtime-db inc4: an id-keyed slot TOML (stem is the digit id) must
+        # snapshot under its real display name, not the digit stem — the
+        # "list_slots CLI/portable callers" id-awareness fix deferred from
+        # inc1. Capability lookups must key off the real name too, since
+        # capabilities.toml is never touched by the id-keying migration.
+        d = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "143.toml").write_text(
+            "[slot]\n"
+            "id = 143\n"
+            'name = "brain"\n'
+            "port = 8081\n"
+            'device = "gpu-rocm"\n'
+            "[model]\n"
+            'default = "ace-saber"\n',
+            encoding="utf-8",
+        )
+        _write_caps(
+            tmp_hal0_home,
+            "\n".join(
+                [
+                    "schema_version = 2",
+                    "[selections.brain.brain]",
+                    'device = "npu"',
+                    'provider = "flm"',
+                    'model = "bge-m3"',
+                    "enabled = true",
+                    "",
+                ]
+            ),
+        )
+        stack = snapshot_live_stack(registry=reg, name="Live")
+        assert not any(e.slot == "143" for e in stack.slots)
+        brain = next(e for e in stack.slots if e.slot == "brain")
+        assert brain.model == "ace-saber"
+        assert any(r.model == "bge-m3" and r.device == "npu" for r in brain.capabilities)
+
     def test_unset_capability_device_is_skipped(
         self, reg: ModelRegistry, tmp_hal0_home: str
     ) -> None:

@@ -314,6 +314,12 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
     server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
     device = g("device")
     return {
+        # id-aware (P3-runtime-db inc4): on an id-keyed box *slot_name* is the
+        # digit stem, not the display name — prefer the TOML's own embedded
+        # ``name`` (bilingual writers always set it) and only fall back to the
+        # stem for a name-keyed (or genuinely nameless) file, where they're
+        # identical anyway.
+        "name": g("name", slot_name),
         "model": model,
         # device must be a canonical _VALID_DEVICES value or None — a legacy
         # backend string (e.g. "rocm") would fail StackSlotEntry validation.
@@ -353,9 +359,12 @@ def snapshot_live_stack(
         if sc is None:
             # A missing/unparseable slot TOML never breaks the whole snapshot.
             continue
+        display_name = sc["name"]
 
         rows: list[StackCapabilityRow] = []
-        for child, sel in caps.selections.get(slot_name, {}).items():
+        # capabilities.toml is never touched by the id-keying migration — it
+        # stays keyed by the real slot name, so the lookup must too.
+        for child, sel in caps.selections.get(display_name, {}).items():
             if sel.device not in _VALID_DEVICES:
                 continue  # unset / blank-picker selection
             rows.append(
@@ -374,7 +383,7 @@ def snapshot_live_stack(
 
         entries.append(
             StackSlotEntry(
-                slot=slot_name,
+                slot=display_name,
                 model=model,
                 device=sc["device"],
                 provider=sc["provider"],
