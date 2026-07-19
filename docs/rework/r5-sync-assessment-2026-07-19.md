@@ -156,7 +156,14 @@ Remaining desync, beyond §1.2's missing routes:
   vs the spec's carve-out of 2 — convert the two convertible or re-ratify.
 - **Declare the finish line for the last god files**: `v1.py` 1,685 and `api/__init__.py`
   1,892 are deliberately outside every DoD — give them explicit accepted-as-is (or split)
-  rows so the wiring section has a bounded tail.
+  rows so the wiring section has a bounded tail. **Refined by the q1/q2 graph investigation
+  (§11):** inside `api/__init__.py` the real refactor target is **`lifespan()`
+  (`api/__init__.py:862`, ~540 lines, 44 `app.state.` touches with hidden ordering
+  invariants)** — phase-split (boot_config/persistence/runtime), type `app.state`, emit a
+  BootReport for degraded-boot visibility. Do **NOT** refactor `create_app()`
+  (`api/__init__.py:1400`): its high centrality is a test-fixture artifact (the conftest app
+  fixture fanning into ~700 tests), not real coupling — the *file* is the target, the
+  function isn't.
 
 ## 4. Memory/Admin MCP tools — buildout, edit, testing
 
@@ -512,10 +519,59 @@ Per the handoff's routing table and hard conventions:
 - P2-updater-b (§9): re-scope from "build" to **scope-trim + verify + delete extra
   mechanisms** — the pipeline is already implemented (`updater.py`, 1,918 lines).
 
+## 11. Graph-methodology findings (q1–q7 investigation)
+
+Folded from the suggested-questions investigation committed on `rework/descar` (`2ab6ae6`,
+`graphify-out/analysis/q1..q7-*.md`), which pressure-tested the graph's own metrics. These
+change *how to read* the refactor signals in §1/§3/§7, and surface tool-level improvements.
+
+### 11.1 Don't trust raw graph degree/betweenness — filter first
+INFERRED edges are ~87–93% correct for existence/direction, but **degree is inflated** by
+three characterized noise modes; a naive "high degree/betweenness = refactor" reading wastes
+effort:
+- **Test-edge inflation** — SlotManager shows 177 INFERRED edges but 159 are
+  `test→SlotManager()`; real production coupling ≈14 (q4).
+- **Cross-language token collision** — Python `connect()` matched a `.ts` SSE helper
+  `connect` in `useLogs.ts`/`useActivity.ts` (q5).
+- **Same-file import propagation** — one import at `updater.py:1338` attributed to every
+  class in the file (12 spurious edges) (q6).
+- The "generic method-name collision" hypothesis (`__init__`/`_read`/`.get`) was **refuted**
+  — those really do call the target. Real noise is cross-language + same-file + test-fixture.
+- **This doc is mostly immune** — its god-module calls are `wc -l` line counts, not graph
+  degree. But any future "god-node by degree" reasoning must filter tests/ + language +
+  same-file first.
+
+### 11.2 Same statistic, three remediations (the betweenness bridges)
+Betweenness 0.08–0.10 on three nodes, three different correct actions:
+- **`lifespan()` (0.102)** — legit boot-wiring hub but a real god function → phase-split +
+  type `app.state` + BootReport (folded into §3 above).
+- **`create_app()` (0.085)** — measurement noise (conftest fixture fan-in) → **do not
+  refactor the function**; the `api/__init__.py` file is a separate, real target.
+- **`SlotManager` (0.082)** — the genuine **architectural waist**: routing above (the
+  documented narrow RoutingHost seam) reaches every downstream resource (providers/arbiter/
+  drift/events/identity) only through it. Confirmed #1 coupling even after filtering test
+  noise (~250 real edges). **Consequence for the FLAGS-own → SlotManager wide-surface
+  collapse (board:84):** extract per `P3-slots` §4 order and **keep SlotManager's position**
+  — moving it creates two waists. This is the true refactor waist; `create_app` is not.
+
+### 11.3 Committed-graph hygiene (Q7) + upstreamable graphify fixes
+- **Q7 — 9,585 weakly-connected nodes is an extractor artifact, not a doc gap.** The q-run's
+  graph was a **code-only AST build** (manifest `semantic_hash` empty), so every prose/spec
+  node is a degree-1 island. My committed graph (§0) *did* run the deep semantic pass, but
+  its `graph.json` is local-only — anyone rebuilding with `graphify update .` (AST-only) gets
+  the code-only graph. **Hygiene note:** to keep doc→code reference edges available to Hermes/
+  the graph MCP, the semantic pass must be re-run (not just `update`) after doc changes, or a
+  committed doc-edges overlay is needed. Policy docs (this file, the handoff) correctly stay
+  degree-1 — no code target exists.
+- **Four upstreamable graphify improvements** (to `github.com/Graphify-Labs/graphify` if we
+  contribute back): filter test edges from coupling metrics; language-scope INFERRED name
+  matching; fix same-file import propagation; make the semantic doc pass part of `update`.
+
 ---
 
 _Graph artifacts for this assessment are committed under `graphify-out/` (report + wiki;
 raw graph.json regenerates via `graphify update .`). Findings without a board row cite
 source at the referenced `path:line`; corrections from adversarial verification are marked
 inline. Two survey claims were materially corrected during verification; none were refuted.
-§10 folds in the descar→main landing handoff (2026-07-19)._
+§10 folds in the descar→main landing handoff; §11 folds in the q1–q7 graph-methodology
+investigation (both 2026-07-19)._
