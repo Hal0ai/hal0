@@ -75,6 +75,26 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Backend & GPU')
   })
 
+  // Phase-2 settings-seam lane (SWEEP §5): these two sections were bare
+  // "not yet wired — placeholder" stubs. Both now mount real, typed hooks
+  // (useModels/DownloadsPane for Library & Downloads; useHealthSystem/
+  // useStatsHardware/useStatsPower/useRequestsRollup/useServicesHealth for
+  // Health & Stats) — assert they mount without a runtime error AND that
+  // the placeholder string is actually gone (the fix this test guards).
+  test('Library & Downloads section mounts and drops the placeholder string', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Library & Downloads' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Library & Downloads')
+    await expect(page.locator('.settings-content')).not.toContainText('not yet wired')
+  })
+
+  test('Health & Stats section mounts and drops the placeholder string', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Health & Stats' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Health & Stats')
+    await expect(page.locator('.settings-content')).not.toContainText('not yet wired')
+  })
+
   // VERS-flash (docs/rework/handoff-r5-drive2.md §3): index.html no longer
   // hardcodes a version literal — the build-time stamp (ui/package.json,
   // reconciled to the backend release) is what first paints, and App()
