@@ -414,6 +414,28 @@ count, R1 "what remains" cell) · hermes-bump runbook.
 · `MCP-mem-hindsight` (§4.5) · `CLI-auth+verbs` (§5.1–5.2) · `UI-API-2` (auth affordances)
 · `typed-bodies-rest` · `mock-prod-gate` · `hermes-bump-runbook` · `comfyui-repin`.
 
+## 9. Coverage gaps in this assessment (completeness pass)
+
+The seven surveys did not open-code-verify four plan sections; they are captured from the
+plan/board in the scope digest, but flagged here so they get a dedicated code pass before R5:
+- **P2-updater-b — board status contradicts the code (major, re-verify first).** The board
+  lists it as todo ("one cosign+swap+rollback path"), but `src/hal0/updater/updater.py` is
+  already a **1,918-line implemented** cosign verify-blob + atomic `/usr/lib/hal0/current`
+  symlink-swap + rollback pipeline. What's actually unverified: whether install.sh lays down
+  the `/usr/lib/hal0/current` layout the updater assumes; whether a release pipeline publishes
+  the tarball + sigstore bundle the manifest fetcher expects; exposure/UI/CLI wiring of
+  `api/routes/updater.py`; and the stale `PLAN.md §9/§17` docstring ref (`updater.py:30`). So
+  P2-updater-b is likely *scope-trim + verify + delete the extra mechanisms*, not build-from-todo.
+- **P3-runtime-db (major)** — `state.json` still consumed across `slots/manager.py`,
+  `arbiter.py`, `stacks/state.py`, `config/paths.py`; migration 006 pre-allocated; the
+  "state.json double-touch" M5-vs-runtime-db sequencing decision (board:197) needs confirming
+  at dispatch. Couples to the launch-blocking SLOT-B live flip (§7 wave 4).
+- **Observability §13 (major)** — `002_metrics.sql` landed, but which of §13.1–13.7 (3-tier
+  measurement, baseline/regression, opt-in Prometheus/Grafana) ships vs remains is unassessed;
+  the §2 missing `/api/stats/requests` route is the OBS lane's deliverable, not standalone.
+- **§20 bench** — assessed only via edges (UI routes unconsumed, CLI verb undocumented), not
+  as a surface; see the scope digest for the full lane.
+
 ---
 
 _Graph artifacts for this assessment are committed under `graphify-out/` (report + wiki;
