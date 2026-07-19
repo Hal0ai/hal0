@@ -75,3 +75,36 @@ def _install_stub() -> None:
 # ``hal0.mcp.admin`` / ``hal0.mcp.memory`` finds a working SDK.
 if not _has_real_mcp():
     _install_stub()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def _admin_route_map_source() -> tuple[dict, dict]:
+    """Build the admin route map once from the live app (route-id keyed).
+
+    ``_REST_MAP`` / ``_PATH_ARGS`` are lazy now (spec §4.4): they are empty at
+    import and populated by ``install_admin_route_map`` in create_app or
+    ``set_admin_route_map`` in a test. Unit tests under ``tests/mcp/`` that
+    poke the catalog directly (dispatch, ``_validate_catalog``, ``_REST_MAP``
+    assertions) need a map installed — build it once here.
+    """
+    from hal0.api import create_app
+    from hal0.mcp import admin
+
+    create_app()  # installs the map as a side effect of mount_mcp_servers
+    return dict(admin._ROUTE_MAP), dict(admin._ROUTE_PATH_ARGS)
+
+
+@pytest.fixture(autouse=True)
+def _install_admin_route_map(_admin_route_map_source: tuple[dict, dict]) -> None:
+    """Re-install the known-good route map before every ``tests/mcp/`` test.
+
+    Function-scoped so a test that mutates the map (monkeypatch, or a fake app
+    via ``set_admin_route_map``) starts from the real, validated map — cheap
+    dict copy, no create_app per test.
+    """
+    from hal0.mcp import admin
+
+    admin.set_admin_route_map(*_admin_route_map_source)
