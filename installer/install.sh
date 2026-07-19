@@ -2220,8 +2220,27 @@ else
         # Redirecting from /dev/null turns that crash into a clean EOF.
         GATEWAY_UNIT_DST="${UNIT_DIR}/hermes-gateway.service"
         info "installing system-scope hermes gateway (User=hal0)"
-        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
-            || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        # m1 fix: this script runs as root, so a bare `env -u HERMES_HOME
+        # hermes ...` here resolves `~/.hermes` to /root/.hermes — the exact
+        # "split-brain" root-owned tree `hal0 doctor perms` flags as Hermes
+        # ownership drift (check_hermes_ownership's stray_home check; see
+        # installer/lib/run-as-hal0.sh's docstring, which names this same
+        # failure mode #843). Drop to hal0 first (same runuser -> setpriv ->
+        # sudo cascade run-as-hal0.sh uses) so this subprocess never runs as
+        # root and never creates /root/.hermes.
+        if command -v runuser >/dev/null 2>&1; then
+            runuser -u hal0 -- env -u HERMES_HOME HOME=/var/lib/hal0 \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        elif command -v setpriv >/dev/null 2>&1; then
+            setpriv --reuid hal0 --regid hal0 --init-groups -- env -u HERMES_HOME HOME=/var/lib/hal0 \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        else
+            sudo -H -u hal0 -- env -u HERMES_HOME \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        fi
         # Only enable/start if hermes actually laid down the unit. If the
         # install genuinely failed the file is absent; `systemctl enable` would
         # otherwise emit a scary "Unit file … does not exist" error and trip

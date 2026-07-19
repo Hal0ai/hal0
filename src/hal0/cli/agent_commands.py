@@ -438,7 +438,7 @@ def _hermes_root_prelude() -> None:
             console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
-def _run_as_hal0(argv: list[str]) -> int:
+def _run_as_hal0(argv: list[str], *, stdin: int | None = None) -> int:
     """Run ``argv`` as the hal0 service user, returning its exit code.
 
     Sanitizes the env (strips ``HERMES_HOME``, sets ``HOME`` to hal0's home) and
@@ -447,6 +447,10 @@ def _run_as_hal0(argv: list[str]) -> int:
     All three tools wrap the command in the same ``env_argv`` so HOME/HERMES_HOME
     are set identically regardless of which tool is available. The caller
     guarantees ``euid == 0``.
+
+    ``stdin`` is forwarded to ``subprocess.run`` (e.g. ``subprocess.DEVNULL`` for
+    a caller like ``hermes gateway install`` that prompts interactively with no
+    bypass flag — a real TTY would block, and a closed fd 0 crashes it).
     """
     import pwd as _pwd
     import shutil as _shutil
@@ -474,7 +478,7 @@ def _run_as_hal0(argv: list[str]) -> int:
         # env_argv already sets HOME explicitly, so no -H needed (and HOME is
         # consistent with the runuser/setpriv paths).
         cmd = ["sudo", "-u", _AGENT_RUNTIME_USER, "--", *env_argv]
-    return _subprocess.run(cmd, check=False).returncode  # nosec B603 — fixed argv
+    return _subprocess.run(cmd, stdin=stdin, check=False).returncode  # nosec B603 — fixed argv
 
 
 def _provision_hermes(
@@ -608,17 +612,32 @@ def _install_hermes_gateway() -> None:
 
     # HERMES_HOME is unset so the generator bakes the hal0 default
     # (~/.hermes) rather than a value inherited from the invoking shell.
-    env = dict(_os.environ)
-    env.pop("HERMES_HOME", None)
+    #
+    # m1 fix: "the hal0 default (~/.hermes)" is only actually hal0's home
+    # when THIS process is already running as hal0. `hal0 agent install
+    # hermes` (and installer/install.sh's equivalent inline block) run as
+    # root, so unqualified `~` resolved to /root — writing a stray
+    # root-owned /root/.hermes (the exact "split-brain" ownership drift
+    # `hal0 doctor perms` flags via check_hermes_ownership's stray_home
+    # check, and installer/lib/run-as-hal0.sh's own docstring calls out
+    # by name as the "root-clobber regression" #843). Drop to hal0 first,
+    # same seam `_provision_hermes` already uses, so this subprocess never
+    # runs as root in the first place.
+    gateway_argv = [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"]
     # `hermes gateway install` prompts interactively with no bypass flag;
     # stdin=DEVNULL gives a clean EOF so it falls back to its built-in
     # defaults (install + enable on boot + start now) instead of blocking.
-    rc = _subprocess.run(  # nosec B603 — fixed argv, known path
-        [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"],
-        stdin=_subprocess.DEVNULL,
-        env=env,
-        check=False,
-    ).returncode
+    if _os.geteuid() == 0:
+        rc = _run_as_hal0(gateway_argv, stdin=_subprocess.DEVNULL)
+    else:
+        env = dict(_os.environ)
+        env.pop("HERMES_HOME", None)
+        rc = _subprocess.run(  # nosec B603 — fixed argv, known path
+            gateway_argv,
+            stdin=_subprocess.DEVNULL,
+            env=env,
+            check=False,
+        ).returncode
     if rc != 0:
         console.print(
             "[yellow]hermes gateway install failed — Telegram/Discord bridge "
@@ -1214,19 +1233,52 @@ def bootstrap_hermes(
 # ── Bootstrap status / log / upgrade / uninstall (Phase 10, #246) ───────────
 
 
+def _agent_provision_state_file(name: str) -> Any:
+    """Path to ``<name>``'s ``provision.json`` snapshot.
+
+    Factored out as a seam (mirrors :func:`_bundled_agent_manager` above)
+    so tests can monkeypatch ``ac._agent_provision_state_file`` to point
+    at a tmp_path fixture instead of the real root-owned
+    ``/var/lib/hal0`` tree.
+    """
+    from pathlib import Path
+
+    return Path(f"/var/lib/hal0/state/agents/{name}/provision.json")
+
+
 @app.command("status")
 def agent_status(
     name: str = typer.Argument("hermes", help="Bundled agent name (default: hermes)."),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw provision.json snapshot as JSON for CI/pipe use (no Rich table).",
+    ),
 ) -> None:
     """Pretty-print the agent's last provision report (provision.json snapshot)."""
     import json as _json
-    from pathlib import Path
 
-    state_file = Path(f"/var/lib/hal0/state/agents/{name}/provision.json")
+    state_file = _agent_provision_state_file(name)
     if not state_file.exists():
+        if json_out:
+            # Mirror the "not yet bootstrapped" case as valid, parseable
+            # JSON instead of leaving stdout empty. Before this fix
+            # `--json` wasn't a recognized option at all, so Typer/Click
+            # raised a UsageError to stderr and stdout stayed empty
+            # (the exact symptom from live install-validation m4).
+            typer.echo(
+                _json.dumps({"name": name, "provisioned": False, "phases": {}}, indent=2)
+            )
+            raise typer.Exit(0)
         console.print(f"[dim]{name}: no provision.json yet (run bootstrap first).[/dim]")
         raise typer.Exit(0)
     data = _json.loads(state_file.read_text())
+    if json_out:
+        # Same data the table below renders, just machine-readable — no
+        # separate source of truth to drift out of sync with the table.
+        payload = {"name": name, "provisioned": True, **data}
+        typer.echo(_json.dumps(payload, indent=2))
+        return
     table = Table(title=f"{name} bootstrap status")
     table.add_column("Phase", style="bold")
     table.add_column("Status")

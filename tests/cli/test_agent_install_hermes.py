@@ -369,6 +369,57 @@ def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path)
     assert ["systemctl", "enable", "--now", "hermes-gateway.service"] in calls
 
 
+def test_install_hermes_gateway_drops_to_hal0_when_root(monkeypatch, tmp_path) -> None:
+    """m1: as root, `hermes gateway install` must run via ``_run_as_hal0``, not
+    a bare ``subprocess.run`` — a bare root invocation resolves ``~/.hermes``
+    to ``/root/.hermes``, the exact "split-brain" tree ``hal0 doctor perms``
+    flags as Hermes ownership drift (check_hermes_ownership's stray_home
+    check / installer/lib/run-as-hal0.sh's docstring, both naming #843).
+    """
+    gateway_unit = tmp_path / "hermes-gateway.service"
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
+    monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
+    monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_as_hal0(argv: list[str], *, stdin: Any = None) -> int:
+        captured["argv"] = argv
+        captured["stdin"] = stdin
+        gateway_unit.write_text("[Unit]\n")
+        return 0
+
+    monkeypatch.setattr(ac, "_run_as_hal0", _fake_run_as_hal0)
+
+    # A bare subprocess.run call for the gateway-install argv would mean the
+    # fix regressed — root path must route through _run_as_hal0 instead.
+    def _boom(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        if argv and argv[0] == ac._HERMES_BIN:
+            raise AssertionError("gateway install ran unprivileged-dropped as root")
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    ac._install_hermes_gateway()
+
+    assert captured["argv"] == [
+        ac._HERMES_BIN,
+        "gateway",
+        "install",
+        "--system",
+        "--run-as-user",
+        "hal0",
+    ]
+    assert captured["stdin"] == subprocess.DEVNULL
+
+
 def test_install_hermes_gateway_writes_dropin_before_gateway_install(monkeypatch, tmp_path) -> None:
     """The secrets drop-in must be laid down BEFORE `hermes gateway install`
     starts the (start-now) vanilla unit — otherwise hal0 flags its own active,
