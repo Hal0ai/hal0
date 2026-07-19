@@ -359,7 +359,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     gpu_rc=0
     HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
-        err "GPU passthrough is broken: the render device is visible but its gid maps to no group in this container."
+        err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
         exit 1
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then

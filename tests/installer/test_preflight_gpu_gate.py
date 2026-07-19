@@ -98,14 +98,107 @@ def test_gate_bare_metal_no_gpu_proceeds(tmp_path: Path) -> None:
 
 
 def test_gate_device_good_gid_proceeds(render_glob: str) -> None:
-    """Device present + gid maps to a real group → proceed (0)."""
+    """Device present + gid maps to the (expected) render group → proceed (0).
+
+    HAL0_GPU_RENDER_GROUP_OVERRIDE points "the render group" at 'root' (gid 0
+    always maps to 'root') so this is hermetic without a real 'render' group
+    on the host running the suite.
+    """
     rc = _run_gpu_gate(
         {
             "HAL0_GPU_GATE": "1",
             "HAL0_GPU_DRI_GLOB": render_glob,
             "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
-            # gid 0 always maps to the 'root' group.
             "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+        }
+    )
+    assert rc == RC_OK
+
+
+def test_gate_gid_maps_to_wrong_group_hard_stops(render_glob: str) -> None:
+    """M3 regression: gid resolves to a REAL group that is NOT the render
+    group (a gid/name collision, e.g. host gid 993 landing on 'clock' inside
+    the container instead of 'render') must hard-stop, not false-pass just
+    because *some* group name was found.
+    """
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            # gid 0 maps to 'root', but the expected group is 'render' (the
+            # untouched default) — a real-group / wrong-name collision.
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+        }
+    )
+    assert rc == RC_BROKEN_GID
+
+
+def test_gate_wrong_group_on_bare_metal_does_not_block(render_glob: str) -> None:
+    """Mirrors test_gate_broken_gid_on_bare_metal_does_not_block: the wrong-
+    group collision only hard-stops inside an LXC, same as the no-group case.
+    """
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "none",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+        }
+    )
+    assert rc == RC_OK
+
+
+def test_gate_member_user_proceeds(render_glob: str) -> None:
+    """Correct group + hal0-equivalent user IS a member → proceed (0)."""
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            # root is always a member of its own primary group 'root'.
+            "HAL0_GPU_USER_OVERRIDE": "root",
+        }
+    )
+    assert rc == RC_OK
+
+
+def test_gate_non_member_user_warns_but_does_not_block(render_glob: str) -> None:
+    """Correct group but the target user is NOT a member: advisory only — the
+    gate still proceeds (install.sh's own usermod step runs later and is
+    idempotent, so this must not hard-block an otherwise-fresh install).
+    """
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            # 'nobody' exists on virtually every Linux host and is never a
+            # member of 'root'.
+            "HAL0_GPU_USER_OVERRIDE": "nobody",
+        }
+    )
+    assert rc == RC_OK
+
+
+def test_gate_nonexistent_user_skips_membership_check(render_glob: str) -> None:
+    """A user that doesn't exist yet (fresh install: preflight_gpu runs
+    BEFORE install.sh creates the hal0 system user) must not be treated as a
+    membership failure — the check is skipped entirely.
+    """
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            "HAL0_GPU_USER_OVERRIDE": "hal0-user-does-not-exist-xyz",
         }
     )
     assert rc == RC_OK

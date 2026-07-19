@@ -470,6 +470,10 @@ _resolve_container_runtime() {
 # `timeout` so an offline host fails fast instead of hanging the install;
 # HAL0_CONTAINER_SMOKE_IMAGE overrides the pulled image for air-gapped/
 # mirrored registries.
+# Captures the smoke test's combined output for _container_runtime_gate to
+# diagnose on failure (module-global by design — bash has no return-by-ref;
+# reset on every call so a stale message never survives into a later check).
+_HAL0_CONTAINER_SMOKE_OUTPUT=""
 _container_run_smoke_test() {
     local rt="$1" image="${HAL0_CONTAINER_SMOKE_IMAGE:-quay.io/podman/hello}"
     # Run the image with its OWN entrypoint — do NOT override the command with
@@ -478,19 +482,37 @@ _container_run_smoke_test() {
     # ("executable file `true` not found") even when the runtime is perfectly
     # healthy, which false-failed the REQUIRED container gate on every host and
     # aborted the install. The hello image self-exits 0; that is the smoke.
-    timeout 30 "${rt}" run --rm "${image}" >/dev/null 2>&1
+    _HAL0_CONTAINER_SMOKE_OUTPUT="$(timeout 30 "${rt}" run --rm "${image}" 2>&1)"
 }
 
-# Run the real `<rt> run` smoke test and print the LXC-nesting remedy on
-# failure. Only called in REQUIRED mode (install.sh) — `hal0 doctor` stays
-# fast and side-effect-free (no image pull) in the default soft mode.
+# Run the real `<rt> run` smoke test and print an accurate remedy on failure.
+# Only called in REQUIRED mode (install.sh) — `hal0 doctor` stays fast and
+# side-effect-free (no image pull) in the default soft mode.
+#
+# The failure branch used to assume every `<rt> run` failure inside an LXC was
+# a missing `nesting`/`keyctl` feature flag. That's wrong when the container
+# HAS nesting+keyctl but crun still can't create a session keyring because the
+# kernel keyring byte-quota (kernel.keys.maxbytes) is exhausted — observed
+# live as `crun: create keyring '…': Disk quota exceeded` (exit 126) with
+# nesting=1,keyctl=1 already set. The nesting/keyctl message is actively
+# misleading there (operator "fixes" a config that was never broken). Detect
+# that signature first and give the real remedy; fall through to the generic
+# LXC hint for every other failure shape so nothing else gets mis-masked.
 _container_runtime_gate() {
     local rt="$1"
     if _container_run_smoke_test "${rt}"; then
         return 0
     fi
     err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
-    if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+    if printf '%s\n' "${_HAL0_CONTAINER_SMOKE_OUTPUT}" \
+        | grep -qiE 'create keyring.*(disk quota exceeded|quota exceeded)|keyring.*edquot'; then
+        warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
+        warn "  kernel keyring quota exhausted (crun could not create a session keyring) — this is NOT a missing"
+        warn "  nesting/keyctl config. Check: cat /proc/key-users (look for a uid near its byte quota)"
+        warn "  remedy: reboot this container to clear leaked session keyrings, or as root: keyctl clear @s /"
+        warn "  find + kill the leaked keyring holders, or raise the quota: sysctl kernel.keys.maxbytes (and"
+        warn "  kernel.keys.maxkeys) higher on the PROXMOX HOST, then re-run install.sh"
+    elif grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
         warn "  inside an unprivileged Proxmox/LXC container this needs 'features: nesting=1' (and often keyctl=1)"
         warn "  set it in /etc/pve/lxc/<CTID>.conf on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
     else
@@ -629,12 +651,19 @@ preflight_podman_forward() {
 #       0                         → GPU present + wired, or a genuine bare-metal
 #                                    CPU box: proceed.
 #       HAL0_GPU_RC_BROKEN_GID(3) → render device visible but its gid maps to
-#                                    NO group inside this LXC (dev0 miswire):
-#                                    caller HARD STOPS with the printed remedy.
+#                                    NO group, or to a group OTHER than the
+#                                    render group, inside this LXC (dev0
+#                                    miswire): caller HARD STOPS with the
+#                                    printed remedy.
 #       HAL0_GPU_RC_NO_DEVICE(4)  → no GPU devices inside an LXC: caller allows
 #                                    an EXPLICIT CPU-only opt-in.
+# The gid check requires the NAME match the render group specifically, not
+# merely resolve to *some* group — a bare "maps to a group" check false-passed
+# a gid/name collision (renderD128 gid landing on an unrelated system group
+# like 'clock' instead of 'render') because getent still resolved a name.
 # Test seams (only consulted here, never set in production): HAL0_GPU_DRI_GLOB,
-# HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE.
+# HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE,
+# HAL0_GPU_RENDER_GROUP_OVERRIDE, HAL0_GPU_USER_OVERRIDE.
 # See docs/guides/proxmox.md for the full walkthrough.
 HAL0_GPU_RC_BROKEN_GID=3
 HAL0_GPU_RC_NO_DEVICE=4
@@ -680,12 +709,19 @@ preflight_gpu() {
         return 0
     fi
 
-    # Node group wiring: the render node's gid should map to a named group
-    # (usually 'render') that hal0/containers can be given. In a Proxmox LXC
-    # a dev0 entry with the HOST's gid leaves the node owned by an unmapped
-    # gid inside the container — userspace then gets Permission denied.
-    local node gid grpname
+    # Node group wiring: the render node's gid must map to the ACTUAL render
+    # group (not merely *some* named group) that hal0/containers are granted
+    # access through. In a Proxmox LXC a dev0 entry with the HOST's gid can
+    # either leave the node owned by an unmapped gid inside the container, or
+    # — the false-pass this closes — collide with an unrelated system group
+    # (e.g. gid 993 landing on 'clock' instead of 'render' because the host's
+    # and container's gid spaces disagree). getent still resolves a name in
+    # that case, so checking only "maps to *a* group" reports success while
+    # GPU access is actually denied. HAL0_GPU_RENDER_GROUP_OVERRIDE lets tests
+    # target a group name guaranteed to exist without a real GPU/render host.
+    local node gid grpname want_group
     node="$(compgen -G "${dri_glob}" 2>/dev/null | head -1)"
+    want_group="${HAL0_GPU_RENDER_GROUP_OVERRIDE:-render}"
     if [[ -n "${node}" ]]; then
         gid="${HAL0_GPU_RENDER_GID_OVERRIDE:-$(stat -c '%g' "${node}" 2>/dev/null)}"
         grpname="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)"
@@ -693,15 +729,49 @@ preflight_gpu() {
             warn "gpu: ${node} is owned by gid ${gid}, which maps to NO group in this container"
             if [[ "${in_container}" == "lxc" ]]; then
                 local want_gid
-                want_gid="$(getent group render 2>/dev/null | cut -d: -f3)"
-                warn "  Fix on the Proxmox host: dev0: ${node},gid=${want_gid:-<render gid>}"
+                want_gid="$(getent group "${want_group}" 2>/dev/null | cut -d: -f3)"
+                warn "  Fix on the Proxmox host: dev0: ${node},gid=${want_gid:-<${want_group} gid>}"
                 warn "  (gid= must be the group id INSIDE the container, not the host's)"
                 # Gated install: devices present but a mis-mapped gid → silent
                 # CPU-only fallback. This is the #1 broken-install shape.
                 [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             fi
+        elif [[ "${grpname}" != "${want_group}" ]]; then
+            # M3: the gid resolves to a REAL group, just not the render one —
+            # a gid/name collision. hal0/containers are only ever granted
+            # device access via '${want_group}', so this gid grants none
+            # despite looking like a pass.
+            warn "gpu: ${node} is owned by gid ${gid}, which maps to group '${grpname}' — NOT '${want_group}'"
+            warn "  hal0/containers are only granted GPU access via the '${want_group}' group; this gid grants none"
+            if [[ "${in_container}" == "lxc" ]]; then
+                local want_gid
+                want_gid="$(getent group "${want_group}" 2>/dev/null | cut -d: -f3)"
+                warn "  Fix on the Proxmox host: dev0: ${node},gid=${want_gid:-<${want_group} gid>}"
+                warn "  (gid= must be the '${want_group}' group's id INSIDE the container, not the host's)"
+                # Gated install: same broken-install shape as the no-group
+                # case above — a wrong group is just as silently CPU-only.
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
+            fi
         else
             info "gpu: ${node} → group ${grpname} (gid ${gid})"
+            # A correct group name is necessary but not sufficient — the hal0
+            # service user must actually be a member, or device access still
+            # fails with Permission denied at runtime. Skipped when the user
+            # doesn't exist yet: install.sh runs this gate BEFORE creating the
+            # hal0 system user and adding it to '${want_group}' (see "System
+            # user" step), so its absence here is expected on a fresh install,
+            # not a fault. An EXISTING hal0 missing from the group is a real,
+            # warnable gap (advisory only — usermod during install is
+            # idempotent and self-heals it moments later).
+            local gpu_user="${HAL0_GPU_USER_OVERRIDE:-hal0}"
+            if id "${gpu_user}" >/dev/null 2>&1; then
+                if id -nG "${gpu_user}" 2>/dev/null | tr ' ' '\n' | grep -qx "${want_group}"; then
+                    info "gpu: ${gpu_user} is a member of ${want_group}"
+                else
+                    warn "gpu: ${gpu_user} exists but is NOT a member of '${want_group}' — GPU device access will be denied"
+                    warn "  fix: usermod -aG ${want_group} ${gpu_user}   (then restart hal0 services)"
+                fi
+            fi
         fi
     fi
     return 0
