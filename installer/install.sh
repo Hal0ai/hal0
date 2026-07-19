@@ -637,6 +637,13 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
 else
     ui_spinner_run "Installing hal0 from ${REPO_ROOT}" \
         "${PIP}" install "${REPO_ROOT}"
+    # Same-version --source git re-run: pip sees the version satisfied and
+    # SKIPS, leaving OLD code in the venv (halo143 finding, 2026-07-19). The
+    # refresh must gate on tree contents, not the version string — force the
+    # hal0 code reinstall; deps were just resolved by the line above so
+    # --no-deps keeps this fast and offline-safe.
+    ui_spinner_run "Refreshing hal0 code in venv" \
+        "${PIP}" install --force-reinstall --no-deps "${REPO_ROOT}"
 fi
 
 if [[ ! -x "${HAL0_BIN}" ]]; then
