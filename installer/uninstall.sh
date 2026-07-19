@@ -210,8 +210,11 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # writes neither, but an install that predates those changes still
     # has the unit on disk — and a stale hal0-lemonade restart-loops with
     # 203/EXEC once its placeholder binary is gone, so tear it down too.
+    # hal0.target (r5-sync-assessment §6.1): its own suffix is embedded so
+    # the bare-name-defaults-to-.service systemctl calls below still resolve
+    # it correctly.
     UNITS=(hal0-api hal0-openwebui hal0-podman-forward hal0-caddy hal0-lemonade \
-           hindsight-api hal0-agent@hermes hermes-gateway)
+           hindsight-api hal0-agent@hermes hermes-gateway hal0.target)
 
     # Discover any running slot instances
     while IFS= read -r UNIT; do
@@ -329,7 +332,10 @@ step "Removing systemd units"
 
 # The hal0-caddy + hal0-lemonade entries are legacy: not written by the
 # current installer, swept so old boxes come clean (pre-v0.3 auth/Caddy
-# removal; pre lemonade-removal epic).
+# removal; pre lemonade-removal epic). hal0.target (§6.1) + the hal0-honcho
+# units (§6.3, P2-memory cheap sweep — Honcho's runtime can provision
+# hal0-honcho.service + its sync timer even though the installer never
+# writes them itself) are swept the same way: no-op if never installed.
 for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
@@ -339,7 +345,11 @@ for UNIT_FILE in \
     "${UNIT_DIR}/hindsight-api.service" \
     "${UNIT_DIR}/hal0-slot@.service" \
     "${UNIT_DIR}/hal0-agent@.service" \
-    "${UNIT_DIR}/hermes-gateway.service"
+    "${UNIT_DIR}/hermes-gateway.service" \
+    "${UNIT_DIR}/hal0.target" \
+    "${UNIT_DIR}/hal0-honcho.service" \
+    "${UNIT_DIR}/hal0-honcho-sync.service" \
+    "${UNIT_DIR}/hal0-honcho-sync.timer"
 do
     rm_path "${UNIT_FILE}"
 done
@@ -355,13 +365,35 @@ do
     [[ -d "${DROPIN_DIR}" ]] && rm_path "${DROPIN_DIR}"
 done
 
+# Quadlet SOURCES (r5-sync-assessment §6.3, verified orphan): the per-slot
+# Quadlet ``.container`` files hal0-api renders live under
+# /etc/containers/systemd/, NOT ${UNIT_DIR} — the sweep above only ever
+# touched UNIT_DIR, so a leftover hal0-slot@<token>.container survived every
+# prior uninstall. podman's systemd generator re-derives
+# hal0-slot@<token>.service from it on the very next daemon-reload (e.g. a
+# reinstall, or just a reboot), resurrecting a "ghost" slot the operator
+# thought was gone. Fixed absolute path (container.py's _QUADLET_DIR is not
+# PREFIX-relative even under --dev), so gate on system mode like the other
+# absolute-system-path sweeps in this script.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    QUADLET_DIR="/etc/containers/systemd"
+    for QUADLET_FILE in "${QUADLET_DIR}"/hal0-slot@*.container; do
+        [[ -e "${QUADLET_FILE}" ]] && rm_path "${QUADLET_FILE}"
+    done
+    for QUADLET_DROPIN in "${QUADLET_DIR}"/hal0-slot@*.container.d; do
+        [[ -d "${QUADLET_DROPIN}" ]] && rm_path "${QUADLET_DROPIN}"
+    done
+fi
+
 # Stale enablement symlinks under multi-user.target.wants/ — `systemctl
 # disable` above should have removed them, but a half-installed box can have
 # a dangling symlink whose target unit was never written. Sweep defensively.
 for WANTS_LINK in \
     "${UNIT_DIR}/multi-user.target.wants"/hal0-*.service \
     "${UNIT_DIR}/multi-user.target.wants"/hindsight-api.service \
-    "${UNIT_DIR}/multi-user.target.wants"/hermes-gateway.service
+    "${UNIT_DIR}/multi-user.target.wants"/hermes-gateway.service \
+    "${UNIT_DIR}/multi-user.target.wants"/hal0.target \
+    "${UNIT_DIR}/multi-user.target.wants"/hal0-honcho-sync.timer
 do
     [[ -L "${WANTS_LINK}" ]] && rm_path "${WANTS_LINK}"
 done
@@ -398,6 +430,11 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     rm_path "/etc/sudoers.d/hal0-systemctl"
     # hal0-comfyui sudoers removed in #984 (hardened-perms abandoned, ADR-0023)
     rm_path "/etc/sudoers.d/hal0-comfyui"
+    # O12: hal0-podman-ro (read-only podman-introspection seam, install.sh's
+    # PODMAN_RO_SUDOERS_DST) — installed since O12 landed but never swept
+    # here (r5-sync-assessment §6.3): a root sudoers grant for a
+    # re-creatable principal left behind on every uninstall.
+    rm_path "/etc/sudoers.d/hal0-podman-ro"
     # hal0.bench units (timer + scheduled session + run-queue worker). The
     # result store /var/lib/hal0-bench is data, kept unless --purge.
     systemctl disable --now hal0-bench.timer hal0-bench-worker.service >/dev/null 2>&1 || true
@@ -448,7 +485,15 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # hal0 (main CLI), hal0-agent (agent shim), hermes (hermes_provision.py
     # installs /usr/local/bin/hermes as the hermes-agent CLI shim — never
     # removed before this fix, so it shadowed a fresh provision's shim).
-    for SHIM in "${HAL0_PATH_LINK}" "${BIN_DIR}/hal0-agent" "${BIN_DIR}/hermes"; do
+    # hal0-hermes (r5-sync-assessment §6.3): install.sh's §7.4 root prelude
+    # additionally symlinks /usr/local/bin/hal0-hermes -> hermes (the
+    # back-compat alias) — it was never in this sweep, so it dangled after
+    # `hermes` above was removed. NOTE (deliberate gap, out of scope here):
+    # that same prelude, when it finds a FOREIGN pre-existing /usr/local/
+    # bin/hermes, backs it up to hermes.pre-hal0 before overwriting — this
+    # uninstaller does not restore that backup; a re-install collides with
+    # it silently unless an operator restores it by hand.
+    for SHIM in "${HAL0_PATH_LINK}" "${BIN_DIR}/hal0-agent" "${BIN_DIR}/hermes" "${BIN_DIR}/hal0-hermes"; do
         if [[ -L "${SHIM}" || -f "${SHIM}" ]]; then
             rm_path "${SHIM}"
         fi
@@ -488,6 +533,14 @@ else
         for DATA_DIR in "${ETC_DIR}" "${VAR_DIR}"; do
             rm_path "${DATA_DIR}"
         done
+        # /var/lib/hal0-bench (r5-sync-assessment §6.3): the bench result
+        # store two comments elsewhere in this file already claim is removed
+        # under --purge ("kept unless --purge") — no code path actually did
+        # it. System mode only; it's a fixed absolute path outside PREFIX,
+        # like the sudoers grants above.
+        if [[ "${DEV_MODE}" -eq 0 ]]; then
+            rm_path "/var/lib/hal0-bench"
+        fi
     fi
 fi
 

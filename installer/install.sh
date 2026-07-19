@@ -503,16 +503,21 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
-# O13: the runtime state trees (slots/, registry/) are born root:root from the
-# mkdir above, but hal0-api runs User=hal0 and must create slots/<id>/state.json
-# + write the registry there. Left root:root, every slot degrades to `error` on
-# a fresh box. The `doctor perms --fix` backstop (Service start) also heals these
-# via their OwnershipStore rows (src/hal0/install/perms.py), but chown here so
+# O13: the runtime state trees (slots/, registry/, models/) are born root:root
+# from the mkdir above, but hal0-api runs User=hal0 and must create
+# slots/<id>/state.json, write the registry, and write pulled model files
+# there. Left root:root, every slot degrades to `error` on a fresh box, and
+# default-store pulls fail with PermissionError (r5-sync-assessment §6.2).
+# The `doctor perms --fix` backstop (Service start) also heals these via
+# their OwnershipStore rows (src/hal0/install/perms.py), but chown here so
 # they're born correct before the daemon's first touch. Prod-only + hal0-gated:
-# the service user doesn't exist in dev mode.
+# the service user doesn't exist in dev mode. ${VAR_DIR}/models is the
+# OwnershipStore row's FHS-default target — chowned explicitly (not
+# ${MODELS_DIR}, which may point off-tree via --models-dir/HAL0_MODELS_DIR;
+# an external store's ownership is out of scope here).
 if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
-    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" 2>/dev/null || true
-    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" 2>/dev/null || true
+    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
+    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
 fi
 
 # Production (FHS, #495) ships the source tree into the versioned dir
@@ -1000,6 +1005,22 @@ info "wrote ${API_UNIT}"
 API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
 rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
 rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
+
+# hal0.target (r5-sync-assessment §6.1, launch-blocker #1): every rendered
+# per-slot Quadlet declares `[Install] WantedBy=hal0.target`
+# (src/hal0/providers/container.py) but nothing ever shipped the target
+# itself — slots silently stayed down after every reboot. Ship + enable it
+# unconditionally (System mode only; harmless idempotent re-write on
+# upgrade) so multi-user.target pulls it in, which in turn starts every
+# enabled hal0-slot@ unit.
+TARGET_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0.target"
+TARGET_UNIT_DST="${UNIT_DIR}/hal0.target"
+if [[ -f "${TARGET_UNIT_SRC}" ]]; then
+    cp "${TARGET_UNIT_SRC}" "${TARGET_UNIT_DST}"
+    info "wrote ${TARGET_UNIT_DST}"
+else
+    warn "${TARGET_UNIT_SRC} not found — hal0.target not installed; slots will not autostart after reboot"
+fi
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
@@ -1938,6 +1959,18 @@ else
         info "hal0-api is running"
     else
         warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
+    fi
+
+    # hal0.target (§6.1 above): enable so multi-user.target pulls it in at
+    # boot; `--now` also starts it right away, which pulls in whichever
+    # hal0-slot@ units are ALREADY enabled (WantedBy=hal0.target) on this
+    # box — harmless no-op on a fresh install with no slots yet.
+    if [[ -f "${TARGET_UNIT_DST}" ]]; then
+        if systemctl enable --now hal0.target; then
+            info "hal0.target enabled — slots will autostart after reboot"
+        else
+            warn "'systemctl enable --now hal0.target' failed; slots will not autostart after reboot — check 'systemctl status hal0.target'"
+        fi
     fi
 
     # ── Memory engine (Hindsight) ─────────────────────────────────────────────
