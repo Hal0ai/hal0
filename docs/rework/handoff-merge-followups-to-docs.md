@@ -93,3 +93,111 @@ Apply the file edits directly; hand board deltas to the writer if you don't
 hold the token. Run the capped gate (ruff + format-check + import smoke +
 sunset + named tests) on any code/test touch; docs-only touches just need the
 dangling-link grep. Report merge SHAs + board deltas back.
+
+---
+
+## Graphify structural findings (2026-07-19) — routed
+
+Source: fresh graphify graph on `rework/descar` HEAD `270a35ae` — 26,181 nodes /
+49,958 edges / 1,179 communities, code AST-only (0 import cycles, 88% EXTRACTED).
+6-worker swarm analysis; per-slice reports at `graphify-out/analysis/w1..w6-*.md`
+(graph.json + analysis/ are gitignored per the PR-churn rule — reports are the
+durable artifact if you want to commit them under `docs/rework/`). Every LOC/count
+below re-verified against the tree (`wc -l` / `grep -c`), not just graph degree.
+Board changes are **deltas** (not the writer this session) — hand to the writer.
+
+### → ARCHITECTURE.md (inline decision) + board (P3-routers lane)
+
+- **F1. `api/__init__.py` is the router god the P3-routers spec never listed.**
+  `src/hal0/api/__init__.py` = **1,892 LOC** (larger than any single route module),
+  `create_app()` degree 104, **50** `app.include_router(...)` mounts (L1441–L1686).
+  `src/hal0/api/routes/__init__.py` is **0 bytes** — no mount registry.
+  → **ARCHITECTURE.md**: record the standing decision "the API app-composer and the
+  route-mount registry are separate concerns" inline next to the API section.
+  → **board delta**: `P3-routers` → note *scope gap* — spec enumerates
+  models/slots/mcp/chat_templates/exposure but omits `api/__init__.py` (composer),
+  `routes/memory.py` (1,205 LOC, 14 handlers), `routes/memory_admin.py`. Add file 1.0
+  = split `api/app.py` (FastAPI+middleware+lifespan) from the 50-line mount registry
+  seeded into the empty `routes/__init__.py`. **Kills the degree-104 god.** Not a
+  shipped PR — needs a lane, do not re-spec as done.
+
+### → board `## Open review-driven adds` (new P3-providers lane candidate)
+
+- **F2. `providers/container.py` (1,967 LOC) has SlotManager's 8-responsibility
+  fingerprint and NO spec covers it.** Degree 113, fuses Quadlet render +
+  mount derivation + launch-plan dispatch + NPU-trio classify + ctx-window derive.
+  → **board delta**: add `P3-providers` (☐) — mirror P3-slots. Split
+  `container/launch.py` (spawn/terminate/probe) + `container/spec_render.py`
+  (quadlet text + flag resolution), keep `ContainerProvider` as thin facade.
+  First extraction = `_resolve_llama_scalars` subtree (already half-contained).
+
+- **F3. `_PROVIDERS` registry is decorative — silent-misroute risk (fix
+  follow-up).** `src/hal0/providers/__init__.py` registers only container/flm/comfyui;
+  authoritative dispatch `_spec_provider_for()` (`src/hal0/providers/container.py`)
+  hardcodes all 5 families (Kokoro/Qwen3TTS instantiated fresh, never via
+  `get_provider`). Two dispatch surfaces that can drift.
+  → **board delta**: `ML-5`/providers lane row — "make `_PROVIDERS` the single
+  dispatch truth; `_spec_provider_for` returns `get_provider(family)`."
+  file:line evidence in `graphify-out/analysis/w2-backend-services.md` F1/R1.
+
+- **F4. Provider-layer simplifications (code-meld, low risk).**
+  `FLMProvider` fuses launcher+HTTP-client while `LlamaServerProvider` shows the
+  clean split; `CapabilityOrchestrator` holds 6 parallel child-mapping dicts →
+  one `CapabilityChildSpec` table; 3 distinct `MemoryProvider` classes share the
+  name across `src/hal0/memory/provider.py`, the Hermes plugin, and a test fixture.
+  → **board delta**: single `## Open review-driven adds` bullet pointing at
+  `w2-backend-services.md` Rec1/Rec2/Rec5/Rec6. Not urgent; bundle behind FLAGS-own.
+
+### → board (frontend lane) — no golden-path change (these are UI unit gaps)
+
+- **F5. Frontend runs two parallel API seams.** Real ESM stack
+  (`ui/src/api/client.ts` `apiGet` → `endpoints.ts`) coexists with a legacy
+  `window.__hal0Use*` hook-bridge layer for the in-browser-Babel prototype panes
+  (`ui/src/main.tsx`). Plus `ui/src/api/mock.ts` = **1,233 LOC** parallel API
+  (32 allowlist rows); builder↔backend drift invisible until exercised.
+  `ui/src/api/hooks/useBoard.ts` = **1,494 LOC** (REST+mutations+WS+SSE in one).
+  → **board delta**: UI lane row — "split `useBoard.ts` along transport
+  boundaries; add `mockFetch` contract test asserting every `ENDPOINTS` key has a
+  builder; migrate bridge panes to ESM." UI test ratio ~22% (9 files / 40+ hooks).
+
+### → tests/golden_paths + board (test-coverage gaps)
+
+- **F6. `v1.py` OpenAI-compat routes have no direct test (coverage gap).**
+  `src/hal0/api/routes/v1.py` (1,685 LOC, degree 42) — `images_generations`,
+  `audio_speech`, `audio_transcriptions`, `embeddings`, `_dispatch_via_npu_trio`
+  exercised only transitively (board_chat / chat_normalization). Also
+  `StackApplyEngine` (zero test neighbors), `UpstreamRegistry`.
+  → **golden-paths**: this is unit-level, not deploy-shaped — do NOT add to the
+  15-scenario map. **board delta**: coverage row — "add `tests/api/test_v1_routes.py`
+  (grep for existing owner FIRST, rule 11)."
+
+### → CONTRIBUTING.md anti-scar rule 12 (bit twice — earns a rule)
+
+- **F7. A wire contract that only exists on the live peer must be pinned by a
+  contract fixture — CI-green ≠ deploy-green.** HP-executor merged ✔ but the board
+  flags `WORKER_BASE_PATH /api/plugins/kanban/runs` as *unpinned by contract
+  fixtures*. Same class as the historical route-collision scar (`43f29e30` landed,
+  duplicate `0b93a48b` passed CI then broke on newer FastAPI). Two hits = a rule.
+  → **CONTRIBUTING.md**: append **Rule 12** (non-gated — no CI teeth yet, mark so):
+  *"Any contract against a live peer (Hermes plugin path, external route shape) is
+  pinned by a fixture under `tests/fixtures/hermes/contracts/` before the lane is ✔.
+  CI-green is not deploy-green — the route-collision (`43f29e30`) and HP-executor
+  `WORKER_BASE_PATH` both proved it."*
+  → **board delta** + **halo143 runbook (#5)**: HP-executor row — add a
+  **both-boxes** deploy step "validate `WORKER_BASE_PATH` against live Hermes on
+  150 (privileged) + 143 (unprivileged)" as a checkable runbook line, not prose.
+
+### → board (sequencing note, FLAGS-own critical path)
+
+- **F8. FLAGS-own is the standing critical path.** Its spec node
+  (`docs/rework/hal0-specs/spec-flags-ownership.md`) is graph-degree-1 (orphan);
+  `slots/manager.py` still holds flag-bearing fields (device/chat_template on slot).
+  It blocks slot purity AND P2-config's "one apply engine."
+  → **board delta**: `FLAGS-own` row — note it need not wait on P3-routers inc-3 +
+  P3-runtime-db; dispatch a narrow **increment-A** (model device/chat_template moves
+  only) to unblock. Sequencing decision for the writer.
+
+**Capped-gate note:** every item above is docs-only or a board delta as written —
+no code touched here, so only the dangling-link grep applies. The moment a
+follow-up applies F1/F2/F3/F6 as code, run the full capped gate (ruff +
+format-check + import smoke + sunset + named tests).
