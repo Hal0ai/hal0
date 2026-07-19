@@ -28,6 +28,8 @@ export interface Model {
   ns: 'blessed' | 'pulled' | string
   installed: boolean
   runtime: string
+  /** True when this model is its dispatcher type's default (per-type marker). */
+  default?: boolean
 }
 
 const MODELS_POLL_MS = 30_000
@@ -191,6 +193,27 @@ export function useModelUpdate() {
   return useMutation<Model, Hal0Error, { id: string; body: Record<string, unknown> }>({
     mutationFn: ({ id, body }) =>
       apiPut<Model>(ENDPOINTS.model(id), body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+  })
+}
+
+export interface ModelDefaultResult {
+  model_id: string
+  type: string
+  default: boolean
+  demoted: string[]
+  changed: boolean
+}
+
+export function useModelSetDefault() {
+  // POST /api/models/{id}/default — promote (default:true, demoting the current
+  // holder of this type) or clear (default:false) a model's per-type default.
+  // The server enforces the single-holder invariant; we just invalidate the
+  // catalog so every row's badge reflects the new holder on the next render.
+  const qc = useQueryClient()
+  return useMutation<ModelDefaultResult, Hal0Error, { id: string; default: boolean }>({
+    mutationFn: ({ id, default: isDefault }) =>
+      apiPost<ModelDefaultResult>(ENDPOINTS.modelSetDefault(id), { default: isDefault }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
   })
 }
