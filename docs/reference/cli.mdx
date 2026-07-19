@@ -38,7 +38,8 @@ directly so they work without a running daemon.
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots`, `--source {release\|git}` |
 | `hal0 update owui` | Repin the OpenWebUI companion image to the latest (or an explicit) digest, pull, and restart. | `--check`, `--tag TAG`, `--target DIGEST`, `--yes`/`-y`, `--force` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
-| `hal0 chat` | Terminal chat REPL over `/v1/chat/completions` — handy for SSH/headless boxes. In-REPL: `/think on\|off\|default`, `/clear`, `/quit` (or Ctrl-D). | `--model` (default `agent`), `--base-url` (default `http://127.0.0.1:8080/v1`), `--no-stream` |
+| `hal0 chat` | Terminal chat REPL over `/v1/chat/completions` (or the hal0-brain steward with `--brain`) — handy for SSH/headless boxes. In-REPL: `/think on\|off\|default`, `/clear`, `/quit` (or Ctrl-D). | `--model` (default `agent`), `--base-url` (default `http://127.0.0.1:8080/v1`), `--no-stream`, `--brain` |
+| `hal0 ports` | PortAuthority claim map: who owns which port, and any conflicts. | `--json` |
 
 `hal0 update` with no flags checks the configured channel and applies the
 update if one is newer; it polls the apply job to completion. `--channel`
@@ -70,7 +71,8 @@ fallback chain ends in) or an explicit `--model`.
 |---|---|
 | `--model` | Slot alias or model id to chat with (default `agent`). |
 | `--base-url` | hal0 OpenAI-compatible API base, `…/v1` (default `http://127.0.0.1:8080/v1`; also honours `$HAL0_CHAT_BASE_URL`). |
-| `--no-stream` | Wait for each full reply instead of streaming tokens live. |
+| `--no-stream` | Wait for each full reply instead of streaming tokens live. Ignored with `--brain` (the steward has no non-streaming mode). |
+| `--brain` | Talk to the hal0-brain steward (`POST /api/brain/chat`) instead of the raw `agent` chat slot — gets board/memory tool access, at the cost of a different (non-OpenAI) SSE frame shape. |
 
 In-REPL commands: `/think on\|off\|default` forces reasoning on/off for
 every turn from then on, or falls back to the slot's own configured default;
@@ -122,6 +124,7 @@ hal0 setup --auto --no-pull --no-extensions
 | `slot create <name>` | Create a new slot config. | `--type`/`-t`, `--provider`, `--hardware`, `--model`/`-m` (required), `--port`/`-p`, `--ctx-size` |
 | `slot edit <name>` | Update one or more slot config fields. | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware` |
 | `slot delete <name>` | Delete a slot (stops the unit, removes config). | `--force`/`-f` |
+| `slot rename <name> <new-name>` | Rename a slot's display label in place — the slot's `id` (port, state, history) is unaffected. Slot must be offline. | — |
 | `slot logs <name>` | Print or follow slot logs. | `--follow`/`-f`, `--lines`/`-n` (default 200) |
 | `slot metrics [name]` | Live per-slot runtime metrics (tok/s, KV%, mem, uptime, queue depth). Omit `name` for all slots. | `--json` |
 | `slot capacity` | Per-slot resident memory + the `[slots].max_slots` budget. | `--json` |
@@ -178,13 +181,15 @@ default.
 |---|---|---|
 | `model list` | List registry + upstream models. | `--json` |
 | `model show <ref>` | Show a model's metadata. | `--json` |
-| `model pull <ref>` | Download a model from Hugging Face into the registry (with progress). | — |
+| `model pull <ref>` | Download a model from Hugging Face into the registry (with progress). | `--cancel` |
+| `model default <ref>` | Promote (or `--clear`) a model as its dispatcher type's default — demotes whichever model currently holds it. | `--clear` |
+| `model update [ref]` | Re-pull an HF-pulled model's file in place over its existing bytes, or (`--check`) probe HF for models with newer bytes without downloading anything. | `--check`, `--refresh` |
 | `model add <path>` | Register an already-downloaded file; id/capabilities auto-detected from the header. | `--id`, `--name`, `--license`, `--overwrite` |
 | `model scan` | Walk the configured roots + store and register new files (no api restart needed). | — |
 | `model store [path]` | Show — or change — the single directory hal0 pulls to, scans, and mounts into slots. | `--migrate` |
 | `model run <ref>` | Assign to a slot, load it, and wait until it serves — the one-command first-run path. | `--slot`/`-s`, `--timeout` |
 | `model rm <ref>` | Remove a model from the registry. | `--force`/`-f` |
-| `model import-backup <path>` | Restore `registry.toml` from a v0.1.x backup tarball (disaster recovery). | `--force`/`-f`, `--dest` |
+| `model import-backup <path>` | Restore `registry.toml` from a v0.1.x backup tarball (disaster recovery), then chain the same idempotent import into the SQLite registry (`registry.toml` is a derived snapshot post-ML-1; SQLite is what every runtime reader consults). | `--force`/`-f`, `--dest` |
 | `model register <id>` | **[Deprecated]** hidden alias for `model add` — its `--id`/`--name`/`--license` flags are folded into `add`. | `--path`/`-p` (required), `--name`, `--license` |
 | `model assign <ref>` | **[Deprecated]** hidden alias for `slot edit --model` (same `PUT /api/slots/{slot}/config` endpoint). | `--slot`/`-s` (required) |
 
@@ -464,10 +469,29 @@ completion.
 | `agent personas activate <id>` | Switch the active persona and nudge Hermes to hot-reload. | `--reload-url` |
 
 <Aside type="note">
-There is no `rotate-token` subcommand. The daemon has no built-in auth;
-agent identity flows through the `X-hal0-Agent` header the wrapper
-sets from `$HAL0_AGENT_ID`.
+There is no per-agent `rotate-token` subcommand here — agent identity flows
+through the `X-hal0-Agent` header the wrapper sets from `$HAL0_AGENT_ID`,
+which is orthogonal to the box-level bearer credential. The daemon DOES
+support auth (opt-in, off by default) — see `hal0 auth` below.
 </Aside>
+
+## `hal0 auth` — API authentication
+
+A thin client over `/api/auth/*`. `status` mirrors what the dashboard's own
+login gate reads; `rotate` is the lockout-recovery path when a bearer is
+lost or compromised; `require` flips the `[security].require_auth`
+enforcement posture live (no restart).
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `auth status` | Show the current auth posture (`auth_required`, `has_admin_key`, this caller's resolved `tier`). | `--json` |
+| `auth rotate [admin\|client]` | Rotate the admin (default) or client box key and write it to `/etc/hal0/api.env`. The value is never printed — retrieve it on-box afterwards. | `--force`/`-f` |
+| `auth require <on\|off>` | Persist the `[security].require_auth` toggle. Enabling with no admin key configured is refused (would lock everyone out). | — |
+
+`hal0 auth rotate` prints only a fingerprint and confirmation — never the
+key itself. Rotating the admin key does not sign the operator's own browser
+session out (it's an independent HMAC cookie); bearer/API callers on the
+OLD key stop working immediately.
 
 ## `hal0 mcp` — MCP servers
 
@@ -495,6 +519,19 @@ hits `127.0.0.1:8080`. Manage the bundled MCP servers (`hal0-admin`,
 MCP process restart is a planned follow-up. Until then, `restart` reports the
 stub instead of bouncing the server.
 </Aside>
+
+## `hal0 board` — operator board
+
+A thin client over a slice of `/api/board/*` — list what's on the board, show
+one task, add one, move it between lanes. Full CRUD (comments, links, bulk
+ops, board switching, orchestration knobs) stays dashboard-only.
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `board list` | List tasks grouped by lane. | `--board`, `--include-archived`, `--json` |
+| `board show <id>` | Show one task. | `--json` |
+| `board add <title>` | Create a task (default lane `triage`). | `--body`, `--assignee`, `--status`, `--board`, `--priority` |
+| `board move <id> <status>` | Move a task to a different lane (e.g. `triage`, `running`, `done`, `blocked`). | — |
 
 ## `hal0 migrate` — config/state migrations
 

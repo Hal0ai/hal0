@@ -27,8 +27,10 @@ from hal0.cli._shared import (
 )
 from hal0.cli.agent_commands import app as agent_app
 from hal0.cli.app_commands import app as app_ext_app
+from hal0.cli.auth_commands import app as auth_app
 from hal0.cli.bench_commands import BENCH_CONTEXT_SETTINGS, BENCH_HELP
 from hal0.cli.bench_commands import bench as bench_command
+from hal0.cli.board_commands import app as board_app
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.chat_commands import chat_command
 from hal0.cli.comfyui_commands import app as comfyui_app
@@ -38,6 +40,7 @@ from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
+from hal0.cli.ports_command import ports_cmd
 from hal0.cli.registry_commands import app as registry_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
@@ -80,6 +83,11 @@ app.add_typer(registry_app, name="registry")
 # Issue #504 — ``hal0 mcp {list,status,install,uninstall,restart,catalog}``
 # CLI over /api/mcp/*. Mounted after registry before setup.
 app.add_typer(mcp_app, name="mcp")
+# §5.2 (R5 sync assessment) — the R3/R4 auth + operator-board surfaces the
+# CLI had zero verbs for. `auth` mirrors /api/auth/{status,rotate,require};
+# `board` is a thin list|show|add|move slice of /api/board.
+app.add_typer(auth_app, name="auth")
+app.add_typer(board_app, name="board")
 app.add_typer(setup_app, name="setup", help="First-run setup")
 # `hal0 bench <verb>` — a single passthrough command (not a typer group): the
 # bench CLI is argparse-based (design §5), so the raw argv forwards to
@@ -94,6 +102,9 @@ app.command("chat")(chat_command)
 from hal0.cli.system_info_command import system_info_cmd  # noqa: E402
 
 app.command("system-info")(system_info_cmd)
+# §5.2 — `hal0 ports`: PortAuthority claim-map view. Plain function
+# registration (no verbs of its own), like `chat`/`bench`/`system-info`.
+app.command("ports")(ports_cmd)
 
 
 # ---------------------------------------------------------------------------

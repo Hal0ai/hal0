@@ -41,7 +41,7 @@ import httpx
 import typer
 from rich.console import Console
 
-from hal0.cli._shared import auth_client
+from hal0.cli._shared import _api_base, auth_client
 from hal0.normalize.thinking import apply_thinking_policy
 from hal0.toolloop.engine import assistant_text, assistant_thinking, split_thinking
 
@@ -156,6 +156,92 @@ def _iter_stream_events(
                 yield parsed
 
 
+def _iter_brain_sse_events(
+    client: httpx.Client, url: str, body: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    """Consume the hal0-brain SSE stream (``{"type": ...}`` frames).
+
+    Distinct framing from the OpenAI-style ``choices[].delta`` chunks
+    :func:`_iter_stream_events` parses for the plain ``/v1`` path: brain
+    frames are ``{"type": "token"|"thinking"|"tool_call"|"tool_result"|
+    "approval_required"|"ping"|"error"|"done", ...}`` (see
+    :mod:`hal0.brain.chat`, mounted at ``POST /api/brain/chat``). Malformed
+    lines are skipped, same tolerance as the ``/v1`` iterator.
+    """
+    with client.stream("POST", url, json=body) as resp:
+        resp.raise_for_status()
+        for raw in resp.iter_lines():
+            if not raw or not raw.startswith("data:"):
+                continue
+            payload = raw[len("data:") :].strip()
+            try:
+                parsed = jsonlib.loads(payload)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                yield parsed
+
+
+def _run_brain_turn(session: ChatSession, client: httpx.Client, url: str, user_text: str) -> None:
+    """One turn through the hal0-brain steward (``POST /api/brain/chat``, SSE).
+
+    Unlike the plain ``/v1`` path, tool calls (board CRUD, memory, …) run
+    server-side inside the steward's own tool loop — this just renders the
+    frame stream: tokens live, a dim ``(thinking) …`` prefix for reasoning,
+    and a one-line summary per tool call/result so the operator can follow
+    what the steward did without a dashboard open.
+    """
+    session.history.append({"role": "user", "content": user_text})
+    body: dict[str, Any] = {"messages": list(session.history)}
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    reasoning_started = False
+    content_started = False
+    console.print("hal0> ", end="", markup=False, highlight=False)
+    for event in _iter_brain_sse_events(client, url, body):
+        etype = event.get("type")
+        if etype == "thinking":
+            text = event.get("text") or ""
+            if not reasoning_started:
+                console.print(
+                    "(thinking) ", end="", style="dim italic", markup=False, highlight=False
+                )
+                reasoning_started = True
+            reasoning_parts.append(text)
+            console.print(text, end="", style="dim italic", markup=False, highlight=False)
+        elif etype == "token":
+            text = event.get("text") or ""
+            if reasoning_started and not content_started:
+                console.print()
+            content_started = True
+            content_parts.append(text)
+            console.print(text, end="", markup=False, highlight=False)
+        elif etype == "tool_call":
+            console.print()
+            console.print(
+                f"[dim]→ tool: {event.get('name')}({event.get('arguments')})[/dim]",
+                markup=False,
+                highlight=False,
+            )
+        elif etype == "tool_result":
+            console.print(
+                f"[dim]← {event.get('name')}: {event.get('result')}[/dim]",
+                markup=False,
+                highlight=False,
+            )
+        elif etype == "approval_required":
+            console.print(
+                f"[yellow]waiting on operator approval for {event.get('name')} "
+                f"(approval_id={event.get('approval_id')})[/yellow]"
+            )
+        elif etype == "error":
+            console.print(f"[red]error:[/red] {event.get('message')}")
+        elif etype == "done":
+            break
+    console.print()
+    session.finish_assistant_turn("".join(content_parts), "".join(reasoning_parts))
+
+
 def _handle_think_command(session: ChatSession, line: str) -> None:
     parts = line.split(maxsplit=1)
     mode = parts[1].strip() if len(parts) > 1 else ""
@@ -233,14 +319,23 @@ def chat_command(
         "--no-stream",
         help="Disable SSE streaming — wait for each full reply instead of printing tokens live.",
     ),
+    brain: bool = typer.Option(
+        False,
+        "--brain",
+        help=(
+            "Talk to the hal0-brain steward (POST /api/brain/chat) instead of the raw "
+            "'agent' chat slot — gets board/memory tool access, at the cost of a "
+            "different (non-OpenAI) SSE frame shape."
+        ),
+    ),
 ) -> None:
-    """Terminal chat REPL over ``/v1/chat/completions``.
+    """Terminal chat REPL over ``/v1/chat/completions`` (or the brain steward with ``--brain``).
 
     In-REPL commands:
 
     \b
       /think on|off|default   force reasoning on/off, or fall back to the
-                               slot's own configured default
+                               slot's own configured default (ignored with --brain)
       /clear                  reset the conversation history
       /quit                   exit (Ctrl-D also works)
 
@@ -248,13 +343,17 @@ def chat_command(
     reachable. Reasoning tokens are always split out of the model's reply
     before it's folded back into history, regardless of ``/think`` state —
     long sessions never balloon the context with the model's own prior
-    chain-of-thought.
+    chain-of-thought. ``--brain`` always streams (the steward has no
+    non-streaming mode) — ``--no-stream`` is ignored when combined with it.
     """
     session = ChatSession(model=model, stream=not no_stream)
-    url = base_url.rstrip("/") + "/chat/completions"
+    if brain:
+        url = _api_base().rstrip("/") + "/api/brain/chat"
+    else:
+        url = base_url.rstrip("/") + "/chat/completions"
     console.print(
-        f"[dim]hal0 chat — model={model} think={session.think_mode} "
-        f"stream={session.stream} · {url}[/dim]"
+        f"[dim]hal0 chat — {'brain steward' if brain else f'model={model}'} "
+        f"think={session.think_mode} stream={session.stream} · {url}[/dim]"
     )
     console.print("[dim]/think on|off|default  ·  /clear  ·  /quit (or Ctrl-D)[/dim]")
     with auth_client(timeout=120.0) as client:
@@ -277,7 +376,9 @@ def chat_command(
                 _handle_think_command(session, line)
                 continue
             try:
-                if session.stream:
+                if brain:
+                    _run_brain_turn(session, client, url, line)
+                elif session.stream:
                     _run_streaming_turn(session, client, url, line)
                 else:
                     _run_nonstreaming_turn(session, client, url, line)

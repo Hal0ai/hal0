@@ -221,3 +221,53 @@ def test_repl_think_and_clear_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_repl_exits_cleanly_on_eof() -> None:
     result = runner.invoke(app, ["chat"], input="")
     assert result.exit_code == 0, result.output
+
+
+# ── --brain (§5.2 R5 sync assessment) ────────────────────────────────────────
+
+
+def test_run_brain_turn_renders_tokens_and_tool_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The brain SSE frame shape (``{"type": ...}``) is distinct from the
+    OpenAI ``choices[].delta`` chunks the plain /v1 path parses — pin that
+    tokens accumulate, tool_call/tool_result render, and only the stripped
+    visible reply is folded into history (never the tool chatter)."""
+
+    def fake_events(client: Any, url: str, body: dict[str, Any]):
+        assert url == "http://example.invalid/api/brain/chat"
+        assert body["messages"][-1] == {"role": "user", "content": "what's on the board?"}
+        yield {"type": "thinking", "text": "let me check… "}
+        yield {"type": "tool_call", "id": "1", "name": "board_list", "arguments": {}}
+        yield {"type": "tool_result", "id": "1", "name": "board_list", "result": {"n": 2}}
+        yield {"type": "token", "text": "there are "}
+        yield {"type": "token", "text": "2 tasks"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(chat_commands, "_iter_brain_sse_events", fake_events)
+
+    session = ChatSession()
+    chat_commands._run_brain_turn(
+        session, _FakeClient(), "http://example.invalid/api/brain/chat", "what's on the board?"
+    )
+
+    assert session.history[-1] == {"role": "assistant", "content": "there are 2 tasks"}
+    assert "let me check" not in session.history[-1]["content"]
+
+
+def test_chat_brain_flag_posts_to_brain_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_events(client: Any, url: str, body: dict[str, Any]):
+        calls.append({"url": url, "body": body})
+        yield {"type": "token", "text": "hi back"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(chat_commands, "_iter_brain_sse_events", fake_events)
+    monkeypatch.setenv("HAL0_API_URL", "http://example.invalid")
+
+    result = runner.invoke(app, ["chat", "--brain"], input="hello\n/quit\n")
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["url"] == "http://example.invalid/api/brain/chat"
+    assert calls[0]["body"] == {"messages": [{"role": "user", "content": "hello"}]}
+    assert "brain steward" in result.output

@@ -1238,10 +1238,12 @@ def agent_upgrade(
     raise typer.Exit(rc)
 
 
-# Note: there is no `rotate-token` subcommand. The hal0
-# daemon has no auth; agent identity flows via the X-hal0-Agent header
-# the wrapper exports from $HAL0_AGENT_ID. See #246 sharpening's second
-# correction comment for the supersede.
+# Note: there is no per-agent `rotate-token` subcommand here — agent
+# identity flows via the X-hal0-Agent header the wrapper exports from
+# $HAL0_AGENT_ID (see #246 sharpening's second correction comment), which
+# is orthogonal to the box-level bearer credential. The daemon DOES have
+# auth (KB-1/§1, opt-in via [security].require_auth): rotate the admin or
+# client box key with `hal0 auth rotate <admin|client>`.
 
 
 # ── Reprovision (PR-3, v0.3) ────────────────────────────────────────────────

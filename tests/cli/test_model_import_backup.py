@@ -51,7 +51,11 @@ def test_model_import_backup_is_registered_and_not_hidden() -> None:
     assert "import-backup" in result.output
 
 
-def test_model_import_backup_happy_path(tmp_path: Path) -> None:
+def test_model_import_backup_happy_path(tmp_path: Path, tmp_hal0_home: str) -> None:
+    """``tmp_hal0_home`` isolates the SQLite chain (§5.2) this command now
+    runs after the TOML copy — without it, ``import_toml_to_sqlite``'s
+    default db path resolves to the real box, which a sandboxed test
+    process can't (and mustn't) write to."""
     tar_path = _make_backup(tmp_path)
     dest = tmp_path / "out" / "registry.toml"
 
@@ -71,3 +75,24 @@ def test_model_import_backup_refuses_to_overwrite_without_force(tmp_path: Path) 
     assert result.exit_code != 0
     assert "--force" in result.output
     assert dest.read_bytes() == b"# pre-existing v0.2 registry -- do not clobber\n"
+
+
+def test_model_import_backup_chains_into_sqlite(tmp_path: Path, tmp_hal0_home: str) -> None:
+    """§5.2: post-ML-1, SQLite is authoritative and ignores a non-empty
+    on-disk ``registry.toml`` — a restore that only wrote the TOML would be
+    silently invisible to ``hal0 model list``. The command must chain the
+    same idempotent ``import_toml_to_sqlite`` ``hal0 registry import-sqlite``
+    uses and report the sync counts, using the isolated ``tmp_hal0_home``
+    database so this test never touches a real box's registry.
+    """
+    tar_path = _make_backup(tmp_path)
+    dest = tmp_path / "out" / "registry.toml"
+
+    result = runner.invoke(model_app, ["import-backup", str(tar_path), "--dest", str(dest)])
+    assert result.exit_code == 0, result.output
+    assert "sqlite sync" in result.output.lower()
+
+    from hal0.registry.sqlite_store import SqliteModelRegistry
+
+    registry = SqliteModelRegistry()
+    assert registry.has("hermes-4-14b")

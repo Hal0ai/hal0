@@ -289,6 +289,28 @@ def slot_restart(
     console.print(f"Restarted [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))}")
 
 
+@app.command("rename")
+def slot_rename(
+    name: str = typer.Argument(..., help="Current slot name"),
+    new_name: str = typer.Argument(..., help="New slot name"),
+) -> None:
+    """Rename a slot in place (POST /api/slots/{name}/rename).
+
+    The slot's ``id`` is stable across the rename — quadlets, port claims,
+    and history stay bound to the id, not the label; only the display name
+    changes.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        snap = api_post(f"/api/slots/{name}/rename", json={"new_name": new_name})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(f"Renamed [bold]{name}[/bold] → [bold]{snap.get('name', new_name)}[/bold]")
+
+
 @app.command("swap")
 def slot_swap(
     name: str = typer.Argument(..., help="Slot name to swap"),
