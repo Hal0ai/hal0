@@ -39,7 +39,52 @@ async function gotoTools(page: any) {
 }
 
 test.describe('Memory tools', () => {
+  // Recall/Reflect are POST-only and the mock layer's substitution is
+  // GET-only by design (prod-mock gating, 268f96ac) — so these POSTs pass
+  // through to the network and MUST be page.route-mocked here, mirroring
+  // the mockFixtures builder shapes the assertions were written against.
+  const RECALL_BODY = {
+    results: [
+      {
+        id: 'mf-1',
+        text: 'ComfyUI thermal throttling resolved with a -30mV iGPU undervolt',
+        type: 'experience',
+        entities: ['comfyui'],
+        occurred_start: '2026-06-01T00:00:00Z',
+        tags: ['thermals'],
+      },
+      {
+        id: 'mf-2',
+        text: 'HuggingFace pulls contained by the 90% auto-pause and a 41 GB prune',
+        type: 'world',
+        entities: ['storage'],
+        occurred_start: '2026-06-10T00:00:00Z',
+        tags: ['storage'],
+      },
+    ],
+  }
+  const REFLECT_BODY = {
+    text: 'Over the last six weeks the strix-halo-01 operator hardened a fresh hal0 install into a resilient daily driver.',
+    based_on: { facts: 24, documents: 6, mental_models: 3 },
+  }
+
+  function mockMemoryPosts(page: any) {
+    return Promise.all([
+      page.route(/\/api\/memory\/banks\/[^/]+\/recall$/, (route: any) =>
+        route.request().method() === 'POST'
+          ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(RECALL_BODY) })
+          : route.fallback(),
+      ),
+      page.route(/\/api\/memory\/banks\/[^/]+\/reflect$/, (route: any) =>
+        route.request().method() === 'POST'
+          ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(REFLECT_BODY) })
+          : route.fallback(),
+      ),
+    ])
+  }
+
   test('Recall runs and renders ranked results', async ({ page }) => {
+    await mockMemoryPosts(page)
     await gotoTools(page)
 
     await page.fill('[data-testid="mem-recall-q"]', 'what changed recently')
@@ -53,6 +98,7 @@ test.describe('Memory tools', () => {
   })
 
   test('Reflect renders answer and based_on counts', async ({ page }) => {
+    await mockMemoryPosts(page)
     await gotoTools(page)
 
     await page.fill('[data-testid="mem-reflect-q"]', 'summarize the platform state')
