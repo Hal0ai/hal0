@@ -138,6 +138,18 @@ def evaluate_model_update(
         return verdict
     remote_sha = files.get(filename)
     if remote_sha is None:
+        # Exact repo-relative path missed — fall back to a UNIQUE basename
+        # match. A row whose stored hf_filename dropped the upstream subdir
+        # prefix (hand-registered or path-added rows) would otherwise
+        # silently never flag even though the file is right there under
+        # ``<quant>/<file>``. Guarded on a single distinct sha so an
+        # ambiguous basename (the same filename under two quant dirs) is
+        # left unresolved rather than compared against the wrong variant.
+        base = filename.rsplit("/", 1)[-1]
+        candidates = {sha for path, sha in files.items() if path.rsplit("/", 1)[-1] == base}
+        if len(candidates) == 1:
+            remote_sha = next(iter(candidates))
+    if remote_sha is None:
         # File renamed/removed upstream, or a non-LFS object (no sha256).
         verdict["reason"] = "file_missing_or_not_lfs"
         return verdict
