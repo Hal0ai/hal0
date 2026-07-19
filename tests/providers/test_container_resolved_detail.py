@@ -40,8 +40,11 @@ def test_detail_dedups_and_attributes_provenance() -> None:
     assert prov["-b"]["source"] == "extra_args"
     assert prov["-b"]["value"] == "8192"
     # --jinja is the default-on runner capability injection (§7.1a / ML-5) —
-    # it lands in the model_defaults segment now, not the profile segment.
-    assert prov["--jinja"]["source"] == "model_defaults"
+    # it's folded into the model-defaults extra_args string, which now rides
+    # its own ``model_extra_args`` segment (split out from ``model_defaults`` so
+    # a user's free-form model extra_args is screened against the managed-arg
+    # denylist at launch; --jinja is not managed, so it passes through).
+    assert prov["--jinja"]["source"] == "model_extra_args"
     assert prov["--jinja"]["value"] is None
     # base-segment structural flags are credited to "base"
     assert prov["--model"]["source"] == "base"

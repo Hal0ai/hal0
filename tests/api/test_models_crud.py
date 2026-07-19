@@ -414,6 +414,67 @@ def test_put_single_quoted_json_extra_args_accepted(
     assert r.json()["defaults"]["extra_args"] == good
 
 
+# ── Deliverable 1: create screens too, + dry-run /validate ────────────────────
+
+
+def test_create_screens_managed_extra_args(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """POST create screens defaults.extra_args like PUT does — a smuggled
+    managed flag fails the write instead of persisting a row that rebinds a
+    slot at launch."""
+    fpath = crud_models_root / "cs1.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "cs1",
+            "path": str(fpath),
+            "defaults": {"extra_args": "--flash-attn on --port 9"},
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    # And nothing was written.
+    assert crud_client.get("/api/models/cs1").status_code == 404
+
+
+def test_create_screens_unknown_preferred_runner(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "cs2.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "cs2", "path": str(fpath), "preferred_runner": "does-not-exist"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.unknown_runner"
+
+
+def test_validate_accepts_clean_body(crud_client: TestClient) -> None:
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"defaults": {"extra_args": "-b 8192 --flash-attn on"}, "preferred_runner": "cpu"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
+def test_validate_rejects_managed_extra_args_without_writing(crud_client: TestClient) -> None:
+    """/validate is a dry run: it screens with the same envelope as create/PUT
+    and never touches the registry (no id required, nothing persisted)."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"id": "should-not-persist", "defaults": {"extra_args": "--model /etc/passwd"}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    assert crud_client.get("/api/models/should-not-persist").status_code == 404
+
+
 # ── Deliverable 3: duplicate-model endpoint ────────────────────────────────────
 
 
