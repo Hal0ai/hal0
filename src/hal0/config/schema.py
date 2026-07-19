@@ -2709,6 +2709,20 @@ class BrainChatConfig(BaseModel):
     loop (runaway backstop); ``completion_timeout_s`` is the transport timeout
     for each LLM round against the target slot.
 
+    Context floor (fresh-box finding, docs/rework/r4-stage-validation.md
+    "steward config note"): whichever slot ends up serving the chat --
+    ``model``/``tool_model`` here, the persona's ``preferred_model``, or the
+    ``hal0/brain`` -> ``agent`` resolver fallback -- MUST be loaded with at
+    least 8k tokens of context. The built-in hal0-brain system prompt alone
+    is ~7.3k tokens before any conversation history or tool schemas are
+    added; a smaller context window truncates the prompt and the steward
+    degrades silently (malformed tool calls, prompt-following failures)
+    rather than failing loudly. Separately, a ``model``/``tool_model`` (or
+    resolver fallback) that resolves to NO loaded slot at all 404s the self
+    ``/v1/chat/completions`` call outright -- surfaced by
+    :mod:`hal0.brain.chat` as an actionable SSE ``error`` frame (naming the
+    model tried and how to fix it) rather than the raw transport failure.
+
     ``extra="forbid"`` (P3-schema Part C): a leaf tunable table. Previously
     had no explicit ``model_config`` (pydantic's default is ``"ignore"``, not
     ``"allow"``) -- made explicit here rather than left implicit.
@@ -2725,6 +2739,10 @@ class BrainChatConfig(BaseModel):
     # Empty → persona preferred_model (hal0/brain). Set to a virtual slot model
     # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
     # explicit per-request ``model`` in the chat body still wins over this.
+    # Whatever slot this ends up pointing at (directly, via the persona, or
+    # via the hal0/brain -> agent resolver fallback) needs >= 8k context —
+    # the steward system prompt alone is ~7.3k tokens — and must actually be
+    # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
     # Route tool-calling turns to a capable, tool-format-compatible model. The
     # steward always offers tools, so when set this is the model its tool loop
