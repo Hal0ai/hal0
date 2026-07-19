@@ -25,6 +25,12 @@ podman --version                     # 150: 4.9.3 · 143: 5.7 — record
 
 ```bash
 hal0 update --source git             # target main @ rework-R4-stage / c91d0cf5
+# ⚠ SAME-VERSION TRAP (bit us on 143): 0.9.8 is unchanged, so an idempotent
+# reinstall may SKIP the venv refresh and leave old code running. Force it:
+sudo -u hal0 /path/to/venv/bin/pip install --force-reinstall --no-deps /path/to/checkout
+systemctl restart hal0-api
+hal0 --version && curl -s http://127.0.0.1:8080/api/system-info | grep -o '"podman_context[^,]*'
+#   ^ podman_context PRESENT in the response at all = new code is actually live
 hal0 doctor all && hal0 doctor perms # expect: NO .config/.local ownership findings
                                      # (those rows are RETIRED — a finding here is a bug)
 curl -s http://127.0.0.1:8080/api/health   # OPEN endpoint, must 200
@@ -130,9 +136,16 @@ grep -E "PodmanArgs|AutoRemove|GroupAdd|SecurityOpt|Network" /etc/containers/sys
 
 **Expect**: `--group-add`/`--security-opt` ONLY inside `PodmanArgs=`; NO
 `AutoRemove`/`GroupAdd=`/`SecurityOpt=` keys anywhere; identical render shape on
-BOTH boxes. Inference round-trip; slot delete tears down clean (143: zero
-netavark/netns errors in the journal — bridge is fine now that AutoRemove is gone;
-host-net is a SEPARATE queued lane, don't flip it this pass).
+BOTH boxes.
+
+**Split by substrate** (operator finding 2026-07-19): 143's bridge netns teardown
+still breaks slot lifecycle until the host-net lane lands — so:
+- **150**: full slot-load validation — inference round-trip, delete tears down clean.
+- **143**: render/introspection checks only (the grep above + unit generation), OR
+  hand-apply the validated host-net pair to the one test slot (`Network=host` +
+  Exec `--host 127.0.0.1`, per podman-unprivileged-findings.md) and round-trip
+  through that. Record which path you took. The renderer-owned fix is the queued
+  host-net lane — first post-redeploy dispatch.
 
 ## Phase 8 — Uninstall gate + wrap (10 min, one box)
 
