@@ -187,7 +187,45 @@ _TEXT_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL 
 _FUNCTION_TAG_RE = re.compile(
     r"<function=([A-Za-z0-9_.\-]+)>\s*(\{.*?\})?\s*</function>", re.DOTALL | re.IGNORECASE
 )
+# Attribute form emitted by the fpx8-agent steward / minicpm5 / hermes tool-use
+# templates: ``<function name="NAME"> ... </function>``. The body is EITHER a
+# JSON object OR nested ``<parameter name="k">v</parameter>`` tags (the antml
+# convention). ``name`` may be single- or double-quoted.
+_FUNCTION_ATTR_RE = re.compile(
+    r"""<function\s+name\s*=\s*["']([A-Za-z0-9_.\-]+)["']\s*>(.*?)</function>""",
+    re.DOTALL | re.IGNORECASE,
+)
+_PARAMETER_RE = re.compile(
+    r"""<parameter\s+name\s*=\s*["']([A-Za-z0-9_.\-]+)["']\s*>(.*?)</parameter>""",
+    re.DOTALL | re.IGNORECASE,
+)
+# The antml/hermes wrapper that brackets one or more attribute-form calls.
+_FUNCTION_CALLS_WRAP_RE = re.compile(
+    r"<function_calls>\s*(.*?)\s*</function_calls>", re.DOTALL | re.IGNORECASE
+)
 _FENCED_JSON_RE = re.compile(r"```(?:json|tool_call)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_attr_body(body: str) -> dict[str, Any]:
+    """Arguments from an attribute-form ``<function name=...>`` body.
+
+    Handles both shapes the tool-use templates emit: nested
+    ``<parameter name="k">v</parameter>`` tags (each value JSON-decoded when it
+    parses, else kept as the raw string), or a plain JSON object body.
+    """
+    params = _PARAMETER_RE.findall(body)
+    if params:
+        args: dict[str, Any] = {}
+        for key, raw in params:
+            val = raw.strip()
+            try:
+                args[key] = json.loads(val)
+            except ValueError:
+                args[key] = val
+        return args
+    if body.strip().startswith("{"):
+        return _coerce_args(body.strip())
+    return {}
 
 
 def _coerce_args(raw: Any) -> dict[str, Any]:
@@ -240,12 +278,17 @@ def parse_text_tool_calls(
             calls.append({"id": f"txt-{len(calls)}-{name}", "name": name, "arguments": args})
             spans.append(span)
 
-    # 1) <tool_call>...</tool_call> — JSON body or a nested <function=...> tag.
+    # 1) <tool_call>...</tool_call> — JSON body, nested <function=...> tag, or
+    #    the attribute-form <function name="..."> tag.
     for m in _TEXT_TOOLCALL_RE.finditer(text):
         body = m.group(1).strip()
         fn = _FUNCTION_TAG_RE.search(body)
         if fn:
             _accept(fn.group(1), _coerce_args(fn.group(2) or "{}"), m.span())
+            continue
+        attr = _FUNCTION_ATTR_RE.search(body)
+        if attr:
+            _accept(attr.group(1), _parse_attr_body(attr.group(2)), m.span())
             continue
         try:
             parsed = _toolcall_from_obj(json.loads(body))
@@ -254,13 +297,39 @@ def parse_text_tool_calls(
         if parsed:
             _accept(parsed[0], parsed[1], m.span())
 
-    # 2) bare <function=NAME>{...}</function> outside a wrapper.
+    # 2) <function_calls>…</function_calls> wrapper (antml/hermes) holding one or
+    #    more attribute-form <function name="NAME"> tags — the whole wrapper is a
+    #    single span so its bracket tags never leak into the visible reply.
+    for m in _FUNCTION_CALLS_WRAP_RE.finditer(text):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        before = len(calls)
+        for fm in _FUNCTION_ATTR_RE.finditer(m.group(1)):
+            name = fm.group(1)
+            if name in known_names:
+                calls.append(
+                    {
+                        "id": f"txt-{len(calls)}-{name}",
+                        "name": name,
+                        "arguments": _parse_attr_body(fm.group(2)),
+                    }
+                )
+        if len(calls) > before:
+            spans.append(m.span())
+
+    # 3) bare attribute-form <function name="NAME">…</function> outside a wrapper.
+    for m in _FUNCTION_ATTR_RE.finditer(text):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        _accept(m.group(1), _parse_attr_body(m.group(2)), m.span())
+
+    # 4) bare <function=NAME>{...}</function> outside a wrapper.
     for m in _FUNCTION_TAG_RE.finditer(text):
         if any(s <= m.start() < e for s, e in spans):
             continue
         _accept(m.group(1), _coerce_args(m.group(2) or "{}"), m.span())
 
-    # 3) fenced ```json {...}``` blocks.
+    # 5) fenced ```json {...}``` blocks.
     for m in _FENCED_JSON_RE.finditer(text):
         if any(s <= m.start() < e for s, e in spans):
             continue
@@ -271,7 +340,7 @@ def parse_text_tool_calls(
         if parsed:
             _accept(parsed[0], parsed[1], m.span())
 
-    # 4) the whole trimmed reply is a single JSON tool-call object.
+    # 6) the whole trimmed reply is a single JSON tool-call object.
     if not calls:
         stripped = text.strip()
         if stripped.startswith("{") and stripped.endswith("}"):
