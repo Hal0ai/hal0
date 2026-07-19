@@ -457,6 +457,104 @@ def test_install_hermes_gateway_warns_without_raising_when_unit_missing(monkeypa
     ac._install_hermes_gateway()  # must not raise
 
 
+# ── --reset-personas (explicit, opt-in canonical persona overwrite) ──────────
+#
+# RELOCATE(brain-lane) moved persona seeding out of `_INSTALL_STEPS` and into
+# the hal0-api boot lifespan's `_boot_seeds` phase, which seeds idempotently
+# (overwrite=False — never touches an existing persona file). That silently
+# dropped `hal0 agent install hermes --repair`'s old implicit force-reset of
+# personas to canonical. `--reset-personas` is the explicit, opt-in
+# replacement: it reuses `hermes_provision._phase_persona_seed`'s existing
+# overwrite path (no persona-writing logic duplicated in the CLI layer) via
+# `ac._reset_hermes_personas`.
+
+
+def test_reset_hermes_personas_overwrites_divergent_file(monkeypatch, tmp_path) -> None:
+    """`_reset_hermes_personas` force-overwrites even a hand-edited persona
+    file back to canonical — the exact behavior --repair used to have."""
+    from hal0.agents import personas as _personas
+
+    var_lib_root = tmp_path / "var-lib"
+    monkeypatch.setattr("hal0.config.paths.var_lib", lambda: var_lib_root)
+
+    # First call seeds the canonical defaults fresh (nothing existed yet).
+    ac._reset_hermes_personas()
+    persona_path = var_lib_root / ".hermes" / "personas" / "hermes.toml"
+    assert persona_path.exists()
+    assert _personas.load_persona("hermes", root=persona_path.parent).display_name == "Hermes"
+
+    # Operator hand-edits the persona (diverges from canonical).
+    persona_path.write_text('[persona]\nid = "hermes"\ndisplay_name = "Custom"\n', encoding="utf-8")
+    assert _personas.load_persona("hermes", root=persona_path.parent).display_name == "Custom"
+
+    # --reset-personas forces it back to canonical, overwriting the edit.
+    ac._reset_hermes_personas()
+    assert _personas.load_persona("hermes", root=persona_path.parent).display_name == "Hermes"
+
+
+def test_install_hermes_without_reset_personas_flag_leaves_personas_untouched(
+    monkeypatch,
+) -> None:
+    """Default `hal0 agent install hermes` (no --reset-personas) never calls
+    the overwrite path — existing personas are preserved exactly as-is."""
+    called = {"reset": False}
+    monkeypatch.setattr(ac, "_reset_hermes_personas", lambda: called.__setitem__("reset", True))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 0})())
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", lambda **_k: 0, raising=True)
+    monkeypatch.setattr(ac, "api_post", lambda *_a, **_k: {})
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+
+    ac._install_hermes(switch=False, gateway=False)  # reset_personas defaults to False
+
+    assert called["reset"] is False
+
+
+def test_install_hermes_reset_personas_flag_triggers_overwrite_path(monkeypatch) -> None:
+    """`_install_hermes(reset_personas=True)` calls the overwrite path after
+    provisioning succeeds."""
+    called = {"reset": False}
+    monkeypatch.setattr(ac, "_reset_hermes_personas", lambda: called.__setitem__("reset", True))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 0})())
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", lambda **_k: 0, raising=True)
+    monkeypatch.setattr(ac, "api_post", lambda *_a, **_k: {})
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+
+    ac._install_hermes(switch=False, gateway=False, reset_personas=True)
+
+    assert called["reset"] is True
+
+
+def test_install_hermes_reset_personas_cli_flag_parses_and_forwards(monkeypatch) -> None:
+    """`hal0 agent install hermes --reset-personas` — the Typer flag itself
+    parses and forwards through to `_install_hermes`."""
+    from typer.testing import CliRunner
+
+    captured: dict[str, Any] = {}
+
+    def _fake_install_hermes(*, switch, gateway=True, reset_personas=False):  # type: ignore[no-untyped-def]
+        captured["switch"] = switch
+        captured["gateway"] = gateway
+        captured["reset_personas"] = reset_personas
+
+    monkeypatch.setattr(ac, "_install_hermes", _fake_install_hermes)
+
+    runner = CliRunner()
+    res = runner.invoke(ac.app, ["install", "hermes", "--reset-personas"])
+
+    assert res.exit_code == 0, res.output
+    assert captured["reset_personas"] is True
+
+    # Absent by default — the wiring doesn't force it on.
+    captured.clear()
+    res2 = runner.invoke(ac.app, ["install", "hermes"])
+    assert res2.exit_code == 0, res2.output
+    assert captured["reset_personas"] is False
+
+
 # ── Single-pick enforcement (Finding 11) ─────────────────────────────────────
 #
 # `hal0 agent install hermes` provisions locally (toolchain + bootstrap_cli)

@@ -78,6 +78,19 @@ def agent_install(
             "without the messaging bridge."
         ),
     ),
+    reset_personas: bool = typer.Option(
+        False,
+        "--reset-personas",
+        help=(
+            "Hermes only: force-overwrite the default personas (hermes, "
+            "hal0-brain) and the active.txt pointer back to canonical, even "
+            "over operator edits. Without this flag, personas are only ever "
+            "seeded idempotently (missing defaults added, existing files "
+            "untouched) — this is the explicit, opt-in reset that "
+            "--repair used to do implicitly before RELOCATE(brain-lane) "
+            "moved persona seeding out of the install pipeline."
+        ),
+    ),
 ) -> None:
     """Install a bundled agent.
 
@@ -94,7 +107,7 @@ def agent_install(
     #1102 / decision Q9.
     """
     if name == "hermes":
-        _install_hermes(switch=switch, gateway=gateway)
+        _install_hermes(switch=switch, gateway=gateway, reset_personas=reset_personas)
         return
 
     url = _api_base()
@@ -115,15 +128,15 @@ def agent_install(
     )
 
 
-def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
+def _install_hermes(*, switch: bool, gateway: bool = True, reset_personas: bool = False) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
-    Five steps, all local + foreground:
+    Six steps, all local + foreground:
 
     0. **Single-pick** — :func:`_enforce_hermes_single_pick` refuses (or,
        with ``--switch``, uninstalls) a different incumbent bundled agent
        BEFORE any provisioning side effect — see its docstring for why this
-       can't wait for the daemon call in step 3.
+       can't wait for the daemon call in step 4.
     1. **Toolchain** — ``installer/agents/hermes-prereqs.sh`` ensures
        python3 (>=3.11), python3-venv (the clean-Ubuntu trap), python3-pip
        and pipx via the distro helper. Idempotent.
@@ -131,10 +144,15 @@ def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
        pip-installs hermes-agent into it, installs the
        ``/usr/local/bin/hermes`` shim, and writes the manager seed
        (registers the agent).
-    3. **Switch** — best-effort daemon call so ``--switch`` still does the
+    3. **Reset personas** — (``reset_personas=True``, opt-in) force-overwrite
+       the default personas + ``active.txt`` pointer to canonical via
+       :func:`_reset_hermes_personas`. Skipped by default: personas are
+       otherwise only ever idempotently seeded (by the hal0-api boot
+       lifespan's ``_boot_seeds`` phase), never overwritten.
+    4. **Switch** — best-effort daemon call so ``--switch`` still does the
        atomic single-pick swap; provisioning already registered hermes, so
        a daemon hiccup here doesn't un-provision it.
-    4. **Gateway** — (``gateway=True``, the default) install + enable the
+    5. **Gateway** — (``gateway=True``, the default) install + enable the
        Telegram/Discord gateway, the same wiring installer/install.sh runs
        inline at install time. This is what makes the DEFERRED path (run
        manually after ``HAL0_SKIP_HERMES=1``) lossless vs. install-time
@@ -190,6 +208,13 @@ def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
     # §7.4 F.7: no chown-back — provisioning drops to hal0 (see _provision_hermes)
     # so the trees are born hal0:hal0.
 
+    # Explicit, opt-in canonical reset — see _reset_hermes_personas docstring.
+    # Runs AFTER provisioning (HERMES_HOME + the personas dir now exist) and
+    # BEFORE the register/gateway steps so a fresh install with --reset-personas
+    # and a repeat install both converge on the same canonical persona state.
+    if reset_personas:
+        _reset_hermes_personas()
+
     # Register + honour --switch via the daemon (venv now present → gate passes).
     url = _api_base()
     if not _api_unreachable(url):
@@ -216,6 +241,43 @@ def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
             border_style="green",
         )
     )
+
+
+def _reset_hermes_personas() -> None:
+    """Force-overwrite the default personas + ``active.txt`` pointer to canonical.
+
+    ``--reset-personas`` is the explicit, opt-in replacement for the
+    force-reset ``hal0 agent install hermes --repair`` used to do implicitly
+    before RELOCATE(brain-lane) moved persona seeding out of
+    ``hermes_provision._INSTALL_STEPS`` and into the hal0-api boot lifespan's
+    ``_boot_seeds`` phase (which seeds idempotently — ``overwrite=False`` —
+    and never resets an operator's edits). That overwrite behaviour still
+    exists: :func:`hal0.agents.hermes_provision._phase_persona_seed` (kept
+    importable specifically for this — see its module comment) sets
+    ``overwrite = ctx.repair``, so constructing a ``_StepCtx`` with
+    ``repair=True`` and calling it directly re-triggers the exact same
+    overwrite path with no persona-writing logic duplicated here.
+
+    Resolves ``$HERMES_HOME`` the same way the boot lifespan's ``_boot_seeds``
+    does (``paths.var_lib() / ".hermes"``) so an install-time reset and the
+    next boot-time idempotent seed agree on one persona root — including
+    under ``HAL0_HOME``-scoped dev/test installs.
+    """
+    from hal0.agents.hermes_provision import (
+        BootstrapState,
+        InstallIO,
+        _phase_persona_seed,
+        _StepCtx,
+    )
+    from hal0.config import paths as _hal0_paths
+
+    console.print("[bold]--reset-personas[/bold]: overwriting default personas to canonical…")
+    hermes_home = _hal0_paths.var_lib() / ".hermes"
+    state = BootstrapState(hermes_home=str(hermes_home))
+    ctx = _StepCtx(state=state, io=InstallIO(), repair=True)
+    result = _phase_persona_seed(ctx)
+    seeded = result.details.get("seeded") or []
+    console.print(f"[dim]personas reset to canonical: {', '.join(seeded) or '(none)'}[/dim]")
 
 
 def _bundled_agent_manager() -> Any:
