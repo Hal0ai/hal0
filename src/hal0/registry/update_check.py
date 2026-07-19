@@ -140,7 +140,7 @@ def evaluate_model_update(
     if remote_sha is None:
         # Exact repo-relative path missed — fall back to a UNIQUE basename
         # match. A row whose stored hf_filename dropped the upstream subdir
-        # prefix (hand-registered rows, legacy imports) would otherwise
+        # prefix (hand-registered or path-added rows) would otherwise
         # silently never flag even though the file is right there under
         # ``<quant>/<file>``. Guarded on a single distinct sha so an
         # ambiguous basename (the same filename under two quant dirs) is
