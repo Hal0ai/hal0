@@ -1417,7 +1417,17 @@ def _build_config_overlay(
     ]
 
     # mcp_servers via config set (NOT `hermes mcp add` — interactive/hangs).
-    # No Bearer; agent identity flows via X-hal0-Agent.
+    # Agent identity flows via X-hal0-Agent; the `/mcp` mount is ADMIN-classed
+    # (security/exposure.py), so once auth is on the box the request also
+    # needs a bearer — the SAME box service identity the CLI/steward
+    # self-calls use (hal0.service_identity, env → api.env). Resolved once
+    # per overlay build so a re-provision picks up a rotated key (rotation
+    # itself is NOT live-propagated into this static config.yaml — an
+    # operator/`--repair` re-run of provisioning is what re-reads the
+    # current key and rewrites the overlay).
+    from hal0.service_identity import service_key
+
+    bearer = service_key(prefer="admin")
     for srv in mcp_servers:
         name = srv["name"]
         pairs += [
@@ -1426,6 +1436,8 @@ def _build_config_overlay(
             (f"mcp_servers.{name}.headers.X-hal0-Agent", agent_id),
             (f"mcp_servers.{name}.timeout", srv.get("timeout", 60)),
         ]
+        if bearer:
+            pairs.append((f"mcp_servers.{name}.headers.Authorization", f"Bearer {bearer}"))
         if srv.get("private"):
             pairs.append((f"mcp_servers.{name}.headers.X-hal0-Private", "1"))
 
@@ -2000,10 +2012,18 @@ def _probe_mcp_server(
     Uses stdlib urllib because the bootstrap can't assume httpx is
     installed in the hal0 daemon's venv (it usually is — but keeping
     this stdlib-only means env_probe can run on a minimal install).
+
+    The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so once
+    auth is on the box this probe needs a bearer too, same as the
+    provisioned config it's validating — resolved fresh on every call from
+    the box service identity (:func:`hal0.service_identity.service_key`),
+    so a mid-install key rotation is picked up on the very next probe.
     """
     import contextlib
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
+
+    from hal0.service_identity import service_key
 
     transport_url = url.rstrip("/") + "/mcp"
     base_headers = {
@@ -2011,6 +2031,9 @@ def _probe_mcp_server(
         "Accept": "application/json, text/event-stream",
         "X-hal0-Agent": agent_id,
     }
+    bearer = service_key(prefer="admin")
+    if bearer:
+        base_headers["Authorization"] = f"Bearer {bearer}"
     if private:
         base_headers["X-hal0-Private"] = "1"
 
@@ -3061,20 +3084,36 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
     to the brain identity (``X-hal0-Agent: hermes__hal0-brain``); memory is
     private (its own 3-tier bank). google_workspace/hal0-browser are
     deliberately NOT included — the steward gets platform control + memory only.
+
+    The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
+    the top-level overlay — a bearer is attached from the box service identity
+    (:func:`hal0.service_identity.service_key`) whenever one is discoverable.
+    Resolved fresh on every call: :func:`_phase_brain_profile_mcp_wire` re-runs
+    this (and re-diffs the merge) on every provision/``--repair`` pass, so a
+    rotated key is re-propagated the next time provisioning runs — the static
+    config.yaml itself does not update live on rotation.
     """
     from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+    from hal0.service_identity import service_key
+
+    bearer = service_key(prefer="admin")
+    admin_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID}
+    memory_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": 1}
+    if bearer:
+        admin_headers["Authorization"] = f"Bearer {bearer}"
+        memory_headers["Authorization"] = f"Bearer {bearer}"
 
     return {
         "hal0-admin": {
             "type": "http",
             "url": "http://127.0.0.1:8080/mcp/admin/mcp",
-            "headers": {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID},
+            "headers": admin_headers,
             "timeout": 60,
         },
         "hal0-memory": {
             "type": "http",
             "url": "http://127.0.0.1:8080/mcp/memory/mcp",
-            "headers": {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": 1},
+            "headers": memory_headers,
             "timeout": 30,
         },
     }
