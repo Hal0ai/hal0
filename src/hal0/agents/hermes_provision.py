@@ -5047,7 +5047,6 @@ def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
 def bootstrap_cli(
     *,
     repair: bool,
-    adopt: bool = False,
     dry_run: bool = False,
     skip_phases: tuple[str, ...] = (),
     verbose: bool = False,
@@ -5055,10 +5054,12 @@ def bootstrap_cli(
 ) -> int:
     """CLI entry point — thin delegator to :func:`install_hermes`.
 
-    Returns a POSIX exit code (0 = success, 1 = any step failed). ``adopt`` and
-    ``skip_phases`` are retired no-ops kept in the signature so the existing
-    ``hal0 agent bootstrap`` flags keep parsing; ``dry_run`` suppresses the
-    last-run report write.
+    Returns a POSIX exit code (0 = success, 1 = any step failed). The
+    ``--adopt`` capture flag is retired (spec-retired, O14): the single-managed
+    HERMES_HOME model means hal0 owns the tree by construction, so there is no
+    foreign install to capture. ``skip_phases`` is a retired no-op kept in the
+    signature so the existing ``hal0 agent bootstrap`` flags keep parsing;
+    ``dry_run`` suppresses the last-run report write.
     """
     report = install_hermes(
         repair=repair,

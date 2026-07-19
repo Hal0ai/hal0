@@ -78,15 +78,6 @@ def agent_install(
             "without the messaging bridge."
         ),
     ),
-    adopt: bool = typer.Option(
-        False,
-        "--adopt",
-        help=(
-            "Hermes only: capture an existing (foreign) install — back up "
-            "$HERMES_HOME, import its .env tokens, then claim it. Without this, "
-            "a foreign home or a live foreign gateway aborts provisioning."
-        ),
-    ),
 ) -> None:
     """Install a bundled agent.
 
@@ -103,7 +94,7 @@ def agent_install(
     #1102 / decision Q9.
     """
     if name == "hermes":
-        _install_hermes(switch=switch, gateway=gateway, adopt=adopt)
+        _install_hermes(switch=switch, gateway=gateway)
         return
 
     url = _api_base()
@@ -124,7 +115,7 @@ def agent_install(
     )
 
 
-def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) -> None:
+def _install_hermes(*, switch: bool, gateway: bool = True) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
     Five steps, all local + foreground:
@@ -189,7 +180,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     # §7.4: when invoked as root this drops to the hal0 user so every HERMES_HOME
     # write is born hal0:hal0 (root-only prelude + re-exec). Non-root runs the
     # pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes(adopt=adopt)
+    rc = _provision_hermes()
     if rc != 0:
         die(
             "Hermes provisioning failed — inspect `hal0 agent status hermes` / `hal0 agent log hermes`."
@@ -427,7 +418,6 @@ def _run_as_hal0(argv: list[str]) -> int:
 def _provision_hermes(
     *,
     repair: bool = False,
-    adopt: bool = False,
     dry_run: bool = False,
     skip_phases: tuple[str, ...] = (),
     offline: bool = False,
@@ -447,7 +437,6 @@ def _provision_hermes(
     if _os.geteuid() != 0:
         return bootstrap_cli(
             repair=repair,
-            adopt=adopt,
             dry_run=dry_run,
             skip_phases=tuple(skip_phases),
             verbose=verbose,
@@ -458,8 +447,6 @@ def _provision_hermes(
     argv = [hal0_bin, "agent", "bootstrap", "hermes"]
     if repair:
         argv.append("--repair")
-    if adopt:
-        argv.append("--adopt")
     if dry_run:
         argv.append("--dry-run")
     for phase in skip_phases:
@@ -1119,31 +1106,12 @@ def agent_peers() -> None:
     console.print(table)
 
 
-@bootstrap_app.command(
-    "hermes",
-    epilog=(
-        "CAPTURE: a populated $HERMES_HOME that hal0 didn't create, or a live "
-        "foreign hermes-gateway (e.g. a `systemctl --user` unit), aborts the run. "
-        "Pass --adopt to capture it safely: hal0 backs up the tree to "
-        "<home>.pre-hal0-<UTC>, imports its .env tokens into the vault, then "
-        "claims it. Operator config overrides deep-merge from "
-        "/etc/hal0/agents/hermes/overrides.yaml (applied last)."
-    ),
-)
+@bootstrap_app.command("hermes")
 def bootstrap_hermes(
     repair: bool = typer.Option(
         False,
         "--repair",
         help="Re-run every phase regardless of checkpoint state (forces full rerun).",
-    ),
-    adopt: bool = typer.Option(
-        False,
-        "--adopt",
-        help=(
-            "Capture an existing (foreign) hermes install: back up $HERMES_HOME, "
-            "import its .env tokens into the vault, then claim it. Without this, a "
-            "foreign home or a live foreign gateway aborts the run."
-        ),
     ),
     dry_run: bool = typer.Option(
         False,
@@ -1173,7 +1141,6 @@ def bootstrap_hermes(
     # as hal0), else runs the pipeline in-process. See _provision_hermes.
     rc = _provision_hermes(
         repair=repair,
-        adopt=adopt,
         dry_run=dry_run,
         skip_phases=tuple(skip_phase),
         offline=offline,
