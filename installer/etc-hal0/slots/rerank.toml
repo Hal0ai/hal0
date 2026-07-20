@@ -22,3 +22,7 @@ threads = 0
 
 [model]
 context_size = 4096
+
+[server]
+# llama-server reranking mode (serves /rerank + /v1/rerank natively).
+extra_args = "--reranking"
