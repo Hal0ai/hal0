@@ -4,8 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="theme-color" content="#0a0a0a" />
-<title>hal0 — Install &amp; Migration Guide (v1.0.0 · R5)</title>
-<meta name="description" content="hal0 v1.0.0 — install, first-run, and upgrade/migration guide for new and existing operators. Local AI inference appliance: container-runtime slots, ROCm/Vulkan/NPU, OmniRouter, Hermes agents, Hindsight memory." />
+<title>hal0 — Install &amp; Migration Guide (v1.0.0-alpha.0 · R5)</title>
+<meta name="description" content="hal0 v1.0.0-alpha.0 — install, first-run, and upgrade/migration guide for new and existing operators. Local AI inference appliance: container-runtime slots, ROCm/Vulkan/NPU, OmniRouter, Hermes agents, Hindsight memory." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -172,7 +172,7 @@ footer .mono{font-family:var(--jbm)}
     <circle cx="12" cy="12" r="3" fill="#FFB000"/>
   </svg>
   <span class="name">hal0</span>
-  <span class="ver">v1.0.0</span>
+  <span class="ver">v1.0.0-alpha.0</span>
   <span class="rel">Install &amp; Migration Guide · R5</span>
   <span class="spacer"></span>
   <a class="tlink" href="#new">New install</a>
@@ -205,7 +205,7 @@ footer .mono{font-family:var(--jbm)}
 
 <div class="hero" id="overview">
   <h1>Set up <span class="halo">hal0</span> — the local AI inference appliance</h1>
-  <p>hal0 runs open models on your own hardware: every inference slot is its own podman container supervised by systemd, with a control-plane dashboard on <code>:8080</code>, OmniRouter, Hermes agents, and Hindsight memory. This guide covers a <strong>fresh install</strong> for new operators and an <strong>in-place upgrade</strong> for existing boxes — plus the full <strong>R5 / v1.0.0</strong> changelog.</p>
+  <p>hal0 runs open models on your own hardware: every inference slot is its own podman container supervised by systemd, with a control-plane dashboard on <code>:8080</code>, OmniRouter, Hermes agents, and Hindsight memory. This guide covers a <strong>fresh install</strong> for new operators and an <strong>in-place upgrade</strong> for existing boxes — plus the full <strong>R5 / v1.0.0-alpha.0</strong> changelog.</p>
   <div class="cta">
     <a class="btn primary" href="#new">Install hal0 →</a>
     <a class="btn" href="#upgrade">I'm upgrading →</a>
@@ -221,7 +221,7 @@ footer .mono{font-family:var(--jbm)}
 
 <div class="note acc">
   <span class="tag">Validated</span>
-  <p>v1.0.0's installer was live-validated on two substrates — <span class="pill rocm">podman 4.9.3 · privileged</span> and <span class="pill vulkan">podman 5.7 · unprivileged</span> — both a clean fresh install and an in-place upgrade, exit 0, non-destructive.</p>
+  <p>v1.0.0-alpha.0's installer was live-validated on two substrates — <span class="pill rocm">podman 4.9.3 · privileged</span> and <span class="pill vulkan">podman 5.7 · unprivileged</span> — both a clean fresh install and an in-place upgrade, exit 0, non-destructive.</p>
 </div>
 
 <hr class="sep"/>
@@ -255,7 +255,7 @@ footer .mono{font-family:var(--jbm)}
 
   <h3>Inference backends</h3>
   <div class="grid c2">
-    <div class="card"><h4><span class="pill vulkan">Vulkan</span> recommended on Strix Halo</h4><p class="k">RADV/Vulkan benchmarked <strong>+40% prefill · +16% gen · −30% TTFT</strong> vs ROCm on the same weights (unified-memory APUs). v1.0.0 standardizes shared APU models on Vulkan.</p></div>
+    <div class="card"><h4><span class="pill vulkan">Vulkan</span> recommended on Strix Halo</h4><p class="k">RADV/Vulkan benchmarked <strong>+40% prefill · +16% gen · −30% TTFT</strong> vs ROCm on the same weights (unified-memory APUs). v1.0.0-alpha.0 standardizes shared APU models on Vulkan.</p></div>
     <div class="card"><h4><span class="pill rocm">ROCm</span> · <span class="pill npu">NPU</span> · <span class="pill cpu">CPU</span></h4><p class="k">ROCm/HIP for discrete AMD, AMDXDNA NPU via FastFlowLM, and a fully-supported CPU path. hal0 picks per-model at launch; you can pin a device.</p></div>
   </div>
 
@@ -335,7 +335,7 @@ curl -fsS <span class="str">http://127.0.0.1:8080/api/health</span></pre>
 hal0 model pull <span class="str">&lt;model&gt;</span>
 hal0 slot create <span class="str">my-slot</span> <span class="flag">--model</span> <span class="str">&lt;model&gt;</span> <span class="flag">--provider</span> llama-server
 hal0 chat <span class="flag">--slot</span> <span class="str">my-slot</span></pre>
-  <div class="note info"><span class="tag">Note · v1.0.0</span><p>Flags now belong to <strong>models</strong>, not slots. Set launch tuning on the model's defaults; slots carry only identity + which model + port. See <a href="#changelog">FLAGS-own</a> below.</p></div>
+  <div class="note info"><span class="tag">Note · v1.0.0-alpha.0</span><p>Models own logical behavior such as chat templates. Physical launch facts — device, NGL, threads, binary, profile, and image pin — belong to the slot.</p></div>
 </section>
 
 <hr class="sep"/>
@@ -357,62 +357,149 @@ sudo hal0 update</pre>
 
 <section id="migrations">
   <h3>Migrations (run deliberately, at a window)</h3>
+  <p class="lead">The current CLI ships several one-shot migrations. <strong>None run automatically</strong> on boot or update. Preview each plan, apply it deliberately, then verify the result.</p>
+
+  <h4>The migrate CLI at a glance</h4>
   <table>
-    <thead><tr><th>Migration</th><th>Who needs it</th><th>How</th></tr></thead>
+    <thead><tr><th>Command</th><th>Purpose</th><th>Default</th><th>Key flags</th></tr></thead>
     <tbody>
       <tr>
-        <td><strong>Honcho → Hindsight</strong><br><span class="k">memory engine</span></td>
-        <td>Only boxes that ran Honcho. Memory is now Hindsight-only.</td>
-        <td><code>hal0 memory migrate --from honcho --to hindsight</code> <em>before</em> the upgrade. Most boxes are already Hindsight → <span class="pill ok">no-op</span>.</td>
+        <td><code>hal0 migrate model-layout</code></td>
+        <td>Create the canonical <code>&lt;recipe&gt;/&lt;capability&gt;/</code> symlink tree for a v0.1.x model store. Model files stay in place.</td>
+        <td>dry-run</td>
+        <td><code>--apply</code> · <code>--force</code>/<code>-f</code> · <code>--registry</code> · <code>--mount-root</code> · <code>--canonical-root</code></td>
       </tr>
       <tr>
-        <td><strong>Slot-flag fold</strong><br><span class="k">FLAGS-own</span></td>
-        <td>Boxes whose slots carried device/flag/template overrides (now owned by models).</td>
-        <td>Operator-run migrator folds slot tunes into model defaults. <strong>Refuses</strong> (no partial write) if slots share a model with <em>divergent</em> tunes — resolve by canonicalizing or splitting per model first. Dry-run by default.</td>
+        <td><code>hal0 slot migrate-hw</code></td>
+        <td>Restore slot-owned hardware values: NGL, runner binary, and deliberate image pins.</td>
+        <td>dry-run</td>
+        <td><code>--apply</code> · <code>--yes</code>/<code>-y</code> · <code>--stop-services</code></td>
       </tr>
       <tr>
-        <td><strong>Slot id-keying</strong><br><span class="k">SLOT-B</span></td>
-        <td>Optional operability upgrade (runtime-identity change, not functional).</td>
-        <td><code>hal0 slot migrate-id-keying</code> in a downtime window (takes a pre-flight backup). The runtime reads either layout; the flip is deliberate + reversible.</td>
+        <td><code>hal0 slot migrate-id-keying</code></td>
+        <td>Flip every slot artefact from name-keyed (<code>&lt;name&gt;.toml</code>, <code>hal0-slot@&lt;name&gt;</code>) to id-keyed (<code>&lt;id&gt;.toml</code>, <code>hal0-slot@&lt;id&gt;</code>).</td>
+        <td>apply after confirmation</td>
+        <td><code>--dry-run</code> · <code>--yes</code>/<code>-y</code> · <code>--stop-services</code></td>
+      </tr>
+      <tr>
+        <td><code>hal0 memory migrate --from honcho --to hindsight</code></td>
+        <td>One-shot memory-engine migration; only needed if you ran Honcho.</td>
+        <td>apply; use <code>--dry-run</code> to preview</td>
+        <td><code>--dry-run</code> · <code>--agent</code> · <code>--dataset</code> · <code>--since</code> · <code>--resume</code></td>
       </tr>
     </tbody>
   </table>
 
-  <div class="note err"><span class="tag">Ordering — important</span><p>The slot-flag migrator <strong>refuses the whole run</strong> if any shared model has divergent slot tunes (a safety guard against silently picking a winner). Resolve each shared model first, then re-run. Back up <code>/var/lib/hal0/hal0.db</code> + <code>/etc/hal0/slots</code> + <code>/var/lib/hal0/slots</code> before any apply.</p></div>
+  <h4><code>hal0 migrate model-layout</code> — end-to-end</h4>
+  <p>Use this for a v0.1.x model store under <code>/mnt/ai-models/</code>. It builds the canonical symlink tree under <code>/var/lib/hal0/models/</code>.</p>
+  <p><strong>Model files are never moved or copied.</strong> The command is dry-run by default and idempotent after a successful apply.</p>
+
+  <p><strong>Standard usage</strong> — plan, apply, verify:</p>
+  <pre data-label="shell"><span class="cmt"># 1. Plan the move. No files written. Read the action table.</span>
+sudo hal0 migrate model-layout
+<span class="cmt"># → table of: action / link / target / source / reason</span>
+<span class="cmt"># → "planned by leaf" rollup</span>
+<span class="cmt"># → "--dry-run — would create N symlink(s); pass --apply to write."</span>
+
+<span class="cmt"># 2. Apply.</span>
+sudo hal0 migrate model-layout --apply
+<span class="cmt"># → "applied N symlink(s) under /var/lib/hal0/models."</span>
+<span class="cmt"># Idempotent — re-running --apply after success is a no-op.</span>
+
+<span class="cmt"># 3. Verify. Exit 0 means current; exit 1 means links are still pending.</span>
+sudo hal0 doctor migrations
+sudo hal0 doctor models
+find /var/lib/hal0/models -type l</pre>
+
+  <div class="note ok"><span class="tag">Source data stays put</span><p>The command writes only symlinks under <code>--canonical-root</code>. It does not modify the source files under <code>--mount-root</code>.</p><p>To roll back, remove only the links listed by the dry-run/apply table. Do not delete model source files.</p></div>
+
+  <div class="note warn"><span class="tag">Flags worth knowing</span><p><code>--force</code> overwrites a differing symlink, but never a non-symlink file. Review every <code>would-overwrite</code> row before using it.</p><p>Use <code>--registry</code>, <code>--mount-root</code>, and <code>--canonical-root</code> only when your paths differ from the FHS defaults.</p></div>
+
+  <h4><code>hal0 slot migrate-hw</code> — end-to-end</h4>
+  <p>This migration restores physical settings to slots: NGL, runner binary, and deliberate image pins. It also clears the folded model hardware columns.</p>
+  <p>The bare command is a dry-run. <code>--apply</code> rewrites slot TOMLs and the registry DB after creating a timestamped backup.</p>
+
+  <pre data-label="shell"><span class="cmt"># 1. Preview the fold (no files written, no columns nulled).</span>
+sudo hal0 slot migrate-hw
+<span class="cmt"># → per-slot list of: set_ngl · set_binary · set_image_pin · drops</span>
+
+<span class="cmt"># 2. Apply. Let the CLI stop active hal0 units.</span>
+sudo hal0 slot migrate-hw --apply --yes --stop-services
+<span class="cmt"># → "backup written to /var/lib/hal0/backups/&lt;timestamped&gt;.tar.gz"</span>
+<span class="cmt"># → "Applied hardware-ownership fold: ..."</span>
+<span class="cmt"># → "Restart hal0-api (and daemon-reload) to pick up the slot HW grid."</span>
+
+sudo systemctl daemon-reload
+sudo systemctl start hal0-api
+hal0 doctor                          <span class="cmt"># expect all-green for slots</span></pre>
+
+  <div class="note err"><span class="tag">Safeguard</span><p><code>--apply</code> refuses while <code>hal0-api</code> or any <code>hal0-slot@*</code> unit is active. Stop them first, or pass <code>--stop-services</code>.</p><p>The bare command is the dry-run; this subcommand has no separate <code>--dry-run</code> flag.</p></div>
+
+  <h4><code>hal0 slot migrate-id-keying</code> — end-to-end</h4>
+  <p>This optional migration changes slot artefacts from mutable-name keys to stable IDs. It renames the TOML, state directory, systemd unit, and podman container.</p>
+  <p>Run it only after upgrading to the bilingual id-keying runtime. See the <a href="https://hal0.dev/docs/operate/slot-id-keying-migration">full runbook</a> before applying.</p>
+
+  <pre data-label="shell"><span class="cmt"># 1. Stop hal0. Even the preview refuses while these units are active.</span>
+sudo systemctl stop 'hal0-slot@*' hal0-api
+
+<span class="cmt"># 2. Preview — prints the computed name→id plan, no file moves.</span>
+sudo hal0 slot migrate-id-keying --dry-run
+
+<span class="cmt"># 3. Apply. The command backs up slots/ + hal0.db, then flips artefacts.</span>
+sudo hal0 slot migrate-id-keying --yes
+
+sudo systemctl daemon-reload
+sudo systemctl start hal0-api
+hal0 slot list                       <span class="cmt"># confirm every slot appears once</span>
+systemctl list-units 'hal0-slot@*'</pre>
+
+  <div class="note err"><span class="tag">Rollback boundary</span><p>The id-keying command has no undo. It writes a timestamped backup under <code>/var/lib/hal0/backups/</code> before moving anything.</p><p>If verification fails, stop hal0 and restore that backup. Use <code>--stop-services</code> instead of the manual stop command when desired.</p></div>
+
+  <h4>Honcho → Hindsight</h4>
+  <p>Only boxes that previously ran Honcho need the memory migration. Run it before upgrading; Hindsight-only boxes are already current.</p>
+  <pre data-label="shell">hal0 memory migrate <span class="flag">--from</span> honcho <span class="flag">--to</span> hindsight</pre>
 </section>
 
 <section id="backcompat">
   <h3>Why your box keeps working before you migrate</h3>
   <div class="grid c2">
-    <div class="card"><h4>Tolerant config</h4><p class="k">Slot/model config is <code>extra="allow"</code> — a live TOML with now-deprecated fields (<code>device</code>, <code>chat_template</code>, <code>extra_args</code>, <code>image</code> on slots) <strong>loads without a boot crash</strong>. Stale fields are ignored until the migrator backfills.</p></div>
-    <div class="card"><h4>Nothing removed yet</h4><p class="k">Deprecated surfaces are <code>HAL0-SUNSET: v1.0.0</code>-stamped but still functional — <code>--backend</code>, the <code>cognee</code> engine literal, old CLI aliases. They work now; they retire on schedule.</p></div>
+    <div class="card"><h4>Tolerant config</h4><p class="k">Legacy slot and model keys load without a boot crash. Dry-run the relevant migrator to see what will change.</p></div>
+    <div class="card"><h4>Nothing automatic</h4><p class="k">Update swaps code, but one-shot migrations remain operator-controlled. Existing layouts continue working until you schedule the migration.</p></div>
   </div>
-  <div class="note info"><span class="tag">Rollback</span><p>Migrators are dry-run-first and refuse on ambiguity; the id-flip takes an auto-backup. Keep a reference box (don't deploy to your rollback host directly). Restore = drop the backed-up <code>hal0.db</code> + slot dirs back and restart <code>hal0-api</code>.</p></div>
+  <div class="note info"><span class="tag">Different rollback models</span><p><code>model-layout</code> adds symlinks without moving source data. The slot migrations rewrite state and therefore create backups first.</p></div>
 </section>
 
 <hr class="sep"/>
 
 <!-- ─────────────────────────── CHANGELOG ─────────────────────────── -->
 <section id="changelog">
-  <h2><span class="eyebrow">Release</span>What's new — R5 / v1.0.0 (the rework release)</h2>
-  <p class="lead">R5 is a structural rework that puts the platform back together as a genuine 1.0: memory + Hermes finished, dead surface swept, flags re-homed on models, and the install path hardened against real-world hosts.</p>
+  <h2><span class="eyebrow">Release</span>What's new — R5 / v1.0.0-alpha.0</h2>
+  <p class="lead">R5 hardens install and runtime behavior. The current alpha adds workload-oriented profiles, slot-owned hardware, stable slot IDs, a first-class brain route, and clearer slot/model drawers.</p>
 
-  <h3><span class="pill" style="color:var(--hal0-accent);border-color:var(--accent-line);background:var(--accent-soft)">Centerpiece</span> FLAGS-own — flags belong to models</h3>
+  <h3><span class="pill" style="color:var(--hal0-accent);border-color:var(--accent-line);background:var(--accent-soft)">Current</span> Workload profiles &amp; slot-owned hardware</h3>
   <ul class="tick">
-    <li>Launch flags/device/chat-template now live on <strong>models</strong>; a slot is just <code>(id, name, model, port, state)</code>.</li>
-    <li>Profiles became <strong>copy-on-stamp templates</strong> (read at stamp + explicit re-apply, never mutated by model edits).</li>
-    <li>The argv resolver stops reading profile/slot overrides at launch; <code>model.defaults</code> carries the materialized tune.</li>
-    <li><strong>Security tightened:</strong> the managed-arg denylist now screens a model's <code>defaults.extra_args</code> too (closing a bypass where a denied flag in defaults reached the container).</li>
-    <li>A one-shot migrator folds existing slot tunes into models with provenance + a divergent-share refusal guard.</li>
+    <li>Seeded profiles are workload-oriented templates rather than hardware identity. Applying one stamps defaults; later model edits do not mutate the profile.</li>
+    <li>Physical launch facts now live on each slot: device, NGL, threads, resolved runner binary, profile, and optional <code>image_pin</code>.</li>
+    <li>Models remain logical and device-agnostic. The slot-purity update moves <code>chat_template</code> to the model and sunsets the old slot tier.</li>
+    <li><code>hal0 slot migrate-hw</code> folds prior model/profile hardware values back onto slots. It is dry-run-first, backup-first, and maintenance-window gated.</li>
+    <li>Slot artefacts can be converted from names to stable IDs with <code>hal0 slot migrate-id-keying</code>; name-keyed boxes remain supported.</li>
   </ul>
 
-  <h3>Memory &amp; Hermes</h3>
+  <h3>Dashboard drawers</h3>
   <ul class="tick">
-    <li>Memory tools renamed to the upstream surface: <code>hindsight_recall</code> / <code>hindsight_retain</code> / <code>hindsight_reflect</code> (old <code>hal0_memory_*</code> kept as aliases); <code>reflect</code> implemented; config moved to <code>~/.hermes/hindsight/config.json</code> (<code>local_external</code>).</li>
-    <li><strong>Honcho removed</strong> — memory is Hindsight-only.</li>
-    <li>Hermes brain-lane (persona seed, identity/brain-profile registration, self-report) relocated from agent-install into the <strong>api boot lifespan</strong> — seeded on every restart, the one hook fresh/update/dev share.</li>
-    <li>New <code>hal0 agent install hermes --reset-personas</code> to force personas back to canonical (<code>--repair</code> stays non-destructive).</li>
-    <li>Drift-watch fixtures + a <code>hermes-bump</code> runbook added.</li>
+    <li>The slot drawer presents a typed hardware grid: Device, Image, Profile, Threads, and NGL.</li>
+    <li>It shows the resolved runner binary, profile-default image placeholder, and actual running image reference with slot ID.</li>
+    <li>Parallel and Extra Args now sit in the slot's Model section. Reasoning and MTP remain model-owned.</li>
+    <li>The model drawer adds the typed Thinking capability (<code>auto</code>, <code>on</code>, or <code>off</code>) before MTP.</li>
+  </ul>
+
+  <h3>Memory, brain &amp; Hermes</h3>
+  <ul class="tick">
+    <li>Memory tools use the Hindsight surface: <code>hindsight_recall</code>, <code>hindsight_retain</code>, and <code>hindsight_reflect</code>. Honcho is removed.</li>
+    <li>The first-class <code>hal0-brain</code> module now serves the primary <code>POST /api/brain/chat</code> steward route.</li>
+    <li>Hermes persona and brain-profile registration run in the API boot lifespan, so fresh installs, updates, and dev starts share one path.</li>
+    <li><code>hal0 agent install hermes --reset-personas</code> restores canonical personas; <code>--repair</code> remains non-destructive.</li>
+    <li>Hermes uninstall now stops its service before removal, and provisioning accepts both string and <code>Path</code> database paths.</li>
   </ul>
 
   <h3>Install &amp; runtime hardening</h3>
@@ -420,19 +507,18 @@ sudo hal0 update</pre>
     <li>Container-runtime preflight now surfaces the <strong>real</strong> cause on failure (e.g. kernel keyring-quota exhaustion) instead of a misleading nesting/keyctl message.</li>
     <li>GPU preflight + renderer now derive the render group from the <strong>device node's owner GID</strong> (not the group name) — fixes silent GPU-access loss on hosts where <code>renderD128</code>'s group is misnamed.</li>
     <li>Slot units emit <code>StartLimit*</code> in <code>[Unit]</code> so restart rate-limiting actually applies.</li>
-    <li>Hermes gateway install now drops to the <code>hal0</code> user (no more stray root-owned <code>~/.hermes</code>).</li>
+    <li>Hermes gateway install runs as the <code>hal0</code> user. Uninstall now stops the Hermes service before removing it.</li>
     <li><code>hal0 agent status --json</code> emits real JSON; <code>reconcile_listeners</code> wired into <code>/api/ports</code>.</li>
     <li>Shared APU models standardized on <strong>Vulkan</strong> (benchmark-backed).</li>
   </ul>
 
   <h3>Housekeeping (SWEEP)</h3>
   <ul class="tick">
-    <li>Dead code removed; deprecated surfaces machine-stamped <code>HAL0-SUNSET: v1.0.0</code> for scheduled removal (<code>--backend</code>, <code>SlotConfig.runtime/workers</code>, <code>cognee</code> engine literal, legacy CLI aliases).</li>
-    <li>Version reconciled to a single source of truth; the alpha placeholder is gone.</li>
-    <li>Boot split into 14 named, observable phases with a typed <code>BootState</code>.</li>
+    <li>Deprecated surfaces remain machine-stamped <code>HAL0-SUNSET: v1.0.0</code> until their scheduled removal.</li>
+    <li>Python and UI package manifests now report <code>1.0.0-alpha.0</code> consistently.</li>
+    <li>Boot is split into 14 named, observable phases with a typed <code>BootState</code>.</li>
+    <li>The bilingual slot runtime reads both name-keyed and id-keyed layouts; the operator chooses when to flip.</li>
   </ul>
-
-  <div class="note warn"><span class="tag">Deferred to a follow release</span><p>Full slot-purity field-removal (FLAGS-own §7) and the id-keyed runtime read-path (SLOT-B / P3-runtime-db) land next — both are back-compat-safe deferrals; the platform ships fully functional name-keyed.</p></div>
 </section>
 
 <hr class="sep"/>
@@ -450,7 +536,7 @@ keyctl clear @s
 sysctl -w kernel.keys.maxbytes=2000000</pre>
 
   <h4><span class="pill rocm">GPU</span> Slot runs but on CPU / GPU access denied</h4>
-  <p>If <code>/dev/dri/renderD128</code> is owned by a group that isn't your host's <code>render</code> group, older builds group-added the wrong GID. v1.0.0 derives the GID from the device node itself. Confirm your <code>hal0</code> user is in the device's owner group:</p>
+  <p>If <code>/dev/dri/renderD128</code> is owned by a group that isn't your host's <code>render</code> group, older builds group-added the wrong GID. v1.0.0-alpha.0 derives the GID from the device node itself. Confirm your <code>hal0</code> user is in the device's owner group:</p>
   <pre data-label="check">stat -c '%G %g' /dev/dri/renderD128
 id -nG hal0</pre>
 
@@ -472,7 +558,8 @@ id -nG hal0</pre>
         <tbody>
           <tr><td><code>/usr/lib/hal0/current</code></td><td>active code (symlink)</td></tr>
           <tr><td><code>/etc/hal0/</code></td><td>config (hal0.toml, slots/, api.env)</td></tr>
-          <tr><td><code>/var/lib/hal0/models</code></td><td>model weights</td></tr>
+          <tr><td><code>/mnt/ai-models</code></td><td>default source model store</td></tr>
+          <tr><td><code>/var/lib/hal0/models</code></td><td>canonical recipe/capability symlink tree</td></tr>
           <tr><td><code>/var/lib/hal0/hal0.db</code></td><td>model registry + slot identity</td></tr>
           <tr><td><code>/var/lib/hal0/slots</code></td><td>per-slot runtime state</td></tr>
         </tbody>
@@ -485,20 +572,22 @@ id -nG hal0</pre>
           <tr><td><code>hal0 doctor</code></td><td>health across the platform</td></tr>
           <tr><td><code>hal0 slot list / create</code></td><td>manage inference slots</td></tr>
           <tr><td><code>hal0 model pull / default</code></td><td>manage the catalog + tuning</td></tr>
+          <tr><td><code>hal0 doctor migrations</code></td><td>detect pending model-layout links</td></tr>
+          <tr><td><code>hal0 migrate model-layout</code></td><td>preview/apply canonical model links</td></tr>
           <tr><td><code>hal0 update</code></td><td>atomic in-place upgrade</td></tr>
           <tr><td><code>hal0 chat --slot &lt;s&gt;</code></td><td>talk to a slot</td></tr>
         </tbody>
       </table>
     </div>
   </div>
-  <div class="note acc"><span class="tag">Units</span><p><code>hal0-api.service</code> (control plane + dashboard, <code>:8080</code>) · <code>hal0-openwebui.service</code> · <code>hal0-slot@&lt;name&gt;.service</code> (per-slot, managed by hal0) · non-root <code>hal0</code> services: agents, hermes-gateway, hindsight-api.</p></div>
+  <div class="note acc"><span class="tag">Units</span><p><code>hal0-api.service</code> serves the control plane on <code>:8080</code>. Slot units use <code>hal0-slot@&lt;name&gt;</code> before id-keying and <code>hal0-slot@&lt;id&gt;</code> after it.</p><p>Agents, Hermes gateway, and Hindsight run as the non-root <code>hal0</code> user.</p></div>
 </section>
 
 </main>
 </div>
 
 <footer>
-  <p><span class="mono">hal0 v1.0.0 · R5</span> — local AI inference appliance. Container-runtime slots · ROCm / Vulkan / NPU · OmniRouter · Hermes agents · Hindsight memory.</p>
+  <p><span class="mono">hal0 v1.0.0-alpha.0 · R5</span> — local AI inference appliance. Container-runtime slots · ROCm / Vulkan / NPU · OmniRouter · Hermes agents · Hindsight memory.</p>
   <p>Install: <span class="mono">curl -fsSL https://hal0.dev/install.sh | bash</span> &nbsp;·&nbsp; Docs: <a href="https://hal0.dev">hal0.dev</a> &nbsp;·&nbsp; Dashboard: <span class="mono">http://&lt;host&gt;:8080</span></p>
 </footer>
 
