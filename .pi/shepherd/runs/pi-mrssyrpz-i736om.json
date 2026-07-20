@@ -1,0 +1,16 @@
+{
+  "id": "pi-mrssyrpz-i736om",
+  "taskName": "pi-session",
+  "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-2/session.jsonl",
+  "provider": "pi",
+  "model": "unknown",
+  "status": "finished",
+  "startedAt": "2026-07-20T05:47:17.591Z",
+  "trace": [],
+  "changeset": {
+    "binding": "workspace",
+    "files": []
+  },
+  "artifacts": [],
+  "endedAt": "2026-07-20T05:47:18.101Z"
+}

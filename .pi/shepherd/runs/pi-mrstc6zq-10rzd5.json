@@ -1,0 +1,681 @@
+{
+  "id": "pi-mrstc6zq-10rzd5",
+  "taskName": "pi-turn",
+  "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+  "provider": "pi",
+  "model": "unknown",
+  "status": "finished",
+  "startedAt": "2026-07-20T05:57:43.910Z",
+  "trace": [
+    {
+      "index": 0,
+      "kind": "model.request",
+      "timestamp": "2026-07-20T05:57:43.910Z",
+      "data": {
+        "provider": "pi",
+        "model": "unknown",
+        "systemPrompt": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\nAvailable tools:\n- read: Read",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Add an exact-first legacy compatibility layer:                                                                                                                       \n     - Preserve an operator-defined profile when its old name exists.                                                                                                    \n     - If absent, resolve retired names to their canonical workload profile.                                                                                             \n     - Classify tts/tts-qwen3 using their canonical runtime families.                  --- I don't think we need this extra layer"
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "kind": "model.response",
+      "timestamp": "2026-07-20T05:58:16.047Z",
+      "data": {
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "**Confirming test-only scope****Planning test fixture updates****Considering AST-based pattern replacements**",
+            "thinkingSignature": "7a2e1ee6720e0e9732565af409c6d544103d78eb404ab5e03ebac95e1ed30d1e"
+          },
+          {
+            "type": "text",
+            "text": "Understood. I’ll omit the compatibility layer entirely. Legacy profile names will not receive aliases or special runtime classification.\n\nThe fix scope is now limited to aligning stale tests and fixtures with the already-approved 1.0 contract: canonical workload profile names and slot-owned image/device/hardware fields. Production behavior will remain unchanged."
+          },
+          {
+            "type": "toolCall",
+            "id": "call_SxcEIRUXfq8604DH3O4NPL8L",
+            "name": "read",
+            "arguments": {
+              "limit": 400,
+              "offset": 1,
+              "path": "/home/mint/.pi/agent/npm/node_modules/pi-lens/skills/pi-lens-ast-grep/SKILL.md"
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call_AGQnhBLSNiUpq9VqATLbpaEH",
+            "name": "pi_lens_activate_tools",
+            "arguments": {
+              "tools": [
+                "ast_grep_search",
+                "ast_grep_replace"
+              ]
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call_f6vlYsSgUI4cVMSrUBALNUjB",
+            "name": "todo",
+            "arguments": {
+              "action": "update",
+              "activeForm": "updating stale CI tests",
+              "description": "Fix PR #1324's 123 Python CI failures by updating tests/fixtures only for the already-approved 1.0 workload-profile and slot-owned hardware/image contract. Do not add legacy aliasing or change production runtime behavior. Run targeted then full CI-equivalent verification, push, and merge when GitHub checks are green. Include branch/worktree audit in final report.",
+              "id": 3,
+              "metadata": {
+                "pr": 1324,
+                "head": "ea3e4661",
+                "ciRun": 29718900970,
+                "scope": "tests/fixtures only; no legacy compatibility layer"
+              }
+            }
+          }
+        ],
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0
+        }
+      }
+    },
+    {
+      "index": 2,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:16.047Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_SxcEIRUXfq8604DH3O4NPL8L",
+        "args": {
+          "limit": 400,
+          "offset": 1,
+          "path": "/home/mint/.pi/agent/npm/node_modules/pi-lens/skills/pi-lens-ast-grep/SKILL.md"
+        }
+      }
+    },
+    {
+      "index": 3,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:16.059Z",
+      "data": {
+        "toolName": "pi_lens_activate_tools",
+        "toolCallId": "call_AGQnhBLSNiUpq9VqATLbpaEH",
+        "args": {
+          "tools": [
+            "ast_grep_search",
+            "ast_grep_replace"
+          ]
+        }
+      }
+    },
+    {
+      "index": 4,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:16.060Z",
+      "data": {
+        "toolName": "todo",
+        "toolCallId": "call_f6vlYsSgUI4cVMSrUBALNUjB",
+        "args": {
+          "action": "update",
+          "activeForm": "updating stale CI tests",
+          "description": "Fix PR #1324's 123 Python CI failures by updating tests/fixtures only for the already-approved 1.0 workload-profile and slot-owned hardware/image contract. Do not add legacy aliasing or change production runtime behavior. Run targeted then full CI-equivalent verification, push, and merge when GitHub checks are green. Include branch/worktree audit in final report.",
+          "id": 3,
+          "metadata": {
+            "pr": 1324,
+            "head": "ea3e4661",
+            "ciRun": 29718900970,
+            "scope": "tests/fixtures only; no legacy compatibility layer"
+          }
+        }
+      }
+    },
+    {
+      "index": 5,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:16.060Z",
+      "data": {
+        "toolName": "pi_lens_activate_tools",
+        "toolCallId": "call_AGQnhBLSNiUpq9VqATLbpaEH",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Activated: ast_grep_search, ast_grep_replace. Available starting next turn."
+          }
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:16.060Z",
+      "data": {
+        "toolName": "todo",
+        "toolCallId": "call_f6vlYsSgUI4cVMSrUBALNUjB",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Updated #3"
+          }
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:16.117Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_SxcEIRUXfq8604DH3O4NPL8L",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "---\nname: pi-lens-ast-grep\ndescription: Use when searching or replacing code patterns - use ast-grep instead of text search for semantic accuracy\n---\n\n# AST-Grep Code Search\n\nUse `ast_grep_search` and `ast_grep_replace` for semantic code search/replace. ast-grep understands code structure, not just text.\n\nThese tools (plus `ast_grep_outline`, `ast_grep_dump`, `lsp_navigation`) are registered but inactive by default on hosts that support pi's dynamic tooling. If a call to one of them isn't recognized, activate it first: `pi_lens_activate_tools tools=[\"ast_grep_search\", \"ast_grep_replace\"]`.\n\n## When to Use\n\n- Function calls, imports, class methods (structured code)\n- Safe replacements across files\n- **Use LSP first for:** definitions/references/types — then scope ast-grep to files discovered by LSP\n- **Use grep for:** partial string patterns, comments, URLs, or after one simplified ast-grep retry still returns zero matches\n\n## Golden Rules\n\n1. **Be specific** — `fetchMetrics($ARGS)` not `fetchMetrics`\n2. **Scope it** — always specify `paths` to relevant files\n3. **Retry once on zero matches** — simplify the pattern, same `paths`, then fall back to grep\n4. **Dry-run first** — `apply: false` before `apply: true`\n5. **Valid code only** — `function $NAME($$$) { $$$ }` not `function $NAME(`\n6. **Avoid `selector` unless expert** — narrows to AST node kind; does not extract metavariables\n7. **Metavariables don't work inside strings** — `from \"$PATH\"` matches literal `\"$PATH\"`, not a wildcard\n\n## Metavariables\n\n| Syntax | Matches | Named? |\n|---|---|---|\n| `$X` | single node | yes — captures the node |\n| `$$$` | zero or more nodes | no — unnamed wildcard |\n| `$$$ARGS` | zero or more nodes | yes — captures the list |\n\nUse `$$$` when you don't need the captured value; `$$$NAME` when you do.\n\n## Quick Reference\n\n### Patterns\n\n| Pattern | Matches |\n|---|---|\n| `fetchMetrics($ARGS)` | call with any single arg |\n| `fetchMetrics($$$ARGS)` | call with any number of args |\n| `function $NAME($$$) { $$$ }` | function declaration |\n| `import { $NAMES } from $PATH` | named import (no quotes on path) |\n| `const $X = $Y` | variable declaration |\n\n### Structural-intent parameters (preferred for cross-context queries)\n\nUse these instead of writing raw YAML:\n\n| Parameter | What it does |\n|---|---|\n| `insideKind` | Only match inside an ancestor of this node kind |\n| `hasKind` | Only match nodes that contain a descendant of this kind |\n| `follows` | Only match nodes preceded by a sibling matching this pattern |\n| `precedes` | Only match nodes followed by a sibling matching this pattern |\n\n```\n# console.log only inside functions\nast_grep_search pattern=\"console.log($MSG)\" lang=\"typescript\" insideKind=\"function_declaration\"\n\n# replace var with let, scoped to functions only\nast_grep_replace pattern=\"var $X\" rewrite=\"let $X\" lang=\"javascript\" insideKind=\"function_declaration\"\n```\n\nThese synthesize a YAML rule automatically. Use `rule:` for the full DSL when you need `all`/`any`/`not`, `nthChild`, `regex`, or other advanced constraints.\n\n### Raw YAML rule (`rule:` parameter)\n\nPass a complete ast-grep YAML rule to unlock the full DSL:\n\n```\nast_grep_search rule=\"id: my-rule\nlanguage: TypeScript\nrule:\n  pattern: console.log($MSG)\n  inside:\n    kind: function_declaration\n    stopBy: end\" lang=\"typescript\"\n```\n\n### Debugging unknown node kinds — `ast_grep_dump`\n\nWhen a pattern returns zero matches and you don't know the correct node kind or field name, use `ast_grep_dump` to inspect a SMALL representative snippet:\n\n```\nast_grep_dump source=\"function foo() { return 1; }\" lang=\"typescript\"\n```\n\nReturns the full indented AST with node kinds and positions. Then use the correct kind in your pattern or `insideKind`. `ast_grep_dump` is registered but inactive by default — call `pi_lens_activate_tools` with `tools: [\"ast_grep_dump\"]` first if it isn't already active.\n\n### Composite (has/inside) in raw YAML\n\n```yaml\n# console.log inside a class method\npattern: console.log($$$)\ninside:\n  kind: method_definition\n  stopBy: end\n```\n\nUse `kind:` directly when you want to match a node type without a pattern:\n\n```yaml\n# any arrow function\nkind: arrow_function\n```\n\n## Common Gotchas\n\n```\n❌ $VAR inside quotes — matches literal \"$VAR\", not a metavar\n   from \"$PATH\"  →  use grep for wildcard path matching\n   from \"./utils\"  →  ✅ exact string literal works fine\n\n❌ Trailing comma in objects\n   { type: $T, }  →  use { type: $T }\n\n❌ Shorthand property mismatch\n   { runnerId: $RID }  →  won't match { runnerId }\n   use { runnerId } or { runnerId, $$$REST }\n\n❌ Unnamed $$$ when you need the value\n   foo($$$)  →  captures nothing; use foo($$$ARGS) to inspect matches\n\n❌ Multiple top-level statements — triggers \"Multiple AST nodes are detected\"\n   Two shapes, two fixes:\n\n   1. Sequence inside a block — wrap in braces:\n      foo(); bar();  →  { foo(); bar(); }\n\n   2. Cross-context (module-level + block-level together, e.g. an import AND a call) —\n      wrapping in {} makes the pattern invalid (imports can't live inside a block).\n      Use two searches: find files containing the import, then scope the call search\n      to those paths. Or use a YAML `inside:`/`has:` rule (see Composite section above).\n```\n\n**No matches?**\n\n1. Try `strictness: relaxed` — ignores unnamed punctuation (trailing commas, semicolons) that `smart` mode requires\n2. Use `ast_grep_dump` on a sample snippet to verify the correct node kind\n3. Simplify the pattern and retry once\n4. Fall back to `grep` or `lsp_navigation`\n\n## Agent task recipes\n\nUse these as starting points, then scope `paths` tightly.\n\n| Task | Pattern / params |\n|---|---|\n| Find pi lifecycle handlers | `pattern: pi.on($EVENT, $HANDLER)` |\n| Find timers | `pattern: setTimeout($CALLBACK, $$$REST)` or `setInterval($CALLBACK, $$$REST)` |\n| Find immediate/deferred work | `pattern: setImmediate($CALLBACK)` |\n| Find promise callbacks | `pattern: $PROMISE.then($CALLBACK)` / `.catch($CALLBACK)` / `.finally($CALLBACK)` |\n| Find object-literal function dependency by name | `pattern: { resetLSPService: $FN, $$$REST }` |\n| Find fire-and-forget async calls | `pattern: void $CALL` |\n| Find empty catches | `pattern: try { $$$BODY } catch ($ERR) { }` |\n\nFor lifecycle bugs, search first, then use the returned `details.matchLocations[].readSlice` handle for bounded context.\n\n**Metavar captures** appear automatically below each match line:\n\n```\nsrc/foo.ts:1:1: const x = foo(a, b)\n  $VAR=x  $$$ARGS=a,b\n```\n\nNamed captures (`$X`, `$$$NAME`) are shown; unnamed wildcards (`$$$`) are not.\n\n**Pagination** — use `skip: N` when results are truncated (next-page hint appears in output).\n\nDebug: <https://ast-grep.github.io/playground.html>\n"
+          }
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:23.332Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1aa4fb7c009bc9c8df",
+        "args": {
+          "command": "printf '%s\\n' '=== TESTS PROFILECONFIG IMAGE KW COUNT ==='; rg -n --no-heading -tpy 'ProfileConfig\\([^)]*\\bimage=' tests | wc -l; printf '\\n=== TESTS WITH ProfileConfig( LITERALS ==='; rg -l --no-heading -tpy 'ProfileConfig\\(' tests; printf '\\n=== FIELDS THAT NEED image_kw REMOVAL (sampling) ==='; rg -n --no-heading -tpy 'ProfileConfig\\([^)]*image=' tests | head -40",
+          "timeout": 120
+        }
+      }
+    },
+    {
+      "index": 9,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:23.332Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1aa4fb7c009bc9c8e8",
+        "args": {
+          "command": "printf '%s\\n' '=== ProfileConfig literals full ==='; rg -n --no-heading -tpy 'ProfileConfig\\(' tests | head -80; printf '\\n=== FULL PROFILECONFIG LINES THAT INCLUDE image ==='; rg -n --no-heading -tpy 'image=' tests | grep -i 'profileconfig' | head -80",
+          "timeout": 120
+        }
+      }
+    },
+    {
+      "index": 10,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:23.356Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1aa4fb7c009bc9c8e8",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "=== ProfileConfig literals full ===\ntests/providers/test_runtime_launch_plan.py:167:    profile = ProfileConfig(flags=\"-fa on --no-mmap\", mtp=False)\ntests/providers/test_container_assembler.py:42:    return ProfileConfig(**base)\ntests/providers/test_container_resolved_detail.py:20:    return ProfileConfig(flags=\"-b 512\", mtp=False)\ntests/providers/test_container_spec_dispatch.py:195:    profile = ProfileConfig(\ntests/providers/test_capability_injection.py:26:    return ProfileConfig(**base)\ntests/providers/test_capability_injection.py:32:    return ProfileConfig(**base)\ntests/profiles/test_portable.py:30:    return ProfileConfig(\ntests/profiles/test_portable.py:99:        env = export_envelope(\"bare\", ProfileConfig(), exported_at=\"t\")\ntests/profiles/test_portable.py:178:        catalog.create(\"taken\", ProfileConfig())\ntests/providers/test_parallel_batching.py:20:    return ProfileConfig(\ntests/stacks/test_import.py:125:        env[\"stack\"][\"profiles\"] = {\"custom-x\": ProfileConfig().model_dump(mode=\"python\")}\ntests/providers/test_container.py:118:    return ProfileConfig(\ntests/providers/test_container.py:125:    return ProfileConfig(\ntests/providers/test_container.py:1096:        profile = ProfileConfig(flags=vseed[\"flags\"], mtp=False)\ntests/profiles/test_catalog.py:42:        ProfileConfig(\ntests/profiles/test_catalog.py:80:    catalog.create(\"my-rocm\", ProfileConfig())\ntests/profiles/test_catalog.py:94:        ProfileConfig(flags=\"-fa on\", cloned_from=\"vulkan\"),\ntests/profiles/test_catalog.py:107:    plain = catalog.create(\"my-rocm\", ProfileConfig())\ntests/profiles/test_catalog.py:110:    catalog.create(\"my-copy\", ProfileConfig(cloned_from=\"my-rocm\"))\ntests/profiles/test_catalog.py:138:        ProfileConfig(intent=\"My workload\", quant=\"Q5_K_M\"),\ntests/providers/test_container_mmproj.py:33:    return ProfileConfig(\ntests/updater/test_unit_rerender.py:29:_PROFILE = ProfileConfig(\ntests/stacks/test_export.py:88:        save_profiles_config(ProfilesConfig(profile={\"custom-moe\": ProfileConfig(quant=\"FP4\")}))\ntests/providers/test_container_chat_template.py:30:    return ProfileConfig(\ntests/providers/test_container_npu.py:212:        profile = ProfileConfig(\ntests/providers/test_container_vision_toggle.py:21:    return ProfileConfig(\ntests/api/test_slots_container_state.py:235:    fake_profile = ProfileConfig(\ntests/api/test_slots_container_state.py:291:    fake_profile = ProfileConfig(\ntests/api/test_slots_container_state.py:367:    prof = ProfileConfig(flags=\"--flash-attn on\", mtp=False)\ntests/api/test_slots_image_pull.py:43:    fake_profile = ProfileConfig(\ntests/config/test_loader_profiles_save.py:22:        catalog.profile[\"my-custom\"] = ProfileConfig(flags=\"-fa on\")\ntests/config/test_loader_profiles_save.py:33:        catalog.profile[\"extra\"] = ProfileConfig()\ntests/config/test_loader_profiles_save.py:59:        catalog.profile[\"mine\"] = ProfileConfig()\ntests/config/test_loader_profiles_save.py:75:        catalog.profile[\"v2\"] = ProfileConfig()\ntests/config/test_mtp_override.py:32:    return ProfileConfig(\ntests/config/test_mtp_override.py:66:    p = ProfileConfig(flags=\"-fa on\", mtp=False, device_class=\"gpu\", backend=\"rocm\")\ntests/config/test_mtp_override.py:90:    p = ProfileConfig(flags=\"-fa on\", mtp=True, device_class=\"gpu\", backend=\"vulkan\")\ntests/config/test_profiles.py:28:        p = ProfileConfig(flags=\"-fa on\", mtp=False)\ntests/config/test_profiles.py:33:        p = ProfileConfig()\ntests/config/test_profiles.py:37:        p = ProfileConfig()\ntests/config/test_profiles.py:41:        p = ProfileConfig()\ntests/config/test_profiles.py:45:        assert ProfileConfig(backend=\"rocm\").backend == \"rocm\"\ntests/config/test_profiles.py:46:        assert ProfileConfig(backend=\"vulkan\").backend == \"vulkan\"\ntests/config/test_profiles.py:48:        assert ProfileConfig(backend=\"cuda\").backend == \"cuda\"\ntests/config/test_profiles.py:54:            ProfileConfig(backend=\"metal\")\ntests/config/test_profiles.py:60:            ProfileConfig(image=\"ghcr.io/hal0ai/foo:bar\")\ntests/config/test_profiles.py:98:        p = ProfileConfig(flags=\"-fa on -b 512\", mtp=False)\ntests/config/test_profiles.py:107:        p = ProfileConfig(flags=\"-fa on -b 512\", mtp=True)\ntests/config/test_profiles.py:118:        p = ProfileConfig(flags=\"-fa on -b 512\", mtp=True)\ntests/config/test_profiles.py:127:        p = ProfileConfig(\ntests/config/test_profiles.py:144:        p = ProfileConfig(flags=\"-fa on\", mtp=True)\ntests/config/test_profiles.py:156:        p = ProfileConfig(flags=\"-fa on\", mtp=True)\ntests/config/test_profiles.py:161:        p = ProfileConfig(flags=\"\", mtp=False)\ntests/config/test_profiles.py:165:        p = ProfileConfig(flags=\"\", mtp=True)\ntests/config/test_profiles.py:170:        p = ProfileConfig(flags=\"  -fa on  \", mtp=False)\ntests/config/test_profiles.py:381:    assert ProfileConfig().device_class == \"gpu\"\ntests/model_fit/test_model_fit.py:82:        ProfileConfig(\n\n=== FULL PROFILECONFIG LINES THAT INCLUDE image ===tests/config/test_profiles.py:60:            ProfileConfig(image=\"ghcr.io/hal0ai/foo:bar\")\n"
+          }
+        ]
+      }
+    },
+    {
+      "index": 11,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:23.369Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1aa4fb7c009bc9c8df",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "=== TESTS PROFILECONFIG IMAGE KW COUNT ===\n1\n\n=== TESTS WITH ProfileConfig( LITERALS ===tests/stacks/test_import.py\ntests/updater/test_unit_rerender.py\ntests/stacks/test_export.py\ntests/model_fit/test_model_fit.py\ntests/config/test_profiles.py\ntests/config/test_mtp_override.py\ntests/config/test_loader_profiles_save.py\ntests/providers/test_runtime_launch_plan.py\ntests/providers/test_container_npu.py\ntests/providers/test_container_spec_dispatch.py\ntests/providers/test_container_resolved_detail.py\ntests/providers/test_container_assembler.py\ntests/providers/test_container_mmproj.py\ntests/providers/test_container.py\ntests/providers/test_container_chat_template.py\ntests/providers/test_capability_injection.py\ntests/providers/test_parallel_batching.py\ntests/profiles/test_portable.py\ntests/providers/test_container_vision_toggle.py\ntests/api/test_slots_container_state.py\ntests/api/test_slots_image_pull.py\ntests/profiles/test_catalog.py\n\n=== FIELDS THAT NEED image_kw REMOVAL (sampling) ===tests/config/test_profiles.py:60:            ProfileConfig(image=\"ghcr.io/hal0ai/foo:bar\")\n"
+          }
+        ]
+      }
+    },
+    {
+      "index": 12,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:26.792Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1ab28e7753b8d8c9ce",
+        "args": {
+          "path": "tests/config/test_profiles.py",
+          "offset": 50,
+          "limit": 30
+        }
+      }
+    },
+    {
+      "index": 13,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:26.876Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1ab28e7753b8d8c9d8",
+        "args": {
+          "command": "printf '%s\\n' '=== ProfileConfig kw lines (multiline) ==='; rg -n --no-heading -tpy -U 'ProfileConfig\\([^)]*image=' tests | head -40; printf '\\n=== ProfileConfig(image=) anywhere ==='; rg -n --no-heading -tpy '\\bimage\\s*=' tests | head -60; printf '\\n=== ProfileConfig(...) blocks (multiline) ==='; rg -n --no-heading -tpy -U 'ProfileConfig\\([\\s\\S]*?\\bimage\\s*=' tests | head -40",
+          "timeout": 120
+        }
+      }
+    },
+    {
+      "index": 14,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:26.889Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1ab28e7753b8d8c9ce",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "    def test_backend_rejects_unknown(self) -> None:\n        from pydantic import ValidationError\n\n        with pytest.raises(ValidationError):\n            ProfileConfig(backend=\"metal\")\n\n    def test_image_is_not_a_profile_field(self) -> None:\n        from pydantic import ValidationError\n\n        with pytest.raises(ValidationError, match=\"image\"):\n            ProfileConfig(image=\"ghcr.io/hal0ai/foo:bar\")\n\n    def test_extra_fields_forbidden(self) -> None:\n        \"\"\"extra='forbid' catches typos in profile toml keys.\"\"\"\n        from pydantic import ValidationError\n\n        with pytest.raises(ValidationError):\n            ProfileConfig.model_validate({\"unknown_key\": \"bad\"})\n\n\n# ── ProfilesConfig ────────────────────────────────────────────────────────────\n\n\nclass TestProfilesConfig:\n    def test_empty_profiles(self) -> None:\n        cfg = ProfilesConfig()\n        assert cfg.profile == {}\n\n    def test_parse_from_dict(self) -> None:\n        cfg = ProfilesConfig.model_validate(\n\n[338 more lines in file. Use offset=80 to continue.]"
+          }
+        ]
+      }
+    },
+    {
+      "index": 15,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:26.917Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1ab28e7753b8d8c9d8",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "=== ProfileConfig kw lines (multiline) ===\ntests/config/test_profiles.py:60:            ProfileConfig(image=\"ghcr.io/hal0ai/foo:bar\")\ntests/providers/test_container_vision_toggle.py:21:    return ProfileConfig(\ntests/providers/test_container_vision_toggle.py:22:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/model_fit/test_model_fit.py:82:        ProfileConfig(\ntests/model_fit/test_model_fit.py:83:            image=\"ghcr.io/x/llama-cpu:z\",\ntests/providers/test_container_npu.py:212:        profile = ProfileConfig(\ntests/providers/test_container_npu.py:213:            image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_chat_template.py:30:    return ProfileConfig(\ntests/providers/test_container_chat_template.py:31:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_parallel_batching.py:20:    return ProfileConfig(\ntests/providers/test_parallel_batching.py:21:        image=\"img\", flags=\"-fa on --parallel 1\", mtp=mtp, device_class=\"gpu\", backend=\"rocm\"\ntests/providers/test_container_spec_dispatch.py:195:    profile = ProfileConfig(\ntests/providers/test_container_spec_dispatch.py:196:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_mmproj.py:33:    return ProfileConfig(\ntests/providers/test_container_mmproj.py:34:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/api/test_slots_image_pull.py:43:    fake_profile = ProfileConfig(\ntests/api/test_slots_image_pull.py:44:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server\",\n\n=== ProfileConfig(image=) anywhere ===tests/golden_paths/test_gp05_stamped_launch_layering.py:86:    image = \"ghcr.io/hal0ai/x:rocm-server\"\ntests/model_fit/test_model_fit.py:83:            image=\"ghcr.io/x/llama-cpu:z\",\ntests/updater/test_seed_profiles_migration.py:58:        'image = \"ghcr.io/my-org/custom-vulkan-embed:v1\"\\n'\ntests/updater/test_image_retag.py:45:    _write_slot(\"stale-flat\", f'image = \"{STALE}\"\\nname = \"stale-flat\"\\n')\ntests/updater/test_image_retag.py:47:    _write_slot(\"custom\", f'image = \"{CUSTOM}\"\\nname = \"custom\"\\n')\ntests/updater/test_image_retag.py:66:    _write_slot(\"s\", f'image = \"{ref}\"\\nname = \"s\"\\n')\ntests/updater/test_image_retag.py:72:    _write_slot(\"s\", f'image = \"{STALE}\"\\nname = \"s\"\\n')\ntests/updater/test_image_retag.py:103:        f'image = \"{FALLBACK_VULKAN_IMAGE}\"\\nname = \"g\"\\nbackend = \"vulkan\"\\ndevice = \"gpu-vulkan\"\\n',\ntests/updater/test_image_retag.py:112:    _write_slot(\"c\", f'image = \"{FALLBACK_VULKAN_IMAGE}\"\\nname = \"c\"\\ndevice = \"cpu\"\\n')\ntests/config/test_profiles.py:60:            ProfileConfig(image=\"ghcr.io/hal0ai/foo:bar\")\ntests/config/test_profiles.py:242:            'image = \"ghcr.io/hal0ai/test:v1\"\\n'\ntests/config/test_profiles.py:257:            'image = \"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\"\\n'\ntests/config/test_profiles.py:286:            f'image = \"{stale_image}\"\\n'\ntests/config/test_profiles.py:305:            'image = \"ghcr.io/my-org/special:v42\"\\n'\ntests/config/test_hw_slot_ownership_migration.py:152:    plan = _plan([_slot(\"s\", \"m\", image=\"ghcr.io/hal0ai/mine:v2\")])\ntests/config/test_hw_slot_ownership_migration.py:160:        [_slot(\"s\", \"m\", profile=\"p\", image=\"ghcr.io/hal0ai/slotwins:v1\")],\ntests/config/test_hw_slot_ownership_migration.py:169:    fold = _plan([_slot(\"s\", \"m\", image=stale)]).slot_fold(\"s\")\ntests/config/test_hw_slot_ownership_migration.py:202:    slots = [_slot(\"s\", \"m\", image=\"ghcr.io/hal0ai/mine:v2\")]\ntests/providers/test_runtime_launch_plan.py:57:        image=image,\ntests/providers/test_runtime_launch_plan.py:131:        plan = RuntimeLaunchPlan(image=\"img\", command=[\"x\"], port=8080, network_mode=\"host\")\ntests/providers/test_runtime_launch_plan.py:137:        plan = RuntimeLaunchPlan(image=\"img\", command=[\"x\"], port=8080, network_mode=\"\")\ntests/providers/test_runtime_launch_plan.py:143:        plan = RuntimeLaunchPlan(image=\"img\", command=[\"x\"], port=8080, network_mode=\"\")\ntests/providers/test_runtime_launch_plan.py:150:            image=\"img\", command=[\"x\"], mounts=[Mount(\"/m\", \"/m\", read_only=True)]\ntests/providers/test_runtime_launch_plan.py:152:        as_tuple = RuntimeLaunchPlan(image=\"img\", command=[\"x\"], mounts=[(\"/m\", \"/m:ro\")])\ntests/providers/test_runtime_launch_plan.py:182:        image=\"ghcr.io/hal0ai/hal0-toolbox:v1\",\ntests/providers/test_image_resolution.py:29:    return SimpleNamespace(image=image, backend=backend, device_class=\"gpu\", flags=\"\", mtp=False)\ntests/providers/test_image_resolution.py:68:    profile = SimpleNamespace(image=None, backend=\"vulkan\", device_class=\"gpu\")\ntests/providers/test_image_resolution.py:74:    profile = SimpleNamespace(image=None, backend=None, device_class=\"cpu\")\ntests/providers/test_image_resolution.py:84:        image=\"ghcr.io/foo/profilepin:1\", backend=\"vulkan\", device_class=\"gpu\"\ntests/providers/test_image_resolution.py:115:    assert image == \"ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5\"\ntests/providers/test_image_resolution.py:121:        image=None, flags=\"-ngl 999\", mtp=False, backend=\"rocm\", device_class=\"gpu\"\ntests/providers/test_image_resolution.py:124:    assert image == DEFAULT_ROCMFPX_IMAGE\ntests/providers/test_container_assembler.py:113:            image=\"i:1\",\ntests/providers/test_container_assembler.py:129:        image=\"i:1\",\ntests/providers/test_container_assembler.py:145:        image=\"i:1\",\ntests/providers/test_container_assembler.py:169:        image=\"i:1\",\ntests/providers/test_container_assembler.py:185:        image=\"i:1\",\ntests/providers/test_container_assembler.py:202:        image=\"i:1\",\ntests/providers/test_container_assembler.py:300:        image=\"i:1\", port=8095, model_path=\"/m.gguf\", flags_str=\"\", devices=[], group_ids=[]\ntests/api/test_slots_container_state.py:332:    profile='', image=None, resolved_command=None, image_status=not-configured\ntests/api/test_slots_container_state.py:374:    \"\"\"#663: running container image == profile image -> actual_image set, image_mismatch False.\"\"\"\ntests/cli/test_doctor_profiles.py:29:def _profile(name, *, seed=False, cloned_from=None, flags=\"\", image=\"\", used_by=()):\ntests/cli/test_doctor_profiles.py:36:        image=image,\ntests/cli/test_doctor_profiles.py:66:    p = _profile(\"rocm\", image=\"ghcr.io/hal0ai/tb:v1\", used_by=(\"primary\",))\ntests/cli/test_doctor_profiles.py:71:    p = _profile(\"rocm\", image=\"ghcr.io/hal0ai/tb:v1\", used_by=(\"primary\",))\ntests/cli/test_doctor_profiles.py:79:    p = _profile(\"rocm\", image=\"ghcr.io/hal0ai/tb:v2\", used_by=(\"primary\",))\ntests/cli/test_doctor_profiles.py:86:    p = _profile(\"rocm\", image=\"ghcr.io/hal0ai/tb:v1\", used_by=())\ntests/api/test_slots_image_pull.py:44:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server\",\ntests/providers/test_container.py:92:        image=image,\ntests/providers/test_container.py:581:        assert spec.image == DEFAULT_ROCMFPX_IMAGE\ntests/providers/test_container.py:1146:            image=\"img:latest\",\ntests/providers/test_container.py:1201:            image=\"comfy:latest\",\ntests/providers/test_container_vision_toggle.py:22:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_chat_template.py:31:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_chat_template.py:85:            image=\"img:latest\",\ntests/providers/test_container_chat_template.py:100:            image=\"img:latest\",\ntests/providers/test_container_chat_template.py:119:            image=\"img:latest\",\ntests/harness/integration/test_delegate_task_dispatch_matrix.py:241:    b = FakeDockerBackend(image=\"alpine:3.20\")\ntests/harness/integration/test_delegate_task_dispatch_matrix.py:247:    b = FakeModalBackend(image=\"python:3.11-slim\")\ntests/harness/integration/test_delegate_task_modal.py:37:        image=\"python:3.11-slim\",\n\n=== ProfileConfig(...) blocks (multiline) ===tests/model_fit/test_model_fit.py:82:        ProfileConfig(\ntests/model_fit/test_model_fit.py:83:            image=\"ghcr.io/x/llama-cpu:z\",\ntests/providers/test_parallel_batching.py:20:    return ProfileConfig(\ntests/providers/test_parallel_batching.py:21:        image=\"img\", flags=\"-fa on --parallel 1\", mtp=mtp, device_class=\"gpu\", backend=\"rocm\"\ntests/providers/test_runtime_launch_plan.py:167:    profile = ProfileConfig(flags=\"-fa on --no-mmap\", mtp=False)\ntests/providers/test_runtime_launch_plan.py:168:    flags = resolve_profile_flags(profile)\ntests/providers/test_runtime_launch_plan.py:169:\ntests/providers/test_runtime_launch_plan.py:170:    shim_unit = _render_llama(\ntests/providers/test_runtime_launch_plan.py:171:        \"chat\",\ntests/providers/test_runtime_launch_plan.py:172:        \"ghcr.io/hal0ai/hal0-toolbox:v1\",\ntests/providers/test_runtime_launch_plan.py:173:        8095,\ntests/providers/test_runtime_launch_plan.py:174:        \"/mnt/ai-models/m.gguf\",\ntests/providers/test_runtime_launch_plan.py:175:        flags,\ntests/providers/test_runtime_launch_plan.py:176:        device_paths=[\"/dev/kfd\", \"/dev/dri/renderD128\"],\ntests/providers/test_runtime_launch_plan.py:177:        context_size=131072,\ntests/providers/test_runtime_launch_plan.py:178:        model_alias=\"my-model\",\ntests/providers/test_runtime_launch_plan.py:179:    )\ntests/providers/test_runtime_launch_plan.py:180:\ntests/providers/test_runtime_launch_plan.py:181:    equivalent = RuntimeLaunchPlan(\ntests/providers/test_runtime_launch_plan.py:182:        image=\"ghcr.io/hal0ai/hal0-toolbox:v1\",\ntests/providers/test_container_spec_dispatch.py:195:    profile = ProfileConfig(\ntests/providers/test_container_spec_dispatch.py:196:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_chat_template.py:30:    return ProfileConfig(\ntests/providers/test_container_chat_template.py:31:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_mmproj.py:33:    return ProfileConfig(\ntests/providers/test_container_mmproj.py:34:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_vision_toggle.py:21:    return ProfileConfig(\ntests/providers/test_container_vision_toggle.py:22:        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_npu.py:212:        profile = ProfileConfig(\ntests/providers/test_container_npu.py:213:            image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\ntests/providers/test_container_assembler.py:42:    return ProfileConfig(**base)\ntests/providers/test_container_assembler.py:43:\ntests/providers/test_container_assembler.py:44:\ntests/providers/test_container_assembler.py:45:# ── 1. preview == launch parity (mtp + chat_template + mmproj + extra_args) ────\ntests/providers/test_container_assembler.py:46:\ntests/providers/test_container_assembler.py:47:\ntests/providers/test_container_assembler.py:48:def test_preview_equals_launch_full_slot() -> None:\ntests/providers/test_container_assembler.py:49:    \"\"\"resolved_command_for_slot renders the exact argv container_spec launches\ntests/providers/test_container_assembler.py:50:    for a slot exercising the mtp override, model-registry defaults, a\ntests/providers/test_container_assembler.py:51:    chat-template, an mmproj sidecar, the slot HW grid (NGL + threads), and\n"
+          }
+        ]
+      }
+    },
+    {
+      "index": 16,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:34.922Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d7899",
+        "args": {
+          "path": "tests/providers/test_container.py",
+          "symbol": "TestContainerSpecChatTemplate"
+        }
+      }
+    },
+    {
+      "index": 17,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:34.922Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78ad",
+        "args": {
+          "path": "tests/providers/test_container_chat_template.py",
+          "symbol": "_fake_profile_catalog"
+        }
+      }
+    },
+    {
+      "index": 18,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:34.922Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78b5",
+        "args": {
+          "path": "tests/providers/test_container.py",
+          "symbol": "TestContainerSpecChatTemplate",
+          "kind": "class"
+        }
+      }
+    },
+    {
+      "index": 19,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:34.922Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78c5",
+        "args": {
+          "path": "tests/providers/test_container_mmproj.py",
+          "symbol": "TestContainerSpecMmproj"
+        }
+      }
+    },
+    {
+      "index": 20,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:34.922Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78d8",
+        "args": {
+          "path": "tests/providers/test_container.py",
+          "symbol": "_fake_profile_catalog"
+        }
+      }
+    },
+    {
+      "index": 21,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:35.037Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d7899",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Symbol \"TestContainerSpecChatTemplate\" not found in test_container.py. Did you mean: TestContainerSpec, TestContainerRuntimeProbe, test_container_name_key?"
+          }
+        ]
+      }
+    },
+    {
+      "index": 22,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:35.037Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78ad",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Symbol \"_fake_profile_catalog\" not found in test_container_chat_template.py. Did you mean: _moe_profile?"
+          }
+        ]
+      }
+    },
+    {
+      "index": 23,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:35.037Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78b5",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Symbol \"TestContainerSpecChatTemplate\" not found in test_container.py. Did you mean: TestContainerSpec, TestContainerRuntimeProbe, test_container_name_key?"
+          }
+        ]
+      }
+    },
+    {
+      "index": 24,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:35.037Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78c5",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "class TestContainerSpecMmproj  test_container_mmproj.py:130-145\n\nclass TestContainerSpecMmproj:\n    def test_mmproj_emitted_from_model_info(self) -> None:\n        spec = _build_spec(_slot_cfg(), _model_info(mmproj=_SIDECAR))\n        assert \"--mmproj\" in spec.command, f\"--mmproj missing from command: {spec.command}\"\n        idx = spec.command.index(\"--mmproj\")\n        assert spec.command[idx + 1] == _SIDECAR\n\n    def test_no_mmproj_when_model_has_no_sidecar(self) -> None:\n        spec = _build_spec(_slot_cfg(), _model_info())  # mmproj absent\n        assert \"--mmproj\" not in spec.command, (\n            f\"--mmproj must be absent for a text-only model: {spec.command}\"\n        )\n\n    def test_no_mmproj_when_sidecar_is_none(self) -> None:\n        spec = _build_spec(_slot_cfg(), _model_info(mmproj=None))\n        assert \"--mmproj\" not in spec.command"
+          }
+        ]
+      }
+    },
+    {
+      "index": 25,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:35.037Z",
+      "data": {
+        "toolName": "read_symbol",
+        "toolCallId": "call_019f7e1ad23d7ef1991d78d8",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Symbol \"_fake_profile_catalog\" not found in test_container.py. Did you mean: _moe_profile?"
+          }
+        ]
+      }
+    },
+    {
+      "index": 26,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:37.203Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1adb3872a0862a6881",
+        "args": {
+          "path": "tests/providers/test_container_chat_template.py",
+          "limit": 70
+        }
+      }
+    },
+    {
+      "index": 27,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:37.217Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1adb3872a0862a6896",
+        "args": {
+          "path": "tests/providers/test_container_mmproj.py",
+          "limit": 140
+        }
+      }
+    },
+    {
+      "index": 28,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:37.227Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1adb3872a0862a68ab",
+        "args": {
+          "path": "tests/providers/test_container.py",
+          "offset": 1090,
+          "limit": 160
+        }
+      }
+    },
+    {
+      "index": 29,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:37.267Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1adb3872a0862a6881",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"Tests: container emits --chat-template-file from the resolved chat_template.\n\nTask 3 / Phase 3 — slot-config-phase3-templates. Updated for FLAGS-own §7\n(slot-purity fold): the chat template is model-intrinsic, so it is resolved\nONLY from ``model.defaults.chat_template``. The per-slot ``chat_template`` is\nsunset/inert at launch (the migrator folds it into the bound model).\n\nCovers:\n  * When model_info carries defaults.chat_template the flag is emitted with\n    ``--chat-template-file <store>/chat-templates/<id>.jinja``.\n  * A residual slot ``chat_template`` is inert — it neither emits the flag on\n    its own nor overrides the model default.\n  * When the model specifies no template (or 'auto' / None),\n    ``--chat-template-file`` is ABSENT from the command.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom typing import Any\nfrom unittest.mock import patch\n\nfrom hal0.config.paths import model_store_root\nfrom hal0.config.schema import ProfileConfig\nfrom hal0.providers.container import ContainerProvider, _llama_launch_plan\n\n# ── shared helpers ────────────────────────────────────────────────────────────\n\n\ndef _moe_profile() -> ProfileConfig:\n    return ProfileConfig(\n        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\n        flags=\"-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap\",\n        mtp=False,\n    )\n\n\ndef _slot_cfg(**overrides: Any) -> dict[str, Any]:\n    base: dict[str, Any] = {\n        \"name\": \"test-container\",\n        \"port\": 8095,\n        \"profile\": \"rocm\",\n        \"runtime\": \"container\",\n        \"device\": \"gpu-rocm\",\n        \"model\": {\"default\": \"chadrock-35b.gguf\"},\n    }\n    base.update(overrides)\n    return base\n\n\ndef _model_info(**overrides: Any) -> dict[str, Any]:\n    base: dict[str, Any] = {\n        \"path\": \"/mnt/ai-models/chadrock-35b.gguf\",\n        \"_model_key\": \"chadrock-35b\",\n    }\n    base.update(overrides)\n    return base\n\n\ndef _build_spec(slot_cfg: dict[str, Any], model_info: dict[str, Any]):\n    provider = ContainerProvider()\n    with (\n        patch(\"hal0.providers.container._resolve_profile\", return_value=_moe_profile()),\n        patch(\n            \"hal0.providers.container.resolve_gpu_device_paths\",\n            return_value=[\"/dev/kfd\", \"/dev/dri/renderD128\"],\n        ),\n        patch(\n            \"hal0.providers.container.resolve_gpu_group_ids\",\n            return_value=[],\n        ),\n\n[237 more lines in file. Use offset=71 to continue.]"
+          }
+        ]
+      }
+    },
+    {
+      "index": 30,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:37.272Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1adb3872a0862a6896",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"Tests: container provider emits --mmproj from the model's sidecar (#900).\n\nMirrors the native llama_server.py provider, which already appends\n``--mmproj <path>`` when ``model_info[\"mmproj\"]`` is set. This is what lets a\ncontainer-runtime llama-server slot load the multimodal projector and report\n``modalities.vision: true`` without the hand-written ``[server].extra_args``\nhack that previously lived in the live chat.toml.\n\nCovers:\n  * ``_llama_launch_plan`` appends ``--mmproj <path>`` when given, omits it when None.\n  * A manual ``--mmproj`` in ``extra_args`` overrides the sidecar; normalize_argv\n    dedups to one flag (last-wins) so there's no duplicate in the command.\n  * ``container_spec`` reads ``model_info[\"mmproj\"]`` and emits the flag.\n  * No flag when the model carries no sidecar (no regression for text-only slots).\n  * ``load_sync`` writes a unit file containing the flag when a sidecar is present.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom typing import Any\nfrom unittest.mock import MagicMock, patch\n\nfrom hal0.config.schema import ProfileConfig\nfrom hal0.providers.container import ContainerProvider, _llama_launch_plan\n\n_SIDECAR = \"/mnt/ai-models/qwopus3.6-27b-v2/mmproj-F32.mmproj\"\n\n\n# ── shared helpers (parallel to test_container_chat_template.py) ───────────────\n\n\ndef _moe_profile() -> ProfileConfig:\n    return ProfileConfig(\n        image=\"ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server\",\n        flags=\"-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap\",\n        mtp=False,\n    )\n\n\ndef _slot_cfg(**overrides: Any) -> dict[str, Any]:\n    base: dict[str, Any] = {\n        \"name\": \"test-container\",\n        \"port\": 8095,\n        \"profile\": \"rocm\",\n        \"runtime\": \"container\",\n        \"device\": \"gpu-rocm\",\n        \"model\": {\"default\": \"chadrock-35b.gguf\"},\n    }\n    base.update(overrides)\n    return base\n\n\ndef _model_info(**overrides: Any) -> dict[str, Any]:\n    base: dict[str, Any] = {\n        \"path\": \"/mnt/ai-models/chadrock-35b.gguf\",\n        \"_model_key\": \"chadrock-35b\",\n    }\n    base.update(overrides)\n    return base\n\n\ndef _build_spec(slot_cfg: dict[str, Any], model_info: dict[str, Any]):\n    provider = ContainerProvider()\n    with (\n        patch(\"hal0.providers.container._resolve_profile\", return_value=_moe_profile()),\n        patch(\n            \"hal0.providers.container.resolve_gpu_device_paths\",\n            return_value=[\"/dev/kfd\", \"/dev/dri/renderD128\"],\n        ),\n        patch(\"hal0.providers.container.resolve_gpu_group_ids\", return_value=[]),\n    ):\n        return provider.container_spec(slot_cfg, model_info)\n\n\n# ── _llama_launch_plan direct tests ──────────────────────────────────────────\n\n\nclass TestLlamaLaunchPlanMmproj:\n    def test_mmproj_flag_present_when_path_set(self) -> None:\n        plan = _llama_launch_plan(\n            image=\"img:latest\",\n            port=8095,\n            model_path=\"/mnt/ai-models/m.gguf\",\n            flags_str=\"\",\n            devices=[],\n            group_ids=[],\n            mmproj=_SIDECAR,\n        )\n        assert \"--mmproj\" in plan.command\n        idx = plan.command.index(\"--mmproj\")\n        assert plan.command[idx + 1] == _SIDECAR\n\n    def test_mmproj_flag_absent_when_none(self) -> None:\n        plan = _llama_launch_plan(\n            image=\"img:latest\",\n            port=8095,\n            model_path=\"/mnt/ai-models/m.gguf\",\n            flags_str=\"\",\n            devices=[],\n            group_ids=[],\n            mmproj=None,\n        )\n        assert \"--mmproj\" not in plan.command\n\n    def test_mmproj_sidecar_wins_over_tune_duplicate(self) -> None:\n        \"\"\"FLAGS-own: the mmproj sidecar rides the typed ``mmproj`` segment,\n        which sits AFTER ``model_extra_args``. So a redundant ``--mmproj``\n        smuggled into the model's freeform ``defaults.extra_args`` is deduped\n        away and the resolved sidecar wins (the sidecar is model-intrinsic).\"\"\"\n        smuggled = \"/mnt/ai-models/override/mmproj.gguf\"\n        plan = _llama_launch_plan(\n            image=\"img:latest\",\n            port=8095,\n            model_path=\"/mnt/ai-models/m.gguf\",\n            flags_str=\"\",\n            devices=[],\n            group_ids=[],\n            model_defaults={\"extra_args\": f\"--mmproj {smuggled}\"},\n            mmproj=_SIDECAR,\n        )\n        cmd = plan.command\n        assert cmd.count(\"--mmproj\") == 1\n        idx = cmd.index(\"--mmproj\")\n        assert cmd[idx + 1] == _SIDECAR  # resolved sidecar wins, smuggled deduped\n\n\n# ── container_spec integration tests ─────────────────────────────────────────\n\n\nclass TestContainerSpecMmproj:\n    def test_mmproj_emitted_from_model_info(self) -> None:\n        spec = _build_spec(_slot_cfg(), _model_info(mmproj=_SIDECAR))\n        assert \"--mmproj\" in spec.command, f\"--mmproj missing from command: {spec.command}\"\n        idx = spec.command.index(\"--mmproj\")\n        assert spec.command[idx + 1] == _SIDECAR\n\n    def test_no_mmproj_when_model_has_no_sidecar(self) -> None:\n        spec = _build_spec(_slot_cfg(), _model_info())  # mmproj absent\n        assert \"--mmproj\" not in spec.command, (\n            f\"--mmproj must be absent for a text-only model: {spec.command}\"\n\n[45 more lines in file. Use offset=141 to continue.]"
+          }
+        ]
+      }
+    },
+    {
+      "index": 31,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:37.278Z",
+      "data": {
+        "toolName": "read",
+        "toolCallId": "call_019f7e1adb3872a0862a68ab",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "        A slot on the basic vulkan seed therefore never gets a forced q8 KV.\n        \"\"\"\n        vseed = SEED_PROFILES[\"chat\"]\n        assert \"-ctk\" not in vseed[\"flags\"] and \"q8_0\" not in vseed[\"flags\"]\n        assert \"-fa on\" in vseed[\"flags\"]\n\n        profile = ProfileConfig(flags=vseed[\"flags\"], mtp=False)\n        cfg = {\"profile\": \"chat\", \"port\": 8096, \"model\": {\"default\": \"qwen3-27b\"}}\n        with patch(\"hal0.providers.container._resolve_profile\", return_value=profile):\n            argv = resolved_command_for_slot(cfg, model_path=\"/mnt/ai-models/qwen3-27b.gguf\")\n        assert argv is not None\n        assert \"q8_0\" not in argv  # basic seed forces no KV quant\n\n\nclass TestUniformQuadletRender:\n    \"\"\"halo150/143 O8+O11: ONE render for every substrate — no version branch.\n\n    Native AutoRemove=/GroupAdd=/SecurityOpt= keys are deliberately never\n    emitted: 4.x generators hard-fail the conversion on them, and the native\n    render's systemd lifecycle broke on unprivileged podman-5-in-LXC\n    (netavark /run/user/0/netns teardown race) while the PodmanArgs render\n    ran healthy on both validation boxes.\n    \"\"\"\n\n    def _rendered(self) -> str:\n        return _render_llama(\"qtest\", \"img:latest\", 18081, \"/models/m.gguf\", \"-fa on\")\n\n    def test_no_native_5x_keys_ever(self):\n        text = self._rendered()\n        assert \"AutoRemove\" not in text\n        assert \"GroupAdd=\" not in text\n        assert \"SecurityOpt=\" not in text\n\n    def test_gpu_groups_ride_podman_args(self):\n        text = self._rendered()\n        if \"--group-add\" in text:\n            assert \"PodmanArgs=\" in text\n\n\ndef _exec_tokens(unit_text: str) -> list[str]:\n    \"\"\"shlex-split the rendered ``Exec=`` argv back into tokens.\"\"\"\n    return shlex.split(_exec_line(unit_text))\n\n\nclass TestHostNetLoopbackFence:\n    \"\"\"host-net ⇄ loopback-bind coupling (podman-unprivileged-findings.md, Issue 1).\n\n    Under ``Network=host`` there is no ``PublishPort=127.0.0.1:…`` fence, so the\n    process bind IS the fence — the renderer must flip ``--host 0.0.0.0`` (and\n    ComfyUI's ``--listen 0.0.0.0``) to loopback. The invariant: a host-net plan\n    can NEVER render a 0.0.0.0 bind. Bridge mode keeps 0.0.0.0 + the 127.0.0.1\n    PublishPort pin unchanged.\n    \"\"\"\n\n    def _llama_plan(self, network_mode: str = \"\") -> RuntimeLaunchPlan:\n        return RuntimeLaunchPlan(\n            image=\"img:latest\",\n            command=[\"--host\", \"0.0.0.0\", \"--port\", \"8095\", \"--model\", \"/models/m.gguf\"],\n            port=8095,\n            network_mode=network_mode,\n        )\n\n    # ── INVARIANT: host-net plan never renders a 0.0.0.0 bind ────────────────\n    def test_host_net_plan_never_renders_zero_bind(self) -> None:\n        \"\"\"THE invariant. A plan pinned network_mode=host binds loopback.\"\"\"\n        plan = self._llama_plan(network_mode=\"host\")\n        unit = _render_quadlet_from_plan(\"slot\", plan)\n        assert \"Network=host\" in unit.splitlines()\n        assert \"0.0.0.0\" not in unit  # no bind, no publish, nowhere\n        tokens = _exec_tokens(unit)\n        assert tokens[tokens.index(\"--host\") + 1] == \"127.0.0.1\"\n        # host net → no PublishPort (would be a no-op).\n        assert not any(ln.startswith(\"PublishPort=\") for ln in unit.splitlines())\n\n    def test_config_default_host_net_flips_bind_for_bridge_plan(self) -> None:\n        \"\"\"A plan with empty network_mode picks up the [slots].network_mode=host\n        box default and STILL gets the loopback bind + Network=host — the\n        deploy-time knob drives the fence, not just an explicit per-plan mode.\"\"\"\n        plan = self._llama_plan(network_mode=\"\")  # bridge-shaped plan\n        unit = _render_quadlet_from_plan(\"slot\", plan, network_mode_default=\"host\")\n        assert \"Network=host\" in unit.splitlines()\n        assert \"0.0.0.0\" not in unit\n        tokens = _exec_tokens(unit)\n        assert tokens[tokens.index(\"--host\") + 1] == \"127.0.0.1\"\n\n    # ── REGRESSION: bridge mode keeps 0.0.0.0 + loopback PublishPort ─────────\n    def test_bridge_mode_keeps_zero_bind_and_loopback_publish(self) -> None:\n        \"\"\"Bridge (empty network_mode, no host default): the process binds\n        0.0.0.0 inside its netns and the 127.0.0.1 PublishPort is the fence —\n        unchanged from before this lane.\"\"\"\n        plan = self._llama_plan(network_mode=\"\")\n        unit = _render_quadlet_from_plan(\"slot\", plan)  # network_mode_default=\"\"\n        assert not any(ln.startswith(\"Network=\") for ln in unit.splitlines())\n        assert \"PublishPort=127.0.0.1:8095:8095\" in unit.splitlines()\n        tokens = _exec_tokens(unit)\n        assert tokens[tokens.index(\"--host\") + 1] == \"0.0.0.0\"\n\n    def test_bridge_mode_publish_host_widen_still_binds_zero(self) -> None:\n        \"\"\"publish_host=0.0.0.0 widens the PUBLISH (bridge); the process bind is\n        untouched (still 0.0.0.0 in-netns). Only host-net flips the bind.\"\"\"\n        plan = self._llama_plan(network_mode=\"\")\n        unit = _render_quadlet_from_plan(\"slot\", plan, publish_host=\"0.0.0.0\")\n        assert \"PublishPort=0.0.0.0:8095:8095\" in unit.splitlines()\n\n    # ── ComfyUI --listen inside a bash -lc payload string ───────────────────\n    def test_comfyui_shell_payload_listen_flipped_under_host_net(self) -> None:\n        \"\"\"ComfyUI templates ``--listen 0.0.0.0`` inside a single bash -lc token\n        AND always runs host net — the chokepoint must reach into the shell\n        string too so its web UI port is loopback-fenced like every slot.\"\"\"\n        payload = \"cd /opt/ComfyUI && exec python main.py --listen 0.0.0.0 --port 8188 -fa\"\n        plan = RuntimeLaunchPlan(\n            image=\"comfy:latest\",\n            command=[\"bash\", \"-lc\", payload],\n            port=8188,\n            network_mode=\"host\",\n        )\n        unit = _render_quadlet_from_plan(\"img\", plan)\n        assert \"Network=host\" in unit.splitlines()\n        assert \"0.0.0.0\" not in unit\n        assert \"--listen 127.0.0.1\" in _exec_line(unit)\n\n\nclass TestLoopbackFenceCommand:\n    \"\"\"Unit coverage for the fence helper across every bind-flag shape.\"\"\"\n\n    def test_split_token_host(self) -> None:\n        assert _loopback_fence_command([\"--host\", \"0.0.0.0\", \"--port\", \"9\"]) == [\n            \"--host\",\n            \"127.0.0.1\",\n            \"--port\",\n            \"9\",\n        ]\n\n    def test_split_token_listen(self) -> None:\n        assert _loopback_fence_command([\"--listen\", \"0.0.0.0\"]) == [\"--listen\", \"127.0.0.1\"]\n\n    def test_inline_equals_form(self) -> None:\n        assert _loopback_fence_command([\"--host=0.0.0.0\"]) == [\"--host=127.0.0.1\"]\n\n    def test_embedded_shell_string(self) -> None:\n        out = _loopback_fence_command([\"bash\", \"-lc\", \"python m.py --listen 0.0.0.0 --port 8\"])\n        assert out[-1] == \"python m.py --listen 127.0.0.1 --port 8\"\n\n    def test_no_bind_flag_untouched(self) -> None:\n        # A bare 0.0.0.0 not preceded by a bind flag is left alone (defensive:\n        # the fence targets bind addresses, not arbitrary values).\n        assert _loopback_fence_command([\"--some-ip\", \"0.0.0.0\"]) == [\"--some-ip\", \"0.0.0.0\"]\n\n\nclass TestSlotHardwareSegment:\n    \"\"\"spec-hw-slot-ownership §2: the slot owns NGL + THREADS; the model no\n    longer emits -ngl. Covers _llama_argv_segments' slot_hardware segment.\"\"\"\n\n    @staticmethod\n    def _argv(**kw: Any) -> list[str]:\n        segs = _llama_argv_segments(port=8081, model_path=\"/m.gguf\", **kw)\n        return resolve_argv(segs).argv\n\n    def test_slot_ngl_emits_ngl(self) -> None:\n        argv = self._argv(slot_n_gpu_layers=99)\n\n[36 more lines in file. Use offset=1250 to continue.]"
+          }
+        ]
+      }
+    },
+    {
+      "index": 32,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:40.656Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1ae8b470808a36540e",
+        "args": {
+          "command": "printf '%s\\n' '=== FULL CI FAILURE LOG ==='; cat /tmp/pi-bash-7057d38c6a881d3e.log | wc -l",
+          "timeout": 30
+        }
+      }
+    },
+    {
+      "index": 33,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:40.657Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1ae8b470808a36541d",
+        "args": {
+          "command": "printf '%s\\n' '=== FAILED TESTS BY NAME WITH FAILURE TRACE (deduped to first occurrence) ==='; rg -n --no-heading 'FAILED ' /tmp/pi-bash-7057d38c6a881d3e.log | sed -E 's/^.*FAILED ([^:]+):([^ ]+).*$/\\1:\\2/' | sort -u | head -200",
+          "timeout": 30
+        }
+      }
+    },
+    {
+      "index": 34,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:40.669Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1ae8b470808a36540e",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "=== FULL CI FAILURE LOG ===\n4196\n"
+          }
+        ]
+      }
+    },
+    {
+      "index": 35,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T05:58:40.675Z",
+      "data": {
+        "toolName": "bash",
+        "toolCallId": "call_019f7e1ae8b470808a36541d",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "=== FAILED TESTS BY NAME WITH FAILURE TRACE (deduped to first occurrence) ===\ntests/api/test_install_apply.py::test_apply_seeds_jobs_and_creates_slots\ntests/api/test_meta_enums.py::test_payload_matches_canonical_taxonomy\ntests/api/test_slots_image_pull.py::test_image_status_missing\ntests/api/test_slots_image_pull.py::test_image_status_present\ntests/api/test_slots_image_pull.py::test_image_status_pulling_when_job_active\ntests/api/test_slots_image_pull.py::test_pull_start_idempotent\ntests/api/test_slots_image_pull.py::test_pull_start_returns_202\ntests/api/test_slots_image_pull.py::test_pull_status_missing_when_no_job\ntests/api/test_slots_image_pull.py::test_pull_status_present_when_no_job\ntests/api/test_slots_image_pull.py::test_pull_stream_missing_when_no_job\ntests/api/test_slots_image_pull.py::test_pull_stream_present_when_no_job\ntests/capabilities/test_tts_capability_switch.py::test_apply_selecting_kokoro_cpu_swaps_tts_slot_back_to_kokoro_profile\ntests/capabilities/test_tts_capability_switch.py::test_apply_selecting_qwen3_gpu_swaps_tts_slot_to_qwen3_profile\ntests/capabilities/test_tts_capability_switch.py::test_catalog_profile_for_fit_tts_cpu_is_kokoro\ntests/capabilities/test_tts_capability_switch.py::test_catalog_profile_for_fit_tts_gpu_is_qwen3\ntests/capabilities/test_tts_capability_switch.py::test_kokoro_row_offers_cpu_backend\ntests/capabilities/test_tts_capability_switch.py::test_orchestrator_profile_for_fit_non_tts_gpu_unchanged\ntests/capabilities/test_tts_capability_switch.py::test_orchestrator_profile_for_fit_tts_cpu_is_kokoro\ntests/capabilities/test_tts_capability_switch.py::test_orchestrator_profile_for_fit_tts_gpu_is_qwen3\ntests/capabilities/test_tts_capability_switch.py::test_qwen3_row_offers_gpu_rocm_backend\ntests/capabilities/test_tts_capability_switch.py::test_tts_profile_for_device_mapping\ntests/cli/test_doctor_profiles.py::test_images_ok_when_repo_present_regardless_of_tag\ntests/cli/test_doctor_profiles.py::test_images_warn_when_in_use_image_not_pulled\ntests/config/test_profile_derivation_parity.py::test_base_profile_for_backend_is_non_mtp\ntests/config/test_profile_derivation_parity.py::test_derive_profile_cpu_tts_vs_non_tts\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[agent-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[agent-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[agent-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[chat-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[chat-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[chat-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[coder-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[coder-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[coder-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[embed-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[embed-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[embed-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[image-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[image-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[image-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[rerank-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[rerank-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[rerank-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[tts-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[tts-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[tts-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[utility-cpu]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[utility-gpu-rocm]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_matrix_is_pinned[utility-gpu-vulkan]\ntests/config/test_profile_derivation_parity.py::test_derive_profile_rocm_dense_chat_coder_and_lanes\ntests/config/test_profile_derivation_parity.py::test_device_default_profiles_table_is_pinned\ntests/config/test_profile_derivation_parity.py::test_fit_helper_is_non_mtp_on_rocm\ntests/config/test_profile_derivation_parity.py::test_profile_for_fit_matches_shared_helper[npu-tts]\ntests/config/test_profile_derivation_parity.py::test_reconcile_device_flip_stays_non_mtp\ntests/config/test_schema_npu.py::test_seed_tts_toml_validates\ntests/golden_paths/test_gp05_stamped_launch_layering.py::test_launch_builder_emits_no_profile_or_slot_flag_segment\ntests/hardware/test_recommend.py::test_cpu_only_host_seeds_chat_capable_profile\ntests/hardware/test_recommend.py::test_seeded_slot_carries_container_runtime_and_profile\ntests/hardware/test_recommend.py::test_seeded_slot_validates_as_slotconfig\ntests/install/test_orchestrate.py::test_apply_setup_creates_chat_slot_and_plans_pull[asyncio]\ntests/install/test_orchestrate.py::test_apply_setup_scaffolds_modelless_slot_without_pull[asyncio]\ntests/model_fit/test_model_fit.py::test_allows_matching_llm_gpu_profile\ntests/model_fit/test_model_fit.py::test_blocks_model_slot_type_mismatch\ntests/model_fit/test_model_fit.py::test_blocks_profile_slot_type_mismatch\ntests/model_fit/test_model_fit.py::test_degrades_gpu_cpu_profile_mismatch\ntests/providers/test_container_chat_template.py::TestContainerSpecChatTemplate::test_auto_chat_template_treated_as_none\ntests/providers/test_container_chat_template.py::TestContainerSpecChatTemplate::test_model_auto_chat_template_treated_as_none\ntests/providers/test_container_chat_template.py::TestContainerSpecChatTemplate::test_model_defaults_chat_template_emitted_when_no_slot_override\ntests/providers/test_container_chat_template.py::TestContainerSpecChatTemplate::test_model_default_wins_slot_override_inert\ntests/providers/test_container_chat_template.py::TestContainerSpecChatTemplate::test_no_chat_template_flag_when_neither_set\ntests/providers/test_container_chat_template.py::TestContainerSpecChatTemplate::test_slot_chat_template_is_inert\ntests/providers/test_container_chat_template.py::TestLoadSyncChatTemplate::test_unit_contains_chat_template_file_flag\ntests/providers/test_container_chat_template.py::TestLoadSyncChatTemplate::test_unit_no_chat_template_flag_when_unset\ntests/providers/test_container_mmproj.py::TestContainerSpecMmproj::test_mmproj_emitted_from_model_info\ntests/providers/test_container_mmproj.py::TestContainerSpecMmproj::test_no_mmproj_when_model_has_no_sidecar\ntests/providers/test_container_mmproj.py::TestContainerSpecMmproj::test_no_mmproj_when_sidecar_is_none\ntests/providers/test_container_mmproj.py::TestLoadSyncMmproj::test_unit_contains_mmproj_flag\ntests/providers/test_container_mmproj.py::TestLoadSyncMmproj::test_unit_no_mmproj_flag_when_unset\ntests/providers/test_container_npu.py::TestLoadSyncNpuBranch::test_gpu_slot_unaffected_by_npu_branch\ntests/providers/test_container_spec_dispatch.py::test_gpu_slot_unaffected_still_takes_llama_path\ntests/providers/test_container_spec_dispatch.py::test_kokoro_path_does_not_require_registry_model_path\ntests/providers/test_container_spec_dispatch.py::test_spec_provider_kokoro_profile_returns_kokoro\ntests/providers/test_container_spec_dispatch.py::test_tts_kokoro_slot_renders_spec_unit\ntests/providers/test_container_spec_dispatch.py::test_tts_slot_by_type_only_no_profile\ntests/providers/test_container_vision_toggle.py::TestVisionToggleGatesMmproj::test_default_on_emits_mmproj\ntests/providers/test_container_vision_toggle.py::TestVisionToggleGatesMmproj::test_no_sidecar_no_mmproj_regardless\ntests/providers/test_container_vision_toggle.py::TestVisionToggleGatesMmproj::test_vision_false_suppresses_mmproj\ntests/providers/test_container_vision_toggle.py::TestVisionToggleGatesMmproj::test_vision_true_emits_mmproj\ntests/providers/test_flm.py::test_image_ref_honors_slot_override\ntests/providers/test_kokoro_container_spec.py::test_renderer_no_device_args_publish_volume_command\ntests/providers/test_kokoro_container_spec.py::test_slot_port_override_wins\ntests/providers/test_kokoro_container_spec.py::test_spec_command_carries_port_host_and_model_path\ntests/providers/test_kokoro_container_spec.py::test_spec_has_no_gpu_devices_or_groups\ntests/providers/test_kokoro_container_spec.py::test_spec_mounts_model_store_and_publishes_loopback\ntests/providers/test_kokoro_container_spec.py::test_spec_ro_mount_is_read_only\ntests/providers/test_kokoro_container_spec.py::test_spec_security_opts_for_lxc\ntests/providers/test_parallel_batching.py::test_slot_parallel_is_inert_in_scalars\ntests/providers/test_parallel_batching.py::test_workers_default_is_silent\ntests/providers/test_parallel_batching.py::test_workers_deprecation_warn_launch_only\ntests/providers/test_qwen3tts_container_spec.py::test_cache_dir_env_override\ntests/providers/test_qwen3tts_container_spec.py::test_no_registry_model_path_required\ntests/providers/test_qwen3tts_container_spec.py::test_qwen3tts_family_wins_over_generic_tts_fallback\ntests/providers/test_qwen3tts_container_spec.py::test_renderer_emits_gpu_args_cache_volume_and_miopen_env\ntests/providers/test_qwen3tts_container_spec.py::test_slot_port_override_wins\ntests/providers/test_qwen3tts_container_spec.py::test_spec_command_carries_port_host_model_path_and_voice\ntests/providers/test_qwen3tts_container_spec.py::test_spec_emits_gpu_devices_and_groups\ntests/providers/test_qwen3tts_container_spec.py::test_spec_miopen_env_set_no_hsa_override\ntests/providers/test_qwen3tts_container_spec.py::test_spec_mounts_ro_model_store_and_rw_cache\ntests/providers/test_qwen3tts_container_spec.py::test_spec_provider_qwen3tts_profile_returns_qwen3tts\ntests/providers/test_qwen3tts_container_spec.py::test_spec_security_opts_and_loopback_publish\ntests/registry/test_duplicate_refcount.py::test_duplicate_with_profile_stamps_flags\ntests/slots/test_device_profile_coherence.py::test_create_rejects_incoherent_pair\ntests/slots/test_device_profile_coherence.py::test_device_change_reconciles_conflicting_profile\ntests/slots/test_device_profile_coherence.py::test_explicit_contradiction_rejected\ntests/slots/test_device_profile_coherence.py::test_profile_change_drives_device\ntests/slots/test_model_preferred_profile.py::test_create_adopts_compatible_preferred_profile\ntests/slots/test_model_preferred_profile.py::test_profile_fits_slot_matrix\ntests/stacks/test_apply_plan.py::TestGuardedReconcile::test_conflicting_device_profile_is_flagged_not_applied\ntests/stacks/test_apply_plan.py::TestGuardedReconcile::test_device_flip_repoints_stale_profile\ntests/updater/test_seed_profiles_migration.py::test_divergent_seed_named_entry_is_rescued_not_deleted\ntests/updater/test_seed_profiles_migration.py::test_identical_materialised_seed_is_pruned\ntests/updater/test_seed_profiles_migration.py::test_operator_profiles_pass_through\ntests/updater/test_seed_profiles_migration.py::test_prune_writes_backup_once\n"
+          }
+        ]
+      }
+    },
+    {
+      "index": 36,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T05:58:57.393Z",
+      "data": {
+        "toolName": "subagent",
+        "toolCallId": "call_019f7e1b2a0670c3a3eba7d0",
+        "args": {
+          "acceptance": "auto",
+          "agent": "worker",
+          "artifacts": true,
+          "async": false,
+          "context": "fork",
+          "task": "In /home/mint/hal0 on branch rework/descar at ea3e4661, fix the 123 failing tests in PR #1324 by updating ONLY the test files and fixtures. Do NOT modify any source under src/hal0/, do NOT add a legacy alias layer, do NOT re-add `ProfileConfig.image`. The 1.0 contract is: image is slot-owned, profile is workload-oriented (chat/dense/moe/cpu-chat/embedding/reranking/kokoro/qwen3-tts/flm/comfyui), backend lives on SlotConfig.device.\n\nInputs:\n- Full CI failure log: /tmp/pi-bash-7057d38c6a881d3e.log\n- Reference docs: docs/rework/hal0-specs/spec-hw-slot-ownership.md\n- Canonical seeded profile names: chat, chat-long-context, dense, moe, embedding, reranking, cpu-chat, flm, kokoro, qwen3-tts, comfyui\n\nMethod:\n1. Run pytest on each failing file once to capture remaining failure shapes and to detect interactions between test classes (use -p no:cacheprovider --no-header -q --tb=line). DO NOT skip on first failure — read the actual current assertion.\n2. For every failing test, fix the TEST file or its fixtures so it asserts the canonical 1.0 contract. Do not touch src/. Tests should reflect that images come from the slot (via SlotConfig.image_pin / runner default / runner key 'binary') and that profile names are workload-oriented.\n3. Apply targeted edits with the edit tool; do not use sed/awk. Show file:line before/after in the report.\n4. After every batch, re-run only the tests you just fixed. When the entire failing set passes locally with `PATH=\"$PWD/.venv/bin:$PATH\" pytest -q tests/ --tb=line` (full suite — should land at 123 → 0 failures with the full count above 7000), record the exact command and the final tail line.\n5. NEVER mark the task complete without running the full Python suite end-to-end. Report the exact `X failed, Y passed, Z skipped` final line.\n6. Do not commit, do not push. Leave the working tree dirty for review. Report all modified files.\n\nSpecific already-known issues you must handle:\n- `tests/config/test_profiles.py::test_image_is_not_a_profile_field` — KEEP as-is; it's a guard. Do not delete.\n- `tests/updater/test_seed_profiles_migration.py` tests build pre-migration dict fixtures; construct via raw dict then route through the migrator's input path (not `ProfileConfig(...)`).\n- `tests/cli/test_doctor_profiles.py` IndexError failures — these hit `check_profile_images_present` which now returns []; convert to asserting the slot-image check path that replaced it, OR remove the obsolete assertions if the doctor surface intentionally omits the profile-image warning.\n\nOutput a final report containing:\n- Exact list of files modified (path only)\n- Final pytest summary line (e.g. '0 failed, 6901 passed, 13 skipped, 1 xfailed, ...')\n- The two green-run commands you executed\n- Any test that could not be fixed without touching src/, with the exact reason",
+          "timeoutMs": 1500000,
+          "toolBudget": {
+            "hard": 400,
+            "soft": 250,
+            "block": [
+              "edit",
+              "write",
+              "bash",
+              "read",
+              "module_report",
+              "read_symbol",
+              "ast_grep_search",
+              "ast_grep_replace"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "index": 37,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T06:13:57.971Z",
+      "data": {
+        "toolName": "subagent",
+        "toolCallId": "call_019f7e1b2a0670c3a3eba7d0",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed\n\nOutput:\nNow fix the TTS container spec tests and all remaining failing test files.\n\nOutput artifact: /home/mint/hal0/.pi-subagents/artifacts/93420c67_worker_0_output.md"
+          }
+        ]
+      }
+    }
+  ],
+  "changeset": {
+    "binding": "workspace",
+    "files": [
+      {
+        "path": "/home/mint/.pi/agent/npm/node_modules/pi-lens/skills/pi-lens-ast-grep/SKILL.md",
+        "kind": "read"
+      },
+      {
+        "path": "wc",
+        "kind": "modify"
+      },
+      {
+        "path": "head",
+        "kind": "modify"
+      },
+      {
+        "path": "tests/config/test_profiles.py",
+        "kind": "read"
+      },
+      {
+        "path": "tests/providers/test_container_chat_template.py",
+        "kind": "read"
+      },
+      {
+        "path": "tests/providers/test_container_mmproj.py",
+        "kind": "read"
+      },
+      {
+        "path": "tests/providers/test_container.py",
+        "kind": "read"
+      },
+      {
+        "path": "sed",
+        "kind": "modify"
+      }
+    ]
+  },
+  "artifacts": [],
+  "endedAt": "2026-07-20T06:13:58.012Z"
+}

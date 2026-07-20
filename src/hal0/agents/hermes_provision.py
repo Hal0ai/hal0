@@ -1078,7 +1078,7 @@ def _phase_kanban_db_init(ctx: _StepCtx) -> PhaseResult:
     # would send its own dot-dirs into root's unwritable home. HERMES_HOME is
     # set explicitly, matching every other hermes-venv subprocess call here.
     env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))
-    script = f"from hermes_cli.kanban_db import init_db; init_db({str(db_path)!r})"
+    script = f"from pathlib import Path as _P; from hermes_cli.kanban_db import init_db; init_db(_P({str(db_path)!r}))"
     try:
         ctx.io.run(
             [str(hermes_python), "-c", script],

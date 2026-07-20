@@ -1,0 +1,88 @@
+{
+  "runId": "ba696243",
+  "agent": "scout",
+  "task": "Read-only branch/worktree archaeology in /home/mint/hal0. Search all local and remote refs for recent commits that already update tests failing in PR #1324 after workload-profile renames or slot-owned image/device changes. Report exact branches/commits/files that can be reused, and distinguish unrelated work. Do not edit.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/mint/hal0/.pi-subagents/artifacts/outputs/ba696243/context.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 83703,
+    "output": 12488,
+    "cacheRead": 273536,
+    "cacheWrite": 0,
+    "cost": 0.016121262,
+    "turns": 16
+  },
+  "model": "openrouter/deepseek/deepseek-v4-flash:low",
+  "attemptedModels": [
+    "openrouter/deepseek/deepseek-v4-flash:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 83703,
+        "output": 12488,
+        "cacheRead": 273536,
+        "cacheWrite": 0,
+        "cost": 0.016121262,
+        "turns": 16
+      }
+    }
+  ],
+  "durationMs": 170871,
+  "toolCount": 53,
+  "acceptance": {
+    "status": "rejected",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "attestation",
+        "status": "failed",
+        "message": "Failed to parse acceptance-report: Empty or unterminated acceptance-report fence. (in configured output /home/mint/hal0/.pi-subagents/artifacts/outputs/ba696243/context.md)"
+      }
+    ],
+    "verifyRuns": [],
+    "childReportParseError": "Failed to parse acceptance-report: Empty or unterminated acceptance-report fence. (in configured output /home/mint/hal0/.pi-subagents/artifacts/outputs/ba696243/context.md)"
+  },
+  "transcriptPath": "/home/mint/hal0/.pi-subagents/artifacts/ba696243_scout_1_transcript.jsonl",
+  "timestamp": 1784526606333
+}

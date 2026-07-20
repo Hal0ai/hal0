@@ -1,0 +1,95 @@
+{
+  "id": "pi-mrt1a0lk-subrum",
+  "taskName": "pi-turn",
+  "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+  "provider": "pi",
+  "model": "unknown",
+  "status": "finished",
+  "startedAt": "2026-07-20T09:39:59.240Z",
+  "trace": [
+    {
+      "index": 0,
+      "kind": "model.request",
+      "timestamp": "2026-07-20T09:39:59.247Z",
+      "data": {
+        "provider": "pi",
+        "model": "unknown",
+        "systemPrompt": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\nAvailable tools:\n- read: Read",
+        "messages": [
+          {
+            "role": "user",
+            "content": "create a document outlining the work that was just rolled back and save it locally"
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "kind": "model.response",
+      "timestamp": "2026-07-20T09:40:20.136Z",
+      "data": {
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "Let me recall exactly what we did:\n\n1. Added `\"image_pin\"` to `TOLERATED_SLOT_CONFIG_KEYS` in `src/hal0/slot_config/__init__.py`\n2. Reordered/relabeled HW grid in `ui/src/dash/slot-modals.jsx`: DEVICE, IMAGE, BINARY, THREADS\n3. Moved NGL from Hardware grid to Model section\n4. Moved Parallel and extra_args from Inference/Advanced to Model section\n5. Fixed image status to show actual image ref + slot_id, show \"—\" when not running\n6. Fixed runner·binary to show backend (rocm/vulkan) instead of \"auto (from device)\"\n7. Renamed BINARY label to Profile\n8. Deployed to 143\n\nThen rolled back. Save this as a local doc.",
+            "thinkingSignature": "reasoning"
+          },
+          {
+            "type": "toolCall",
+            "id": "call_00_5h4t9GAGJRj1wtyMAG1O3055",
+            "name": "write",
+            "arguments": {
+              "path": "/home/mint/hal0/.handoff-slot-drawer-cleanup.md",
+              "content": "# Slot Drawer Cleanup — Rolled Back Changes\n\n**Date**: 2026-07-20  \n**Rolled back from**: `e3163605` → reset to `3ddd9f58` (pre-merge `origin/main` into `rework/p3-brain`)\n\n## Changes Applied (then rolled back)\n\n### 1. Fix `image_pin` save rejection (`src/hal0/slot_config/__init__.py`)\n- Added `\"image_pin\"` to `TOLERATED_SLOT_CONFIG_KEYS` so PUT /config no longer returns \"unknown slot config key(s): image_pin\"\n- Belt-and-suspenders fix — the field IS declared on `SlotConfig` pydantic model but the running backend may predate it\n\n### 2. Hardware grid relabel & reorder (`ui/src/dash/slot-modals.jsx`)\n- **Old order**: `device` → `NGL` → `THREADS` → `BINARY` → `image_pin` (mixed case)\n- **New order**: `DEVICE` → `IMAGE` → `BINARY` → `THREADS` (all caps)\n- Changed `image_pin` label to `IMAGE`\n\n### 3. NGL moved to Model section\n- NGL (GPU offload layers) removed from Hardware grid\n- Inserted into Model section between `ctx_size` and `Template`\n- Rationale: it's a model-load parameter, not a hardware constraint\n\n### 4. Parallel + extra_args moved to Model section\n- **Parallel** (continuous batching / `--parallel`) moved from Inference → Model\n- **extra_args** (per-slot flag override) moved from Advanced → Model\n- Model section now: Model picker → ctx_size → NGL → Template → Parallel → extra_args\n- Advanced disclosure now only holds resolved command preview + provenance legend\n\n### 5. Image status strip shows actual image ref + slot_id\n- Shows `slot.actual_image || slot.image_pin || slot.image` instead of `\"present\"`/`\"missing\"`\n- Appends slot ID (e.g. `#3`) so operator can correlate to owning slot\n- Shows `—` when slot is not running (`slotButtonPhase(slot) !== \"running\"`)\n\n### 6. Runner · binary shows resolved backend\n- When `slot.binary` is empty, shows `auto · rocm` (or `vulkan`/`cpu`/`npu`) instead of `auto (from device)`\n- Uses `deviceBackend(device)` for resolution\n\n### 7. BINARY label renamed to Profile\n- HW grid field label: `BINARY` → `Profile`\n- Description: \"runner image (RUNNER_IMAGES)\" → \"runner profile\"\n- Dropdown options are profile names, not binary/image names\n\n### 8. Deployed to 143\n- SCP'd `slot-modals.jsx` and `slot_config/__init__.py` to `/usr/lib/hal0/hal0-0.9.8/`\n- Rebuilt dashboard (`npm run build`)\n- Restarted `hal0-api`\n\n## Re-apply Instructions\n\n```bash\ncd /home/mint/hal0\n\n# 1. Backend: add image_pin to tolerated keys\n#    Edit src/hal0/slot_config/__init__.py line ~220:\n#    Add \"image_pin\" to the TOLERATED_SLOT_CONFIG_KEYS frozenset\n\n# 2. Frontend: all changes are in ui/src/dash/slot-modals.jsx\n#    - HW grid: reorder DEVICE → IMAGE → Profile → THREADS, all caps\n#    - Move NGL to Model section (after ctx_size)\n#    - Move Parallel to Model (after Template)\n#    - Move extra_args to Model (after Parallel, before </FieldGroup>)\n#    - Image status: actual_image || image_pin || image, + slot_id, \"—\" when stopped\n#    - Runner · binary: deviceBackend(device) fallback instead of \"auto (from device)\"\n\n# Deploy to 143:\nscp -i ~/.ssh/thin-mint ui/src/dash/slot-modals.jsx root@10.0.1.143:/usr/lib/hal0/hal0-0.9.8/ui/src/dash/slot-modals.jsx\nssh -i ~/.ssh/thin-mint root@10.0.1.143 'cd /usr/lib/hal0/hal0-0.9.8/ui && rm -rf dist && npm run build'\nscp -i ~/.ssh/thin-mint src/hal0/slot_config/__init__.py root@10.0.1.143:/usr/lib/hal0/hal0-0.9.8/src/hal0/slot_config/__init__.py\nssh -i ~/.ssh/thin-mint root@10.0.1.143 'systemctl restart hal0-api'\n```\n\n## Files Modified\n- `src/hal0/slot_config/__init__.py` (1 line — add `\"image_pin\"` to set)\n- `ui/src/dash/slot-modals.jsx` (multiple sections — reorder, relabel, relocate fields)\n"
+            }
+          }
+        ],
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0
+        }
+      }
+    },
+    {
+      "index": 2,
+      "kind": "tool.call",
+      "timestamp": "2026-07-20T09:40:33.274Z",
+      "data": {
+        "toolName": "write",
+        "toolCallId": "call_00_5h4t9GAGJRj1wtyMAG1O3055",
+        "args": {
+          "path": "/home/mint/hal0/.handoff-slot-drawer-cleanup.md",
+          "content": "# Slot Drawer Cleanup — Rolled Back Changes\n\n**Date**: 2026-07-20  \n**Rolled back from**: `e3163605` → reset to `3ddd9f58` (pre-merge `origin/main` into `rework/p3-brain`)\n\n## Changes Applied (then rolled back)\n\n### 1. Fix `image_pin` save rejection (`src/hal0/slot_config/__init__.py`)\n- Added `\"image_pin\"` to `TOLERATED_SLOT_CONFIG_KEYS` so PUT /config no longer returns \"unknown slot config key(s): image_pin\"\n- Belt-and-suspenders fix — the field IS declared on `SlotConfig` pydantic model but the running backend may predate it\n\n### 2. Hardware grid relabel & reorder (`ui/src/dash/slot-modals.jsx`)\n- **Old order**: `device` → `NGL` → `THREADS` → `BINARY` → `image_pin` (mixed case)\n- **New order**: `DEVICE` → `IMAGE` → `BINARY` → `THREADS` (all caps)\n- Changed `image_pin` label to `IMAGE`\n\n### 3. NGL moved to Model section\n- NGL (GPU offload layers) removed from Hardware grid\n- Inserted into Model section between `ctx_size` and `Template`\n- Rationale: it's a model-load parameter, not a hardware constraint\n\n### 4. Parallel + extra_args moved to Model section\n- **Parallel** (continuous batching / `--parallel`) moved from Inference → Model\n- **extra_args** (per-slot flag override) moved from Advanced → Model\n- Model section now: Model picker → ctx_size → NGL → Template → Parallel → extra_args\n- Advanced disclosure now only holds resolved command preview + provenance legend\n\n### 5. Image status strip shows actual image ref + slot_id\n- Shows `slot.actual_image || slot.image_pin || slot.image` instead of `\"present\"`/`\"missing\"`\n- Appends slot ID (e.g. `#3`) so operator can correlate to owning slot\n- Shows `—` when slot is not running (`slotButtonPhase(slot) !== \"running\"`)\n\n### 6. Runner · binary shows resolved backend\n- When `slot.binary` is empty, shows `auto · rocm` (or `vulkan`/`cpu`/`npu`) instead of `auto (from device)`\n- Uses `deviceBackend(device)` for resolution\n\n### 7. BINARY label renamed to Profile\n- HW grid field label: `BINARY` → `Profile`\n- Description: \"runner image (RUNNER_IMAGES)\" → \"runner profile\"\n- Dropdown options are profile names, not binary/image names\n\n### 8. Deployed to 143\n- SCP'd `slot-modals.jsx` and `slot_config/__init__.py` to `/usr/lib/hal0/hal0-0.9.8/`\n- Rebuilt dashboard (`npm run build`)\n- Restarted `hal0-api`\n\n## Re-apply Instructions\n\n```bash\ncd /home/mint/hal0\n\n# 1. Backend: add image_pin to tolerated keys\n#    Edit src/hal0/slot_config/__init__.py line ~220:\n#    Add \"image_pin\" to the TOLERATED_SLOT_CONFIG_KEYS frozenset\n\n# 2. Frontend: all changes are in ui/src/dash/slot-modals.jsx\n#    - HW grid: reorder DEVICE → IMAGE → Profile → THREADS, all caps\n#    - Move NGL to Model section (after ctx_size)\n#    - Move Parallel to Model (after Template)\n#    - Move extra_args to Model (after Parallel, before </FieldGroup>)\n#    - Image status: actual_image || image_pin || image, + slot_id, \"—\" when stopped\n#    - Runner · binary: deviceBackend(device) fallback instead of \"auto (from device)\"\n\n# Deploy to 143:\nscp -i ~/.ssh/thin-mint ui/src/dash/slot-modals.jsx root@10.0.1.143:/usr/lib/hal0/hal0-0.9.8/ui/src/dash/slot-modals.jsx\nssh -i ~/.ssh/thin-mint root@10.0.1.143 'cd /usr/lib/hal0/hal0-0.9.8/ui && rm -rf dist && npm run build'\nscp -i ~/.ssh/thin-mint src/hal0/slot_config/__init__.py root@10.0.1.143:/usr/lib/hal0/hal0-0.9.8/src/hal0/slot_config/__init__.py\nssh -i ~/.ssh/thin-mint root@10.0.1.143 'systemctl restart hal0-api'\n```\n\n## Files Modified\n- `src/hal0/slot_config/__init__.py` (1 line — add `\"image_pin\"` to set)\n- `ui/src/dash/slot-modals.jsx` (multiple sections — reorder, relabel, relocate fields)\n"
+        }
+      }
+    },
+    {
+      "index": 3,
+      "kind": "tool.result",
+      "timestamp": "2026-07-20T09:40:33.283Z",
+      "data": {
+        "toolName": "write",
+        "toolCallId": "call_00_5h4t9GAGJRj1wtyMAG1O3055",
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Successfully wrote 3599 bytes to /home/mint/hal0/.handoff-slot-drawer-cleanup.md"
+          }
+        ]
+      }
+    }
+  ],
+  "changeset": {
+    "binding": "workspace",
+    "files": [
+      {
+        "path": "/home/mint/hal0/.handoff-slot-drawer-cleanup.md",
+        "kind": "modify",
+        "size": 3599
+      }
+    ]
+  },
+  "artifacts": [],
+  "endedAt": "2026-07-20T09:40:50.168Z"
+}

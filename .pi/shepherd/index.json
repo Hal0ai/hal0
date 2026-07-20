@@ -1,0 +1,655 @@
+{
+  "runs": [
+    {
+      "id": "pi-mrss36s0-ajv4bj",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-22-41-760Z_019f7df9-f7e0-7275-9b0a-05f069a7a400.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-20T05:22:44.112Z",
+      "endedAt": "2026-07-20T05:23:18.854Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrssds68-q6vmx1",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:30:58.400Z",
+      "endedAt": "2026-07-20T05:31:40.865Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsseoxt-q4to36",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:31:40.865Z",
+      "endedAt": "2026-07-20T05:38:22.341Z",
+      "fileCount": 10,
+      "toolCallCount": 24
+    },
+    {
+      "id": "pi-mrsspvl9-d3xzj0",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/349beddc/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:40:22.701Z",
+      "endedAt": "2026-07-20T05:40:23.164Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsspvlm-25iu3r",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/349beddc/run-2/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:40:22.714Z",
+      "endedAt": "2026-07-20T05:40:23.171Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsspvm0-szyooi",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/349beddc/run-1/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:40:22.728Z",
+      "endedAt": "2026-07-20T05:40:23.178Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsspvyj-n0eabj",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/349beddc/run-1/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:40:23.179Z",
+      "endedAt": "2026-07-20T05:40:53.292Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsspvy4-xcs5em",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/349beddc/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:40:23.164Z",
+      "endedAt": "2026-07-20T05:46:30.303Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrsspvyb-us397n",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/349beddc/run-2/session.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-20T05:40:23.171Z",
+      "endedAt": "2026-07-20T05:46:55.929Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrssyrpz-i736om",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-2/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:47:17.591Z",
+      "endedAt": "2026-07-20T05:47:18.101Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrssyrqi-hg7uda",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:47:17.610Z",
+      "endedAt": "2026-07-20T05:47:18.115Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrssyrtn-thaxcm",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-1/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:47:17.723Z",
+      "endedAt": "2026-07-20T05:47:18.207Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrssys73-7bjzzk",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-1/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:47:18.207Z",
+      "endedAt": "2026-07-20T05:50:05.289Z",
+      "fileCount": 2,
+      "toolCallCount": 51
+    },
+    {
+      "id": "pi-mrssys4k-9p7vt6",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:47:18.116Z",
+      "endedAt": "2026-07-20T05:50:40.866Z",
+      "fileCount": 22,
+      "toolCallCount": 40
+    },
+    {
+      "id": "pi-mrssys45-r46sl5",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855/ba696243/run-2/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:47:18.101Z",
+      "endedAt": "2026-07-20T05:52:45.735Z",
+      "fileCount": 16,
+      "toolCallCount": 31
+    },
+    {
+      "id": "pi-mrssyd5i-iwyiah",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:46:58.710Z",
+      "endedAt": "2026-07-20T05:55:37.519Z",
+      "fileCount": 2,
+      "toolCallCount": 10
+    },
+    {
+      "id": "pi-mrstdtf1-l2hrh6",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-58-57-436Z_019f7e1b-2a9b-79d6-9d65-f1d74ce53ec7.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:58:59.630Z",
+      "endedAt": "2026-07-20T05:58:59.885Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrstdtm6-z34cr0",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-58-57-436Z_019f7e1b-2a9b-79d6-9d65-f1d74ce53ec7.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-20T05:58:59.886Z",
+      "endedAt": "2026-07-20T06:13:57.393Z",
+      "fileCount": 22,
+      "toolCallCount": 88
+    },
+    {
+      "id": "pi-mrstc6zq-10rzd5",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T05:57:43.910Z",
+      "endedAt": "2026-07-20T06:13:58.012Z",
+      "fileCount": 8,
+      "toolCallCount": 18
+    },
+    {
+      "id": "pi-mrsu1u6i-y46wcu",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T06-17-38-211Z_019f7e2c-44a3-737f-b3ca-72c3ff1ef733.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T06:17:40.362Z",
+      "endedAt": "2026-07-20T06:17:40.593Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsuvtjb-r7ugwc",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T06:40:59.207Z",
+      "endedAt": "2026-07-20T06:54:08.615Z",
+      "fileCount": 1,
+      "toolCallCount": 1
+    },
+    {
+      "id": "pi-mrsvcuvj-4hoskp",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T06:54:14.095Z",
+      "endedAt": "2026-07-20T06:55:05.256Z",
+      "fileCount": 1,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrsvy9zy-0j9c8z",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:10:53.470Z",
+      "endedAt": "2026-07-20T07:11:11.037Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsvynjy-ib2l2o",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:11:11.038Z",
+      "endedAt": "2026-07-20T07:11:57.381Z",
+      "fileCount": 3,
+      "toolCallCount": 4
+    },
+    {
+      "id": "pi-mrsw004j-od8rdr",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:12:13.987Z",
+      "endedAt": "2026-07-20T07:15:03.775Z",
+      "fileCount": 4,
+      "toolCallCount": 17
+    },
+    {
+      "id": "pi-mrsw3pbr-qrh77y",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:15:06.615Z",
+      "endedAt": "2026-07-20T07:15:48.864Z",
+      "fileCount": 3,
+      "toolCallCount": 4
+    },
+    {
+      "id": "pi-mrsw4zai-3iedkj",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:16:06.186Z",
+      "endedAt": "2026-07-20T07:17:08.199Z",
+      "fileCount": 4,
+      "toolCallCount": 7
+    },
+    {
+      "id": "pi-mrsw8clm-t6efw5",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:18:43.402Z",
+      "endedAt": "2026-07-20T07:20:46.388Z",
+      "fileCount": 4,
+      "toolCallCount": 25
+    },
+    {
+      "id": "pi-mrswbg4b-i95l4x",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:21:07.931Z",
+      "endedAt": "2026-07-20T07:22:55.699Z",
+      "fileCount": 3,
+      "toolCallCount": 7
+    },
+    {
+      "id": "pi-mrsve8wl-8juukr",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T06:55:18.933Z",
+      "endedAt": "2026-07-20T07:38:52.120Z",
+      "fileCount": 8,
+      "toolCallCount": 47
+    },
+    {
+      "id": "pi-mrswz7st-tmm7p1",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:39:36.893Z",
+      "endedAt": "2026-07-20T07:41:06.125Z",
+      "fileCount": 4,
+      "toolCallCount": 5
+    },
+    {
+      "id": "pi-mrsx1wht-6tz7oj",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:41:42.209Z",
+      "endedAt": "2026-07-20T07:42:39.708Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrsx4d6k-p0vx25",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:43:37.148Z",
+      "endedAt": "2026-07-20T07:45:05.354Z",
+      "fileCount": 2,
+      "toolCallCount": 4
+    },
+    {
+      "id": "pi-mrsx6x2z-5zt3as",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:45:36.251Z",
+      "endedAt": "2026-07-20T07:46:08.140Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrsx7s9s-uhslos",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:46:16.672Z",
+      "endedAt": "2026-07-20T07:46:51.710Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrsxammj-pcsa9y",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T07:48:29.323Z",
+      "endedAt": "2026-07-20T08:11:41.687Z",
+      "fileCount": 9,
+      "toolCallCount": 29
+    },
+    {
+      "id": "pi-mrsyi46o-0pstej",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:22:18.288Z",
+      "endedAt": "2026-07-20T08:26:40.515Z",
+      "fileCount": 3,
+      "toolCallCount": 3
+    },
+    {
+      "id": "pi-mrsyp0o6-atdx6p",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:27:40.326Z",
+      "endedAt": "2026-07-20T08:29:04.819Z",
+      "fileCount": 1,
+      "toolCallCount": 3
+    },
+    {
+      "id": "pi-mrsyor9b-m91cqa",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T07-10-51-740Z_019f7e5c-ff5c-73e1-8ab2-2c0c9403de84.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:27:28.127Z",
+      "endedAt": "2026-07-20T08:29:45.769Z",
+      "fileCount": 9,
+      "toolCallCount": 10
+    },
+    {
+      "id": "pi-mrsyrzvs-emne90",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:29:59.272Z",
+      "endedAt": "2026-07-20T08:30:27.328Z",
+      "fileCount": 1,
+      "toolCallCount": 1
+    },
+    {
+      "id": "pi-mrsyzi1n-arjgbb",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:35:49.403Z",
+      "endedAt": "2026-07-20T08:36:13.208Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsz1gym-13swfg",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-37-19-516Z_019f7eac-281b-72bb-89c6-5886f18c1992.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-20T08:37:21.310Z",
+      "endedAt": "2026-07-20T08:37:49.181Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsz49h2-7ogvmn",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:39:31.574Z",
+      "endedAt": "2026-07-20T08:41:08.651Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrsz56qb-ohi1po",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-40-12-853Z_019f7eae-cd35-70fb-8d92-217755804469.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-20T08:40:14.675Z",
+      "endedAt": "2026-07-20T08:41:38.813Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsyt5t7-he9jmx",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:30:53.611Z",
+      "endedAt": "2026-07-20T08:49:31.279Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrszh47r-2a8nmd",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:49:31.287Z",
+      "endedAt": "2026-07-20T08:57:40.126Z",
+      "fileCount": 12,
+      "toolCallCount": 43
+    },
+    {
+      "id": "pi-mrszszbv-4bbvb6",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:58:44.827Z",
+      "endedAt": "2026-07-20T08:59:56.844Z",
+      "fileCount": 3,
+      "toolCallCount": 5
+    },
+    {
+      "id": "pi-mrszuxjx-166rtl",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:00:15.837Z",
+      "endedAt": "2026-07-20T09:00:51.696Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrszvpt0-bph0x6",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:00:52.452Z",
+      "endedAt": "2026-07-20T09:01:49.131Z",
+      "fileCount": 3,
+      "toolCallCount": 4
+    },
+    {
+      "id": "pi-mrt00vl8-humqqd",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:04:53.228Z",
+      "endedAt": "2026-07-20T09:04:54.267Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrszzy98-2n18s4",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:04:10.028Z",
+      "endedAt": "2026-07-20T09:05:07.739Z",
+      "fileCount": 2,
+      "toolCallCount": 5
+    },
+    {
+      "id": "pi-mrt0354q-o6s5iw",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:06:38.906Z",
+      "endedAt": "2026-07-20T09:06:40.259Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrt03ebd-xpdlo7",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:06:50.809Z",
+      "endedAt": "2026-07-20T09:06:51.332Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrsz22po-vczk1d",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-37-49-181Z_019f7eac-9bfd-730b-bfdd-fa85c2e86b20.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T08:37:49.500Z",
+      "endedAt": "2026-07-20T09:06:58.112Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrt03jy9-pvscp2",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-37-49-181Z_019f7eac-9bfd-730b-bfdd-fa85c2e86b20.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:06:58.113Z",
+      "endedAt": "2026-07-20T09:07:42.397Z",
+      "fileCount": 3,
+      "toolCallCount": 6
+    },
+    {
+      "id": "pi-mrsz6zxo-odc6mf",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-41-38-813Z_019f7eb0-1cfd-72f5-aa35-f03fe8c6559b.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-20T08:41:39.180Z",
+      "endedAt": "2026-07-20T09:10:33.181Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrt05ryg-kxxjo5",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:08:41.800Z",
+      "endedAt": "2026-07-20T09:12:29.529Z",
+      "fileCount": 6,
+      "toolCallCount": 13
+    },
+    {
+      "id": "pi-mrt0at1v-8dnxz5",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:12:36.499Z",
+      "endedAt": "2026-07-20T09:13:20.958Z",
+      "fileCount": 4,
+      "toolCallCount": 4
+    },
+    {
+      "id": "pi-mrt0c8pu-uyoz1a",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:13:43.458Z",
+      "endedAt": "2026-07-20T09:15:09.499Z",
+      "fileCount": 4,
+      "toolCallCount": 10
+    },
+    {
+      "id": "pi-mrt08693-nrhbtj",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T09-10-33-181Z_019f7eca-93dc-779c-9165-e75b7250d55b.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:10:33.639Z",
+      "endedAt": "2026-07-20T09:17:53.191Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrt0hlew-q7h3nj",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T09-10-33-181Z_019f7eca-93dc-779c-9165-e75b7250d55b.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:17:53.192Z",
+      "endedAt": "2026-07-20T09:19:30.529Z",
+      "fileCount": 7,
+      "toolCallCount": 11
+    },
+    {
+      "id": "pi-mrt0mob8-dty0cw",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:21:50.228Z",
+      "endedAt": "2026-07-20T09:22:35.579Z",
+      "fileCount": 1,
+      "toolCallCount": 5
+    },
+    {
+      "id": "pi-mrt1a0lk-subrum",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:39:59.240Z",
+      "endedAt": "2026-07-20T09:40:50.168Z",
+      "fileCount": 1,
+      "toolCallCount": 1
+    },
+    {
+      "id": "pi-mrt1ifbh-eq626h",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T09:46:31.565Z",
+      "endedAt": "2026-07-20T09:56:51.625Z",
+      "fileCount": 12,
+      "toolCallCount": 77
+    },
+    {
+      "id": "pi-mrt3bcb1-81wer1",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T05-30-56-824Z_019f7e01-85b8-7543-85b6-63ba2f98e855.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:37:00.301Z",
+      "endedAt": "2026-07-20T10:37:08.444Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    }
+  ],
+  "updatedAt": "2026-07-20T10:37:08.444Z"
+}
