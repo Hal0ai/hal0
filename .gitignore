@@ -125,3 +125,6 @@ node_modules
 
 # ad-hoc QA screenshots at repo root
 /logs-*.png
+
+# git worktrees (project-local isolation; see superpowers:using-git-worktrees)
+/.worktrees/
