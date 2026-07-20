@@ -91,3 +91,53 @@ flags = "--disable-mmap --bf16-vae --cache-none"
 mtp = false
 intent = "ComfyUI"
 quant = ""
+
+[profile.brain]
+# Brain steward workload + MiniCPM5-1B-Agentic-Tooluse quirks (per
+# spec-p3-brain.final.md §5a). Brain is 1:1 with its model (the only
+# 1B model the steward runs), so a single combined profile is cleaner
+# than overlay. Small batch (1B model), reasoning off, no native
+# toolcalls on FPX — tool turns route via [brain_chat] tool_model.
+flags = "--jinja -fa on -b 512 -ub 256 -c 65536 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.9 --top-k 20 --no-mmproj"
+mtp = false
+intent = "Brain steward (1B MiniCPM5 + persona + tool-call routing)"
+quant = ""
+
+[profile.chadrock-dense]
+# Chadrock 27B dense coder recipe (from
+# jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp model card — the chadrock
+# launch card that the legacy profile.dense was distilled from). 27B
+# dense + ROCmFP4 + MTP-capable + mmproj (vision).
+flags = "--jinja -fa on -b 2048 -ub 512 -c 131072 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = true
+intent = "Chadrock 27B dense coder (ROCmFP4 + MTP-capable + mmproj)"
+quant = "ROCmFP4"
+
+[profile.chadrock-moe]
+# Chadrock 35B MoE Saber recipe (from
+# jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp model card — the Saber launch
+# card that the legacy profile.moe was distilled from). 35B MoE A3B +
+# ROCmFPX MoEQuality + MTP draft heads.
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = true
+intent = "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP)"
+quant = "ROCmFP4"
+
+[profile.thinking]
+# Workload-level reasoning-ON profile. Use for reasoning-capable models
+# (qwen3-5-9b-deepseek, qwen3-6-35b-a3b-halostrix-dyn-mtp, chadrock-
+# uncensored-thinking). Family-specific reasoning-format / MTP bits fold
+# into the materialized model text at edit time.
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj"
+mtp = false
+intent = "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking, etc.)"
+quant = ""
+
+[profile.coding]
+# Workload-level code-gen tuned profile. Use for the coder slot (port
+# 8082), qwen3-coder, qwopus-coder, Qwen3-Coder-30B-A3B. Higher temp
+# for code-gen creativity; no reasoning (coders are non-reasoning).
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
+mtp = false
+intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder)"
+quant = ""
