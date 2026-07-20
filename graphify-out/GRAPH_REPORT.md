@@ -1,7 +1,7 @@
 # Graph Report - seeded-profile-rework  (2026-07-20)
 
 ## Corpus Check
-- 1534 files · ~1,900,619 words
+- 1534 files · ~1,900,615 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `973eb28a`
+- Built from commit: `b571162c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -5664,5 +5664,5 @@ _Questions this graph is uniquely positioned to answer:_
   _`connect()` has 117 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 40 inferred relationships involving `ApprovalQueue` (e.g. with `create_app()` and `ApprovalAlreadyResolved`) actually correct?**
   _`ApprovalQueue` has 40 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `First-class hal0-brain chat engine — the ``POST /api/brain/chat`` core.  SPEC §G`, `Resolve (system_prompt, default_model) from the hal0-brain profile.      Reads t`, `The caller's bearer token (sans ``Bearer `` prefix), or ``None``.` to the rest of the system?**
+- **What connects `Per spec §1.2 / §10: family_defaults.toml data is cleared for 1.0.  The schema l`, `[family] table exists but contains no entries (cleared for 1.0).`, `Cleared file parses as valid TOML (no syntax breakage).` to the rest of the system?**
   _10079 weakly-connected nodes found - possible documentation gaps or missing edges._

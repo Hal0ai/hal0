@@ -18,22 +18,48 @@ SEED_PROFILES_PATH = Path(__file__).resolve().parents[2] / "src/hal0/config/data
 
 # Per spec §4.1: hardware + operational flags removed from every profile.
 SLOT_HARDWARE_FLAG_FRAGMENTS = (
-    "-ngl ", "--n-gpu-layers", "-ngl=", "-dev ", "--device ",
-    "--threads ", "-t ", "--threads=", "-tb ",
-    "--main-gpu", "--tensor-split", "--split-mode", "-ngld",
+    "-ngl ",
+    "--n-gpu-layers",
+    "-ngl=",
+    "-dev ",
+    "--device ",
+    "--threads ",
+    "-t ",
+    "--threads=",
+    "-tb ",
+    "--main-gpu",
+    "--tensor-split",
+    "--split-mode",
+    "-ngld",
 )
 OPERATIONAL_FLAG_FRAGMENTS = (
-    "--parallel", "--metrics", "--no-webui",
-    "--poll", "--poll-batch", "--slot-prompt-similarity", "--no-mmap",
+    "--parallel",
+    "--metrics",
+    "--no-webui",
+    "--poll",
+    "--poll-batch",
+    "--slot-prompt-similarity",
+    "--no-mmap",
 )
 
 ALL_16_PROFILES = [
-    "profile.chat", "profile.chat-long-context", "profile.dense", "profile.moe",
-    "profile.embedding", "profile.reranking", "profile.cpu-chat",
-    "profile.flm", "profile.kokoro", "profile.qwen3-tts", "profile.comfyui",
+    "profile.chat",
+    "profile.chat-long-context",
+    "profile.dense",
+    "profile.moe",
+    "profile.embedding",
+    "profile.reranking",
+    "profile.cpu-chat",
+    "profile.flm",
+    "profile.kokoro",
+    "profile.qwen3-tts",
+    "profile.comfyui",
     # New for 1.0 (per spec §4.2):
-    "profile.brain", "profile.chadrock-dense", "profile.chadrock-moe",
-    "profile.thinking", "profile.coding",
+    "profile.brain",
+    "profile.chadrock-dense",
+    "profile.chadrock-moe",
+    "profile.thinking",
+    "profile.coding",
 ]
 
 
@@ -63,10 +89,17 @@ def test_catalog_has_exactly_16_profiles() -> None:
 # (cpu-chat=cpu, flm=npu, kokoro=cpu, qwen3-tts=gpu, comfyui=img). Generic
 # profiles are device-agnostic (no device_class field) per spec §4.1.
 DEVICE_AGNOSTIC_PROFILES = [
-    "profile.chat", "profile.chat-long-context", "profile.dense", "profile.moe",
-    "profile.embedding", "profile.reranking", "profile.brain",
-    "profile.chadrock-dense", "profile.chadrock-moe",
-    "profile.thinking", "profile.coding",
+    "profile.chat",
+    "profile.chat-long-context",
+    "profile.dense",
+    "profile.moe",
+    "profile.embedding",
+    "profile.reranking",
+    "profile.brain",
+    "profile.chadrock-dense",
+    "profile.chadrock-moe",
+    "profile.thinking",
+    "profile.coding",
 ]
 DEVICE_SPECIFIC_PROFILES = [
     ("profile.cpu-chat", "cpu"),

@@ -18,17 +18,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = REPO_ROOT / "installer/install.sh"
 SLOTS_DIR = REPO_ROOT / "installer/etc-hal0/slots"
 
-EXPECTED_10 = frozenset({
-    "flm", "tts", "rerank", "utility", "img", "agent", "brain",
-    "qwen3tts", "coder", "embed",
-})
+EXPECTED_10 = frozenset(
+    {
+        "flm",
+        "tts",
+        "rerank",
+        "utility",
+        "img",
+        "agent",
+        "brain",
+        "qwen3tts",
+        "coder",
+        "embed",
+    }
+)
 
 
 def test_static_seed_slots_tuple_is_10() -> None:
     """STATIC_SEED_SLOTS tuple is exactly the 10 expected seed names."""
     assert frozenset(STATIC_SEED_SLOTS) == EXPECTED_10, (
-        f"STATIC_SEED_SLOTS = {sorted(STATIC_SEED_SLOTS)}, "
-        f"expected {sorted(EXPECTED_10)}"
+        f"STATIC_SEED_SLOTS = {sorted(STATIC_SEED_SLOTS)}, expected {sorted(EXPECTED_10)}"
     )
 
 
