@@ -1123,12 +1123,16 @@ class ProfileConfig(BaseModel):
             "on-disk/API back-compat until P3-schema externalizes profiles."
         ),
     )
-    device_class: Literal["gpu", "cpu", "npu", "img"] = Field(
-        default="gpu",
+    device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
+        default=None,
         description=(
-            "Device class this profile targets.  Drives drawer profile filtering "
-            "and create-modal device defaults.  ``'img'`` is reserved for Phase D "
-            "(ComfyUI image-generation slots) and is not yet used."
+            "Device class this profile targets.  None (default, per "
+            "spec-hw-slot-ownership.md §4.1 / seeded-profile-rework §4.1) "
+            "means the profile is device-agnostic — the slot owns device "
+            "and the profile supplies the logical tune only.  ``'gpu'``, "
+            "``'cpu'``, ``'npu'``, ``'img'`` are explicit-fit values; "
+            "``profile_fits_slot`` skips the device-class gate when this is "
+            "None."
         ),
     )
     backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
@@ -2831,8 +2835,11 @@ class BrainChatConfig(BaseModel):
     # brain slot) can't emit tool calls the local runtime parses natively (it
     # leaks/500s). Point it at a model that tool-calls cleanly on this runtime
     # (a capable local slot like ``hal0/agent``, or the fallback provider).
-    # Empty → use ``model``/persona. An explicit per-request ``model`` wins.
-    tool_model: str = ""
+    # Default "hal0/agent" per spec-p3-brain.final.md §5a + ADR-0023
+    # (always-on anchor every fallback chain ends in). Set to "" to opt back
+    # into routing tool turns to ``model``/persona. An explicit per-request
+    # ``model`` wins over both.
+    tool_model: str = "hal0/agent"
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
 

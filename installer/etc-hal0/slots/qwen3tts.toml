@@ -2,12 +2,12 @@
 # (hal0-slot@qwen3tts). The GPU sibling of the cpu `tts`/kokoro slot; both
 # implement the OpenAI /v1/audio/speech contract.
 #
-# EXPLICITLY OUT of the installer's seed loop (WS-E, #1107): install.sh only
-# copies `flm tts rerank utility img agent brain` into /etc/hal0/slots. This file is an
-# opt-in TEMPLATE the operator drops in by hand (or a future picker enables) to
-# add the GPU multilingual engine alongside the lighter default CPU Kokoro slot.
-# Like the seeded slots it ships DISABLED with no `[model].default` pin, so
-# copying it in never triggers a surprise download or a crash-loop.
+# Per spec §5.4: this file was previously an opt-in template (NOT in the
+# installer's STATIC_SEED_SLOTS loop). For 1.0 it becomes a real static
+# seed — adds to STATIC_SEED_SLOTS tuple + install.sh:1666 loop + the
+# spec §5.1 mapping table. Like other seeds it ships DISABLED with no
+# `[model].default` pin, so copying it in never triggers a surprise
+# download or a crash-loop.
 name = "qwen3tts"
 type = "tts"
 device = "gpu-rocm"
@@ -15,3 +15,5 @@ runtime = "container"
 profile = "qwen3-tts"
 enabled = false
 port = 8095
+n_gpu_layers = -1
+threads = 0

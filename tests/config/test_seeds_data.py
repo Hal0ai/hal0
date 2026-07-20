@@ -22,7 +22,7 @@ from hal0.config.schema import (
 )
 
 # The 1.0 catalog is intentionally small: workload/runtime-family seeds only.
-_EXPECTED_PROFILE_COUNT = 11
+_EXPECTED_PROFILE_COUNT = 16
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
 
 
@@ -75,9 +75,10 @@ class TestProfileBenchToml:
 
 
 class TestFamilyDefaultsToml:
-    def test_gemma_entry(self) -> None:
+    def test_family_defaults_empty_for_1_0(self) -> None:
+        """Per spec §1.2: family_defaults.toml data cleared for 1.0."""
         fam = seeds.family_defaults()
-        assert fam["gemma"] == "-ctk f16 -ctv f16 --cache-reuse 0"
+        assert fam == {}
 
 
 class TestSchemaShims:

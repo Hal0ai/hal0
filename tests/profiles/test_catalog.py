@@ -125,8 +125,11 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
-    assert by_name["chat"].intent == "General chat"
-    assert by_name["dense"].quant == "ROCmFP4"
+    assert by_name["chat"].intent == "Generic chat (fallback for unknown models)"
+    # Per spec §4.2: generic dense profile is model-agnostic (no quant hint);
+    # the chadrock-dense family-specific profile carries the ROCmFP4 hint.
+    assert by_name["dense"].quant == ""
+    assert by_name["chadrock-dense"].quant == "ROCmFP4"
 
 
 def test_custom_profile_has_no_bench_and_round_trips_intent_quant(

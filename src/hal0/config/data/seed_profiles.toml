@@ -1,93 +1,153 @@
-# hal0 1.0 seeded profile catalog.
+# hal0 1.0 seeded profile catalog (16 profiles total).
 #
-# Seeds are small, device-agnostic workload templates. Physical placement,
-# GPU offload, CPU threads, runner binary, and image pins belong to slots.
-# Model-family quirks belong in family_defaults.toml and per-model defaults.
-# Backend-specific experiments are clone-only examples, not catalog seeds.
+# Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md §4:
+# Profiles are device-agnostic logical-tune TEMPLATES — they carry only
+# model-behavior flags (chat template, sampler, reasoning, KV type, batch
+# sizes, capability toggles). Hardware/operational flags (NGL, threads,
+# --parallel, --metrics, --no-webui, --no-mmap, --poll, --slot-prompt-
+# similarity, --main-gpu, --tensor-split, --split-mode, --ngld) live on
+# the slot. Images and runners live on the slot (via binary / image_pin).
 #
-# `mtp` remains on the public profile shape for one release as informational
-# compatibility metadata. It is not read by launch; model capability and the
-# selected slot runner decide MTP.
+# `mtp` remains informational for 1.0 (per spec-hw-slot-ownership.md §10)
+# — launch reads MTP from model capability plus the selected slot runner.
+#
+# Each profile is a complete recipe for a (workload × model-family) cell.
+# Slot picks ONE profile; per-slot [model].defaults.extra_args overrides.
+# Family-specific quirks (kv-cache type, mmproj behavior, sampler) live in
+# the family-specific profile (e.g. profile.chadrock-moe), NOT in a
+# separate family_defaults layer.
 
 [profile.chat]
-flags = "-fa on"
+# Minimal generic chat — fallback for unknown models.
+flags = "-fa on --jinja -b 2048 -ub 512"
 mtp = false
-device_class = "gpu"
-intent = "General chat"
+intent = "Generic chat (fallback for unknown models)"
 quant = ""
 
 [profile.chat-long-context]
-# Logical long-context tune; model-family defaults may override KV policy.
-flags = "-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui"
+# Long-context chat variant (model-family defaults may override KV policy).
+flags = "-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 -c 131072 --no-context-shift"
 mtp = false
-device_class = "gpu"
 intent = "Long-context chat"
 quant = ""
 
-[profile.moe]
-# FPX-MOE logical tune distilled from the validated Saber launch card.
-# Hardware and MTP draft-device flags are deliberately slot/model-owned.
-flags = "--jinja -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -fa on -b 2048 -ub 512 -tb 32 -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --parallel 1 --no-mmproj --metrics --no-webui --slot-prompt-similarity 0.0"
-mtp = false
-device_class = "gpu"
-intent = "MoE chat · Saber tune"
-quant = "ROCmFP4"
-
 [profile.dense]
-# FPX-DNSE logical tune distilled from the validated Chadrock launch card.
-# The 131072 context target is a workload default; slots still own hardware.
-flags = "--jinja -c 131072 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -fa on -b 2048 -ub 512 -tb 32 -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --parallel 1 --no-mmproj --metrics --no-webui --slot-prompt-similarity 0.0"
+# Generic dense workload — model-agnostic. Family-specific kv-cache / sampler
+# overrides go in profile.<family>-dense (e.g. profile.chadrock-dense).
+flags = "--jinja -fa on -b 2048 -ub 512 -c 131072 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
-device_class = "gpu"
-intent = "Dense chat · long context"
-quant = "ROCmFP4"
+intent = "Generic dense workload"
+quant = ""
+
+[profile.moe]
+# Generic MoE workload — model-agnostic. Family-specific overrides in
+# profile.<family>-moe (e.g. profile.chadrock-moe).
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = false
+intent = "Generic MoE workload"
+quant = ""
 
 [profile.embedding]
-flags = "--embedding -fa on -b 8192 -ub 8192 --no-mmap"
+flags = "--embedding -fa on -b 8192 -ub 8192"
 mtp = false
-device_class = "gpu"
-intent = "Embeddings"
+intent = "Pooled embeddings"
 quant = ""
 
 [profile.reranking]
-flags = "--reranking -fa on -b 8192 -ub 8192 --no-mmap"
+flags = "--reranking -fa on -b 8192 -ub 8192"
 mtp = false
-device_class = "gpu"
 intent = "Reranking"
 quant = ""
 
 [profile.cpu-chat]
-# No --threads here: thread count is a slot hardware fact.
-flags = "--threads-batch 8 -b 256 -ub 256 --parallel 1"
-mtp = false
+# CPU-safe chat. --threads-batch is llama-server specific (sets the number
+# of threads to use for batch processing; distinct from --threads which
+# sets total CPU threads). --threads stays on the slot.
+#
+# device_class = "cpu" preserves the existing fit-gating semantics: this
+# profile's CPU-tuned flags don't make sense on a GPU runtime. The slot
+# is free to override (operator-custom slot TOML), but the default-seed
+# adoption path rejects applying this profile to a gpu-* slot.
 device_class = "cpu"
-intent = "CPU chat"
+flags = "--threads-batch 8 --jinja -b 256 -ub 256"
+mtp = false
+intent = "CPU-safe chat"
 quant = ""
 
 [profile.flm]
+device_class = "npu"
 flags = ""
 mtp = false
-device_class = "npu"
-intent = "FLM"
+intent = "FLM NPU (chat/embed/STT)"
 quant = "W4ABF16"
 
 [profile.kokoro]
+device_class = "cpu"
 flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 mtp = false
-device_class = "cpu"
 intent = "Kokoro TTS"
 quant = ""
 
 [profile.qwen3-tts]
+device_class = "gpu"
 flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
 mtp = false
-device_class = "gpu"
 intent = "Qwen3-TTS"
 quant = "BF16"
 
 [profile.comfyui]
+device_class = "img"
 flags = "--disable-mmap --bf16-vae --cache-none"
 mtp = false
-device_class = "img"
 intent = "ComfyUI"
+quant = ""
+
+[profile.brain]
+# Brain steward workload + MiniCPM5-1B-Agentic-Tooluse quirks (per
+# spec-p3-brain.final.md §5a). Brain is 1:1 with its model (the only
+# 1B model the steward runs), so a single combined profile is cleaner
+# than overlay. Small batch (1B model), reasoning off, no native
+# toolcalls on FPX — tool turns route via [brain_chat] tool_model.
+flags = "--jinja -fa on -b 512 -ub 256 -c 65536 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.9 --top-k 20 --no-mmproj"
+mtp = false
+intent = "Brain steward (1B MiniCPM5 + persona + tool-call routing)"
+quant = ""
+
+[profile.chadrock-dense]
+# Chadrock 27B dense coder recipe (from
+# jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp model card — the chadrock
+# launch card that the legacy profile.dense was distilled from). 27B
+# dense + ROCmFP4 + MTP-capable + mmproj (vision).
+flags = "--jinja -fa on -b 2048 -ub 512 -c 131072 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = true
+intent = "Chadrock 27B dense coder (ROCmFP4 + MTP-capable + mmproj)"
+quant = "ROCmFP4"
+
+[profile.chadrock-moe]
+# Chadrock 35B MoE Saber recipe (from
+# jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp model card — the Saber launch
+# card that the legacy profile.moe was distilled from). 35B MoE A3B +
+# ROCmFPX MoEQuality + MTP draft heads.
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = true
+intent = "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP)"
+quant = "ROCmFP4"
+
+[profile.thinking]
+# Workload-level reasoning-ON profile. Use for reasoning-capable models
+# (qwen3-5-9b-deepseek, qwen3-6-35b-a3b-halostrix-dyn-mtp, chadrock-
+# uncensored-thinking). Family-specific reasoning-format / MTP bits fold
+# into the materialized model text at edit time.
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj"
+mtp = false
+intent = "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking, etc.)"
+quant = ""
+
+[profile.coding]
+# Workload-level code-gen tuned profile. Use for the coder slot (port
+# 8082), qwen3-coder, qwopus-coder, Qwen3-Coder-30B-A3B. Higher temp
+# for code-gen creativity; no reasoning (coders are non-reasoning).
+flags = "--jinja -fa on -b 2048 -ub 512 -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
+mtp = false
+intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder)"
 quant = ""

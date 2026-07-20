@@ -196,9 +196,14 @@ class TestLoadProfilesConfig:
         assert cfg.profile["chat"].mtp is False
 
     def test_seed_rocmfpx_grid_mtp_true(self, tmp_path: Path) -> None:
+        """Non-MTP profiles stay False; MTP-capable family profiles are True."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
+        _MTP_TRUE_PROFILES = {"chadrock-dense", "chadrock-moe"}
         for name in SEED_PROFILES:
-            assert cfg.profile[name].mtp is False
+            expected_mtp = name in _MTP_TRUE_PROFILES
+            assert cfg.profile[name].mtp is expected_mtp, (
+                f"profile {name}: expected mtp={expected_mtp}, got mtp={cfg.profile[name].mtp}"
+            )
 
     def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
         """Canonical GPU seeds do not pin a backend or runner image."""
@@ -377,16 +382,45 @@ def test_kokoro_seed_profile() -> None:
 # ── device_class + backend + DEVICE_DEFAULT_PROFILES ──────────────────────────
 
 
-def test_profile_device_class_defaults_gpu() -> None:
-    assert ProfileConfig().device_class == "gpu"
+def test_profile_device_class_defaults_none() -> None:
+    """Per spec §4.1: device_class defaults to None (device-agnostic)."""
+    assert ProfileConfig().device_class is None
 
 
 def test_seed_device_classes() -> None:
-    for name in ("chat", "chat-long-context", "moe", "dense"):
-        assert SEED_PROFILES[name]["device_class"] == "gpu"
-    assert SEED_PROFILES["flm"]["device_class"] == "npu"
-    assert SEED_PROFILES["kokoro"]["device_class"] == "cpu"
-    assert SEED_PROFILES["comfyui"]["device_class"] == "img"
+    """Generic profiles are device-agnostic (slot owns device per §4.1);
+    device-specific profiles declare their class explicitly to preserve
+    the existing fit-gating semantics."""
+    DEVICE_AGNOSTIC = {
+        "chat",
+        "chat-long-context",
+        "moe",
+        "dense",
+        "embedding",
+        "reranking",
+        "brain",
+        "chadrock-dense",
+        "chadrock-moe",
+        "thinking",
+        "coding",
+    }
+    for name in DEVICE_AGNOSTIC:
+        assert "device_class" not in SEED_PROFILES[name], (
+            f"profile {name} should be device-agnostic but has device_class"
+        )
+    # Device-specific profiles declare their class explicitly.
+    DEVICE_SPECIFIC = {
+        "cpu-chat": "cpu",
+        "flm": "npu",
+        "kokoro": "cpu",
+        "qwen3-tts": "gpu",
+        "comfyui": "img",
+    }
+    for name, expected_class in DEVICE_SPECIFIC.items():
+        assert SEED_PROFILES[name]["device_class"] == expected_class, (
+            f"profile {name}: expected device_class={expected_class!r}, "
+            f"got {SEED_PROFILES[name].get('device_class')!r}"
+        )
 
 
 def test_seed_backends() -> None:
