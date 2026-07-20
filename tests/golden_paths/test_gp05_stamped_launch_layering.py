@@ -42,19 +42,20 @@ def test_launch_builder_emits_no_profile_or_slot_flag_segment() -> None:
     assert "profile" not in labels
     assert "slot_overrides" not in labels
     assert "extra_args" not in labels
-    assert labels == {"base", "model_extra_args", "model_defaults", "chat_template", "mmproj"}
+    assert labels == {"base", "model_extra_args", "chat_template", "mmproj", "slot_hardware"}
 
     resolved = resolve_argv(segments)
     prov = {p.flag: p.source for p in resolved.provenance}
     # The stamped model tune reaches launch...
     assert "-b" in resolved.argv
     assert prov.get("-b") == "model_extra_args"
-    assert resolved.argv[resolved.argv.index("-ngl") + 1] == "99"  # model's -ngl, not slot 30
+    # spec-hw-slot-ownership §2: the slot now owns -ngl — the slot's 30 wins
+    # over the model's defaulted 99.
+    assert resolved.argv[resolved.argv.index("-ngl") + 1] == "30"
     # ...and none of the inert profile/slot flags do.
     assert "-fa" not in resolved.argv  # profile flag gone
     assert "--foo" not in resolved.argv  # slot extra_args gone
     assert "--parallel" not in resolved.argv  # slot parallel gone
-    assert "30" not in resolved.argv  # slot -ngl gone; model's 99 won
 
 
 def test_stamped_launch_does_not_consult_the_profile_flag_resolver() -> None:

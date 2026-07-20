@@ -103,9 +103,9 @@ def test_duplicate_with_profile_stamps_flags(registry: SqliteModelRegistry, tmp_
     f = tmp_path / "p.gguf"
     f.write_bytes(b"\x00")
     registry.add(Model(id="p", path=str(f)))
-    resolved = ProfileCatalog().resolve("cpu-llm")
-    out = duplicate_model(registry, source_id="p", new_id="p-copy", profile="cpu-llm")
-    assert out["defaults"]["profile"] == "cpu-llm"
+    resolved = ProfileCatalog().resolve("cpu-chat")
+    out = duplicate_model(registry, source_id="p", new_id="p-copy", profile="cpu-chat")
+    assert out["defaults"]["profile"] == "cpu-chat"
     assert out["defaults"]["extra_args"] == resolved.flags
     # Source untouched.
     assert registry.get("p").defaults is None

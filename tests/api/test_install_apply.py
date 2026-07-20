@@ -109,7 +109,7 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
     assert "qwen3.5-9b" in body["model_ids"]
     # chat.primary -> slot_name "agent" (ADR-0023 LLM anchor).
     chat = next(s for s in body["slots"] if s["slot"] == "agent")
-    assert chat["profile"] in ("rocm", "vulkan")
+    assert chat["profile"] in ("chat", "dense", "moe", "chat-long-context")
     assert chat["created"] is True
     # Slot TOML written OFFLINE (not started).
     toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent.toml"

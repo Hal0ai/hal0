@@ -103,6 +103,6 @@ def test_seed_tts_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "tts.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "tts"
+    assert slot.profile == "kokoro"
     assert slot.device == "cpu"
     assert slot.port == 8084

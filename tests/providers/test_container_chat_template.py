@@ -28,7 +28,6 @@ from hal0.providers.container import ContainerProvider, _llama_launch_plan
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         mtp=False,
     )

@@ -1125,8 +1125,8 @@
     "semantic_hash": ""
   },
   "src/hal0/cli/doctor_commands.py": {
-    "mtime": 1784522467.5289533,
-    "ast_hash": "216e82cea29120ae59c080fb98ea04a7",
+    "mtime": 1784524287.2856805,
+    "ast_hash": "17517b82b9c7edc5da8399487612a39e",
     "semantic_hash": ""
   },
   "src/hal0/cli/doctor_diagnosis.py": {
@@ -2790,8 +2790,8 @@
     "semantic_hash": ""
   },
   "tests/api/test_profiles_route.py": {
-    "mtime": 1784522467.5389533,
-    "ast_hash": "8c6593292154aa0e63291e037f71bf2a",
+    "mtime": 1784524287.2826805,
+    "ast_hash": "b00542ba4160d985b6f384565e5a1049",
     "semantic_hash": ""
   },
   "tests/api/test_providers.py": {
@@ -4445,8 +4445,8 @@
     "semantic_hash": ""
   },
   "tests/profiles/test_portable.py": {
-    "mtime": 1784522467.5419533,
-    "ast_hash": "4fea3affa5dd5d3fc3d776083232eea7",
+    "mtime": 1784524287.2826805,
+    "ast_hash": "e0256df7b0c8b176ea4247ed1121ea74",
     "semantic_hash": ""
   },
   "tests/providers/__init__.py": {
@@ -4480,8 +4480,8 @@
     "semantic_hash": "31e140c1d63026316ccb8d8759cc26c6"
   },
   "tests/providers/test_container.py": {
-    "mtime": 1784522467.5419533,
-    "ast_hash": "7b4673308f6ed700b188b7b94c5e5400",
+    "mtime": 1784524287.2846806,
+    "ast_hash": "05050d14d6173a32da92e029537b9ae9",
     "semantic_hash": ""
   },
   "tests/providers/test_container_assembler.py": {
@@ -4550,8 +4550,8 @@
     "semantic_hash": ""
   },
   "tests/providers/test_image_resolution.py": {
-    "mtime": 1784522467.5429535,
-    "ast_hash": "248bc74e52e281f3fac7e6a3dab01bb1",
+    "mtime": 1784524287.2826805,
+    "ast_hash": "fd69eb885ec6c997b5f618e71cce14a1",
     "semantic_hash": ""
   },
   "tests/providers/test_kokoro_container_spec.py": {
@@ -4875,8 +4875,8 @@
     "semantic_hash": "72daf977ed20ef4e772d12579a4aafd1"
   },
   "tests/slots/test_argv.py": {
-    "mtime": 1784522467.5449536,
-    "ast_hash": "c20cc3d5b82a747238ab7ba4fd33e636",
+    "mtime": 1784524287.2836804,
+    "ast_hash": "54dd78b4e9138cc0994c34a250ba779c",
     "semantic_hash": ""
   },
   "tests/slots/test_config_drift_aliases.py": {
@@ -5095,13 +5095,13 @@
     "semantic_hash": "348a46d30faa0256976d36dbce4f71b6"
   },
   "tests/stacks/test_export.py": {
-    "mtime": 1784522467.5449536,
-    "ast_hash": "bd9efbe0081f412de7323278d502b129",
+    "mtime": 1784524287.2826805,
+    "ast_hash": "7785083b43526d101a10d452a23ef340",
     "semantic_hash": ""
   },
   "tests/stacks/test_import.py": {
-    "mtime": 1784522467.5449536,
-    "ast_hash": "fe0f72b1a0e348787c133af588fd3905",
+    "mtime": 1784524287.2826805,
+    "ast_hash": "558561fa39be85612036966b3366be58",
     "semantic_hash": ""
   },
   "tests/stacks/test_snapshot.py": {
@@ -6310,9 +6310,9 @@
     "semantic_hash": ""
   },
   "ui/tests/e2e/specs/profiles-page-v3.spec.ts": {
-    "mtime": 1784344983.7703872,
-    "ast_hash": "e79d2db0bdd8586420e95f0c42380069",
-    "semantic_hash": "e79d2db0bdd8586420e95f0c42380069"
+    "mtime": 1784524328.2903037,
+    "ast_hash": "9720aa9fcf9128948d09e9bbd53534fd",
+    "semantic_hash": ""
   },
   "ui/tests/e2e/specs/runtimes-page-v3.spec.ts": {
     "mtime": 1784407271.6839283,
@@ -6365,9 +6365,9 @@
     "semantic_hash": "cc89b4dfb87981930ae8322a2efdd77f"
   },
   "ui/tests/e2e/specs/slot-drawer-profile-v3.spec.ts": {
-    "mtime": 1784407271.6839283,
-    "ast_hash": "8f51e953058acccdef1cb0464b1dff5d",
-    "semantic_hash": "8f51e953058acccdef1cb0464b1dff5d"
+    "mtime": 1784524427.4568107,
+    "ast_hash": "0498c1658f69bddea21a05655e51ea7f",
+    "semantic_hash": ""
   },
   "ui/tests/e2e/specs/slot-edit-controls-v3.spec.ts": {
     "mtime": 1784522467.5489535,
@@ -7760,8 +7760,8 @@
     "semantic_hash": ""
   },
   "src/hal0/config/migrations/hw_slot_ownership.py": {
-    "mtime": 1784522467.5299532,
-    "ast_hash": "e4ec1c65af2ab31c560502f5a8de8e4d",
+    "mtime": 1784524287.2836804,
+    "ast_hash": "e2b4724f64a9ffe05ce6a0511cb1691b",
     "semantic_hash": ""
   },
   "tests/cli/test_slot_migrate_hw.py": {
@@ -7770,13 +7770,33 @@
     "semantic_hash": ""
   },
   "tests/config/test_hw_slot_ownership_migration.py": {
-    "mtime": 1784522467.5399535,
-    "ast_hash": "628f73948891dcb710f3d7904c713e7d",
+    "mtime": 1784524287.2826805,
+    "ast_hash": "f9e192017a41ea2f227314eadec6d271",
     "semantic_hash": ""
   },
   "docs/rework/hal0-specs/spec-hw-slot-ownership.md": {
     "mtime": 1784522467.5209532,
     "ast_hash": "2fad4d942149bb7cba7a164bed5cb922",
+    "semantic_hash": ""
+  },
+  "tests/api/test_typed_bodies.py": {
+    "mtime": 1784522467.4809525,
+    "ast_hash": "7b872b7107cb7e3fcabebd353e24c7a0",
+    "semantic_hash": ""
+  },
+  "tests/mcp/test_admin_route_map.py": {
+    "mtime": 1784522467.4829526,
+    "ast_hash": "6965b86a6f96ff549419581337075523",
+    "semantic_hash": ""
+  },
+  "tests/mcp/test_unclassified_routes.py": {
+    "mtime": 1784522467.4859526,
+    "ast_hash": "3b6d7af198ac9af5b093ef64dd0259ea",
+    "semantic_hash": ""
+  },
+  "tests/mcp/test_validate_catalog.py": {
+    "mtime": 1784522467.4859526,
+    "ast_hash": "31a86dcfe0f9db6ef16133f6ebe35b93",
     "semantic_hash": ""
   }
 }

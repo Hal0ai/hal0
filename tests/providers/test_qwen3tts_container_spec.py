@@ -38,7 +38,7 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
         "device": "gpu-rocm",
         "type": "tts",
         "runtime": "container",
-        "profile": "tts-qwen3",
+        "profile": "qwen3-tts",
         "model": {"default": "qwen3-tts"},
     }
     base.update(overrides)
@@ -49,7 +49,7 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
 def _stub_gpu(tmp_hal0_home: str) -> Any:
     """Deterministic GPU passthrough regardless of the host (CI or real iGPU).
 
-    Depends on ``tmp_hal0_home`` so the ``tts-qwen3`` profile resolves from
+    Depends on ``tmp_hal0_home`` so the ``qwen3-tts`` profile resolves from
     SEED_PROFILES (isolated HAL0_HOME) rather than the host's real
     /etc/hal0/profiles.toml, which may not carry it yet (pre-deploy).
     """
@@ -142,7 +142,13 @@ def test_renderer_emits_gpu_args_cache_volume_and_miopen_env() -> None:
     assert "--group-add 993" in unit
     assert "--group-add 44" in unit
     assert "PublishPort=127.0.0.1:8095:8095" in lines
-    assert "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" in lines
+    # Read-only bind is the contract; the SELinux `:z` suffix is suppressed
+    # on NFS sources (chcon ENOTSUP) so it must NOT be hard-coded here.
+    model_volumes = [ln for ln in lines if ln.startswith("Volume=/mnt/ai-models:")]
+    assert model_volumes, f"missing /mnt/ai-models Volume=: {lines!r}"
+    assert any(v == "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" for v in model_volumes) or any(
+        v == "Volume=/mnt/ai-models:/mnt/ai-models:ro" for v in model_volumes
+    ), f"unexpected model volume form: {model_volumes}"
     assert "Volume=/var/lib/hal0/qwen3tts-cache:/cache:z" in lines
     assert "Environment=MIOPEN_FIND_MODE=FAST" in lines
     assert "HSA_OVERRIDE_GFX_VERSION" not in unit
@@ -169,7 +175,7 @@ def test_qwen3tts_family_wins_over_generic_tts_fallback() -> None:
     """Family discrimination beats the bare ``type == "tts"`` → Kokoro rule."""
     from hal0.providers.kokoro import KokoroProvider
 
-    qwen = _spec_provider_for({"type": "tts", "profile": "tts-qwen3"})
-    kok = _spec_provider_for({"type": "tts", "profile": "tts"})
+    qwen = _spec_provider_for({"type": "tts", "profile": "qwen3-tts"})
+    kok = _spec_provider_for({"type": "tts", "profile": "kokoro"})
     assert isinstance(qwen, Qwen3TTSProvider)
     assert isinstance(kok, KokoroProvider)

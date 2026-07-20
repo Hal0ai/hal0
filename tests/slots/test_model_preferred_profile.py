@@ -40,16 +40,16 @@ def _gpu_vulkan_cfg(name: str, model: str) -> dict:
 
 
 async def test_create_adopts_compatible_preferred_profile(tmp_hal0_home: str) -> None:
-    _register("vk-model", profile="vulkan")
+    _register("vk-model", profile="chat")
     sm = SlotManager()
     await sm.create("g", _gpu_vulkan_cfg("g", "vk-model"))
     cfg = await sm.get_config("g")
-    assert cfg["profile"] == "vulkan"
+    assert cfg["profile"] == "chat"
 
 
 async def test_create_ignores_incompatible_preferred_profile(tmp_hal0_home: str) -> None:
-    # cpu-llm is device_class=cpu — must NOT be forced onto a GPU slot.
-    _register("cpu-pref", profile="cpu-llm")
+    # cpu-chat is device_class=cpu — must NOT be forced onto a GPU slot.
+    _register("cpu-pref", profile="cpu-chat")
     sm = SlotManager()
     await sm.create("g", _gpu_vulkan_cfg("g", "cpu-pref"))
     cfg = await sm.get_config("g")
@@ -57,47 +57,44 @@ async def test_create_ignores_incompatible_preferred_profile(tmp_hal0_home: str)
 
 
 async def test_create_ignores_cross_backend_preferred_profile(tmp_hal0_home: str) -> None:
-    # rocm is device_class=gpu but backend=rocm — a vulkan slot must not adopt
-    # it (we never flip the slot's hardware to satisfy a model preference).
-    _register("rocm-pref", profile="rocm")
+    # chat is device_class=gpu, device-agnostic — a vulkan slot ADOPTS it
+    _register("chat-pref", profile="chat")
     sm = SlotManager()
-    await sm.create("g", _gpu_vulkan_cfg("g", "rocm-pref"))
+    await sm.create("g", _gpu_vulkan_cfg("g", "chat-pref"))
     cfg = await sm.get_config("g")
-    assert not cfg.get("profile")
+    assert cfg.get("profile") == "chat"
 
 
 async def test_apply_preferred_profile_swaps_when_compatible(tmp_hal0_home: str) -> None:
-    # Slot starts on the vulkan profile; swapping in a model that prefers a
+    # Slot starts on the chat profile; swapping in a model that prefers a
     # different COMPATIBLE profile re-points the slot (the swap path uses this
     # before the reload). Here both fit gpu-vulkan, so the change is applied.
-    _register("v2", profile="vulkan")
+    _register("v2", profile="dense")
     sm = SlotManager()
     cfg0 = _gpu_vulkan_cfg("g", "v2")
-    cfg0["profile"] = "rocm"  # a stale profile that doesn't match device
-    # create would reconcile; write directly via create with a coherent profile
-    cfg0["profile"] = "vulkan"
+    cfg0["profile"] = "chat"
     await sm.create("g", cfg0)
     changed = await sm._apply_preferred_profile("g", "v2")
-    # Already on "vulkan" → no change.
-    assert changed is False
+    assert changed is True
+    assert (await sm.get_config("g"))["profile"] == "dense"
 
 
 async def test_apply_preferred_profile_skips_incompatible(tmp_hal0_home: str) -> None:
-    _register("rocm-pref2", profile="rocm")
+    _register("cpu-chat-pref", profile="cpu-chat")
     sm = SlotManager()
-    cfg = _gpu_vulkan_cfg("g", "rocm-pref2")
-    cfg["profile"] = "vulkan"
+    cfg = _gpu_vulkan_cfg("g", "cpu-chat-pref")
+    cfg["profile"] = "chat"
     await sm.create("g", cfg)
-    changed = await sm._apply_preferred_profile("g", "rocm-pref2")
+    changed = await sm._apply_preferred_profile("g", "cpu-chat-pref")
     assert changed is False
-    assert (await sm.get_config("g"))["profile"] == "vulkan"
+    assert (await sm.get_config("g"))["profile"] == "chat"
 
 
 def test_profile_fits_slot_matrix(tmp_hal0_home: str) -> None:
     fits = SlotManager._profile_fits_slot
     gpu_vulkan = {"type": "llm", "device": "gpu-vulkan"}
-    assert fits("vulkan", gpu_vulkan) is True
-    assert fits("rocm", gpu_vulkan) is False  # cross-backend
-    assert fits("cpu-llm", gpu_vulkan) is False  # wrong device class
+    assert fits("chat", gpu_vulkan) is True
+    assert fits("chat", {"type": "llm", "device": "gpu-rocm"}) is True
+    assert fits("cpu-chat", gpu_vulkan) is False  # wrong device class
     assert fits("comfyui", gpu_vulkan) is False  # img profile, wrong type+class
     assert fits("does-not-exist", gpu_vulkan) is False

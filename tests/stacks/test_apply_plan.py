@@ -138,7 +138,7 @@ class TestGuardedReconcile:
         return path
 
     def test_conflicting_device_profile_is_flagged_not_applied(self, tmp_hal0_home: str) -> None:
-        slot_path = _write_agent_slot(tmp_hal0_home)
+        _write_agent_slot(tmp_hal0_home)
         stack = StackConfig(
             name="Bad",
             slots=[
@@ -146,22 +146,21 @@ class TestGuardedReconcile:
                     slot="agent",
                     model="m",
                     device="gpu-vulkan",
-                    profile="rocm",  # rocm profile under a vulkan device
+                    profile="chat",  # device-agnostic workload profile, no conflict
                 )
             ],
         )
         plan = StackApplyEngine().plan("bad", stack)
-        # Per-slot error recorded; whole plan not aborted.
-        assert plan.errors and plan.errors[0][0] == "agent"
-        assert "conflict" in plan.errors[0][1]
-        assert any("rejected" in line for line in plan.summary)
-        # The offending slot's after == before (nothing to commit).
-        after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
-        assert after == _read(slot_path)
-        assert plan.change_set.changed is False
+        # 1.0: profiles are device-agnostic workload names — no backend
+        # conflict to flag. The plan succeeds without errors.
+        assert plan.errors == []
+        assert any("agent" in line for line in plan.summary)
 
     def test_device_flip_repoints_stale_profile(self, tmp_hal0_home: str) -> None:
-        """A stack that moves device across backends heals the profile too."""
+        """A stack that moves device across backends keeps the workload profile.
+
+        1.0: profiles are device-agnostic workload names — device flip
+        does NOT change the profile."""
         slot_path = self._write_slot(
             tmp_hal0_home,
             "agent",
@@ -169,7 +168,7 @@ class TestGuardedReconcile:
                 'name = "agent"',
                 "port = 8087",
                 'device = "gpu-vulkan"',
-                'profile = "vulkan"',
+                'profile = "chat"',
                 "[model]",
                 'default = "old"',
             ],
@@ -183,8 +182,8 @@ class TestGuardedReconcile:
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after["device"] == "gpu-rocm"
         assert "backend" not in after
-        # Pre-fix: profile stayed "vulkan" → rocm device under a vulkan image.
-        assert after["profile"] == "rocm"
+        # 1.0: profile stays the workload name; device flip doesn't repoint it.
+        assert after["profile"] == "chat"
 
     def test_ctx_size_alias_folded_by_stack_write(self, tmp_hal0_home: str) -> None:
         slot_path = self._write_slot(

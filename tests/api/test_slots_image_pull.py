@@ -41,7 +41,6 @@ def _fake_profile_catalog():
     from hal0.config.schema import ProfileConfig
 
     fake_profile = ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         flags="--flash-attn on",
         mtp=False,
     )

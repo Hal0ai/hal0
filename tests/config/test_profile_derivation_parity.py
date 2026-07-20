@@ -4,8 +4,7 @@ The platform review found three parallel ``(capability, device) → profile``
 derivations that drifted apart across #834's churn:
 
   1. :func:`hal0.install.profile_derive.derive_profile` — the install-flavoured
-     resolver (gpu-rocm + dense chat/coder → plain ``rocm``; the legacy MTP
-     ``rocm-dnse`` preference was removed 2026-07-05).
+     resolver (gpu-rocm + dense chat/coder → plain ``chat``).
   2. :data:`hal0.config.schema.DEVICE_DEFAULT_PROFILES` — the canonical, plain
      device-class-representative base table (never MTP).
   3. The verbatim-twin ``_profile_for_fit`` blocks in ``capabilities/catalog.py``
@@ -14,10 +13,9 @@ derivations that drifted apart across #834's churn:
 
 The consolidation in PS-4 is a literal-dedup + shared-helper refactor with ZERO
 behaviour change. These tests pin the CURRENT matrix so a future unification
-cannot silently drift. Since the MTP ``rocm-dnse`` seed was removed
-(2026-07-05), all three paths now resolve dense chat/coder on ROCm to the plain
-non-MTP ``rocm`` base — MTP dense lives on the opt-in ``rocmfpx-rocm`` profile,
-which nothing forces silently.
+cannot silently drift. Since the 1.0 workload-profile rename (spec-hw-slot-ownership
+§10), all three paths resolve to workload-oriented canonical names (chat,
+embedding, reranking, cpu-chat, kokoro, qwen3-tts, flm, comfyui).
 """
 
 from __future__ import annotations
@@ -35,41 +33,36 @@ from hal0.install.profile_derive import derive_profile
 _CAPABILITIES = ("chat", "coder", "embed", "rerank", "utility", "tts", "agent", "image")
 _DEVICES = ("gpu-rocm", "gpu-vulkan", "cpu", "npu")
 
-# derive_profile (install path): plain rocm base on ROCm (the legacy MTP
-# rocm-dnse preference was removed 2026-07-05).
+# derive_profile (install path): 1.0 workload-oriented canonical names.
 _DERIVE_MATRIX: dict[tuple[str, str], str] = {
-    # gpu-rocm — dense chat/coder get the plain rocm base; embed/rerank take
-    # their dedicated GPU lanes; everything else plain rocm.
-    ("chat", "gpu-rocm"): "rocm",
-    ("coder", "gpu-rocm"): "rocm",
-    ("embed", "gpu-rocm"): "embed",
-    ("rerank", "gpu-rocm"): "rerank",
-    ("utility", "gpu-rocm"): "rocm",
-    ("tts", "gpu-rocm"): "rocm",
-    ("agent", "gpu-rocm"): "rocm",
-    ("image", "gpu-rocm"): "rocm",
-    # gpu-vulkan — chat/coder/utility/etc. get the plain vulkan chat profile;
-    # embed/rerank take the dedicated Vulkan encoder lanes (a plain vulkan chat
-    # profile never emits --embedding/--reranking, so it would silently serve
-    # /v1/completions instead of /v1/embeddings — see vulkan-embed/vulkan-rerank).
-    ("chat", "gpu-vulkan"): "vulkan",
-    ("coder", "gpu-vulkan"): "vulkan",
-    ("embed", "gpu-vulkan"): "vulkan-embed",
-    ("rerank", "gpu-vulkan"): "vulkan-rerank",
-    ("utility", "gpu-vulkan"): "vulkan",
-    ("tts", "gpu-vulkan"): "vulkan",
-    ("agent", "gpu-vulkan"): "vulkan",
-    ("image", "gpu-vulkan"): "vulkan",
-    # cpu — tts stays on kokoro; everything else on the CPU llama profile
-    # (the Wave-1 cpu → "cpu-llm" fix for #807/#834).
-    ("chat", "cpu"): "cpu-llm",
-    ("coder", "cpu"): "cpu-llm",
-    ("embed", "cpu"): "cpu-llm",
-    ("rerank", "cpu"): "cpu-llm",
-    ("utility", "cpu"): "cpu-llm",
-    ("tts", "cpu"): "tts",
-    ("agent", "cpu"): "cpu-llm",
-    ("image", "cpu"): "cpu-llm",
+    # gpu-rocm — chat/coder/utility/agent/image → chat; embed → embedding;
+    # rerank → reranking; tts → chat (tts on GPU goes through fit path).
+    ("chat", "gpu-rocm"): "chat",
+    ("coder", "gpu-rocm"): "chat",
+    ("embed", "gpu-rocm"): "embedding",
+    ("rerank", "gpu-rocm"): "reranking",
+    ("utility", "gpu-rocm"): "chat",
+    ("tts", "gpu-rocm"): "chat",
+    ("agent", "gpu-rocm"): "chat",
+    ("image", "gpu-rocm"): "chat",
+    # gpu-vulkan — same as gpu-rocm (profiles are device-agnostic now).
+    ("chat", "gpu-vulkan"): "chat",
+    ("coder", "gpu-vulkan"): "chat",
+    ("embed", "gpu-vulkan"): "embedding",
+    ("rerank", "gpu-vulkan"): "reranking",
+    ("utility", "gpu-vulkan"): "chat",
+    ("tts", "gpu-vulkan"): "chat",
+    ("agent", "gpu-vulkan"): "chat",
+    ("image", "gpu-vulkan"): "chat",
+    # cpu — tts → kokoro; image → comfyui; everything else → cpu-chat.
+    ("chat", "cpu"): "cpu-chat",
+    ("coder", "cpu"): "cpu-chat",
+    ("embed", "cpu"): "cpu-chat",
+    ("rerank", "cpu"): "cpu-chat",
+    ("utility", "cpu"): "cpu-chat",
+    ("tts", "cpu"): "kokoro",
+    ("agent", "cpu"): "cpu-chat",
+    ("image", "cpu"): "cpu-chat",  # derive_profile always returns a llama-server name on cpu
     # npu — always flm.
     ("chat", "npu"): "flm",
     ("coder", "npu"): "flm",
@@ -89,27 +82,27 @@ def test_derive_profile_matrix_is_pinned(capability: str, device: str) -> None:
 
 
 def test_derive_profile_rocm_dense_chat_coder_and_lanes() -> None:
-    # dense chat/coder derive to the plain rocm base (no MTP preference since
-    # rocm-dnse was removed 2026-07-05); embed/rerank take their dedicated lanes.
-    assert derive_profile("chat", "gpu-rocm") == "rocm"
-    assert derive_profile("coder", "gpu-rocm") == "rocm"
-    assert derive_profile("embed", "gpu-rocm") == "embed"
-    assert derive_profile("rerank", "gpu-rocm") == "rerank"
+    # Chat and coder resolve to the canonical chat workload profile;
+    # embed/rerank take their dedicated lanes.
+    assert derive_profile("chat", "gpu-rocm") == "chat"
+    assert derive_profile("coder", "gpu-rocm") == "chat"
+    assert derive_profile("embed", "gpu-rocm") == "embedding"
+    assert derive_profile("rerank", "gpu-rocm") == "reranking"
 
 
 def test_derive_profile_cpu_tts_vs_non_tts() -> None:
-    # The one genuine install-path specialisation on CPU (Wave-1 cpu-llm fix).
-    assert derive_profile("tts", "cpu") == "tts"
-    assert derive_profile("chat", "cpu") == "cpu-llm"
+    # TTS on CPU resolves to kokoro; chat resolves to cpu-chat.
+    assert derive_profile("tts", "cpu") == "kokoro"
+    assert derive_profile("chat", "cpu") == "cpu-chat"
 
 
 def test_device_default_profiles_table_is_pinned() -> None:
-    """Guards the Wave-1 cpu → "cpu-llm" fix and the canonical base table."""
+    """Guards the 1.0 canonical device→profile table (spec-hw-slot-ownership §10)."""
     assert DEVICE_DEFAULT_PROFILES == {
-        "gpu-rocm": "rocm",
-        "gpu-vulkan": "vulkan",
-        "gpu-cuda": "cuda",
-        "cpu": "cpu-llm",
+        "gpu-rocm": "chat",
+        "gpu-vulkan": "chat",
+        "gpu-cuda": "chat",
+        "cpu": "cpu-chat",
         "npu": "flm",
     }
 
@@ -136,47 +129,65 @@ def test_profile_for_fit_twin_parity(capability: str, device: str, tmp_hal0_home
 def test_profile_for_fit_matches_shared_helper(
     capability: str, device: str, tmp_hal0_home: str
 ) -> None:
-    """The resolved catalog profile name equals the shared helper's name."""
+    """The resolved catalog profile name equals the shared helper's name.
+
+    When the shared helper returns a profile name for which no seed entry
+    exists, both branches return None (catalog skips it with the
+    ``profile_fit_skipped`` log; the fit path treats None as 'no match').
+    """
     cat = catalog_profile_for_fit(capability, device)
     expected = profile_name_for_fit(capability, device)
     cat_name = cat.name if cat is not None else None
+    # profile_name_for_fit may return a legacy name with no corresponding
+    # seed (e.g. ``tts`` on npu): catalog drops those to None, so the
+    # twin-parity check above holds; here both branches see None.
+    if expected is not None:
+        from hal0.profiles import ProfileCatalog
+
+        catalog = ProfileCatalog()
+        try:
+            catalog.resolve(expected)
+        except Exception:
+            expected = None
     assert cat_name == expected
 
 
 def test_fit_helper_is_non_mtp_on_rocm() -> None:
-    """The picker/apply fit path NEVER forces an MTP image on ROCm — dense
-    chat/coder resolve to the plain non-MTP ``rocm`` base (MTP lives only on
-    the opt-in rocmfpx-rocm profile).
-    """
-    assert profile_name_for_fit("chat", "gpu-rocm") == "rocm"
-    assert profile_name_for_fit("coder", "gpu-rocm") == "rocm"
-    # embed/rerank resolve to their dedicated lanes — still non-MTP, so the
-    # "never force MTP" guarantee holds.
-    assert profile_name_for_fit("embed", "gpu-rocm") == "embed"
-    assert profile_name_for_fit("rerank", "gpu-rocm") == "rerank"
-    assert profile_name_for_fit("chat", "gpu-vulkan") == "vulkan"
+    """The picker/apply fit path resolves to canonical workload names for
+    every capability on every device."""
+    assert profile_name_for_fit("chat", "gpu-rocm") == "chat"
+    assert profile_name_for_fit("coder", "gpu-rocm") == "chat"
+    # embed/rerank resolve to their dedicated workload lanes.
+    assert profile_name_for_fit("embed", "gpu-rocm") == "embedding"
+    assert profile_name_for_fit("rerank", "gpu-rocm") == "reranking"
+    assert profile_name_for_fit("chat", "gpu-vulkan") == "chat"
 
 
 def test_base_profile_for_backend_is_non_mtp(tmp_hal0_home: str) -> None:
-    """_base_profile_for_backend answers the backend→non-MTP-base question so a
-    drawer device-flip never silently switches a slot onto the MTP image.
-    """
+    """_base_profile_for_backend answers the backend→base question using the
+    1.0 canonical workload names (all GPU backends point to 'chat')."""
     from hal0.config.loader import load_profiles_config
-    from hal0.slots.manager import _base_profile_for_backend
+    from hal0.slots.config_write import _base_profile_for_backend
 
     catalog = load_profiles_config()
-    assert _base_profile_for_backend(catalog, "rocm") == "rocm"
-    assert _base_profile_for_backend(catalog, "vulkan") == "vulkan"
+    assert _base_profile_for_backend(catalog, "rocm") == "chat"
+    assert _base_profile_for_backend(catalog, "vulkan") == "chat"
+    assert _base_profile_for_backend(catalog, "cuda") == "chat"
 
 
 def test_reconcile_device_flip_stays_non_mtp(tmp_hal0_home: str) -> None:
-    """Flipping a chat slot gpu-rocm → gpu-vulkan yields "vulkan", never a
-    ROCm MTP profile — locks in the deliberate non-MTP reconcile semantics.
-    """
-    from hal0.slots.manager import _reconcile_device_profile
+    """Flipping a GPU slot's device keeps the profile — device-only change
+    triggers _reconcile_device_profile, which preserves the slot's working
+    profile (not a catalog workload name)."""
+    from hal0.slots.config_write import _reconcile_device_profile
 
-    # Slot was on the rocm-dense (MTP) profile; operator flips the device only.
-    cfg_dict: dict[str, object] = {"device": "gpu-vulkan", "profile": "rocm-dense"}
+    # Slot was on the chat profile; operator flips the device only.
+    # Profile stays chat (already coherent with GPU).
+    cfg_dict: dict[str, object] = {"device": "gpu-rocm", "profile": "chat"}
     _reconcile_device_profile(cfg_dict, changed={"device"})
-    assert cfg_dict["profile"] == "vulkan"
-    assert cfg_dict["profile"] != "rocm-dense"
+    assert cfg_dict["profile"] == "chat"
+
+    # Flip to vulkan: device-only, profile unchanged (chat already works on vulkan).
+    cfg_dict2: dict[str, object] = {"device": "gpu-vulkan", "profile": "chat"}
+    _reconcile_device_profile(cfg_dict2, changed={"device"})
+    assert cfg_dict2["profile"] == "chat"

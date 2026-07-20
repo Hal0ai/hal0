@@ -44,7 +44,7 @@ def test_absent_file_is_noop(tmp_hal0_home: str) -> None:
 
 
 def test_identical_materialised_seed_is_pruned(tmp_hal0_home: str) -> None:
-    _write_profiles(_seed_table("rocm"))
+    _write_profiles(_seed_table("chat"))
     assert ensure_seed_profiles() == 1
     on_disk = tomllib.loads(profiles_toml().read_text(encoding="utf-8"))
     assert on_disk.get("profile", {}) == {}
@@ -54,8 +54,7 @@ def test_divergent_seed_named_entry_is_rescued_not_deleted(tmp_hal0_home: str) -
     """An operator profile that collides with a (possibly newer) seed name is
     renamed to <name>-custom — the content survives the migration."""
     _write_profiles(
-        "[profile.embed]\n"
-        'image = "ghcr.io/my-org/custom-vulkan-embed:v1"\n'
+        "[profile.embedding]\n"
         'flags = "--embedding -ub 4096"\n'
         "mtp = false\n"
         'device_class = "gpu"\n'
@@ -64,29 +63,26 @@ def test_divergent_seed_named_entry_is_rescued_not_deleted(tmp_hal0_home: str) -
     assert ensure_seed_profiles() == 1
     on_disk = tomllib.loads(profiles_toml().read_text(encoding="utf-8"))
     profiles = on_disk.get("profile", {})
-    assert "embed" not in profiles  # seed name freed for the code overlay
-    assert profiles["embed-custom"]["image"] == "ghcr.io/my-org/custom-vulkan-embed:v1"
-    assert profiles["embed-custom"]["flags"] == "--embedding -ub 4096"
+    assert "embedding" not in profiles  # seed name freed for the code overlay
+    assert profiles["embedding-custom"]["flags"] == "--embedding -ub 4096"
 
 
 def test_prune_writes_backup_once(tmp_hal0_home: str) -> None:
-    _write_profiles(_seed_table("rocm"))
+    _write_profiles(_seed_table("chat"))
     ensure_seed_profiles()
     backup = profiles_toml().with_name(profiles_toml().name + ".pre-virtual-seeds.bak")
     assert backup.exists()
     original = backup.read_text(encoding="utf-8")
     # A second migration run must not clobber the original backup.
-    _write_profiles(_seed_table("vulkan"))
+    _write_profiles(_seed_table("dense"))
     ensure_seed_profiles()
     assert backup.read_text(encoding="utf-8") == original
 
 
 def test_operator_profiles_pass_through(tmp_hal0_home: str) -> None:
-    _write_profiles(
-        _seed_table("rocm") + '\n[profile.my-own]\nimage = "ghcr.io/me/mine:1"\nflags = "-fa on"\n'
-    )
+    _write_profiles(_seed_table("chat") + '\n[profile.my-own]\nflags = "-fa on"\n')
     assert ensure_seed_profiles() == 1
     on_disk = tomllib.loads(profiles_toml().read_text(encoding="utf-8"))
     profiles = on_disk.get("profile", {})
-    assert "rocm" not in profiles
-    assert profiles["my-own"]["image"] == "ghcr.io/me/mine:1"
+    assert "chat" not in profiles
+    assert profiles["my-own"]["flags"] == "-fa on"

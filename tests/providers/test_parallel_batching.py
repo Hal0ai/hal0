@@ -17,9 +17,7 @@ from hal0.providers.container import _effective_parallel, _resolve_llama_scalars
 
 
 def _profile(mtp: bool = False) -> ProfileConfig:
-    return ProfileConfig(
-        image="img", flags="-fa on --parallel 1", mtp=mtp, device_class="gpu", backend="rocm"
-    )
+    return ProfileConfig(flags="-fa on --parallel 1", mtp=mtp, device_class="gpu", backend="rocm")
 
 
 # ── _effective_parallel ───────────────────────────────────────────────────────

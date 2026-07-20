@@ -18,10 +18,7 @@ is rejected rather than silently resolved. Non-GPU profiles (npu/cpu/img,
 
 from __future__ import annotations
 
-import pytest
-
 from hal0.slots.manager import SlotManager
-from hal0.slots.state import SlotConfigError
 
 
 def _gpu_cfg(name: str, *, device: str, profile: str, model: str = "m") -> dict:
@@ -39,69 +36,83 @@ def _gpu_cfg(name: str, *, device: str, profile: str, model: str = "m") -> dict:
 
 
 async def test_profile_change_drives_device(tmp_hal0_home: str) -> None:
-    """Switching the profile re-derives device — the exact utility-slot bug.
+    """Switching profile keeps device unchanged — 1.0 profiles are device-agnostic.
 
-    A vulkan slot re-pointed at the rocm profile must end up on
-    ``device=gpu-rocm``; otherwise the drawer 'changes' the profile but the
-    backend stays vulkan forever.
+    A vulkan slot re-pointed at the chat workload profile stays on
+    ``device=gpu-vulkan``; profiles are not backend-bound.
     """
     sm = SlotManager()
-    await sm.create("util", _gpu_cfg("util", device="gpu-vulkan", profile="vulkan"))
+    await sm.create("util", _gpu_cfg("util", device="gpu-vulkan", profile="chat"))
 
-    await sm.update_config("util", {"profile": "rocm"})
+    await sm.update_config("util", {"profile": "dense"})
 
     cfg = await sm.get_config("util")
-    assert cfg["profile"] == "rocm"
-    assert cfg["device"] == "gpu-rocm"
+    assert cfg["profile"] == "dense"
+    # 1.0: profiles are device-agnostic workload names; profile change
+    # does NOT flip device.
+    assert cfg["device"] == "gpu-vulkan"
 
 
 async def test_device_change_reconciles_conflicting_profile(tmp_hal0_home: str) -> None:
     """Flipping device across backends drops an incompatible profile.
 
     A cross-backend ``device`` change via ``update_config`` must reconcile
-    the profile to a compatible one so no rocm+vulkan pair is ever persisted.
+    the profile to a compatible one. In 1.0 profiles are device-agnostic
+    workload names; device flip keeps the workload profile unchanged.
     """
     sm = SlotManager()
-    await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="rocm"))
+    await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="chat"))
 
     await sm.update_config("util", {"device": "gpu-vulkan"})
 
     cfg = await sm.get_config("util")
     assert cfg["device"] == "gpu-vulkan"
-    assert cfg["profile"] == "vulkan"
+    # 1.0: profiles are workload-oriented (device-agnostic); device flip DOES
+    # NOT change the workload profile.
+    assert cfg["profile"] == "chat"
 
 
 async def test_unrelated_update_preserves_coherent_pair(tmp_hal0_home: str) -> None:
     """A change that touches neither device nor profile leaves both intact."""
     sm = SlotManager()
-    await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="rocm"))
+    await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="chat"))
 
     await sm.update_config("util", {"model": {"context_size": 32768}})
 
     cfg = await sm.get_config("util")
     assert cfg["device"] == "gpu-rocm"
-    assert cfg["profile"] == "rocm"
+    assert cfg["profile"] == "chat"
     assert cfg["model"]["context_size"] == 32768
 
 
 async def test_explicit_contradiction_rejected(tmp_hal0_home: str) -> None:
-    """Changing both fields to conflicting backends is an operator error."""
-    sm = SlotManager()
-    await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="rocm"))
+    """Changing both fields to conflicting backends is an operator error.
 
-    with pytest.raises(SlotConfigError, match=r"(?i)backend"):
-        await sm.update_config("util", {"profile": "rocm", "device": "gpu-vulkan"})
+    1.0: profiles are device-agnostic workload names; the contradiction
+    reject no longer fires because "chat" fits both rocm and vulkan.
+    This guard was backend-slot-ownership specific.
+    """
+    sm = SlotManager()
+    await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="chat"))
+    # 1.0: device-agnostic profiles; no contradiction to reject.
+    await sm.update_config("util", {"profile": "chat", "device": "gpu-vulkan"})
+    cfg = await sm.get_config("util")
+    assert cfg["device"] == "gpu-vulkan"
+    assert cfg["profile"] == "chat"
 
 
 async def test_create_rejects_incoherent_pair(tmp_hal0_home: str) -> None:
     """create() must refuse a vulkan device paired with a rocm profile.
 
-    This is the door the dashboard left open — 'allowed the utility slot to
-    be set to vulkan but with a ROCM-MTP profile'.
+    1.0: profiles are device-agnostic workload names; the contradiction
+    guard no longer fires because workload profiles fit any GPU device.
+    The slot is created without error.
     """
     sm = SlotManager()
-    with pytest.raises(SlotConfigError, match=r"(?i)backend"):
-        await sm.create("util", _gpu_cfg("util", device="gpu-vulkan", profile="rocm"))
+    await sm.create("util", _gpu_cfg("util", device="gpu-vulkan", profile="chat"))
+    cfg = await sm.get_config("util")
+    assert cfg["device"] == "gpu-vulkan"
+    assert cfg["profile"] == "chat"
 
 
 async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
@@ -114,7 +125,7 @@ async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
             "port": 8091,
             "type": "tts",
             "device": "cpu",
-            "profile": "tts",
+            "profile": "kokoro",
             "provider": "llama-server",
             "enabled": True,
             "group": "custom",
@@ -126,4 +137,4 @@ async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
 
     cfg = await sm.get_config("voice")
     assert cfg["device"] == "cpu"
-    assert cfg["profile"] == "tts"
+    assert cfg["profile"] == "kokoro"
