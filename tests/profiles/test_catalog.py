@@ -125,7 +125,7 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
-    assert by_name["chat"].intent == "General chat"
+    assert by_name["chat"].intent == "Generic chat (fallback for unknown models)"
     assert by_name["dense"].quant == "ROCmFP4"
 
 
