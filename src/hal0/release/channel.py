@@ -62,9 +62,7 @@ def base_matches(pyproject_version: str, tag: str) -> bool:
     Both values are normalised via :class:`hal0.release.policy.ReleasePolicy`
     for consistency.
     """
-    return ReleasePolicy.from_tag(tag).base_version == base_version(
-        pyproject_version
-    )
+    return ReleasePolicy.from_tag(tag).base_version == base_version(pyproject_version)
 
 
 def nightlies_to_prune(tags: list[str], keep: int = 7) -> list[str]:

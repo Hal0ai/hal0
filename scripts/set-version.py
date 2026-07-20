@@ -50,9 +50,7 @@ def _version_to_pep440(version: str) -> str:
         1.0.0-rc.3      → 1.0.0rc3
         1.0.0           → 1.0.0
     """
-    match = re.match(
-        r"^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$", version
-    )
+    match = re.match(r"^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$", version)
     if match:
         base = match.group(1)
         stage = match.group(2)
@@ -73,6 +71,7 @@ def _resolve_channel(version: str) -> str:
     # at the top level.  We only need kind from the policy.
     tag = f"v{version}"
     import sys as _sys
+
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
     from hal0.release.policy import ReleasePolicy  # fmt: skip
 
@@ -145,9 +144,7 @@ def _update_uv_lock_version(lock_text: str, new_version_pep440: str) -> str:
     return "\n".join(result)
 
 
-def _update_file_atomic(
-    dst: Path, content: str, tmpdir: Path
-) -> Path:
+def _update_file_atomic(dst: Path, content: str, tmpdir: Path) -> Path:
     """Write *content* to a tempfile in *tmpdir*, return the temp path."""
     fd, tmp_path = tempfile.mkstemp(
         dir=tmpdir,
@@ -182,13 +179,14 @@ def set_version(root: Path, version: str) -> None:
     pyproj_path = root / "pyproject.toml"
     pyproj_text = pyproj_path.read_text(encoding="utf-8")
     import tomllib  # fmt: skip
+
     pyproj_data = tomllib.loads(pyproj_text)
     if "version" not in pyproj_data.get("project", {}):
         raise ValueError("pyproject.toml has no [project].version")
     # Replace version in the TOML text to preserve formatting
     pyproj_new = re.sub(
         r'(^version\s*=\s*")[^"]*',
-        rf'\g<1>{version}',
+        rf"\g<1>{version}",
         pyproj_text,
         count=1,
         flags=re.MULTILINE,
@@ -259,16 +257,12 @@ def set_version(root: Path, version: str) -> None:
             if dst == pyproj_path:
                 re_parsed_py = tomllib.loads(content)
                 if re_parsed_py["project"]["version"] != version:
-                    raise ValueError(
-                        f"validation error: {dst} version mismatch after rewrite"
-                    )
+                    raise ValueError(f"validation error: {dst} version mismatch after rewrite")
             # Validate: JSON files — re-parse
             elif dst.suffix in (".json",):
                 re_parsed_json = json.loads(content)
                 if re_parsed_json.get("version") != version:
-                    raise ValueError(
-                        f"validation error: {dst} version mismatch after rewrite"
-                    )
+                    raise ValueError(f"validation error: {dst} version mismatch after rewrite")
                 # Validate: manifest channel (same JSON parse)
                 if dst == manifest_path and re_parsed_json.get("channel") != channel:
                     raise ValueError(
@@ -314,11 +308,7 @@ def set_version(root: Path, version: str) -> None:
     lock_text_final = lock_path.read_text(encoding="utf-8")
     lock_data_final = tomllib.loads(lock_text_final)
     hal0ai_final = next(
-        (
-            p["version"]
-            for p in lock_data_final.get("package", [])
-            if p.get("name") == "hal0ai"
-        ),
+        (p["version"] for p in lock_data_final.get("package", []) if p.get("name") == "hal0ai"),
         None,
     )
     if hal0ai_final != pep440:

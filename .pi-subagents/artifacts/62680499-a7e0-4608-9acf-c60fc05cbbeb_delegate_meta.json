@@ -1,0 +1,121 @@
+{
+  "runId": "62680499-a7e0-4608-9acf-c60fc05cbbeb",
+  "agent": "delegate",
+  "task": "Implement Task 4: Publish explicit GitHub previews, PyPI wheels, and signed manifests.\n\nRead your task brief FIRST: /home/mint/hal0/.superpowers/sdd/task-4-brief.md\nIt contains the exact workflow contract, shell invocations, and the commit message.\n\nWorking directory: /home/mint/hal0/.worktrees/prerelease-channel\n\nContext: Task 1-3 built policy, version sync, and manifest fields. This task wires release.yml and nightly.yml. Run `uv sync` first.\n\nRun tests with HAL0_HOME=$(mktemp -d). Run `uv run ruff check` and `uv run mypy` before commit. Validate YAML with `python -c 'import yaml; yaml.safe_load(open(N))'`.\n\nWrite report to: /home/mint/hal0/.superpowers/sdd/task-4-report.md\n\nReturn: status, commits, test line-count, concerns.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/mint/hal0/.superpowers/sdd/task-4-report.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    },\n    {\n      \"id\": \"criterion-2\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openrouter/deepseek/deepseek-v4-flash:low",
+  "attemptedModels": [
+    "openrouter/deepseek/deepseek-v4-flash:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 64148,
+        "output": 8134,
+        "cacheRead": 206464,
+        "cacheWrite": 0,
+        "cost": 0.0119274624,
+        "turns": 12
+      }
+    }
+  ],
+  "acceptance": {
+    "status": "rejected",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "reviewed",
+      "explicit": false,
+      "inferredReason": [
+        "async write-capable or risky run"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Implement the requested change without widening scope",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "validation-output",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        },
+        {
+          "id": "criterion-2",
+          "must": "Return evidence sufficient for an independent acceptance review",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "validation-output",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "changed-files",
+        "tests-added",
+        "commands-run",
+        "validation-output",
+        "residual-risks",
+        "no-staged-files"
+      ],
+      "verify": [],
+      "review": {
+        "agent": "reviewer",
+        "required": true
+      },
+      "stopRules": []
+    },
+    "inferredReason": [
+      "async write-capable or risky run"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Implement the requested change without widening scope",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "validation-output",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      },
+      {
+        "id": "criterion-2",
+        "must": "Return evidence sufficient for an independent acceptance review",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "validation-output",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "attestation",
+        "status": "failed",
+        "message": "Structured acceptance report not found."
+      }
+    ],
+    "verifyRuns": [],
+    "childReportParseError": "Structured acceptance report not found."
+  },
+  "transcriptPath": "/home/mint/hal0/.worktrees/prerelease-channel/.pi-subagents/artifacts/62680499-a7e0-4608-9acf-c60fc05cbbeb_delegate_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784569213028
+}

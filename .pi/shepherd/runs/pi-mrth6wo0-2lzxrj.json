@@ -1,0 +1,45 @@
+{
+  "id": "pi-mrth6wo0-2lzxrj",
+  "taskName": "pi-turn",
+  "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/9d3b1372/run-0/session.jsonl",
+  "provider": "pi",
+  "model": "unknown",
+  "status": "finished",
+  "startedAt": "2026-07-20T17:05:28.032Z",
+  "trace": [
+    {
+      "index": 0,
+      "kind": "model.request",
+      "timestamp": "2026-07-20T17:05:28.032Z",
+      "data": {
+        "provider": "pi",
+        "model": "unknown",
+        "systemPrompt": "You are a child subagent, not the parent orchestrator.\nThe parent session owns delegation, orchestration, review fanout, and follow-up worker launches.\nIgnore prior parent-only orchestration instructi",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Task: You are implementing the first task of the official prerelease release publication plan: `Task 1: Deep release-policy module`\n\nRead your task brief FIRST: /home/mint/hal0/.superpowers/sdd/task-1-brief.md\nIt contains the full task text, exact types, interfaces, tests, commands, and commit message.\n\nYour working directory is: /home/mint/hal0/.worktrees/prerelease-channel\n\nContext: this is a stdlib-only module that one interface — `ReleasePolicy.from_tag(tag)` — powers tag classification, channel routing, and GitHub/PyPI publication decisions. It must work in GitHub Actions before project dependencies install.\n\n## Global Constraints\n- Stdlib-only: `re`, `dataclasses`, `argparse`, `json`, `Literal` from `typing` (not `typing_extensions`)\n- Tag forms: `v1.0.0-alpha.N`, `v1.0.0-beta.N`, `v1.0.0-rc.N`, `v1.0.0`, `v1.0.0-nightly.14digit`\n- Test matrix covers every tag→kind→targets→booleans row\n- Invalid tags raise `ReleaseTagError(ValueError)`\n- `to_github_outputs()` returns lowercase string booleans\n\n## Your Job\nFollow the brief exactly — it contains TDD test code, implementation code, and the commit message. Pre-run `uv sync` in the worktree first — it creates the editable install. Run all Python tests with `HAL0_HOME=$(mktemp -d)` to avoid system config conflicts. Run `uv run ruff check` and `uv run mypy` before committing.\n\nWrite your report to: /home/mint/hal0/.superpowers/sdd/task-1-report.md\n\nReturn ONLY: status, commits, test line-count, and concerns.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/mint/hal0/.superpowers/sdd/task-1-report.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions."
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "kind": "model.response",
+      "timestamp": "2026-07-20T17:05:28.254Z",
+      "data": {
+        "content": [],
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0
+        }
+      }
+    }
+  ],
+  "changeset": {
+    "binding": "workspace",
+    "files": []
+  },
+  "artifacts": [],
+  "endedAt": "2026-07-20T17:05:28.258Z"
+}

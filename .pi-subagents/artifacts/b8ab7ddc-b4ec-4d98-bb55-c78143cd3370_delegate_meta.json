@@ -1,0 +1,232 @@
+{
+  "runId": "b8ab7ddc-b4ec-4d98-bb55-c78143cd3370",
+  "agent": "delegate",
+  "task": "Implement Task 2: Atomic version synchronization and release preflight.\n\nRead your task brief FIRST: /home/mint/hal0/.superpowers/sdd/task-2-brief.md\nIt contains exact TDD test code, implementation code, and the commit message.\n\nWorking directory: /home/mint/hal0/.worktrees/prerelease-channel\n\nContext: Task 1 built `ReleasePolicy.from_tag()` and it passes 28 tests. This task creates `scripts/set-version.py` (stdlib-only) and extends `scripts/release-check.sh`. `uv sync` already done.\n\n## Global Constraints\n- `scripts/set-version.py` must be stdlib-only (no Hal0 imports)\n- Parse version through `ReleasePolicy.from_tag(f\"v{version}\")`; reject nightly\n- Update exact top-level JSON version fields plus the one `hal0ai` editable package block in `uv.lock`\n- Write every candidate to tempfile, validate all, then `os.replace` atomically\n- Re-run `uv lock` and re-validate\n- `release-check.sh` invokes `python3 -m hal0.release.policy \"$TAG\" --format json` and compares normalized source versions\n- Compose the report to: /home/mint/hal0/.superpowers/sdd/task-2-report.md\n\nReturn: status, commits, test line-count, concerns.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/mint/hal0/.superpowers/sdd/task-2-report.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    },\n    {\n      \"id\": \"criterion-2\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openrouter/deepseek/deepseek-v4-flash:low",
+  "attemptedModels": [
+    "openrouter/deepseek/deepseek-v4-flash:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 497059,
+        "output": 23295,
+        "cacheRead": 1911680,
+        "cacheWrite": 0,
+        "cost": 0.09074653,
+        "turns": 55
+      }
+    }
+  ],
+  "acceptance": {
+    "status": "checked",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "reviewed",
+      "explicit": false,
+      "inferredReason": [
+        "async write-capable or risky run"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Implement the requested change without widening scope",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "validation-output",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        },
+        {
+          "id": "criterion-2",
+          "must": "Return evidence sufficient for an independent acceptance review",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "validation-output",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "changed-files",
+        "tests-added",
+        "commands-run",
+        "validation-output",
+        "residual-risks",
+        "no-staged-files"
+      ],
+      "verify": [],
+      "review": {
+        "agent": "reviewer",
+        "required": true
+      },
+      "stopRules": []
+    },
+    "inferredReason": [
+      "async write-capable or risky run"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Implement the requested change without widening scope",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "validation-output",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      },
+      {
+        "id": "criterion-2",
+        "must": "Return evidence sufficient for an independent acceptance review",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "validation-output",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "criterion:criterion-1",
+        "status": "passed",
+        "message": "Required criterion 'criterion-1' satisfied."
+      },
+      {
+        "id": "criterion:criterion-2",
+        "status": "passed",
+        "message": "Required criterion 'criterion-2' satisfied."
+      },
+      {
+        "id": "evidence:changed-files",
+        "status": "passed",
+        "message": "changed-files evidence present."
+      },
+      {
+        "id": "evidence:tests-added",
+        "status": "passed",
+        "message": "tests-added evidence present."
+      },
+      {
+        "id": "evidence:commands-run",
+        "status": "passed",
+        "message": "commands-run evidence present."
+      },
+      {
+        "id": "evidence:validation-output",
+        "status": "passed",
+        "message": "validation-output evidence present."
+      },
+      {
+        "id": "evidence:residual-risks",
+        "status": "passed",
+        "message": "residual-risks evidence present."
+      },
+      {
+        "id": "evidence:no-staged-files",
+        "status": "passed",
+        "message": "no-staged-files evidence present."
+      },
+      {
+        "id": "no-staged-files",
+        "status": "passed",
+        "message": "No staged files detected."
+      }
+    ],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Task brief implemented exactly: scripts/set-version.py (stdlib-only) created with ReleasePolicy.from_tag() parsing, nightly rejection, atomic os.replace, uv lock re-run; release-check.sh extended with gate 8 (policy JSON, version comparison, tag/release/PyPI collision detection); test file tests/scripts/test_set_version.py with 4 hermetic tests covering all public files + PEP 440 lock update + nightly rejection + missing/duplicate field error paths"
+        },
+        {
+          "id": "criterion-2",
+          "status": "satisfied",
+          "evidence": "All 4 tests pass (4 passed in 0.20s); --check dry-run outputs valid policy; release-check.sh --dry-run prints policy and DRY-RUN note; commit 4d77304d created with correct message; no staged files remain; residual risks documented"
+        }
+      ],
+      "changedFiles": [
+        "scripts/set-version.py",
+        "tests/scripts/test_set_version.py",
+        "scripts/release-check.sh"
+      ],
+      "testsAddedOrUpdated": [
+        "tests/scripts/test_set_version.py"
+      ],
+      "commandsRun": [
+        {
+          "command": "uv run pytest --confcutdir=tests/scripts tests/scripts/test_set_version.py -v",
+          "result": "passed",
+          "summary": "4/4 tests passed"
+        },
+        {
+          "command": "python3 scripts/set-version.py --check 1.0.0-alpha.0",
+          "result": "passed",
+          "summary": "Dry-run: version=1.0.0-alpha.0 pep440=1.0.0a0 channel=preview VALID"
+        },
+        {
+          "command": "bash scripts/release-check.sh --tag v1.0.0-alpha.0 --dry-run",
+          "result": "passed",
+          "summary": "Gate 8: policy resolves, version agrees, DRY-RUN note printed"
+        },
+        {
+          "command": "git commit -m \"feat(release): synchronize and preflight official versions\"",
+          "result": "passed",
+          "summary": "Commit 4d77304d created (3 files, 706 insertions)"
+        }
+      ],
+      "validationOutput": [
+        "4 hermetic tests pass: test_set_version_updates_all_public_files, test_nightly_is_rejected, test_raises_on_missing_version_field, test_duplicate_version_field_raises",
+        "set-version.py --check resolves policy: preview channel, PEP 440 1.0.0a0",
+        "release-check.sh --dry-run: preflight gate prints policy version + kind + DRY-RUN without mutation",
+        "bash syntax check passes",
+        "ruff lint clean"
+      ],
+      "residualRisks": [
+        "_resolve_channel() modifies sys.path (acceptable for CLI, not re-entrant)",
+        "GitHub check query uses :owner/:repo shorthand requiring gh auth",
+        "PyPI check via unauthenticated curl may be rate-limited in CI"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "706 insertions across 3 files: new scripts/set-version.py (stdlib atomic version sync, ~360 lines), new tests/scripts/test_set_version.py (hermetic TDD tests, ~260 lines), modified scripts/release-check.sh (+82 lines, gate 8 preflight)",
+      "reviewFindings": [
+        "no blockers"
+      ],
+      "manualNotes": "4 tests pass. Commit made. All brief requirements satisfied."
+    },
+    "reviewResult": {
+      "status": "needs-parent-decision",
+      "findings": [
+        {
+          "severity": "non-blocking",
+          "issue": "Reviewed acceptance requires an independent reviewer result.",
+          "rationale": "The run cannot be marked reviewed from child evidence alone."
+        }
+      ]
+    }
+  },
+  "transcriptPath": "/home/mint/hal0/.worktrees/prerelease-channel/.pi-subagents/artifacts/b8ab7ddc-b4ec-4d98-bb55-c78143cd3370_delegate_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784568548589
+}

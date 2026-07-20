@@ -709,7 +709,117 @@
       "endedAt": "2026-07-20T10:58:45.256Z",
       "fileCount": 8,
       "toolCallCount": 11
+    },
+    {
+      "id": "pi-mrtgtsk0-brcohi",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/d1b33419/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T16:55:16.176Z",
+      "endedAt": "2026-07-20T16:55:16.275Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrth6w9f-3tlq0h",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/9d3b1372/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:05:27.507Z",
+      "endedAt": "2026-07-20T17:05:28.032Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrth6wo0-2lzxrj",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/9d3b1372/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:05:28.032Z",
+      "endedAt": "2026-07-20T17:05:28.258Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrth7q0j-dbvylu",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/17f8f0ec/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:06:06.067Z",
+      "endedAt": "2026-07-20T17:06:06.503Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrth7qco-r59yr5",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/17f8f0ec/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:06:06.504Z",
+      "endedAt": "2026-07-20T17:17:27.142Z",
+      "fileCount": 16,
+      "toolCallCount": 90
+    },
+    {
+      "id": "pi-mrthrl09-yfow2l",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/91cbba0a/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:21:32.697Z",
+      "endedAt": "2026-07-20T17:21:33.042Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrthrl9v-6yojrq",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/91cbba0a/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:21:33.043Z",
+      "endedAt": "2026-07-20T17:29:07.542Z",
+      "fileCount": 18,
+      "toolCallCount": 68
+    },
+    {
+      "id": "pi-mrti2bs2-nh3d2b",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/57d9b1dc/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:29:53.954Z",
+      "endedAt": "2026-07-20T17:29:54.230Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrti2bzr-mxstz9",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/57d9b1dc/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:29:54.231Z",
+      "endedAt": "2026-07-20T17:36:53.512Z",
+      "fileCount": 11,
+      "toolCallCount": 61
+    },
+    {
+      "id": "pi-mrticqg8-kmcr7m",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/b65eb6b0/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:37:59.528Z",
+      "endedAt": "2026-07-20T17:38:00.024Z",
+      "fileCount": 0,
+      "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrticqu0-976rlb",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T14-02-56-740Z_019f7fd6-4564-7575-b8b2-1be92dc81d63/b65eb6b0/run-0/session.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T17:38:00.024Z",
+      "endedAt": "2026-07-20T17:40:11.947Z",
+      "fileCount": 11,
+      "toolCallCount": 18
     }
   ],
-  "updatedAt": "2026-07-20T10:58:45.256Z"
+  "updatedAt": "2026-07-20T17:40:11.948Z"
 }

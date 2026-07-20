@@ -153,9 +153,7 @@ def _replace_lock_version(lock_text: str, new_version: str) -> str:
 class TestSetVersion:
     """Tests for set_version() core logic."""
 
-    def test_set_version_updates_all_public_files(
-        self, tmp_path: Path
-    ) -> None:
+    def test_set_version_updates_all_public_files(self, tmp_path: Path) -> None:
         """set_version writes SemVer to all public files, PEP 440 to hal0ai
         lock package, and the policy-derived channel to manifest.json."""
         _populate_project(tmp_path, "1.0.0-alpha.0")
@@ -167,25 +165,19 @@ class TestSetVersion:
 
         # pyproject.toml
         pyproj_text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-        assert (
-            tomllib.loads(pyproj_text)["project"]["version"] == "1.0.0-alpha.2"
-        )
+        assert tomllib.loads(pyproj_text)["project"]["version"] == "1.0.0-alpha.2"
 
         # ui/package.json
         ui_pkg = json.loads((tmp_path / "ui" / "package.json").read_text(encoding="utf-8"))
         assert ui_pkg["version"] == "1.0.0-alpha.2"
 
         # ui/package-lock.json — top-level and packages[""]
-        ui_lock = json.loads(
-            (tmp_path / "ui" / "package-lock.json").read_text(encoding="utf-8")
-        )
+        ui_lock = json.loads((tmp_path / "ui" / "package-lock.json").read_text(encoding="utf-8"))
         assert ui_lock["version"] == "1.0.0-alpha.2"
         assert ui_lock["packages"][""]["version"] == "1.0.0-alpha.2"
 
         # manifest.json — version + channel (other fields preserved)
-        manifest = json.loads(
-            (tmp_path / "manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["version"] == "1.0.0-alpha.2"
         assert manifest["channel"] == "preview"
 
@@ -204,9 +196,7 @@ class TestSetVersion:
             mod.set_version(tmp_path, "1.0.0-nightly.20260720123456")
         assert "nightly" in str(exc.value).lower()
 
-    def test_raises_on_missing_version_field(
-        self, tmp_path: Path
-    ) -> None:
+    def test_raises_on_missing_version_field(self, tmp_path: Path) -> None:
         """Missing version field raises without replacing any file."""
         _populate_project(tmp_path, "1.0.0-alpha.0")
 
@@ -226,19 +216,13 @@ class TestSetVersion:
 
         # pyproject has no version, set_version may read from different path
         # but ui/package.json should be untouched
-        ui_pkg = json.loads(
-            (tmp_path / "ui" / "package.json").read_text(encoding="utf-8")
-        )
+        ui_pkg = json.loads((tmp_path / "ui" / "package.json").read_text(encoding="utf-8"))
         assert ui_pkg["version"] == "1.0.0-alpha.0"
 
-        manifest = json.loads(
-            (tmp_path / "manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["version"] == "1.0.0-alpha.0"
 
-    def test_duplicate_version_field_raises(
-        self, tmp_path: Path
-    ) -> None:
+    def test_duplicate_version_field_raises(self, tmp_path: Path) -> None:
         """A file with duplicate version fields raises without replacing
         any file."""
         _populate_project(tmp_path, "1.0.0-alpha.0")
@@ -255,7 +239,5 @@ class TestSetVersion:
         # pyproject.toml should still have the original version
         import tomllib
 
-        pyproj = tomllib.loads(
-            (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-        )
+        pyproj = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
         assert pyproj["project"]["version"] == "1.0.0-alpha.0"

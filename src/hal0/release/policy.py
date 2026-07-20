@@ -23,13 +23,9 @@ from typing import Literal
 ReleaseKind = Literal["stable", "preview", "nightly"]
 PreviewStage = Literal["alpha", "beta", "rc"]
 
-_PREVIEW = re.compile(
-    r"^v(?P<base>\d+\.\d+\.\d+)-(?P<stage>alpha|beta|rc)\.(?P<seq>0|[1-9]\d*)$"
-)
+_PREVIEW = re.compile(r"^v(?P<base>\d+\.\d+\.\d+)-(?P<stage>alpha|beta|rc)\.(?P<seq>0|[1-9]\d*)$")
 _FINAL = re.compile(r"^v(?P<base>\d+\.\d+\.\d+)$")
-_NIGHTLY = re.compile(
-    r"^v(?P<base>\d+\.\d+\.\d+)-nightly\.(?P<stamp>\d{14})$"
-)
+_NIGHTLY = re.compile(r"^v(?P<base>\d+\.\d+\.\d+)-nightly\.(?P<stamp>\d{14})$")
 
 
 class ReleaseTagError(ValueError):
@@ -131,9 +127,7 @@ class ReleasePolicy:
 
 
 def _main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Derive release policy from a git tag."
-    )
+    parser = argparse.ArgumentParser(description="Derive release policy from a git tag.")
     parser.add_argument("tag", help="Git tag (e.g. v1.0.0-alpha.1)")
     parser.add_argument(
         "--format",
