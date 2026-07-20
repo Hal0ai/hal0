@@ -55,13 +55,13 @@ on:
         default: ""
 
 permissions:
-  contents: write     # required to upload Release assets
-  id-token: write     # required for cosign keyless OIDC + PyPI OIDC
-  packages: read      # in case we ever pull a private image at build time
+  contents: write # required to upload Release assets
+  id-token: write # required for cosign keyless OIDC + PyPI OIDC
+  packages: read # in case we ever pull a private image at build time
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false   # never cancel a half-published release
+  cancel-in-progress: false # never cancel a half-published release
 
 jobs:
   release:
@@ -330,10 +330,16 @@ jobs:
           # github.ref — correct for both tag-push and workflow_call (nightly).
           IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
 
-          python3 - "${OUT}" "${VERSION}" "${TAG}" "${CHANNEL}" "${DIGEST}" \
+          PYTHONPATH=src python3 - "${OUT}" "${VERSION}" "${TAG}" "${CHANNEL}" "${DIGEST}" \
                    "${BASE_URL}" "${MANIFEST_URL}" "${IDENT}" <<'PY'
           import json, sys, datetime as dt
+          from hal0.release.policy import ReleasePolicy
           out, version, tag, channel, digest, base, self_url, ident = sys.argv[1:]
+          # Derive release_kind + prerelease_stage from the tag so the
+          # ReleaseManifest pydantic schema's cross-field validator sees
+          # consistent values (release_kind must match channel, and preview
+          # requires a non-None prerelease_stage).
+          policy = ReleasePolicy.from_tag(tag)
           # Mirror the toolbox_images block from manifest.json into the
           # release manifest so an updater can pull the matching image
           # set (see docs/internal/release-manifest.md §"What the release pipeline
@@ -343,6 +349,8 @@ jobs:
               "_schema":         "hal0.releases.v1",
               "version":         version,
               "channel":         channel,
+              "release_kind":    policy.kind,
+              "prerelease_stage": policy.prerelease_stage,
               "url":             f"{base}/hal0-{version}.tar.gz",
               "bundle_url":      f"{base}/hal0-{version}.tar.gz.bundle",
               # Transition-window fields (see the sign step above) — dropped
@@ -537,11 +545,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: release  # never ship a wheel for a release the tarball job couldn't verify
+    needs: release # never ship a wheel for a release the tarball job couldn't verify
     environment: pypi
     permissions:
       contents: read
-      id-token: write  # required for PyPI OIDC
+      id-token: write # required for PyPI OIDC
 
     steps:
       - name: Resolve tag
