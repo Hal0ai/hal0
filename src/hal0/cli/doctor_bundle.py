@@ -333,12 +333,15 @@ def _write_diagnostics_section(out: Path, *, base: str | None = None) -> None:
         profiles = catalog.list()
         valid_names = {p.name for p in profiles}
         slot_profiles: list[tuple[str, str | None]] = []
+        # id-aware (P3-runtime-db inc4): report cfg.name (the real display
+        # name), not the raw list_slots() stem — see the identical fix +
+        # rationale in doctor_commands.doctor_profiles.
         for slot_name in list_slots():
             try:
                 cfg = load_slot_config(slot_name)
             except Exception:
                 continue
-            slot_profiles.append((slot_name, cfg.profile))
+            slot_profiles.append((cfg.name, cfg.profile))
         ref_rows = check_slot_profile_refs(slot_profiles, valid_names)
         img_rows = check_profile_images_present(profiles, _local_image_repos())
         profile_diagnoses = _diagnose_profiles(ref_rows, img_rows)

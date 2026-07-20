@@ -32,6 +32,7 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ValidationError
 
 from hal0.api._audit import record_action
 from hal0.api._redact import redact_log_line
@@ -371,6 +372,65 @@ _next_free_slot_port = _port_alloc.next_free_slot_port
 _reject_port_conflict = _port_alloc.reject_port_conflict
 
 
+def _validation_error_details(exc: ValidationError) -> dict[str, str]:
+    """Render a pydantic ValidationError into ``{field_path: message}``.
+
+    Same shape as the identically-named helper in ``config.py`` /
+    ``dashboard_layout.py`` / ``settings.py`` — kept local per-module rather
+    than shared, matching the house pattern.
+    """
+    out: dict[str, str] = {}
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        out[loc or "<root>"] = err.get("msg", "invalid")
+    return out
+
+
+# ── typed command bodies (typed-bodies inc-3) ────────────────────────────────
+#
+# In-handler pydantic validation for the COMMAND bodies where a missing/
+# wrong-type key used to silently degrade into a bad downstream call (a
+# non-string model_id tunnelling into SlotManager.load/.swap, eventually
+# either 500ing inside is_resolvable() or riding out the 180s container
+# health timeout) instead of failing fast with a clean 400. Deliberately
+# NOT FastAPI body-params: every site here already emits 400 + the hal0
+# typed envelope on bad input, and body-params would flip that to FastAPI's
+# 422 + a different envelope shape — a second dashboard break layered on
+# top of the one this lane exists to avoid. So: parse the body by hand
+# exactly as before, run it through ``Model.model_validate``, and translate
+# any ``ValidationError`` into the SAME ``BadRequest`` (status + code) the
+# site already raises for the equivalent bad-value case today.
+#
+# The SlotConfig config-write trio — create_slot / update_slot_config /
+# update_slot_defaults — is deliberately LEFT LOOSE: those bodies are
+# ``extra="allow"`` and already gated by ``_reject_unknown_config_keys``
+# (dynamic field-set validation against the SlotConfig/ModelConfig/
+# ServerConfig pydantic schemas). Adding a second, narrower pydantic model
+# in front of that boundary would duplicate it and risk drifting out of
+# sync with the real schema — the existing boundary IS the typed layer for
+# those three.
+
+
+class _RenameSlotBody(BaseModel):
+    """``POST /{name}/rename`` body — either key names the new label."""
+
+    new_name: str | None = None
+    name: str | None = None
+
+
+class _SlotLoadBody(BaseModel):
+    """``POST /{name}/load`` body — both keys accepted for the same field."""
+
+    model_id: str | None = None
+    model: str | None = None
+
+
+class _SlotSwapBody(BaseModel):
+    """``POST /{name}/swap`` body — model_id is required (checked after parse)."""
+
+    model_id: str | None = None
+
+
 def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
     """400 when a slot-config write body carries keys the schema doesn't know.
 
@@ -596,8 +656,18 @@ async def rename_slot(name: str, request: Request) -> dict[str, object]:
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    new_name = body.get("new_name") or body.get("name")
-    if not isinstance(new_name, str) or not new_name.strip():
+    try:
+        parsed_body = _RenameSlotBody.model_validate(body)
+    except ValidationError as exc:
+        # A wrong-type new_name/name (e.g. an int) fails isinstance the same
+        # way an empty one does today — same code, same message.
+        raise BadRequest(
+            "rename requires a non-empty 'new_name' in the request body",
+            code="slot.name_required",
+            details={"slot": name, **_validation_error_details(exc)},
+        ) from exc
+    new_name = parsed_body.new_name or parsed_body.name
+    if not new_name or not new_name.strip():
         raise BadRequest(
             "rename requires a non-empty 'new_name' in the request body",
             code="slot.name_required",
@@ -989,11 +1059,27 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
     except Exception:
         # POST without a body is fine — fall back to the slot's default model.
         body = {}
-    model_id = body.get("model_id") if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        parsed_body = _SlotLoadBody.model_validate(body)
+    except ValidationError as exc:
+        # A non-string model_id (e.g. an int, or a falsy-but-wrong-typed 0)
+        # used to slip past the old truthy `if model_id:` guard below and
+        # tunnel into SlotManager.load, which either 500s inside
+        # is_resolvable() (AttributeError: int has no .endswith) or spawns a
+        # container that never goes healthy — the operator eats the 180s
+        # timeout the docstring warns about. This is a NEW guard (no prior
+        # site error to reuse — a missing model_id was always legal here),
+        # so it gets its own code rather than reusing another route's.
+        raise BadRequest(
+            "model_id must be a string",
+            code="slot.invalid_model_id",
+            details={"slot": name, **_validation_error_details(exc)},
+        ) from exc
     # Some callers post {"model": "..."} for symmetry with the slot
     # config schema. Accept both so a dashboard typo doesn't 422.
-    if not model_id and isinstance(body, dict):
-        model_id = body.get("model")
+    model_id = parsed_body.model_id or parsed_body.model
     if model_id:
         registry = getattr(request.app.state, "model_registry", None)
         if registry is not None and not is_resolvable(model_id, registry):
@@ -1065,7 +1151,21 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
         body = await request.json()
     except Exception:
         body = {}
-    model_id = body.get("model_id") if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        parsed_body = _SlotSwapBody.model_validate(body)
+    except ValidationError as exc:
+        # A truthy non-string model_id (e.g. an int) used to sail past this
+        # guard (only an empty/falsy value was rejected) and crash inside
+        # is_resolvable()'s .endswith() call — reuse the SAME missing-model
+        # error the empty-body case already raises below.
+        raise BadRequest(
+            "swap requires a non-empty model_id in the request body",
+            details={"slot": name, **_validation_error_details(exc)},
+            code="swap.missing_model",
+        ) from exc
+    model_id = parsed_body.model_id
     if not model_id:
         raise BadRequest(
             "swap requires a non-empty model_id in the request body",

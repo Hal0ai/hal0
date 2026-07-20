@@ -249,6 +249,14 @@ class ProfileCatalog:
 
         Malformed slot TOMLs are logged and skipped so a single bad slot
         never breaks the whole profile listing.
+
+        id-aware (P3-runtime-db inc4): ``list_slots()`` enumerates on-disk
+        *stems*, which on an id-keyed box are digit ids, not display names.
+        ``load_slot_config`` still needs the raw stem to find the file, but
+        the reported slot identity is always ``cfg.name`` — the real display
+        name a bilingual TOML embeds regardless of which stem it lives under
+        (a name-keyed TOML's stem already IS its name, so this is a no-op
+        there).
         """
         out: list[tuple[str, str | None]] = []
         for slot_name in list_slots():
@@ -257,7 +265,7 @@ class ProfileCatalog:
             except Exception as exc:
                 log.warning("profiles.in_use_scan_error slot=%s error=%s", slot_name, exc)
                 continue
-            out.append((slot_name, cfg.profile))
+            out.append((cfg.name, cfg.profile))
         return out
 
     def _used_by_index(self) -> dict[str, list[str]]:

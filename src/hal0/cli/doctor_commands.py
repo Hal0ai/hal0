@@ -1907,6 +1907,12 @@ def doctor_profiles(
 
     # Scan slots → (slot, profile_name) here (not via the catalog's private
     # helper) so a malformed slot is surfaced, not silently skipped.
+    #
+    # id-aware (P3-runtime-db inc4): list_slots() enumerates on-disk stems,
+    # which on an id-keyed box are digit ids, not display names. load_slot_config
+    # still needs the raw stem to find the file, but the reported identity is
+    # always cfg.name — the real display name a bilingual TOML embeds
+    # regardless of which stem it lives under.
     slot_profiles: list[tuple[str, str | None]] = []
     for slot_name in list_slots():
         try:
@@ -1916,7 +1922,7 @@ def doctor_profiles(
                 f"[yellow]![/yellow]  slot {slot_name}: unreadable TOML ({exc}) — skipped."
             )
             continue
-        slot_profiles.append((slot_name, cfg.profile))
+        slot_profiles.append((cfg.name, cfg.profile))
 
     ref_rows = check_slot_profile_refs(slot_profiles, valid_names)
     img_rows = check_profile_images_present(profiles, _local_image_repos())

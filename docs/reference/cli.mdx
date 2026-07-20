@@ -128,6 +128,7 @@ hal0 setup --auto --no-pull --no-extensions
 | `slot logs <name>` | Print or follow slot logs. | `--follow`/`-f`, `--lines`/`-n` (default 200) |
 | `slot metrics [name]` | Live per-slot runtime metrics (tok/s, KV%, mem, uptime, queue depth). Omit `name` for all slots. | `--json` |
 | `slot capacity` | Per-slot resident memory + the `[slots].max_slots` budget. | `--json` |
+| `slot migrate-id-keying` | One-shot, operator-run: flip every slot artefact from name-keyed to id-keyed on disk. Destructive (backs itself up first); needs hal0 stopped. See the [migration runbook](/docs/operate/slot-id-keying-migration). | `--dry-run`, `--yes`/`-y`, `--stop-services` |
 
 `slot create` flags:
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ValidationError
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
@@ -92,6 +93,81 @@ _emit_terminal_pull_event = _pull_jobs.emit_terminal_pull_event
 _speed_bps = _pull_jobs.speed_bps
 _eta_s = _pull_jobs.eta_s
 _start_flm_pull = _pull_jobs.start_flm_pull
+
+
+# ── typed command bodies (typed-bodies inc-3) ────────────────────────────────
+#
+# House pattern (precedent: config.py / settings.py / dashboard_layout.py):
+# parse the body by hand exactly as before (so a malformed-JSON / non-object
+# body keeps its existing 400 + hal0 envelope), then run the parsed dict
+# through a pydantic model and translate ``ValidationError`` into the SAME
+# ``BadRequest`` (status + code) the site already raises for the equivalent
+# bad-value case today. Deliberately NOT FastAPI body-params — every site
+# below already 400s on bad input with the typed envelope, and body-params
+# would flip that to FastAPI's 422 + a different envelope shape.
+#
+# LEFT LOOSE (not typed here — already screened downstream, typing would
+# duplicate + risk drifting out of sync with the real boundary):
+#   - create_model  — ``Model(**body)`` IS the validation (registry.store.Model
+#     is the pydantic schema of record for a model row).
+#   - update_model  — ``registry.update()`` re-validates through the same
+#     ``Model`` schema; ``_svc.screen_model_write`` additionally screens the
+#     launch-affecting fields (preferred_runner / extra_args) before that.
+#   - add-from-path / inspect / validate — thin route shells whose body
+#     shape is screened inside ``hal0.services.models_service``
+#     (``add_from_path`` / ``inspect_hf_repo`` / ``screen_model_write``).
+#   - scan (plain ``POST /scan``) — already defensive by design: any body
+#     read failure or a non-list ``rows`` falls back to the old
+#     roots-walk auto-scan rather than 400ing; that fallback IS the
+#     intended contract, not a validation gap.
+
+
+class _ScanPreviewBody(BaseModel):
+    """``POST /scan/preview`` body — only ``paths`` needs real typing.
+
+    ``recursive`` is intentionally left OUT of this model (see
+    ``scan_preview`` below) — its existing ``bool(body.get(...))`` truthy
+    coercion must not be replaced by pydantic's stricter bool parsing.
+    """
+
+    paths: list[str] = []
+
+
+class _SetModelDefaultBody(BaseModel):
+    """``POST /{model_id}/default`` body.
+
+    ``default`` is typed ``Any`` ON PURPOSE, not ``bool`` — see
+    ``set_model_default`` below for why: pydantic's bool coercion parses
+    the STRING ``"false"`` as ``False``, but the existing code path does
+    ``bool(body["default"])``, and Python's ``bool("false")`` is ``True``
+    (any non-empty string is truthy). Typing this field ``bool`` would
+    silently flip that result — a real behavior change this lane must not
+    introduce. Kept as a pydantic model anyway (rather than a bare dict)
+    so the body-shape validation still follows the house pattern.
+    """
+
+    default: Any = None
+
+
+class _DuplicateModelBody(BaseModel):
+    """``POST /{model_id}/duplicate`` body."""
+
+    new_id: str
+    profile: str | None = None
+
+
+def _validation_error_details(exc: ValidationError) -> dict[str, str]:
+    """Render a pydantic ValidationError into ``{field_path: message}``.
+
+    Same shape as the identically-named helper in ``config.py`` /
+    ``dashboard_layout.py`` / ``settings.py`` / ``slots.py`` — kept local
+    per-module rather than shared, matching the house pattern.
+    """
+    out: dict[str, str] = {}
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        out[loc or "<root>"] = err.get("msg", "invalid")
+    return out
 
 
 @router.get("")
@@ -171,9 +247,23 @@ async def scan_preview(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
-    raw_paths = body.get("paths") or []
-    if not isinstance(raw_paths, list) or not raw_paths:
+    try:
+        parsed_body = _ScanPreviewBody.model_validate({"paths": body.get("paths") or []})
+    except ValidationError as exc:
+        # Covers both a non-list `paths` (old behavior: same message) and a
+        # list containing non-string entries (NEW: the old code only checked
+        # `isinstance(raw_paths, list)`, so e.g. `{"paths": [1, 2]}` used to
+        # sail through and crash downstream Path()/detect() calls on the int
+        # instead of failing here with a clean 400).
+        raise BadRequest(
+            "'paths' must be a non-empty list of absolute path strings",
+            details=_validation_error_details(exc),
+        ) from exc
+    raw_paths = parsed_body.paths
+    if not raw_paths:
         raise BadRequest("'paths' must be a non-empty list of absolute paths")
+    # `recursive` stays a raw truthy-coerce exactly like before — see
+    # `_ScanPreviewBody`'s docstring for why it's not a typed bool field.
     recursive = bool(body.get("recursive", True))
 
     cfg = load_hal0_config()
@@ -571,7 +661,16 @@ async def set_model_default(model_id: str, request: Request) -> dict[str, Any]:
         if int(request.headers.get("content-length") or 0) > 0:
             body = await request.json()
             if isinstance(body, dict) and "default" in body:
-                default = bool(body["default"])
+                # `_SetModelDefaultBody.default` is `Any` — this parse step
+                # cannot itself raise ValidationError; it exists only to
+                # keep the body-shape read on the house pattern. See the
+                # model's docstring for why `default` isn't typed `bool`:
+                # pydantic's bool coercion would parse the STRING "false"
+                # as `False`, but the existing `bool(x)` below treats any
+                # non-empty string as truthy — e.g. `{"default": "false"}`
+                # stays `True`, same as today.
+                parsed_body = _SetModelDefaultBody.model_validate(body)
+                default = bool(parsed_body.default)
     except Exception as exc:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
 
@@ -632,12 +731,27 @@ async def duplicate_model(model_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
-    new_id = body.get("new_id")
-    if not isinstance(new_id, str):
-        raise BadRequest("'new_id' must be a string", code="validation.invalid")
-    profile = body.get("profile")
-    if profile is not None and not isinstance(profile, str):
-        raise BadRequest("'profile' must be a string when set", code="validation.invalid")
+    try:
+        parsed_body = _DuplicateModelBody.model_validate(body)
+    except ValidationError as exc:
+        errors = exc.errors()
+        # Preserve the exact per-field message the old isinstance checks
+        # raised, AND their check order — new_id was validated first, so a
+        # body with both fields wrong reported the new_id message before
+        # ever reaching the profile check.
+        if any(err.get("loc") == ("new_id",) for err in errors):
+            raise BadRequest(
+                "'new_id' must be a string",
+                code="validation.invalid",
+                details=_validation_error_details(exc),
+            ) from exc
+        raise BadRequest(
+            "'profile' must be a string when set",
+            code="validation.invalid",
+            details=_validation_error_details(exc),
+        ) from exc
+    new_id = parsed_body.new_id
+    profile = parsed_body.profile
 
     result = _svc.duplicate_model(registry, source_id=model_id, new_id=new_id, profile=profile)
 

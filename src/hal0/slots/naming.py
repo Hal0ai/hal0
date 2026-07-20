@@ -32,10 +32,18 @@ from typing import Any
 def slot_instance_token(slot_cfg: Mapping[str, Any]) -> str:
     """The runtime-artefact instance token for a slot config.
 
-    NAME-BASED today — the single place §11.1's M5 downtime window re-points to
-    ``slot_cfg["id"]``. Reads the flat ``name`` or the nested ``[slot].name``
-    (the two on-disk shapes) so every caller gets the identical token.
+    §11.1's M5 id-flip seam: prefers the stable opaque ``slot_cfg["id"]`` when
+    one is set (an id-keyed, post-migration slot) — every artefact then renders
+    ``hal0-slot@<id>...``. Falls back to the mutable ``name`` (flat or nested
+    ``[slot].name``, the two on-disk shapes) when no id is set, which is
+    every slot's behaviour before the operator runs the migration — unchanged
+    from pre-M5. A falsy id (``None``/``0``/``""``) is treated as "not set":
+    slot ids are SQLite ``AUTOINCREMENT`` and start at 1, so 0 is never a real
+    id, and this keeps a stray ``id = 0`` from ever winning over the name.
     """
+    slot_id = slot_cfg.get("id")
+    if slot_id:
+        return str(slot_id)
     token = slot_cfg.get("name")
     if not token:
         nested = slot_cfg.get("slot")
