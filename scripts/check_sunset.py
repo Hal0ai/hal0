@@ -17,11 +17,14 @@ Usage:
   python scripts/check_sunset.py                    # check (CI + `make check-sunset`)
   python scripts/check_sunset.py --update-baseline  # rewrite baseline to current count
 """
+
 from __future__ import annotations
 
 import re
 import sys
 import tomllib
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,31 +34,56 @@ BASELINE = Path(__file__).resolve().parent / "scar_baseline.txt"
 # Keep in lockstep with docs: this is the canonical scar-marker definition.
 SCAR_RE = re.compile(r"removed in #|DEPRECATED|deprecated|\blegacy\b|backward.compat|compat shim")
 SUNSET_RE = re.compile(r"HAL0-SUNSET:\s*v?(\d+)\.(\d+)(?:\.(\d+))?")
+PROJECT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)$")
+PEP440_PRERELEASE_RE = re.compile(r"^\.?(?:a|alpha|b|beta|rc|pre|preview|dev)", re.IGNORECASE)
 
 
-def current_version() -> tuple[int, int, int]:
+@dataclass(frozen=True)
+class ProjectVersion:
+    raw: str
+    release: tuple[int, int, int]
+    is_prerelease: bool
+
+
+def _release_tuple(match: re.Match[str]) -> tuple[int, int, int]:
+    try:
+        return (
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3) or 0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid release components: {match.group(0)!r}") from exc
+
+
+def current_version() -> ProjectVersion:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    parts = re.findall(r"\d+", data["project"]["version"])[:3]
-    parts += ["0"] * (3 - len(parts))
-    return tuple(int(x) for x in parts)  # type: ignore[return-value]
+    raw = data["project"]["version"]
+    match = PROJECT_VERSION_RE.fullmatch(raw)
+    if match is None:
+        raise ValueError(f"unsupported project version: {raw!r}")
+    release = _release_tuple(match)
+    suffix = match.group(4).split("+", 1)[0]
+    is_prerelease = suffix.startswith("-") or bool(PEP440_PRERELEASE_RE.match(suffix))
+    return ProjectVersion(raw=raw, release=release, is_prerelease=is_prerelease)
 
 
-def _py_files():
+def _py_files() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
 
 
 def scar_count() -> int:
     n = 0
     for f in _py_files():
-        try:
-            n += sum(1 for line in f.read_text(errors="ignore").splitlines() if SCAR_RE.search(line))
-        except OSError:
-            pass
+        with suppress(OSError):
+            n += sum(
+                1 for line in f.read_text(errors="ignore").splitlines() if SCAR_RE.search(line)
+            )
     return n
 
 
-def overdue_markers(cur: tuple[int, int, int]):
-    out = []
+def overdue_markers(cur: ProjectVersion) -> list[tuple[Path, int, tuple[int, int, int]]]:
+    out: list[tuple[Path, int, tuple[int, int, int]]] = []
     for f in _py_files():
         try:
             text = f.read_text(errors="ignore")
@@ -64,13 +92,13 @@ def overdue_markers(cur: tuple[int, int, int]):
         for i, line in enumerate(text.splitlines(), 1):
             m = SUNSET_RE.search(line)
             if m:
-                mv = tuple(int(m.group(k) or 0) for k in (1, 2, 3))
-                if mv <= cur:
+                mv = _release_tuple(m)
+                if mv < cur.release or (mv == cur.release and not cur.is_prerelease):
                     out.append((f.relative_to(ROOT), i, mv))
     return out
 
 
-def _fmt(v) -> str:
+def _fmt(v: tuple[int, int, int]) -> str:
     return ".".join(map(str, v))
 
 
@@ -87,11 +115,17 @@ def main(argv: list[str]) -> int:
     overdue = overdue_markers(cur)
     if overdue:
         fail = True
-        print(f"❌ OVERDUE HAL0-SUNSET shims (current v{_fmt(cur)}):")
+        print(f"❌ OVERDUE HAL0-SUNSET shims (current v{cur.raw}):")
         for f, i, mv in overdue:
             print(f"   {f}:{i}  sunset v{_fmt(mv)} — delete it")
 
-    base = int(BASELINE.read_text().strip()) if BASELINE.exists() else 10**9
+    if BASELINE.exists():
+        try:
+            base = int(BASELINE.read_text().strip())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"invalid scar baseline: {BASELINE}") from exc
+    else:
+        base = 10**9
     cnt = scar_count()
     if cnt > base:
         fail = True
@@ -102,9 +136,11 @@ def main(argv: list[str]) -> int:
     else:
         print(f"✅ scar markers: {cnt} <= baseline {base}")
         if cnt < base:
-            print(f"   ↓ baseline can be lowered to {cnt} — run: python scripts/check_sunset.py --update-baseline")
+            print(
+                f"   ↓ baseline can be lowered to {cnt} — run: python scripts/check_sunset.py --update-baseline"
+            )
     if not overdue:
-        print(f"✅ no overdue HAL0-SUNSET shims (current v{_fmt(cur)})")
+        print(f"✅ no overdue HAL0-SUNSET shims (current v{cur.raw})")
 
     return 1 if fail else 0
 
