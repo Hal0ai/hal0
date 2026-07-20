@@ -14,6 +14,11 @@ CANONICAL_PROFILES = {
     "kokoro",
     "qwen3-tts",
     "comfyui",
+    "brain",
+    "chadrock-dense",
+    "chadrock-moe",
+    "thinking",
+    "coding",
 }
 
 
@@ -32,9 +37,18 @@ def test_seed_profiles_are_device_agnostic_and_partition_safe() -> None:
 def test_fpx_profiles_keep_logical_tune_and_drop_physical_mtp_flags() -> None:
     moe = seeds.seed_profiles()["moe"]["flags"]
     dense = seeds.seed_profiles()["dense"]["flags"]
-    assert "-b 2048" in moe and "-ctk f16" in moe
-    assert "-c 131072" in dense and "-ctk q8_0" in dense
-    for flags in (moe, dense):
+    # Generic moe/dense are model-agnostic and carry no family-specific
+    # kv-cache (chadrock-specific -ctk/-ctv moved to chadrock-moe/dense
+    # per spec §4.2). Both still carry batch + context defaults.
+    assert "-b 2048" in moe
+    assert "-c 32768" in moe
+    assert "-c 131072" in dense
+    # Chadrock family profiles own the family-specific KV quirks
+    chadrock_moe = seeds.seed_profiles()["chadrock-moe"]["flags"]
+    chadrock_dense = seeds.seed_profiles()["chadrock-dense"]["flags"]
+    assert "-ctk f16" in chadrock_moe
+    assert "-ctk q8_0" in chadrock_dense
+    for flags in (moe, dense, chadrock_moe, chadrock_dense):
         assert "--spec-type" not in flags
         assert "--spec-draft-device" not in flags
         assert "--spec-draft-ngl" not in flags

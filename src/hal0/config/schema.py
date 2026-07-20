@@ -1123,12 +1123,16 @@ class ProfileConfig(BaseModel):
             "on-disk/API back-compat until P3-schema externalizes profiles."
         ),
     )
-    device_class: Literal["gpu", "cpu", "npu", "img"] = Field(
-        default="gpu",
+    device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
+        default=None,
         description=(
-            "Device class this profile targets.  Drives drawer profile filtering "
-            "and create-modal device defaults.  ``'img'`` is reserved for Phase D "
-            "(ComfyUI image-generation slots) and is not yet used."
+            "Device class this profile targets.  None (default, per "
+            "spec-hw-slot-ownership.md §4.1 / seeded-profile-rework §4.1) "
+            "means the profile is device-agnostic — the slot owns device "
+            "and the profile supplies the logical tune only.  ``'gpu'``, "
+            "``'cpu'``, ``'npu'``, ``'img'`` are explicit-fit values; "
+            "``profile_fits_slot`` skips the device-class gate when this is "
+            "None."
         ),
     )
     backend: Literal["rocm", "vulkan", "cuda"] | None = Field(

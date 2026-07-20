@@ -77,7 +77,7 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
             if device in ("npu", "cpu", "img")
             else "cpu"
         )
-        if resolved.device_class != slot_class:
+        if resolved.device_class is not None and resolved.device_class != slot_class:
             return False
         if resolved.backend:
             from hal0.model_meta import device_to_backend
