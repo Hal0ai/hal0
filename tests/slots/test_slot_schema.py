@@ -11,7 +11,6 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from hal0.config.schema import SlotConfig
 

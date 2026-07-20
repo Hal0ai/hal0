@@ -7,9 +7,8 @@ moves family-specific recipes into profile.<family>-<variant> entries.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 _FAMILY_DEFAULTS = (
     Path(__file__).resolve().parents[2]
