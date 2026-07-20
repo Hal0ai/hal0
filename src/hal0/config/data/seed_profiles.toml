@@ -54,7 +54,7 @@ intent = "Pooled embeddings"
 quant = ""
 
 [profile.reranking]
-flags = "-fa on -b 8192 -ub 8192"
+flags = "--reranking -fa on -b 8192 -ub 8192"
 mtp = false
 intent = "Reranking"
 quant = ""
