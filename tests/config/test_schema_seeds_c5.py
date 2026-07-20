@@ -20,7 +20,12 @@ def test_seed_rerank_toml_validates() -> None:
     assert slot.profile == "reranking"
     assert slot.device == "gpu-vulkan"
     assert slot.port == 8086  # drifted from 8083 per spec §5.4 (port fix for _SETUP_SLOTS[embed] conflict)
-    assert "--reranking" in (slot.server.extra_args or "")
+    # Per spec §4.3 / spec-hw-slot-ownership §10: --reranking is a
+    # profile-owned capability toggle (profile.reranking.flags), NOT a
+    # slot [server].extra_args (the extra_args slot field is
+    # HAL0-SUNSET and inert at launch).  SlotConfig.server validates
+    # that extra_args is None (clean seed — no stale slot overrides).
+    assert slot.server.extra_args is None
     # Clean seed (WS-E, #1107): no model pin — boots grey, no surprise download.
     assert slot.model.default == ""
     assert slot.enabled is False
