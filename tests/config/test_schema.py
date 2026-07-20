@@ -41,6 +41,7 @@ class TestBrainChatConfig:
         # [brain_chat] read_only=false opt-in.
         assert bc.read_only is True
         assert bc.model == ""
+        assert bc.tool_model == "hal0/agent"
         assert bc.max_rounds == 8
         assert bc.completion_timeout_s == 300.0
 
