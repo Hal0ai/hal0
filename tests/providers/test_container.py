@@ -1089,7 +1089,9 @@ class TestFamilyDefaults:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
         assert "q4_0" not in argv  # slot extra_args inert
-        assert "-ctk" not in argv  # profile flags inert; no family override; no model defaults in test path
+        assert (
+            "-ctk" not in argv
+        )  # profile flags inert; no family override; no model defaults in test path
 
     def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
         """The vulkan seed ships minimal flags with NO forced KV quant.

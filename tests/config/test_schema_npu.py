@@ -105,4 +105,6 @@ def test_seed_tts_toml_validates() -> None:
     assert slot.runtime == "container"
     assert slot.profile == "kokoro"
     assert slot.device == "cpu"
-    assert slot.port == 8085  # drifted from 8084 per spec §5.4 (port fix for _SETUP_SLOTS[stt] conflict)
+    assert (
+        slot.port == 8085
+    )  # drifted from 8084 per spec §5.4 (port fix for _SETUP_SLOTS[stt] conflict)

@@ -19,7 +19,9 @@ def test_seed_rerank_toml_validates() -> None:
     assert slot.runtime == "container"
     assert slot.profile == "reranking"
     assert slot.device == "gpu-vulkan"
-    assert slot.port == 8086  # drifted from 8083 per spec §5.4 (port fix for _SETUP_SLOTS[embed] conflict)
+    assert (
+        slot.port == 8086
+    )  # drifted from 8083 per spec §5.4 (port fix for _SETUP_SLOTS[embed] conflict)
     # Per spec §4.3 / spec-hw-slot-ownership §10: --reranking is a
     # profile-owned capability toggle (profile.reranking.flags), NOT a
     # slot [server].extra_args (the extra_args slot field is

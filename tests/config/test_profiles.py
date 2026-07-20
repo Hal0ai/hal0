@@ -202,8 +202,7 @@ class TestLoadProfilesConfig:
         for name in SEED_PROFILES:
             expected_mtp = name in _MTP_TRUE_PROFILES
             assert cfg.profile[name].mtp is expected_mtp, (
-                f"profile {name}: expected mtp={expected_mtp}, "
-                f"got mtp={cfg.profile[name].mtp}"
+                f"profile {name}: expected mtp={expected_mtp}, got mtp={cfg.profile[name].mtp}"
             )
 
     def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
@@ -393,9 +392,17 @@ def test_seed_device_classes() -> None:
     device-specific profiles declare their class explicitly to preserve
     the existing fit-gating semantics."""
     DEVICE_AGNOSTIC = {
-        "chat", "chat-long-context", "moe", "dense",
-        "embedding", "reranking", "brain",
-        "chadrock-dense", "chadrock-moe", "thinking", "coding",
+        "chat",
+        "chat-long-context",
+        "moe",
+        "dense",
+        "embedding",
+        "reranking",
+        "brain",
+        "chadrock-dense",
+        "chadrock-moe",
+        "thinking",
+        "coding",
     }
     for name in DEVICE_AGNOSTIC:
         assert "device_class" not in SEED_PROFILES[name], (
