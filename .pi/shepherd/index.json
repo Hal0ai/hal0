@@ -649,7 +649,67 @@
       "endedAt": "2026-07-20T10:37:08.444Z",
       "fileCount": 0,
       "toolCallCount": 0
+    },
+    {
+      "id": "pi-mrt31iyk-8npy1m",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:29:22.364Z",
+      "endedAt": "2026-07-20T10:40:53.164Z",
+      "fileCount": 19,
+      "toolCallCount": 94
+    },
+    {
+      "id": "pi-mrt3ho43-y7wase",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:41:55.539Z",
+      "endedAt": "2026-07-20T10:42:04.537Z",
+      "fileCount": 1,
+      "toolCallCount": 1
+    },
+    {
+      "id": "pi-mrt3iw86-uft2jj",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:42:52.710Z",
+      "endedAt": "2026-07-20T10:51:11.149Z",
+      "fileCount": 18,
+      "toolCallCount": 56
+    },
+    {
+      "id": "pi-mrt3vj6t-1fyx1z",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:52:42.341Z",
+      "endedAt": "2026-07-20T10:55:54.084Z",
+      "fileCount": 12,
+      "toolCallCount": 25
+    },
+    {
+      "id": "pi-mrt3zwvw-nfdslb",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:56:06.716Z",
+      "endedAt": "2026-07-20T10:56:42.497Z",
+      "fileCount": 2,
+      "toolCallCount": 2
+    },
+    {
+      "id": "pi-mrt41qry-tee6fn",
+      "taskName": "pi-turn",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-30-51-671Z_019f7ea6-3d17-76a9-b52c-07f15fee26b5.jsonl",
+      "status": "finished",
+      "startedAt": "2026-07-20T10:57:32.110Z",
+      "endedAt": "2026-07-20T10:58:45.256Z",
+      "fileCount": 8,
+      "toolCallCount": 11
     }
   ],
-  "updatedAt": "2026-07-20T10:37:08.444Z"
+  "updatedAt": "2026-07-20T10:58:45.256Z"
 }
