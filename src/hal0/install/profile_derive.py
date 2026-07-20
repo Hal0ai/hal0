@@ -138,7 +138,7 @@ def derive_profile(capability: str, device: str) -> str:
         # Plain ROCm GPU LLM. (The legacy MTP rocm-dnse profile was removed
         # 2026-07-05; MTP dense now lives on the ROCmFPX profiles, which slots
         # opt into explicitly — derivation never silently forces MTP.)
-        return "rocm"
+        return "chat"
     if capability == "embed":
         # Embeddings get a dedicated embed profile (llama-server --embedding,
         # -ub 8192) rather than the chat-tuned base — the chat KV-quant/batch
@@ -147,19 +147,23 @@ def derive_profile(capability: str, device: str) -> str:
         # instead of /v1/embeddings. Route to the backend-coherent embed lane:
         # gpu-rocm→embed, gpu-vulkan→vulkan-embed; other devices (incl. CPU,
         # which has no dedicated embed seed yet) fall back to the base profile.
-        return {"gpu-rocm": "embed", "gpu-vulkan": "vulkan-embed"}.get(
-            device
-        ) or DEVICE_DEFAULT_PROFILES.get(device, "cpu-llm")
+        return (
+            "embedding"
+            if device in {"gpu-rocm", "gpu-vulkan"}
+            else DEVICE_DEFAULT_PROFILES.get(device, "cpu-chat")
+        )
     if capability == "rerank":
         # Rerankers get a dedicated rerank profile (llama-server --reranking →
         # /v1/rerank); MUST stay a separate instance from embed. Same backend-
         # coherent routing as embed (gpu-rocm→rerank, gpu-vulkan→vulkan-rerank);
         # non-GPU falls back to the base profile (no dedicated CPU rerank seed).
-        return {"gpu-rocm": "rerank", "gpu-vulkan": "vulkan-rerank"}.get(
-            device
-        ) or DEVICE_DEFAULT_PROFILES.get(device, "cpu-llm")
+        return (
+            "reranking"
+            if device in {"gpu-rocm", "gpu-vulkan"}
+            else DEVICE_DEFAULT_PROFILES.get(device, "cpu-chat")
+        )
     if device == "cpu" and capability == "tts":
         # ``tts`` stays on the kokoro/CPU profile; everything else on CPU takes
         # the CPU-coherent llama-server profile from the base table below.
-        return "tts"
-    return DEVICE_DEFAULT_PROFILES.get(device, "cpu-llm")
+        return "kokoro"
+    return DEVICE_DEFAULT_PROFILES.get(device, "cpu-chat")

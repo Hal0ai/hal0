@@ -76,9 +76,8 @@ def _base_profile_for_backend(catalog: Any, backend: str) -> str:
     never silently switches a slot onto the MTP ``rocm-dnse`` image. Do NOT
     fold it into the device→profile helper (finding PS-4).
     """
-    named = catalog.profile.get(backend)
-    if named is not None and getattr(named, "backend", None) == backend:
-        return backend
+    if "chat" in catalog.profile:
+        return "chat"
     for name, prof in catalog.profile.items():
         if getattr(prof, "backend", None) == backend and not getattr(prof, "mtp", False):
             return str(name)

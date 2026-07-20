@@ -17,7 +17,7 @@ def _profile() -> ProfileConfig:
     # §7.1a / ML-5: seed/real profiles no longer carry --jinja literally —
     # it's injected as a runner capability (model_defaults segment) by
     # _resolve_llama_scalars, not a profile tune.
-    return ProfileConfig(image="img:1", flags="-b 512", mtp=False)
+    return ProfileConfig(flags="-b 512", mtp=False)
 
 
 def test_detail_dedups_and_attributes_provenance() -> None:
@@ -42,7 +42,10 @@ def test_detail_dedups_and_attributes_provenance() -> None:
         detail = resolved_argv_detail_for_slot(cfg)
 
     assert detail is not None
-    assert detail["argv"][0] == "img:1"
+    # spec-hw-slot-ownership §3: profile.image is ignored — the image is the
+    # HW-gated default (a real registry ref), never the profile's "img:1".
+    assert detail["argv"][0] != "img:1"
+    assert "/" in detail["argv"][0]
     # -b deduped to one occurrence, last (model tune) value wins
     assert detail["argv"].count("-b") == 1
     assert detail["removed"] == 1

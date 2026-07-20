@@ -30,7 +30,7 @@ tags = ["agentic", "moe", "fast"]
 slot = "agent"
 model = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
 device = "gpu-rocm"
-profile = "rocm"
+profile = "moe"
 mtp = true
 capabilities = "@embed_rerank"
 
@@ -38,7 +38,7 @@ capabilities = "@embed_rerank"
 slot = "utility"
 model = "gemma-4-12b-it-ud-q4-k-xl"
 device = "gpu-vulkan"
-profile = "vulkan"
+profile = "chat"
 
 # forge -- coding-first developer loadout: a coder agent + a fast draft coder.
 [stack.forge]
@@ -52,7 +52,7 @@ tags = ["coding", "developer"]
 slot = "agent"
 model = "qwopus3-6-27b-coder-mtp-q6-k"
 device = "gpu-rocm"
-profile = "rocm"
+profile = "chat"
 mtp = true
 capabilities = "@embed_rerank"
 
@@ -60,7 +60,7 @@ capabilities = "@embed_rerank"
 slot = "utility"
 model = "qwopus3-5-4b-coder-mtp-q6-k"
 device = "gpu-vulkan"
-profile = "vulkan"
+profile = "chat"
 mtp = true
 
 # pi -- always-on support: faithful compaction, memory recall (quality > speed).
@@ -75,7 +75,7 @@ tags = ["support", "memory", "compaction"]
 slot = "utility"
 model = "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean"
 device = "gpu-rocm"
-profile = "rocm"
+profile = "chat"
 mtp = true
 capabilities = "@embed_rerank"
 
@@ -83,4 +83,4 @@ capabilities = "@embed_rerank"
 slot = "agent"
 model = "gemma-4-12b-it-ud-q4-k-xl"
 device = "gpu-vulkan"
-profile = "vulkan"
+profile = "chat"

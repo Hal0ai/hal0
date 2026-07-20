@@ -9,7 +9,7 @@ name = "rerank"
 type = "reranking"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "vulkan"
+profile = "reranking"
 enabled = false
 port = 8083
 

@@ -16,6 +16,7 @@ import {
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModels, usePullJob } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
+import { useSystemInfo, deviceBackend } from '@/api/hooks/useRuntimes'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSlotLogsStream } from '@/api/hooks/useLogs'
@@ -103,6 +104,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const profilesQuery = useProfiles();
   const modelsQuery = useModels();
   const chatTemplatesQuery = useChatTemplates(open);
+  // HW grid (spec-hw-slot-ownership §2): device enum from meta, BINARY options +
+  // fit-check metadata from system-info (RUNNER_IMAGES).
+  const metaEnums = useMetaEnums();
+  const systemInfoQuery = useSystemInfo();
 
   // Seed from the slot list payload when available (PR #587 — same fix
   // class as #584). llamacpp_args (profile base flags) is read-only;
@@ -121,21 +126,28 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // sends null). Both seed from the slot list payload.
   const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
   const [thinkingPending, setThinkingPending] = useStateSM(false);
+  // ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────────
+  // The slot owns the physical layer as typed fields: device (enum) · NGL ·
+  // THREADS · BINARY (runner image ref) + an optional image_pin escape hatch.
+  // NGL rides the Save button as a TOP-LEVEL slot config key (reversing the §5
+  // fold into [model].n_gpu_layers).
+  const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
   const [nGpuLayers, setNGpuLayers] = useStateSM(
     slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
   );
+  const [threads, setThreads] = useStateSM(
+    slot?.threads != null ? String(slot.threads) : "0"
+  );
+  const [binary, setBinary] = useStateSM(slot?.binary || "");
+  // image_pin — optional escape hatch. Empty = release default
+  // (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
+  const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
   // Continuous batching: --parallel sequence slots. Empty = inherit the
   // profile (today: 1). Rides the Save button (PUT /config {parallel}),
   // restart-required. See the concurrency-batching plan.
   const [parallel, setParallel] = useStateSM(
     slot?.parallel != null ? String(slot.parallel) : ""
   );
-  // Per-slot image override. Empty = use profile default (DEFAULT_ROCMFPX_IMAGE
-  // in schema.py, v0.9.5+). The current 0.9.4.1 backend ignores this field
-  // on the wire; 0.9.5+ reads it via _resolve_image_ref. Sibling fields
-  // (profile, model) keep their own state — image is a third independent
-  // axis, not a sub-set of profile.
-  const [image, setImage] = useStateSM(slot?.image || "");
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Dirty-close confirms through the shared ConfirmDialog (state-driven),
@@ -159,11 +171,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [thinkingErr, setThinkingErr] = useStateSM(null);
   // Per-field validation errors for numeric inputs (#548).
   const [fieldErrs, setFieldErrs] = useStateSM({});
-  // C7: profile swap for GPU container slots.
-  // Seeded from slot.profile; only sent on Save when changed. After a
-  // profile-change save the slot is restarted (model swap semantics — same
-  // cold-restart contract as profile image change).
-  const [selectedProfile, setSelectedProfile] = useStateSM(slot?.profile || "");
   // Task 5: per-slot chat_template override.
   // chatTemplate seeds from slot.chat_template (empty = no override).
   // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
@@ -285,7 +292,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
       setThinking(slot.enable_thinking === true);
       setThinkingPending(false);
+      // HW grid re-seed from the (possibly-updated) slot prop.
+      setDevice(slot.device || "gpu-rocm");
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
+      setThreads(slot.threads != null ? String(slot.threads) : "0");
+      setBinary(slot.binary || "");
+      setImagePin(slot.image_pin || "");
       setParallel(slot.parallel != null ? String(slot.parallel) : "");
       // #587: re-seed from the slot prop so the drawer tracks the real
       // on-disk values.
@@ -295,10 +307,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setPendingSwap(null);
       setThinkingErr(null);
       setFieldErrs({});
-      // C7: re-seed profile from the (possibly-updated) slot prop.
-      setSelectedProfile(slot.profile || "");
-      // Re-seed per-slot image override from the (possibly-updated) slot prop.
-      setImage(slot.image || "");
       // Task 5: re-seed chat_template override from the slot prop.
       setChatTemplate(slot.chat_template || "");
       setOverrideOpen(!!(slot.chat_template));
@@ -331,37 +339,30 @@ function EditSlotDrawer({ open, slot, onClose }) {
     if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
       errs.ctx = "Must be an integer ≥ 128";
     }
-    // n_gpu_layers: -1 or empty = "use model default / profile" (persisted as
-    // null → backend unsets [model].n_gpu_layers); otherwise an integer ≥ 0.
+    // NGL (HW grid, spec-hw-slot-ownership §2): a slot-owned TOP-LEVEL int.
+    // -1 or empty = "all layers" default; otherwise an integer ≥ -1.
     const nglRaw = String(nGpuLayers).trim();
     const nglNum = nglRaw === "" ? null : Number(nglRaw);
     if (nglRaw !== "" && (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1)) {
       errs.ngl = "Must be an integer ≥ -1 (or empty)";
     }
-    // parallel (--parallel/-np): empty = inherit the profile; else integer ≥ 1.
+    // THREADS (HW grid): 0 = unset (runtime default); otherwise integer ≥ 0.
+    const thrRaw = String(threads).trim();
+    const thrNum = thrRaw === "" ? 0 : Number(thrRaw);
+    if (thrRaw !== "" && (!Number.isFinite(thrNum) || !Number.isInteger(thrNum) || thrNum < 0)) {
+      errs.threads = "Must be an integer ≥ 0 (0 = runtime default)";
+    }
+    // parallel (--parallel/-np): empty = inherit default; else integer ≥ 1.
     const parRaw = String(parallel).trim();
     const parNum = parRaw === "" ? null : Number(parRaw);
     if (parRaw !== "" && (!Number.isFinite(parNum) || !Number.isInteger(parNum) || parNum < 1)) {
-      errs.parallel = "Must be an integer ≥ 1 (or empty to inherit the profile)";
+      errs.parallel = "Must be an integer ≥ 1 (or empty to inherit the default)";
     }
-    // Task 5: GPU-class slots have an editable profile select; mirror the
-    // create-slot modal's guard and block Save when it's been cleared. NPU/CPU
-    // slots render fixed text (no select) so they can never hit this.
-    const allProfiles = profilesQuery.data ?? [];
-    const currentProfileMeta = allProfiles.find(p => p.name === (slot.profile || ""));
-    const slotDeviceIsGpu = !["npu", "cpu"].includes(slot.device || "");
-    const profileDeviceClass = currentProfileMeta?.device_class
-      ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
-    if (profileDeviceClass === "gpu" && !selectedProfile) {
-      errs.profile = "Profile is required";
-    }
-    // Image: empty is allowed (use profile default). When set, must look like
-    // a registry ref — at minimum contains ":" (host:tag or repo:tag) and
-    // doesn't contain whitespace. Keep the regex loose; the actual pull
-    // happens in load_sync and reports its own errors.
-    const imgTrim = (image || "").trim();
-    if (imgTrim && (!imgTrim.includes(":") || /\s/.test(imgTrim))) {
-      errs.image = "Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
+    // image_pin: empty is allowed (release default). When set, must look like a
+    // registry ref — contains ":" (host:tag or repo:tag) and no whitespace.
+    const pinTrim = (imagePin || "").trim();
+    if (pinTrim && (!pinTrim.includes(":") || /\s/.test(pinTrim))) {
+      errs.imagePin = "Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
     }
     // Block Save on malformed extra_args (unbalanced quotes) the same way
     // numeric fields block — the resolved command can't be built from it.
@@ -373,61 +374,52 @@ function EditSlotDrawer({ open, slot, onClose }) {
       return;
     }
     setFieldErrs({});
-    // C7: include profile only when changed; restart after save
-    // (profile swap = cold restart, same semantics as model swap).
-    const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
     // Task 5: include chat_template only when the user has set/changed an override.
-    // Dirty-track against slot.chat_template (mirrors profileChanged pattern).
     const chatTemplateChanged = overrideOpen && chatTemplate !== (slot.chat_template || "");
     // Per-slot extra_args override — ship only when changed, nested under
     // [server] so the backend one-level merge preserves sibling server keys.
     const extraArgsChanged = extraArgs !== extraArgsBaseline;
-    // Only write ctx_size when the operator actually changed it. The old code
-    // sent ctxNum unconditionally, so any unrelated save (profile, extra_args)
-    // on a not-currently-serving slot clobbered the persisted context window
-    // with the seeded fallback. Gate on the persisted baseline (ctxBaseline).
+    // Only write ctx_size when the operator actually changed it. Gate on the
+    // persisted baseline (ctxBaseline).
     const ctxChanged = ctxNum !== Number(ctxBaseline);
-    // n_gpu_layers rides the same PATCH /defaults path as ctx_size
-    // ([model].n_gpu_layers). -1 and empty both mean "unset" (→ null on the
-    // wire); only ship when the NORMALIZED value differs from the persisted
-    // baseline so a no-op Save stays quiet (#587 dirty-tracking contract).
-    const nglValue = nglRaw === "" || nglNum === -1 ? null : nglNum;
-    const nglChanged = nglValue !== nglBaselineValue;
+    // HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS are
+    // top-level slot config ints now (reversing the §5 fold). -1/empty NGL and
+    // 0/empty THREADS normalize to the "unset" defaults.
+    const nglValue = nglRaw === "" ? -1 : nglNum;
+    const thrValue = thrRaw === "" ? 0 : thrNum;
+    const pinValue = pinTrim === "" ? null : pinTrim;
+    const deviceChanged = device !== (slot.device || "gpu-rocm");
+    const nglChanged = nglValue !== (slot.n_gpu_layers ?? -1);
+    const threadsChanged = thrValue !== (slot.threads ?? 0);
+    const binaryChanged = binary !== (slot.binary || "");
+    const imagePinChanged = pinValue !== (slot.image_pin ?? null);
+    // A hardware change (device/NGL/threads/binary/image_pin) needs a cold
+    // restart, same as a chat_template change.
+    const hwChanged = deviceChanged || nglChanged || threadsChanged || binaryChanged || imagePinChanged;
     try {
-      // Two-step: defaults (ctx_size / n_gpu_layers live under [model]) +
-      // slot config for the top-level keys (profile, chat_template, server).
-      // llamacpp_args base flags are owned by the profile — never included in
-      // a save (extra_args is the per-slot override). These are fast on-disk
-      // writes, so we await them and keep the drawer open to surface any
-      // write error.
+      // Two-step: defaults (ctx_size lives under [model]) + slot config for the
+      // top-level keys (device / NGL / threads / binary / image_pin /
+      // chat_template / server). These are fast on-disk writes.
       const slotBody = {};
-      if (profileChanged) {
-        slotBody.profile = selectedProfile;
-      }
+      if (deviceChanged) slotBody.device = device;
+      if (nglChanged) slotBody.n_gpu_layers = nglValue;
+      if (threadsChanged) slotBody.threads = thrValue;
+      if (binaryChanged) slotBody.binary = binary;
+      if (imagePinChanged) slotBody.image_pin = pinValue;
       if (chatTemplateChanged) {
         slotBody.chat_template = chatTemplate;
-      }
-      // Per-slot image override. Empty → null (use profile default). Ship
-      // only when the normalized (trimmed) value differs from the persisted
-      // baseline so a no-op Save stays quiet. The backend's
-      // _resolve_image_ref (v0.9.5+) prefers this field over profile.image.
-      const imgValue = imgTrim === "" ? null : imgTrim;
-      if (imgValue !== (slot.image || null)) {
-        slotBody.image = imgValue;
       }
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
       }
-      // parallel is a top-level slot field. Empty → null (inherit the profile;
-      // the None-means-delete merge clears any persisted override). Ship only
-      // when the normalized value differs from the persisted baseline.
+      // parallel is a top-level slot field. Empty → null (inherit; the
+      // None-means-delete merge clears any persisted override).
       const parValue = parRaw === "" ? null : parNum;
       if (parValue !== (slot.parallel ?? null)) {
         slotBody.parallel = parValue;
       }
       const defaultsBody = {};
       if (ctxChanged) defaultsBody.ctx_size = ctxNum;
-      if (nglChanged) defaultsBody.n_gpu_layers = nglValue;
       if (Object.keys(defaultsBody).length > 0) {
         await defaultsMut.mutateAsync({
           name: slot.name,
@@ -442,13 +434,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setSubmitErr(err?.message || "save failed");
       return;
     }
-    // Non-blocking apply: a profile or chat_template change requires a cold
+    // Non-blocking apply: a hardware or chat_template change requires a cold
     // restart that can take model-load seconds-to-minutes. Fire it in the
-    // BACKGROUND (do NOT await) and close the drawer immediately — the slots
-    // list polls every 5s and reflects the transitional → running phase as
-    // the restart progresses. Restart failures surface via toast since the
-    // drawer is already gone.
-    if (profileChanged || chatTemplateChanged) {
+    // BACKGROUND (do NOT await) and close the drawer immediately.
+    if (hwChanged || chatTemplateChanged) {
       restartMut.mutate(slot.name, {
         onError: (err) =>
           window.__hal0Toast && window.__hal0Toast(
@@ -533,26 +522,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // the 8192 floor only when nothing is persisted, so an untouched field on a
   // cold slot is never counted dirty (and never written — see ctxChanged).
   const ctxBaseline = slot.ctx_max ?? (slot.metrics?.ctx || 8192);
-  // n_gpu_layers baseline, NORMALIZED: -1 and absent both mean "unset" (use
-  // model default / profile), so they compare equal — an untouched "-1" seed
-  // never counts dirty and never rides the PATCH.
-  const nglBaselineValue =
-    slot.n_gpu_layers == null || slot.n_gpu_layers === -1 ? null : slot.n_gpu_layers;
+  // HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS normalize
+  // their "unset" seeds (-1 NGL, 0 THREADS) so an untouched field never counts
+  // dirty. Baselines compare against the slot's persisted top-level HW fields.
   const nglRawNow = String(nGpuLayers).trim();
-  const nglValueNow =
-    nglRawNow === "" || Number(nglRawNow) === -1 ? null : Number(nglRawNow);
-  const nglDirty = nglValueNow !== nglBaselineValue;
+  const nglValueNow = nglRawNow === "" ? -1 : Number(nglRawNow);
+  const nglDirty = nglValueNow !== (slot.n_gpu_layers ?? -1);
+  const thrRawNow = String(threads).trim();
+  const thrValueNow = thrRawNow === "" ? 0 : Number(thrRawNow);
+  const threadsDirty = thrValueNow !== (slot.threads ?? 0);
+  const deviceDirty = device !== (slot.device || "gpu-rocm");
+  const binaryDirty = binary !== (slot.binary || "");
+  const imagePinDirty = (imagePin.trim() || null) !== (slot.image_pin ?? null);
 
-  // UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields
-  // (extra_args, ctx, n_gpu_layers, profile, chat_template override). The
-  // instant-apply toggles (thinking / MTP / enable) fire their own PUT/POST
-  // outside Save and are intentionally excluded — a flipped toggle is
-  // already persisted.
+  // UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
+  // grid, extra_args, ctx, parallel, chat_template override). The instant-apply
+  // toggles (thinking / MTP / enable) fire their own PUT/POST outside Save and
+  // are intentionally excluded — a flipped toggle is already persisted.
   // ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
-  // onSaveClick: Number(ctx) !== Number(ctxBaseline)) — the old string compare
-  // flagged "8192 " / "08192" as dirty even though Save would send nothing.
-  // Trim + parse before comparing; an unparseable edit still counts dirty
-  // (NaN !== N) so garbage input keeps the guard armed.
+  // onSaveClick: Number(ctx) !== Number(ctxBaseline)).
   const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
   const parRawNow = String(parallel).trim();
   const parValueNow = parRawNow === "" ? null : Number(parRawNow);
@@ -561,8 +549,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
     extraArgsDirty ||
     ctxDirty ||
     nglDirty ||
+    threadsDirty ||
+    deviceDirty ||
+    binaryDirty ||
+    imagePinDirty ||
     parallelDirty ||
-    (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
     (overrideOpen && chatTemplate !== (slot.chat_template || ""));
   const requestClose = () => {
     if (dirty) { setDiscardOpen(true); return; }
@@ -644,9 +635,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <ReadOnlyStrip k="state" v={<span className={stateChipClass(slot)}>{slot.state}</span>} />
       </div>
 
-      {/* Profile + image status strip — read-only. */}
+      {/* Runner + image status strip — read-only. Runner (BINARY) resolves the
+          launch image (RUNNER_IMAGES[binary]); image_pin overrides it (§3). */}
       <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
-        <ReadOnlyStrip k="profile" v={slot.profile || "—"} />
+        <ReadOnlyStrip k="runner · binary" v={slot.binary || "auto (from device)"} />
         <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
       </div>
 
@@ -669,74 +661,155 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
       </div>
 
-      {/* Profile is the configuration surface.
-          GPU-class slots get an editable select filtered to device_class==="gpu"
-          profiles. NPU/CPU/image-class slots are pinned by silicon/runtime —
-          render fixed text (no select). Profile change triggers restart
-          (same cold-restart semantics as a model swap). */}
-      {(() => {
-        const allProfiles = profilesQuery.data ?? [];
-        // Find the current profile's device_class from the catalog.
-        // Fall back to slot.device when the profiles query hasn't loaded:
-        //   npu/cpu devices → not GPU; gpu-rocm/gpu-vulkan/unknown → treat as GPU.
-        const currentProfileMeta = allProfiles.find(p => p.name === (slot.profile || ""));
-        const slotDeviceIsGpu = !["npu", "cpu"].includes(slot.device || "");
-        const profileDeviceClass = currentProfileMeta?.device_class
-          ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
-        const isGpuProfile = profileDeviceClass === "gpu";
-        const gpuProfiles = allProfiles.filter(p => p.device_class === "gpu");
-        const profileImageHint = (() => {
-          const meta = gpuProfiles.find(p => p.name === selectedProfile);
-          return meta?.image || slot.image || null;
-        })();
-        return (
-          <div className="form-row">
-            <div className="form-lbl">
-              <span>Profile</span>
-              {isGpuProfile
-                ? <span className="sub warn">⟳ restart required on change</span>
-                : <span className="sub">image + bench-tuned flags for this slot — runtime-pinned</span>
-              }
-            </div>
-            <div className="form-ctl">
-              {isGpuProfile ? (
-                <select
-                  className={"input mono" + (fieldErrs.profile ? " input-err" : "")}
-                  value={selectedProfile}
-                  onChange={e => { setSelectedProfile(e.target.value); setFieldErrs(p => ({...p, profile: undefined})); }}
-                >
-                  {/* Task 5: an empty option lets the field be cleared, which
-                      the Save guard then rejects (mirrors the create modal). */}
-                  {!selectedProfile && <option value="">— select a profile —</option>}
-                  {gpuProfiles.map(p => (
-                    <option key={p.name} value={p.name}>
-                      {p.intent ? `${p.name} · ${p.intent}` : p.name}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input className="input mono" value={slot.profile || "—"} readOnly />
-              )}
-              {fieldErrs.profile && (
-                <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.profile}</div>
-              )}
-              {profileImageHint && (
-                <div className="hint mono">{profileImageHint}</div>
-              )}
-              {/* Task 2: announce the pending restart before Save fires it. */}
-              {!!selectedProfile && selectedProfile !== (slot.profile || "") && (
-                <div
-                  className="hint"
-                  style={{marginTop: 6, padding: "6px 10px", borderRadius: "var(--rad-sm)", color: "var(--warn)", border: "1px solid var(--warn-line)", background: "var(--warn-soft)"}}
-                >
-                  ⟳ Profile change requires a restart — applied on Save.
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })()}
+      </FieldGroup>
 
+      {/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
+          The slot owns the physical/placement layer as 4 typed fields:
+          device · NGL · THREADS · BINARY, plus an optional image_pin escape
+          hatch. Replaces the per-slot profile selector + freeform image
+          override (those left the slot per §2/§7 — the model is device-
+          agnostic; the runner image comes from RUNNER_IMAGES[binary]). Every
+          HW change is a cold restart, applied on Save. */}
+      <FieldGroup label="Hardware" hint="device · placement · runner">
+        {(() => {
+          const devices = Array.isArray(metaEnums?.devices) ? metaEnums.devices : [];
+          const backends = systemInfoQuery.data?.backends ?? {};
+          const binaryKeys = Object.keys(backends);
+          const devBackend = deviceBackend(device);
+          // Fit-check (§4): the selected device's backend must be in the chosen
+          // BINARY's supported_backends. WARN at assignment, never block. Only
+          // when a BINARY is explicitly picked (empty = HW-gated default).
+          const selRunner = binary ? backends[binary] : null;
+          const supported =
+            selRunner && Array.isArray(selRunner.supported_backends) && selRunner.supported_backends.length
+              ? selRunner.supported_backends
+              : selRunner && selRunner.backend
+                ? [selRunner.backend]
+                : null;
+          const fitWarn =
+            binary && devBackend && supported && !supported.includes(devBackend)
+              ? `Device backend "${devBackend}" is not in ${binary}'s supported backends (${supported.join(", ")}). The slot may fall back or fail at spawn.`
+              : null;
+          return (
+            <>
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>device</span>
+                  <span className="sub warn">⟳ restart required · class + backend (rocm/vulkan/cpu/npu)</span>
+                </div>
+                <div className="form-ctl">
+                  <select
+                    className="input mono"
+                    data-testid="slot-hw-device"
+                    value={device}
+                    onChange={e => setDevice(e.target.value)}
+                  >
+                    {/* keep an out-of-vocab persisted device selectable */}
+                    {device && !devices.some(d => d.id === device) && (
+                      <option value={device}>{device}</option>
+                    )}
+                    {devices.map(d => (
+                      <option key={d.id} value={d.id} title={d.description}>
+                        {d.label}{d.recommended ? " ★" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>NGL</span>
+                  <span className="sub">layers offloaded to GPU · -1 = all, 0 = CPU only · emits -ngl</span>
+                </div>
+                <div className="form-ctl">
+                  <input
+                    className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
+                    data-testid="slot-hw-ngl"
+                    value={nGpuLayers}
+                    onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
+                    placeholder="-1"
+                    inputMode="numeric"
+                  />
+                  {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>THREADS</span>
+                  <span className="sub">CPU threads for the runner · 0 = runtime default · emits --threads</span>
+                </div>
+                <div className="form-ctl">
+                  <input
+                    className={"input mono" + (fieldErrs.threads ? " input-err" : "")}
+                    data-testid="slot-hw-threads"
+                    value={threads}
+                    onChange={e => { setThreads(e.target.value); setFieldErrs(p => ({...p, threads: undefined})); }}
+                    placeholder="0"
+                    inputMode="numeric"
+                  />
+                  {fieldErrs.threads && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.threads}</div>}
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>BINARY</span>
+                  <span className="sub warn">⟳ restart required · runner image (RUNNER_IMAGES) · empty = default from device</span>
+                </div>
+                <div className="form-ctl">
+                  <select
+                    className={"input mono" + (fitWarn ? " input-err" : "")}
+                    data-testid="slot-hw-binary"
+                    value={binary}
+                    onChange={e => setBinary(e.target.value)}
+                  >
+                    <option value="">— default (from device) —</option>
+                    {/* keep an out-of-vocab persisted binary selectable */}
+                    {binary && !binaryKeys.includes(binary) && (
+                      <option value={binary}>{binary}</option>
+                    )}
+                    {binaryKeys.map(k => (
+                      <option key={k} value={k}>
+                        {k}{backends[k]?.backend ? ` · ${backends[k].backend}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {fitWarn && (
+                    <div
+                      className="hint"
+                      data-testid="slot-hw-fit-warning"
+                      style={{marginTop: 6, padding: "6px 10px", borderRadius: "var(--rad-sm)", color: "var(--warn)", border: "1px solid var(--warn-line)", background: "var(--warn-soft)"}}
+                    >
+                      ⚠ {fitWarn}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>image_pin</span>
+                  <span className="sub warn">⟳ restart required · overrides the release default · empty = release default</span>
+                </div>
+                <div className="form-ctl">
+                  <input
+                    className={"input mono" + (fieldErrs.imagePin ? " input-err" : "")}
+                    data-testid="slot-hw-image-pin"
+                    value={imagePin}
+                    onChange={e => { setImagePin(e.target.value); setFieldErrs(p => ({...p, imagePin: undefined})); }}
+                    placeholder="release default — e.g. ghcr.io/owner/repo:tag"
+                    spellCheck={false}
+                  />
+                  {fieldErrs.imagePin
+                    ? <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.imagePin}</div>
+                    : <div className="hint">Escape hatch for a debug build / A-B / rollback. A non-default pin is shown on the slot card.</div>}
+                </div>
+              </div>
+            </>
+          );
+        })()}
       </FieldGroup>
 
       {slot.device !== "npu" && (
@@ -748,12 +821,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
           popover does. */}
       {(() => {
         const isContainer = slot.runtime === "container";
-        // Derive the backend from the SELECTED profile (reactive), falling back
-        // to the slot's persisted backend when the profile carries none or isn't
-        // found yet. This makes the rocmfp4 filter re-evaluate immediately when
-        // the operator switches profiles — before Save is clicked.
-        const selProfileMeta = (profilesQuery.data ?? []).find(p => p.name === selectedProfile);
-        const selBackend = selProfileMeta?.backend ?? slot.backend;
+        // Derive the backend from the SELECTED device (reactive) so the rocmfp4
+        // filter re-evaluates immediately when the operator switches the HW-grid
+        // device — before Save is clicked. (Device is the single owner of the
+        // rocm/vulkan axis now — spec-hw-slot-ownership §2.)
+        const selBackend = deviceBackend(device) || slot.backend;
         const compatible = compatibleModels(modelsQuery.data, { type: slot.type, backend: selBackend });
         const cur = slot.model_id || slot.model || "";
         const has = compatible.some(m => m.id === cur);
@@ -1023,7 +1095,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         // Auto is effective only when the model is eligible AND the slot's
         // profile opts into MTP — mirror the server's _effective_mtp rule so
         // the hint never disagrees with what actually launches.
-        const prof = (profilesQuery.data ?? []).find(p => p.name === (selectedProfile || slot.profile));
+        const prof = (profilesQuery.data ?? []).find(p => p.name === slot.profile);
         const profileOptsIn = !!prof?.mtp;
         const autoActive = modelEligible && profileOptsIn;
         const inactiveReason = !modelEligible && !profileOptsIn
@@ -1167,29 +1239,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <details className="adv-disclosure">
       <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
 
-      {/* GPU offload tuning — per-slot override persisted via
-          PATCH /defaults ([model].n_gpu_layers). -1/empty = unset, i.e. the
-          model default / profile value applies. Rides the Save button with
-          the same dirty-tracking as ctx_size.
+      {/* n_gpu_layers moved to the Hardware grid above (spec-hw-slot-ownership
+          §2): NGL is a top-level slot-owned HW field now, not a [model] default.
           (rope_freq_base was removed — deprecated; advanced users set it via
           extra_args below.) */}
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>n_gpu_layers</span>
-          <span className="sub">-1 / empty = use model default / profile</span>
-        </div>
-        <div className="form-ctl">
-          <input
-            className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
-            value={nGpuLayers}
-            onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
-            placeholder="-1"
-            inputMode="numeric"
-            data-testid="n-gpu-layers-input"
-          />
-          {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
-        </div>
-      </div>
 
       {/* Per-slot freeform override. Persisted to [server].extra_args on the
           slot TOML (NOT the profile) and appended AFTER the profile flags in

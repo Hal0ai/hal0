@@ -115,7 +115,7 @@ CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
         id="gpu-rocm",
         label="GPU (ROCm)",
         device_class="gpu",
-        default_profile="rocm",
+        default_profile="chat",
         legacy_backend="rocm",
         recommended=True,
         description="Best throughput on Strix Halo — the recommended default.",
@@ -124,7 +124,7 @@ CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
         id="gpu-vulkan",
         label="GPU (Vulkan)",
         device_class="gpu",
-        default_profile="vulkan",
+        default_profile="chat",
         legacy_backend="vulkan",
         recommended=False,
         description="Runs anywhere Mesa Vulkan does; slower than ROCm on Strix Halo — fallback.",
@@ -133,7 +133,7 @@ CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
         id="gpu-cuda",
         label="GPU (CUDA)",
         device_class="gpu",
-        default_profile="cuda",
+        default_profile="chat",
         legacy_backend="cuda",
         recommended=False,
         description="NVIDIA GPUs via llama.cpp CUDA — experimental on hal0.",
@@ -142,7 +142,7 @@ CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
         id="cpu",
         label="CPU",
         device_class="cpu",
-        default_profile="cpu-llm",
+        default_profile="cpu-chat",
         legacy_backend="cpu",
         recommended=False,
         description="CPU-only inference — always available, slow but correct.",
@@ -202,7 +202,7 @@ BACKEND_TO_DEVICE: dict[str, str] = {
 
 #: Device → seed profile that best represents it (create-modal preselect,
 #: legacy-slot migration defaults, stack apply's fresh-slot creation, and the
-#: installer's primary-slot recommendation). ``cpu`` maps to ``cpu-llm`` —
+#: installer's primary-slot recommendation). ``cpu`` maps to ``cpu-chat`` —
 #: a fresh slot with ``profile=""`` fails to load ("profile '' not found"),
 #: so an empty default is never correct here.
 DEVICE_TO_DEFAULT_PROFILE: dict[str, str] = {d.id: d.default_profile for d in CANONICAL_DEVICES}

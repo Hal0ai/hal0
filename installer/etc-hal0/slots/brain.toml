@@ -24,7 +24,7 @@ name = "brain"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "vulkan"
+profile = "chat"
 enabled = true
 port = 8089
 

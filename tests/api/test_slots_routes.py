@@ -1642,15 +1642,16 @@ def test_json_serialisation_roundtrips(
     assert isinstance(body, list)
 
 
-def test_config_profile_change_drives_device_via_route(
+def test_config_profile_change_keeps_slot_owned_device_via_route(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """PUT /config with a new profile re-derives device (drawer path).
+    """PUT /config with a new profile does not re-derive device (drawer path).
 
-    Re-points a vulkan slot at the rocm profile; the device must follow
-    to gpu-rocm so the slot no longer reports vulkan under a ROCm profile.
+    Hardware is slot-owned in the 1.0 pivot. Re-pointing a vulkan slot at a
+    profile changes only the template binding; device remains the slot's typed
+    hardware fact.
     """
     _seed_slot_toml(
         tmp_hal0_home,
@@ -1673,4 +1674,138 @@ def test_config_profile_change_drives_device_via_route(
 
     cfg = isolated_client.get("/api/slots/utility/config").json()
     assert cfg["profile"] == "rocm"
-    assert cfg["device"] == "gpu-rocm"
+    assert cfg["device"] == "gpu-vulkan"
+
+
+# ── spec-hw-slot-ownership §2/§4: HW-grid round-trip + fit-check warn ─────────
+
+
+def test_put_config_round_trips_hw_grid_fields(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+) -> None:
+    """The slot HW grid (NGL / THREADS / BINARY / image_pin) is top-level slot
+    config: a PUT /config write persists it and both /config and the serialized
+    /api/slots read surface it (config_enrichment lift)."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "hw",
+        [
+            'name = "hw"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "enabled = true",
+            "[model]",
+            'default = "m"',
+        ],
+    )
+    body = {
+        "n_gpu_layers": 99,
+        "threads": 8,
+        "binary": "rocmfpx",
+        "image_pin": "ghcr.io/owner/repo:dbg",
+    }
+    r = isolated_client.put("/api/slots/hw/config", json=body)
+    assert r.status_code == 200, r.text
+
+    # Raw TOML round-trips every field.
+    cfg = isolated_client.get("/api/slots/hw/config").json()
+    assert cfg["n_gpu_layers"] == 99
+    assert cfg["threads"] == 8
+    assert cfg["binary"] == "rocmfpx"
+    assert cfg["image_pin"] == "ghcr.io/owner/repo:dbg"
+
+    # The serialized slot read (config_enrichment lift) surfaces them too, so
+    # the UI edit-drawer + card seed from /api/slots without a /config fetch.
+    view = isolated_client.get("/api/slots/hw").json()
+    assert view["n_gpu_layers"] == 99
+    assert view["threads"] == 8
+    assert view["binary"] == "rocmfpx"
+    assert view["image_pin"] == "ghcr.io/owner/repo:dbg"
+
+
+def test_put_config_fit_check_warns_on_incompatible_pair(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+) -> None:
+    """spec-hw-slot-ownership §4: a (device, BINARY) pair whose device backend
+    is not in the runner's supported_backends WARNS (non-blocking) — the write
+    still succeeds (200) and the response carries a ``fit_warning``."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "mismatch",
+        [
+            'name = "mismatch"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "enabled = true",
+            "[model]",
+            'default = "m"',
+        ],
+    )
+    # binary "cpu" supports only ("cpu",); device gpu-rocm → backend rocm ∉ that.
+    r = isolated_client.put("/api/slots/mismatch/config", json={"binary": "cpu"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert "fit_warning" in out
+    assert "cpu" in out["fit_warning"]
+    assert "rocm" in out["fit_warning"]
+
+
+def test_put_config_no_fit_warning_when_compatible(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+) -> None:
+    """A compatible (device, BINARY) pair carries no fit_warning key."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "ok",
+        [
+            'name = "ok"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "enabled = true",
+            "[model]",
+            'default = "m"',
+        ],
+    )
+    # rocmfpx supports ("rocm", "vulkan") → gpu-rocm fits.
+    r = isolated_client.put("/api/slots/ok/config", json={"binary": "rocmfpx"})
+    assert r.status_code == 200, r.text
+    assert "fit_warning" not in r.json()
+
+
+# ── pure fit-check helpers ───────────────────────────────────────────────────
+
+
+def test_device_backend_strips_gpu_prefix() -> None:
+    from hal0.api.routes.slots import _device_backend
+
+    assert _device_backend("gpu-rocm") == "rocm"
+    assert _device_backend("gpu-vulkan") == "vulkan"
+    assert _device_backend("gpu-cuda") == "cuda"
+    assert _device_backend("cpu") == "cpu"
+    assert _device_backend("npu") == "npu"
+    assert _device_backend("") == ""
+    assert _device_backend(None) == ""
+
+
+def test_fit_check_warning_paths() -> None:
+    from hal0.api.routes.slots import _fit_check_warning
+
+    # rocmfpx supports rocm+vulkan → gpu-rocm/gpu-vulkan fit, cpu does not.
+    assert _fit_check_warning("gpu-rocm", "rocmfpx") is None
+    assert _fit_check_warning("gpu-vulkan", "rocmfpx") is None
+    warn = _fit_check_warning("cpu", "rocmfpx")
+    assert warn is not None and "cpu" in warn
+    # Empty BINARY = HW-gated default from device → no check.
+    assert _fit_check_warning("gpu-rocm", "") is None
+    assert _fit_check_warning("gpu-rocm", None) is None
+    # Unknown BINARY key → no check (launch path reports its own error).
+    assert _fit_check_warning("gpu-rocm", "does-not-exist") is None

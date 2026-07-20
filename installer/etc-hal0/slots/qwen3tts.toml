@@ -12,6 +12,6 @@ name = "qwen3tts"
 type = "tts"
 device = "gpu-rocm"
 runtime = "container"
-profile = "tts-qwen3"
+profile = "qwen3-tts"
 enabled = false
 port = 8095

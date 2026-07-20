@@ -30,6 +30,7 @@ import { canonicalCapabilities, modelDeviceClasses, profileDeviceClass } from '@
 import { MODEL_TYPE_TAGS, splitModelTags, mergeModelTags } from '@/dash/model-types.js'
 import {
   findManagedFlags,
+  findSlotHardwareFlags,
   MANAGED_FLAG_SOURCE,
   highlightSegments,
   diffFlags,
@@ -46,18 +47,9 @@ function sameSet(a, b) {
   return sa.length === sb.length && sa.join(" ") === sb.join(" ");
 }
 
-// Derive a device flavour + hue from the model's backends/device. Device now
-// rides the model's stamped tune; the drawer shows it as a chip, the slot reads
-// the same hue. Returns { token, label, cssVar }.
-function deviceFlavour(model) {
-  const backends = Array.isArray(model?.backends) ? model.backends : [];
-  const dev = String(model?.device || "").toLowerCase();
-  const has = (b) => backends.includes(b) || dev.includes(b);
-  if (has("rocm")) return { token: "rocm", label: "rocm", cssVar: "--dev-rocm" };
-  if (has("vulkan")) return { token: "vulkan", label: "vulkan", cssVar: "--dev-vulkan" };
-  if (has("flm") || dev.includes("npu")) return { token: "npu", label: "npu", cssVar: "--dev-npu" };
-  return { token: "cpu", label: "cpu", cssVar: "--dev-cpu" };
-}
+// spec-hw-slot-ownership §1/§8: the model is device-agnostic — it carries no
+// device, runner, or image. The former deviceFlavour() chip (and the read-only
+// Runner section) were removed; device lives on the slot's HW grid now.
 
 // Modality read-out derived from the model's capabilities/type (typed field —
 // shown read-only in the drawer; the capability toggles below are the control).
@@ -389,7 +381,6 @@ function ModelDrawer({ open, onClose, model }) {
   const [profile, setProfile] = useStateMD("");
   // Typed caps.
   const [ctx, setCtx] = useStateMD("");
-  const [ngl, setNgl] = useStateMD("");
   const [chatTemplate, setChatTemplate] = useStateMD("auto");
   const [mtp, setMtp] = useStateMD("auto");
   const [jinja, setJinja] = useStateMD("auto");
@@ -416,7 +407,6 @@ function ModelDrawer({ open, onClose, model }) {
       setExtra(init.extra_args || "");
       setProfile(init.profile || "");
       setCtx(init.context_size != null ? String(init.context_size) : "");
-      setNgl(init.n_gpu_layers != null ? String(init.n_gpu_layers) : "");
       setChatTemplate(init.chat_template ?? "auto");
       setMtp(triFromDefault(init.mtp));
       setJinja(triFromDefault(init.jinja));
@@ -462,14 +452,22 @@ function ModelDrawer({ open, onClose, model }) {
   );
   const diverged = !!(diff && diff.diverged);
 
-  // Managed-arg + shlex validation on the flags text (inline, blocks save).
+  // Managed-arg + slot-hardware + shlex validation on the flags text (inline,
+  // blocks save). spec-hw-slot-ownership §5: the model is device-agnostic, so
+  // the grid-owned hardware flags (-ngl/-dev/--threads) are rejected with a
+  // "belongs on the slot" message — mirrors the server hard-reject Lane C adds.
+  // Checked BEFORE the managed set so --n-gpu-layers (in both) gets the more
+  // specific slot-hardware message.
   const managedOffenders = useMemoMD(() => findManagedFlags(extra), [extra]);
+  const hwOffenders = useMemoMD(() => findSlotHardwareFlags(extra), [extra]);
   const shlexErr = useMemoMD(() => tokenizeFlags(extra).error, [extra]);
   const flagsError = shlexErr
     ? shlexErr
-    : managedOffenders.length
-      ? managedFlagMessage(managedOffenders)
-      : null;
+    : hwOffenders.length
+      ? slotHardwareFlagMessage(hwOffenders)
+      : managedOffenders.length
+        ? managedFlagMessage(managedOffenders)
+        : null;
 
   // Return null when closed — matching the Modal contract the old
   // RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
@@ -477,8 +475,6 @@ function ModelDrawer({ open, onClose, model }) {
   // drawer is shut, so an always-mounted drawer would leave phantom inputs in
   // the DOM (colliding with the AddByHF modal's fields). All hooks run above.
   if (!open || !model) return null;
-
-  const dev = deviceFlavour(model);
 
   // STAMP: selecting a profile copies its flags into the editor. Confirm if the
   // current flags would be clobbered (non-empty and not already the target text).
@@ -544,7 +540,6 @@ function ModelDrawer({ open, onClose, model }) {
     extra !== (init.extra_args || "") ||
     profile !== (init.profile || "") ||
     ctx !== (init.context_size != null ? String(init.context_size) : "") ||
-    ngl !== (init.n_gpu_layers != null ? String(init.n_gpu_layers) : "") ||
     chatTemplate !== (init.chat_template ?? "auto") ||
     mtp !== triFromDefault(init.mtp) ||
     jinja !== triFromDefault(init.jinja);
@@ -554,7 +549,9 @@ function ModelDrawer({ open, onClose, model }) {
     // Start from stored defaults; override only surfaced keys (empty = delete).
     const defaults = { ...init };
     if (ctx.trim()) { const n = parseInt(ctx, 10); if (Number.isFinite(n)) defaults.context_size = n; else delete defaults.context_size; } else delete defaults.context_size;
-    if (ngl.trim()) { const n = parseInt(ngl, 10); if (Number.isFinite(n)) defaults.n_gpu_layers = n; else delete defaults.n_gpu_layers; } else delete defaults.n_gpu_layers;
+    // n_gpu_layers is no longer a model default (spec-hw-slot-ownership §2): drop
+    // any stored value so a save unsets the sunset key rather than round-tripping it.
+    delete defaults.n_gpu_layers;
     if (extra.trim()) defaults.extra_args = extra; else delete defaults.extra_args;
     if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate; else delete defaults.chat_template;
     if (profile.trim()) defaults.profile = profile.trim(); else delete defaults.profile;
@@ -598,16 +595,6 @@ function ModelDrawer({ open, onClose, model }) {
         dirty={dirty}
         eyebrow="Edit model · the launchable thing"
         title={model.longName || model.name || model.id}
-        headRight={
-          <span
-            className="mono"
-            data-testid="model-device-chip"
-            style={{ fontSize: 10, padding: "3px 8px", borderRadius: 4, display: "inline-flex", alignItems: "center", gap: 5, color: `var(${dev.cssVar})`, border: `1px solid var(${dev.cssVar})`, background: "var(--bg-2)" }}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: `var(${dev.cssVar})` }} />
-            {dev.label}
-          </span>
-        }
         foot={
           <>
             <span style={{ color: "var(--warn)" }}>⟳ changes require the slot to restart</span>
@@ -730,15 +717,14 @@ function ModelDrawer({ open, onClose, model }) {
           </div>
         </div>
 
-        {/* ── Numeric tune (typed source of the managed --ctx-size / -ngl) ── */}
+        {/* ── Numeric tune (typed source of the managed --ctx-size) ── */}
         <div className="form-row">
           <div className="form-lbl"><span>context_size</span><span className="sub">tokens · empty = launcher default · sets managed --ctx-size</span></div>
           <div className="form-ctl"><input className="input mono" data-testid="model-ctx-input" inputMode="numeric" placeholder="e.g. 8192" value={ctx} onChange={(e) => setCtx(e.target.value)} /></div>
         </div>
-        <div className="form-row">
-          <div className="form-lbl"><span>n_gpu_layers</span><span className="sub">-1 = all on GPU · 0 = CPU only · sets managed --n-gpu-layers</span></div>
-          <div className="form-ctl"><input className="input mono" data-testid="model-ngl-input" inputMode="numeric" placeholder="e.g. -1" value={ngl} onChange={(e) => setNgl(e.target.value)} /></div>
-        </div>
+        {/* n_gpu_layers input removed (spec-hw-slot-ownership §2/§6): NGL is
+            slot-owned hardware now (the slot's HW grid), not a model default.
+            The one-shot migration folds model.defaults.n_gpu_layers → slot NGL. */}
 
         {/* ── Routing (capabilities + backends) ── */}
         <div className="form-section" style={{ marginTop: 16 }}>Routing</div>
@@ -767,17 +753,10 @@ function ModelDrawer({ open, onClose, model }) {
           </div>
         </div>
 
-        {/* ── Runner (read-only; override + image/digest land with D3 Runtimes) ── */}
-        <div className="form-section" style={{ marginTop: 16 }}>Runner</div>
-        <div className="form-row">
-          <div className="form-lbl"><span>preferred_runner</span><span className="sub">derived from architecture · image pinned by release</span></div>
-          <div className="form-ctl">
-            <div className="mono" data-testid="model-runner-readonly" style={{ background: "var(--bg-sunken)", border: "1px solid var(--line-soft)", borderRadius: 4, padding: "8px 10px", fontSize: 10.5, color: "var(--fg-4)", lineHeight: 1.6 }}>
-              runner · <span style={{ color: "var(--fg-3)" }}>{model.preferred_runner || dev.label}</span><br />
-              <span style={{ color: "var(--fg-5)" }}>image &amp; digest are pinned by the release — see Settings → Runtimes (read-only)</span>
-            </div>
-          </div>
-        </div>
+        {/* Runner / image section removed (spec-hw-slot-ownership §8): the model
+            is device-agnostic and no longer resolves to a runner or image. The
+            runner is chosen on the slot (BINARY → RUNNER_IMAGES); the Runtimes
+            page (Settings → Runtimes) shows which slots resolve to each runner. */}
 
         {/* ── Source · re-pull coords ── */}
         <div className="form-section" style={{ marginTop: 16 }}>Source · re-pull coords</div>
@@ -830,6 +809,15 @@ function canonManagedForMsg(flag) {
   if (flag === "-ngl") return "--n-gpu-layers";
   if (flag === "-c") return "--ctx-size";
   return flag;
+}
+
+// Slot-hardware rejection copy (spec-hw-slot-ownership §5): the model is
+// device-agnostic — hardware flags belong on the slot's HW grid. Names the
+// offending flag(s) and points at where they're set.
+function slotHardwareFlagMessage(offenders) {
+  const first = offenders[0];
+  const rest = offenders.length > 1 ? ` (also: ${offenders.slice(1).join(", ")})` : "";
+  return `${first} is hardware — it belongs on the slot (device · NGL · THREADS grid), not the model. The model is device-agnostic. Remove it.${rest}`;
 }
 
 Object.assign(window, { ModelDrawer, FlagsEditor, DivergenceDiff, DuplicateModelDialog });

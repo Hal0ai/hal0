@@ -117,3 +117,29 @@ def test_stale_runner_image_refs_alias_matches_schema() -> None:
     from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS
 
     assert STALE_RUNNER_IMAGE_REFS == STALE_ROCMFPX_IMAGE_REFS
+
+
+def test_every_runner_carries_fit_check_metadata() -> None:
+    """spec-hw-slot-ownership §4: each RUNNER_IMAGES entry exposes a
+    ``supported_backends`` tuple + a ``format_arch`` marker for the fit-check."""
+    for key, runner in RUNNER_IMAGES.items():
+        assert isinstance(runner.supported_backends, tuple), key
+        assert all(isinstance(b, str) for b in runner.supported_backends), key
+        assert runner.format_arch, f"{key} missing format_arch"
+        # A runner that declares a backend must list it among its supported set
+        # (metadata is a superset of the entry's own primary backend).
+        if runner.backend is not None:
+            assert runner.backend in runner.supported_backends, key
+
+
+def test_llama_server_runners_report_gguf_format() -> None:
+    for key, runner in RUNNER_IMAGES.items():
+        if runner.runtime_family == "llama-server":
+            assert runner.format_arch == "gguf", key
+
+
+def test_rocm_and_vulkan_fpx_share_supported_backends() -> None:
+    """One Vulkan-portable image → both fpx keys advertise (rocm, vulkan);
+    device — not BINARY — disambiguates (spec-hw-slot-ownership §2/§4)."""
+    assert RUNNER_IMAGES["rocmfpx"].supported_backends == ("rocm", "vulkan")
+    assert RUNNER_IMAGES["vulkanfpx"].supported_backends == ("rocm", "vulkan")

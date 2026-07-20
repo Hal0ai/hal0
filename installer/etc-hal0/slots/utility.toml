@@ -15,7 +15,7 @@ name = "utility"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "vulkan"
+profile = "chat"
 enabled = false
 # Port 8090: 8081 is the `agent` seed's canonical primary port (ADR-0023);
 # existing installs keep whatever their file says (seeds never overwrite).

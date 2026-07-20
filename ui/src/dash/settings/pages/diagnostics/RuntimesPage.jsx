@@ -2,11 +2,12 @@
 //
 // One page for the runner/image axis — EVIDENCE UI, not config UI. A row per
 // runner (RUNNER_IMAGES): family, image ref + digest (read-only), on-disk state
-// vs the shipped registry, and the reverse index of which models + slots resolve
-// to it. Nothing here edits an image string — images ship with hal0 releases and
-// the updater reconciles drift; to change what a model runs on, stamp it with a
-// different template. Lives in the SYSTEM & UPDATES (Diagnostics) nav group,
-// deliberately far from the model/profile editors.
+// vs the shipped registry, and the reverse index of which slots resolve to it
+// (plus the models transitively bound through those slots). Nothing here edits
+// an image string — images ship with hal0 releases and the updater reconciles
+// drift; to change what a slot runs on, set its BINARY in the slot editor
+// (spec-hw-slot-ownership §8: hardware/placement is owned by the slot, not the
+// model). Lives in the SYSTEM & UPDATES (Diagnostics) nav group.
 //
 // Backend reality (hardware.py GET /api/system-info): per-runner state is
 // installed | installable | unavailable (local podman-images presence only).
@@ -102,7 +103,7 @@ export function RuntimesPage() {
       <p className="desc">
         Container images pinned per runner. Images ship with hal0 releases and are reconciled by the
         updater — this page shows what each runner resolves to, never edits an image. To change what a
-        model runs on, stamp it with a different template.
+        slot runs on, set its BINARY in the slot editor.
       </p>
 
       {rt.probeUnavailable && (

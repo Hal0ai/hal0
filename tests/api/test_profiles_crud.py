@@ -75,7 +75,6 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
         "/api/profiles",
         json={
             "name": "my-vulkan",
-            "image": "ghcr.io/x/y:z",
             "flags": "-fa on",
             "mtp": False,
             "device_class": "gpu",
@@ -84,7 +83,6 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
     assert r.status_code == 201
     body = r.json()
     assert body["name"] == "my-vulkan"
-    assert body["image"] == "ghcr.io/x/y:z"
     assert body["flags"] == "-fa on"
     assert body["mtp"] is False
     assert body["device_class"] == "gpu"
@@ -94,13 +92,61 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
     assert any(p["name"] == "my-vulkan" for p in listed)
 
 
+# ── spec-hw-slot-ownership §5: profile flags reject slot-hardware flags ────────
+
+
+def test_create_profile_rejects_slot_hardware_flag(client: TestClient) -> None:
+    """A profile is a device-agnostic tune template — its flags must not carry a
+    grid-owned hardware flag (--threads/-ngl/--device). The create hard-rejects
+    with the "belongs on the slot" envelope and persists nothing."""
+    r = client.post(
+        "/api/profiles",
+        json={
+            "name": "hw-profile",
+            "flags": "-fa on --threads 8",
+            "device_class": "gpu",
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+    assert "slot" in r.json()["error"]["message"].lower()
+    listed = client.get("/api/profiles").json()
+    assert not any(p["name"] == "hw-profile" for p in listed)
+
+
+def test_update_profile_rejects_slot_hardware_flag(client: TestClient) -> None:
+    """PUT screens the same partition — a clean profile edited to carry -ngl is
+    rejected."""
+    created = client.post(
+        "/api/profiles",
+        json={"name": "edit-me", "flags": "-fa on"},
+    )
+    assert created.status_code == 201, created.text
+    r = client.put("/api/profiles/edit-me", json={"flags": "-b 2048 -ngl 99"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+def test_create_profile_accepts_device_agnostic_tune(client: TestClient) -> None:
+    """A real tune template (batch/flash-attn/KV-quant, no hardware) is accepted."""
+    r = client.post(
+        "/api/profiles",
+        json={
+            "name": "clean-tune",
+            "flags": "-b 2048 -ub 512 -fa on -ctk q8_0",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["flags"] == "-b 2048 -ub 512 -fa on -ctk q8_0"
+
+
 def test_create_persists_across_reload(tmp_hal0_home: str) -> None:
     """Second app/client constructed after the POST sees the written file."""
     app1 = create_app()
     with TestClient(app1) as c1:
         r = c1.post(
             "/api/profiles",
-            json={"name": "persist-me", "image": "ghcr.io/x/y:z"},
+            json={"name": "persist-me"},
         )
         assert r.status_code == 201
 
@@ -115,11 +161,11 @@ def test_create_duplicate_name_409(client: TestClient) -> None:
     """Duplicate against existing custom profile → 409 profiles.exists."""
     client.post(
         "/api/profiles",
-        json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+        json={"name": "my-vulkan"},
     )
     r = client.post(
         "/api/profiles",
-        json={"name": "my-vulkan", "image": "ghcr.io/a/b:c"},
+        json={"name": "my-vulkan"},
     )
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "profiles.exists"
@@ -130,7 +176,7 @@ def test_create_seed_name_409(client: TestClient) -> None:
     seed_name = next(iter(SEED_PROFILES))
     r = client.post(
         "/api/profiles",
-        json={"name": seed_name, "image": "ghcr.io/x/y:z"},
+        json={"name": seed_name},
     )
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "profiles.exists"
@@ -140,7 +186,7 @@ def test_create_mtp_false_resolved_flags_equals_flags(client: TestClient) -> Non
     """Custom profile with mtp=False: resolved_flags == flags (stripped)."""
     r = client.post(
         "/api/profiles",
-        json={"name": "no-mtp", "image": "ghcr.io/x/y:z", "flags": "-fa on", "mtp": False},
+        json={"name": "no-mtp", "flags": "-fa on", "mtp": False},
     )
     assert r.status_code == 201
     body = r.json()
@@ -158,7 +204,7 @@ def test_create_mtp_true_resolved_flags_no_longer_injects_bundle(client: TestCli
     support it)."""
     r = client.post(
         "/api/profiles",
-        json={"name": "with-mtp", "image": "ghcr.io/x/y:z", "flags": "-fa on", "mtp": True},
+        json={"name": "with-mtp", "flags": "-fa on", "mtp": True},
     )
     assert r.status_code == 201
     body = r.json()
@@ -168,18 +214,10 @@ def test_create_mtp_true_resolved_flags_no_longer_injects_bundle(client: TestCli
     assert "-fa on" in body["resolved_flags"]
 
 
-def test_create_invalid_empty_image_422(client: TestClient) -> None:
-    r = client.post(
-        "/api/profiles",
-        json={"name": "valid-name", "image": ""},
-    )
-    assert r.status_code == 422
-
-
 def test_create_invalid_bad_device_class_422(client: TestClient) -> None:
     r = client.post(
         "/api/profiles",
-        json={"name": "valid-name", "image": "ghcr.io/x/y:z", "device_class": "badvalue"},
+        json={"name": "valid-name", "device_class": "badvalue"},
     )
     assert r.status_code == 422
 
@@ -187,7 +225,7 @@ def test_create_invalid_bad_device_class_422(client: TestClient) -> None:
 def test_create_invalid_uppercase_name_422(client: TestClient) -> None:
     r = client.post(
         "/api/profiles",
-        json={"name": "MyProfile", "image": "ghcr.io/x/y:z"},
+        json={"name": "MyProfile"},
     )
     assert r.status_code == 422
 
@@ -195,7 +233,7 @@ def test_create_invalid_uppercase_name_422(client: TestClient) -> None:
 def test_create_invalid_name_with_spaces_422(client: TestClient) -> None:
     r = client.post(
         "/api/profiles",
-        json={"name": "my profile", "image": "ghcr.io/x/y:z"},
+        json={"name": "my profile"},
     )
     assert r.status_code == 422
 
@@ -209,7 +247,7 @@ def test_update_custom_profile_200(tmp_hal0_home: str) -> None:
     with TestClient(app1) as c1:
         c1.post(
             "/api/profiles",
-            json={"name": "my-vulkan", "image": "ghcr.io/x/y:z", "flags": "-fa on"},
+            json={"name": "my-vulkan", "flags": "-fa on"},
         )
         r = c1.put("/api/profiles/my-vulkan", json={"flags": "-fa off"})
         assert r.status_code == 200
@@ -229,7 +267,6 @@ def test_update_only_device_class_preserves_other_fields(client: TestClient) -> 
         "/api/profiles",
         json={
             "name": "my-vulkan",
-            "image": "ghcr.io/x/y:z",
             "flags": "-fa on",
             "mtp": True,
             "device_class": "gpu",
@@ -239,7 +276,6 @@ def test_update_only_device_class_preserves_other_fields(client: TestClient) -> 
     assert r.status_code == 200
     body = r.json()
     assert body["device_class"] == "cpu"
-    assert body["image"] == "ghcr.io/x/y:z"
     assert body["flags"] == "-fa on"
     assert body["mtp"] is True
     # Persisted view agrees.
@@ -271,7 +307,7 @@ def test_seed_immutable_put_409(client: TestClient) -> None:
 def test_delete_custom_204(client: TestClient) -> None:
     client.post(
         "/api/profiles",
-        json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+        json={"name": "my-vulkan"},
     )
     r = client.delete("/api/profiles/my-vulkan")
     assert r.status_code == 204
@@ -305,7 +341,7 @@ def test_delete_in_use_409(tmp_hal0_home: str) -> None:
         # Create the custom profile (seeds are the starting catalog).
         c.post(
             "/api/profiles",
-            json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+            json={"name": "my-vulkan"},
         )
         r = c.delete("/api/profiles/my-vulkan")
     assert r.status_code == 409
@@ -327,7 +363,7 @@ def test_delete_in_use_409_flat_slot_toml(tmp_hal0_home: str) -> None:
     with TestClient(app) as c:
         c.post(
             "/api/profiles",
-            json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+            json={"name": "my-vulkan"},
         )
         listed = c.get("/api/profiles").json()
         r = c.delete("/api/profiles/my-vulkan")
@@ -350,7 +386,7 @@ def test_delete_in_use_409_despite_corrupt_sibling_toml(tmp_hal0_home: str) -> N
     with TestClient(app) as c:
         c.post(
             "/api/profiles",
-            json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+            json={"name": "my-vulkan"},
         )
         r = c.delete("/api/profiles/my-vulkan")
     assert r.status_code == 409
@@ -378,7 +414,7 @@ def test_delete_succeeds_with_only_corrupt_toml_and_warns(
     with TestClient(app) as c:
         c.post(
             "/api/profiles",
-            json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
+            json={"name": "my-vulkan"},
         )
         capsys.readouterr()  # drain startup noise
         with caplog.at_level("WARNING"):
@@ -398,7 +434,6 @@ def test_create_with_cloned_from_201_and_listed(client: TestClient) -> None:
         "/api/profiles",
         json={
             "name": "vulkan-custom",
-            "image": "ghcr.io/x/y:z",
             "cloned_from": "vulkan",
         },
     )

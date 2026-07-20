@@ -1,24 +1,9 @@
 /**
- * slot-drawer-profile-v3 — Task C7 spec.
+ * slot-drawer-profile-v3 — slot drawer profile/HW ownership spec.
  *
- * Covers drawer-editable profile for GPU container slots + create-modal
- * device derivation from selected profile's device_class.
- *
- *   C7a. GPU container slot (chat, profile rocm-mtp):
- *          - drawer shows profile <select> listing ONLY device_class==="gpu" profiles
- *          - tts (cpu) and flm (npu) absent from options
- *          - current profile (rocm-mtp) preselected
- *   C7b. Change profile to vulkan + Save:
- *          - PUT /api/slots/chat/config body contains { profile: "vulkan" }
- *          - followed by POST /api/slots/chat/restart
- *   C7c. Save WITHOUT profile change:
- *          - PUT body does NOT contain `profile` key (no gratuitous restart)
- *          - restart endpoint NOT called
- *   C7d. NPU slot: profile rendered as fixed text (no <select>)
- *   C7e. TTS slot: profile rendered as fixed text (no <select>)
- *   C7f. Create modal: device derivation from selected profile's backend:
- *          - vulkan (backend "vulkan") → device "gpu-vulkan"
- *          - rocm-mtp (backend "rocm")  → device "gpu-rocm"
+ * The 1.0 hw-slot-ownership pivot removed drawer-editable profile/device
+ * derivation. Profiles are logical tune templates; device/NGL/threads/binary
+ * live on the slot HW grid.
  */
 import { test, expect, MOCK_DATA, type Page } from '../fixtures/apiMock'
 
@@ -46,50 +31,27 @@ async function seedSlots(page: Page, slots: any[]) {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
-test.describe('C7 — drawer-editable profile + create-modal device derivation', () => {
+test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () => {
 
-  // C7a — GPU container slot: profile select shows only gpu profiles
-  test('C7a — GPU slot: profile select shows only gpu-class profiles', async ({ page }) => {
+  test('C7a — GPU slot: drawer has HW grid and no profile select', async ({ page }) => {
     await seedSlots(page, [CHAT_CONTAINER, NPU_SLOT, TTS_SLOT])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' }).first()
-    await expect(profileRow).toBeVisible()
-
-    // Must be a select (not readOnly input) for GPU slot
-    const sel = profileRow.locator('select')
-    await expect(sel).toBeVisible()
-
-    // Current profile is preselected
-    await expect(sel).toHaveValue('rocm-mtp')
-
-    // GPU profiles present
-    const gpuOptions = ['rocm', 'rocm-mtp', 'vulkan']
-    for (const name of gpuOptions) {
-      await expect(sel.locator(`option[value="${name}"]`)).toHaveCount(1)
-    }
-
-    // Non-GPU profiles absent from options
-    await expect(sel.locator('option[value="tts"]')).toHaveCount(0)
-    await expect(sel.locator('option[value="flm"]')).toHaveCount(0)
+    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
+    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
   })
 
-  // C7a2 — profile options surface the intent label so custom profiles
-  // (auto-named e.g. "rocm-custom") are recognizable, not just the bare name.
-  test('C7a2 — GPU profile options show name · intent', async ({ page }) => {
+  test('C7a2 — slot card still surfaces the bound profile chip', async ({ page }) => {
     await seedSlots(page, [CHAT_CONTAINER])
     await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    const sel = page.locator('.drawer .form-row', { hasText: 'Profile' }).first().locator('select')
-    // The rocm-mtp option carries its intent ("Dense chat + MTP") in the label.
-    await expect(sel.locator('option[value="rocm-mtp"]')).toContainText('Dense chat + MTP')
-    await expect(sel.locator('option[value="vulkan"]')).toContainText('Vulkan std · fallback')
+    await expect(page.locator('button', { hasText: CHAT_CONTAINER.profile || '' })).toBeVisible()
   })
 
-  // C7b — profile change Save: PUT with profile + restart fires
-  test('C7b — profile change: PUT includes profile + restart fires', async ({ page }) => {
+  test.skip('C7b — obsolete: profile changes no longer drive slot config/restart', async ({ page }) => {
     const configPuts: any[] = []
     const restartCalls: string[] = []
 
@@ -164,7 +126,7 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
   // writes land, WITHOUT waiting for the slow POST /restart to resolve. This
   // is the fix for "save/edit hangs the dash" — restart can take model-load
   // seconds-to-minutes and must never block the UI.
-  test('C7g — profile-change Save closes the drawer without awaiting restart', async ({ page }) => {
+  test.skip('C7g — obsolete: profile-change restart moved out of slot drawer', async ({ page }) => {
     let restartStarted = false
     let releaseRestart: () => void = () => {}
     const restartGate = new Promise<void>((resolve) => { releaseRestart = resolve })
@@ -198,32 +160,21 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     releaseRestart() // let the held request settle for clean teardown
   })
 
-  // C7d — NPU slot: profile is fixed text (no select)
-  test('C7d — NPU slot: profile rendered as fixed text, no select', async ({ page }) => {
+  test('C7d — NPU slot: no profile editor; HW grid owns placement', async ({ page }) => {
     await seedSlots(page, [NPU_SLOT])
     await page.goto('/#slots/npu')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' }).first()
-    await expect(profileRow).toBeVisible()
-
-    // Must be readOnly input, not select
-    await expect(profileRow.locator('input[readonly]')).toBeVisible()
-    await expect(profileRow.locator('select')).toHaveCount(0)
+    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
   })
 
-  // C7e — TTS slot: profile is fixed text (no select)
-  test('C7e — TTS slot: profile rendered as fixed text, no select', async ({ page }) => {
+  test('C7e — TTS slot: no profile editor', async ({ page }) => {
     await seedSlots(page, [TTS_SLOT])
     await page.goto('/#slots/tts')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' }).first()
-    await expect(profileRow).toBeVisible()
-
-    // Must be readOnly input, not select
-    await expect(profileRow.locator('input[readonly]')).toBeVisible()
-    await expect(profileRow.locator('select')).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
   })
 
   // C7f — Create modal (D2): device rides the MODEL, not a slot profile.
@@ -395,8 +346,7 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await expect.poll(() => restarted).toBe(true)
   })
 
-  // C7h — model options re-filter from the SELECTED profile, not the persisted one
-  test('C7h — model options re-filter from the SELECTED profile, not the persisted one', async ({ page }) => {
+  test.skip('C7h — obsolete: model filtering no longer follows selected profile', async ({ page }) => {
     // The dashboard uses mockFetch (VITE_MOCK_HAL0=1) which short-circuits
     // page.route for allowlisted endpoints like /api/models — it reads
     // HAL0_DATA.models directly. Seed both slots AND models in a single

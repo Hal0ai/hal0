@@ -64,6 +64,25 @@ def test_system_info_backends_expose_runner_supports_metadata(
         }
 
 
+def test_system_info_backends_expose_fit_check_metadata(
+    isolated_client: TestClient,
+) -> None:
+    """spec-hw-slot-ownership §4: each backend exposes the runner registry's
+    fit-check metadata (``supported_backends`` + ``format_arch``) so the UI
+    slot-HW-grid fit-check and the Runtimes panel can read registry truth."""
+    from hal0.runners import RUNNER_IMAGES
+
+    body = isolated_client.get("/api/system-info").json()
+    for key, entry in body["backends"].items():
+        runner = RUNNER_IMAGES[key]
+        assert entry["supported_backends"] == list(runner.supported_backends)
+        assert entry["format_arch"] == runner.format_arch
+        # A slot's own device backend must resolve against this list — every
+        # runner declares at least one supported backend.
+        assert isinstance(entry["supported_backends"], list)
+        assert entry["supported_backends"], f"{key} declares no supported_backends"
+
+
 def test_system_info_matches_hardware_and_features_endpoints(
     isolated_client: TestClient,
 ) -> None:

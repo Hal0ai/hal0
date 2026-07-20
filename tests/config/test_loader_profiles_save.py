@@ -19,7 +19,7 @@ from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
 class TestSaveProfilesConfig:
     def test_save_profiles_config_round_trips(self, tmp_hal0_home: str) -> None:
         catalog = load_profiles_config()
-        catalog.profile["my-custom"] = ProfileConfig(image="ghcr.io/x/y:z", flags="-fa on")
+        catalog.profile["my-custom"] = ProfileConfig(flags="-fa on")
         save_profiles_config(catalog)
         reloaded = load_profiles_config()
         assert "my-custom" in reloaded.profile
@@ -30,7 +30,7 @@ class TestSaveProfilesConfig:
     def test_save_omits_virtual_seeds(self, tmp_hal0_home: str) -> None:
         """Seeds are virtual: save persists only operator (non-seed) profiles."""
         catalog = load_profiles_config()
-        catalog.profile["extra"] = ProfileConfig(image="ghcr.io/a/b:c")
+        catalog.profile["extra"] = ProfileConfig()
         save_profiles_config(catalog)
 
         target = paths.profiles_toml()
@@ -56,7 +56,7 @@ class TestSaveProfilesConfig:
 
     def test_save_accepts_explicit_path(self, tmp_path: Path) -> None:
         catalog = ProfilesConfig.model_validate({"profile": SEED_PROFILES})
-        catalog.profile["mine"] = ProfileConfig(image="ghcr.io/x/mine:1")
+        catalog.profile["mine"] = ProfileConfig()
         target = tmp_path / "custom_profiles.toml"
         save_profiles_config(catalog, path=target)
         assert target.exists()
@@ -72,7 +72,7 @@ class TestSaveProfilesConfig:
         save_profiles_config(catalog)
 
         # Add a profile and save again
-        catalog.profile["v2"] = ProfileConfig(image="ghcr.io/v/2:latest")
+        catalog.profile["v2"] = ProfileConfig()
         save_profiles_config(catalog)
 
         reloaded = load_profiles_config()

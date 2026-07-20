@@ -12,7 +12,13 @@ from __future__ import annotations
 import pytest
 
 from hal0.errors import BadRequest
-from hal0.slots.argv import MANAGED_ARGS_DENYLIST, normalize_argv, resolve_argv
+from hal0.slots.argv import (
+    MANAGED_ARGS_DENYLIST,
+    SLOT_HARDWARE_FLAGS,
+    _deny_slot_hardware_flags,
+    normalize_argv,
+    resolve_argv,
+)
 
 # The flag portion of the live `agent` slot resolved_command (post `--port`).
 # Verbatim from `mcp__hal0-admin__slot_list` — includes the profile MTP bundle
@@ -380,3 +386,50 @@ def test_resolve_argv_does_not_screen_trusted_model_defaults_ngl() -> None:
 def test_managed_args_denylist_covers_expected_flags() -> None:
     expected = frozenset({"--model", "--ctx-size", "--host", "--port", "--n-gpu-layers", "--alias"})
     assert expected == MANAGED_ARGS_DENYLIST
+
+
+def test_slot_hardware_flags_covers_grid_flags_both_spellings() -> None:
+    """spec-hw-slot-ownership §5 partition set: the grid-owned hardware flags
+    (device/-dev, NGL/-ngl, threads/--threads) in BOTH long and short form."""
+    expected = frozenset({"--n-gpu-layers", "-ngl", "--device", "-dev", "--threads", "-t"})
+    assert expected == SLOT_HARDWARE_FLAGS
+
+
+# ── slot-hardware partition guard (spec-hw-slot-ownership §5) ─────────────────
+
+
+@pytest.mark.parametrize(
+    "denied_tokens",
+    [
+        ["-ngl", "99"],
+        ["--n-gpu-layers", "99"],
+        ["-dev", "CUDA0"],
+        ["--device", "ROCm0"],
+        ["-t", "8"],
+        ["--threads", "8"],
+    ],
+)
+def test_deny_slot_hardware_flags_rejects_both_spellings(denied_tokens: list[str]) -> None:
+    """A model/profile freeform-flag save that carries a grid-owned hardware flag
+    (either spelling) is hard-rejected with the "belongs on the slot" envelope."""
+    tokens = ["--flash-attn", "on", *denied_tokens]
+    with pytest.raises(BadRequest) as exc_info:
+        _deny_slot_hardware_flags(tokens, segment="model defaults.extra_args")
+    assert exc_info.value.code == "slot.hardware_flag_denied"
+    assert denied_tokens[0] in exc_info.value.message
+    assert "slot" in exc_info.value.message.lower()
+    assert exc_info.value.details["flags"] == [denied_tokens[0]]
+
+
+def test_deny_slot_hardware_flags_reports_every_offender() -> None:
+    tokens = ["-ngl", "40", "--threads", "8", "-fa", "on"]
+    with pytest.raises(BadRequest) as exc_info:
+        _deny_slot_hardware_flags(tokens, segment="profile flags")
+    assert exc_info.value.details["flags"] == ["-ngl", "--threads"]
+
+
+def test_deny_slot_hardware_flags_allows_clean_tune() -> None:
+    """A real device-agnostic tune (batch/flash-attn/KV-quant/rope) has no
+    hardware flags, so the guard is a no-op."""
+    tokens = ["-b", "2048", "-ub", "512", "-fa", "on", "-ctk", "q8_0", "--no-mmap"]
+    _deny_slot_hardware_flags(tokens, segment="model defaults.extra_args")  # must not raise

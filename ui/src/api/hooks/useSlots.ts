@@ -75,9 +75,23 @@ export interface Slot {
   /** Per-slot reasoning default (llm slots). true → thinking on; false/null →
    *  off (suppressed). Seeds the drawer's Thinking toggle. */
   enable_thinking?: boolean | null
-  /** GPU offload layer count for the slot's model (-1 = all). Seeds the
-   *  drawer's Advanced n_gpu_layers input. */
+  // ── Hardware grid (spec-hw-slot-ownership §2) ───────────────────────
+  /** NGL — GPU offload layer count owned by the SLOT (-1 = all, 0 = CPU only).
+   *  Reversed from model.defaults.n_gpu_layers by the §6 migration; seeds the
+   *  slot editor's HW-grid NGL field and the card's HW chip. */
   n_gpu_layers?: number
+  /** THREADS — CPU threads for the runner (0 = unset → runtime default). Emits
+   *  --threads. Owned by the slot's HW grid. */
+  threads?: number
+  /** BINARY — the runner image ref: a key into RUNNER_IMAGES (container build)
+   *  that resolves the slot's launch image. Replaces model.preferred_runner.
+   *  Empty = derive the HW-gated default from `device`. */
+  binary?: string
+  /** image_pin — optional escape hatch (spec §3): a fully-resolved image ref
+   *  overriding RUNNER_IMAGES[binary] for this slot (debug / A-B / rollback).
+   *  null/absent = release default. A non-default pin is shown on the card so
+   *  drift is never hidden. Canonical TOML key `image_pin`. */
+  image_pin?: string | null
   /** Configured context window ([model].context_size). Surfaced by
    *  config_enrichment so the Inference engine pane can render "ctx
    *  used / max". Absent when the slot configures no context window —
@@ -297,6 +311,12 @@ function normalizeSlot(s: any): Slot {
     resolved_command: s?.resolved_command ?? null,
     // npu: trio modality toggles for npu slots (Phase A).
     npu: s?.npu ?? null,
+    // Hardware grid (spec-hw-slot-ownership §2). Pass through verbatim; absent
+    // keys surface as undefined/null so the card + editor render safely.
+    n_gpu_layers: s?.n_gpu_layers,
+    threads: s?.threads,
+    binary: s?.binary ?? '',
+    image_pin: s?.image_pin ?? null,
   }
 }
 

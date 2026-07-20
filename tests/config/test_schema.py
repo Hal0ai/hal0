@@ -111,6 +111,41 @@ class TestSlotConfig:
         assert s.enabled is True
         assert isinstance(s.model, ModelConfig)
 
+    def test_hardware_grid_defaults(self) -> None:
+        """spec-hw-slot-ownership §2: the slot-owned HW grid fields exist with
+        device-agnostic-safe defaults."""
+        s = SlotConfig(name="primary", port=8081)
+        assert s.n_gpu_layers == -1  # NGL: all layers
+        assert s.threads == 0  # unset → launcher omits --threads
+        assert s.binary == ""  # unset → HW-gated default via runner_for_backend
+        assert s.image_pin is None  # no escape-hatch pin
+
+    def test_hardware_grid_roundtrip(self) -> None:
+        """Every new HW-grid field round-trips through construction + dump."""
+        s = SlotConfig(
+            name="primary",
+            port=8081,
+            n_gpu_layers=99,
+            threads=8,
+            binary="rocmfpx",
+            image_pin="ghcr.io/hal0ai/hal0-toolbox-rocmfpx:debug",
+        )
+        assert s.n_gpu_layers == 99
+        assert s.threads == 8
+        assert s.binary == "rocmfpx"
+        assert s.image_pin == "ghcr.io/hal0ai/hal0-toolbox-rocmfpx:debug"
+        dumped = s.model_dump()
+        assert dumped["n_gpu_layers"] == 99
+        assert dumped["threads"] == 8
+        assert dumped["binary"] == "rocmfpx"
+        assert dumped["image_pin"] == "ghcr.io/hal0ai/hal0-toolbox-rocmfpx:debug"
+        # Re-validating the dump preserves the grid (TOML round-trip proxy).
+        assert SlotConfig(**dumped).n_gpu_layers == 99
+
+    def test_negative_threads_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            SlotConfig(name="primary", port=8081, threads=-1)
+
     def test_invalid_device_raises_with_field_path(self) -> None:
         """PLAN.md §5 Tier 1: device = 'gpu-rcom' must surface field path."""
         with pytest.raises(ValidationError) as ei:

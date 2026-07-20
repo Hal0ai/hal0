@@ -1,8 +1,7 @@
 # hal0 profile catalog — OPERATOR CUSTOM PROFILES ONLY.
 #
-# Seed profiles are VIRTUAL: the built-in catalog (rocm / rocm-dense / rocm-moe /
-# vulkan-dense / vulkan-moe / rocm-longctx / vulkan / cuda / embed / rerank /
-# vulkan-embed / vulkan-rerank / flm / tts / tts-qwen3 / cpu-llm / comfyui)
+# Seed profiles are VIRTUAL: the built-in catalog (chat / chat-long-context /
+# embedding / reranking / cpu-chat / flm / kokoro / qwen3-tts / comfyui)
 # lives in code
 # (SEED_PROFILES in hal0.config.schema) and is overlaid on every
 # load. It is intentionally NOT materialised here so that a re-tuned seed — new
@@ -16,19 +15,17 @@
 # non-seed profiles to /etc/hal0/profiles.toml; any seed key written here is
 # ignored in favour of the code definition and pruned on the next save/upgrade.
 #
-# A profile = (image, flags, mtp, device_class, backend). Slots reference a
-# profile by name; the profile supplies the container image + flag bundle and
-# the GPU runtime (backend = rocm|vulkan|cuda). See the container-runtime design
+# A profile = (flags, mtp, runtime-family metadata). Slots reference a
+# profile by name; the slot supplies hardware, runner binary, and image. See
+# the container-runtime design
 # doc (§1) for the layering rationale. NOTE (§7.1a / ML-5): `mtp` here is
 # informational only — MTP and --jinja are now MODEL/runner capabilities, not
 # profile tunes; see ModelDefaults.mtp / .jinja in hal0.registry.model.
 #
-# Example — a custom ROCm profile cloned from `rocm-moe`:
+# Example — a custom workload profile cloned from `chat-long-context`:
 #
 #   [profile.my-moe]
-#   image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-#   flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --no-mmap"
-#   mtp          = true
+#   flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --no-mmap"
+#   mtp          = false
 #   device_class = "gpu"
-#   backend      = "rocm"
-#   cloned_from  = "rocm-moe"
+#   cloned_from  = "chat-long-context"

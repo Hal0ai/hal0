@@ -551,7 +551,7 @@ class SlotConfigStore:
         by device. The device alone is not enough to start the right engine —
         the slot's ``profile`` is what ``container._spec_provider_for`` resolves
         to a runtime family. So for the ``tts`` child we also derive and write
-        the engine's ``profile`` (cpu → ``tts``, gpu → ``tts-qwen3``); without
+        the engine's ``profile`` (cpu → ``kokoro``, gpu → ``qwen3-tts``); without
         this the slot would keep Kokoro's profile and never spawn Qwen3.
         """
         selection = slot_selection.selection

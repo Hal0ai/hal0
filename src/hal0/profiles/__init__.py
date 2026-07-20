@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,6 @@ from hal0.config.schema import (
     resolve_profile_flags,
 )
 from hal0.errors import Conflict, NotFound
-from hal0.runners import RUNNER_IMAGES
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,6 @@ class ResolvedProfile:
     """Profile facts after seed/custom lookup and runtime classification."""
 
     name: str
-    image: str
     flags: str
     mtp: bool
     device_class: str
@@ -73,7 +72,6 @@ class ResolvedProfile:
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
-            "image": self.image,
             "flags": self.flags,
             "mtp": self.mtp,
             "device_class": self.device_class,
@@ -95,7 +93,6 @@ class ResolvedProfile:
 class ProfilePatch:
     """Partial profile update input."""
 
-    image: str | None = None
     flags: str | None = None
     mtp: bool | None = None
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = None
@@ -105,37 +102,27 @@ class ProfilePatch:
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
-    """Classify a profile's runtime family.
+    """Classify a profile's runtime family from its TYPED fields — the profile
+    ``name`` + ``device_class`` — never an image string.
 
-    §7.1b / ML-4: prefers a runner-registry lookup when ``profile.image``
-    exactly matches a known runner's image — an exact hit means we KNOW
-    which runtime that image boots (``RUNNER_IMAGES[key].runtime_family``)
-    rather than guessing from name/image substrings.
-    ``ProfileConfig`` has no dedicated ``runner`` key yet (profiles losing
-    ``image`` entirely in favor of a runner key is ML-5/P3-schema scope),
-    so this is index-by-image rather than a direct field read. Falls back
-    to the string-sniff below — kept as-is, unchanged — for any profile
-    whose image doesn't match a registry entry verbatim (custom profiles,
-    dev overrides, a stale/renamed image).
+    spec-hw-slot-ownership §3: profiles carry no ``image`` anymore, so the old
+    exact-image→``RUNNER_IMAGES`` lookup and the image-substring sniffs are gone.
+    The runtime family is a structural fact: ``device_class`` pins the
+    single-purpose runtimes (``img`` → comfyui, ``npu`` → flm), and the two TTS
+    engines (kokoro / qwen3tts) — which share a ``cpu`` device_class with a plain
+    llama-server CPU profile and so can only be told apart by name — key off
+    their seed slug. Mirrors the model-side backends-driven classification in
+    :func:`hal0.model_meta.modality.derive_modalities` (a structural signal, not
+    a substring guess). Custom (cloned) profiles have no special-runtime signal
+    and resolve to ``llama-server`` — the single-purpose runtimes are seed-only.
     """
-    image = profile.image.lower()
-    for runner in RUNNER_IMAGES.values():
-        if runner.image.lower() == image:
-            return runner.runtime_family
-
-    # Classify by device_class/image (robust to slug renames); the legacy
-    # name literals are kept as a belt-and-suspenders hint.
-    if name == "flm" or profile.device_class == "npu" or "flm" in image:
+    if name == "flm" or profile.device_class == "npu":
         return "flm"
-    # Qwen3-TTS (GPU) is checked before Kokoro and the llama-server fallback:
-    # it is a TTS engine on a GPU device_class, so neither the kokoro nor the
-    # llama discriminators would catch it. Match by image/name (robust to a
-    # slug rename, same belt-and-suspenders style as the others).
-    if name == "tts-qwen3" or "qwen3tts" in image or "qwen3-tts" in image:
+    if name == "qwen3-tts":
         return "qwen3tts"
-    if name == "tts" or "kokoro" in image:
+    if name == "kokoro":
         return "kokoro"
-    if name == "comfyui" or profile.device_class == "img" or "comfyui" in image:
+    if name == "comfyui" or profile.device_class == "img":
         return "comfyui"
     return "llama-server"
 
@@ -181,6 +168,7 @@ class ProfileCatalog:
 
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
+        _screen_hardware_flags(profile.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -195,6 +183,8 @@ class ProfileCatalog:
 
     def update(self, name: str, patch: ProfilePatch) -> ResolvedProfile:
         self._guard_custom(name)
+        if patch.flags is not None:
+            _screen_hardware_flags(patch.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             existing = catalog.profile.get(name)
@@ -205,7 +195,6 @@ class ProfileCatalog:
                     details={"profile": name},
                 )
             updated = ProfileConfig(
-                image=patch.image if patch.image is not None else existing.image,
                 flags=patch.flags if patch.flags is not None else existing.flags,
                 mtp=patch.mtp if patch.mtp is not None else existing.mtp,
                 device_class=(
@@ -287,7 +276,6 @@ class ProfileCatalog:
         bench = PROFILE_BENCH.get(name, {})
         return ResolvedProfile(
             name=name,
-            image=profile.image,
             flags=profile.flags,
             mtp=profile.mtp,
             device_class=profile.device_class,
@@ -335,3 +323,22 @@ __all__ = [
     "RuntimeFamily",
     "SlotType",
 ]
+
+
+def _screen_hardware_flags(flags: str) -> None:
+    """Reject physical slot flags before a profile is persisted.
+
+    The HTTP route performs the same check for an early, route-specific error,
+    but the catalog is also used by import/CLI paths and is the actual write
+    seam. Keeping the guard here prevents those paths from bypassing the
+    model/profile ownership partition.
+    """
+    if not flags.strip():
+        return
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        return  # schema/parser owns malformed quoting diagnostics
+    from hal0.slots.argv import _deny_slot_hardware_flags
+
+    _deny_slot_hardware_flags(tokens, segment="profile flags")

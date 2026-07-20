@@ -36,7 +36,7 @@ def test_delete_unknown_profile_records_error(client: TestClient) -> None:
 
 def test_update_unknown_profile_records_error(client: TestClient) -> None:
     # Unknown custom profile → 404 profiles.not_found, raised inside the wrap.
-    r = client.put("/api/profiles/__nope__", json={"image": "ghcr.io/x:y"})
+    r = client.put("/api/profiles/__nope__", json={"flags": "-fa on"})
     assert r.status_code >= 400
     rows = _activity(client, action="profile.update")
     assert rows, "expected a profile.update audit row"
@@ -45,17 +45,13 @@ def test_update_unknown_profile_records_error(client: TestClient) -> None:
 
 
 def test_create_duplicate_profile_records_error(client: TestClient) -> None:
-    # Re-creating a seed profile name → 409 profiles.exists, inside the wrap.
-    # 'rocm' is a seed profile, so create collides.
-    r = client.post(
-        "/api/profiles",
-        json={"name": "rocm", "image": "ghcr.io/x:y"},
-    )
+    client.post("/api/profiles", json={"name": "duplicate-me", "flags": "-fa on"})
+    r = client.post("/api/profiles", json={"name": "duplicate-me", "flags": "-fa on"})
     assert r.status_code >= 400
     rows = _activity(client, action="profile.create")
     assert rows, "expected a profile.create audit row"
     assert rows[0]["outcome"] == "error"
-    assert rows[0]["target"] == "rocm"
+    assert rows[0]["target"] == "duplicate-me"
 
 
 def test_create_profile_records_ok(client: TestClient) -> None:
@@ -64,7 +60,6 @@ def test_create_profile_records_ok(client: TestClient) -> None:
         "/api/profiles",
         json={
             "name": "auditprof",
-            "image": "ghcr.io/hal0ai/x:rocm",
             "device_class": "gpu",
         },
     )

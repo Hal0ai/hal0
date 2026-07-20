@@ -4,10 +4,14 @@
 // code registry, RUNNER_IMAGES, digest-pinned and shipped with hal0 releases).
 // GET /api/system-info (CLIENT) reports, per runner, its resolved image ref +
 // runtime family + device class + a local on-disk state (installed /
-// installable / unavailable). The reverse index — which models + slots resolve
-// to each runner — is computed CLIENT-SIDE from the existing model/slot lists
-// (a model selects a runner via `preferred_runner`; slots inherit through the
-// model), so no dedicated /api/runtimes endpoint is needed for v1.
+// installable / unavailable). The reverse index — which slots resolve to each
+// runner — is computed CLIENT-SIDE from the existing slot list.
+//
+// spec-hw-slot-ownership §8: the join FLIPPED. Models no longer resolve to a
+// runner (`model.preferred_runner` is sunset — a model is device-agnostic).
+// Hardware/placement is owned by the SLOT: a slot picks its runner via
+// `slot.binary` (a key into RUNNER_IMAGES). This hook now indexes SLOTS via
+// `binary`; the models column is transitive (the models bound to those slots).
 //
 // NOT surfaced by system-info (deliberate backend scope trim, hardware.py):
 // digest drift vs the shipped registry, and per-runner pull progress — so this
@@ -27,6 +31,14 @@ export interface SystemInfoBackend {
   runtime_family: string
   device_class: string
   backend: string
+  /** Fit-check metadata (spec-hw-slot-ownership §4): the backends this runner
+   *  image can serve. RUNNER_IMAGES carries `supported_backends`; the
+   *  system-info endpoint is assumed to surface it (backend Lane C). Absent on
+   *  an older backend — callers fall back to `[backend]`. */
+  supported_backends?: string[]
+  /** GGUF/format arch the runner accepts (lxc105: forks reject newer GGUFs).
+   *  Assumed surfaced alongside supported_backends; optional. */
+  format_arch?: string | null
   state: RunnerState
 }
 
@@ -40,13 +52,17 @@ export interface RuntimeRow {
   key: string
   family: string
   backend: string
+  /** Fit-check backends this runner image serves (falls back to [backend]). */
+  supportedBackends: string[]
   deviceClass: string
   image: string
   imageRepo: string
   tag: string | null
   digest: string | null
   state: RunnerState
+  /** Models transitively bound (via a slot's `binary`) to this runner. */
   models: string[]
+  /** Slots whose `binary` resolves to this runner. */
   slots: string[]
 }
 
@@ -87,6 +103,15 @@ function parseImageRef(ref: string): { repo: string; tag: string | null; digest:
  * degrades to "unavailable" (the dev/no-podman box) — the page shows the
  * shipped registry and disables pull actions with that reason.
  */
+/** Normalize a slot `device` enum (gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu)
+ *  to its bare backend token — the value fit-checked against a runner's
+ *  supported_backends. Strips the `gpu-` prefix; passes cpu/npu through. */
+export function deviceBackend(device?: string | null): string {
+  const d = String(device || '').toLowerCase()
+  if (!d) return ''
+  return d.startsWith('gpu-') ? d.slice(4) : d
+}
+
 export function useRuntimes() {
   const sys = useSystemInfo()
   const models = useModels()
@@ -96,46 +121,55 @@ export function useRuntimes() {
   const modelRows = (models.data ?? []) as any[]
   const slotRows = (slots.data ?? []) as any[]
 
-  // model id → runner key (preferred_runner is an untyped runtime field).
-  const modelRunner = new Map<string, string>()
+  // model id → display label (models no longer carry a runner — §8).
   const modelLabel = new Map<string, string>()
   for (const m of modelRows) {
-    const runner = m?.preferred_runner
-    if (m?.id) {
-      modelLabel.set(m.id, m.longName || m.name || m.id)
-      if (runner) modelRunner.set(m.id, String(runner))
-    }
+    if (m?.id) modelLabel.set(m.id, m.longName || m.name || m.id)
+  }
+
+  // Resolve a slot to its runner key. Primary: the slot's typed `binary` field
+  // (a RUNNER_IMAGES key). Fallback for slots not yet migrated (empty binary):
+  // the runner whose backend matches the slot's device backend — mirrors the
+  // backend's `runner_for_backend` HW-gated default.
+  const slotRunnerKey = (s: any): string | undefined => {
+    const explicit = s?.binary ? String(s.binary) : ''
+    if (explicit) return explicit
+    const be = deviceBackend(s?.device)
+    if (!be) return undefined
+    const match = Object.entries(backends).find(([, b]) => b.backend === be)
+    return match?.[0]
   }
 
   const rows: RuntimeRow[] = Object.entries(backends).map(([key, b]) => {
     const { repo, tag, digest } = parseImageRef(b.image)
-    // Models that resolve to this runner: explicit preferred_runner match, else
-    // fall back to the runner's backend appearing in the model's backends set.
-    const modelNames: string[] = []
-    for (const m of modelRows) {
-      const explicit = m?.preferred_runner && String(m.preferred_runner) === key
-      const byBackend =
-        !m?.preferred_runner && b.backend && Array.isArray(m?.backends) && m.backends.includes(b.backend)
-      if (explicit || byBackend) modelNames.push(m.longName || m.name || m.id)
-    }
-    // Slots resolve through their model.
+    const supportedBackends =
+      Array.isArray(b.supported_backends) && b.supported_backends.length > 0
+        ? b.supported_backends
+        : b.backend
+          ? [b.backend]
+          : []
+    // Slots resolve to this runner via `binary` (or the device-backend default).
     const slotNames: string[] = []
+    const modelSet = new Set<string>()
     for (const s of slotRows) {
+      if (slotRunnerKey(s) !== key) continue
+      slotNames.push(s.name)
+      // Models column is transitive — the models bound to those slots.
       const mid = s?.model_id || s?.model
-      const runnerForSlot = mid ? modelRunner.get(mid) : undefined
-      if (runnerForSlot === key) slotNames.push(s.name)
+      if (mid) modelSet.add(modelLabel.get(mid) || String(mid))
     }
     return {
       key,
       family: b.runtime_family,
       backend: b.backend,
+      supportedBackends,
       deviceClass: b.device_class,
       image: b.image,
       imageRepo: repo,
       tag,
       digest,
       state: b.state,
-      models: modelNames,
+      models: [...modelSet],
       slots: slotNames,
     }
   })

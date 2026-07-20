@@ -40,11 +40,11 @@ def profile_name_for_fit(capability: str, device: str) -> str | None:
         # gpu-rocm→embed, gpu-vulkan→vulkan-embed. Both non-MTP, so this honours
         # the resolver's "never force MTP" contract. The base chat profile never
         # emits --embedding, so embed must not fall through to it.
-        return "embed" if device == "gpu-rocm" else "vulkan-embed"
+        return "embedding"
     if capability == "rerank" and device in {"gpu-rocm", "gpu-vulkan"}:
         # Dedicated GPU rerank lane (llama-server --reranking → /v1/rerank),
         # backend-coherent: gpu-rocm→rerank, gpu-vulkan→vulkan-rerank.
-        return "rerank" if device == "gpu-rocm" else "vulkan-rerank"
+        return "reranking"
     if device in {"gpu-rocm", "gpu-vulkan"}:
         return DEVICE_DEFAULT_PROFILES.get(device)
     if capability == "image":

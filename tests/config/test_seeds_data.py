@@ -1,9 +1,9 @@
 """Tests for hal0.config.seeds — the shipped-TOML seed-data loader (P3-schema).
 
 Covers spec-p3-schema.final.md Part A: the four data files under
-``hal0/config/data/`` load, validate, and resolve image sentinels correctly,
-and the schema.py backward-compat shims (``SEED_PROFILES`` etc.) still expose
-the same shape every existing caller expects.
+``hal0/config/data/`` load and validate correctly, and the schema.py
+backward-compat shims (``SEED_PROFILES`` etc.) still expose the same shape
+every existing caller expects.
 
 Targeted file run:
     uv run python -m pytest tests/config/test_seeds_data.py -q
@@ -21,12 +21,8 @@ from hal0.config.schema import (
     StackConfig,
 )
 
-# Grep-verified against src/hal0/config/data/seed_profiles.toml: 17 seed
-# profiles today (§7.1a / ML-5 dropped rocm-dense-nojinja /
-# vulkan-dense-nojinja / rocm-dense-small — jinja moved to a runner
-# capability, so the nojinja clones are redundant; was 20 pre-ML-5) — see
-# test_seeds_parity.py for the byte-identical guard.
-_EXPECTED_PROFILE_COUNT = 17
+# The 1.0 catalog is intentionally small: workload/runtime-family seeds only.
+_EXPECTED_PROFILE_COUNT = 11
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
 
 
@@ -38,37 +34,6 @@ class TestSeedProfilesToml:
     def test_every_entry_validates(self) -> None:
         for name, raw in seeds.seed_profiles().items():
             ProfileConfig.model_validate(raw), name  # raises on failure
-
-    def test_no_unresolved_sentinels(self) -> None:
-        """Every ``@NAME`` placeholder in the shipped TOML must resolve to a
-        real image ref — a leftover sentinel would ship a broken image pin."""
-        for name, raw in seeds.seed_profiles().items():
-            image = raw.get("image", "")
-            assert not str(image).startswith("@"), (
-                f"profile {name!r} still carries an unresolved sentinel: {image!r}"
-            )
-
-    def test_rocmfpx_lanes_resolve_to_the_live_constant(self) -> None:
-        """Profiles that reference the ROCmFPX sentinel must resolve to the
-        SAME live ``DEFAULT_ROCMFPX_IMAGE`` constant, not a frozen copy —
-        this is the whole point of the sentinel indirection (spec R1)."""
-        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
-
-        profiles = seeds.seed_profiles()
-        for name in ("rocm", "rocm-dense", "vulkan", "embed", "rerank"):
-            assert profiles[name]["image"] == DEFAULT_ROCMFPX_IMAGE, name
-        assert profiles["cpu-llm"]["image"] == FALLBACK_VULKAN_IMAGE
-
-    def test_literal_non_rocmfpx_images_stay_literal(self) -> None:
-        """flm/kokoro/qwen3tts/the upstream CUDA image/the comfyui digest are
-        NOT part of the ROCmFPX pin the ML-runner registry is absorbing —
-        they must NOT be sentinel-resolved, just passed through verbatim."""
-        profiles = seeds.seed_profiles()
-        assert profiles["flm"]["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
-        assert profiles["tts"]["image"] == "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
-        assert profiles["tts-qwen3"]["image"] == "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
-        assert profiles["cuda"]["image"] == "ghcr.io/ggml-org/llama.cpp:server-cuda"
-        assert profiles["comfyui"]["image"].startswith("docker.io/kyuz0/amd-strix-halo-comfyui@")
 
 
 class TestSeedStacksToml:
@@ -104,8 +69,9 @@ class TestProfileBenchToml:
 
     def test_values_shape(self) -> None:
         bench = seeds.profile_bench()
-        assert bench["rocm"] == {"tps": 52.8}
-        assert bench["tts-qwen3"] == {"rtf": 0.48}
+        assert bench["chat"] == {"tps": 52.8}
+        assert bench["kokoro"] == {"rtf": 0.18}
+        assert bench["qwen3-tts"] == {"rtf": 0.48}
 
 
 class TestFamilyDefaultsToml:

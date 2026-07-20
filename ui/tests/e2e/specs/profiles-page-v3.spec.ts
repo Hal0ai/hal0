@@ -107,11 +107,11 @@ test.describe('Profiles page (#658)', () => {
     await expect(intent).toContainText('MoE agents')
   })
 
-  test('Profile card shows image tag as secondary metadata', async ({ page }) => {
+  test('Profile card shows slot-owned runtime metadata instead of image tag', async ({ page }) => {
     await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
     const firstCard = page.locator('.stk-lib-card').first()
-    // Image tag should be the portion after the colon
-    await expect(firstCard).toContainText('rocm-7.2.4-rocmfp4-server')
+    await expect(firstCard.locator('.pf-bk')).toContainText('slot')
+    await expect(firstCard).toContainText('--flash-attn')
   })
 
   test('vulkan profile shows fallback intent label', async ({ page }) => {
@@ -122,14 +122,14 @@ test.describe('Profiles page (#658)', () => {
     await expect(vulkanCard.locator('.stk-lib-intent')).toContainText('Vulkan std · fallback')
   })
 
-  test('overhaul: summary strip + sectioned cards + backend chip + bench metric', async ({ page }) => {
+  test('overhaul: summary strip + sectioned cards + runtime chip + bench metric', async ({ page }) => {
     await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
     await expect(page.locator('.pf-summary')).toBeVisible()
     const seedSection = page.locator('.pf-section', { hasText: 'Seed templates' })
     await expect(seedSection.locator('.stk-lib-card')).toHaveCount(MOCK_DATA.profiles.length)
-    const rocm = page.locator('.stk-lib-card', { has: page.locator('.stk-lib-name', { hasText: /^rocm$/ }) })
-    await expect(rocm.locator('.pf-bk')).toContainText('ROCm')
-    await expect(rocm.locator('.pf-card-metric')).toContainText('52.8')
+    const chat = page.locator('.stk-lib-card').first()
+    await expect(chat.locator('.pf-bk')).toContainText('slot')
+    await expect(chat.locator('.pf-card-metric')).toContainText('52.8')
   })
 })
 

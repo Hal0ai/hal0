@@ -1,139 +1,124 @@
-"""Unit tests for the slot.image override + DEFAULT_ROCMFPX_IMAGE chain.
+"""Unit tests for the slot image-resolution chain (spec-hw-slot-ownership §3).
 
-Covers the v0.9.5 image-control refactor: image resolution walks
-``slot.image`` -> ``profile.image`` -> ``DEFAULT_ROCMFPX_IMAGE`` (in that
-order), and the slot-level override always wins.  These tests pin the
-contract operators rely on after the refactor.
+The chain collapsed to::
+
+    image_default = RUNNER_IMAGES[slot.BINARY]     (code registry)
+    effective     = slot.image_pin or image_default
+
+Reversing the prior spec-flags-ownership §7 chain: the raw ``slot.image`` /
+``[slot].image`` string reads collapsed into the typed ``image_pin`` escape
+hatch, and the ``profile.image`` tier was DELETED (profiles are device-agnostic
+tune templates, carrying no image). These tests pin the new contract.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE, ProfileConfig
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
 from hal0.providers.container import (
     _profile_image_and_flags,
     _resolve_image_ref,
 )
 
 
-def _profile(image: str | None = None) -> ProfileConfig:
-    """Build a minimal ProfileConfig (or pass image=None to drop the field)."""
-    raw: dict[str, object] = {
-        "image": image if image is not None else "",
-        "flags": "-ngl 999 --jinja",
-        "mtp": False,
-        "device_class": "gpu",
-    }
-    if image is None:
-        raw.pop("image", None)
-    return ProfileConfig.model_validate(raw)
+def _profile(image: str | None = None, *, backend: str = "vulkan") -> SimpleNamespace:
+    """A device-agnostic profile stand-in. ``image`` is set only to prove it is
+    IGNORED — real profiles no longer carry one. ``flags``/``mtp`` are present so
+    _profile_image_and_flags can resolve its (unused-here) flag string."""
+    return SimpleNamespace(image=image, backend=backend, device_class="gpu", flags="", mtp=False)
 
 
-# --- _resolve_image_ref: pure priority chain ------------------------------ #
+# --- image_pin escape hatch (tier 1) --------------------------------------- #
 
 
-def test_resolve_image_ref_slot_top_level_string_wins() -> None:
-    """slot.image (top-level string) overrides everything else."""
-    profile = _profile("ghcr.io/hal0ai/hal0-rocmfpx:server")
-    slot_cfg = {"image": "ghcr.io/foo/override:bar"}
-    assert _resolve_image_ref(slot_cfg, profile) == "ghcr.io/foo/override:bar"
+def test_image_pin_is_honored_verbatim() -> None:
+    """slot.image_pin overrides the BINARY-resolved default, verbatim."""
+    slot_cfg = {"image_pin": "ghcr.io/foo/debug:bar", "binary": "cpu"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == "ghcr.io/foo/debug:bar"
 
 
-def test_resolve_image_ref_slot_nested_section_wins() -> None:
-    """slot.slot.image (nested [slot] table) also counts as override."""
-    profile = _profile("ghcr.io/hal0ai/hal0-rocmfpx:server")
-    slot_cfg = {"slot": {"image": "ghcr.io/foo/nested:baz"}}
-    assert _resolve_image_ref(slot_cfg, profile) == "ghcr.io/foo/nested:baz"
+def test_empty_image_pin_falls_through_to_binary() -> None:
+    """An empty-string image_pin is treated as 'no pin'."""
+    slot_cfg = {"image_pin": "", "binary": "cpu"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
 
 
-def test_resolve_image_ref_falls_back_to_profile_image() -> None:
-    """No slot override -> profile.image is used (Phase 1 back-compat)."""
-    profile = _profile("ghcr.io/hal0ai/hal0-rocmfpx:server")
-    assert _resolve_image_ref(None, profile) == "ghcr.io/hal0ai/hal0-rocmfpx:server"
+def test_non_string_image_pin_ignored() -> None:
+    """A non-string image_pin (e.g. a stray table) never becomes str(dict)."""
+    slot_cfg = {"image_pin": {"oops": 1}, "binary": "cpu"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
 
 
-def test_resolve_image_ref_falls_back_to_rocmfpx_default() -> None:
-    """No slot override AND no profile.image on a GPU lane -> the universal
-    rocmfpx runner."""
+# --- BINARY-resolved default (tier 2) -------------------------------------- #
+
+
+def test_binary_resolves_the_image() -> None:
+    """slot.binary is a RUNNER_IMAGES key → its resolved image."""
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+
+
+def test_unknown_binary_falls_back_to_hw_default() -> None:
+    """An unknown BINARY key is skipped (not a launch crash) → HW-gated default."""
+    assert _resolve_image_ref({"binary": "does-not-exist"}, _profile()) == DEFAULT_ROCMFPX_IMAGE
+
+
+def test_no_binary_uses_hw_gated_default_gpu() -> None:
+    """No pin, no binary, GPU lane → the universal rocmfpx runner image."""
     profile = SimpleNamespace(image=None, backend="vulkan", device_class="gpu")
     assert _resolve_image_ref(None, profile) == DEFAULT_ROCMFPX_IMAGE
 
 
-def test_resolve_image_ref_cpu_lane_falls_back_to_toolbox() -> None:
-    """A CPU-only lane with no image gets the lean toolbox, not the big runner."""
+def test_no_binary_cpu_lane_uses_lean_toolbox() -> None:
+    """No pin, no binary, CPU lane → the lean toolbox, not the big GPU runner."""
     profile = SimpleNamespace(image=None, backend=None, device_class="cpu")
     assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
 
 
-def test_resolve_image_ref_honors_explicit_profile_pin_verbatim() -> None:
-    """An explicit profile.image is honored verbatim — never re-resolved (keeps
-    the spec.image == profile.image invariant)."""
-    profile = SimpleNamespace(image=FALLBACK_VULKAN_IMAGE, backend="vulkan", device_class="gpu")
-    assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
+# --- DELETED tiers: profile.image + raw slot.image are NOT read ------------ #
 
 
-def test_resolve_image_ref_ignores_image_gen_dict() -> None:
-    """[image] TOML table (#599 image-gen settings) must NOT be treated as
-    a container-image ref. Treating that dict as a ref renders str(dict)
-    into ExecStart and podman fails with 'invalid reference format'.
-    """
-    profile = _profile("ghcr.io/hal0ai/hal0-rocmfpx:server")
-    slot_cfg = {"image": {"idle_restore_minutes": 0, "default_steps": 30}}
-    assert _resolve_image_ref(slot_cfg, profile) == "ghcr.io/hal0ai/hal0-rocmfpx:server"
+def test_profile_image_is_ignored() -> None:
+    """spec §3: profile.image is DELETED from the chain — never read."""
+    profile = SimpleNamespace(
+        image="ghcr.io/foo/profilepin:1", backend="vulkan", device_class="gpu"
+    )
+    assert _resolve_image_ref(None, profile) == DEFAULT_ROCMFPX_IMAGE
 
 
-def test_resolve_image_ref_empty_string_falls_through() -> None:
-    """Empty string slot override is treated as 'no override'."""
-    profile = _profile("ghcr.io/hal0ai/hal0-rocmfpx:server")
-    assert _resolve_image_ref({"image": ""}, profile) == "ghcr.io/hal0ai/hal0-rocmfpx:server"
+def test_raw_slot_image_key_is_ignored() -> None:
+    """The old top-level ``image`` string is no longer read (collapsed into
+    image_pin by the migration lane)."""
+    assert _resolve_image_ref({"image": "ghcr.io/foo/old:1"}, _profile()) == DEFAULT_ROCMFPX_IMAGE
 
 
-# --- _profile_image_and_flags: integration with the slot --------------------- #
+def test_nested_slot_image_key_is_ignored() -> None:
+    """The old nested ``[slot].image`` string is no longer read either."""
+    slot_cfg = {"slot": {"image": "ghcr.io/foo/nested:1"}}
+    assert _resolve_image_ref(slot_cfg, _profile()) == DEFAULT_ROCMFPX_IMAGE
 
 
-def test_profile_image_and_flags_honours_slot_override() -> None:
-    """Direct test of the function called by the launch renderer.
+def test_image_gen_dict_does_not_break_resolution() -> None:
+    """The [image] image-gen table (#599) shares no key with image_pin, so it
+    can never be mis-read as a ref (the prior str(dict) overload is gone)."""
+    slot_cfg = {"image": {"idle_restore_minutes": 0, "default_steps": 30}, "binary": "cpu"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
 
-    Pins the user-visible behaviour: editing a slot's image in the slot
-    TOML causes the resolved (image, flags) tuple to use that image, NOT
-    the profile's image. This is the answer to 'with your plan, will the
-    image field in slot edit overrule the profile?' -> YES.
-    """
-    profile = _profile("ghcr.io/hal0ai/hal0-rocmfpx:server")
-    slot_cfg = {"image": "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"}
-    image, _flags = _profile_image_and_flags(profile, slot_cfg=slot_cfg)
+
+# --- _profile_image_and_flags integration ---------------------------------- #
+
+
+def test_profile_image_and_flags_honours_image_pin() -> None:
+    """The launch renderer's (image, flags) tuple uses the slot image_pin."""
+    slot_cfg = {"image_pin": "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"}
+    image, _flags = _profile_image_and_flags(_profile(), slot_cfg=slot_cfg)
     assert image == "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"
 
 
 def test_profile_image_and_flags_default_when_nothing_set() -> None:
-    """No slot image, profile has no image -> the universal rocmfpx default."""
-    profile = SimpleNamespace(image=None, flags="-ngl 999", mtp=False)
+    """No image_pin, no binary → the HW-gated rocmfpx default."""
+    profile = SimpleNamespace(
+        image=None, flags="-ngl 999", mtp=False, backend="rocm", device_class="gpu"
+    )
     image, _flags = _profile_image_and_flags(profile)
     assert image == DEFAULT_ROCMFPX_IMAGE
-
-
-@pytest.mark.parametrize(
-    "seed_name,expected_image",
-    [
-        # The 2x2 (backend x {dense,moe}) ROCmFPX grid consolidated in 0.9.5.
-        # c077206 became the default runner in #1173 (hal0-bench in-tree).
-        ("rocm-dense", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
-        ("rocm-moe", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
-        ("vulkan-dense", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
-        ("vulkan-moe", "ghcr.io/hal0ai/hal0-rocmfpx:c077206"),
-    ],
-)
-def test_seed_profiles_image_pinned_to_c077206(seed_name: str, expected_image: str) -> None:
-    """The ROCmFPX runner seed profiles use the current default image.
-
-    Pins the rollout: every fresh install gets the c077206 ROCmFPX
-    runner on its first launch unless the operator pins a different
-    image in their slot TOML.
-    """
-    from hal0.config.schema import SEED_PROFILES
-
-    assert SEED_PROFILES[seed_name]["image"] == expected_image
-    assert expected_image == DEFAULT_ROCMFPX_IMAGE

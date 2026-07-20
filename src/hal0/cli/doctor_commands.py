@@ -1744,7 +1744,7 @@ def check_profile_images_present(
     profiles: list[Any],
     local_repos: set[str] | None,
 ) -> list[dict[str, str]]:
-    """Warn when an *in-use* profile's image repo isn't present locally.
+    """Warn when an *in-use* slot's effective image isn't present locally.
 
     ``local_repos`` is the set of ``registry/repo`` strings from ``podman
     images`` (tag-insensitive to avoid false alarms on a re-pinned tag), or
@@ -1755,24 +1755,39 @@ def check_profile_images_present(
     if local_repos is None:
         return []
     rows: list[dict[str, str]] = []
+    from hal0.config.loader import load_slot_config
+    from hal0.profiles import ProfileCatalog
+    from hal0.providers.container import _resolve_image_ref
+
+    catalog = ProfileCatalog()
     for p in profiles:
-        if not getattr(p, "used_by", ()) or not getattr(p, "image", ""):
+        used_by = tuple(getattr(p, "used_by", ()))
+        if not used_by:
             continue
-        repo = _image_repo(p.image)
-        if repo in local_repos:
-            rows.append({"label": p.name, "status": "ok", "detail": f"image {repo} present"})
-        else:
-            rows.append(
-                {
-                    "label": p.name,
-                    "status": "warn",
-                    "detail": (
-                        f"image repo {repo} not pulled (used by "
-                        f"{', '.join(p.used_by)}) — first slot start will pull it, "
-                        f"or pre-pull: podman pull {p.image}"
-                    ),
-                },
-            )
+        try:
+            profile = catalog.resolve(p.name)
+        except Exception:
+            continue
+        for slot_name in used_by:
+            try:
+                slot_cfg = load_slot_config(slot_name).model_dump(mode="python")
+                image = _resolve_image_ref(slot_cfg, profile)
+            except Exception:
+                continue
+            repo = _image_repo(image)
+            if repo in local_repos:
+                rows.append({"label": slot_name, "status": "ok", "detail": f"image {repo} present"})
+            else:
+                rows.append(
+                    {
+                        "label": slot_name,
+                        "status": "warn",
+                        "detail": (
+                            f"image repo {repo} not pulled (profile {p.name}) — first slot "
+                            f"start will pull it, or pre-pull: podman pull {image}"
+                        ),
+                    },
+                )
     return rows
 
 

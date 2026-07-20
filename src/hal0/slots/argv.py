@@ -98,6 +98,30 @@ MANAGED_ARGS_DENYLIST: frozenset[str] = frozenset(
     }
 )
 
+# ── Slot hardware-flag partition (spec-hw-slot-ownership §5) ──────────────────
+#
+# The grid-owned hardware flags: the physical/placement knobs the SLOT owns as
+# typed fields (``device`` → ``-dev`` + GPU-visibility, ``n_gpu_layers`` →
+# ``-ngl``, ``threads`` → ``--threads``). This is the single source of truth for
+# the partition guard: a model / profile freeform-flag save HARD-REJECTS any
+# flag in this set with a "belongs on the slot" message (symmetric to the §21.7
+# ``MANAGED_ARGS_DENYLIST`` hard-reject). ``-dev`` is also enum-owned (device).
+#
+# Both spellings are listed so a direct membership test (server reject OR the
+# client-side model-drawer mirror) catches either form without first routing the
+# token through ``_canon()``; ``_canon()`` also maps every short form here onto
+# its long partner, so a canonicalising caller matches the long entry too.
+SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--n-gpu-layers",
+        "-ngl",
+        "--device",
+        "-dev",
+        "--threads",
+        "-t",
+    }
+)
+
 # Segment labels whose tokens are free-form / caller-supplied rather than
 # hal0-computed, and therefore must be screened against
 # ``MANAGED_ARGS_DENYLIST`` before they're merged in:
@@ -200,6 +224,35 @@ def _deny_managed_flags(tokens: list[str], *, segment: str) -> None:
             "these from the slot/model configuration and they cannot be "
             "overridden via extra_args",
             code="slot.managed_arg_denied",
+            details={"segment": segment, "flags": offenders},
+        )
+
+
+def _deny_slot_hardware_flags(tokens: list[str], *, segment: str) -> None:
+    """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set a slot-hardware flag.
+
+    The partition guard for spec-hw-slot-ownership §5: a MODEL / PROFILE
+    freeform-flag save must not carry the grid-owned hardware flags
+    (``-ngl``/``--n-gpu-layers``, ``-dev``/``--device``, ``--threads``/``-t``) —
+    those belong on the slot's typed hardware grid (device · NGL · THREADS), not
+    the device-agnostic model/profile tune. Symmetric to
+    :func:`_deny_managed_flags`, but with a "belongs on the slot" message + its
+    own ``slot.hardware_flag_denied`` code so the surface can point the operator
+    at the right editor. ``_split_pairs`` canonicalises every short spelling onto
+    its long partner, so both forms are caught by a single membership test.
+    """
+    offenders: list[str] = []
+    for pair in _split_pairs(tokens):
+        if pair.canon is not None and pair.canon in SLOT_HARDWARE_FLAGS:
+            assert pair.flag is not None
+            offenders.append(pair.flag)
+    if offenders:
+        flags = ", ".join(repr(f) for f in offenders)
+        raise BadRequest(
+            f"{segment} may not set hardware flag(s) {flags}; these belong on "
+            "the slot's hardware grid (device / NGL / THREADS), not the "
+            "device-agnostic model/profile tune. Set them on the slot instead.",
+            code="slot.hardware_flag_denied",
             details={"segment": segment, "flags": offenders},
         )
 
@@ -385,6 +438,7 @@ __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
     "MANAGED_ARGS_DENYLIST",
+    "SLOT_HARDWARE_FLAGS",
     "UNTRUSTED_SEGMENT_LABELS",
     "FlagProvenance",
     "NormalizedArgv",

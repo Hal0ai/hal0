@@ -48,9 +48,8 @@ _FULL_ENTRY = {
     "mmproj": "/models/qwen3-4b-mmproj.gguf",
     "defaults": {
         "context_size": 8192,
-        "n_gpu_layers": -1,
         "rope_freq_base": 1000000.0,
-        "extra_args": "--threads 8",
+        "extra_args": "-b 8192",
         "chat_template": "chatml",
         "profile": "balanced",
     },
@@ -91,9 +90,8 @@ class TestLosslessImport:
 
         assert got.defaults is not None
         assert got.defaults.context_size == 8192
-        assert got.defaults.n_gpu_layers == -1
         assert got.defaults.rope_freq_base == 1000000.0
-        assert got.defaults.extra_args == "--threads 8"
+        assert got.defaults.extra_args == "-b 8192"
         assert got.defaults.chat_template == "chatml"
         assert got.defaults.profile == "balanced"
 

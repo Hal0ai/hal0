@@ -94,7 +94,7 @@ _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
 # TTS is engine-selected WITHIN the single ``tts`` slot: the operator picks a
 # device in the voice.tts card and the slot swaps which provider it runs.
 #   - cpu      → Kokoro (provider ``kokoro``, profile ``tts``)
-#   - gpu-rocm → Qwen3-TTS (provider ``qwen3tts``, profile ``tts-qwen3``)
+#   - gpu-rocm → Qwen3-TTS (provider ``qwen3tts``, profile ``qwen3-tts``)
 # Each entry feeds both the catalog enumeration below and ``_profile_for_fit``
 # so the picker and the apply path agree on which profile/provider a device
 # implies.
@@ -103,13 +103,13 @@ _TTS_ENGINES: tuple[dict[str, str], ...] = (
         "id": "kokoro-v1",
         "device": "cpu",
         "provider": "kokoro",
-        "profile": "tts",
+        "profile": "kokoro",
     },
     {
         "id": "qwen3-tts",
         "device": "gpu-rocm",
         "provider": "qwen3tts",
-        "profile": "tts-qwen3",
+        "profile": "qwen3-tts",
     },
 )
 
@@ -120,14 +120,14 @@ TTS_DEVICE_TO_PROFILE: dict[str, str] = {e["device"]: e["profile"] for e in _TTS
 
 #: GPU TTS resolves to Qwen3 regardless of which GPU backend the card offers
 #: (only ROCm is wired today, but a future Vulkan TTS engine would slot here).
-_TTS_GPU_PROFILE = "tts-qwen3"
+_TTS_GPU_PROFILE = "qwen3-tts"
 
 
 def tts_profile_for_device(device: str) -> str:
     """Return the TTS slot profile a device selection implies.
 
     The engine switch: ``cpu`` → Kokoro's ``tts`` profile, any GPU backend
-    → Qwen3's ``tts-qwen3`` profile. Unknown/empty devices fall back to the
+    → Qwen3's ``qwen3-tts`` profile. Unknown/empty devices fall back to the
     CPU Kokoro profile (the safe default — it needs no GPU passthrough).
     """
     if device in TTS_DEVICE_TO_PROFILE:

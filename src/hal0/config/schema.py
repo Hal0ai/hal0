@@ -353,6 +353,56 @@ class SlotConfig(BaseModel):
             "unchanged behaviour."
         ),
     )
+    # ── Hardware grid (spec-hw-slot-ownership §2) ────────────────────────
+    # The slot owns the physical/placement layer as typed fields:
+    # ``device`` (class+backend enum, above) · ``n_gpu_layers`` (NGL) ·
+    # ``threads`` · ``binary`` (runner image ref). Plus an optional
+    # ``image_pin`` escape hatch. Reverses the spec-flags-ownership §5 fold
+    # that moved NGL into ``model.defaults.n_gpu_layers``: hardware is
+    # single-owner on the slot, the model stays logical/device-agnostic.
+    n_gpu_layers: int = Field(
+        default=-1,
+        description=(
+            "NGL — layers to offload to GPU; emits ``-ngl``. Authoritative on "
+            "the slot (spec-hw-slot-ownership §2, reversing the §5 fold into "
+            "model.defaults.n_gpu_layers). -1 = all layers, 0 = CPU only. "
+            "Distinct from the nested [model].n_gpu_layers (ModelConfig), which "
+            "the one-shot migration folds into this field and then sunsets."
+        ),
+    )
+    threads: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "THREADS — CPU threads for the runner; emits ``--threads`` "
+            "(spec-hw-slot-ownership §2). 0 = unset → the launcher omits "
+            "``--threads`` and lets the runtime pick its own default."
+        ),
+    )
+    binary: str = Field(
+        default="",
+        description=(
+            "BINARY — the runner image ref: a key into "
+            "hal0.runners.RUNNER_IMAGES (container build) that resolves the "
+            "slot's launch image (spec-hw-slot-ownership §2/§3). Replaces the "
+            "sunset model.preferred_runner. Its ``supported_backends`` is "
+            "fit-check metadata, NOT a selector — a multi-backend image is "
+            "disambiguated by ``device``, never by BINARY. Empty = derive the "
+            "HW-gated default from ``device`` (hal0.runners.runner_for_backend)."
+        ),
+    )
+    image_pin: str | None = Field(
+        default=None,
+        description=(
+            "Optional image escape hatch (spec-hw-slot-ownership §3): a fully "
+            "resolved image ref that overrides RUNNER_IMAGES[binary] for this "
+            "slot (debug build / A-B / rollback-to-last-known-good). Canonical "
+            "TOML key ``image_pin``; the prior ``image`` / ``[slot].image`` "
+            "nestings collapse into it in the migration lane. None (default) = "
+            "use the BINARY-resolved default image. A non-default pin is shown "
+            "on the slot card so drift is never hidden."
+        ),
+    )
     provider: str = Field(
         default="llama-server",
         description=(
@@ -1051,15 +1101,13 @@ class ProfileConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    # HAL0-SUNSET: v1.0.0 — images belong to RUNNERS (spec-flags-ownership §7).
-    # The profile.image pin is the last crosscutting image layer; ML-4 already
-    # directs image out of profiles (RUNNER_IMAGES[runner], digest-pinned). This
-    # field is an expiring pin honored by container._resolve_image_ref until the
-    # Runtimes-panel flow retires it. Left required to keep profiles.toml valid.
-    image: str = Field(
-        ...,
-        description="Container image ref, e.g. ghcr.io/hal0ai/…:rocm-7.2.4-rocmfp4-server.",
-    )
+    # spec-hw-slot-ownership §3: ``image`` is GONE from profiles — a profile is a
+    # device-agnostic tune template. The image is slot-owned
+    # (``slot.image_pin or RUNNER_IMAGES[slot.binary]``); the deploy-window
+    # migration (hal0.config.migrations.hw_slot_ownership) folds any prior
+    # profile.image onto its slots and strips the key, and
+    # ``loader.load_profiles_config`` drops a stray ``image`` key from an
+    # un-migrated profiles.toml so the field's removal is load-safe.
     flags: str = Field(
         default="",
         description="Bench-tuned llama-server CLI flags (no model/port/ctx args).",
@@ -1116,13 +1164,6 @@ class ProfileConfig(BaseModel):
             "the quant from the model, not this field."
         ),
     )
-
-    @field_validator("image")
-    @classmethod
-    def image_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("profile image must not be empty")
-        return v
 
 
 class ProfilesConfig(BaseModel):

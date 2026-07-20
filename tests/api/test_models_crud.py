@@ -144,7 +144,7 @@ def test_scan_with_rows_persists_user_overrides(
                     "name": "User Chosen Name",
                     "backends": ["vulkan"],
                     "capabilities": ["embed"],
-                    "defaults": {"context_size": 8192, "n_gpu_layers": -1},
+                    "defaults": {"context_size": 8192},
                 }
             ]
         },
@@ -160,7 +160,6 @@ def test_scan_with_rows_persists_user_overrides(
     assert entry["backends"] == ["vulkan"]
     assert entry["capabilities"] == ["embed"]
     assert entry["defaults"]["context_size"] == 8192
-    assert entry["defaults"]["n_gpu_layers"] == -1
 
     # model.registered fired with source=scan.
     events = _events_since(crud_client, pre, "model.registered")
@@ -337,46 +336,9 @@ def test_put_profile_change_does_not_rematerialize_extra_args(
     assert body["defaults"]["extra_args"] == "-b 1024 -fa on"
 
 
-# ── Deliverable 2: preferred_runner is writable + validated ────────────────────
-
-
-def test_put_preferred_runner_valid_key_persists(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    fpath = crud_models_root / "pr.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "pr", "path": str(fpath)})
-    r = crud_client.put("/api/models/pr", json={"preferred_runner": "cpu"})
-    assert r.status_code == 200, r.text
-    assert r.json()["preferred_runner"] == "cpu"
-
-
-def test_put_preferred_runner_unknown_key_rejected(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    fpath = crud_models_root / "pr2.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "pr2", "path": str(fpath)})
-    r = crud_client.put("/api/models/pr2", json={"preferred_runner": "does-not-exist"})
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.unknown_runner"
-
-
-def test_put_preferred_runner_null_clears(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    fpath = crud_models_root / "pr3.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post(
-        "/api/models",
-        json={"id": "pr3", "path": str(fpath), "preferred_runner": "cpu"},
-    )
-    r = crud_client.put("/api/models/pr3", json={"preferred_runner": None})
-    assert r.status_code == 200, r.text
-    assert r.json()["preferred_runner"] is None
+# ── Deliverable 2 (REMOVED): preferred_runner was a model field, now slot-owned
+# (spec-hw-slot-ownership §2/§3 — SlotConfig.binary). The model write path no
+# longer validates or persists it; the former put/clear/reject tests are gone.
 
 
 # ── Deliverable 4: O10 guard — bare double-quoted JSON eaten by the shell ──────
@@ -440,24 +402,10 @@ def test_create_screens_managed_extra_args(
     assert crud_client.get("/api/models/cs1").status_code == 404
 
 
-def test_create_screens_unknown_preferred_runner(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    fpath = crud_models_root / "cs2.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    r = crud_client.post(
-        "/api/models",
-        json={"id": "cs2", "path": str(fpath), "preferred_runner": "does-not-exist"},
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.unknown_runner"
-
-
 def test_validate_accepts_clean_body(crud_client: TestClient) -> None:
     r = crud_client.post(
         "/api/models/validate",
-        json={"defaults": {"extra_args": "-b 8192 --flash-attn on"}, "preferred_runner": "cpu"},
+        json={"defaults": {"extra_args": "-b 8192 --flash-attn on"}},
     )
     assert r.status_code == 200, r.text
     assert r.json()["ok"] is True
@@ -473,6 +421,71 @@ def test_validate_rejects_managed_extra_args_without_writing(crud_client: TestCl
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.managed_arg_denied"
     assert crud_client.get("/api/models/should-not-persist").status_code == 404
+
+
+# ── spec-hw-slot-ownership §5: model rejects slot-hardware flags ───────────────
+
+
+def test_create_rejects_slot_hardware_threads(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """POST create rejects a grid-owned hardware flag (--threads) in
+    defaults.extra_args — it belongs on the slot, not the device-agnostic
+    model (spec-hw-slot-ownership §5). Nothing is persisted."""
+    fpath = crud_models_root / "hw1.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "hw1",
+            "path": str(fpath),
+            "defaults": {"extra_args": "--flash-attn on --threads 8"},
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+    assert "slot" in r.json()["error"]["message"].lower()
+    assert crud_client.get("/api/models/hw1").status_code == 404
+
+
+def test_put_rejects_slot_hardware_ngl(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """PUT rejects -ngl in defaults.extra_args with the slot-hardware envelope
+    (not the generic managed-arg one), even though -ngl is in both sets — the
+    more specific "belongs on the slot" message is checked first."""
+    fpath = crud_models_root / "hw2.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "hw2", "path": str(fpath)})
+    r = crud_client.put(
+        "/api/models/hw2",
+        json={"defaults": {"extra_args": "-b 2048 -ngl 99"}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+def test_validate_rejects_slot_hardware_device(crud_client: TestClient) -> None:
+    """/validate dry-run screens slot-hardware flags too, without writing."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"defaults": {"extra_args": "-fa on --device ROCm0"}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+def test_validate_accepts_device_agnostic_tune(crud_client: TestClient) -> None:
+    """A real device-agnostic tune (batch/flash-attn/KV-quant) with no hardware
+    flags passes the §5 partition guard."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"defaults": {"extra_args": "-b 2048 -ub 512 -fa on -ctk q8_0"}},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
 
 
 # ── Deliverable 3: duplicate-model endpoint ────────────────────────────────────
@@ -531,14 +544,14 @@ def test_duplicate_with_profile_stamps_flags_into_defaults(
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "dup-prof", "path": str(fpath)})
 
-    resolved = ProfileCatalog().resolve("cpu-llm")
+    resolved = ProfileCatalog().resolve("cpu-chat")
     r = crud_client.post(
         "/api/models/dup-prof/duplicate",
-        json={"new_id": "dup-prof-cpu", "profile": "cpu-llm"},
+        json={"new_id": "dup-prof-cpu", "profile": "cpu-chat"},
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["defaults"]["profile"] == "cpu-llm"
+    assert body["defaults"]["profile"] == "cpu-chat"
     assert body["defaults"]["extra_args"] == resolved.flags
 
     # Source keeps no stamped defaults — it was never mutated.

@@ -1,261 +1,91 @@
-# Seed profile catalog — shipped with hal0, returned by `load_profiles_config()`
-# when /etc/hal0/profiles.toml is absent so GET /api/profiles is always
-# populated on a fresh install.
+# hal0 1.0 seeded profile catalog.
 #
-# Externalized from hal0.config.schema.SEED_PROFILES (P3-schema, spec Part A).
-# Loaded + validated by hal0.config.seeds.seed_profiles(); schema.py keeps a
-# bottom-of-module import shim (`SEED_PROFILES = _seeds.seed_profiles()`) so
-# every existing `from hal0.config.schema import SEED_PROFILES` call site is
-# unaffected.
+# Seeds are small, device-agnostic workload templates. Physical placement,
+# GPU offload, CPU threads, runner binary, and image pins belong to slots.
+# Model-family quirks belong in family_defaults.toml and per-model defaults.
+# Backend-specific experiments are clone-only examples, not catalog seeds.
 #
-# Image-pin sentinels: any `image` value starting with "@" is a placeholder
-# resolved by hal0.config.seeds against the still-in-schema.py image
-# constants (DEFAULT_ROCMFPX_IMAGE / FALLBACK_VULKAN_IMAGE /
-# FALLBACK_CUDA_IMAGE) — see the ML-runner handshake (spec §H). Do NOT
-# hardcode a resolved digest here for the ROCmFPX/Vulkan-fallback lanes; that
-# would fork the pin the ML-runner registry is about to own. Non-rocmfpx
-# images (flm, kokoro, qwen3tts, the upstream llama.cpp CUDA image, the
-# comfyui digest) are literal — they are not part of the ROCmFPX pin.
-#
-# Slugs are backend-agnostic workload names — the `backend` field (not the
-# slug) carries the ROCm/Vulkan choice, and the card chip renders the backend
-# as colour, so the slug no longer repeats it. GPU profiles set `backend`;
-# non-GPU profiles (npu/cpu/img) omit it and let `device_class` drive display.
-#
-# §7.1a / ML-5: `mtp` on every profile below is INFORMATIONAL ONLY — it is
-# no longer read by resolve_profile_flags()/the launch path. MTP is a MODEL
-# capability now (ModelDefaults.mtp / the registry 'mtp' tag), gated by the
-# launching runner's supports.mtp. `--jinja` is likewise no longer a profile
-# flag — it's injected as a runner capability at launch time (default-on
-# for every llama-server runner, suppressible via ModelDefaults.jinja =
-# false), which is why it no longer appears in any flags string below.
+# `mtp` remains on the public profile shape for one release as informational
+# compatibility metadata. It is not read by launch; model capability and the
+# selected slot runner decide MTP.
 
-[profile.rocm]
-# Basic general-purpose ROCm GPU LLM profile (Strix Halo toolbox image).
-# Intentionally minimal: -ngl 999 (offload all), -fa on (flash attn).
-# --jinja is injected as a runner capability at launch (see the module
-# header). Per-model KV/batch/MTP tuning lives in the model's
-# defaults.extra_args. mtp stays False (informational) — the ROCmFPX MTP
-# capability is model-driven now; the old rocmfpx-rocm / vkfpx-* slugs
-# were consolidated into the 2x2 (backend x {dense,moe}) grid in 0.9.5.
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "-ngl 999 -fa on"
+[profile.chat]
+flags = "-fa on"
 mtp = false
 device_class = "gpu"
-backend = "rocm"
-intent = "ROCm"
-quant = "FP4"
+intent = "General chat"
+quant = ""
 
-# ROCmFPX runner — 2x2 grid (backend x {dense,moe}). Replaces the
-# rocmfpx-rocm / vkfpx-moe / vkfpx-dense slugs (consolidated 0.9.5).
-# Image = DEFAULT_ROCMFPX_IMAGE (see the constant for lineage).
-
-[profile.rocm-dense]
-# ROCm0/HIP + ROCmFP4 DENSE weights. Sustained-decode win on Strix Halo
-# (operator memory: ROCm lane wins sustained decode, Vulkan lane wins
-# prefill by ~+24% PP). --no-mmap + --ctx-checkpoints are the dense
-# workload's preferred memory pattern; per-model KV + spec-draft
-# tuning come from the model's defaults.extra_args.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev ROCm0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --metrics --no-webui --ctx-checkpoints 0 --checkpoint-every-n-tokens -1"
-mtp = true
+[profile.chat-long-context]
+# Logical long-context tune; model-family defaults may override KV policy.
+flags = "-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui"
+mtp = false
 device_class = "gpu"
-backend = "rocm"
-intent = "ROCmFPX · DENSE · MTP (sustained-decode)"
+intent = "Long-context chat"
+quant = ""
+
+[profile.moe]
+# FPX-MOE logical tune distilled from the validated Saber launch card.
+# Hardware and MTP draft-device flags are deliberately slot/model-owned.
+flags = "--jinja -c 32768 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -fa on -b 2048 -ub 512 -tb 32 -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --parallel 1 --no-mmproj --metrics --no-webui --slot-prompt-similarity 0.0"
+mtp = false
+device_class = "gpu"
+intent = "MoE chat · Saber tune"
 quant = "ROCmFP4"
 
-[profile.rocm-moe]
-# ROCm0/HIP + ROCmFPX MoEQuality weights. Vulkan is the recommended
-# lane for MoE sustained-decode (better t/s); this profile is the
-# prefill-bound / -dev ROCm0 opt-in for operators who want the same
-# backend lane across all their ROCmFPX slots. -sm none (single GPU)
-# and --no-context-shift per the validated Tool-Eval card.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev ROCm0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
-mtp = true
+[profile.dense]
+# FPX-DNSE logical tune distilled from the validated Chadrock launch card.
+# The 131072 context target is a workload default; slots still own hardware.
+flags = "--jinja -c 131072 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -fa on -b 2048 -ub 512 -tb 32 -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --parallel 1 --no-mmproj --metrics --no-webui --slot-prompt-similarity 0.0"
+mtp = false
 device_class = "gpu"
-backend = "rocm"
-intent = "ROCmFPX · MOE · MTP (prefill-bound / -dev ROCm0)"
-quant = "ROCmFPX"
-
-[profile.vulkan-dense]
-# Vulkan0 + ROCmFP4 DENSE weights. Prefill win (~+24% PP) for prefill-
-# bound dense workloads (RAG / long-context reads / re-prefill after a
-# cache miss). Small ubatch wins on gfx1151; per-model KV + spec-draft
-# tuning come from the model's defaults.extra_args.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev Vulkan0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
-mtp = true
-device_class = "gpu"
-backend = "vulkan"
-intent = "VULKFPX · DENSE · MTP (prefill-bound)"
+intent = "Dense chat · long context"
 quant = "ROCmFP4"
 
-[profile.vulkan-moe]
-# Vulkan0 + ROCmFPX MoEQuality weights. Best sustained-decode t/s for
-# MoE on Strix Halo. The validated Tool-Eval card. External chat
-# templates (e.g. Froggeric Qwen fixed) are set per-slot via
-# [server].extra_args.
-image = "@DEFAULT_ROCMFPX_IMAGE"
-flags = "-ngl 999 -fa on -dev Vulkan0 -sm none -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --metrics --no-webui"
-mtp = true
-device_class = "gpu"
-backend = "vulkan"
-intent = "VULKFPX · MOE · MTP (best decode t/s)"
-quant = "ROCmFPX"
-
-[profile.rocm-longctx]
-# Dense long-context template: q8_0 KV halves the KV-cache footprint so
-# more context fits in the shared pool, plus `--poll` tuning for steady
-# decode. Safe on gemma models — FAMILY_DEFAULTS pins the gemma family
-# back to f16 KV (iSWA regresses on quantized KV). mtp False.
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "-ngl 999 -fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --threads 16 --no-mmap --no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui"
+[profile.embedding]
+flags = "--embedding -fa on -b 8192 -ub 8192 --no-mmap"
 mtp = false
 device_class = "gpu"
-backend = "rocm"
-intent = "Dense · long-context (q8_0 KV)"
-quant = "FP4"
-
-[profile.vulkan]
-# Basic general-purpose Vulkan (RADV) GPU LLM profile. Intentionally
-# minimal: -ngl 999, -fa on (--jinja is injected as a runner capability at
-# launch — see the module header). No KV quant (defaults to f16, which
-# is gemma-safe) — per-model KV/batch tuning lives in the model's
-# defaults.extra_args.
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "-ngl 999 -fa on"
-mtp = false
-device_class = "gpu"
-backend = "vulkan"
-intent = "Vulkan"
-quant = "Q4_K_M"
-
-[profile.cuda]
-# NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. The image is
-# UPSTREAM llama.cpp (ghcr.io/ggml-org/llama.cpp:server-cuda), not the
-# AMD Strix-Halo toolbox family the other GPU profiles use. Flags
-# mirror the vulkan profile's conservative structure (no AMD-specific
-# tuning, no KV-quant assumptions); requires nvidia-container-toolkit
-# (CDI) for GPU passthrough — see providers/_gpu.nvidia_cdi_devices.
-# NOTE: literal (not a sentinel) — this is the upstream llama.cpp image,
-# not a ROCmFPX/Vulkan-fallback pin the ML-runner registry is absorbing.
-image = "ghcr.io/ggml-org/llama.cpp:server-cuda"
-flags = "-ngl 999 -fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp = false
-device_class = "gpu"
-backend = "cuda"
-intent = "CUDA · experimental"
-quant = "Q4_K_M"
-
-[profile.embed]
-# GPU embedding template (llama-server --embedding). Serves
-# /v1/embeddings for Qwen3-Embedding / nomic / bge GGUFs. -ub must
-# cover the longest single input: pooled embeddings run the whole
-# sequence in ONE physical ubatch, so -ub 8192 (== -b) matches the
-# 8k-token models and larger inputs would truncate/fail on a smaller
-# ubatch (llama.cpp #6263/#11105). Pooling is left to GGUF metadata
-# (Qwen3-Embedding pins --pooling last via its model defaults); no KV
-# quant — meaningless for a single-pass encoder. GPU because these
-# tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap"
-mtp = false
-device_class = "gpu"
-backend = "rocm"
 intent = "Embeddings"
 quant = ""
 
-[profile.rerank]
-# GPU reranker template (llama-server --reranking → /v1/rerank, implies
-# embedding-mode + rank pooling). Sized for bge-reranker-v2-m3
-# (8192-token query+doc pairs): -ub 8192 must cover the longest pair or
-# the request truncates. MUST be a SEPARATE instance from `embed` —
-# combining --embedding and --reranking on one server yields all-zero
-# scores (llama.cpp #20085). For parallel scoring raise ctx via the
-# slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap"
+[profile.reranking]
+flags = "--reranking -fa on -b 8192 -ub 8192 --no-mmap"
 mtp = false
 device_class = "gpu"
-backend = "rocm"
 intent = "Reranking"
 quant = ""
 
-[profile.vulkan-embed]
-# Vulkan-backend sibling of `embed`. The rocm-backed `embed`/`rerank`
-# seeds fail the #807 device/backend coherence check on a gpu-vulkan box,
-# so a Vulkan-only or CUDA-less GPU host has no device-coherent embed
-# lane — derive_profile used to fall through to the plain `vulkan` CHAT
-# profile, which never emits --embedding and silently serves
-# /v1/completions instead of /v1/embeddings. Same llama-server / flag
-# bundle as `embed`, just on the RADV image. See profile_derive.derive_profile.
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap"
+[profile.cpu-chat]
+# No --threads here: thread count is a slot hardware fact.
+flags = "--threads-batch 8 -b 256 -ub 256 --parallel 1"
 mtp = false
-device_class = "gpu"
-backend = "vulkan"
-intent = "Embeddings · Vulkan"
-quant = ""
-
-[profile.vulkan-rerank]
-# Vulkan-backend sibling of `rerank` (see `vulkan-embed` for why this
-# exists). MUST be a SEPARATE instance from vulkan-embed — combining
-# --embedding and --reranking on one server yields all-zero scores
-# (llama.cpp #20085).
-image = "@DEFAULT_ROCMFPX_IMAGE" # universal AMD-GPU default (Vulkan-portable)
-flags = "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap"
-mtp = false
-device_class = "gpu"
-backend = "vulkan"
-intent = "Reranking · Vulkan"
+device_class = "cpu"
+intent = "CPU chat"
 quant = ""
 
 [profile.flm]
-image = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
 flags = ""
 mtp = false
 device_class = "npu"
-intent = "FLM · NPU"
+intent = "FLM"
 quant = "W4ABF16"
 
-[profile.tts]
-image = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+[profile.kokoro]
 flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 mtp = false
 device_class = "cpu"
-intent = "TTS · CPU"
+intent = "Kokoro TTS"
 quant = ""
 
-[profile.tts-qwen3]
-image = "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
+[profile.qwen3-tts]
 flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
 mtp = false
 device_class = "gpu"
-backend = "rocm"
-intent = "TTS · GPU"
+intent = "Qwen3-TTS"
 quant = "BF16"
 
-[profile.cpu-llm]
-# The Vulkan toolbox image runs in CPU-only mode when no GPU devices
-# are passed to the container (llama-server auto-selects GGML_CPU).
-# CPU-optimal flags: no flash-attn (not available without GPU), smaller
-# batch to limit peak RAM, and a thread count sensible for a typical
-# multi-core host. backend=None keeps the #807 coherence check happy.
-# NOTE: mmap is intentionally left ON here (no --no-mmap) — the CPU-only
-# path is the documented exception to the universal-GPU --no-mmap rule
-# (2026-07-04 Strix Halo consolidation, fact 6): CPU-only wants the page
-# cache (faster re-loads, no GTT involved); --no-mmap would force the
-# whole model into anonymous RAM and forfeit page-cache-backed reloads.
-image = "@FALLBACK_VULKAN_IMAGE" # CPU-only: lean toolbox in CPU mode (rocmfpx is wasteful)
-flags = "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1"
-mtp = false
-device_class = "cpu"
-intent = "CPU"
-quant = "Q4_K_M"
-
 [profile.comfyui]
-image = "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
 flags = "--disable-mmap --bf16-vae --cache-none"
 mtp = false
 device_class = "img"

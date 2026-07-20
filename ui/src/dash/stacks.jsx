@@ -26,6 +26,7 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
+import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { deviceClassForToken, profileDeviceClass } from '@/lib/deviceMeta'
 import { isMtpEligibleModel } from '@/lib/normalizeApiModel'
@@ -60,7 +61,10 @@ function buildDeviceMeta(enums) {
 // mtp defaults to null = AUTO: MTP is derived from model-eligibility × profile
 // opt-in on apply, so a row carries an explicit boolean only when the user
 // forces it — no stale `mtp:false` frozen onto every row.
-const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', profile: '', mtp: null, capabilities: [] };
+// spec-hw-slot-ownership §2: a slot owns its hardware — device + BINARY (runner
+// image ref) live on the slot. `profile` stays as a device-agnostic tune
+// template (§1). `binary` empty = HW-gated default derived from `device`.
+const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', binary: '', profile: '', mtp: null, capabilities: [] };
 const BLANK = { name: '', description: '', icon: '', tags: '', slots: [{ ...BLANK_SLOT }] };
 
 // Live-slot → dot class, derived from the SHARED slot-status classifier
@@ -389,6 +393,7 @@ function fromStack(s) {
       slot: e.slot || e.name || '',
       model: e.model || '',
       device: e.device || 'gpu-rocm',
+      binary: e.binary || '',
       profile: e.profile || '',
       mtp: e.mtp ?? null, // preserve Auto (null) vs explicit on/off
       capabilities: e.capabilities || [],
@@ -408,6 +413,9 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const enums = useMetaEnums();
   const deviceMeta = useMemo(() => buildDeviceMeta(enums), [enums]);
   const deviceIds = Object.keys(deviceMeta);
+  // BINARY (runner image ref) options — RUNNER_IMAGES keys via system-info.
+  const runnerBackends = useSystemInfo().data?.backends ?? {};
+  const binaryKeys = Object.keys(runnerBackends);
 
   const create = useStackCreate();
   const update = useStackUpdate();
@@ -455,6 +463,7 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
         slot: s.slot.trim(),
         model: s.model || null,
         device: s.device || null,
+        binary: s.binary || null,
         profile: s.profile || null,
         mtp: s.mtp,
         capabilities: s.capabilities || [],
@@ -593,6 +602,23 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
                         {dm.recommended ? '★ recommended' : dm.description}
                       </span>
                     )}
+                  </label>
+                  {/* BINARY — the runner image ref (spec-hw-slot-ownership §2).
+                      Empty = HW-gated default derived from device. */}
+                  <label className="st-fld">
+                    <span className="st-fld-lbl">Binary</span>
+                    <select className="pf-input mono" value={s.binary || ''}
+                      onChange={e => setSlot(i, 'binary', e.target.value)} data-testid={`st-slot-binary-${i}`}>
+                      <option value="">— default (from device) —</option>
+                      {s.binary && !binaryKeys.includes(s.binary) && (
+                        <option value={s.binary}>{s.binary}</option>
+                      )}
+                      {binaryKeys.map(k => (
+                        <option key={k} value={k}>
+                          {k}{runnerBackends[k]?.backend ? ` · ${runnerBackends[k].backend}` : ''}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="st-fld">
                     <span className="st-fld-lbl">Profile</span>

@@ -26,6 +26,38 @@ export const MANAGED_FLAGS = [
 const MANAGED_SHORT = { "-ngl": "--n-gpu-layers", "-c": "--ctx-size" };
 const MANAGED_SET = new Set([...MANAGED_FLAGS, ...Object.keys(MANAGED_SHORT)]);
 
+// Slot-hardware flags (spec-hw-slot-ownership §5): the grid-owned hardware
+// flags a MODEL / PROFILE tune must never carry — they belong on the slot's
+// typed hardware grid (device · NGL · THREADS). Mirrors the server
+// SLOT_HARDWARE_FLAGS frozenset (hal0.slots.argv), including both long and
+// short spellings. The model/profile flag save HARD-REJECTS any of these; this
+// client check mirrors that reject inline before the PUT fires.
+export const SLOT_HARDWARE_FLAGS = [
+  "-ngl",
+  "--n-gpu-layers",
+  "-dev",
+  "--device",
+  "--threads",
+  "-t",
+];
+const SLOT_HARDWARE_SET = new Set(SLOT_HARDWARE_FLAGS);
+
+// The slot-hardware flags present in `text` (deduped, order-preserved). Empty
+// array = clean. Used by the model + profile flag editors to reject the grid-
+// owned hardware flags with a "these belong on the slot" message.
+export function findSlotHardwareFlags(text) {
+  const { tokens } = tokenizeFlags(text);
+  const seen = new Set();
+  const offenders = [];
+  for (const tok of tokens) {
+    if (SLOT_HARDWARE_SET.has(tok) && !seen.has(tok)) {
+      seen.add(tok);
+      offenders.push(tok);
+    }
+  }
+  return offenders;
+}
+
 // Where each managed flag is actually controlled from — surfaced in the inline
 // rejection so the operator knows why it's off-limits and where to set it.
 export const MANAGED_FLAG_SOURCE = {

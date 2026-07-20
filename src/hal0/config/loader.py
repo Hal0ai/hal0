@@ -526,6 +526,17 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     if not Path(target).exists():
         return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
     raw = _read_toml(Path(target))
+    # spec-hw-slot-ownership §3: ``image`` was removed from ProfileConfig. Drop a
+    # stray ``image`` key an un-migrated (or hand-edited) profiles.toml still
+    # carries, BEFORE validation — ProfileConfig is ``extra="forbid"``, so an
+    # unknown ``image`` would otherwise hard-fail load on a box that hasn't run
+    # `hal0 slot migrate-hw` yet. Only ``image`` is dropped; every other typo
+    # still raises. The deploy-window migration removes the key permanently.
+    profiles_raw = raw.get("profile")
+    if isinstance(profiles_raw, dict):
+        for entry in profiles_raw.values():
+            if isinstance(entry, dict):
+                entry.pop("image", None)
     try:
         cfg = ProfilesConfig.model_validate(raw)
     except Exception as exc:

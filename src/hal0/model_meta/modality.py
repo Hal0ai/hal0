@@ -205,14 +205,26 @@ def derive_modalities_from_model_info(model_info: Mapping[str, Any]) -> list[Mod
 
     Accepts the shape :meth:`hal0.registry.model.Model.model_dump` (or the
     ``_resolve_model_info``-style dict SlotManager already builds):
-    ``mmproj``, ``preferred_runner``, ``metadata.pooling_type``, ``id``,
+    ``mmproj``, ``backends``, ``metadata.pooling_type``, ``id``,
     ``modalities_override``.
+
+    spec-hw-slot-ownership: the model no longer carries ``preferred_runner`` —
+    the runtime-family hint that drives ASR/TTS/IMAGE now comes from the model's
+    own ``backends`` (single-purpose models carry ``["moonshine"]`` / ``["kokoro"]``
+    / ``["flm"]`` / ``["qwen3tts"]`` / ``["comfyui"]``). A leftover
+    ``preferred_runner`` key on an unmigrated dump is honoured as a fallback.
     """
     metadata = model_info.get("metadata") or {}
     pooling_type = metadata.get("pooling_type") if isinstance(metadata, Mapping) else None
+    _family_runners = {"flm", "moonshine", "kokoro", "qwen3tts", "comfyui"}
+    backends = model_info.get("backends") or []
+    runner_hint = next(
+        (b for b in backends if isinstance(b, str) and b in _family_runners),
+        None,
+    ) or model_info.get("preferred_runner")
     return derive_modalities(
         mmproj=model_info.get("mmproj"),
-        preferred_runner=model_info.get("preferred_runner"),
+        preferred_runner=runner_hint,
         pooling_type=pooling_type,
         model_id=str(model_info.get("id") or model_info.get("_model_key") or ""),
         explicit=model_info.get("modalities_override"),
