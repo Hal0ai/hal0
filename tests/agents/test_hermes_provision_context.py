@@ -1,34 +1,33 @@
-"""PhaseContext / PhaseIO / Phase-graph plumbing (issue #702).
+"""Linear-installer plumbing: InstallIO / _StepCtx / InstallReport.
 
-Pins the explicit-pipeline contract:
+Replaces the retired PhaseIO / PhaseContext / Phase-graph contract. Pins:
 
-* ``PhaseIO`` defaults bind the real IO seams — constructing it with no
-  arguments must be production behaviour, byte-for-byte.
-* ``PhaseContext.output_of(name)`` raises unless the calling phase
-  declared ``name`` in its needs; declared reads return the target
-  phase's checkpoint ``details`` dict (empty when absent — the
-  cross-run config_write→mcp_wire read on a fresh install).
-* ``_validate_phase_graph`` rejects, at import time, a PHASES ordering
-  that violates a declared need.
+* ``InstallIO`` defaults bind the real IO seams (default-constructed = production)
+  and it is frozen.
+* ``_StepCtx.output_of(name)`` returns an earlier step's details, empty when the
+  step hasn't run — no needs-graph enforcement.
+* the ``_INSTALL_STEPS`` order (mcp_wire before config_write) and the
+  ``report.converged`` signal.
+* RELOCATE(brain-lane) landed: persona_seed, namespace_register,
+  brain_profile_seed, brain_profile_mcp_wire, self_report no longer appear
+  in ``_INSTALL_STEPS`` at all — they run from the hal0-api boot lifespan
+  instead (src/hal0/api/__init__.py). The step functions stay importable
+  and directly callable for unit coverage + lifespan reuse.
 """
 
 from __future__ import annotations
+
+import inspect
 
 import pytest
 
 from hal0.agents import hermes_provision as hp
 
-
-def _ok_phase(_ctx: hp.PhaseContext) -> hp.PhaseResult:
-    return hp.PhaseResult(status=hp.PhaseStatus.OK)
+# ── InstallIO ────────────────────────────────────────────────────────────────
 
 
-# ── PhaseIO ──────────────────────────────────────────────────────────────────
-
-
-def test_phaseio_defaults_bind_real_seams() -> None:
-    """A default-constructed PhaseIO is the production wiring."""
-    io = hp.PhaseIO()
+def test_installio_defaults_bind_real_seams() -> None:
+    io = hp.InstallIO()
     assert io.http_get is hp._http_get
     assert io.fetch_slots is hp._fetch_slots
     assert io.fetch_model_contexts is hp._fetch_model_contexts
@@ -36,190 +35,151 @@ def test_phaseio_defaults_bind_real_seams() -> None:
     assert io.mcp_memory_call is hp._mcp_memory_call
     assert io.install_venv is hp._install_venv
     assert io.read_env_probe is hp._read_env_probe
+    assert io.load_config is hp._load_hal0_config
     assert io.run is hp.subprocess.run
 
 
-def test_phaseio_is_frozen() -> None:
-    io = hp.PhaseIO()
+def test_installio_is_frozen() -> None:
+    io = hp.InstallIO()
     with pytest.raises(AttributeError):
         io.fetch_slots = lambda: []  # type: ignore[misc]
 
 
-# ── PhaseContext.output_of ───────────────────────────────────────────────────
+# ── _StepCtx.output_of ───────────────────────────────────────────────────────
 
 
-def test_output_of_raises_on_undeclared_need() -> None:
-    state = hp.BootstrapState()
-    state.phases["mcp_wire"] = {"status": "ok", "details": {"rendered_servers": []}}
-    ctx = hp.PhaseContext(state=state, phase_name="config_write")
-    with pytest.raises(hp.PhaseNeedError, match=r"config_write.*mcp_wire"):
-        ctx.output_of("mcp_wire")
-
-
-def test_output_of_returns_declared_phase_details() -> None:
-    state = hp.BootstrapState()
-    state.phases["smoke_tests"] = {
-        "status": "ok",
-        "details": {"failures": ["chat_completions: 503"]},
-    }
-    ctx = hp.PhaseContext(
-        state=state,
-        phase_name="self_report",
-        allowed_needs=frozenset({"smoke_tests"}),
-    )
-    assert ctx.output_of("smoke_tests") == {"failures": ["chat_completions: 503"]}
-
-
-def test_output_of_returns_empty_dict_when_target_never_ran() -> None:
-    """Fresh-install posture: config_write reads mcp_wire's PREVIOUS-run
-    checkpoint, which doesn't exist on run #1 — that's an empty dict,
-    not an error (the phase falls back to its default inventory)."""
-    ctx = hp.PhaseContext(
+def test_output_of_returns_prior_step_details() -> None:
+    ctx = hp._StepCtx(
         state=hp.BootstrapState(),
-        phase_name="config_write",
-        allowed_needs=frozenset({"mcp_wire"}),
+        io=hp.InstallIO(),
+        _prior={"mcp_wire": {"rendered_servers": [{"name": "hal0-admin"}]}},
     )
+    assert ctx.output_of("mcp_wire") == {"rendered_servers": [{"name": "hal0-admin"}]}
+
+
+def test_output_of_empty_when_step_has_not_run() -> None:
+    ctx = hp._StepCtx(state=hp.BootstrapState(), io=hp.InstallIO())
     assert ctx.output_of("mcp_wire") == {}
 
 
-# ── Phase graph validation ───────────────────────────────────────────────────
+# ── pipeline shape ───────────────────────────────────────────────────────────
 
 
-def test_validate_phase_graph_accepts_ordered_needs() -> None:
-    phases = [
-        hp.Phase("a", _ok_phase),
-        hp.Phase("b", _ok_phase, needs=("a",)),
-        hp.Phase("c", _ok_phase, needs_previous=("d",)),
-        hp.Phase("d", _ok_phase, needs=("a", "b")),
+def test_install_steps_ordering() -> None:
+    names = [name for name, _fn in hp._INSTALL_STEPS]
+    assert names.index("mcp_wire") < names.index("config_write")
+    # model_automap is gone; ownership_reconcile is gone.
+    assert "model_automap" not in names
+    assert "ownership_reconcile" not in names
+
+
+def test_retired_machinery_is_gone() -> None:
+    for attr in (
+        "PHASES",
+        "Phase",
+        "PhaseContext",
+        "PhaseIO",
+        "PhaseNeedError",
+        "context_for",
+        "RunResult",
+        "run",
+        "_validate_phase_graph",
+    ):
+        assert not hasattr(hp, attr), f"{attr} should be deleted"
+
+
+_RELOCATED_BRAIN_LANE_STEPS = frozenset(
+    {
+        "persona_seed",
+        "namespace_register",
+        "brain_profile_seed",
+        "brain_profile_mcp_wire",
+        "self_report",
+    }
+)
+
+
+def test_brain_lane_steps_relocated_out_of_install() -> None:
+    """RELOCATE(brain-lane) landed: the 5 brain-lane steps no longer run as
+    part of the linear install pipeline — they moved into the hal0-api boot
+    lifespan (``_boot_seeds`` for persona_seed/brain_profile_mcp_wire, the
+    terminal ``_boot_brain_lane`` phase for namespace_register/
+    brain_profile_seed/self_report; see src/hal0/api/__init__.py).
+
+    The step FUNCTIONS themselves stay put and importable — the lifespan
+    phases call them directly (no copy-pasted body) via the same
+    InstallIO/_StepCtx seam this test module's other tests already use to
+    call them in isolation. Only their ``_INSTALL_STEPS`` membership moved.
+    """
+    names = {name for name, _fn in hp._INSTALL_STEPS}
+    assert _RELOCATED_BRAIN_LANE_STEPS.isdisjoint(names), (
+        f"still in _INSTALL_STEPS after relocation: {_RELOCATED_BRAIN_LANE_STEPS & names}"
+    )
+    assert callable(hp._phase_persona_seed)
+    assert callable(hp._phase_namespace_register)
+    assert callable(hp._phase_brain_profile_seed)
+    assert callable(hp._phase_brain_profile_mcp_wire)
+    assert callable(hp._phase_self_report)
+    # The _INSTALL_STEPS table + the InstallIO docstring above it record the
+    # relocation explicitly (RELOCATE(brain-lane) — LANDED), so a future
+    # reader can't miss it.
+    src = inspect.getsource(hp)
+    assert src.count("RELOCATE(brain-lane)") >= len(_RELOCATED_BRAIN_LANE_STEPS)
+    # _BRAIN_LANE_STEPS (the convergence-exemption set) is retired along with
+    # the markers — nothing in _INSTALL_STEPS needs the exemption anymore.
+    assert not hasattr(hp, "_BRAIN_LANE_STEPS")
+
+
+def test_relocated_steps_no_longer_special_cased_in_step_changed() -> None:
+    """_step_changed has no brain-lane exemption branch left to test — a
+    result carrying details["changed"]=True for one of the relocated names
+    now just follows the normal path (there's no caller left that would
+    ever pass one of these names in, since they're gone from
+    _INSTALL_STEPS, but the function itself should not silently resurrect
+    a special case for them)."""
+    result = hp.PhaseResult(status=hp.PhaseStatus.OK, details={"changed": True})
+    for name in _RELOCATED_BRAIN_LANE_STEPS:
+        assert hp._step_changed(name, result) is True
+    assert hp._step_changed("config_write", result) is True
+
+
+# ── InstallReport ────────────────────────────────────────────────────────────
+
+
+def test_install_report_converged_and_failed() -> None:
+    report = hp.InstallReport(hermes_home="/hh", venv="/v", agent_id="hermes")
+    report.steps = [
+        hp.InstallStep("preflight", "ok"),
+        hp.InstallStep("install", "ok", changed=True),
+        hp.InstallStep("voice_wire", "skip"),
     ]
-    hp._validate_phase_graph(phases)  # must not raise
+    assert report.ok is True
+    assert report.failed == []
+    assert report.mutated == ["install"]
+    assert report.converged is False
+
+    report.steps.append(hp.InstallStep("config_write", "fail", reason="boom"))
+    assert report.ok is False
+    assert report.failed == ["config_write"]
+    assert report.step("config_write").reason == "boom"
 
 
-def test_validate_phase_graph_rejects_need_that_follows_reader() -> None:
-    phases = [
-        hp.Phase("reader", _ok_phase, needs=("target",)),
-        hp.Phase("target", _ok_phase),
-    ]
-    with pytest.raises(ValueError, match=r"reader.*target"):
-        hp._validate_phase_graph(phases)
+# ── repair reaches persona_seed ──────────────────────────────────────────────
 
 
-def test_validate_phase_graph_rejects_unknown_need() -> None:
-    phases = [hp.Phase("reader", _ok_phase, needs=("ghost",))]
-    with pytest.raises(ValueError, match="ghost"):
-        hp._validate_phase_graph(phases)
-
-
-def test_validate_phase_graph_rejects_unknown_previous_need() -> None:
-    phases = [hp.Phase("reader", _ok_phase, needs_previous=("ghost",))]
-    with pytest.raises(ValueError, match="ghost"):
-        hp._validate_phase_graph(phases)
-
-
-def test_validate_phase_graph_rejects_previous_need_that_precedes_reader() -> None:
-    """A needs_previous target that runs BEFORE its reader is a plain
-    same-run need mislabelled as a cross-run read — reject loudly."""
-    phases = [
-        hp.Phase("target", _ok_phase),
-        hp.Phase("reader", _ok_phase, needs_previous=("target",)),
-    ]
-    with pytest.raises(ValueError, match="needs_previous"):
-        hp._validate_phase_graph(phases)
-
-
-def test_validate_phase_graph_rejects_duplicate_phase_names() -> None:
-    phases = [hp.Phase("a", _ok_phase), hp.Phase("a", _ok_phase)]
-    with pytest.raises(ValueError, match="duplicate"):
-        hp._validate_phase_graph(phases)
-
-
-# ── The real PHASES graph ────────────────────────────────────────────────────
-
-
-def test_phases_declare_the_locked_needs_graph() -> None:
-    """Pin the cross-phase edges. config-set redesign: model_automap +
-    voice_wire re-apply their overlay slice via ``hermes config set`` (no full
-    re-render), so they no longer read mcp_wire's probed-server checkpoint —
-    only config_write still does (cross-run)."""
-    by_name = {p.name: p for p in hp.PHASES}
-    # config_write reads mcp_wire's PREVIOUS-run checkpoint (mcp_wire
-    # runs after it in the list) — a cross-run edge, not a same-run one.
-    assert by_name["config_write"].needs == ()
-    assert by_name["config_write"].needs_previous == ("mcp_wire",)
-    assert by_name["model_automap"].needs == ()
-    assert by_name["voice_wire"].needs == ()
-    assert by_name["self_report"].needs == ("smoke_tests",)
-    # No other phase declares anything.
-    declared = {p.name for p in hp.PHASES if p.needs or p.needs_previous}
-    assert declared == {"config_write", "self_report"}
-
-
-def test_real_phases_graph_validates() -> None:
-    hp._validate_phase_graph(hp.PHASES)  # import already ran this; pin it anyway
-
-
-def test_phases_permutation_violating_needs_fails_loudly() -> None:
-    """Moving self_report ahead of smoke_tests must be rejected."""
-    permuted = sorted(hp.PHASES, key=lambda p: 0 if p.name == "self_report" else 1)
-    with pytest.raises(ValueError, match=r"self_report.*smoke_tests"):
-        hp._validate_phase_graph(permuted)
-
-
-def test_phases_permutation_violating_needs_previous_fails_loudly() -> None:
-    """Moving mcp_wire ahead of config_write flips the cross-run edge
-    into a same-run one — the mislabelled declaration must fail."""
-    permuted = sorted(hp.PHASES, key=lambda p: 0 if p.name == "mcp_wire" else 1)
-    with pytest.raises(ValueError, match="needs_previous"):
-        hp._validate_phase_graph(permuted)
-
-
-# ── context_for + undeclared reads through real phases ──────────────────────
-
-
-def test_context_for_carries_declared_needs() -> None:
-    ctx = hp.context_for("self_report", hp.BootstrapState())
-    assert ctx.allowed_needs == frozenset({"smoke_tests"})
-    assert ctx.phase_name == "self_report"
-    assert ctx.repair is False
-
-
-def test_context_for_rejects_unknown_phase() -> None:
-    with pytest.raises(KeyError, match="no_such_phase"):
-        hp.context_for("no_such_phase", hp.BootstrapState())
-
-
-def test_self_report_with_undeclared_needs_raises(tmp_path) -> None:
-    """A phase body that reads a checkpoint without its declared needs
-    must blow up loudly — the read is never silently empty."""
-    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
-    bare_ctx = hp.PhaseContext(state=state, phase_name="self_report")  # no allowed_needs
-    with pytest.raises(hp.PhaseNeedError):
-        hp._phase_self_report(bare_ctx)
-
-
-# ── ctx.repair replaces the _repair_flag sentinel ────────────────────────────
-
-
-def test_repair_flag_sentinel_is_gone() -> None:
-    """The smuggled state.phases['_repair_flag'] sentinel is deleted —
-    no run ever stashes or strips it again."""
-    assert not hasattr(hp, "_REPAIR_FLAG")
-    import inspect
-
-    assert "_repair_flag" not in inspect.getsource(hp.run)
-
-
-def test_persona_seed_overwrites_on_ctx_repair(tmp_path) -> None:
-    from hal0.agents import personas as P
+def test_persona_seed_overwrites_on_repair(tmp_path) -> None:
+    from hal0.agents import personas as _personas
 
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
-    out = hp._phase_persona_seed(hp.context_for("persona_seed", state))
+    ctx = hp._StepCtx(state=state, io=hp.InstallIO())
+    out = hp._phase_persona_seed(ctx)
     assert out.status == hp.PhaseStatus.OK
+
     persona_path = tmp_path / "hh" / "personas" / "hermes.toml"
     persona_path.write_text('[persona]\nid = "hermes"\ndisplay_name = "Custom"\n', encoding="utf-8")
     # No repair → operator edit survives.
-    hp._phase_persona_seed(hp.context_for("persona_seed", state))
-    assert P.load_persona("hermes", root=persona_path.parent).display_name == "Custom"
+    hp._phase_persona_seed(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert _personas.load_persona("hermes", root=persona_path.parent).display_name == "Custom"
     # repair → seeds rewritten.
-    hp._phase_persona_seed(hp.context_for("persona_seed", state, repair=True))
-    assert P.load_persona("hermes", root=persona_path.parent).display_name == "Hermes"
+    hp._phase_persona_seed(hp._StepCtx(state=state, io=hp.InstallIO(), repair=True))
+    assert _personas.load_persona("hermes", root=persona_path.parent).display_name == "Hermes"

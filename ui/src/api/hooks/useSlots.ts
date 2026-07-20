@@ -151,6 +151,12 @@ export interface Slot {
   // that fronts every chat model. These are NOT loadable/unloadable/
   // deletable slots, so `useSlots()` filters them out of the slot grid
   // and `useEndpoints()` surfaces them in the sidebar instead.
+  /** True once the heavy /api/slots aggregator has stamped live container
+   *  state onto this entry — or once reconcileEnrichment carried the last-good
+   *  enrichment forward across a dropped poll. Bare /api/status union entries
+   *  read false; the InferencePane gates a "pending" style off this so a card
+   *  doesn't flash zeroed metrics while a slow /api/slots poll is in flight. */
+  _enriched?: boolean
   /** True for synthetic upstream-backed entries (composite endpoints). */
   _synthetic?: boolean
   /** Operator-facing explanation of why this entry isn't a real slot. */
@@ -190,7 +196,14 @@ const DEFAULT_METRICS: SlotMetrics = {
 // `group` for built-in slots (primary, embed, stt, …). The v3 SlotsView
 // groups via `slots.filter(s => s.group === "chat")` etc., so without
 // inference the page renders just the header — looks blank/black.
-// Infer from BUILTIN_SLOTS conventions (primary→chat/llm, embed→embed/…).
+//
+// A slot's NAME is operator-controlled (useSlotRename lets anyone relabel
+// any slot at any time), so it is the least honest signal available here —
+// last resort only. Prefer `provider` (backend-reported, describes what the
+// slot actually IS) and semantic role keywords in the name (`includes`,
+// describing what the slot DOES) over an exact-name convention guess
+// (`name === 'primary'`), which only fires for the narrow sparse-response
+// case where the backend gives us nothing else to go on.
 function inferSlotShape(s: any): { type: string; group: string; device: string } {
   const name = String(s?.name ?? '').toLowerCase()
   const provider = String(s?.provider ?? '').toLowerCase()
@@ -201,19 +214,29 @@ function inferSlotShape(s: any): { type: string; group: string; device: string }
   let device = s?.device as string | undefined
 
   if (!type || !group) {
-    if (name === 'primary' || name === 'agent' || name.includes('chat')) {
+    if (provider.includes('llama') || provider.includes('llm')) {
       type ??= 'llm'; group ??= 'chat'
-    } else if (name === 'rerank' || name.includes('rerank')) {
+    } else if (name.includes('rerank')) {
       type ??= 'reranking'; group ??= 'embed'
-    } else if (name === 'embed' || name.includes('embed')) {
+    } else if (name.includes('embed')) {
       type ??= 'embedding'; group ??= 'embed'
-    } else if (name === 'stt' || name.includes('whisper') || name.includes('moonshine')) {
+    } else if (name.includes('whisper') || name.includes('moonshine')) {
       type ??= 'transcription'; group ??= 'voice'
-    } else if (name === 'tts' || name.includes('kokoro') || name.includes('vibe')) {
+    } else if (name.includes('kokoro') || name.includes('vibe')) {
       type ??= 'tts'; group ??= 'voice'
-    } else if (name === 'img' || name === 'image' || name.includes('image') || name.includes('sd')) {
+    } else if (name.includes('image') || name.includes('sd')) {
       type ??= 'image'; group ??= 'img'
-    } else if (provider.includes('llama') || provider.includes('llm')) {
+    } else if (name === 'stt') {
+      type ??= 'transcription'; group ??= 'voice'
+    } else if (name === 'tts') {
+      type ??= 'tts'; group ??= 'voice'
+    } else if (name === 'img') {
+      type ??= 'image'; group ??= 'img'
+    } else if (name === 'primary' || name === 'agent' || name.includes('chat')) {
+      // Last-resort convention guess — the built-in default chat slot is
+      // usually named "primary" or "agent", but this is display-name, not
+      // a role marker; every branch above (provider + semantic keyword) is
+      // tried first.
       type ??= 'llm'; group ??= 'chat'
     }
   }
@@ -314,30 +337,54 @@ async function fetchSlotsUnion(): Promise<Slot[]> {
 const ENRICH_TTL_MS = 30_000
 const lastGoodEnrichment = new Map<
   string,
-  { container_status: unknown; container_health: unknown; ts: number }
+  {
+    container_status: unknown
+    container_health: unknown
+    model: unknown
+    metrics: unknown
+    ts: number
+  }
 >()
+
+// A slot is "enriched" once the /api/slots aggregator has stamped its live
+// container probe onto it. /api/status union entries arrive bare (FSM state
+// only, container_status null).
+function isEnriched(s: Slot): boolean {
+  return s.container_status != null
+}
 
 function reconcileEnrichment(slots: Slot[]): Slot[] {
   const now = Date.now()
   return slots.map((s) => {
     if (s._synthetic) return s
-    if (s.container_status != null) {
+    if (isEnriched(s)) {
+      // Fresh authoritative data — snapshot it (including model + metrics, so a
+      // subsequent dropped poll can carry the whole card forward, not just the
+      // container dot) and trust it verbatim even when it reads offline/idle.
       lastGoodEnrichment.set(s.name, {
         container_status: s.container_status,
         container_health: (s as { container_health?: unknown }).container_health,
+        model: s.model,
+        metrics: s.metrics,
         ts: now,
       })
-      return s
+      return { ...s, _enriched: true }
     }
     const lg = lastGoodEnrichment.get(s.name)
     if (lg && now - lg.ts <= ENRICH_TTL_MS) {
+      // Bare entry won a poll that /api/slots lost — carry the last-good
+      // enrichment forward so the card holds its dot + model + metrics instead
+      // of degrading to a downgraded state and zeroed tok/s for one interval.
       return {
         ...s,
         container_status: lg.container_status,
         container_health: lg.container_health,
+        model: s.model || (lg.model as string | undefined) || s.model,
+        metrics: lg.metrics ?? s.metrics,
+        _enriched: true,
       } as Slot
     }
-    return s
+    return { ...s, _enriched: false }
   })
 }
 
@@ -434,6 +481,21 @@ export function useSlotCreate() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
     mutationFn: (body: Record<string, unknown>) => slotPost(ENDPOINTS.slots, body),
+    onSuccess: invalidate,
+  })
+}
+
+/**
+ * Rename a slot's display label. POST /api/slots/{name}/rename — body
+ * { new_name }. The stable numeric slot id is preserved (a rename is a pure
+ * relabel), but the systemd unit is still name-keyed so the slot must be
+ * OFFLINE — the backend returns a typed error while running (rework §11.1).
+ */
+export function useSlotRename() {
+  const invalidate = useSlotsInvalidator()
+  return useMutation({
+    mutationFn: ({ name, new_name }: { name: string; new_name: string }) =>
+      slotPost(ENDPOINTS.slotRename(name), { new_name }),
     onSuccess: invalidate,
   })
 }

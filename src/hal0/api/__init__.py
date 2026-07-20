@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -68,6 +69,7 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     comfyui,
     dashboard_layout,
+    doctor,
     hardware,
     health,
     hf,
@@ -114,6 +116,9 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     proxmox as proxmox_routes,
+)
+from hal0.api.routes import (
+    realtime as realtime_routes,
 )
 from hal0.api.routes import (
     secrets as secrets_routes,
@@ -855,32 +860,159 @@ async def _shutdown_pull_jobs(app: FastAPI, timeout_s: float = _PULL_SHUTDOWN_TI
         log.warning("hal0.api.shutdown_pull_cancel_timed_out", count=len(pending))
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    log.info("hal0.api.startup", version=__version__)
+@dataclass
+class BootPhaseRecord:
+    """One boot phase's outcome — surfaced via ``app.state.boot_report``."""
 
-    upstreams = UpstreamRegistry()
-    _hydrate_upstreams(upstreams)
-    model_registry = ModelRegistry()
-    hardware_probe = HardwareProbe()
+    name: str
+    status: str = "ok"  # "ok" | "skip" | "error"
+    duration_ms: float = 0.0
+    detail: str | None = None
+
+
+@dataclass
+class BootReport:
+    """Structured, additive record of what each boot phase did.
+
+    Attached to ``app.state.boot_report`` so a degraded boot is observable
+    (which phase ran, how long it took, whether it errored) without changing
+    any existing startup behaviour. The report only observes; it never alters
+    control flow.
+    """
+
+    phases: list[BootPhaseRecord] = field(default_factory=list)
+
+    def record(
+        self,
+        name: str,
+        status: str = "ok",
+        duration_ms: float = 0.0,
+        detail: str | None = None,
+    ) -> None:
+        self.phases.append(
+            BootPhaseRecord(name=name, status=status, duration_ms=duration_ms, detail=detail)
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "phases": [
+                {
+                    "name": p.name,
+                    "status": p.status,
+                    "duration_ms": round(p.duration_ms, 3),
+                    "detail": p.detail,
+                }
+                for p in self.phases
+            ]
+        }
+
+
+@dataclass
+class BootState:
+    """Typed container for the ``app.state`` members owned by :func:`lifespan`.
+
+    Replaces the loose ``app.state.<attr> = ...`` soup with a single typed
+    record of every runtime object the boot sequence constructs. Each boot
+    phase populates its fields here and mirrors the published subset onto
+    ``app.state`` (the Starlette read surface every request handler uses) at
+    the exact point the original monolithic lifespan did — so behaviour and
+    boot order stay byte-for-byte equivalent.
+
+    NOTE: ``app.state`` also carries members owned by ``create_app()`` and the
+    routers (e.g. ``memory_provider``, ``mcp_servers``, ``mcp_session_managers``,
+    ``approval_queue``, ``realtime_backends``, ``board_store``); those are
+    deliberately NOT in this container — this owns only the lifespan-set facts.
+    """
+
+    # --- published to app.state (readers use request.app.state.<name>) ---
+    upstreams: UpstreamRegistry | None = None
+    model_registry: ModelRegistry | None = None
+    hal0_config: Any = None
+    hardware_probe: HardwareProbe | None = None
+    hardware_stats: Any = None
+    model_pull_jobs: dict[str, Any] = field(default_factory=dict)
+    model_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    shutting_down: asyncio.Event | None = None
+    slot_pull_jobs: dict[str, Any] = field(default_factory=dict)
+    events: EventBus | None = None
+    audit: AuditStore | None = None
+    audit_epoch: str = ""
+    hermes_kanban: Any = None
+    upstream_models: dict[str, list[str]] = field(default_factory=dict)
+    dispatcher: Dispatcher | None = None
+    slot_manager: SlotManager | None = None
+    model_cache: dict[str, list[str]] = field(default_factory=dict)
+    capability_orchestrator: CapabilityOrchestrator | None = None
+    last_used_model: dict[str, str] = field(default_factory=dict)
+    tps_events: Any = None
+    ttft_events: Any = None
+    slot_throughput: dict[str, float] = field(default_factory=dict)
+    slot_kv_occupancy: dict[str, float] = field(default_factory=dict)
+    slot_request_count: dict[str, int] = field(default_factory=dict)
+    slot_last_used: dict[str, float] = field(default_factory=dict)
+    metrics_service: Any = None
+    metrics_seam: Any = None
+    gpu_arbiter_idle_task: asyncio.Task[None] | None = None
+    omni_router: Any = None
+    npu_trio_router: Any = None
+
+    # --- boot-internal working set (NOT published to app.state) ---
+    identity_store: object | None = None
+    port_authority: object | None = None
+    audit_sink: Any = None
+    fetch_and_cache: Any = None
+    managers: list[Any] = field(default_factory=list)
+    refresh_task: asyncio.Task[None] | None = None
+    stop_refresh_task: Any = None
+    stop_gpu_arbiter_idle_loop: Any = None
+    omni_router_client: httpx.AsyncClient | None = None
+    boot_report: BootReport = field(default_factory=BootReport)
+
+
+async def _run_boot_phase(
+    report: BootReport,
+    name: str,
+    phase: Callable[[], Awaitable[None]],
+) -> None:
+    """Run one boot phase, recording its outcome + timing on ``report``.
+
+    Re-raises on failure so a phase that must fail the boot (the original
+    un-guarded structural steps) still does — the BootReport only observes,
+    it never swallows.
+    """
+    start = time.monotonic()
+    try:
+        await phase()
+    except Exception as exc:
+        report.record(name, "error", (time.monotonic() - start) * 1000.0, type(exc).__name__)
+        raise
+    report.record(name, "ok", (time.monotonic() - start) * 1000.0)
+
+
+async def _boot_registries(app: FastAPI, ctx: BootState) -> None:
+    """Phase — core registries + hardware probe + parsed config + model auto-scan."""
+    ctx.upstreams = UpstreamRegistry()
+    _hydrate_upstreams(ctx.upstreams)
+    ctx.model_registry = ModelRegistry()
+    ctx.hardware_probe = HardwareProbe()
 
     # Cache the parsed top-level config so request handlers don't repeatedly
     # re-read hal0.toml. The /api/settings PUT path keeps this in sync.
     try:
-        hal0_cfg = load_hal0_config()
+        ctx.hal0_config = load_hal0_config()
     except ConfigParseError as exc:
         log.warning("hal0.config.parse_failed", error=str(exc))
         from hal0.config.schema import Hal0Config
 
-        hal0_cfg = Hal0Config()
+        ctx.hal0_config = Hal0Config()
 
     # Auto-scan configured model roots so a fresh /mnt/ai-models drop-in
     # shows up in the registry without operator intervention.  Failures
     # here must NOT block startup — the API still has to come up so the
     # user can fix the offending root.
-    if hal0_cfg.models.auto_scan_on_start:
+    if ctx.hal0_config.models.auto_scan_on_start:
         try:
-            scan_result = scan_and_register(model_registry, hal0_cfg.models)
+            scan_result = scan_and_register(ctx.model_registry, ctx.hal0_config.models)
             log.info(
                 "models.auto_scan_complete",
                 added=len(scan_result.get("added", [])),
@@ -890,45 +1022,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             log.warning("models.auto_scan_failed", error=str(exc))
 
-    # Shared in-process /v1/models cache.  The dispatcher's cold-cache
-    # prefetch path needs cached_models() and fetch_models() to share
-    # state — without this, prefetch fans out then re-checks the cache
-    # and finds it empty, and every request 404s.
-    # NOTE: no TTL yet; cache persists for the life of the process.
-    # A TTL / invalidation strategy lands when the dispatcher gets its
-    # own cache layer.
-    model_cache: dict[str, list[str]] = {}
+
+async def _boot_model_cache(app: FastAPI, ctx: BootState) -> None:
+    """Phase — shared in-process /v1/models cache + its fetch-and-merge helper.
+
+    The dispatcher's cold-cache prefetch path needs ``cached_models()`` and
+    ``fetch_models()`` to share state — without this, prefetch fans out then
+    re-checks the cache and finds it empty, and every request 404s. No TTL
+    yet; ``ctx.model_cache`` persists for the life of the process.
+    """
 
     async def _fetch_and_cache(u: Upstream) -> list[str]:
-        models = await upstreams.fetch_models(u.name)
+        models = await ctx.upstreams.fetch_models(u.name)
         # Preserve multiplex tags seeded at startup (e.g. embed-gemma /
         # whisper-v3:turbo on FLM slots). Without this, the dispatcher's
         # cold-cache prefetch overwrites the seeded entries and embed /
         # asr routing breaks until process restart.
-        existing = model_cache.get(u.name, [])
+        existing = ctx.model_cache.get(u.name, [])
         merged = list(models)
         for tag in existing:
             if tag not in merged:
                 merged.append(tag)
-        model_cache[u.name] = merged
+        ctx.model_cache[u.name] = merged
         return merged
 
-    # Durable audit/activity store — the source of truth surfaced by
-    # /api/activity. Constructed before the event bus so the bus can forward
-    # every emitted event into it (the durable mirror). High-frequency
-    # pull.progress is filtered out of the mirror so it can't evict
-    # lifecycle history; the explicit audit_action() path carries the richer
-    # user-action records with before/after + outcome.
+    ctx.fetch_and_cache = _fetch_and_cache
+
+
+async def _boot_audit_store(app: FastAPI, ctx: BootState) -> None:
+    """Phase — durable audit/activity store + the event-bus sink closure.
+
+    Constructed before the event bus so the bus can forward every emitted
+    event into it (the durable mirror). High-frequency pull.progress is
+    filtered out of the mirror so it can't evict lifecycle history.
+    """
+    ctx.audit_epoch = uuid.uuid4().hex
     audit_store: AuditStore | None = None
-    audit_epoch = uuid.uuid4().hex
-    if hal0_cfg.activity.enabled:
+    if ctx.hal0_config.activity.enabled:
         retention = int(
-            os.environ.get("HAL0_ACTIVITY_RETENTION_DAYS") or hal0_cfg.activity.retention_days
+            os.environ.get("HAL0_ACTIVITY_RETENTION_DAYS")
+            or ctx.hal0_config.activity.retention_days
         )
         audit_store = AuditStore(
             activity_db(),
             retention_days=retention,
-            max_rows=hal0_cfg.activity.max_rows,
+            max_rows=ctx.hal0_config.activity.max_rows,
         )
         try:
             audit_store.init_schema()
@@ -936,36 +1074,80 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:  # init must never block startup
             log.warning("activity.init_failed", error=str(exc))
             audit_store = None
+    ctx.audit = audit_store
 
     async def _audit_sink(event: dict[str, Any]) -> None:
-        if audit_store is None or event.get("type") == "pull.progress":
+        if ctx.audit is None or event.get("type") == "pull.progress":
             return
-        await audit_store.record_event(event)
+        await ctx.audit.record_event(event)
 
-    # SlotManager owns slot state.  Built before Dispatcher so it can be
-    # threaded in and forward() can flip slots into SERVING per request.
-    # Construct the event bus first so the SlotManager can side-channel
-    # every transition through it — the footer subscribes to /api/events.
-    event_bus = EventBus(sink=_audit_sink if audit_store is not None else None)
-    slot_manager = SlotManager(event_bus=event_bus, upstreams_registry=upstreams)
+    ctx.audit_sink = _audit_sink
 
-    dispatcher = Dispatcher(
-        upstream_registry=upstreams,
-        model_registry=model_registry,
-        prefetch_timeout_s=hal0_cfg.dispatcher.prefetch_timeout_s,
-        direct_read_timeout_s=hal0_cfg.dispatcher.direct_read_timeout_s,
-        prefetch_parallel_cap=hal0_cfg.dispatcher.prefetch_parallel_cap,
-        cached_models=lambda name: model_cache.get(name, []),
-        fetch_models=_fetch_and_cache,
-        slot_manager=slot_manager,
+
+async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
+    """Phase — event bus + stable-id identity/port authority + SlotManager.
+
+    The event bus is constructed first so the SlotManager can side-channel
+    every transition through it (the footer subscribes to /api/events).
+    SlotManager is built before the Dispatcher so it can be threaded in.
+    """
+    ctx.events = EventBus(sink=ctx.audit_sink if ctx.audit is not None else None)
+    # rework §11.1/§11.2: wire the stable-id identity bridge + the single port
+    # authority into the manager. Best-effort — a DB/init hiccup degrades to the
+    # existing name-keyed/TOML-port behaviour rather than blocking boot.
+    ctx.identity_store = None
+    ctx.port_authority = None
+    try:
+        from hal0.config.schema import _SLOT_PORT_MAX, _SLOT_PORT_MIN
+        from hal0.ports.authority import PortAuthority
+        from hal0.slots.identity import SlotIdentityStore
+
+        ctx.identity_store = SlotIdentityStore()
+        ctx.port_authority = PortAuthority(
+            pool=(_SLOT_PORT_MIN, _SLOT_PORT_MAX),
+            reserved={8080: "api"},
+        )
+        with contextlib.suppress(Exception):
+            ctx.port_authority.reserve(8080, label="api")
+    except Exception as _exc:  # pragma: no cover - defensive boot guard
+        log.warning("slot.identity_store_init_failed", extra={"error": str(_exc)})
+        ctx.identity_store = None
+        ctx.port_authority = None
+    ctx.slot_manager = SlotManager(
+        event_bus=ctx.events,
+        upstreams_registry=ctx.upstreams,
+        identity_store=ctx.identity_store,
+        port_authority=ctx.port_authority,
     )
 
+
+async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
+    """Phase — Dispatcher wired to the shared model cache + slot manager."""
+    ctx.dispatcher = Dispatcher(
+        upstream_registry=ctx.upstreams,
+        model_registry=ctx.model_registry,
+        prefetch_timeout_s=ctx.hal0_config.dispatcher.prefetch_timeout_s,
+        direct_read_timeout_s=ctx.hal0_config.dispatcher.direct_read_timeout_s,
+        prefetch_parallel_cap=ctx.hal0_config.dispatcher.prefetch_parallel_cap,
+        cached_models=lambda name: ctx.model_cache.get(name, []),
+        fetch_models=ctx.fetch_and_cache,
+        slot_manager=ctx.slot_manager,
+    )
+
+
+async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
+    """Phase — one-shot slot reconciliation passes + idle-monitor start.
+
+    ORDERING: ``reconcile_unconfigured_slots`` → ``reconcile_npu_trio_slots``
+    → ``fold_identity`` (folds identity for the trio shadows just reconciled)
+    → ``start_idle_monitor``. Preserved exactly from the monolithic boot.
+    """
     # One-shot reconciliation: clear pre-fix stuck ERROR on slots whose
     # only problem was an empty model.default. After fix(slots): empty
     # default is OFFLINE+CTA, not ERROR; this pass migrates existing
     # state.json snapshots forward so the dashboard doesn't render red
     # until the operator clicks each slot.
-    await slot_manager.reconcile_unconfigured_slots()
+    await ctx.slot_manager.reconcile_unconfigured_slots()
 
     # Reconcile the FLM-trio shadow slots (flm-stt / flm-embed) to canon:
     # rename legacy stt-npu/embed-npu records, normalize device/profile/port/
@@ -973,9 +1155,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # dispatch are coherent on fresh installs and after upgrades. No-op when
     # there is no container NPU anchor; best-effort so it never blocks startup.
     try:
-        await slot_manager.reconcile_npu_trio_slots()
+        await ctx.slot_manager.reconcile_npu_trio_slots()
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("slot.reconcile_trio_failed", error=str(exc))
+
+    # rework §11.1/§11.2 boot fold: ensure a stable-id ``slot`` row + a seeded
+    # ``port_claim`` for every configured slot (incl. the trio shadows just
+    # reconciled above). Idempotent + additive — no artefact/unit rename. No-op
+    # when the identity store isn't wired. Best-effort so it never blocks boot.
+    try:
+        await ctx.slot_manager.fold_identity()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.identity_fold_failed", error=str(exc))
 
     # Idle monitor — demotes READY → IDLE after the configured timeout
     # (so the dashboard distinguishes "warm but quiet" from "warm and
@@ -983,64 +1174,81 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # host RAM (#902).  The global default evict TTL comes from
     # slots.idle_timeout_s; per-slot TOML idle_timeout_s overrides it and
     # idle_timeout_s = 0 pins a slot.  Defaults to 300s for tests.
-    await slot_manager.start_idle_monitor(
-        evict_after_s=hal0_cfg.slots.idle_timeout_s,
-        evict_pressure_mb=hal0_cfg.slots.evict_pressure_mb,
+    await ctx.slot_manager.start_idle_monitor(
+        evict_after_s=ctx.hal0_config.slots.idle_timeout_s,
+        evict_pressure_mb=ctx.hal0_config.slots.evict_pressure_mb,
     )
 
+
+async def _boot_model_priming(app: FastAPI, ctx: BootState) -> None:
+    """Phase — prime composite catalogue, seed multiplex tags, restore upstreams."""
     # Prime the direct-read composite model catalogue (``model_cache["hal0"]``)
     # so /v1/models and the dashboard's synthetic ``hal0`` tile can read it
     # synchronously immediately after startup. Explicit upstreams.toml
     # entries (hydrated above) win — priming skips when the ``hal0`` name
     # is already taken by a real upstream.
     try:
-        await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache)
+        await _prime_hal0_composite_cache(ctx.upstreams, ctx.slot_manager, ctx.model_cache)
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("upstream.hal0_prime_failed", error=str(exc))
-    await _seed_multiplex_models(upstreams, slot_manager, model_cache)
+    await _seed_multiplex_models(ctx.upstreams, ctx.slot_manager, ctx.model_cache)
 
     # #732: re-register per-slot remote upstreams for containers that
     # survived the api restart (the registry is in-memory; the containers
     # are not). Prime each restored upstream's model cache so dispatch
     # routes immediately — no operator unload+load sweep.
     try:
-        restored_slots = await slot_manager.reconcile_container_upstreams()
+        restored_slots = await ctx.slot_manager.reconcile_container_upstreams()
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("container.upstream_reconcile_failed", error=str(exc))
         restored_slots = []
     for restored_name in restored_slots:
-        restored_upstream = upstreams.get(restored_name)
+        restored_upstream = ctx.upstreams.get(restored_name)
         if restored_upstream is None:
             continue
         try:
-            await _fetch_and_cache(restored_upstream)
+            await ctx.fetch_and_cache(restored_upstream)
         except Exception as exc:  # pragma: no cover — defensive
             log.warning("upstream.reconcile_prime_failed", slot=restored_name, error=str(exc))
 
+
+async def _boot_pull_registry(app: FastAPI, ctx: BootState) -> None:
+    """Phase — publish core registries + pull-job registries, sweep, auto-resume.
+
+    ORDERING INVARIANT: the registries + pull dicts are published to
+    ``app.state`` BEFORE ``_auto_resume_interrupted_pulls(app)`` (which reads
+    ``app.state.model_registry`` / ``model_pull_jobs`` / ``model_pull_tasks``),
+    and ``app.state.events`` is deliberately NOT published until the next
+    phase — auto-resume reads ``getattr(app.state, "events", None)`` and MUST
+    observe ``None`` here (resumed pulls emit no events), matching the
+    original monolithic order.
+    """
     from hal0.hardware import HardwareStats
 
-    app.state.upstreams = upstreams
-    app.state.model_registry = model_registry
-    app.state.hal0_config = hal0_cfg
-    app.state.hardware_probe = hardware_probe
-    app.state.hardware_stats = HardwareStats()
+    ctx.hardware_stats = HardwareStats()
+    app.state.upstreams = ctx.upstreams
+    app.state.model_registry = ctx.model_registry
+    app.state.hal0_config = ctx.hal0_config
+    app.state.hardware_probe = ctx.hardware_probe
+    app.state.hardware_stats = ctx.hardware_stats
     # Model-pull job registry — keyed by model_id, value is the
     # ``PullJob`` dataclass holding live progress + cancel flags. SSE
     # and status routes snapshot ``as_dict()`` rather than hold the
     # dataclass across event-loop ticks.
-    app.state.model_pull_jobs = {}
+    app.state.model_pull_jobs = ctx.model_pull_jobs
     # Task handles for the SAME keys (issue #1225). A pull is launched as a
     # detached ``asyncio.Task`` (routes.models._schedule_pull_task), not a
     # Starlette BackgroundTask, specifically so its HTTP request can return
     # immediately instead of keeping the connection open for the whole
     # download — this dict is what lets the shutdown path below (
     # _shutdown_pull_jobs) find and cancel any still-running pull.
-    app.state.model_pull_tasks = {}
+    app.state.model_pull_tasks = ctx.model_pull_tasks
     # Flipped at the START of shutdown (see the lifespan finally block) so
     # long-lived generators (the pull SSE stream) can notice a restart is in
     # progress and close promptly instead of blocking uvicorn's connection
     # drain indefinitely.
-    app.state.shutting_down = asyncio.Event()
+    ctx.shutting_down = asyncio.Event()
+    app.state.shutting_down = ctx.shutting_down
     # Reap orphaned *.part staging files left by a SIGKILL/OOM mid-pull
     # (MR-9). Age-gated so an in-flight pull from another worker is never
     # touched; housekeeping must never block startup.
@@ -1073,23 +1281,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Container image-pull job registry — keyed by slot name, value is a
     # dict with keys: state (pulling|completed|failed), layer, total_layers,
     # error, and a threading.Event for SSE fan-out.
-    app.state.slot_pull_jobs = {}
-    # Dashboard footer event bus. Constructed above (so SlotManager could
+    app.state.slot_pull_jobs = ctx.slot_pull_jobs
+
+
+async def _boot_publish_runtime(app: FastAPI, ctx: BootState) -> None:
+    """Phase — publish the event bus, audit, board client + core runtime handles.
+
+    ``app.state.events`` is published HERE (after auto-resume in the pull-
+    registry phase), and the ``system.restart`` event is emitted once the bus
+    is live.
+    """
+    # Dashboard footer event bus. Constructed earlier (so SlotManager could
     # be wired with the same instance); published on app.state here so
     # request handlers can reach it via ``request.app.state.events``.
-    app.state.events = event_bus
+    app.state.events = ctx.events
     # Durable audit/activity store + a per-process epoch so the ActivityLog
     # can detect a restart and reset its cursor (events ids restart at 1).
-    app.state.audit = audit_store
-    app.state.audit_epoch = audit_epoch
+    app.state.audit = ctx.audit
+    app.state.audit_epoch = ctx.audit_epoch
     # Operator Board: thin audited proxy client to the Hermes kanban plugin
     # (loopback :9119). Constructed once per process; the board router funnels
     # every /api/board/* call through it. Resolves HERMES_DASHBOARD_BASE_URL +
     # the Hermes session bearer (env HERMES_SESSION_TOKEN) from from_env().
     from hal0.board import HermesKanbanClient
 
-    app.state.hermes_kanban = HermesKanbanClient.from_env()
-    await event_bus.emit(
+    ctx.hermes_kanban = HermesKanbanClient.from_env()
+    app.state.hermes_kanban = ctx.hermes_kanban
+    # KB-5 executor bridge (HP-executor): register the concrete Hermes
+    # BoardExecutor ONLY when Hermes is configured (env presence — no network
+    # call at startup). Inert otherwise: the KB-5 registry stays empty and the
+    # board runs fully with no executor (the seam's shipped state).
+    try:
+        from hal0.board.hermes_executor import register as _register_hermes_executor
+
+        if _register_hermes_executor(app):
+            log.info("board.hermes_executor_registered")
+    except Exception as exc:  # optional bridge must never block startup
+        log.warning("board.hermes_executor_register_failed", error=str(exc))
+    await ctx.events.emit(
         "system.restart",
         "info",
         "system",
@@ -1098,21 +1327,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     # /api/upstreams hands the dashboard the cached model list so the
     # "models advertised" column reflects live state without an extra
-    # round trip per upstream.
-    app.state.upstream_models = model_cache
-    app.state.dispatcher = dispatcher
-    app.state.slot_manager = slot_manager
-    app.state.model_cache = model_cache
+    # round trip per upstream. ``upstream_models`` is the same object as
+    # ``model_cache`` so live updates propagate.
+    ctx.upstream_models = ctx.model_cache
+    app.state.upstream_models = ctx.upstream_models
+    app.state.dispatcher = ctx.dispatcher
+    app.state.slot_manager = ctx.slot_manager
+    app.state.model_cache = ctx.model_cache
 
+
+async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
+    """Phase — idempotent persona + static-slot fresh-install seeds.
+
+    RELOCATE(brain-lane): folds in two of the five relocated
+    hermes_provision install steps — both are local-FS-only, no memory
+    call, so they belong here beside the pre-existing seed calls rather
+    than in the memory-dependent terminal ``_boot_brain_lane`` phase:
+
+    - ``persona_seed`` — DEDUPED, not re-added. This phase already called
+      ``seed_default_personas(root=hermes_home / "personas")`` below
+      before persona_seed existed as an install step at all; that call is
+      unchanged and IS this relocation for personas — the standalone
+      ``hermes_provision._phase_persona_seed`` function is kept only for
+      its own direct-call unit coverage (its wider agent_id/overwrite
+      handling collapses to the same defaults this call already used).
+    - ``brain_profile_mcp_wire`` — genuinely new here (see below).
+    """
     # Agent personas — idempotently seed any missing defaults (hermes /
     # coder / hal0-brain). The dashboard's agent-chat slide-out embodies the
     # hal0-brain profile (routes/board_chat), so a box updated from a release
-    # that predates a seed must still grow its editable TOML: provisioning's
-    # persona_seed phase is checkpointed and never re-runs on `hal0 update`,
-    # which makes the post-update API restart the only hook every install
-    # path (update, editable/dev, fresh) shares. Existing files are never
-    # touched (overwrite=False); `hal0 agent install hermes --repair` stays
-    # the reset-to-canonical path. The root goes through paths.var_lib()
+    # that predates a seed must still grow its editable TOML: this seed
+    # is the only hook every install path (update, editable/dev, fresh)
+    # shares, now that RELOCATE(brain-lane) retired the install-time
+    # persona_seed step entirely (see hermes_provision.py). Existing files
+    # are never touched (overwrite=False) — there is no boot-time
+    # equivalent of `hal0 agent install hermes --repair`'s forced reset;
+    # an operator who needs a hard reset removes the persona TOML(s) and
+    # restarts hal0-api, or re-runs `--repair` (still installed, just no
+    # longer touching personas). The root goes through paths.var_lib()
     # rather than the module's PERSONAS_ROOT constant so HAL0_HOME installs
     # (tests, dev boxes) seed under their own tree instead of the host's
     # /var/lib/hal0 — in FHS production the two resolve identically.
@@ -1150,34 +1402,74 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         from hal0.install.static_seeds import seed_static_slots
 
-        seeded_slots = await asyncio.to_thread(seed_static_slots)
+        # P3-runtime-db inc3 (seed split-brain fix): thread the identity
+        # store's known names in. This phase runs AFTER slot_reconcile+
+        # fold_identity, so a slot migrated to id-keying (living at <id>.toml,
+        # with NO <name>.toml) is already an identity row here — passing its
+        # name lets the seeder skip it instead of re-materialising a stale
+        # <name>.toml beside the id-keyed file.
+        existing_names = ctx.slot_manager.identity_names()
+        seeded_slots = await asyncio.to_thread(seed_static_slots, existing_names=existing_names)
         if seeded_slots:
             log.info("slots.startup_seed", names=seeded_slots)
     except Exception as exc:  # seeding must never block startup
         log.warning("slots.startup_seed_failed", error=str(exc))
 
+    # RELOCATE(brain-lane): brain_profile_mcp_wire — deep-merge hal0's two
+    # MCP servers (hal0-admin, hal0-memory) + memory.provider into the
+    # hal0-brain hermes profile's config.yaml, reproducibly. Local FS only
+    # (reads/writes ~/.hermes/profiles/hal0-brain/config.yaml, no memory
+    # call), so it runs here instead of the memory-dependent
+    # _boot_brain_lane phase. Skips when the profile config is absent (the
+    # upstream hermes binary owns profile creation) or PyYAML is missing;
+    # only rewrites when the merged content actually differs, so a
+    # correctly configured box is left byte-untouched on every restart.
+    try:
+        from hal0.agents.hermes_provision import BootstrapState as _BrainWireState
+        from hal0.agents.hermes_provision import InstallIO as _BrainWireIO
+        from hal0.agents.hermes_provision import _phase_brain_profile_mcp_wire
+        from hal0.agents.hermes_provision import _StepCtx as _BrainWireCtx
+        from hal0.config import paths as _hal0_paths_wire
+
+        wire_home = _hal0_paths_wire.var_lib() / ".hermes"
+        wire_result = await asyncio.to_thread(
+            _phase_brain_profile_mcp_wire,
+            _BrainWireCtx(state=_BrainWireState(hermes_home=str(wire_home)), io=_BrainWireIO()),
+        )
+        if wire_result.details.get("wired") and wire_result.details.get("changed"):
+            log.info("brain_profile.mcp_wire_startup_seed", path=wire_result.details.get("path"))
+    except Exception as exc:  # seeding must never block startup
+        log.warning("brain_profile.mcp_wire_startup_seed_failed", error=str(exc))
+
+
+async def _boot_capabilities(app: FastAPI, ctx: BootState) -> None:
+    """Phase — capability orchestrator overlay (built after slots + registry)."""
     # Capability orchestrator — overlay that maps the dashboard's
     # capability-grouped children (embed/voice/img) onto regular slots.
     # The orchestrator is intentionally constructed AFTER the slot
     # manager + registry are ready so initialize_if_missing() can lift
     # current slot config into capabilities.toml on first boot.
-    capability_orchestrator = CapabilityOrchestrator(
-        slot_manager=slot_manager,
-        registry=model_registry,
+    ctx.capability_orchestrator = CapabilityOrchestrator(
+        slot_manager=ctx.slot_manager,
+        registry=ctx.model_registry,
     )
     try:
-        await capability_orchestrator.initialize_if_missing()
+        await ctx.capability_orchestrator.initialize_if_missing()
     except Exception as exc:
         # Never let an overlay seeding failure block API startup — the
         # dashboard can still hit GET /api/capabilities and see empty
         # selections, which is the correct "blank slate" UX.
         log.warning("capabilities.init_failed", error=str(exc))
-    app.state.capability_orchestrator = capability_orchestrator
+    app.state.capability_orchestrator = ctx.capability_orchestrator
+
+
+async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
+    """Phase — per-slot metric registries + the SQLite MetricsService."""
     # Tracks the most recent model id sent to each upstream so the
     # dashboard's synthetic slot reflects current usage instead of the
     # first-non-alias from the catalog. Populated by v1 routes after
     # dispatch resolves.
-    app.state.last_used_model = {}
+    app.state.last_used_model = ctx.last_used_model
     # Per-slot rolling window of (monotonic_ts, tokens_in_chunk) tuples
     # measured on the streaming forward path. Keyed by the dispatcher's
     # `call.upstream_name` (a slot name for local slots, an upstream id
@@ -1189,20 +1481,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     def _new_tps_deque() -> collections.deque[tuple[float, int]]:
         return collections.deque(maxlen=4096)
 
-    app.state.tps_events = collections.defaultdict(_new_tps_deque)
+    ctx.tps_events = collections.defaultdict(_new_tps_deque)
+    app.state.tps_events = ctx.tps_events
 
     def _new_ttft_deque() -> collections.deque[tuple[float, float]]:
         return collections.deque(maxlen=128)
 
-    app.state.ttft_events = collections.defaultdict(_new_ttft_deque)
+    ctx.ttft_events = collections.defaultdict(_new_ttft_deque)
+    app.state.ttft_events = ctx.ttft_events
 
     # FLM / NPU per-slot metrics — updated by v1._record_nonstreaming_throughput
     # when the upstream (FLM container) returns decoding_speed_tps and
     # kv_token_occupancy_rate_percentage in the usage block.
-    app.state.slot_throughput: dict[str, float] = {}
-    app.state.slot_kv_occupancy: dict[str, float] = {}
-    app.state.slot_request_count: dict[str, int] = {}
-    app.state.slot_last_used: dict[str, float] = {}
+    app.state.slot_throughput = ctx.slot_throughput
+    app.state.slot_kv_occupancy = ctx.slot_kv_occupancy
+    app.state.slot_request_count = ctx.slot_request_count
+    app.state.slot_last_used = ctx.slot_last_used
 
     # OBS-1 (§13): the SQLite metrics core. Does NOT replace the deques
     # above -- those keep feeding /api/stats/throughput/history and
@@ -1215,14 +1509,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # background task a no-op — never blocks startup either way.
     from hal0.metrics.service import MetricsService
 
-    metrics_service = MetricsService(slot_manager=slot_manager, registry=model_registry)
-    app.state.metrics_service = metrics_service
-    app.state.metrics_seam = metrics_service.seam
+    ctx.metrics_service = MetricsService(slot_manager=ctx.slot_manager, registry=ctx.model_registry)
+    app.state.metrics_service = ctx.metrics_service
+    ctx.metrics_seam = ctx.metrics_service.seam
+    app.state.metrics_seam = ctx.metrics_seam
 
+
+async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
+    """Phase — MCP session managers + refresh / GPU-arbiter loops + omni & NPU routers.
+
+    The MCP session managers, refresh task and GPU-arbiter idle loop are set up
+    here; their stop callbacks live on ``ctx`` so the orchestrator's
+    AsyncExitStack can register them for shutdown.
+    """
     log.info(
         "hal0.api.upstreams_loaded",
-        count=len(upstreams.list()),
-        names=[u.name for u in upstreams.list()],
+        count=len(ctx.upstreams.list()),
+        names=[u.name for u in ctx.upstreams.list()],
     )
 
     # Each mounted FastMCP server has a ``StreamableHTTPSessionManager``
@@ -1232,20 +1535,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ``run()`` ctxmgr from the parent lifespan via an AsyncExitStack.
     # Without this every /mcp/* request fails with
     # ``Task group is not initialized``.
-    from contextlib import AsyncExitStack
+    ctx.managers = getattr(app.state, "mcp_session_managers", []) or []
 
-    managers = getattr(app.state, "mcp_session_managers", []) or []
-
-    refresh_task = asyncio.create_task(
+    ctx.refresh_task = asyncio.create_task(
         _refresh_model_cache_on_ready(
-            event_bus, upstreams, slot_manager, _fetch_and_cache, model_cache
+            ctx.events, ctx.upstreams, ctx.slot_manager, ctx.fetch_and_cache, ctx.model_cache
         )
     )
 
     async def _stop_refresh_task() -> None:
-        refresh_task.cancel()
+        ctx.refresh_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await refresh_task
+            await ctx.refresh_task
+
+    ctx.stop_refresh_task = _stop_refresh_task
 
     # GpuArbiter idle-restore loop (Phase D, Task D6). Auto-restores the
     # saved LLM set after the img (ComfyUI) slot idles out — window from the
@@ -1255,17 +1558,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # construction failure never blocks API startup (omni-router precedent).
     gpu_arbiter_idle_task: asyncio.Task[None] | None = None
     try:
-        gpu_arbiter_idle_task = asyncio.create_task(slot_manager.arbiter.run_idle_loop())
+        gpu_arbiter_idle_task = asyncio.create_task(ctx.slot_manager.arbiter.run_idle_loop())
         log.info("gpu_arbiter.idle_loop_started")
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("gpu_arbiter.idle_loop_start_failed", error=str(exc))
-    app.state.gpu_arbiter_idle_task = gpu_arbiter_idle_task
+    ctx.gpu_arbiter_idle_task = gpu_arbiter_idle_task
+    app.state.gpu_arbiter_idle_task = ctx.gpu_arbiter_idle_task
 
     async def _stop_gpu_arbiter_idle_loop() -> None:
-        if gpu_arbiter_idle_task is not None:
-            gpu_arbiter_idle_task.cancel()
+        if ctx.gpu_arbiter_idle_task is not None:
+            ctx.gpu_arbiter_idle_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await gpu_arbiter_idle_task
+                await ctx.gpu_arbiter_idle_task
+
+    ctx.stop_gpu_arbiter_idle_loop = _stop_gpu_arbiter_idle_loop
 
     # OmniRouter (PR-16). Client-side OpenAI
     # tool-calling loop. Wired here so the /v1/chat/completions route
@@ -1276,20 +1582,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # surface (#709) so the full dispatch chain — GpuArbiter
     # image-mode guard, readiness gates, container routing — applies
     # to omni traffic too.
-    omni_router_client: httpx.AsyncClient | None = None
+    ctx.omni_router_client = None
     try:
         from hal0.omni_router import OmniRouter
 
-        omni_router_client = httpx.AsyncClient(
+        ctx.omni_router_client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
             follow_redirects=False,
         )
         api_base_url = os.environ.get("HAL0_SELF_BASE_URL", "http://127.0.0.1:8080")
-        app.state.omni_router = OmniRouter(
-            slot_manager=slot_manager,
-            http_client=omni_router_client,
+        ctx.omni_router = OmniRouter(
+            slot_manager=ctx.slot_manager,
+            http_client=ctx.omni_router_client,
             api_base_url=api_base_url,
         )
+        app.state.omni_router = ctx.omni_router
         log.info("omni_router.attached", base_url=api_base_url)
     except Exception as exc:
         # Never let OmniRouter failure block API startup — the chat
@@ -1300,6 +1607,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             error=str(exc),
             error_type=type(exc).__name__,
         )
+        ctx.omni_router = None
         app.state.omni_router = None
 
     # NPU trio router. The containerized npu
@@ -1313,7 +1621,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         from hal0.dispatcher.npu_trio import NpuTrioRouter
 
-        app.state.npu_trio_router = NpuTrioRouter(slot_manager=slot_manager)
+        ctx.npu_trio_router = NpuTrioRouter(slot_manager=ctx.slot_manager)
+        app.state.npu_trio_router = ctx.npu_trio_router
         log.info("npu_trio.attached")
     except Exception as exc:
         log.warning(
@@ -1321,16 +1630,241 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             error=str(exc),
             error_type=type(exc).__name__,
         )
+        ctx.npu_trio_router = None
         app.state.npu_trio_router = None
+
+
+# RELOCATE(brain-lane): namespace_register, brain_profile_seed, and
+# self_report (hermes_provision.py) used to run once at `hal0 agent install
+# hermes` time. They now run on every hal0-api boot instead, via the
+# terminal ``_boot_brain_lane`` phase below. All three call out through
+# hermes_provision's ``ctx.io.mcp_memory_call`` seam, whose production
+# default (``_mcp_memory_call``) POSTs to ``/api/memory/*`` over loopback
+# HTTP (http://127.0.0.1:8080) — that only works once uvicorn's socket is
+# bound and accepting connections. uvicorn.Server.startup() runs
+# ``await self.lifespan.startup()`` BEFORE it creates the listening socket,
+# so at every point during lifespan startup (including every boot phase in
+# this module) that socket does not exist yet — reusing ``_mcp_memory_call``
+# as-is here would always fail with connection-refused, regardless of which
+# phase it ran in.
+#
+# ``_boot_memory_dispatch`` / ``_boot_mcp_memory_call`` below are a drop-in
+# substitute for hermes_provision's IO seam that instead reaches the memory
+# provider IN-PROCESS — the same seam
+# ``hal0.dispatcher.memory_dispatcher.MemoryDispatcher`` uses so the admin
+# MCP server's own memory_* tools skip the loopback tax. That dispatcher
+# isn't reused directly because it's bound to AMBIENT per-request resolvers
+# (Bearer/header derived); there is no HTTP request during boot, so those
+# would resolve to "anonymous"/non-private and silently mis-stamp the
+# agent identity. Building a fresh ``make_dispatcher(...)`` per call with
+# explicit ``agent_id``/``private`` reproduces exactly what the HTTP path's
+# ``X-hal0-Agent`` / ``X-hal0-Private`` headers used to do.
+async def _boot_memory_dispatch(
+    app: FastAPI,
+    method: str,
+    params: dict[str, Any],
+    *,
+    agent_id: str,
+    private: bool = False,
+) -> dict[str, Any]:
+    """Boot-time, in-process substitute for ``hermes_provision._mcp_memory_call``.
+
+    Same ``{"ok": bool, "result": ...}`` / ``{"ok": False, "error": ...}``
+    envelope the hermes_provision phase bodies already expect, so they need
+    no changes to consume this instead of the HTTP-based default.
+    """
+    if method != "tools/call" or not isinstance(params, dict):
+        return {"ok": False, "error": f"unsupported method {method!r}"}
+    tool = params.get("name")
+    if tool not in ("memory_search", "memory_add", "memory_delete"):
+        return {"ok": False, "error": f"unsupported tool {tool!r}"}
+    arguments = params.get("arguments") or {}
+    memory_provider = getattr(app.state, "memory_provider", None)
+    if memory_provider is None:
+        # [memory].enabled = false, or provider construction failed in
+        # create_app() — same warn-as-OK degradation the HTTP path hits
+        # when hal0-memory is unreachable.
+        return {"ok": False, "error": "memory provider not configured"}
+
+    from hal0.mcp.memory import make_dispatcher
+
+    dispatcher = make_dispatcher(
+        memory_provider,
+        client_id_resolver=lambda: agent_id,
+        private_resolver=lambda: private,
+    )
+    try:
+        result = await dispatcher(tool, arguments)
+    except Exception as exc:  # pragma: no cover — defensive; make_dispatcher already catches
+        return {"ok": False, "error": str(exc)}
+    if result.get("status") == "ok":
+        return {"ok": True, "result": {k: v for k, v in result.items() if k != "status"}}
+    error = result.get("error") or {}
+    detail = error.get("detail") or error.get("code") or "memory dispatch failed"
+    return {"ok": False, "error": detail}
+
+
+def _boot_mcp_memory_call(
+    app: FastAPI,
+    loop: asyncio.AbstractEventLoop,
+    method: str,
+    params: dict[str, Any],
+    *,
+    agent_id: str,
+    base_url: str = "http://127.0.0.1:8080",
+    timeout: float = 5.0,
+    private: bool = False,
+) -> dict[str, Any]:
+    """Sync bridge matching ``InstallIO.mcp_memory_call``'s callable shape.
+
+    The hermes_provision phase bodies (``_phase_namespace_register`` et al.)
+    are plain synchronous functions run off the event-loop thread via
+    ``asyncio.to_thread`` (see ``_boot_brain_lane``) — required because
+    blocking that worker thread on ``future.result()`` below would deadlock
+    if it were the loop's own thread. From the worker thread this submits
+    :func:`_boot_memory_dispatch` onto the SAME running loop the memory
+    provider was constructed on (``run_coroutine_threadsafe``) and blocks
+    only the worker thread for the result — never the loop. Bounded so a
+    hung memory engine can never block boot indefinitely; ``base_url`` is
+    accepted (unused) purely for call-site / signature compatibility with
+    ``_mcp_memory_call``.
+    """
+    del base_url
+    coro = _boot_memory_dispatch(app, method, params, agent_id=agent_id, private=private)
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        return future.result(timeout=timeout + 5.0)
+    except Exception as exc:
+        future.cancel()
+        return {"ok": False, "error": str(exc)}
+
+
+async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
+    """Phase — RELOCATE(brain-lane): identity-card + self-report memory publishes.
+
+    Runs LAST (after ``background_tasks``, the final named phase before this
+    one) so ``app.state``/``ctx.boot_report`` reflect a fully-booted process
+    by the time ``self_report`` writes its summary. Reuses hermes_provision's
+    ``_phase_namespace_register`` / ``_phase_brain_profile_seed`` /
+    ``_phase_self_report`` bodies UNCHANGED via the same ``InstallIO`` /
+    ``_StepCtx`` injection seam their tests already use — only
+    ``mcp_memory_call`` is swapped for the boot-safe in-process adapter
+    above (see its docstring for why the HTTP-loopback default can't be
+    reused during lifespan startup). All three are warn-as-OK: memory-layer
+    unavailability must never fail boot, matching their install-time posture.
+
+    ``self_report`` originally read ``ctx.output_of("smoke_tests")`` for its
+    failure rollup — there is no lifespan analogue to a smoke-test pass, so
+    this substitutes a ``{"failures": [<phase name>, ...]}`` shape built
+    from ``ctx.boot_report``'s phases that ended in ``status == "error"``.
+    This is a DESIGN SUBSTITUTION, not a real smoke test: it reports boot
+    *phase* failures (a phase that had to raise), not a functional
+    self-test of chat/memory/etc. Flagged here and in the relocation
+    handoff notes; a future lane could add a lightweight post-boot
+    self-check if a closer smoke_tests equivalent is wanted.
+    """
+    import functools
+
+    from hal0.agents.hermes_provision import (
+        BootstrapState,
+        InstallIO,
+        _phase_brain_profile_seed,
+        _phase_namespace_register,
+        _phase_self_report,
+        _StepCtx,
+    )
+
+    state = BootstrapState()
+    loop = asyncio.get_running_loop()
+    io = InstallIO(mcp_memory_call=functools.partial(_boot_mcp_memory_call, app, loop))
+
+    try:
+        ns_result = await asyncio.to_thread(_phase_namespace_register, _StepCtx(state=state, io=io))
+        if not ns_result.details.get("registered"):
+            log.info(
+                "brain_lane.namespace_register_degraded",
+                warnings=ns_result.details.get("warnings"),
+            )
+    except Exception as exc:  # pragma: no cover — defensive, must never block boot
+        log.warning("brain_lane.namespace_register_failed", error=str(exc))
+
+    try:
+        brain_result = await asyncio.to_thread(
+            _phase_brain_profile_seed, _StepCtx(state=state, io=io)
+        )
+        if not brain_result.details.get("registered"):
+            log.info(
+                "brain_lane.brain_profile_seed_degraded",
+                warnings=brain_result.details.get("warnings"),
+            )
+    except Exception as exc:  # pragma: no cover — defensive, must never block boot
+        log.warning("brain_lane.brain_profile_seed_failed", error=str(exc))
+
+    # self_report MUST run last — see docstring above re: the smoke_tests
+    # substitution.
+    boot_failures = [p.name for p in ctx.boot_report.phases if p.status == "error"]
+    prior = {"smoke_tests": {"failures": boot_failures}}
+    try:
+        report_result = await asyncio.to_thread(
+            _phase_self_report, _StepCtx(state=state, io=io, _prior=prior)
+        )
+        if not report_result.details.get("published"):
+            log.info(
+                "brain_lane.self_report_degraded",
+                warning=report_result.details.get("warning"),
+            )
+    except Exception as exc:  # pragma: no cover — defensive, must never block boot
+        log.warning("brain_lane.self_report_failed", error=str(exc))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application boot/shutdown, decomposed into named, ordered boot phases.
+
+    Behaviour and boot order are byte-for-byte equivalent to the original
+    monolithic lifespan — each phase runs in the same sequence and publishes
+    the same ``app.state`` members at the same relative point. State flows
+    through a single typed :class:`BootState` container (``ctx``) instead of
+    loose locals + ``app.state`` attribute soup. Phases are wrapped by
+    :func:`_run_boot_phase` for an additive :class:`BootReport`
+    (``app.state.boot_report``); the report only observes — a phase that must
+    fail the boot still raises.
+    """
+    log.info("hal0.api.startup", version=__version__)
+
+    ctx = BootState()
+    report = ctx.boot_report
+    app.state.boot_report = report
+
+    await _run_boot_phase(report, "registries", lambda: _boot_registries(app, ctx))
+    await _run_boot_phase(report, "model_cache", lambda: _boot_model_cache(app, ctx))
+    await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
+    await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
+    await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
+    await _run_boot_phase(report, "slot_reconcile", lambda: _boot_slot_reconcile(app, ctx))
+    await _run_boot_phase(report, "model_priming", lambda: _boot_model_priming(app, ctx))
+    await _run_boot_phase(report, "pull_registry", lambda: _boot_pull_registry(app, ctx))
+    await _run_boot_phase(report, "publish_runtime", lambda: _boot_publish_runtime(app, ctx))
+    await _run_boot_phase(report, "seeds", lambda: _boot_seeds(app, ctx))
+    await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
+    await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
+    await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))
+    # RELOCATE(brain-lane): terminal phase — namespace_register,
+    # brain_profile_seed, self_report (in that order; self_report last).
+    # Runs after every other phase so its self-report reflects a fully
+    # booted process. See _boot_brain_lane's docstring.
+    await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
+
+    from contextlib import AsyncExitStack
 
     try:
         async with AsyncExitStack() as stack:
-            for mgr in managers:
+            for mgr in ctx.managers:
                 await stack.enter_async_context(mgr.run())
-            stack.push_async_callback(_stop_refresh_task)
-            stack.push_async_callback(_stop_gpu_arbiter_idle_loop)
-            metrics_service.start()
-            stack.push_async_callback(metrics_service.stop)
+            stack.push_async_callback(ctx.stop_refresh_task)
+            stack.push_async_callback(ctx.stop_gpu_arbiter_idle_loop)
+            ctx.metrics_service.start()
+            stack.push_async_callback(ctx.metrics_service.stop)
             yield
     finally:
         # First — issue #1225: cancel any in-flight model pull before doing
@@ -1338,11 +1872,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # shutdown (and thus `systemctl restart hal0-api`) waiting.
         with contextlib.suppress(Exception):
             await _shutdown_pull_jobs(app)
-        if omni_router_client is not None:
+        if ctx.omni_router_client is not None:
             with contextlib.suppress(Exception):
-                await omni_router_client.aclose()
-        await slot_manager.stop_idle_monitor()
-        await dispatcher.aclose()
+                await ctx.omni_router_client.aclose()
+        await ctx.slot_manager.stop_idle_monitor()
+        await ctx.dispatcher.aclose()
         with contextlib.suppress(Exception):
             await comfyui.aclose_client()
         log.info("hal0.api.shutdown")
@@ -1377,6 +1911,14 @@ def create_app() -> FastAPI:
     # AuthEnforcementMiddleware / require_auth_enabled docstrings.
     app.add_middleware(AuthEnforcementMiddleware)
 
+    # KB-1 hardening: per-IP brute-force throttle for POST /api/auth/login.
+    # One limiter per app instance (fresh per create_app() so tests stay
+    # isolated); the login route reads it off app.state and meters every
+    # attempt before the key compare. Budget tunes via HAL0_LOGIN_RATELIMIT_*.
+    from hal0.security.ratelimit import login_limiter_from_env
+
+    app.state.login_limiter = login_limiter_from_env()
+
     # /api/auth: login (mints the admin-equivalent session cookie via the
     # SAME HMAC cookie agents/_auth.py already ships) + status (posture
     # report for the dashboard's own auth gate). Both routes are OPEN in
@@ -1390,6 +1932,9 @@ def create_app() -> FastAPI:
     # header — keeping that probe auth-free preserves SDK compatibility.
     app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
     app.include_router(v1.router, prefix="/v1", tags=["v1"])
+    # WS /v1/realtime — OpenAI Realtime surface (HP-realtime inc-1). CLIENT tier
+    # (exposure.py "realtime ws" row); reaches STT/TTS/chat over loopback only.
+    app.include_router(realtime_routes.router, prefix="/v1", tags=["realtime"])
 
     # /api/install drives the first-run wizard. Auth was removed
     # so these endpoints are open; the installer surface is admin-only by
@@ -1426,6 +1971,10 @@ def create_app() -> FastAPI:
     #   dashboard_layout.router → GET/PUT /api/user/dashboard-layout (file-backed)
     app.include_router(throughput.router, prefix="/api", tags=["stats"])
     app.include_router(power.router, prefix="/api", tags=["stats"])
+    # GET /api/doctor — doctor verdict feed (D6 diagnostics panel). GET
+    # /api/stats/requests (dispatcher rollup, D5 requests card) lives on
+    # hardware.router above -- already mounted at prefix="/api".
+    app.include_router(doctor.router, prefix="/api", tags=["doctor"])
     app.include_router(services_health.router, prefix="/api/services", tags=["services"])
     # Services management page (registry-driven detail + lifecycle + mDNS):
     #   services_routes.router → GET /api/services, POST /api/services/{id}/action,

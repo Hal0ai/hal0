@@ -69,6 +69,12 @@ def _exact(path: str) -> Matcher:
     def _match(candidate: str) -> bool:
         return candidate == path
 
+    # Introspectable pattern metadata -- lets GET /api/auth/exposure
+    # (routes/auth.py) serialize RULES without duplicating the literal
+    # path strings a second time. Read-only attributes on the closure;
+    # never consulted by match()/applies() itself.
+    _match.pattern = path  # type: ignore[attr-defined]
+    _match.kind = "exact"  # type: ignore[attr-defined]
     return _match
 
 
@@ -83,6 +89,8 @@ def _prefix(prefix: str) -> Matcher:
     def _match(candidate: str) -> bool:
         return candidate == prefix or candidate.startswith(prefix + "/")
 
+    _match.pattern = prefix  # type: ignore[attr-defined]
+    _match.kind = "prefix"  # type: ignore[attr-defined]
     return _match
 
 
@@ -102,6 +110,10 @@ def _outside_api_v1_mcp(candidate: str) -> bool:
     )
 
 
+_outside_api_v1_mcp.pattern = None  # type: ignore[attr-defined]
+_outside_api_v1_mcp.kind = "catchall"  # type: ignore[attr-defined]
+
+
 @dataclass(frozen=True)
 class _Rule:
     label: str
@@ -117,6 +129,7 @@ class _Rule:
 
 _GET: frozenset[str] = frozenset({"GET", "HEAD"})
 _POST: frozenset[str] = frozenset({"POST"})
+_PUT: frozenset[str] = frozenset({"PUT"})
 
 # Ordered, first-match-wins. See the module docstring for the full design
 # rationale and hal0-rework-plan.md §23.5 for the architecture this
@@ -132,6 +145,24 @@ RULES: tuple[_Rule, ...] = (
     _Rule("dashboard bootstrap urls", _exact("/api/config/urls"), AuthClass.OPEN, _GET),
     _Rule("login", _exact("/api/auth/login"), AuthClass.OPEN, _POST),
     _Rule("auth status", _exact("/api/auth/status"), AuthClass.OPEN, _GET),
+    # Clearing your own HttpOnly session cookie is harmless and must work at
+    # any posture (the cookie is the only session end the browser has).
+    _Rule("logout", _exact("/api/auth/logout"), AuthClass.OPEN, _POST),
+    # Persist the enforcement toggle. ADMIN: only the operator may flip the
+    # posture once auth is on (while it's off the middleware isn't enforcing,
+    # so the first enable rides through — the intended "turn it on" path).
+    _Rule("auth require toggle", _exact("/api/auth/require"), AuthClass.ADMIN, _PUT),
+    # Rotate the admin/client box key — destructive, writes /etc/hal0/api.env.
+    # ADMIN: only the operator may mint a new key. Same posture as the require
+    # toggle (rides through while auth is OFF; admin-only once it's ON). Rate-
+    # limited like login (routes/auth.py reuses app.state.login_limiter).
+    _Rule("auth key rotate", _exact("/api/auth/rotate"), AuthClass.ADMIN, _POST),
+    # Serializes RULES + OPEN_ALLOWLIST (the whole deny-by-default table) for
+    # the Settings ▸ Security page's live exposure table (ExposureTable.jsx
+    # stub-with-reason). ADMIN: the rule table is itself a map of the API's
+    # full auth posture — same "surface map is sensitive-ish" reasoning this
+    # module already applies to /api/docs and /api/openapi.json below.
+    _Rule("auth exposure table (GET)", _exact("/api/auth/exposure"), AuthClass.ADMIN, _GET),
     # ── BOOTSTRAP: installer, open only until an admin key exists ──────
     _Rule("installer", _prefix("/api/install"), AuthClass.BOOTSTRAP, None),
     # ── explicit ADMIN for FastAPI's own docs/meta routes ──────────────
@@ -143,9 +174,34 @@ RULES: tuple[_Rule, ...] = (
     _Rule("openapi schema", _exact("/api/openapi.json"), AuthClass.ADMIN, _GET),
     _Rule("swagger oauth2 redirect", _exact("/docs/oauth2-redirect"), AuthClass.ADMIN, _GET),
     # ── CLIENT: /v1 inference + writer surface (rest of /v1/*) ─────────
+    # Realtime WS (HP-realtime inc-1): a spoken inference surface, CLIENT like
+    # chat. Pinned by name before the generic /v1 rule so the Settings Security
+    # page + exposure CI resolve it to an explicit "realtime" rule (the generic
+    # /v1 prefix below would already classify it CLIENT; this documents intent).
+    _Rule("realtime ws (inference)", _prefix("/v1/realtime"), AuthClass.CLIENT, None),
     _Rule("v1 inference/writer", _prefix("/v1"), AuthClass.CLIENT, None),
     # ── CLIENT: explicit read-only introspection GETs ──────────────────
     _Rule("models list/introspection (GET)", _prefix("/api/models"), AuthClass.CLIENT, _GET),
+    # Duplicate a registry row (UI-API-1 item 3) — a write that mints a new
+    # model. Explicitly ADMIN; the generic "models mutations" rule below would
+    # already catch it, but pinning it by name documents the intent and gives
+    # the exposure test a stable target.
+    _Rule(
+        "model duplicate (POST)",
+        _prefix("/api/models"),
+        AuthClass.ADMIN,
+        _POST,
+    ),
+    # Set/clear a model's per-type default marker (POST /api/models/{id}/default)
+    # — a registry mutation. Explicitly ADMIN, matching every other model
+    # mutation; the generic "models mutations" rule below would already catch it,
+    # but pinning it by name documents the intent (same pattern as duplicate).
+    _Rule(
+        "model set-default (POST)",
+        _prefix("/api/models"),
+        AuthClass.ADMIN,
+        _POST,
+    ),
     _Rule("models mutations", _prefix("/api/models"), AuthClass.ADMIN, None),
     _Rule("slots list (GET, exact)", _exact("/api/slots"), AuthClass.CLIENT, _GET),
     _Rule("slots (everything else)", _prefix("/api/slots"), AuthClass.ADMIN, None),
@@ -174,6 +230,12 @@ RULES: tuple[_Rule, ...] = (
     _Rule("metrics json (GET)", _exact("/api/metrics"), AuthClass.CLIENT, _GET),
     _Rule("features (GET)", _exact("/api/features"), AuthClass.CLIENT, _GET),
     _Rule("features (mutations)", _prefix("/api/features"), AuthClass.ADMIN, None),
+    # Doctor verdict feed (D6 diagnostics panel) — a GET, but classified
+    # ADMIN rather than CLIENT: it aggregates + re-surfaces details from
+    # ADMIN-only subsystems (capability slots, memory engine, services
+    # health), same "when unsure, more restrictive" default this module's
+    # docstring names. Mirrors `hal0 doctor verify --json` (operator-only).
+    _Rule("doctor verdict feed (GET)", _exact("/api/doctor"), AuthClass.ADMIN, _GET),
     # ── ADMIN: everything mutating / config / secret ────────────────────
     _Rule("comfyui", _prefix("/api/comfyui"), AuthClass.ADMIN, None),
     _Rule("services", _prefix("/api/services"), AuthClass.ADMIN, None),
@@ -265,6 +327,7 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/config/urls"),
         ("POST", "/api/auth/login"),
         ("GET", "/api/auth/status"),
+        ("POST", "/api/auth/logout"),
         # Hermes dashboard-plugin static asset proxy (kanban plugin JS/CSS
         # bundles) -- not under /api or /v1, so it hits the same
         # not-api/v1/mcp catch-all the SPA shell itself uses. No secrets:

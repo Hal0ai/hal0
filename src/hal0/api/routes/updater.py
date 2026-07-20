@@ -417,18 +417,6 @@ def _flm_toolbox_image() -> str:
         return ""
 
 
-def _parse_flm_version(raw: str | None) -> str | None:
-    """``FLM v0.9.43`` → ``v0.9.43`` (probe output normalisation).
-
-    Strips the leading ``FLM `` prefix emitted by ``flm --version`` and
-    returns the version token. Returns ``None`` on empty / ``None`` input.
-    """
-    if not raw:
-        return None
-    parts = raw.split()
-    return parts[-1] if parts else raw
-
-
 def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
     """``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44`` → ``0.9.44``.
 

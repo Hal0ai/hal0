@@ -78,6 +78,23 @@ def resolve_gpu_device_paths(
     return paths
 
 
+def _device_node_for_group(name: str, node_paths: list[str]) -> str | None:
+    """Pick the discovered device node that gates a GPU access group.
+
+    ``render`` nodes are named ``renderD*`` (e.g. ``renderD128``); ``video``
+    nodes are the older KMS/master nodes, named ``card*`` (occasionally
+    ``video*``). Returns the first (sorted-order) match from
+    :func:`resolve_gpu_device_paths`'s output, or ``None`` when no node of
+    that kind was discovered (CI/no-GPU box, or the bare-directory fallback
+    path, which never matches these prefixes).
+    """
+    prefixes = ("renderD",) if name == "render" else ("card", "video")
+    for path in node_paths:
+        if os.path.basename(path).startswith(prefixes):
+            return path
+    return None
+
+
 def _probed_gpu_group_gids() -> dict[str, int]:
     """GIDs `hal0 probe` recorded in hardware.json (``gpu_group_gids``).
 
@@ -100,15 +117,25 @@ def _probed_gpu_group_gids() -> dict[str, int]:
 def resolve_gpu_group_ids() -> list[int]:
     """Return numeric GIDs for the host's GPU access groups (render, video).
 
-    Fallback chain, PER GROUP, most-live source first:
+    Fallback chain, PER GROUP, most-authoritative source first:
 
-      1. live ``grp.getgrnam`` against the running host's /etc/group —
-         authoritative when the group exists here and now;
-      2. the probe-time record in hardware.json (``gpu_group_gids``, written
+      1. the OWNING gid of the actual device node (``os.stat(node).st_gid``
+         on the ``renderD*`` node for ``render``, the ``card*``/``video*``
+         node for ``video``) — this is what the kernel actually gates on,
+         so it is correct even when the host's group NAME for that gid
+         differs from "render"/"video" (e.g. a halo143-class host where
+         ``renderD128`` is owned by gid 993 but gid 993's /etc/group name
+         is "clock", not "render" — ``grp.getgrnam("render")`` there
+         resolves a DIFFERENT, wrong gid and the container ends up unable
+         to read the device on any non-root-owner slot);
+      2. live ``grp.getgrnam`` against the running host's /etc/group, used
+         only when the device node is absent (CI/no-GPU box) — still
+         better than nothing when the name happens to line up;
+      3. the probe-time record in hardware.json (``gpu_group_gids``, written
          by ``hal0 probe``) — covers deployments where the API process runs
          in a context whose /etc/group lacks the entries the host actually
          uses for /dev/dri (e.g. minimal containers/chroots);
-      3. the Linux-convention constants (render=993, video=44) — last resort
+      4. the Linux-convention constants (render=993, video=44) — last resort
          so unit rendering stays deterministic on hosts with neither source
          (also the sole path on platforms without the ``grp`` module).
 
@@ -116,11 +143,19 @@ def resolve_gpu_group_ids() -> list[int]:
     order preserved.
     """
     probed = _probed_gpu_group_gids()
+    node_paths = resolve_gpu_device_paths()
     gids: list[int] = []
     try:
         import grp
 
         for name, fallback in _GPU_GROUP_FALLBACK_GIDS.items():
+            node = _device_node_for_group(name, node_paths)
+            if node is not None:
+                try:
+                    gids.append(os.stat(node).st_gid)
+                    continue
+                except OSError:
+                    log.debug("provider.gpu_group_node_stat_failed", group=name, node=node)
             try:
                 gids.append(grp.getgrnam(name).gr_gid)
                 continue
@@ -129,8 +164,16 @@ def resolve_gpu_group_ids() -> list[int]:
             recorded = probed.get(name)
             gids.append(recorded if recorded is not None else fallback)
     except ImportError:
-        # No grp module (non-POSIX host): probe record, then constants.
-        gids = [probed.get(name, fb) for name, fb in _GPU_GROUP_FALLBACK_GIDS.items()]
+        # No grp module (non-POSIX host): device node, then probe, then constants.
+        for name, fallback in _GPU_GROUP_FALLBACK_GIDS.items():
+            node = _device_node_for_group(name, node_paths)
+            if node is not None:
+                try:
+                    gids.append(os.stat(node).st_gid)
+                    continue
+                except OSError:
+                    log.debug("provider.gpu_group_node_stat_failed", group=name, node=node)
+            gids.append(probed.get(name, fallback))
     # De-dup while preserving order (render/video can share a GID).
     seen: set[int] = set()
     out: list[int] = []

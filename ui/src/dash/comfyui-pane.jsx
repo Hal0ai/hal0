@@ -23,6 +23,7 @@ import {
   COMFYUI_FALLBACK,
 } from '@/api/hooks/useComfyui'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState, useEffect, useRef } = React
 
@@ -530,7 +531,7 @@ export function ImageGenCard({
                 {hasRun ? <span className="scan" /> : null}
                 {hasRun && comfyBaseUrl && !previewBroken ? (
                   <img
-                    src={`/api/comfyui/preview?t=${previewTick}`}
+                    src={`${ENDPOINTS.comfyuiPreview}?t=${previewTick}`}
                     alt="latest render output"
                     className="preview-img"
                     onError={() => setPreviewBroken(true)}

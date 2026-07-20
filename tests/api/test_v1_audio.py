@@ -42,7 +42,7 @@ def _pin_slot_ready(client: TestClient, slot_name: str = "chat") -> None:
     from hal0.slots.state import SlotState, SlotStateRecord
 
     sm = client.app.state.dispatcher._slot_manager
-    sm._states[slot_name] = SlotStateRecord(
+    sm._states[sm._key(slot_name)] = SlotStateRecord(
         name=slot_name,
         state=SlotState.READY,
         model_id="test-model",

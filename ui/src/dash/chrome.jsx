@@ -389,8 +389,9 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     return () => window.removeEventListener("hal0:agent-chat-changed", onChg);
   }, []);
   // Brand-bar version badge — live from /api/updates/state (hal0.current,
-  // sourced from hal0.__version__) so it never goes stale; the static fallback
-  // keeps it correct before the first response lands.
+  // sourced from hal0.__version__). No static version fallback: a hardcoded
+  // string is guaranteed to lie eventually (operators saw a stale v0.5 flash
+  // on every load) — show an ellipsis until the real version lands.
   const verState = useUpdateState();
   const appVer = verState.data?.hal0?.current;
   const labels = {
@@ -411,7 +412,7 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     <div className="topbar">
       <div className="tb-brand">
         <Wordmark size={18} />
-        <span className="ver mono">{appVer ? "v" + appVer : "v0.5.0-alpha.1"}</span>
+        <span className="ver mono">{appVer ? "v" + appVer : "…"}</span>
       </div>
       {(eyebrow || title) && (
         <div className="tb-eyebrow mono">

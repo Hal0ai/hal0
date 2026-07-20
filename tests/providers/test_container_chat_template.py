@@ -1,12 +1,16 @@
-"""Tests: container emits --chat-template-file from resolved chat_template.
+"""Tests: container emits --chat-template-file from the resolved chat_template.
 
-Task 3 / Phase 3 — slot-config-phase3-templates.
+Task 3 / Phase 3 — slot-config-phase3-templates. Updated for FLAGS-own §7
+(slot-purity fold): the chat template is model-intrinsic, so it is resolved
+ONLY from ``model.defaults.chat_template``. The per-slot ``chat_template`` is
+sunset/inert at launch (the migrator folds it into the bound model).
 
 Covers:
-  * When a slot_cfg has chat_template set (e.g. "chatml"), the rendered command
-    contains ``--chat-template-file <store>/chat-templates/chatml.jinja``.
-  * When model_info carries defaults.chat_template the flag is also emitted.
-  * When neither slot nor model specifies a template (or both are 'auto' / None),
+  * When model_info carries defaults.chat_template the flag is emitted with
+    ``--chat-template-file <store>/chat-templates/<id>.jinja``.
+  * A residual slot ``chat_template`` is inert — it neither emits the flag on
+    its own nor overrides the model default.
+  * When the model specifies no template (or 'auto' / None),
     ``--chat-template-file`` is ABSENT from the command.
 """
 
@@ -103,13 +107,14 @@ class TestLlamaLaunchPlanChatTemplate:
         )
         assert "--chat-template-file" not in plan.command
 
-    def test_chat_template_override_in_extra_args_wins(self) -> None:
-        """A manual ``--chat-template-file`` in [server].extra_args overrides the
-        resolved one. normalize_argv dedups to a single flag whose value is the
-        extra_args override (last-wins) — the documented precedence, now without
-        the confusing duplicate."""
+    def test_chat_template_typed_segment_wins_over_tune_duplicate(self) -> None:
+        """FLAGS-own: chat_template is a TYPED model field resolved into the
+        ``chat_template`` segment, which sits AFTER ``model_extra_args``. So a
+        redundant ``--chat-template-file`` smuggled into the model's freeform
+        ``defaults.extra_args`` is deduped away and the typed resolution wins
+        (the operator sets the typed chat_template, not a raw flag)."""
         tmpl_path = "/mnt/ai-models/chat-templates/llama3.jinja"
-        override = "/mnt/ai-models/chat-templates/override.jinja"
+        smuggled = "/mnt/ai-models/chat-templates/override.jinja"
         plan = _llama_launch_plan(
             image="img:latest",
             port=8095,
@@ -117,13 +122,13 @@ class TestLlamaLaunchPlanChatTemplate:
             flags_str="",
             devices=[],
             group_ids=[],
-            extra_args=f"--chat-template-file {override}",
+            model_defaults={"extra_args": f"--chat-template-file {smuggled}"},
             chat_template_path=tmpl_path,
         )
         cmd = plan.command
         assert cmd.count("--chat-template-file") == 1
         idx = cmd.index("--chat-template-file")
-        assert cmd[idx + 1] == override
+        assert cmd[idx + 1] == tmpl_path  # typed resolution wins, smuggled deduped
 
 
 # ── container_spec integration tests ─────────────────────────────────────────
@@ -132,18 +137,16 @@ class TestLlamaLaunchPlanChatTemplate:
 class TestContainerSpecChatTemplate:
     """container_spec emits --chat-template-file from resolved slot/model template."""
 
-    def test_slot_chat_template_emitted_in_command(self) -> None:
-        """slot_cfg['chat_template'] = 'chatml' → --chat-template-file in command."""
+    def test_slot_chat_template_is_inert(self) -> None:
+        """FLAGS-own §7: chat_template is model-intrinsic, so a slot-only
+        override is SUNSET/inert at launch — it no longer emits the flag. The
+        migrator folds it into the model; only model.defaults.chat_template
+        reaches the command now (see test below)."""
         cfg = _slot_cfg(chat_template="chatml")
-        spec = _build_spec(cfg, _model_info())
-        store = model_store_root()
-        expected_path = str(store) + "/chat-templates/chatml.jinja"
-
-        assert "--chat-template-file" in spec.command, (
-            f"--chat-template-file missing from command: {spec.command}"
+        spec = _build_spec(cfg, _model_info())  # model carries no template
+        assert "--chat-template-file" not in spec.command, (
+            f"sunset slot chat_template must not reach the command: {spec.command}"
         )
-        idx = spec.command.index("--chat-template-file")
-        assert spec.command[idx + 1] == expected_path
 
     def test_model_defaults_chat_template_emitted_when_no_slot_override(self) -> None:
         """model_info['defaults']['chat_template'] = 'llama3' → flag emitted."""
@@ -159,16 +162,18 @@ class TestContainerSpecChatTemplate:
         idx = spec.command.index("--chat-template-file")
         assert spec.command[idx + 1] == expected_path
 
-    def test_slot_override_wins_over_model_default(self) -> None:
-        """Slot-level chat_template takes priority over model defaults."""
+    def test_model_default_wins_slot_override_inert(self) -> None:
+        """FLAGS-own §7: the model default is now the single launch source —
+        a residual slot chat_template is inert and does NOT override it.
+        (Pre-§7 the slot's 'chatml' won; now the model's 'llama3' wins.)"""
         cfg = _slot_cfg(chat_template="chatml")
         mi = _model_info(defaults={"chat_template": "llama3"})
         spec = _build_spec(cfg, mi)
 
         assert "--chat-template-file" in spec.command
         idx = spec.command.index("--chat-template-file")
-        assert "chatml.jinja" in spec.command[idx + 1], (
-            "slot override 'chatml' must win over model default 'llama3'"
+        assert "llama3.jinja" in spec.command[idx + 1], (
+            "model default 'llama3' must win; the slot override is sunset/inert"
         )
 
     def test_no_chat_template_flag_when_neither_set(self) -> None:
@@ -204,6 +209,9 @@ class TestLoadSyncChatTemplate:
     _TEST_RUNTIME = "/usr/bin/docker"
 
     def test_unit_contains_chat_template_file_flag(self, tmp_path) -> None:
+        """§7: the template rides model.defaults (model-intrinsic), and load_sync
+        writes it into the unit. Pre-§7 this drove off a slot chat_template; the
+        slot key is now sunset/inert so the model carries it."""
         provider = ContainerProvider()
         profile = _moe_profile()
         unit_file = tmp_path / "test.service"
@@ -239,9 +247,12 @@ class TestLoadSyncChatTemplate:
                     "profile": "rocm",
                     "device": "gpu-rocm",
                     "model": {"default": "chadrock-35b.gguf"},
-                    "chat_template": "chatml",
                 },
-                {"path": "/mnt/ai-models/chadrock-35b.gguf", "_model_key": "chadrock-35b"},
+                {
+                    "path": "/mnt/ai-models/chadrock-35b.gguf",
+                    "_model_key": "chadrock-35b",
+                    "defaults": {"chat_template": "chatml"},
+                },
             )
 
         unit = unit_file.read_text()

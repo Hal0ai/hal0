@@ -229,9 +229,12 @@ def _is_ready(cfg: AgentConfig, *, timeout: float = 1.0) -> bool:
         with urllib.request.urlopen(cfg.status_url, timeout=timeout) as resp:
             status: int = resp.status
             return 200 <= status < 300
-    except urllib.error.HTTPError as exc:
-        # Server responded (gated/errored) → it IS reachable.
-        return exc.code in (401, 403)
+    except urllib.error.HTTPError:
+        # Server responded at all (401/403 gated, 404 route moved between
+        # Hermes releases — /health was "verified live" on 0.14.0 but the
+        # vetted pin is 0.18.x, halo150 O3) → the socket IS up and serving.
+        # Only a connection-level failure means "not ready".
+        return True
     except (urllib.error.URLError, OSError):
         return False
 

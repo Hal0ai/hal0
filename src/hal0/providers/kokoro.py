@@ -18,7 +18,7 @@ Weights:
   path translation.
 
   The mount dst string carries the ``:ro`` suffix directly because
-  ``_render_unit_from_spec`` renders mounts as ``--volume={src}:{dst}``
+  the Quadlet renderer emits mounts as ``Volume={src}:{dst}``
   verbatim — there is no separate read-only flag on ContainerSpec.
 
 No devices / group_add:
@@ -86,7 +86,7 @@ class KokoroProvider(Provider):
     wraps ``kokoro_server.py`` which implements OpenAI-compat
     ``POST /v1/audio/speech``, ``GET /v1/models``, and ``GET /health``.
 
-    Primary deployment path is ``container_spec`` → ``_render_unit_from_spec``
+    Primary deployment path is ``container_spec`` → ``_render_quadlet_from_plan``
     (same pattern as FLMProvider).  ``build_env`` / ``start_cmd`` are
     informational stubs kept for ABC compliance and debug shells.
     """
@@ -198,7 +198,7 @@ class KokoroProvider(Provider):
             group_add=[],
             port=port,
             # Port-mapped (not host networking) so multiple CPU slots can
-            # coexist.  _render_unit_from_spec derives
+            # coexist.  the Quadlet renderer derives
             # --publish=127.0.0.1:<port>:<port> from spec.port.
             network_mode="",
             extra_args=[],

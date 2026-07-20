@@ -422,7 +422,7 @@ function ModelsView() {
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
-      <RecipeEditorModal open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
+      <ModelDrawer open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
 
       {searchOpen && (
@@ -524,7 +524,7 @@ function ModelRow({ model, selected, onSelect }) {
           : !model.installed
             ? <span className="chip" style={{color: model.ns === "blessed" ? "var(--accent)" : "var(--fg-3)", borderColor: model.ns === "blessed" ? "var(--accent-line)" : "var(--line)", background: model.ns === "blessed" ? "var(--accent-soft)" : "transparent"}}>{model.ns}</span>
             : model.update_available
-              ? <span className="chip amber" data-testid="mdl-row-update" title="A newer version of this file is available on Hugging Face">update ↑</span>
+              ? <span className="chip amber" data-testid="mdl-row-update" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update ↑</span>
               : null}
       </span>
     </div>
@@ -598,7 +598,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
           <div className="nm mono">{model.longName || model.name || model.id}</div>
           <span style={{marginLeft: "auto", display: "inline-flex", gap: 6}}>
             {model.installed && model.update_available && (
-              <span className="chip amber" title="A newer version of this file is available on Hugging Face">update available</span>
+              <span className="chip amber" data-testid="mdl-detail-update-badge" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update available</span>
             )}
             {model.installed
               ? <span className="chip ok">installed</span>

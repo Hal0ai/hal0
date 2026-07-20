@@ -17,7 +17,7 @@ import typer
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from hal0.cli._shared import _api_base
+from hal0.cli._shared import _api_base, _auth_headers
 from hal0.config import paths
 from hal0.config.schema import HardwareInfo
 from hal0.hardware.probe import HardwareProbe, HardwareProbeError
@@ -60,7 +60,7 @@ _SCAFFOLD_CAPS = ("chat", "embed", "rerank", "stt", "tts", "vision")
 
 def _api_reachable(timeout: float = 0.5) -> bool:
     try:
-        r = httpx.get(f"{_api_base()}/api/install/state", timeout=timeout)
+        r = httpx.get(f"{_api_base()}/api/install/state", timeout=timeout, headers=_auth_headers())
         return r.status_code < 500
     except Exception:
         return False

@@ -29,11 +29,12 @@ from hal0.agents import (
     AgentAlreadyInstalledError,
     AgentManager,
     AgentNotFoundError,
+    AgentUninstallIncompleteError,
     HermesNotHal0AwareError,
 )
 from hal0.agents.manager import BUNDLED_AGENTS
 from hal0.agents.persona import AGENT_SKILLS, PERSONA_TONES, PERSONA_TOOLS
-from hal0.errors import BadRequest, Conflict, Hal0Error, NotFound
+from hal0.errors import BadRequest, Conflict, Hal0Error, MultiStatus, NotFound
 
 router = APIRouter()
 
@@ -315,6 +316,22 @@ async def uninstall_agent(name: str) -> dict[str, str]:
         removed = mgr.uninstall(name)
     except AgentNotFoundError as exc:
         raise NotFound(str(exc), code="agent.unknown") from exc
+    except AgentUninstallIncompleteError as exc:
+        # O16: uninstall removed what it could but hit entries the User=hal0
+        # service can't delete (root-owned files inside a managed tree). Surface
+        # an honest 207 partial-removal listing what remained + why — never a
+        # bare 500. ``removed`` reflects the pre-teardown disk witnesses so the
+        # operator sees the agent WAS present.
+        raise MultiStatus(
+            str(exc),
+            code="agent.uninstall_incomplete",
+            details={
+                "name": name,
+                "status": "partially_uninstalled",
+                "removed": exc.had_artifacts,
+                "residual": exc.residual,
+            },
+        ) from exc
     return {
         "name": name,
         "status": "uninstalled" if removed else "not_installed",

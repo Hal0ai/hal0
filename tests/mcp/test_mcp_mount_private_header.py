@@ -116,11 +116,22 @@ def test_private_resolver_reads_header_off_request_ctx() -> None:
 
 
 def test_bearer_resolver_stamps_client_id_off_request_ctx() -> None:
-    """A Bearer token on the live request becomes the client_id."""
+    """A Bearer token on the live request yields the raw bearer (for auth)
+    plus a HASHED client_id label — never the raw token itself.
+
+    The raw bearer is a live, replayable credential; stamping it verbatim
+    into ``client_id`` leaks it into the journald audit trail (readable
+    via ``/api/logs``). ``client_id`` must be a derived, non-reversible
+    label instead.
+    """
     with _CtxToken({"Authorization": "Bearer pi-coder-token"}):
         bearer, client_id = mcp_mount.bearer_resolver()
         assert bearer == "pi-coder-token"
-        assert client_id == "pi-coder-token"
+        assert client_id != "pi-coder-token"
+        assert client_id == mcp_mount._bearer_label("pi-coder-token")
+        # Sanity: label is short, hex, and doesn't embed the raw token.
+        assert len(client_id) == 12
+        assert all(c in "0123456789abcdef" for c in client_id)
 
 
 @pytest.mark.asyncio

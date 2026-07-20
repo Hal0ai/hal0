@@ -3,9 +3,9 @@
 Issue #655 — tracer bullet: ContainerProvider unit-render + control-plane.
 
 Covers:
-  * _render_unit produces the expected podman ExecStart (flags merged from
-    profile, identical-path /mnt/ai-models:ro mount, loopback port publish,
-    numeric GIDs, apparmor/seccomp unconfined)
+  * _render_quadlet_from_plan produces the expected Quadlet .container keys +
+    Exec= argv (flags merged from profile, identical-path /mnt/ai-models:ro,z
+    mount, loopback PublishPort, numeric GroupAdd, apparmor/seccomp unconfined)
   * resolve_profile_flags MTP expansion
   * ContainerProvider.container_spec returns a ContainerSpec with correct
     image, command, mounts, and security opts
@@ -28,20 +28,85 @@ from hal0.config.schema import (
     model_family,
     resolve_profile_flags,
 )
+from hal0.providers import container as _container_mod
+from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
     _container_runtime,
     _image_mismatch,
-    _render_unit,
-    _render_unit_from_plan,
+    _llama_launch_plan,
+    _loopback_fence_command,
+    _render_quadlet_from_plan,
     _resolve_model_path,
     resolved_command_for_slot,
 )
 
-# Use a fixed runtime bin for tests so _render_unit doesn't need podman/docker.
-_TEST_RUNTIME = "/usr/bin/docker"
+# Podman is the only supported runtime under Quadlet; the shims below ignore
+# ``runtime_bin`` (Quadlet doesn't put the runtime binary in the unit), but the
+# param is kept so existing call sites need no edit.
+_TEST_RUNTIME = "/usr/bin/podman"
+
+
+def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"):
+    """Test shim: render a plan to Quadlet ``.container`` text (was ``_render_unit_from_plan``)."""
+    return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
+
+
+def _render_llama(
+    token,
+    image,
+    port,
+    model_path,
+    flags_str,
+    *,
+    runtime_bin=None,
+    device_paths=None,
+    context_size=None,
+    extra_args=None,
+    model_alias=None,
+    publish_host="127.0.0.1",
+):
+    """Test shim mirroring the deleted ``_render_unit`` scalar shim, producing
+    Quadlet text: build the llama launch plan, then render it.
+
+    FLAGS-own: the profile ``flags_str`` and slot ``extra_args`` no longer reach
+    launch — a model owns its tune. So this shim now routes both into the
+    model's materialized ``defaults.extra_args`` (the surviving ``model_extra_args``
+    launch segment), i.e. it simulates a STAMPED model. That keeps these render
+    tests exercising the exact tune-emission + Exec= quoting path they always
+    did, just through the one channel that survives.
+    """
+    # Resolve through the container module so tests patching
+    # ``hal0.providers.container.resolve_gpu_device_paths`` take effect (mirrors
+    # the deleted ``_render_unit`` shim, which resolved it there).
+    devices = (
+        device_paths if device_paths is not None else _container_mod.resolve_gpu_device_paths()
+    )
+    merged_tune = " ".join(p for p in ((flags_str or "").strip(), (extra_args or "").strip()) if p)
+    plan = _llama_launch_plan(
+        image=image,
+        port=port,
+        model_path=model_path,
+        flags_str="",  # inert now
+        devices=list(devices),
+        group_ids=[str(g) for g in resolve_gpu_group_ids()],
+        context_size=context_size,
+        extra_args=None,  # inert now
+        model_alias=model_alias,
+        model_defaults={"extra_args": merged_tune} if merged_tune else None,
+    )
+    return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
+
+
+def _exec_line(unit_text: str) -> str:
+    """Return the ``Exec=`` value (the in-container argv) from Quadlet unit text."""
+    for line in unit_text.splitlines():
+        if line.startswith("Exec="):
+            return line[len("Exec=") :]
+    raise AssertionError("Exec= not found in unit text")
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -124,8 +189,9 @@ class TestResolveProfileFlags:
 
 
 class TestContainerRuntimeProbe:
-    """``_container_runtime`` must find podman/docker wherever PATH puts them,
-    not just at the hardcoded /usr/bin/ prefix (snap, /usr/local/bin, nix, ...)."""
+    """``_container_runtime`` resolves podman wherever PATH puts it (snap,
+    /usr/local/bin, nix, ...). Docker is unsupported under Quadlet — the fallback
+    is gone; only ``/usr/bin/podman`` and a bare ``podman`` PATH lookup remain."""
 
     def test_env_override_wins_over_everything(self, monkeypatch) -> None:
         monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "/opt/custom/podman")
@@ -140,14 +206,6 @@ class TestContainerRuntimeProbe:
         )
         assert _container_runtime() == "/usr/bin/podman"
 
-    def test_falls_back_to_absolute_usr_bin_docker(self, monkeypatch) -> None:
-        monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
-        monkeypatch.setattr(
-            "hal0.providers.container.shutil.which",
-            lambda c: c if c == "/usr/bin/docker" else None,
-        )
-        assert _container_runtime() == "/usr/bin/docker"
-
     def test_falls_back_to_bare_podman_on_path(self, monkeypatch) -> None:
         """podman installed somewhere other than /usr/bin/ (snap, nix, ...)
         must still resolve via a bare PATH lookup — a pinned absolute-path
@@ -155,7 +213,7 @@ class TestContainerRuntimeProbe:
         monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
 
         def fake_which(c: str) -> str | None:
-            if c in ("/usr/bin/podman", "/usr/bin/docker"):
+            if c == "/usr/bin/podman":
                 return None
             if c == "podman":
                 return "/snap/bin/podman"
@@ -164,16 +222,21 @@ class TestContainerRuntimeProbe:
         monkeypatch.setattr("hal0.providers.container.shutil.which", fake_which)
         assert _container_runtime() == "/snap/bin/podman"
 
-    def test_falls_back_to_bare_docker_on_path(self, monkeypatch) -> None:
+    def test_docker_is_not_a_candidate(self, monkeypatch) -> None:
+        """Docker is unsupported: even when only docker is on PATH, resolution
+        must NOT pick it up — it raises instead (podman-only under Quadlet)."""
         monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
 
         def fake_which(c: str) -> str | None:
-            if c == "docker":
-                return "/usr/local/bin/docker"
-            return None
+            return "/usr/local/bin/docker" if c == "docker" else None
 
         monkeypatch.setattr("hal0.providers.container.shutil.which", fake_which)
-        assert _container_runtime() == "/usr/local/bin/docker"
+        try:
+            _container_runtime()
+        except RuntimeError as exc:
+            assert "no podman runtime found" in str(exc)
+        else:
+            raise AssertionError("docker must not be a runtime candidate")
 
     def test_raises_when_no_runtime_found_anywhere(self, monkeypatch) -> None:
         monkeypatch.delenv("HAL0_CONTAINER_RUNTIME", raising=False)
@@ -181,7 +244,7 @@ class TestContainerRuntimeProbe:
         try:
             _container_runtime()
         except RuntimeError as exc:
-            assert "no container runtime found" in str(exc)
+            assert "no podman runtime found" in str(exc)
         else:
             raise AssertionError("expected RuntimeError")
 
@@ -190,445 +253,286 @@ class TestContainerRuntimeProbe:
 
 
 class TestRenderUnit:
-    """_render_unit produces correct podman ExecStart."""
+    """The Quadlet ``.container`` renderer produces correct declarative keys +
+    the in-container ``Exec=`` argv (the podman-run ExecStart string is gone)."""
 
-    def _get_exec_start(self, unit_text: str) -> str:
-        for line in unit_text.splitlines():
-            if line.startswith("ExecStart="):
-                return line[len("ExecStart=") :]
-        raise AssertionError("ExecStart not found in unit text")
-
-    def test_contains_container_run(self) -> None:
+    def test_image_and_exec_present(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
-        assert exec_start.startswith(f"{_TEST_RUNTIME} run")
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert f"Image={profile.image}" in unit.splitlines()
+        assert "--port 8095" in _exec_line(unit)
 
-    def test_replace_flag_clears_stale_container_records_podman(self) -> None:
-        """An unclean shutdown leaves a stale container record with the slot
-        name (``--rm`` never ran), so the next boot fails with podman exit 125
-        "name already in use" (#721). ``--replace`` removes any pre-existing
-        same-name container before starting; no-op when none exists.
-
-        ``--replace`` is podman-only — see
-        ``test_docker_runtime_omits_replace_flag`` for the docker branch."""
+    def test_container_name_key(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin="/usr/bin/podman",
-        )
-        tokens = shlex.split(self._get_exec_start(unit))
-        assert "--replace" in tokens, f"--replace missing from argv: {tokens}"
-        # Must follow --name so the pairing is obvious in the rendered unit.
-        assert tokens.index("--replace") == tokens.index("--name=hal0-slot-test-slot") + 1
-
-    def test_docker_runtime_omits_replace_flag(self) -> None:
-        """docker has no ``--replace`` flag ("unknown flag: --replace") — a
-        plain ``docker run --replace ...`` aborts immediately, which took
-        every container slot down on a docker-only host. The rendered argv
-        for a docker runtime must NOT carry --replace; the stale-record
-        cleanup instead comes from the ExecStartPre=-docker rm -f the unit
-        skeleton emits for every runtime (see
-        test_docker_runtime_gets_execstartpre_rm_cleanup)."""
-        profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        tokens = shlex.split(self._get_exec_start(unit))
-        assert "--replace" not in tokens, f"--replace must not render for docker: {tokens}"
-        assert tokens[0] == _TEST_RUNTIME
-        assert tokens[1] == "run"
-
-    def test_docker_runtime_gets_execstartpre_rm_cleanup(self) -> None:
-        """Every runtime (podman AND docker) gets a tolerant
-        ``ExecStartPre=-{runtime} rm -f <container_name>`` — the docker-safe
-        equivalent of podman's --replace, so an unclean-shutdown stale
-        container record doesn't fail the next docker start either."""
-        profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        assert f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-test-slot" in unit.splitlines()
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert "ContainerName=hal0-slot-test-slot" in unit.splitlines()
 
     def test_identical_path_mount_readonly(self, monkeypatch) -> None:
         """Model store mounted identical-path, read-only, SELinux-relabelled."""
         monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        tokens = shlex.split(self._get_exec_start(unit))
-        vol_args = [t for t in tokens if t.startswith(f"--volume={_MODEL_STORE_MOUNT}")]
-        assert vol_args, f"no --volume for {_MODEL_STORE_MOUNT} in: {tokens}"
-        assert vol_args[0] == f"--volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro,z", (
-            f"unexpected mount: {vol_args[0]}"
-        )
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert f"Volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro,z" in unit.splitlines()
 
     def test_mount_honours_custom_model_store(self, monkeypatch) -> None:
         """A custom HAL0_MODEL_STORE is what the slot bind-mounts — so a model
         dir outside /mnt/ai-models is visible inside the container (the Fedora
-        'No such file or directory' bug). Regression guard for #768 surviving
-        the RuntimeLaunchPlan refactor (#763)."""
+        'No such file or directory' bug). Regression guard for #768."""
         custom = "/home/cuken/ai/models"
         monkeypatch.setenv("HAL0_MODEL_STORE", custom)
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "agent0",
-            profile.image,
-            8095,
-            f"{custom}/Qwen3.6-35B.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        tokens = shlex.split(self._get_exec_start(unit))
-        assert f"--volume={custom}:{custom}:ro,z" in tokens, tokens
-        assert not any(t.startswith("--volume=/mnt/ai-models") for t in tokens), tokens
+        unit = _render_llama("agent0", profile.image, 8095, f"{custom}/Qwen3.6-35B.gguf", flags)
+        assert f"Volume={custom}:{custom}:ro,z" in unit.splitlines()
+        assert not any(ln.startswith("Volume=/mnt/ai-models") for ln in unit.splitlines())
 
-    def test_requires_mounts_for_bind_sources(self, monkeypatch) -> None:
-        """Every bind source lands in RequiresMountsFor so a slot on an
-        external store (/mnt/...) orders after — and pulls in — the backing
-        mount at boot instead of racing it (podman exit 125 statfs)."""
-        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
+    def test_render_mounts_store_and_pull_root(self, monkeypatch) -> None:
+        """O25: when store != pull_root, BOTH roots render a Volume so a model
+        file under the external pull_root tree is reachable in-container."""
+        monkeypatch.setattr(
+            _container_mod,
+            "model_mount_roots",
+            lambda: ["/var/lib/hal0/models", "/mnt/ai-models"],
+        )
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        req_lines = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
-        assert req_lines and _MODEL_STORE_MOUNT in req_lines[0], unit
+        unit = _render_llama("brain", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
+        assert "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" in vols
+        assert "Volume=/var/lib/hal0/models:/var/lib/hal0/models:ro,z" in vols
 
-    def test_readonly_mount_not_auto_created(self, monkeypatch) -> None:
-        """The read-only model store must NOT get an ExecStartPre mkdir —
-        silently creating an empty store would mask a broken mount behind a
-        model-not-found error. It still gets the unconditional stale-record
-        rm -f cleanup (every runtime gets that one)."""
-        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)
+    def test_render_dedups_store_equals_pull_root(self, monkeypatch) -> None:
+        """store == pull_root → exactly one model-store Volume (no dup)."""
+        monkeypatch.setattr(
+            _container_mod,
+            "model_mount_roots",
+            lambda: ["/mnt/ai-models"],
+        )
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
-        assert pre == [f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-test-slot"], unit
-        assert "mkdir" not in unit, unit
-
-    def test_writable_mount_gets_execstartpre_mkdir(self) -> None:
-        """Writable bind sources (FLM cache & co) get a tolerant
-        ExecStartPre=-mkdir -p so a source dir that vanished across a reboot
-        can't fail every start with podman exit 125 — alongside the
-        unconditional stale-record rm -f cleanup every runtime gets."""
-        plan = RuntimeLaunchPlan(
-            image="ghcr.io/hal0ai/hal0-toolbox-flm:test",
-            command=["serve", "x"],
-            mounts=[("/mnt/ai-models/flm/models", "/var/lib/hal0/.config/flm/models")],
-            port=8088,
-            network_mode="",
-        )
-        unit = _render_unit_from_plan("npu", plan, runtime_bin=_TEST_RUNTIME)
-        pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
-        assert pre == [
-            f"ExecStartPre=-{_TEST_RUNTIME} rm -f hal0-slot-npu",
-            "ExecStartPre=-/usr/bin/mkdir -p /mnt/ai-models/flm/models",
-        ], unit
-        req = [ln for ln in unit.splitlines() if ln.startswith("RequiresMountsFor=")]
-        assert req == ["RequiresMountsFor=/mnt/ai-models/flm/models"], unit
+        unit = _render_llama("brain", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
+        assert vols == ["Volume=/mnt/ai-models:/mnt/ai-models:ro,z"]
 
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
-        assert "127.0.0.1:8095:8095" in exec_start
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
 
     def test_healthcheck_targets_slot_port_not_image_default(self) -> None:
         """The toolbox image bakes a HEALTHCHECK probing a hardcoded :8080, but
         hal0 runs llama-server on the slot port — so the unit must override
-        --health-cmd to probe the real port (else `podman ps` shows a permanent
-        false (unhealthy)). A start-period must cover model load."""
+        HealthCmd= to probe the real port (else `podman ps` shows a permanent
+        false (unhealthy))."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        tokens = shlex.split(self._get_exec_start(unit))
-        health_cmd = [t for t in tokens if t.startswith("--health-cmd=")]
-        assert health_cmd, f"no --health-cmd override in: {tokens}"
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        lines = unit.splitlines()
+        health_cmd = [ln for ln in lines if ln.startswith("HealthCmd=")]
+        assert health_cmd, f"no HealthCmd override in: {lines}"
         assert "127.0.0.1:8095/health" in health_cmd[0], health_cmd[0]
         assert ":8080/" not in health_cmd[0], "must not probe the image's :8080 default"
-        assert any(t.startswith("--health-start-period=") for t in tokens), tokens
-        # Health flags are podman run options → must precede the image token.
-        img_idx = tokens.index(profile.image)
-        assert tokens.index(health_cmd[0]) < img_idx, "health flags must precede the image"
+        assert any(ln.startswith("HealthStartPeriod=") for ln in lines), lines
 
     def test_device_passthrough(self) -> None:
         """Default device source is resolve_gpu_device_paths(); each node is
-        passed explicitly via --device=, never the bare /dev/dri directory."""
+        passed explicitly via AddDevice=, never the bare /dev/dri directory."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         with patch(
             "hal0.providers.container.resolve_gpu_device_paths",
             return_value=["/dev/kfd", "/dev/dri/renderD128"],
         ):
-            unit = _render_unit(
-                "test-slot",
-                profile.image,
-                8095,
-                "/mnt/ai-models/model.gguf",
-                flags,
-                runtime_bin=_TEST_RUNTIME,
+            unit = _render_llama(
+                "test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags
             )
-        exec_start = self._get_exec_start(unit)
-        tokens = shlex.split(exec_start)
-        assert "--device=/dev/kfd" in tokens
-        assert "--device=/dev/dri/renderD128" in tokens
-        assert "--device=/dev/dri" not in tokens
+        lines = unit.splitlines()
+        assert "AddDevice=/dev/kfd" in lines
+        assert "AddDevice=/dev/dri/renderD128" in lines
+        assert "AddDevice=/dev/dri" not in lines
 
     def test_explicit_device_nodes_emitted_no_bare_dri_dir(self) -> None:
         """With explicit device_paths, the unit passes each node verbatim and
         never the bare /dev/dri directory (which podman cannot recurse)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
+        unit = _render_llama(
             "test-slot",
             profile.image,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
-            runtime_bin=_TEST_RUNTIME,
             device_paths=["/dev/kfd", "/dev/dri/renderD128"],
         )
-        exec_start = self._get_exec_start(unit)
-        tokens = shlex.split(exec_start)
-        assert "--device=/dev/kfd" in tokens
-        assert "--device=/dev/dri/renderD128" in tokens
-        assert "--device=/dev/dri" not in tokens
+        lines = unit.splitlines()
+        assert "AddDevice=/dev/kfd" in lines
+        assert "AddDevice=/dev/dri/renderD128" in lines
+        assert "AddDevice=/dev/dri" not in lines
 
-    def test_model_alias_in_exec_start(self) -> None:
-        """The container must advertise the hal0 registry model id via
-        --alias, else the dispatcher can't match hal0/* names (llama-server
-        otherwise advertises the raw GGUF basename)."""
+    def test_model_alias_in_exec(self) -> None:
+        """The container must advertise the hal0 registry model id via --alias,
+        else the dispatcher can't match hal0/* names."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
+        unit = _render_llama(
             "test-slot",
             profile.image,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
-            runtime_bin=_TEST_RUNTIME,
             device_paths=["/dev/kfd", "/dev/dri/renderD128"],
             model_alias="qwopus3.6-27b-v2",
         )
-        tokens = shlex.split(self._get_exec_start(unit))
+        tokens = shlex.split(_exec_line(unit))
         assert "--alias" in tokens
         assert tokens[tokens.index("--alias") + 1] == "qwopus3.6-27b-v2"
 
-    def test_ctx_size_in_exec_start(self) -> None:
+    def test_ctx_size_in_exec(self) -> None:
         """The slot's context_size must reach the container as --ctx-size,
         else llama-server boots at its 4096 default (severe ctx regression)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
+        unit = _render_llama(
             "test-slot",
             profile.image,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
-            runtime_bin=_TEST_RUNTIME,
             device_paths=["/dev/kfd", "/dev/dri/renderD128"],
             context_size=131072,
         )
-        tokens = shlex.split(self._get_exec_start(unit))
+        tokens = shlex.split(_exec_line(unit))
         assert "--ctx-size" in tokens
         assert tokens[tokens.index("--ctx-size") + 1] == "131072"
 
     def test_server_extra_args_appended(self) -> None:
-        """[server].extra_args is honored on the container path (override/legacy),
-        appended after profile flags so slot-level flags win."""
+        """[server].extra_args is honored on the container path, appended after
+        profile flags so slot-level flags win."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
+        unit = _render_llama(
             "test-slot",
             profile.image,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
-            runtime_bin=_TEST_RUNTIME,
             device_paths=["/dev/kfd", "/dev/dri/renderD128"],
             extra_args="--override-kv tokenizer.ggml.add_bos=bool:false",
         )
-        tokens = shlex.split(self._get_exec_start(unit))
+        tokens = shlex.split(_exec_line(unit))
         assert "--override-kv" in tokens
         assert "tokenizer.ggml.add_bos=bool:false" in tokens
+
+    def test_json_extra_arg_preserves_quoting(self) -> None:
+        """A space-less JSON extra-arg value must survive systemd's Exec= parser
+        intact (rework board bug).  ``--chat-template-kwargs
+        '{"enable_thinking":false}'`` shlex-splits into a bare, space-less
+        ``{"enable_thinking":false}`` token; the old emitter only quoted tokens
+        containing a space, so the double-quotes were emitted un-escaped and
+        systemd stripped them to ``{enable_thinking:false}`` → llama-server JSON
+        parse error → the slot never starts.  The Quadlet Exec= emitter must
+        ``shlex.quote`` every token so the JSON reaches the process byte-for-byte."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        json_kwargs = '{"enable_thinking":false}'
+        unit = _render_llama(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            device_paths=["/dev/kfd", "/dev/dri/renderD128"],
+            extra_args=f"--chat-template-kwargs '{json_kwargs}'",
+        )
+        exec_line = _exec_line(unit)
+        # The raw line must carry the (now single-quoted) JSON with its double
+        # quotes intact — never the double-quote-stripped form.
+        assert json_kwargs in exec_line
+        assert "{enable_thinking:false}" not in exec_line
+        # And a shell/systemd-style re-parse recovers the exact JSON token.
+        tokens = shlex.split(exec_line)
+        assert "--chat-template-kwargs" in tokens
+        assert tokens[tokens.index("--chat-template-kwargs") + 1] == json_kwargs
 
     def test_security_opts(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
-        assert "apparmor=unconfined" in exec_start
-        assert "seccomp=unconfined" in exec_start
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        # Uniform render (O8+O11): security opts ride PodmanArgs= on every
+        # substrate — native SecurityOpt= keys are deliberately not emitted.
+        assert "--security-opt apparmor=unconfined" in unit
+        assert "--security-opt seccomp=unconfined" in unit
+        assert "SecurityOpt=" not in unit
 
-    def test_model_arg_in_exec_start(self) -> None:
+    def test_model_arg_in_exec(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         model_path = "/mnt/ai-models/model.gguf"
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            model_path,
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
+        unit = _render_llama("test-slot", profile.image, 8095, model_path, flags)
         # llama-server uses space-separated --model PATH (not --model=PATH)
-        assert f"--model {model_path}" in exec_start
+        assert f"--model {model_path}" in _exec_line(unit)
 
-    def test_profile_flags_in_exec_start(self) -> None:
-        """Bench-tuned profile flags must appear after image in ExecStart."""
+    def test_profile_flags_in_exec(self) -> None:
+        """Bench-tuned profile flags must appear in the Exec= argv."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
-        # Key profile flags from seed rocm
-        assert "-fa" in exec_start
-        assert "--no-mmap" in exec_start
-        assert "-ctk" in exec_start
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        exec_line = _exec_line(unit)
+        assert "-fa" in exec_line
+        assert "--no-mmap" in exec_line
+        assert "-ctk" in exec_line
 
-    def test_mtp_flags_in_exec_start_when_mtp_true(self) -> None:
+    def test_mtp_flags_in_exec_when_mtp_true(self) -> None:
         profile = _mtp_profile()
         flags = resolve_profile_flags(profile, mtp_override=True)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
-        assert "--spec-type" in exec_start
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert "--spec-type" in _exec_line(unit)
 
-    def test_container_name_in_exec_stop(self) -> None:
+    def test_unit_has_expected_sections(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        for line in unit.splitlines():
-            if line.startswith("ExecStop="):
-                assert "hal0-slot-test-slot" in line
-                break
-        else:
-            raise AssertionError("ExecStop not found in unit")
-
-    def test_unit_has_service_section(self) -> None:
-        profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "[Unit]" in unit
+        assert "[Container]" in unit
         assert "[Service]" in unit
+        assert "[Install]" in unit
+        # Quadlet owns crash recovery now (was the hand-rendered Restart=no).
+        assert "Restart=always" in unit.splitlines()
+
+    def test_startlimit_keys_land_in_unit_section_not_service(self) -> None:
+        """StartLimit*= are systemd.unit(5) [Unit] directives, not [Service].
+
+        Emitting them under [Service] makes systemd log "Unknown key" and
+        silently drop them, disabling the slot's restart rate-limiting
+        (install-validation m2, halo150, 2026-07-19). Assert they render in
+        the [Unit] block and never leak into [Service].
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit_section, _, remainder = unit.partition("[Container]")
+        service_section = remainder.partition("[Service]")[2].partition("[Install]")[0]
+        assert "StartLimitIntervalSec=300" in unit_section
+        assert "StartLimitBurst=5" in unit_section
+        assert "StartLimitIntervalSec" not in service_section
+        assert "StartLimitBurst" not in service_section
 
     def test_numeric_group_add_present(self) -> None:
-        """group-add must use numeric GIDs (toolbox images lack group names)."""
+        """GroupAdd= must use numeric GIDs (toolbox images lack group names)."""
         from hal0.providers._gpu import resolve_gpu_group_ids
 
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "test-slot",
-            profile.image,
-            8095,
-            "/mnt/ai-models/model.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        exec_start = self._get_exec_start(unit)
-        gids = resolve_gpu_group_ids()
-        for gid in gids:
-            assert f"--group-add={gid}" in exec_start, f"GID {gid} not in ExecStart: {exec_start}"
+        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        # Uniform render: numeric GIDs ride PodmanArgs=--group-add (O8+O11).
+        for gid in resolve_gpu_group_ids():
+            assert f"--group-add {gid}" in unit, f"GID {gid} missing: {unit}"
+        assert "GroupAdd=" not in unit
 
 
 # ── ContainerProvider.container_spec ─────────────────────────────────────────
@@ -696,23 +600,21 @@ class TestContainerSpec:
         assert spec.port == 8095
         assert spec.network_mode == ""
         assert not any("127.0.0.1" in a for a in spec.extra_args)
-        unit = _render_unit_from_plan("test-slot", spec, runtime_bin=_TEST_RUNTIME)
-        assert "--publish=127.0.0.1:8095:8095" in unit
+        unit = _render_from_plan("test-slot", spec)
+        assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
 
     def test_publish_host_default_is_loopback(self) -> None:
         """Absent a publish_host override the renderer keeps the safe default."""
         spec = self._build_spec()
-        unit = _render_unit_from_plan("test-slot", spec, runtime_bin=_TEST_RUNTIME)
-        assert "--publish=127.0.0.1:8095:8095" in unit
+        unit = _render_from_plan("test-slot", spec)
+        assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
 
     def test_publish_host_override_widens_bind(self) -> None:
         """[slots].publish_host=0.0.0.0 → the slot publishes on all interfaces."""
         spec = self._build_spec()
-        unit = _render_unit_from_plan(
-            "test-slot", spec, runtime_bin=_TEST_RUNTIME, publish_host="0.0.0.0"
-        )
-        assert "--publish=0.0.0.0:8095:8095" in unit
-        assert "--publish=127.0.0.1:8095:8095" not in unit
+        unit = _render_from_plan("test-slot", spec, publish_host="0.0.0.0")
+        assert "PublishPort=0.0.0.0:8095:8095" in unit.splitlines()
+        assert "PublishPort=127.0.0.1:8095:8095" not in unit.splitlines()
 
     def test_network_mode_empty(self) -> None:
         """network_mode must be empty (not 'host') so loopback publish is used."""
@@ -735,7 +637,9 @@ class TestContainerSpec:
         assert argv[argv.index("--ctx-size") + 1] == "32768"
 
     def test_expected_argv_emits_config_drift_watched_flag_spellings(self) -> None:
-        """#863: drift watches exact argv spellings, so renderer renames must fail."""
+        """#863: drift watches exact argv spellings, so renderer renames must fail.
+        FLAGS-own: -b/-ub now ride the model's materialized defaults.extra_args
+        (the profile flag segment is gone), so the model carries them here."""
         provider = self._provider()
         with patch(
             "hal0.providers.container._resolve_profile",
@@ -743,7 +647,7 @@ class TestContainerSpec:
         ):
             argv = provider.expected_argv(
                 _slot_cfg(model={"default": "chadrock-35b-ace-saber", "context_size": 131072}),
-                _model_info(),
+                _model_info(defaults={"extra_args": "-b 512 -ub 512"}),
             )
 
         assert argv is not None
@@ -790,9 +694,11 @@ class TestLoadSync:
         assert any("restart" in c for c in cmds), f"restart not in {cmds}"
         assert (tmp_path / "test.service").exists()
 
-    def test_load_sync_threads_ctx_size_and_extra_args(self, tmp_path: Path) -> None:
-        """load_sync must pull context_size + [server].extra_args off the slot
-        cfg and bake them into the rendered unit."""
+    def test_load_sync_threads_ctx_size_and_model_tune(self, tmp_path: Path) -> None:
+        """load_sync bakes the slot ``context_size`` (base --ctx-size, still
+        slot-resolved) AND the MODEL's materialized ``defaults.extra_args`` into
+        the rendered unit. FLAGS-own: a slot ``[server].extra_args`` is inert —
+        the model owns the tune, so the override-kv rides ``model_info.defaults``."""
         profile = _moe_profile()
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
@@ -817,14 +723,19 @@ class TestLoadSync:
                     "port": 8095,
                     "profile": "rocm",
                     "model": {"default": "model", "context_size": 131072},
-                    "server": {"extra_args": "--override-kv k=bool:false"},
+                    "server": {"extra_args": "--override-kv IGNORED=bool:true"},  # inert
                 },
-                {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
+                {
+                    "path": "/mnt/ai-models/model.gguf",
+                    "_model_key": "model",
+                    "defaults": {"extra_args": "--override-kv k=bool:false"},
+                },
             )
 
         unit = unit_file.read_text()
-        assert "--ctx-size 131072" in unit
-        assert "--override-kv k=bool:false" in unit
+        assert "--ctx-size 131072" in unit  # slot context_size still reaches base
+        assert "--override-kv k=bool:false" in unit  # model tune reaches launch
+        assert "IGNORED=bool:true" not in unit  # slot extra_args inert
 
     def test_load_sync_advertises_model_id_alias(self, tmp_path: Path) -> None:
         """load_sync must pass the registry model id (model_info._model_key)
@@ -863,7 +774,7 @@ class TestLoadSync:
         """WS-J (#1103): install (``load_sync``) and update
         (``rerender_unit_sync``) render **byte-identical** unit files for the
         same slot config, because both go through the one renderer
-        ``_render_unit_text``.
+        ``_render_quadlet_text``.
 
         Regression guard for the specific divergence WS-J removes: on a
         LAN-exposed box (``[slots].publish_host = 0.0.0.0``) the pre-fix update
@@ -905,7 +816,7 @@ class TestLoadSync:
             fresh_provider.load_sync(slot_cfg, model_info)
         fresh_text = fresh_unit.read_text()
         # Sanity: the widened bind actually rendered on the fresh install.
-        assert "--publish=0.0.0.0:8095:8095" in fresh_text
+        assert "PublishPort=0.0.0.0:8095:8095" in fresh_text.splitlines()
 
         # ── updated box: a STALE unit already exists; rerender rewrites it ──
         upd_provider = ContainerProvider()
@@ -1117,29 +1028,35 @@ class TestFamilyDefaults:
         assert argv[argv.index("-ctv") + 1] == "f16"
         assert "--cache-reuse" in argv and argv[argv.index("--cache-reuse") + 1] == "0"
 
-    def test_non_gemma_on_q8_profile_keeps_q8(self) -> None:
-        """A qwen model on the same profile is untouched — no family entry."""
+    def test_non_gemma_gets_no_family_kv_leak(self) -> None:
+        """A qwen model has no FAMILY_DEFAULTS entry, so no family KV is forced.
+        FLAGS-own: the profile's -ctk q8_0 is inert (the model owns its tune),
+        and this registry-miss model carries none — so no -ctk leaks in, and
+        crucially the gemma family f16 does NOT leak onto a non-family model."""
         profile = _moe_profile()
         cfg = {"profile": "rocm", "port": 8095, "model": {"default": "qwen3-27b"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
-        assert argv[argv.index("-ctk") + 1] == "q8_0"
-        assert "f16" not in argv
+        assert "-ctk" not in argv  # profile q8_0 inert; no model/family KV here
+        assert "f16" not in argv  # no gemma family leak
 
-    def test_slot_extra_args_still_beats_family(self) -> None:
-        """A hand-authored [server].extra_args overrides the family default."""
+    def test_slot_extra_args_is_inert_family_wins(self) -> None:
+        """FLAGS-own: a slot [server].extra_args no longer beats the family
+        default — it is inert. The gemma family f16 KV wins; a model that truly
+        wants q4_0 carries it in its own defaults.extra_args (migrator-folded)."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
             "port": 8095,
             "model": {"default": "gemma-4-12b-it"},
-            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},
+            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},  # inert
         }
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
-        assert argv[argv.index("-ctk") + 1] == "q4_0"  # slot override wins over family
+        assert argv[argv.index("-ctk") + 1] == "f16"  # family wins, slot inert
+        assert "q4_0" not in argv
 
     def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
         """The vulkan seed ships minimal flags with NO forced KV quant.
@@ -1160,3 +1077,138 @@ class TestFamilyDefaults:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
         assert "q8_0" not in argv  # basic seed forces no KV quant
+
+
+class TestUniformQuadletRender:
+    """halo150/143 O8+O11: ONE render for every substrate — no version branch.
+
+    Native AutoRemove=/GroupAdd=/SecurityOpt= keys are deliberately never
+    emitted: 4.x generators hard-fail the conversion on them, and the native
+    render's systemd lifecycle broke on unprivileged podman-5-in-LXC
+    (netavark /run/user/0/netns teardown race) while the PodmanArgs render
+    ran healthy on both validation boxes.
+    """
+
+    def _rendered(self) -> str:
+        return _render_llama("qtest", "img:latest", 18081, "/models/m.gguf", "-fa on")
+
+    def test_no_native_5x_keys_ever(self):
+        text = self._rendered()
+        assert "AutoRemove" not in text
+        assert "GroupAdd=" not in text
+        assert "SecurityOpt=" not in text
+
+    def test_gpu_groups_ride_podman_args(self):
+        text = self._rendered()
+        if "--group-add" in text:
+            assert "PodmanArgs=" in text
+
+
+def _exec_tokens(unit_text: str) -> list[str]:
+    """shlex-split the rendered ``Exec=`` argv back into tokens."""
+    return shlex.split(_exec_line(unit_text))
+
+
+class TestHostNetLoopbackFence:
+    """host-net ⇄ loopback-bind coupling (podman-unprivileged-findings.md, Issue 1).
+
+    Under ``Network=host`` there is no ``PublishPort=127.0.0.1:…`` fence, so the
+    process bind IS the fence — the renderer must flip ``--host 0.0.0.0`` (and
+    ComfyUI's ``--listen 0.0.0.0``) to loopback. The invariant: a host-net plan
+    can NEVER render a 0.0.0.0 bind. Bridge mode keeps 0.0.0.0 + the 127.0.0.1
+    PublishPort pin unchanged.
+    """
+
+    def _llama_plan(self, network_mode: str = "") -> RuntimeLaunchPlan:
+        return RuntimeLaunchPlan(
+            image="img:latest",
+            command=["--host", "0.0.0.0", "--port", "8095", "--model", "/models/m.gguf"],
+            port=8095,
+            network_mode=network_mode,
+        )
+
+    # ── INVARIANT: host-net plan never renders a 0.0.0.0 bind ────────────────
+    def test_host_net_plan_never_renders_zero_bind(self) -> None:
+        """THE invariant. A plan pinned network_mode=host binds loopback."""
+        plan = self._llama_plan(network_mode="host")
+        unit = _render_quadlet_from_plan("slot", plan)
+        assert "Network=host" in unit.splitlines()
+        assert "0.0.0.0" not in unit  # no bind, no publish, nowhere
+        tokens = _exec_tokens(unit)
+        assert tokens[tokens.index("--host") + 1] == "127.0.0.1"
+        # host net → no PublishPort (would be a no-op).
+        assert not any(ln.startswith("PublishPort=") for ln in unit.splitlines())
+
+    def test_config_default_host_net_flips_bind_for_bridge_plan(self) -> None:
+        """A plan with empty network_mode picks up the [slots].network_mode=host
+        box default and STILL gets the loopback bind + Network=host — the
+        deploy-time knob drives the fence, not just an explicit per-plan mode."""
+        plan = self._llama_plan(network_mode="")  # bridge-shaped plan
+        unit = _render_quadlet_from_plan("slot", plan, network_mode_default="host")
+        assert "Network=host" in unit.splitlines()
+        assert "0.0.0.0" not in unit
+        tokens = _exec_tokens(unit)
+        assert tokens[tokens.index("--host") + 1] == "127.0.0.1"
+
+    # ── REGRESSION: bridge mode keeps 0.0.0.0 + loopback PublishPort ─────────
+    def test_bridge_mode_keeps_zero_bind_and_loopback_publish(self) -> None:
+        """Bridge (empty network_mode, no host default): the process binds
+        0.0.0.0 inside its netns and the 127.0.0.1 PublishPort is the fence —
+        unchanged from before this lane."""
+        plan = self._llama_plan(network_mode="")
+        unit = _render_quadlet_from_plan("slot", plan)  # network_mode_default=""
+        assert not any(ln.startswith("Network=") for ln in unit.splitlines())
+        assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
+        tokens = _exec_tokens(unit)
+        assert tokens[tokens.index("--host") + 1] == "0.0.0.0"
+
+    def test_bridge_mode_publish_host_widen_still_binds_zero(self) -> None:
+        """publish_host=0.0.0.0 widens the PUBLISH (bridge); the process bind is
+        untouched (still 0.0.0.0 in-netns). Only host-net flips the bind."""
+        plan = self._llama_plan(network_mode="")
+        unit = _render_quadlet_from_plan("slot", plan, publish_host="0.0.0.0")
+        assert "PublishPort=0.0.0.0:8095:8095" in unit.splitlines()
+
+    # ── ComfyUI --listen inside a bash -lc payload string ───────────────────
+    def test_comfyui_shell_payload_listen_flipped_under_host_net(self) -> None:
+        """ComfyUI templates ``--listen 0.0.0.0`` inside a single bash -lc token
+        AND always runs host net — the chokepoint must reach into the shell
+        string too so its web UI port is loopback-fenced like every slot."""
+        payload = "cd /opt/ComfyUI && exec python main.py --listen 0.0.0.0 --port 8188 -fa"
+        plan = RuntimeLaunchPlan(
+            image="comfy:latest",
+            command=["bash", "-lc", payload],
+            port=8188,
+            network_mode="host",
+        )
+        unit = _render_quadlet_from_plan("img", plan)
+        assert "Network=host" in unit.splitlines()
+        assert "0.0.0.0" not in unit
+        assert "--listen 127.0.0.1" in _exec_line(unit)
+
+
+class TestLoopbackFenceCommand:
+    """Unit coverage for the fence helper across every bind-flag shape."""
+
+    def test_split_token_host(self) -> None:
+        assert _loopback_fence_command(["--host", "0.0.0.0", "--port", "9"]) == [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9",
+        ]
+
+    def test_split_token_listen(self) -> None:
+        assert _loopback_fence_command(["--listen", "0.0.0.0"]) == ["--listen", "127.0.0.1"]
+
+    def test_inline_equals_form(self) -> None:
+        assert _loopback_fence_command(["--host=0.0.0.0"]) == ["--host=127.0.0.1"]
+
+    def test_embedded_shell_string(self) -> None:
+        out = _loopback_fence_command(["bash", "-lc", "python m.py --listen 0.0.0.0 --port 8"])
+        assert out[-1] == "python m.py --listen 127.0.0.1 --port 8"
+
+    def test_no_bind_flag_untouched(self) -> None:
+        # A bare 0.0.0.0 not preceded by a bind flag is left alone (defensive:
+        # the fence targets bind addresses, not arbitrary values).
+        assert _loopback_fence_command(["--some-ip", "0.0.0.0"]) == ["--some-ip", "0.0.0.0"]

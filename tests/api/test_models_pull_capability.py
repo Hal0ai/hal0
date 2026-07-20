@@ -1,4 +1,9 @@
-"""_resolve_pull_capability — capability + comfyui_subdir for a pull (P3)."""
+"""_resolve_pull_capability — capability + comfyui_subdir for a pull (P3).
+
+The helper moved to ``hal0.registry.pull_jobs`` (P3-routers §J); ``routes.models``
+keeps a re-export binding, but ``get_curated`` is now resolved in ``pull_jobs``,
+so that is the monkeypatch target below.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ def test_registry_capability_used_when_no_body():
 
 
 def test_curated_capability_and_subdir_fallback(monkeypatch):
-    import hal0.api.routes.models as m
+    import hal0.registry.pull_jobs as m
 
     curated = SimpleNamespace(capability="image", comfyui_subdir="checkpoints")
     monkeypatch.setattr(m, "get_curated", lambda _mid: curated)
@@ -45,7 +50,7 @@ def test_curated_capability_and_subdir_fallback(monkeypatch):
 
 
 def test_unknown_model_returns_none(monkeypatch):
-    import hal0.api.routes.models as m
+    import hal0.registry.pull_jobs as m
 
     monkeypatch.setattr(m, "get_curated", lambda _mid: None)
     cap, subdir = _resolve_pull_capability(_req(), "ad-hoc", None)

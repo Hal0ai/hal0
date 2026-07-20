@@ -133,9 +133,18 @@ class ModelConfig(BaseModel):
             "4096 default (chat@4096 incident, 2026-06-15)."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # This slot [model].n_gpu_layers no longer reaches the launch argv; the
+    # migrator folds a slot's effective -ngl into its model's
+    # ``defaults.n_gpu_layers`` (trusted, managed-flag) field. Field stays for
+    # round-trip until the sunset ratchet drops it.
     n_gpu_layers: int = Field(
         default=-1,
-        description="Number of layers to offload to GPU.  -1 means all.",
+        description=(
+            "Number of layers to offload to GPU.  -1 means all. INERT at launch "
+            "(flags own by models): the migrator folds this into the model's "
+            "defaults.n_gpu_layers; it no longer reaches the argv chain."
+        ),
     )
     rope_freq_base: float = Field(
         default=0.0,
@@ -237,14 +246,19 @@ class ServerConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
+    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # This slot [server].extra_args no longer reaches the launch argv chain;
+    # the migrator folds a slot's effective tune into its model's
+    # ``defaults.extra_args`` (the screened ``model_extra_args`` segment). Kept
+    # for round-trip until the sunset ratchet drops it.
     extra_args: str | None = Field(
         default=None,
         description=(
-            "Freeform llama-server CLI passthrough.  Tokenised via shlex and "
-            "appended last in the launch argv; hal0.slots.argv.normalize_argv "
-            "then collapses cross-source duplicates last-wins, so a flag set here "
-            "overrides the same flag from the profile / model defaults "
-            "(append-list flags like --lora / --draft-model / --override-kv are kept)."
+            "Freeform llama-server CLI passthrough. INERT at launch (flags own "
+            "by models): no longer tokenised into the argv chain. The migrator "
+            "folds a slot's effective tune into the bound model's "
+            "defaults.extra_args, where hal0.slots.argv still screens it against "
+            "the §21.7 managed-arg denylist. Retained for TOML round-trip."
         ),
     )
     env: dict[str, str] | None = Field(
@@ -351,6 +365,7 @@ class SlotConfig(BaseModel):
         default=True,
         description="Whether this slot is started on hal0 startup.",
     )
+    # HAL0-SUNSET: v1.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",
         description=(
@@ -389,27 +404,37 @@ class SlotConfig(BaseModel):
             "See providers.container._effective_mtp and build_mtp_flag_bundle."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # This slot-level parallelism knob no longer reaches the launch argv; the
+    # migrator folds an effective ``--parallel N`` (plus ``--kv-unified`` when
+    # N>1) into the bound model's ``defaults.extra_args``. Kept for round-trip
+    # until the sunset ratchet drops it.
     parallel: int | None = Field(
         default=None,
         ge=1,
         description=(
             "Per-slot llama-server sequence slots (--parallel / -np) for continuous "
-            "batching: concurrent requests share the once-loaded weights instead of "
-            "serializing through a single sequence and thrashing one prompt cache. "
-            "None = inherit the profile flags (today: 1). When >1, --kv-unified is "
-            "emitted alongside so --ctx-size stays a SHARED pool (each request may "
-            "use up to the full context) instead of being silently split to ctx/N "
-            "per slot. Interactive slots want low N (per-stream speed ~= 1/N); agent "
-            "fan-in slots want 4-8 (bench-gated). See "
-            "providers.container._effective_parallel."
+            "batching. INERT at launch (flags own by models): no longer emitted to "
+            "the argv chain. The migrator folds an effective --parallel N (and "
+            "--kv-unified when N>1) into the bound model's defaults.extra_args. "
+            "Retained for TOML round-trip."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — chat_template is model-intrinsic and folds into the
+    # model (spec-flags-ownership §7 slot-purity). INERT at launch: the slot
+    # tier was removed from resolve_chat_template, so model.defaults.chat_template
+    # is the single source. The one-shot migrator folds each slot's effective
+    # template into its bound model (divergent-share refusal). Retained for TOML
+    # round-trip until the sunset ratchet drops it.
     chat_template: str | None = Field(
         default=None,
         description=(
-            "Per-slot chat-template override (id from /api/chat-templates, or "
-            "'auto'/None for the GGUF-embedded template). Wins over the model's "
-            "default. See resolve_chat_template."
+            "SUNSET (spec-flags-ownership §7): per-slot chat-template override "
+            "(id from /api/chat-templates, or 'auto'/None for the GGUF-embedded "
+            "template). INERT at launch — the chat template is now model-intrinsic "
+            "and read only from model.defaults.chat_template; the migrator folds "
+            "this into the bound model. Round-trips for one release. See "
+            "resolve_chat_template and slot_flags_fold."
         ),
     )
     vision: bool = Field(
@@ -470,6 +495,7 @@ class SlotConfig(BaseModel):
     # keys, not [server] keys, into the validated SlotConfig).  The new
     # nested ``server`` model below holds fields that are authored under
     # [server] in TOML — keep additions there.
+    # HAL0-SUNSET: v1.0.0 — workers is inert; a non-default value only logs a warning.
     workers: int = Field(
         default=1,
         ge=1,
@@ -1025,6 +1051,11 @@ class ProfileConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
+    # HAL0-SUNSET: v1.0.0 — images belong to RUNNERS (spec-flags-ownership §7).
+    # The profile.image pin is the last crosscutting image layer; ML-4 already
+    # directs image out of profiles (RUNNER_IMAGES[runner], digest-pinned). This
+    # field is an expiring pin honored by container._resolve_image_ref until the
+    # Runtimes-panel flow retires it. Left required to keep profiles.toml valid.
     image: str = Field(
         ...,
         description="Container image ref, e.g. ghcr.io/hal0ai/…:rocm-7.2.4-rocmfp4-server.",
@@ -1356,17 +1387,25 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
 
 
 def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
-    """Effective chat-template id: slot override > model default > None (auto).
+    """Effective chat-template id: model default > None (auto).
+
+    FLAGS-own §7 (slot-purity fold): the chat template is model-intrinsic — it
+    is a property of the artifact, not the slot — so the model's
+    ``defaults.chat_template`` is now the single launch source. The per-slot
+    ``chat_template`` override is sunset (inert at launch); the one-shot
+    migrator (:mod:`hal0.config.migrations.slot_flags_fold`) folds each slot's
+    effective template into its bound model, refusing any model whose slots
+    carry divergent templates. ``slot_cfg`` is retained in the signature for
+    the container provider's call-site shape (and so a future reader can key
+    other model-vs-slot resolution here) but its ``chat_template`` key is no
+    longer consulted.
 
     'auto' (or empty/None) means use the GGUF-embedded template (no
     ``--chat-template-file``). Returns the template id string otherwise.
     """
-    for val in (
-        slot_cfg.get("chat_template"),
-        (model_info.get("defaults") or {}).get("chat_template"),
-    ):
-        if val and val != "auto":
-            return str(val)
+    val = (model_info.get("defaults") or {}).get("chat_template")
+    if val and val != "auto":
+        return str(val)
     return None
 
 
@@ -1788,6 +1827,30 @@ class SlotsConfig(BaseModel):
         ),
     )
 
+    network_mode: str = Field(
+        default="",
+        description=(
+            "Box-default podman network mode for slot containers "
+            "(``Network=<mode>`` in the generated Quadlet). Empty (the default) "
+            "means bridge networking with a loopback ``PublishPort`` — the safe "
+            "default that keeps raw slot ports off the LAN behind hal0-api. "
+            "Set to ``host`` on netns-limited substrates (unprivileged "
+            "podman-in-LXC, where bridge netns teardown races leave slots "
+            "unloadable) so every slot renders ``Network=host``. This is "
+            "DEPLOY-TIME configuration for the box's substrate, not a runtime "
+            "probe — the renderer never sniffs podman/LXC itself. "
+            "SECURITY NOTE: host networking shares the container's loopback "
+            "with hal0-api, so a host-net slot can reach 127.0.0.1 services on "
+            "the CT (e.g. hal0-api itself); the compensating fence is that the "
+            "slot process is force-bound to 127.0.0.1 (not 0.0.0.0) and every "
+            "hal0-api route is auth-gated — the raw unauthenticated slot port "
+            "is never LAN-reachable. This shared-loopback reach is the accepted "
+            "residual (see docs/rework/podman-unprivileged-findings.md). A slot "
+            "whose provider REQUIRES host net (ComfyUI) already forces it "
+            "regardless of this default. Applies on the next slot (re)start."
+        ),
+    )
+
     @field_validator("publish_host")
     @classmethod
     def _publish_host_sane(cls, v: str) -> str:
@@ -1808,6 +1871,26 @@ class SlotsConfig(BaseModel):
                 "(no spaces, ':', or '/'; IPv6 literals are not supported here)"
             )
         return host
+
+    @field_validator("network_mode")
+    @classmethod
+    def _network_mode_known(cls, v: str) -> str:
+        """Allow only the modes the renderer actually couples a fence to.
+
+        ``""`` (bridge + loopback PublishPort) and ``host`` (Network=host +
+        forced loopback bind) are the two the fence logic understands. Anything
+        else (``bridge``, ``none``, a custom CNI name) would render an
+        un-fenced ``Network=`` with no corresponding bind flip, so it is
+        rejected rather than silently accepted — the value lands verbatim in a
+        Quadlet ``Network=`` key, so it must also be a bare token.
+        """
+        mode = str(v).strip()
+        if mode in ("", "host"):
+            return mode
+        raise ValueError(
+            f"[slots].network_mode {mode!r} is not supported "
+            "(use '' for bridge+loopback-publish, or 'host' for host networking)"
+        )
 
     @model_validator(mode="after")
     def port_range_sane(self) -> SlotsConfig:
@@ -2318,6 +2401,7 @@ class MemoryConfig(BaseModel):
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — 'cognee' engine value resolves to hindsight at runtime; drop the alias.
     engine: str = Field(
         default="hindsight",
         description=(
@@ -2665,6 +2749,20 @@ class BrainChatConfig(BaseModel):
     loop (runaway backstop); ``completion_timeout_s`` is the transport timeout
     for each LLM round against the target slot.
 
+    Context floor (fresh-box finding, docs/rework/r4-stage-validation.md
+    "steward config note"): whichever slot ends up serving the chat --
+    ``model``/``tool_model`` here, the persona's ``preferred_model``, or the
+    ``hal0/brain`` -> ``agent`` resolver fallback -- MUST be loaded with at
+    least 8k tokens of context. The built-in hal0-brain system prompt alone
+    is ~7.3k tokens before any conversation history or tool schemas are
+    added; a smaller context window truncates the prompt and the steward
+    degrades silently (malformed tool calls, prompt-following failures)
+    rather than failing loudly. Separately, a ``model``/``tool_model`` (or
+    resolver fallback) that resolves to NO loaded slot at all 404s the self
+    ``/v1/chat/completions`` call outright -- surfaced by
+    :mod:`hal0.brain.chat` as an actionable SSE ``error`` frame (naming the
+    model tried and how to fix it) rather than the raw transport failure.
+
     ``extra="forbid"`` (P3-schema Part C): a leaf tunable table. Previously
     had no explicit ``model_config`` (pydantic's default is ``"ignore"``, not
     ``"allow"``) -- made explicit here rather than left implicit.
@@ -2673,10 +2771,18 @@ class BrainChatConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     enabled: bool = True
-    read_only: bool = False
+    # Ships TRUE (KB-2/3): the steward answers and reads state out of the box,
+    # but every mutating / admin-write tool is refused server-side until an
+    # operator explicitly opts in with [brain_chat] read_only=false. Safe
+    # default over convenient default — the widening path is one config line.
+    read_only: bool = True
     # Empty → persona preferred_model (hal0/brain). Set to a virtual slot model
     # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
     # explicit per-request ``model`` in the chat body still wins over this.
+    # Whatever slot this ends up pointing at (directly, via the persona, or
+    # via the hal0/brain -> agent resolver fallback) needs >= 8k context —
+    # the steward system prompt alone is ~7.3k tokens — and must actually be
+    # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
     # Route tool-calling turns to a capable, tool-format-compatible model. The
     # steward always offers tools, so when set this is the model its tool loop
@@ -2688,6 +2794,94 @@ class BrainChatConfig(BaseModel):
     tool_model: str = ""
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
+
+
+class SecurityConfig(BaseModel):
+    """[security] section — persisted auth-enforcement posture (KB-1 / O19).
+
+    ``require_auth`` is the durable enable/disable toggle the dashboard
+    Security page writes (``PUT /api/auth/require``). Its default is
+    ``None`` = *unset*, which the runtime resolves to auth **OFF** — the
+    shipped posture as of the 2026-07-19 operator decision: hal0 runs
+    trusted-LAN-open by default, matching how the boxes are actually run.
+
+    This deliberately retires KB-1's bind-address / key-presence auto-on:
+    that auto-on armed enforcement on a 0.0.0.0 bind but the dashboard
+    shipped no login UI, so every route answered ``authentication
+    required`` and operators disabled auth wholesale (``HAL0_REQUIRE_AUTH=0``)
+    to use the product (docs/rework r4 finding O19). Auth is now
+    explicit-enable only.
+
+    Resolution precedence (see :func:`hal0.api.auth.require_auth_enabled`):
+    the ``HAL0_REQUIRE_AUTH`` env var wins over this persisted value, which
+    in turn wins over the OFF default.
+
+    ``extra="forbid"`` (P3-schema Part C leaf-table policy, same as
+    ``[brain_chat]``): a typo'd key in the SECURITY section must fail loudly
+    at load, never silently no-op an enforcement toggle.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    require_auth: bool | None = Field(
+        default=None,
+        description=(
+            "Persisted auth-enforcement toggle. None = unset → auth OFF "
+            "(trusted-LAN open, the shipped default). True/False are explicit "
+            "operator choices. Overridden at runtime by the HAL0_REQUIRE_AUTH "
+            "env var."
+        ),
+    )
+
+
+class RealtimeConfig(BaseModel):
+    """``[realtime]`` — the OpenAI-Realtime WebSocket surface (HP-realtime inc-1).
+
+    Tunes the ``WS /v1/realtime`` endpoint: which local slots serve STT/TTS, the
+    fixed pcm16 sample rate, the in-process energy-VAD thresholds (server-VAD
+    turn detection — user decision 1), the output audio frame size, and the
+    voice-bounded approval wait.
+
+    ``enabled`` is a hard kill switch. ``sample_rate`` is fixed at 24 kHz for the
+    MVP (matches the demo client's ``-sample-rate 24000`` and kokoro's native
+    pcm output — no resample either direction). ``stt_model`` / ``tts_model`` /
+    ``tts_voice`` name the loaded slots the gateway calls over loopback (empty
+    ``stt_model``/``tts_model`` falls back to the session's chat model, empty
+    ``tts_voice`` lets the tts slot's own default apply).
+
+    VAD (``vad_*``): a zero-dependency energy-RMS detector (the venv has no
+    onnxruntime/webrtcvad/silero; adding them would pull a heavy dep + an
+    unpullable multi-file model — spec §2d). ``vad_energy_threshold`` is
+    normalized RMS (0-1); ``vad_silence_ms`` of trailing silence ends a turn;
+    a segment shorter than ``vad_min_speech_ms`` of voiced audio is treated as
+    noise and does not fire a turn. A silero backend can replace it in
+    increment 2 without touching these knobs' meaning.
+
+    ``approval_wait_s`` bounds how long a gated steward tool may leave the voice
+    session silent before the assistant speaks a "still waiting — approve at the
+    bell" notice and ends the turn (the brain's own SSE would otherwise block up
+    to 300s — spec §2b / user decision 3). ``frame_ms`` is the output audio
+    frame size (``response.output_audio.delta`` granularity).
+
+    ``extra="forbid"`` (P3-schema Part C): a leaf tunable table — a typo'd key
+    must fail loudly at load, never silently no-op.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    enabled: bool = True
+    sample_rate: int = Field(default=24000, ge=8000, le=48000)
+    default_model: str = ""
+    stt_model: str = ""
+    tts_model: str = "kokoro"
+    tts_voice: str = ""
+    vad_energy_threshold: float = Field(default=0.02, ge=0.0, le=1.0)
+    vad_silence_ms: int = Field(default=500, ge=50, le=10000)
+    vad_min_speech_ms: int = Field(default=200, ge=0, le=10000)
+    vad_window_ms: int = Field(default=20, ge=5, le=100)
+    frame_ms: int = Field(default=20, ge=5, le=200)
+    approval_wait_s: float = Field(default=20.0, gt=0, le=300.0)
+    max_buffer_seconds: float = Field(default=30.0, gt=0, le=600.0)
 
 
 class Hal0Config(BaseModel):
@@ -2712,6 +2906,8 @@ class Hal0Config(BaseModel):
     honcho: HonchoConfig = Field(default_factory=HonchoConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
 
 
 # ── Shipped seed-data shims (P3-schema, spec Part A) ──────────────────────────
@@ -2782,6 +2978,7 @@ __all__ = [
     "ProfilesConfig",
     "ProviderEntry",
     "ProvidersConfig",
+    "SecurityConfig",
     "ServerConfig",
     "SlotConfig",
     "SlotsConfig",

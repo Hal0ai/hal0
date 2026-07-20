@@ -23,6 +23,8 @@ import { GeneralPage } from './pages/server/GeneralPage.jsx'
 import { SecurityPage } from './pages/server/SecurityPage.jsx'
 import { LoadedModelsPage } from './pages/models/LoadedModelsPage.jsx'
 import { LibraryDownloadsPage } from './pages/models/LibraryDownloadsPage.jsx'
+import { ModelDefaultsPage } from './pages/models/ModelDefaultsPage.jsx'
+import { BackendGpuPage } from './pages/inference/BackendGpuPage.jsx'
 import { HardwareTuningPage } from './pages/inference/HardwareTuningPage.jsx'
 import { NpuPage } from './pages/inference/NpuPage.jsx'
 import { VoicePage } from './pages/inference/VoicePage.jsx'
@@ -33,6 +35,7 @@ import { StoragePage } from './pages/data/StoragePage.jsx'
 import { MemoryPage } from './pages/data/MemoryPage.jsx'
 import { DoctorPage } from './pages/diagnostics/DoctorPage.jsx'
 import { UpdatesPage } from './pages/diagnostics/UpdatesPage.jsx'
+import { RuntimesPage } from './pages/diagnostics/RuntimesPage.jsx'
 import { AdvancedPage } from './pages/diagnostics/AdvancedPage.jsx'
 import { AboutPage } from './pages/diagnostics/AboutPage.jsx'
 import { SecretsPage } from './pages/integrations/SecretsPage.jsx'
@@ -47,6 +50,8 @@ export function SettingsShell({ param }) {
       case "security": return <SecurityPage />;
       case "slots": return <LoadedModelsPage />;
       case "library": return <LibraryDownloadsPage />;
+      case "modeldefaults": return <ModelDefaultsPage />;
+      case "backend": return <BackendGpuPage />;
       case "hwtuning": return <HardwareTuningPage />;
       case "npu": return <NpuPage />;
       case "voice": return <VoicePage />;
@@ -57,6 +62,7 @@ export function SettingsShell({ param }) {
       case "memory": return <MemoryPage />;
       case "doctor": return <DoctorPage />;
       case "updates": return <UpdatesPage />;
+      case "runtimes": return <RuntimesPage />;
       case "advanced": return <AdvancedPage />;
       case "about": return <AboutPage />;
       case "secrets": return <SecretsPage />;

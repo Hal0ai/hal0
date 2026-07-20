@@ -1,20 +1,18 @@
-"""PR-3 idempotency contract: re-running every phase converges.
+"""Convergence contract: ``install_hermes`` is idempotent.
 
-The promise: ``hal0 agent reprovision hermes`` (or rerunning
-``bootstrap hermes``) must converge without producing drift. Per the
-master plan §4 PR-3 and DA-arch must-fix #4, the bar is *byte-equal
-provision.json + byte-equal config.yaml* across two consecutive runs
-when nothing in the environment changed.
+The promise: re-running ``install_hermes`` (or ``hal0 agent reprovision hermes``)
+over an already-provisioned box converges without drift — byte-equal config.yaml
++ persona TOMLs, and a *second run that mutates nothing* (every host-mutating
+step reports ``changed=False`` → ``report.converged``). This replaces the old
+byte-equal-provision.json checkpoint contract, which is gone with the pipeline.
 
-We monkey-patch every external touchpoint (HTTP, venv install, MCP
-probes, memory POSTs) so the test runs hermetically and asserts the
-managed-file contents (config.yaml, personas, provision.json checkpoint
-hashes) are identical between run #1 and run #2.
+Every external touchpoint (HTTP, venv install, MCP probes, memory POSTs,
+subprocess) is faked so the runs are hermetic and the two-run comparison is
+byte-exact.
 """
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -23,456 +21,243 @@ import pytest
 from hal0.agents import hermes_provision as hp
 from hal0.agents import personas as P
 
-from ._hermes_fakes import apply_hermes_config_cli
+from ._hermes_fakes import install_io, sandbox_hermes_paths
 
 
 @pytest.fixture
-def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
-    """A BootstrapState rooted entirely in ``tmp_path``.
+def target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Sandbox every host path constant under tmp_path; return (hermes_home, venv)."""
+    return sandbox_hermes_paths(hp, tmp_path, monkeypatch)
 
-    Path CONSTANTS are redirected here (module-level by design, #702);
-    the behavioural IO seams are faked in the companion ``hermetic_io``
-    fixture's :class:`hp.PhaseIO`.
-    """
-    var_lib = tmp_path / "var" / "lib" / "hal0"
-    var_lib.mkdir(parents=True)
-    venv = var_lib / "venvs" / "hermes"
-    hermes_home = var_lib / "agents" / "hermes"
 
-    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
-    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "bin" / "hal0-hermes")
-    # Sandbox the canonical CLI path too — without this the install phase
-    # writes the real /usr/local/bin/hermes (fails as non-root on dev
-    # boxes; CI runners happen to have it writable, which masked the gap).
-    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "bin" / "hermes")
-    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "etc" / "hal0" / "overrides.yaml")
-    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path / "etc" / "hal0")
-    monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", tmp_path / "etc" / "hal0" / "agent-skills")
-    monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "usr" / "share" / "hal0" / "skills")
-    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", tmp_path / "secrets" / "hermes.env")
-    monkeypatch.setattr(hp, "AGENT_ALLOWLIST_PATH", tmp_path / "etc" / "hal0" / "agents.toml")
-    # #437 gateway_secrets_wire: redirect the SYSTEM drop-in dir under
-    # tmp_path so a pipeline run never escapes into the live
-    # /etc/systemd/system — even when the runner is root or /etc/systemd is
-    # ACL-writable (the 2026-06-04 clobber). Patching HERMES_SECRETS_ENV
-    # alone is NOT enough: that only changes the EnvironmentFile *content*,
-    # not the *destination* the phase writes to.
-    _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
-    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
-    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf")
-    # Foreign-gateway preflight: point the user-scope scan at an empty tmp dir
-    # so a run on a real host (which may have a live system hermes-gateway)
-    # stays hermetic; the hermetic_io `run` seam stubs systemctl is-active/pgrep.
-    monkeypatch.setattr(hp, "_USER_SYSTEMD_SCAN_GLOBS", (str(tmp_path / "no-such-user-systemd"),))
-    # Personas land under $HERMES_HOME/personas via _personas_root_for —
-    # the fixture's hermes_home is already in tmp_path so no further
-    # monkey-patching is needed for the persona phase.
-
-    # Wrapper copy needs a source file to exist; just create a stub.
-    wrapper_src = hp.REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hal0-hermes"
-    wrapper_src.parent.mkdir(parents=True, exist_ok=True)
-    if not wrapper_src.exists():
-        wrapper_src.write_text("#!/bin/sh\nexit 0\n")
-        wrapper_src.chmod(0o755)
-
-    return hp.BootstrapState(
-        venv=str(venv),
-        hermes_home=str(hermes_home),
+def _install(target: tuple[Path, Path], *, io=None, repair=False, record=None, state_root=None):
+    home, venv = target
+    # RELOCATE(brain-lane): persona seeding now runs in the hal0-api boot
+    # lifespan's _boot_seeds phase, which in production always runs before
+    # `hal0 agent install hermes` (install talks to the already-running API
+    # over loopback HTTP). Mirror that ordering hermetically so
+    # install_hermes sees the personas it now expects to already exist —
+    # idempotent (overwrite=False), so calling it again before a second
+    # _install() in the same test is a no-op once seeded.
+    P.seed_default_personas(agent_id="hermes-agent", root=home / "personas")
+    return hp.install_hermes(
+        hermes_home=home,
+        venv=venv,
         agent_id="hermes-agent",
+        io=io if io is not None else install_io(hp, record=record),
+        repair=repair,
+        state_root=state_root,
     )
 
 
-@pytest.fixture
-def hermetic_io() -> hp.PhaseIO:
-    """Deterministic :class:`hp.PhaseIO` fakes for hermetic pipeline runs.
+def _config(target: tuple[Path, Path]) -> str:
+    return (target[0] / "config.yaml").read_text(encoding="utf-8")
 
-    Every external touchpoint (HTTP, venv install, MCP probes, memory
-    POSTs) is faked AND stable across calls — a flaky value in `details`
-    would falsely fail the byte-equal assertion (we strip `at`
-    timestamps in the comparison below to side-step the legit one).
+
+# ── the double-run convergence contract ──────────────────────────────────────
+
+
+def test_double_run_zero_mutating_steps(target: tuple[Path, Path], tmp_path: Path) -> None:
+    """Run #1 provisions; run #2 (recorded fakes) mutates ZERO steps.
+
+    The convergence contract: a second ``install_hermes`` over the converged box
+    reports every host-mutating step ``changed=False`` (``report.mutated == []``)
+    and leaves config.yaml + personas byte-identical.
     """
-
-    # Stable, ready-looking slot payload — the bootstrap renders aliases
-    # only when slots are ``type=llm`` AND ``state=ready``.
-    def _fake_slots() -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "chat",
-                "type": "llm",
-                "kind": "local",
-                "state": "ready",
-                "status": "ready",
-                "model_id": "qwen3-test",
-                "backend_url": "http://127.0.0.1:8001/v1",
-                "context_length": 32768,
-            },
-            {
-                "name": "agent",
-                "type": "llm",
-                "kind": "local",
-                "state": "ready",
-                "status": "ready",
-                "model_id": "qwen3-coder-test",
-                "backend_url": "http://127.0.0.1:8001/v1",
-                "context_length": 16384,
-            },
-            {
-                "name": "utility",
-                "type": "llm",
-                "kind": "local",
-                "state": "ready",
-                "status": "ready",
-                "model_id": "qwen3-utility-test",
-                "backend_url": "http://127.0.0.1:8001/v1",
-                "context_length": 8192,
-            },
-            # An embed slot that must NEVER appear in chat aliases.
-            {
-                "name": "embed",
-                "type": "embedding",
-                "kind": "local",
-                "state": "ready",
-                "status": "ready",
-                "model_id": "bge-test",
-                "backend_url": "http://127.0.0.1:8002/v1",
-            },
-        ]
-
-    # MCP probes succeed deterministically with a fixed tool list so the
-    # provision.json `mcp_wire.details` hash matches across runs.
-    def _fake_probe(_url: str, **_kw: Any) -> dict[str, Any]:
-        return {"ok": True, "tools": ["t1", "t2", "t3", "t4", "t5"], "error": None}
-
-    # Memory POSTs succeed silently — namespace_register + self_report
-    # rely on these.
-    def _fake_memory_call(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
-        tool = (params or {}).get("name", "")
-        if tool == "memory_search":
-            return {"ok": True, "result": {"items": []}}
-        if tool == "memory_add":
-            return {"ok": True, "result": {"id": "memid-stable"}}
-        if tool == "memory_delete":
-            return {"ok": True, "result": {"deleted": 0}}
-        return {"ok": True, "result": {}}
-
-    # Fake venv install so we don't shell out to ``python -m venv``.
-    def _fake_install(v: Path, _req: Path, **_kw: Any) -> None:
-        (v / "bin").mkdir(parents=True, exist_ok=True)
-        (v / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
-        (v / "bin" / "hermes").chmod(0o755)
-        (v / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
-        (v / "bin" / "python").chmod(0o755)
-
-    # Intercept ONLY `systemctl daemon-reload`; everything else passes
-    # through so env_probe / smoke phases behave as before.
-    real_run = subprocess.run
-
-    class _NoopCompleted:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    class _InactiveCompleted:
-        returncode = 3
-        stdout = "inactive\n"
-        stderr = ""
-
-    class _NoMatchCompleted:
-        returncode = 1
-        stdout = ""
-        stderr = ""
-
-    def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
-        head = list(argv[:2]) if isinstance(argv, (list, tuple)) else []
-        if head == ["systemctl", "daemon-reload"]:
-            return _NoopCompleted()
-        # Foreign-gateway preflight probes — stub so a live system hermes-gateway
-        # on the host doesn't false-positive an abort.
-        if head == ["systemctl", "is-active"]:
-            return _InactiveCompleted()
-        if isinstance(argv, (list, tuple)) and argv and argv[0] == "pgrep":
-            return _NoMatchCompleted()
-        # Apply `hermes config set/migrate` to the real config.yaml (the stub
-        # venv hermes is a no-op `exit 0`), so the E2E config-content asserts
-        # see what the live CLI would have written.
-        if isinstance(argv, (list, tuple)) and apply_hermes_config_cli(list(argv), kw.get("env")):
-            return _NoopCompleted()
-        return real_run(argv, *a, **kw)
-
-    return hp.PhaseIO(
-        http_get=lambda *_a, **_kw: 200,
-        fetch_slots=_fake_slots,
-        # /v1/models context fetch → empty so per-model context falls back
-        # to each slot's own context_length, keeping renders offline.
-        fetch_model_contexts=lambda: {},
-        probe_mcp_server=_fake_probe,
-        mcp_memory_call=_fake_memory_call,
-        install_venv=_fake_install,
-        # env_probe writes a timestamped snapshot file every run — that's
-        # legitimately non-idempotent (it's a point-in-time view). Fake
-        # ``read_env_probe`` so the snapshot CONTENT is stable across runs
-        # and rely on the test's "ignore env_probe details" filter for the
-        # snapshot path.
-        read_env_probe=lambda: {
-            "env_report": {"cpu": {"strix_halo": True}},
-            "gpu_target_version": {"gfx": "1151"},
-            "npu_status": {"present": True},
-            "ai_models": {"present": False},
-        },
-        run=_guarded_run,
-    )
-
-
-def _strip_volatile(phases: dict[str, Any]) -> dict[str, Any]:
-    """Filter out per-run volatile fields so we can compare two runs.
-
-    ``at`` is a UTC timestamp Phase orchestration stamps; env_probe's
-    snapshot path includes a UTC timestamp too. Both legitimately
-    change every run; we strip them from the comparison and assert
-    every OTHER detail matches.
-    """
-    stable: dict[str, Any] = {}
-    for name, entry in phases.items():
-        if not isinstance(entry, dict):
-            stable[name] = entry
-            continue
-        copy = {k: v for k, v in entry.items() if k != "at"}
-        if name == "env_probe":
-            details = dict(copy.get("details") or {})
-            details.pop("snapshot_path", None)
-            copy["details"] = details
-        stable[name] = copy
-    return stable
-
-
-def test_two_consecutive_runs_converge(
-    tmp_path: Path, hermetic_state: hp.BootstrapState, hermetic_io: hp.PhaseIO
-) -> None:
-    """Run #1 writes everything; run #2 must produce byte-identical
-    config.yaml + persona TOMLs + (post-volatile-strip) provision.json."""
     state_root = tmp_path / "state"
+    io = install_io(hp)
 
-    # Run #1
-    result_1 = hp.run(state_root=state_root, initial_state=hermetic_state, io=hermetic_io)
-    config_path = Path(hermetic_state.hermes_home) / "config.yaml"
-    assert config_path.exists()
-    config_after_1 = config_path.read_text(encoding="utf-8")
+    r1 = _install(target, io=io, state_root=state_root)
+    assert r1.ok, r1.failed
+    # Run #1 genuinely provisions — several steps mutate.
+    assert set(r1.mutated) >= {"install", "config_write", "context_link"}
+    config_1 = _config(target)
 
-    persona_root = Path(hermetic_state.hermes_home) / "personas"
-    hermes_toml_1 = (persona_root / "hermes.toml").read_text(encoding="utf-8")
-    brain_toml_1 = (persona_root / "hal0-brain.toml").read_text(encoding="utf-8")
+    r2 = _install(target, io=io, state_root=state_root)
+    assert r2.ok, r2.failed
+    assert r2.mutated == [], f"second run mutated {r2.mutated}"
+    assert r2.converged
+    assert _config(target) == config_1, "config.yaml drifted on re-run"
+
+
+def test_two_consecutive_runs_converge(target: tuple[Path, Path]) -> None:
+    """config.yaml + persona TOMLs + active pointer are byte-identical run-to-run."""
+    io = install_io(hp)
+    r1 = _install(target, io=io)
+    config_1 = _config(target)
+
+    persona_root = target[0] / "personas"
+    hermes_1 = (persona_root / "hermes.toml").read_text(encoding="utf-8")
+    brain_1 = (persona_root / "hal0-brain.toml").read_text(encoding="utf-8")
     active_1 = (persona_root / "active.txt").read_text(encoding="utf-8")
 
-    provision_1 = _strip_volatile(result_1.phases)
-
-    # Run #2 — same state root means BootstrapState.load picks up the
-    # checkpoint; phases marked OK get skipped. Even so, the on-disk
-    # artefacts (config.yaml, personas) must not change.
-    result_2 = hp.run(state_root=state_root, io=hermetic_io)
-    config_after_2 = config_path.read_text(encoding="utf-8")
-    hermes_toml_2 = (persona_root / "hermes.toml").read_text(encoding="utf-8")
-    brain_toml_2 = (persona_root / "hal0-brain.toml").read_text(encoding="utf-8")
-    active_2 = (persona_root / "active.txt").read_text(encoding="utf-8")
-    provision_2 = _strip_volatile(result_2.phases)
-
-    assert config_after_1 == config_after_2, "config.yaml drifted on re-run"
-    assert hermes_toml_1 == hermes_toml_2, "hermes persona TOML drifted"
-    assert brain_toml_1 == brain_toml_2, "hal0-brain persona TOML drifted"
-    assert active_1 == active_2, "active pointer drifted"
-    # The retired coder seed must not reappear on either run.
+    r2 = _install(target, io=io)
+    assert r1.ok and r2.ok
+    assert _config(target) == config_1
+    assert (persona_root / "hermes.toml").read_text(encoding="utf-8") == hermes_1
+    assert (persona_root / "hal0-brain.toml").read_text(encoding="utf-8") == brain_1
+    assert (persona_root / "active.txt").read_text(encoding="utf-8") == active_1
+    # The retired coder seed must not reappear.
     assert not (persona_root / "coder.toml").exists()
-    # Every phase status should be OK or SKIP on both runs.
-    for name in hp.PHASE_NAMES:
-        s1 = provision_1.get(name, {}).get("status")
-        s2 = provision_2.get(name, {}).get("status")
-        assert s1 in {"ok", "skip"}, f"run #1 {name}: {s1}"
-        assert s2 in {"ok", "skip"}, f"run #2 {name}: {s2}"
+    # Every step ends ok or skip on both runs.
+    for step in r2.steps:
+        assert step.status in {"ok", "skip"}, f"{step.name}: {step.status}"
 
 
-def test_repair_run_rewrites_persona_seeds(
-    tmp_path: Path, hermetic_state: hp.BootstrapState, hermetic_io: hp.PhaseIO
-) -> None:
-    """``--repair`` overwrites operator persona edits with the seeds.
+def test_report_written_for_agent_status(target: tuple[Path, Path], tmp_path: Path) -> None:
+    """install_hermes drops a flat last-run report `hal0 agent status` can render."""
+    import json
 
-    Pure ``--repair`` semantics: the operator asked for a known-good
-    state; preserve nothing. (Without --repair the operator edit
-    survives — see ``test_seed_preserves_operator_edits``.)
-    """
     state_root = tmp_path / "state"
-    hp.run(state_root=state_root, initial_state=hermetic_state, io=hermetic_io)
-    persona_path = Path(hermetic_state.hermes_home) / "personas" / "hermes.toml"
-    persona_path.write_text('[persona]\nid = "hermes"\ndisplay_name = "Custom"\n', encoding="utf-8")
-    hp.run(state_root=state_root, repair=True, io=hermetic_io)
-    reloaded = P.load_persona("hermes", root=persona_path.parent)
-    assert reloaded.display_name == "Hermes"
+    _install(target, state_root=state_root)
+    report = state_root / "provision.json"
+    assert report.exists()
+    data = json.loads(report.read_text())
+    assert "phases" in data and "install" in data["phases"]
+    assert data["phases"]["install"]["status"] == "ok"
+    assert data["completed_at"]  # ok run stamps it
 
 
-def test_config_yaml_contains_persona_prelude(
-    tmp_path: Path, hermetic_state: hp.BootstrapState, hermetic_io: hp.PhaseIO
-) -> None:
-    """Phase 7 contract: rendered config.yaml carries the active persona's
-    system_prompt_prelude. Without this, the agent has no way to see the
-    hal0-tone / approval-policy guidance."""
-    state_root = tmp_path / "state"
-    hp.run(state_root=state_root, initial_state=hermetic_state, io=hermetic_io)
-    config = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
-    assert "system_prompt_prelude" in config, "Phase 7 didn't inject the persona prelude"
-    # Hermes display label lands in the cosmetic personality field.
+# ── repair semantics ─────────────────────────────────────────────────────────
+#
+# RELOCATE(brain-lane) — LANDED: persona_seed no longer runs as part of
+# `install_hermes()`/`--repair` at all (it moved to the hal0-api boot
+# lifespan's _boot_seeds phase, which never forces an overwrite — an
+# operator-chosen edit only gets reset by removing the persona TOML and
+# restarting hal0-api). The direct-call unit coverage for
+# `_phase_persona_seed`'s own overwrite=True/False behavior lives in
+# tests/agents/test_hermes_provision_context.py::
+# test_persona_seed_overwrites_on_repair — that function is unchanged and
+# still exercises the real overwrite logic, just without going through
+# `install_hermes()`.
+
+
+# ── config.yaml content contracts ────────────────────────────────────────────
+
+
+def test_config_yaml_contains_persona_prelude(target: tuple[Path, Path]) -> None:
+    """The render carries the active persona's system_prompt_prelude + label."""
+    _install(target)
+    config = _config(target)
+    assert "system_prompt_prelude" in config
     assert "personality:" in config
 
 
-def test_config_yaml_contains_chat_slot_aliases(
-    tmp_path: Path, hermetic_state: hp.BootstrapState, hermetic_io: hp.PhaseIO
-) -> None:
-    """Phase 5 contract: chat_slots appear in the first render
-    (pre-PR-3 they only appeared after Phase 9)."""
+def test_config_yaml_contains_chat_slot_aliases(target: tuple[Path, Path]) -> None:
+    """chat_slots appear as model_aliases routed through the STABLE gateway."""
     yaml = pytest.importorskip("yaml")
-    state_root = tmp_path / "state"
-    hp.run(state_root=state_root, initial_state=hermetic_state, io=hermetic_io)
-    config = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
+    _install(target)
+    config = _config(target)
     assert "model_aliases:" in config
-    assert "chat:" in config
-    assert "agent:" in config
-    assert "embed:" not in config.split("model_aliases:")[1].split("\n\n")[0], (
-        "embed slot leaked into chat aliases"
-    )
-    # Every alias routes through the STABLE gateway, NOT the slot's raw
-    # per-slot upstream port (:8001 in the fixture) — the upstream can reassign
-    # those on reload, so baked-in ports go stale.
     cfg = yaml.safe_load(config)
+    assert "chat" in cfg["model_aliases"] and "agent" in cfg["model_aliases"]
+    assert "embed" not in cfg["model_aliases"], "embed slot leaked into chat aliases"
     for alias, entry in cfg["model_aliases"].items():
         assert entry["base_url"] == "http://127.0.0.1:8080/v1", (
-            f"alias {alias} base_url should be the gateway, got {entry['base_url']}"
+            f"alias {alias} should route through the gateway, got {entry['base_url']}"
         )
 
 
-def test_config_yaml_contains_mcp_servers(
-    tmp_path: Path, hermetic_state: hp.BootstrapState, hermetic_io: hp.PhaseIO
-) -> None:
-    """Phase 6 contract: rendered config carries both default MCP servers
-    with X-hal0-Agent identity headers."""
-    state_root = tmp_path / "state"
-    hp.run(state_root=state_root, initial_state=hermetic_state, io=hermetic_io)
-    config = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
+def test_config_yaml_contains_mcp_servers(target: tuple[Path, Path]) -> None:
+    """Rendered config carries both default MCP servers + the identity header."""
+    _install(target)
+    config = _config(target)
     assert "mcp_servers:" in config
-    assert "hal0-admin:" in config
-    assert "hal0-memory:" in config
-    assert "X-hal0-Agent: hermes-agent" in config  # identity header value
+    assert "hal0-admin:" in config and "hal0-memory:" in config
+    assert "X-hal0-Agent: hermes-agent" in config
 
 
-def test_config_yaml_contains_role_slot_blocks(
-    tmp_path: Path, hermetic_state: hp.BootstrapState, hermetic_io: hp.PhaseIO
-) -> None:
-    """feat/hermes-role-slots: an end-to-end bootstrap renders the
-    delegation block from the ``agent`` slot and routes the
-    auxiliary compaction group to the ``utility`` slot."""
+def test_config_yaml_contains_role_slot_blocks(target: tuple[Path, Path]) -> None:
+    """delegation ← agent slot; auxiliary compaction group ← utility slot."""
     yaml = pytest.importorskip("yaml")
-    state_root = tmp_path / "state"
-    hp.run(state_root=state_root, initial_state=hermetic_state, io=hermetic_io)
-    config_text = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
-    cfg = yaml.safe_load(config_text)
-    # delegation → agent slot model at the hal0 /v1 endpoint.
+    _install(target)
+    cfg = yaml.safe_load(_config(target))
     assert cfg["delegation"]["model"] == "qwen3-coder-test"
     assert cfg["delegation"]["provider"] == "custom"
     assert cfg["delegation"]["base_url"] == "http://127.0.0.1:8080/v1"
-    # auxiliary compaction/search/title → utility slot model.
     for task in ("compression", "session_search", "title_generation"):
         assert cfg["auxiliary"][task]["model"] == "qwen3-utility-test"
         assert cfg["auxiliary"][task]["provider"] == "custom"
-        assert cfg["auxiliary"][task]["base_url"] == "http://127.0.0.1:8080/v1"
-    # vision/web_extract still inherit the chat model.
     assert cfg["auxiliary"]["vision"]["provider"] == "main"
-    # No global model.context_length override (the deepseek-bleed bug); the
-    # custom_providers per-model block was dropped — under live-resolve +
-    # discover_models, hal0-api's /v1/models serves per-model context_length.
+    # No global model.context_length override; no custom_providers block.
     assert "context_length" not in cfg["model"]
     assert "custom_providers" not in cfg
-    # The embed slot must not leak into the chat aliases.
     assert "bge-test" not in cfg.get("model_aliases", {})
 
 
-def test_namespace_register_skips_add_on_delete_count_mismatch(
-    tmp_path: Path, hermetic_state: hp.BootstrapState
-) -> None:
-    """#448: when memory_delete reports fewer removals than requested, the
-    phase must NOT rewrite the card (avoid duplicate accumulation, #446).
+# ── namespace_register dedup guards (#448 / #446) ────────────────────────────
 
-    Repro: search finds one prior card id, but the delete reports
-    ``deleted: 0`` (the custom-dataset skip bug). The HTTP call is OK, so
-    the old call site trusted it and re-added — flooding the Peer view.
-    The fixed call site inspects the count, warns, and skips the add.
-    """
+
+def _register(state, io):
+    return hp._phase_namespace_register(hp._StepCtx(state=state, io=io))
+
+
+def test_namespace_register_skips_add_on_delete_count_mismatch() -> None:
+    """A delete that pruned fewer ids than requested must NOT re-add the card."""
+    state = hp.BootstrapState(agent_id="hermes-agent")
     add_calls: list[dict[str, Any]] = []
 
-    def _mismatch_memory_call(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+    def _mismatch(method, params, **_kw):
         tool = (params or {}).get("name", "")
         if tool == "memory_search":
             return {
                 "ok": True,
-                "result": {
-                    "items": [{"id": "prior-1", "metadata": {"agent_id": hermetic_state.agent_id}}]
-                },
+                "result": {"items": [{"id": "prior-1", "metadata": {"agent_id": state.agent_id}}]},
             }
         if tool == "memory_add":
             add_calls.append(params)
-            return {"ok": True, "result": {"id": "memid-stable"}}
+            return {"ok": True, "result": {"id": "x"}}
         if tool == "memory_delete":
-            # Found one prior, removed none — the delete-0 mismatch.
             return {"ok": True, "result": {"deleted": 0}}
         return {"ok": True, "result": {}}
 
-    io = hp.PhaseIO(mcp_memory_call=_mismatch_memory_call)
-    result = hp._phase_namespace_register(
-        hp.context_for("namespace_register", hermetic_state, io=io)
-    )
-
+    result = _register(state, hp.InstallIO(mcp_memory_call=_mismatch))
     assert result.status == hp.PhaseStatus.OK
     assert result.details["registered"] is False
     assert result.details["refreshed_existing"] is False
-    assert not add_calls, "card was re-added despite a delete-count mismatch"
-    assert any("memory_delete" in w for w in result.details["warnings"]), (
-        "expected a delete-count-mismatch warning"
-    )
-    # #702: warn-as-OK memory-layer degradation is an observable fallback.
+    assert not add_calls, "card re-added despite a delete-count mismatch"
     assert any(f["site"] == "memory_layer" for f in result.details["fallbacks"])
 
 
-def test_namespace_register_rewrites_when_delete_count_matches(
-    tmp_path: Path, hermetic_state: hp.BootstrapState
-) -> None:
-    """#448 counterpart: when the delete count matches the requested ids,
-    the refresh proceeds normally (card re-added, refreshed_existing True)."""
+def test_namespace_register_rewrites_when_delete_count_matches() -> None:
+    """A matching delete count proceeds to the refresh (card re-added)."""
+    state = hp.BootstrapState(agent_id="hermes-agent")
     add_calls: list[dict[str, Any]] = []
 
-    def _matching_memory_call(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+    def _matching(method, params, **_kw):
         tool = (params or {}).get("name", "")
         if tool == "memory_search":
             return {
                 "ok": True,
-                "result": {
-                    "items": [{"id": "prior-1", "metadata": {"agent_id": hermetic_state.agent_id}}]
-                },
+                "result": {"items": [{"id": "prior-1", "metadata": {"agent_id": state.agent_id}}]},
             }
         if tool == "memory_add":
             add_calls.append(params)
-            return {"ok": True, "result": {"id": "memid-stable"}}
+            return {"ok": True, "result": {"id": "x"}}
         if tool == "memory_delete":
             return {"ok": True, "result": {"deleted": 1}}
         return {"ok": True, "result": {}}
 
-    io = hp.PhaseIO(mcp_memory_call=_matching_memory_call)
-    result = hp._phase_namespace_register(
-        hp.context_for("namespace_register", hermetic_state, io=io)
-    )
-
+    result = _register(state, hp.InstallIO(mcp_memory_call=_matching))
     assert result.status == hp.PhaseStatus.OK
     assert result.details["registered"] is True
     assert result.details["refreshed_existing"] is True
     assert len(add_calls) == 1
 
 
-def test_persona_seed_appears_in_phase_order_before_config_write(tmp_path: Path) -> None:
-    """Ordering guard — persona_seed must come BEFORE config_write so the
-    first render gets the active persona's system_prompt."""
-    names = list(hp.PHASE_NAMES)
-    assert names.index("persona_seed") < names.index("config_write")
+# ── pipeline ordering ────────────────────────────────────────────────────────
+
+
+def test_persona_seed_relocated_out_of_install_pipeline() -> None:
+    """RELOCATE(brain-lane): persona_seed no longer runs inside install_hermes
+    at all — config_write's active-persona read now depends on the hal0-api
+    boot lifespan having already seeded personas (see _install()'s
+    pre-seed call in this file's fixtures, which mirrors that ordering)."""
+    names = [name for name, _fn in hp._INSTALL_STEPS]
+    assert "persona_seed" not in names
+
+
+def test_mcp_wire_runs_before_config_write() -> None:
+    """mcp_wire probes before config_write renders, so the render sees live probes."""
+    names = [name for name, _fn in hp._INSTALL_STEPS]
+    assert names.index("mcp_wire") < names.index("config_write")

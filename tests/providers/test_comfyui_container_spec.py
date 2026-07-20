@@ -15,9 +15,14 @@ from typing import Any
 import pytest
 
 from hal0.providers.comfyui import _HAL0_COMFYUI_IMAGE, ComfyUIProvider
-from hal0.providers.container import _render_unit_from_spec, _spec_provider_for
+from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
 
 _GPU_NODES = ["/dev/kfd", "/dev/dri/card1", "/dev/dri/renderD128"]
+
+
+def _render_from_spec(token, spec, *, runtime_bin=None, publish_host="127.0.0.1"):
+    """Quadlet renderer shim (ignores the legacy runtime_bin kwarg)."""
+    return _render_quadlet_from_plan(token, spec, publish_host=publish_host)
 
 
 def _img_cfg(**overrides: Any) -> dict[str, Any]:
@@ -143,18 +148,21 @@ def test_comfyui_fallback_image_is_kyuz0() -> None:
 
 def test_renderer_host_network_skips_publish_and_keeps_shm() -> None:
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
-    unit = _render_unit_from_spec("img", spec, runtime_bin="/usr/bin/podman")
-    exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    unit = _render_from_spec("img", spec, runtime_bin="/usr/bin/podman")
+    lines = unit.splitlines()
 
-    assert "--network=host" in exec_line
-    assert "--publish" not in exec_line, "host networking must not publish ports"
-    assert "--ipc=host" in exec_line
-    assert "--shm-size" not in exec_line
-    assert "--security-opt=label=disable" in exec_line
-    assert "--device=/dev/kfd" in exec_line
+    assert "Network=host" in lines
+    assert not any(line.startswith("PublishPort=") for line in lines), (
+        "host networking must not publish ports"
+    )
+    # extra_args (--ipc=host) pass through the deprecated PodmanArgs= escape hatch.
+    assert "PodmanArgs=--ipc=host" in lines
+    assert "--shm-size" not in unit
+    assert "--security-opt label=disable" in unit
+    assert "AddDevice=/dev/kfd" in lines
     assert (
-        "--volume=/mnt/ai-models/comfyui/extra_model_paths.yaml"
-        ":/opt/ComfyUI/extra_model_paths.yaml:ro" in exec_line
+        "Volume=/mnt/ai-models/comfyui/extra_model_paths.yaml"
+        ":/opt/ComfyUI/extra_model_paths.yaml:ro" in lines
     )
 
 

@@ -279,10 +279,13 @@ def test_container_slot_has_runtime_profile_image_fields(
     )
 
 
-def test_container_slot_resolved_command_includes_flags(
+def test_container_slot_resolved_command_excludes_profile_flags(
     client_with_container_slot: TestClient,
 ) -> None:
-    """resolved_command must include profile flags tokens."""
+    """FLAGS-own (spec-flags-ownership §2): a profile is a copy-on-stamp template
+    read only in the drawer — its flags NEVER reach the launch/preview command.
+    resolved_command reflects the model's materialized tune + structural base
+    flags, so the profile's --flash-attn/-ngl must NOT appear."""
     from hal0.config.schema import ProfileConfig
 
     fake_profile = ProfileConfig(
@@ -315,10 +318,12 @@ def test_container_slot_resolved_command_includes_flags(
     slot = by_name["gpu-chat"]
     rc = slot.get("resolved_command")
     assert isinstance(rc, list)
-    # Flags should be spread into the command
     joined = " ".join(rc)
-    assert "--flash-attn" in joined, "profile flags must appear in resolved_command"
-    assert "-ngl" in joined, "profile flags must appear in resolved_command"
+    # Structural base flags are always present (resolved, not profile-sourced).
+    assert "--model" in joined and "--port" in joined
+    # Profile flags are inert at launch/preview — the model owns the tune now.
+    assert "--flash-attn" not in joined, "profile flags must NOT reach resolved_command"
+    assert "-ngl" not in joined, "profile flags must NOT reach resolved_command"
 
 
 def test_profileless_slot_has_null_image_and_command(

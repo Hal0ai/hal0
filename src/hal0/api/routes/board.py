@@ -1,30 +1,33 @@
-"""Operator Board proxy — ``/api/board/*`` → Hermes kanban plugin.
+"""Operator Board routes — ``/api/board/*`` backed by the hal0 SQLite store.
 
-The FROZEN FE↔BE contract (SPEC §4). Every path forwards to
-``{HERMES_DASHBOARD_BASE_URL}/api/plugins/kanban/<upstream>``. No kanban data
-lives in hal0 — Hermes owns the DB; hal0-api is a thin AUDITED proxy.
+hal0 OWNS the operator board (rework R4 §Agents-and-brain). These routes read
+and write :class:`hal0.board.store.BoardStore` (``db/migrations/005_board.sql``)
+instead of proxying to the Hermes kanban plugin — Hermes is now an OPTIONAL
+executor, and the board works with it absent.
 
-Shape (mirrors :mod:`hal0.api.routes.memory_admin`):
+The FE↔BE wire contract (``ui/CONTRACTS.md`` "Operator Board", SPEC §4) is
+FROZEN: paths, methods, payload shapes, status codes, and WS events are
+unchanged. Only the implementation moved from a proxy forward to a local store;
+response fields may be added (additive) but never removed or reshaped.
 
-* **Reads** (``GET``) are a table-driven allowlisted passthrough through
-  :meth:`HermesKanbanClient.request_json` — method/path/query/body forward
-  verbatim, response returned verbatim. NOT audited.
+Shape (unchanged from the proxy era):
+
+* **Reads** (``GET``) are NOT audited — they call the store directly.
 * **Mutations** are EXPLICIT handlers each wrapped in
   :func:`hal0.api._audit.record_action` ``(category="board", action="board.<noun>.<verb>")``
-  setting ``rec.after`` to the upstream result, so the slots-page ActivityLog
+  with ``rec.after`` set to the store result, so the slots-page ActivityLog
   records every board write with the actor derived from ``X-hal0-Agent``.
-* ``?board=<slug>`` threads through every task/board-scoped call verbatim
-  (the proxy forwards the whole query string, so ``board`` rides along with
-  no special-casing).
-* ``WS /events`` proxies the upstream kanban events WS (reuses the
-  chat_proxy ``_proxy_ws`` shape).
+* ``?board=<slug>`` threads through every task/board-scoped call (omit ⇒ the
+  current board).
+* ``WS /events`` streams the local ``card_event`` feed (see
+  :mod:`hal0.api.routes.board_ws`) so every mutation — operator's, the agent
+  chat's, a worker's — reflects live on the board through the one transport.
 * ``POST /chat`` (SSE) is the hal0-native orchestrator — see
-  :mod:`hal0.api.routes.board_chat`.
+  :mod:`hal0.api.routes.board_chat` (a separate lane; unchanged here).
 
-Auth: the browser's ``Authorization`` / ``Cookie`` / ``X-Hermes-Session-Token``
-are NEVER forwarded — the client injects the server-resolved Hermes session
-bearer itself (SPEC §2.G). ``X-hal0-Agent`` from the inbound request is
-threaded to the client for audit attribution.
+First-boot import: the first request per process runs
+:meth:`BoardStore.ensure_initialized`, which imports the live Hermes board when
+present + the store is empty, else seeds a clean empty board.
 """
 
 from __future__ import annotations
@@ -32,34 +35,74 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Request, WebSocket
+from fastapi import APIRouter, Request, Response, WebSocket
 
 from hal0.api._audit import record_action
-from hal0.board import BoardUnreachable, HermesKanbanClient
+from hal0.board.store import BoardStore
 from hal0.errors import BadRequest
 
 router = APIRouter()
 
 
-# ── client + agent resolution ──────────────────────────────────────────────
+# ── ETag / optimistic concurrency (KB-6) ────────────────────────────────────
+#
+# Per-card ``revision`` is the ETag validator. Reads emit ``ETag: "<revision>"``;
+# a mutating request MAY send ``If-Match: "<revision>"`` to make the write
+# conditional. A stale validator raises Conflict (409) in the store — hal0 uses
+# 409, not 412, because the error-envelope stack already ships a Conflict(409)
+# class and no 412 machinery, and a stale board write is exactly the
+# "edit-vs-edit race" that class documents. If-Match is OPTIONAL, so a client
+# that omits it behaves exactly as before (the frozen contract is unbroken;
+# ETag + If-Match are purely additive).
 
 
-def _client(request: Request) -> HermesKanbanClient:
-    """Resolve the app-state kanban client, or 503 if unwired."""
-    client = getattr(request.app.state, "hermes_kanban", None)
-    if client is None:
-        raise BoardUnreachable("operator board backend is not configured on this hal0 instance")
-    return client
+def _etag(revision: Any) -> str | None:
+    return f'"{revision}"' if revision is not None else None
 
 
-def _inbound_agent(request: Request) -> str | None:
-    """Pass through the inbound ``X-hal0-Agent`` so audit + upstream agree."""
-    return request.headers.get("X-hal0-Agent")
+def _if_match(request: Request) -> int | None:
+    """Parse an ``If-Match`` header into a revision int, or ``None``.
+
+    Tolerates weak (``W/"5"``) and quoted (``"5"``) forms. ``*`` (match-any) and
+    any unparseable value disable the check (``None``) rather than erroring.
+    """
+    raw = request.headers.get("If-Match")
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw == "*":
+        return None
+    raw = raw.removeprefix("W/").strip().strip('"')
+    return int(raw) if raw.isdigit() else None
 
 
-def _query(request: Request) -> dict[str, str] | None:
-    """The inbound query string forwarded verbatim (carries ``?board=`` etc)."""
-    return dict(request.query_params) or None
+# ── store resolution + request helpers ──────────────────────────────────────
+
+
+async def _store(request: Request) -> BoardStore:
+    """Resolve (and lazily construct) the app-state board store.
+
+    The store is created once per process and cached on ``app.state``; the
+    first access runs the idempotent first-boot import against the optional
+    Hermes kanban client (``app.state.hermes_kanban``), so a fresh box imports a
+    live Hermes board when present and seeds a clean empty board otherwise.
+    """
+    store = getattr(request.app.state, "board_store", None)
+    if store is None:
+        store = BoardStore()
+        request.app.state.board_store = store
+    if not store.initialized:
+        client = getattr(request.app.state, "hermes_kanban", None)
+        await store.ensure_initialized(client)
+    return store
+
+
+def _board(request: Request) -> str | None:
+    return request.query_params.get("board")
+
+
+def _truthy(value: str | None) -> bool:
+    return value is not None and value.lower() in ("1", "true", "yes", "on")
 
 
 async def _read_body(request: Request) -> Any | None:
@@ -72,40 +115,23 @@ async def _read_body(request: Request) -> Any | None:
         raise BadRequest("request body must be valid JSON", code="board.invalid_body") from exc
 
 
-async def _forward(
-    request: Request,
-    method: str,
-    path: str,
-    *,
-    json_body: Any | None = None,
-) -> Any:
-    """Forward to the kanban client, threading query + agent verbatim."""
-    client = _client(request)
-    return await client.request_json(
-        method,
-        path,
-        params=_query(request),
-        json_body=json_body,
-        agent_id=_inbound_agent(request),
-    )
-
-
-# ── explicit audited mutations (SPEC §4 audited rows) ───────────────────────
+# ── audited mutations (SPEC §4 audited rows) ────────────────────────────────
 #
-# Each sets rec.after = upstream result so the audit row proves the write
-# landed. record_action derives the actor from X-hal0-Agent (mcp:<agent>) or
-# falls back to "dashboard".
+# Each sets rec.after = store result so the audit row proves the write landed.
+# record_action derives the actor from X-hal0-Agent (mcp:<agent>) or falls back
+# to "dashboard"; a store error inside the block is recorded outcome=error and
+# re-raised (surfaced through the JSON-error envelope).
 
 
 @router.post("/tasks")
 async def create_task(request: Request) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.create", target=None
     ) as rec:
-        result = await _forward(request, "POST", "/tasks", json_body=body)
+        result = store.create_task(body or {}, board=_board(request))
         rec.after = result
-        # A created task may carry a no-dispatcher warning — keep it visible.
         task = result.get("task") if isinstance(result, dict) else None
         if isinstance(task, dict):
             rec.target = task.get("id")
@@ -113,22 +139,29 @@ async def create_task(request: Request) -> Any:
 
 
 @router.patch("/tasks/{task_id}")
-async def update_task(request: Request, task_id: str) -> Any:
+async def update_task(request: Request, task_id: str, response: Response) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
+    if_revision = _if_match(request)
     async with record_action(
         request, category="board", action="board.task.update", target=task_id
     ) as rec:
-        result = await _forward(request, "PATCH", f"/tasks/{task_id}", json_body=body)
+        result = store.update_task(task_id, body or {}, if_revision=if_revision)
         rec.after = result
+    etag = _etag(result.get("revision")) if isinstance(result, dict) else None
+    if etag:
+        response.headers["ETag"] = etag
     return result
 
 
 @router.delete("/tasks/{task_id}")
 async def delete_task(request: Request, task_id: str) -> Any:
+    store = await _store(request)
+    if_revision = _if_match(request)
     async with record_action(
         request, category="board", action="board.task.delete", target=task_id
     ) as rec:
-        result = await _forward(request, "DELETE", f"/tasks/{task_id}")
+        result = store.delete_task(task_id, if_revision=if_revision)
         rec.after = result
     return result
 
@@ -136,10 +169,11 @@ async def delete_task(request: Request, task_id: str) -> Any:
 @router.post("/tasks/{task_id}/comments")
 async def comment_task(request: Request, task_id: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.comment", target=task_id
     ) as rec:
-        result = await _forward(request, "POST", f"/tasks/{task_id}/comments", json_body=body)
+        result = store.comment_task(task_id, body or {})
         rec.after = result
     return result
 
@@ -147,10 +181,11 @@ async def comment_task(request: Request, task_id: str) -> Any:
 @router.post("/tasks/bulk")
 async def bulk_tasks(request: Request) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.bulk", target=None
     ) as rec:
-        result = await _forward(request, "POST", "/tasks/bulk", json_body=body)
+        result = store.bulk_update(body or {})
         rec.after = result
         if isinstance(body, dict) and isinstance(body.get("ids"), list):
             rec.target = ",".join(str(i) for i in body["ids"])
@@ -160,10 +195,11 @@ async def bulk_tasks(request: Request) -> Any:
 @router.post("/tasks/{task_id}/reassign")
 async def reassign_task(request: Request, task_id: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.reassign", target=task_id
     ) as rec:
-        result = await _forward(request, "POST", f"/tasks/{task_id}/reassign", json_body=body)
+        result = store.reassign(task_id, body or {})
         rec.after = result
     return result
 
@@ -171,10 +207,11 @@ async def reassign_task(request: Request, task_id: str) -> Any:
 @router.post("/tasks/{task_id}/specify")
 async def specify_task(request: Request, task_id: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.specify", target=task_id
     ) as rec:
-        result = await _forward(request, "POST", f"/tasks/{task_id}/specify", json_body=body)
+        result = store.specify(task_id, body or {})
         rec.after = result
     return result
 
@@ -182,10 +219,11 @@ async def specify_task(request: Request, task_id: str) -> Any:
 @router.post("/tasks/{task_id}/decompose")
 async def decompose_task(request: Request, task_id: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.decompose", target=task_id
     ) as rec:
-        result = await _forward(request, "POST", f"/tasks/{task_id}/decompose", json_body=body)
+        result = store.decompose(task_id, body or {})
         rec.after = result
     return result
 
@@ -193,10 +231,11 @@ async def decompose_task(request: Request, task_id: str) -> Any:
 @router.post("/tasks/{task_id}/reclaim")
 async def reclaim_task(request: Request, task_id: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.task.reclaim", target=task_id
     ) as rec:
-        result = await _forward(request, "POST", f"/tasks/{task_id}/reclaim", json_body=body)
+        result = store.reclaim(task_id, body or {})
         rec.after = result
     return result
 
@@ -204,37 +243,43 @@ async def reclaim_task(request: Request, task_id: str) -> Any:
 @router.post("/links")
 async def add_link(request: Request) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     target = None
     if isinstance(body, dict):
         target = f"{body.get('parent_id')}->{body.get('child_id')}"
     async with record_action(
         request, category="board", action="board.link.add", target=target
     ) as rec:
-        result = await _forward(request, "POST", "/links", json_body=body)
+        result = store.add_link(body or {})
         rec.after = result
     return result
 
 
 @router.delete("/links")
 async def remove_link(request: Request) -> Any:
-    # DELETE /links takes parent_id/child_id as QUERY params (SPEC §4) —
-    # they ride along in the forwarded query string.
+    # DELETE /links takes parent_id/child_id as QUERY params (SPEC §4).
     qp = request.query_params
-    target = f"{qp.get('parent_id')}->{qp.get('child_id')}"
+    parent_id = qp.get("parent_id")
+    child_id = qp.get("child_id")
+    target = f"{parent_id}->{child_id}"
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.link.remove", target=target
     ) as rec:
-        result = await _forward(request, "DELETE", "/links")
+        result = store.remove_link(parent_id or "", child_id or "")
         rec.after = result
     return result
 
 
 @router.post("/dispatch")
 async def dispatch_nudge(request: Request) -> Any:
+    store = await _store(request)
+    max_raw = request.query_params.get("max")
+    max_dispatch = int(max_raw) if max_raw and max_raw.isdigit() else None
     async with record_action(
         request, category="board", action="board.dispatch.nudge", target=None
     ) as rec:
-        result = await _forward(request, "POST", "/dispatch")
+        result = store.dispatch_nudge(max_dispatch=max_dispatch)
         rec.after = result
     return result
 
@@ -242,11 +287,12 @@ async def dispatch_nudge(request: Request) -> Any:
 @router.post("/boards")
 async def create_board(request: Request) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     target = body.get("slug") if isinstance(body, dict) else None
     async with record_action(
         request, category="board", action="board.board.create", target=target
     ) as rec:
-        result = await _forward(request, "POST", "/boards", json_body=body)
+        result = store.create_board(body or {})
         rec.after = result
     return result
 
@@ -254,31 +300,33 @@ async def create_board(request: Request) -> Any:
 @router.patch("/boards/{slug}")
 async def update_board(request: Request, slug: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.board.update", target=slug
     ) as rec:
-        result = await _forward(request, "PATCH", f"/boards/{slug}", json_body=body)
+        result = store.update_board(slug, body or {})
         rec.after = result
     return result
 
 
 @router.delete("/boards/{slug}")
 async def delete_board(request: Request, slug: str) -> Any:
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.board.delete", target=slug
     ) as rec:
-        result = await _forward(request, "DELETE", f"/boards/{slug}")
+        result = store.delete_board(slug)
         rec.after = result
     return result
 
 
 @router.post("/boards/{slug}/switch")
 async def switch_board(request: Request, slug: str) -> Any:
-    body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.board.switch", target=slug
     ) as rec:
-        result = await _forward(request, "POST", f"/boards/{slug}/switch", json_body=body)
+        result = store.switch_board(slug)
         rec.after = result
     return result
 
@@ -286,10 +334,11 @@ async def switch_board(request: Request, slug: str) -> Any:
 @router.patch("/profiles/{name}")
 async def update_profile(request: Request, name: str) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.profile.update", target=name
     ) as rec:
-        result = await _forward(request, "PATCH", f"/profiles/{name}", json_body=body)
+        result = store.update_profile(name, body or {})
         rec.after = result
     return result
 
@@ -297,66 +346,109 @@ async def update_profile(request: Request, name: str) -> Any:
 @router.put("/orchestration")
 async def update_orchestration(request: Request) -> Any:
     body = await _read_body(request)
+    store = await _store(request)
     async with record_action(
         request, category="board", action="board.orchestration.update", target=None
     ) as rec:
-        result = await _forward(request, "PUT", "/orchestration", json_body=body)
+        result = store.update_orchestration(body or {})
         rec.after = result
     return result
 
 
-# ── allowlisted read passthrough table (NOT audited) ────────────────────────
-#
-# (hal0 method, hal0 path under /api/board, upstream sub-path template).
-# Path params are substituted from request.path_params; query + body forward
-# verbatim. Mutations are NOT in this table — they are the explicit audited
-# handlers above. The full set is the SPEC §4 read rows.
-
-_READS: tuple[tuple[str, str, str], ...] = (
-    ("GET", "/board", "/board"),
-    ("GET", "/tasks/{task_id}", "/tasks/{task_id}"),
-    ("GET", "/tasks/{task_id}/log", "/tasks/{task_id}/log"),
-    ("GET", "/boards", "/boards"),
-    ("GET", "/profiles", "/profiles"),
-    ("GET", "/assignees", "/assignees"),
-    ("GET", "/stats", "/stats"),
-    ("GET", "/diagnostics", "/diagnostics"),
-    ("GET", "/workers/active", "/workers/active"),
-    ("GET", "/runs/{run_id}", "/runs/{run_id}"),
-    ("GET", "/config", "/config"),
-    ("GET", "/orchestration", "/orchestration"),
-)
+# ── reads (NOT audited) — store-backed ──────────────────────────────────────
 
 
-def _make_read_handler(template: str):
-    async def handler(request: Request) -> Any:
-        upstream = template.format(**request.path_params) if request.path_params else template
-        return await _forward(request, "GET", upstream)
-
-    return handler
-
-
-for _method, _path, _template in _READS:
-    router.add_api_route(
-        _path,
-        _make_read_handler(_template),
-        methods=[_method],
-        name=f"board_get_{_template.strip('/').replace('/', '_').replace('{', '').replace('}', '')}",
+@router.get("/board")
+async def get_board(request: Request) -> Any:
+    store = await _store(request)
+    return store.get_board(
+        board=_board(request),
+        include_archived=_truthy(request.query_params.get("include_archived")),
     )
 
 
-# ── live events WS proxy (NOT audited) ──────────────────────────────────────
+@router.get("/tasks/{task_id}")
+async def get_task(request: Request, task_id: str, response: Response) -> Any:
+    store = await _store(request)
+    task = store.get_task(task_id)
+    etag = _etag(task.get("revision")) if isinstance(task, dict) else None
+    if etag:
+        response.headers["ETag"] = etag
+    return task
+
+
+@router.get("/tasks/{task_id}/log")
+async def get_task_log(request: Request, task_id: str) -> Any:
+    store = await _store(request)
+    tail_raw = request.query_params.get("tail")
+    tail = int(tail_raw) if tail_raw and tail_raw.isdigit() else None
+    return store.get_task_log(task_id, tail=tail)
+
+
+@router.get("/boards")
+async def list_boards(request: Request) -> Any:
+    store = await _store(request)
+    return store.list_boards()
+
+
+@router.get("/profiles")
+async def list_profiles(request: Request) -> Any:
+    store = await _store(request)
+    return store.list_profiles()
+
+
+@router.get("/assignees")
+async def list_assignees(request: Request) -> Any:
+    store = await _store(request)
+    return store.list_assignees(board=_board(request))
+
+
+@router.get("/stats")
+async def board_stats(request: Request) -> Any:
+    store = await _store(request)
+    return store.stats(board=_board(request))
+
+
+@router.get("/diagnostics")
+async def board_diagnostics(request: Request) -> Any:
+    store = await _store(request)
+    return store.diagnostics()
+
+
+@router.get("/workers/active")
+async def workers_active(request: Request) -> Any:
+    store = await _store(request)
+    return store.workers_active()
+
+
+@router.get("/runs/{run_id}")
+async def get_run(request: Request, run_id: str) -> Any:
+    store = await _store(request)
+    return store.get_run(run_id)
+
+
+@router.get("/config")
+async def get_config(request: Request) -> Any:
+    store = await _store(request)
+    return store.get_config()
+
+
+@router.get("/orchestration")
+async def get_orchestration(request: Request) -> Any:
+    store = await _store(request)
+    return store.get_orchestration()
+
+
+# ── live events WS (NOT audited) ────────────────────────────────────────────
 
 
 @router.websocket("/events")
 async def board_events_ws(websocket: WebSocket) -> None:
-    """Proxy the browser WS to the upstream kanban events WS.
+    """Stream the local ``card_event`` feed to the browser.
 
-    Reuses the chat_proxy bidi pump shape. The browser passes
-    ``since`` / ``board`` / ``tenant``; the upstream ``?token=`` is supplied
-    server-side from the Hermes session resolver (browsers can't set
-    ``Authorization`` on a WS upgrade — SPEC §2.C). On upstream failure the
-    browser WS is closed with 1011 so its retry logic kicks in.
+    The browser passes ``since`` (last cursor) / ``board``; the bridge polls the
+    store and pushes ``{"events": [...], "cursor": N}`` frames — the same frozen
+    frame shape the Hermes proxy relayed, now sourced from hal0's own store.
     """
     from hal0.api.routes.board_ws import proxy_board_events
 
@@ -371,9 +463,7 @@ async def board_events_ws(websocket: WebSocket) -> None:
 async def board_chat(request: Request):
     """hal0-native board orchestrator. SSE stream. SPEC §2.D / §4.
 
-    Delegates to :mod:`hal0.api.routes.board_chat` so the transport stays
-    swappable (future: route to the Hermes agent via chat_proxy without
-    changing this contract).
+    Delegates to :mod:`hal0.api.routes.board_chat` (a separate lane; unchanged).
     """
     from hal0.api.routes.board_chat import run_board_chat
 

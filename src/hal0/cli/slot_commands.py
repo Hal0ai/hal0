@@ -1,12 +1,23 @@
-"""hal0 slot subcommands — thin HTTP client to the hal0 API."""
+"""hal0 slot subcommands — thin HTTP client to the hal0 API.
+
+One deliberate exception: ``migrate-id-keying`` (bottom of file) is offline /
+filesystem-direct, not an API call — it flips the on-disk layout the (stopped)
+API reads on its next boot, so routing it through the API would be
+nonsensical (see that command's docstring).
+"""
 
 from __future__ import annotations
 
 import json as jsonlib
+import subprocess
+import tarfile
+import tomllib
+from collections.abc import Callable
+from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
-import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -22,6 +33,7 @@ from hal0.cli._shared import (
     api_post,
     api_put,
     die,
+    follow_sse_logs,
 )
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 
@@ -289,6 +301,28 @@ def slot_restart(
     console.print(f"Restarted [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))}")
 
 
+@app.command("rename")
+def slot_rename(
+    name: str = typer.Argument(..., help="Current slot name"),
+    new_name: str = typer.Argument(..., help="New slot name"),
+) -> None:
+    """Rename a slot in place (POST /api/slots/{name}/rename).
+
+    The slot's ``id`` is stable across the rename — quadlets, port claims,
+    and history stay bound to the id, not the label; only the display name
+    changes.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        snap = api_post(f"/api/slots/{name}/rename", json={"new_name": new_name})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(f"Renamed [bold]{name}[/bold] → [bold]{snap.get('name', new_name)}[/bold]")
+
+
 @app.command("swap")
 def slot_swap(
     name: str = typer.Argument(..., help="Slot name to swap"),
@@ -362,18 +396,7 @@ def slot_logs(
         return
 
     # Stream SSE — line-buffered passthrough.
-    try:
-        with httpx.stream("GET", url + f"/api/slots/{name}/logs/stream", timeout=None) as r:
-            for raw in r.iter_lines():
-                if not raw or not raw.startswith("data:"):
-                    continue
-                payload = raw[5:].strip()
-                try:
-                    console.print(jsonlib.loads(payload))
-                except ValueError:
-                    console.print(payload)
-    except (httpx.HTTPError, KeyboardInterrupt):
-        return
+    follow_sse_logs(f"/api/slots/{name}/logs/stream", console=console)
 
 
 @app.command("create")
@@ -409,6 +432,7 @@ def slot_create(
         ),
         case_sensitive=False,
     ),
+    # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
         "--backend",
@@ -507,6 +531,7 @@ def slot_edit(
         case_sensitive=False,
         help="Change the slot's hardware backend (vulkan | rocm | cpu).",
     ),
+    # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
         "--backend",
@@ -604,6 +629,7 @@ def slot_delete(
     console.print(f"Deleted slot [bold]{name}[/bold].")
 
 
+# HAL0-SUNSET: v1.0.0 — alias for `slot create`; drop the alias.
 @app.command("add", hidden=True)
 def slot_add(
     name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
@@ -632,6 +658,7 @@ def slot_add(
     )
 
 
+# HAL0-SUNSET: v1.0.0 — alias for `slot delete`; drop the alias.
 @app.command("remove", hidden=True)
 def slot_remove(
     name: str = typer.Argument(..., help="Slot name to delete"),
@@ -781,3 +808,253 @@ def slot_capacity(
             str(s.get("mem_mb", "—")),
         )
     console.print(table)
+
+
+# ── migrate-id-keying (P3-runtime-db inc4 / §11.1 M5 downtime window) ────────
+#
+# Offline / filesystem-direct — the only command in this file that is NOT an
+# HTTP client. It flips every slot artefact's on-disk key from the mutable
+# ``name`` to the stable ``id`` (:mod:`hal0.slots.migrate_id_keying`), which
+# only the still-name-keyed runtime the (stopped) API reads at its next boot
+# should ever see change. Running it against a LIVE api/slot set is the exact
+# halo143 split-brain lesson the bilingual read/write layer (inc0-3) was built
+# to avoid on the read side — this command is the write-side guard: refuse
+# (or --stop-services) rather than flip artefacts out from under a running
+# process.
+
+
+def _active_hal0_units(
+    *, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+) -> list[str]:
+    """Every hal0-owned systemd unit currently active: ``hal0-api.service``
+    plus any live ``hal0-slot@*.service`` instance.
+
+    Best-effort: no systemd on this box (dev shell, CI, unit tests) is not an
+    error — it just means nothing can be "active", so an empty list is the
+    correct (not merely convenient) answer.
+    """
+    active: list[str] = []
+    try:
+        result = run(
+            ["systemctl", "is-active", "--quiet", "hal0-api.service"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            active.append("hal0-api.service")
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    try:
+        result = run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--state=active",
+                "--no-legend",
+                "--plain",
+                "hal0-slot@*.service",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if fields:
+                active.append(fields[0])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return active
+
+
+def _backup_slot_state(
+    *, config_dir: Path, data_dir: Path, db_file: Path, backup_root: Path
+) -> Path:
+    """Pre-flight tar backup of everything the migration touches.
+
+    The migrator has no undo (:mod:`hal0.slots.migrate_id_keying` module
+    docstring: "destructive, idempotent") — this tarball IS the rollback
+    path. Written BEFORE the migrator runs, timestamped so re-runs never
+    clobber a prior backup. Tolerates a missing data_dir / db_file (a fresh
+    box that has never loaded a slot) by simply skipping what's absent —
+    ``config_dir`` is the only piece required to exist.
+    """
+    backup_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    tar_path = backup_root / f"slot-id-keying-{ts}.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        if config_dir.exists():
+            tf.add(config_dir, arcname="etc-hal0-slots")
+        if data_dir.exists():
+            tf.add(data_dir, arcname="var-lib-hal0-slots")
+        if db_file.exists():
+            tf.add(db_file, arcname="hal0.db")
+            # SQLite WAL/SHM sidecars carry uncommitted-but-durable writes —
+            # a backup missing them can lose the tail of the identity table.
+            for suffix in ("-wal", "-shm"):
+                sidecar = db_file.with_name(db_file.name + suffix)
+                if sidecar.exists():
+                    tf.add(sidecar, arcname=f"hal0.db{suffix}")
+    return tar_path
+
+
+def _migrate_id_keying_dry_run_plan(*, config_dir: Path, identity: Any) -> list[str]:
+    """The name→id plan a ``--dry-run`` reports, without moving a single file.
+
+    :func:`hal0.slots.migrate_id_keying.migrate_slot_id_keying` has no
+    dry-run mode of its own — every call mints identity rows and renames
+    files. This mirrors its per-TOML classification (already id-keyed vs.
+    name-keyed) read-only: an already-id-keyed stem is reported as a skip; a
+    name-keyed slot reuses its identity row's id when :meth:`fold_identity`
+    (or a prior partial run) already created one, else reports "new id"
+    since the real id is only known once the migrator actually inserts the
+    row (SQLite AUTOINCREMENT).
+    """
+    lines: list[str] = []
+    for toml_path in sorted(config_dir.glob("*.toml")):
+        if toml_path.name.startswith("."):
+            continue
+        try:
+            raw = tomllib.loads(toml_path.read_text())
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            lines.append(f"{toml_path.name}: unreadable ({exc}) — skip")
+            continue
+        slot_tbl = raw.get("slot") if isinstance(raw.get("slot"), dict) else raw
+        name = str(slot_tbl.get("name") or toml_path.stem)
+        existing_id = slot_tbl.get("id")
+        if (
+            isinstance(existing_id, int)
+            and not isinstance(existing_id, bool)
+            and toml_path.stem == str(existing_id)
+        ):
+            lines.append(f"{toml_path.name}: already id-keyed (id={existing_id}) — skip")
+            continue
+        row = identity.get_by_name(name)
+        if row is not None:
+            lines.append(f"{name} ({toml_path.name}) -> {row.id}.toml (existing identity row)")
+        else:
+            lines.append(
+                f"{name} ({toml_path.name}) -> <new id>.toml (identity row will be minted)"
+            )
+    return lines
+
+
+@app.command("migrate-id-keying")
+def slot_migrate_id_keying(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
+    ),
+    stop_services: bool = typer.Option(
+        False,
+        "--stop-services",
+        help=(
+            "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
+            "then proceed. Without this flag the command only WARNS and refuses to "
+            "run while any of those units is active."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the computed name->id plan and exit — no file is moved, no id is minted.",
+    ),
+) -> None:
+    """One-shot: flip every name-keyed slot artefact to id-keyed (P3-runtime-db §11.1 M5).
+
+    ``/etc/hal0/slots/<name>.toml`` -> ``<id>.toml``, the matching
+    ``/var/lib/hal0/slots/<name>/state.json`` -> ``<id>/state.json``, and the
+    Quadlet unit + podman container rename to match. DESTRUCTIVE and OPERATOR-
+    RUN ONLY — never wired into any automatic boot/update path.
+
+    Downtime window required: stop ``hal0-api`` and every ``hal0-slot@*`` unit
+    FIRST (or pass ``--stop-services``). Flipping artefact names under a live
+    runtime is the halo143 split-brain scenario — the running process still
+    resolves the OLD (name) paths while a second reader (a restart, a doctor
+    scan) would see the NEW (id) ones.
+
+    A timestamped tar backup of ``/etc/hal0/slots``, ``/var/lib/hal0/slots``,
+    and ``/var/lib/hal0/hal0.db`` is written to ``/var/lib/hal0/backups/``
+    BEFORE anything moves — that tarball is the only rollback path (the
+    migrator has no undo). Idempotent: re-running rolls a half-migrated tree
+    forward to the same result, so a crash mid-run is safe to retry.
+    """
+    from hal0.config import paths
+    from hal0.slots.identity import SlotIdentityStore
+    from hal0.slots.migrate_id_keying import SubprocessSlotArtifactOps, migrate_slot_id_keying
+
+    config_dir = paths.slots_config_dir()
+    data_dir = paths.var_lib() / "slots"
+    db_file = paths.db_path()
+
+    active = _active_hal0_units()
+    if active:
+        console.print(
+            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
+        )
+        if stop_services:
+            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
+            for unit in active:
+                subprocess.run(["systemctl", "stop", unit], check=False)
+            active = _active_hal0_units()
+        if active:
+            console.print(
+                "[red]✗[/red]  refusing to migrate while hal0 is live — flipping artefact "
+                "names under a running runtime split-brains it (the halo143 lesson).\n"
+                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+                "--stop-services."
+            )
+            raise typer.Exit(1)
+
+    if dry_run:
+        identity = SlotIdentityStore(db_path=db_file)
+        plan = _migrate_id_keying_dry_run_plan(config_dir=config_dir, identity=identity)
+        console.print("[bold]Dry run — no files moved, no ids minted.[/bold]")
+        if not plan:
+            console.print("  [dim](no slot TOMLs found)[/dim]")
+        for line in plan:
+            console.print(f"  {line}")
+        return
+
+    if not yes:
+        typer.confirm(
+            "This flips every slot artefact from name-keyed to id-keyed on disk. "
+            "It is destructive (no built-in undo — a backup is taken first) and "
+            "must run while hal0 is stopped. Proceed?",
+            abort=True,
+        )
+
+    backup_path = _backup_slot_state(
+        config_dir=config_dir,
+        data_dir=data_dir,
+        db_file=db_file,
+        backup_root=paths.var_lib() / "backups",
+    )
+    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+
+    identity = SlotIdentityStore(db_path=db_file)
+    ops = SubprocessSlotArtifactOps()
+    report = migrate_slot_id_keying(
+        identity=identity,
+        config_dir=config_dir,
+        data_dir=data_dir,
+        ops=ops,
+    )
+
+    if not report.migrations and not report.skipped_ids:
+        console.print("[dim]No slot TOMLs found — nothing to migrate.[/dim]")
+        return
+
+    console.print(f"\n[bold]Migrated {len(report.migrations)} slot(s):[/bold]")
+    for m in report.migrations:
+        console.print(f"  {m.name} -> {m.slot_id}.toml")
+    if report.skipped_ids:
+        console.print(
+            f"[dim]Already id-keyed (skipped): {', '.join(str(i) for i in report.skipped_ids)}[/dim]"
+        )
+    console.print(
+        "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the id-keyed layout.[/yellow]"
+    )

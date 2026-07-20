@@ -6,6 +6,21 @@
 // still part of the window-globals shim (see ui/src/main.tsx); this is the
 // first real import in this file.
 import { SettingsShell } from './settings/SettingsShell.jsx'
+// D5 (post-R3 surface rework): flag-migration surfaces. MigrationBanner is the
+// live (endpoint-dormant) banner; MigrationResolveHost opens the resolution
+// view off the Tweaks-panel demo toggle. Real ESM imports (like SettingsShell).
+import { MigrationBanner } from './migration/MigrationBanner.jsx'
+import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
+// O19: app-shell auth gate. Renders the login view in place of the app when
+// enforcement is on and the session is anonymous; a no-op on open boxes (the
+// shipped default). Real ESM import, like SettingsShell above.
+import { AuthGate } from './auth/AuthGate.jsx'
+// VERS-flash (docs/rework/handoff-r5-drive2.md §3): same live-version
+// pattern as AboutPage.jsx — once mounted, keep document.title in sync with
+// the real running backend (not just the build-time stamp baked into
+// index.html), so a box that's live-updated without a UI rebuild still
+// shows its true version.
+import { useUpdateState } from '@/api/hooks/useUpdates'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -145,6 +160,19 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useStateA(false);
   const [navOpen, setNavOpen] = useStateA(false);
   const [chatOpen, setChatOpen] = useStateA(false);
+
+  // VERS-flash: mirror the live hal0 version into the tab title once the
+  // real value is known. index.html's build-time stamp already shows the
+  // correct number on first paint (no flash) — this just keeps the title
+  // truthful if the running backend is newer than the bundle it served
+  // (e.g. box updated without a UI rebuild).
+  const { data: updateState } = useUpdateState();
+  useEffectA(() => {
+    const liveVersion = updateState?.hal0?.current;
+    if (liveVersion) {
+      document.title = `hal0 dashboard — v${liveVersion}`;
+    }
+  }, [updateState?.hal0?.current]);
 
   // Agent-chat slide-out (the orchestrator) is hoisted to App so it can be
   // opened from anywhere in the dash — the topbar Agent Chat button and the
@@ -361,6 +389,11 @@ function App() {
             {/* Phase D8: self-renders while the GPU arbiter reports image
                 mode (/api/comfyui/status arbiter.mode === "img"). */}
             <GpuImageModeBanner />
+            {/* D5: self-renders only when the flag-migration report is non-empty
+                (endpoint pending → dormant today). The resolution-view host
+                sits alongside it, opening off the demo banner's Resolve event. */}
+            <MigrationBanner />
+            <MigrationResolveHost />
             <BannerStack scope="global" route={route} />
           </div>
           <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>
@@ -495,7 +528,9 @@ const hal0QueryClient = window.Hal0QueryClient;
 ReactDOM.createRoot(document.getElementById("root")).render(
   <Hal0QueryClientProvider client={hal0QueryClient}>
     <BannerProvider>
-      <App />
+      <AuthGate>
+        <App />
+      </AuthGate>
     </BannerProvider>
   </Hal0QueryClientProvider>
 );

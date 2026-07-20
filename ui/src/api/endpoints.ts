@@ -27,7 +27,10 @@ export const ENDPOINTS = {
   // Latest output image proxy
   comfyuiPreview: '/api/comfyui/preview',
 
-  slotMetrics: '/api/slots/metrics',
+  // GET /api/system-info (CLIENT) — hardware + features + per-RUNNER_IMAGES
+  // backend state (installed | installable | unavailable). Feeds the Runtimes
+  // settings page (D3) — the runner/image evidence axis.
+  systemInfo: '/api/system-info',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,
   slotConfig: (name: string) => `/api/slots/${encodeURIComponent(name)}/config`,
   // TTS voice-list proxy — forwards to the slot container's /v1/audio/voices;
@@ -38,8 +41,10 @@ export const ENDPOINTS = {
   slotLoad: (name: string) => `/api/slots/${encodeURIComponent(name)}/load`,
   slotUnload: (name: string) => `/api/slots/${encodeURIComponent(name)}/unload`,
   slotSwap: (name: string) => `/api/slots/${encodeURIComponent(name)}/swap`,
-  slotStateStream: (name: string) =>
-    `/api/slots/${encodeURIComponent(name)}/state/stream`,
+  // POST /api/slots/{name}/rename — body { new_name }. The stable slot id is
+  // untouched; the unit is still name-keyed so the slot must be OFFLINE (409
+  // while running) until the live-rename migration lands (rework §11.1).
+  slotRename: (name: string) => `/api/slots/${encodeURIComponent(name)}/rename`,
   slotLogsStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/logs/stream`,
   slotPull: (name: string) =>
@@ -59,13 +64,16 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // Per-type default MODEL marker: POST {default:true} promotes (demoting the
+  // current holder of the type), {default:false} clears. Server enforces the
+  // single-holder invariant in one chokepoint.
+  modelSetDefault: (id: string) => `/api/models/${encodeURIComponent(id)}/default`,
   // HF update check + in-place update. Check is GET (TTL-cached server-side,
   // ?refresh=1 forces); update re-pulls the row's hf_repo/hf_filename over
   // its installed path and reports through the standard pull job surface.
   modelUpdatesCheck: '/api/models/updates/check',
   modelUpdate: (id: string) => `/api/models/${encodeURIComponent(id)}/update`,
   modelScanPreview: '/api/models/scan/preview',
-  modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',
   // Issue #311: free-text HF Hub model search backing the dashboard
   // "Search HF" button. Distinct from /api/models/inspect (which
@@ -101,8 +109,10 @@ export const ENDPOINTS = {
   // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
   statsPower: '/api/stats/power',
   // Dashboard-redesign Requests widget: dispatcher-side /v1 rollup
-  // (req/min, p50/p95, per-endpoint counts over 60s). NEW endpoint —
-  // useRequestsRollup fails soft to "—" until it ships.
+  // (req/min, p50/p95, per-endpoint counts over 60s). Live
+  // (src/hal0/api/routes/hardware.py); useRequestsRollup still fails soft
+  // to "—" on 404/network error as a defensive floor, not because the
+  // route is missing.
   statsRequests: '/api/stats/requests',
   // W6: agent approvals SSE stream (polled list hook is primary; SSE for future).
   agentApprovalsStream: '/api/agent/approvals/events',
@@ -121,21 +131,18 @@ export const ENDPOINTS = {
   // /api/mcp, NOT /api/agents/mcp.  The original constant had the wrong
   // prefix which caused the Clients tab to 404 on every real install.
   agentMcpClients: '/api/mcp/clients',
-  agentMcpClient: (name: string) =>
-    `/api/mcp/clients/${encodeURIComponent(name)}`,
 
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
   // `agents` lives in the catalogue block above (one entry, used by
   // both the bundled-list and sidebar surfaces). The remaining
   // endpoints under this block are surfaces the SidebarAgentBlock
-  // calls — most are NEW in v0.3 and may 404 against an older
-  // hal0-api; the consuming hooks fall back to "—" and console.warn
-  // once when a particular path returns 404 / network error so the
-  // sidebar degrades gracefully on partial deployments.
+  // calls — all live (src/hal0/api/agents/personas.py,
+  // src/hal0/api/agents/restart.py, src/hal0/api/routes/approvals.py).
+  // Consuming hooks still fall back to "—" and console.warn once on a
+  // 404/network error so the sidebar degrades gracefully on partial
+  // deployments, but that's a defensive floor, not the expected state.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
-  agentActivity: (id: string) =>
-    `/api/agents/${encodeURIComponent(id)}/activity`,
   // Restart the systemd unit backing an agent (POST → {status, detail}).
   // Backend: hal0.api.agents.restart — only "hermes" is a known id in v0.3.
   agentRestart: (id: string) =>
@@ -148,8 +155,6 @@ export const ENDPOINTS = {
     `/api/agent/approvals/${encodeURIComponent(id)}/approve`,
   agentApprovalDeny: (id: string) =>
     `/api/agent/approvals/${encodeURIComponent(id)}/deny`,
-  // Memory list endpoint (ADR-0014, PR #736 backend surface).
-  memoryList: '/api/memory/list',
   // ── Hindsight engine admin surface (memory_admin routes) ─────────
   // Fail-soft engine card + allowlisted bank-scoped passthrough.
   memoryEngine: '/api/memory/engine',
@@ -168,18 +173,10 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/graph/subgraph`,
   memoryBankEntityGraph: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/entities/graph`,
-  memoryBankEntities: (bank: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/entities`,
-  memoryBankEntity: (bank: string, id: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/entities/${encodeURIComponent(id)}`,
-  memoryBankMemories: (bank: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/memories`,
   memoryBankDocuments: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/documents`,
   memoryBankDocument: (bank: string, id: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/documents/${encodeURIComponent(id)}`,
-  memoryBankTags: (bank: string) =>
-    `/api/memory/banks/${encodeURIComponent(bank)}/tags`,
   memoryBankRecall: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/recall`,
   memoryBankReflect: (bank: string) =>
@@ -198,9 +195,6 @@ export const ENDPOINTS = {
   // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
   agentMemoryStats: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/memory/stats`,
-  // Persona update — PATCH/PUT /api/agents/{agentId}/personas/{pid}.
-  agentPersonaUpdate: (agentId: string, pid: string) =>
-    `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
 
   // ── MCP host introspection ───────────────────────────────────────
   // Read-only list of hosted MCP servers (+ their tool_details), backing
@@ -245,6 +239,55 @@ export const ENDPOINTS = {
   activity: '/api/activity',
   activityStream: '/api/activity/stream',
   activityExport: '/api/activity/export',
+
+  // ── Auth posture (D4 Security page) ──────────────────────────────
+  // GET /api/auth/status (OPEN) → { auth_required, has_admin_key, tier }.
+  // Status only — never key values. Client-key status, admin-key fingerprint,
+  // last-rotated, and login-throttle counters are NOT reported by this route
+  // (D4 flags them as API-lane requests); the page shows disabled-with-reason
+  // rather than fabricating them. Key rotation IS live — see `authRotate`
+  // below (POST /api/auth/rotate) — this route just doesn't report it.
+  authStatus: '/api/auth/status',
+  // POST /api/auth/login (OPEN) — body { key }; on success mints the HttpOnly
+  // session cookie and returns { ok, tier }. Wrong key → 401 auth.invalid_key;
+  // throttled → 429 auth.rate_limited with details.retry_after_s.
+  authLogin: '/api/auth/login',
+  // POST /api/auth/logout (OPEN) — clears the session cookie (HttpOnly, so JS
+  // can't; this route is the only session end the browser has).
+  authLogout: '/api/auth/logout',
+  // PUT /api/auth/require (ADMIN) — body { require_auth }; persists the
+  // [security].require_auth enforcement toggle. Applies live (no restart).
+  // Refuses enabling with no admin key configured (400 auth.no_admin_key).
+  authRequire: '/api/auth/require',
+  // POST /api/auth/rotate (ADMIN) — body { tier: 'admin'|'client' }; mints a
+  // fresh box key, writes it to /etc/hal0/api.env (0640, never world-readable),
+  // and applies it live in-process (no restart). Returns STATUS ONLY —
+  // { tier, rotated_at, key_len, fingerprint, applies_live, restart_required,
+  // session_preserved, note } — NEVER the key value. Rate-limited (429).
+  authRotate: '/api/auth/rotate',
+  // GET /api/auth/exposure (ADMIN) — serializes RULES + OPEN_ALLOWLIST from
+  // security/exposure.py: the live per-(method,path) deny-by-default
+  // classification table + per-class counts. Backs the Settings ▸ Security
+  // exposure table (ExposureTable.jsx currently ships a stub-with-reason —
+  // wiring it to this route is a separate lane's follow-up).
+  authExposure: '/api/auth/exposure',
+
+  // ── Flag-migration report (D5 migration-resolve) ─────────────────
+  // GET /api/migrations/flag-report — MISSING today (API-lane request). The
+  // typed client (useMigrationReport) returns an empty report by default and
+  // fails soft to empty on 404/network, so the banner + resolution view stay
+  // dormant until the migration lane ships the endpoint. Shape is documented
+  // in useMigrationReport.ts.
+  migrationFlagReport: '/api/migrations/flag-report',
+
+  // ── Doctor diagnoses (D6 diagnostics panel) ──────────────────────
+  // GET /api/doctor — LIVE (src/hal0/api/routes/doctor.py): composes the
+  // same typed Diagnosis objects (HAL0-* id / severity / evidence /
+  // next_steps — src/hal0/diagnostics.py) `hal0 doctor verify --json`
+  // prints, over HTTP. ADMIN-classified (aggregates ADMIN-only subsystem
+  // detail). useDiagnoses.ts still synthesises a fallback Diagnosis from
+  // GET /api/system-info pending the hook switching over to this route.
+  doctor: '/api/doctor',
 
   // ── System health (honest degraded probe) ───────────────────────
   // {status:"ok"|"degraded", checks:{...}} — drives the runtime chip
@@ -397,14 +440,12 @@ export const ENDPOINTS = {
   boardBySlug: (slug: string) => `/api/board/boards/${encodeURIComponent(slug)}`,            // PATCH | DELETE ?delete=
   boardSwitch: (slug: string) => `/api/board/boards/${encodeURIComponent(slug)}/switch`,     // POST
   boardProfiles: '/api/board/profiles',      // GET
-  boardProfile: (name: string) => `/api/board/profiles/${encodeURIComponent(name)}`,         // PATCH
   boardAssignees: '/api/board/assignees',    // GET ?board=
   boardStats: '/api/board/stats',            // GET ?board=
-  boardDiagnostics: '/api/board/diagnostics',// GET
   boardWorkersActive: '/api/board/workers/active', // GET
   boardRun: (id: string) => `/api/board/runs/${encodeURIComponent(id)}`,                     // GET
   boardConfig: '/api/board/config',          // GET (read-only orchestration knobs)
   boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
-  boardEvents: '/api/board/events',          // WS ?token=&since=&board=&tenant=
+  boardEvents: '/api/board/events',          // WS ?since=&board= (local BoardStore poll — no token/tenant, see board_ws.py)
   boardChat: '/api/board/chat',              // POST (SSE)
 } as const

@@ -8,18 +8,20 @@ Architecture (design doc §2):
   - Slot supplies:       model path, context_size, port.
   - Container provides:  the running llama-server process.
 
-Container lifecycle → systemd template unit ``hal0-slot@<name>.service``:
-  ExecStart = podman run --rm ... <image> --model <path> --port <n> <flags>
-  ExecStop  = podman stop -t 20 hal0-slot-<name>
+Container lifecycle → Podman Quadlet ``.container`` unit (P3-quadlet):
+  /etc/containers/systemd/hal0-slot@<token>.container  (declarative
+  [Container] keys; podman's generator emits hal0-slot@<token>.service)
+  Image= / Exec= / AddDevice= / Volume= / PublishPort= / Health*= — no more
+  hand-rendered ``podman run …`` ExecStart string.
 
-The slot's port is loopback-published (``-p 127.0.0.1:<port>:<port>``) so
-the dispatcher can proxy it via a ``kind="remote"`` upstream entry without
+The slot's port is loopback-published (``PublishPort=127.0.0.1:<port>:<port>``)
+so the dispatcher can proxy it via a ``kind="remote"`` upstream entry without
 exposing it on the LAN.  The publish host is configurable via
 ``[slots].publish_host`` (``SlotsConfig.publish_host``) — an operator can set
 it to ``0.0.0.0`` to reach raw slot ports directly over the LAN
 (``http://<host>.local:<port>``); the loopback default is retained for every
 install that doesn't opt in.  ``load_sync`` reads the live value and passes it
-to :func:`_render_unit_from_plan`; the scalar shims keep the loopback default.
+to :func:`_render_quadlet_from_plan`.
 
 Mount design (IDENTICAL path, design doc §2 gotcha):
   /mnt/ai-models → /mnt/ai-models:ro
@@ -31,10 +33,10 @@ GID resolution (reuses providers/_gpu.py):
   Pass numeric GIDs so the kernel gate on /dev/dri/renderD128 passes.
 
 ABC compliance:
-  Provider ABC has docker/systemd-shaped methods (build_env, start_cmd,
+  Provider ABC has podman/systemd-shaped methods (build_env, start_cmd,
   container_spec).  ContainerProvider implements container_spec(); unit
-  rendering is owned by the module-level ``_render_unit_from_plan`` adapter
-  (the legacy ``render_systemd_override`` default was deleted in WS-15).
+  rendering is owned by the module-level ``_render_quadlet_from_plan`` adapter
+  (the hand-rendered ``podman run`` string assembly was deleted in P3-quadlet).
   build_env / start_cmd / health / infer are implemented as informational
   stubs or thin implementations — the real work is load/unload/status/health.
 """
@@ -56,8 +58,13 @@ from typing import Any
 import httpx
 
 from hal0.config import store as model_store_module
-from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
-from hal0.config.schema import family_flags, resolve_chat_template, resolve_profile_flags
+from hal0.config.paths import DEFAULT_MODEL_STORE, model_mount_roots, model_store_root
+from hal0.config.schema import (
+    build_mtp_flag_bundle,
+    family_flags,
+    resolve_chat_template,
+    resolve_profile_flags,
+)
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
@@ -69,6 +76,12 @@ from hal0.providers._gpu import (
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.slots.argv import ResolvedArgv, resolve_argv
+from hal0.slots.naming import (
+    slot_container_name,
+    slot_instance_token,
+    slot_quadlet_name,
+    slot_unit_name,
+)
 from hal0.system.seam import SystemCtlSeam
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
@@ -256,6 +269,11 @@ def _resolve_image_ref(
     the ``image`` key — treating that dict as a ref renders ``str(dict)``
     into ExecStart and podman fails with 'invalid reference format'.
     """
+    # HAL0-SUNSET: v1.0.0 — images belong to RUNNERS (spec-flags-ownership §7).
+    # The slot ``image`` string override (tiers 1-2 below) is an expiring shim:
+    # neither slots nor profiles should carry raw image strings once the
+    # Runtimes-panel flow lands. Honored for now so live slot TOMLs pinning an
+    # image keep launching; the sunset ratchet drops the override read.
     if slot_cfg is not None:
         # Walk both possible nestings; first non-empty string wins.
         candidates: list[Any] = []
@@ -416,12 +434,11 @@ def _effective_parallel(slot_cfg: Mapping[str, Any]) -> int | None:
 
 log = logging.getLogger(__name__)
 
-# Path to the hal0-slot@ base template unit (installed by the package).
-# ContainerProvider writes a complete self-contained unit here, *not*
-# a drop-in, because the v0.2 migration (PR-9) retired the base
-# template.  Writing a complete file means the manager never has to
-# know whether the base exists.
-_SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+# P3-quadlet: per-slot units are Podman Quadlet ``.container`` source files
+# dropped here; podman's systemd generator turns each into a
+# ``hal0-slot@<token>.service`` on ``daemon-reload``. Root-owned by design
+# (written through the hal0-systemctl seam once hal0-api runs as User=hal0).
+_QUADLET_DIR = Path("/etc/containers/systemd")
 
 # P3-perms: the seam that routes unit writes + systemctl verbs through
 # `sudo -n hal0-systemctl` once hal0-api runs as the (unprivileged) hal0
@@ -435,32 +452,29 @@ _SYSTEMCTL_SEAM = SystemCtlSeam()
 _MODEL_STORE_MOUNT = DEFAULT_MODEL_STORE
 
 
-# Container runtime binary.  Prefer podman (rootless, no daemon);
-# fall back to docker when podman is not installed.  The HAL0_CONTAINER_RUNTIME
-# env var overrides both so CI + alternate installs can pin a specific path.
+# Container runtime binary. Podman ONLY — Quadlet is podman's declarative unit
+# generator and has no docker equivalent, so docker is unsupported (P3-quadlet;
+# the old docker fallback + its ``--replace`` / ``ExecStartPre rm`` cargo cult
+# is deleted). HAL0_CONTAINER_RUNTIME still pins a specific path for CI /
+# alternate installs.
 def _container_runtime() -> str:
-    """Resolve the container runtime binary path.
+    """Resolve the podman binary path (docker is unsupported).
 
-    Priority: $HAL0_CONTAINER_RUNTIME > /usr/bin/podman > /usr/bin/docker >
-    ``podman`` on PATH > ``docker`` on PATH.  The absolute-path candidates
-    are checked first (the common, package-manager-installed location); the
-    bare-name PATH lookups are the fallback for a runtime installed
-    somewhere else (snap, /usr/local/bin, nix, ...) — a plain
-    ``shutil.which("/usr/bin/podman")`` never matches those, so without this
-    fallback a perfectly usable runtime not living at /usr/bin/ is invisible
-    to hal0.
-    Raises RuntimeError if none is found.
+    Priority: $HAL0_CONTAINER_RUNTIME > /usr/bin/podman > ``podman`` on PATH.
+    The absolute-path candidate is checked first (the common,
+    package-manager-installed location); the bare-name PATH lookup is the
+    fallback for podman installed somewhere else (snap, /usr/local/bin, nix,
+    ...) — a plain ``shutil.which("/usr/bin/podman")`` never matches those.
+    Raises RuntimeError if podman is not found.
     """
     override = os.environ.get("HAL0_CONTAINER_RUNTIME")
     if override:
         return override
-    for candidate in ("/usr/bin/podman", "/usr/bin/docker", "podman", "docker"):
+    for candidate in ("/usr/bin/podman", "podman"):
         found = shutil.which(candidate)
         if found:
             return found
-    raise RuntimeError(
-        "no container runtime found; install podman or docker or set HAL0_CONTAINER_RUNTIME"
-    )
+    raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
 
 
 def _slot_publish_host() -> str:
@@ -479,6 +493,83 @@ def _slot_publish_host() -> str:
     except Exception:
         log.warning("container.publish_host_load_failed", exc_info=True)
         return "127.0.0.1"
+
+
+def _slot_network_mode() -> str:
+    """Live ``[slots].network_mode`` — the box-default podman network mode.
+
+    Deploy-time configuration, NOT runtime substrate probing: an operator (or
+    the installer) sets this to ``host`` on netns-limited substrates
+    (unprivileged podman-in-LXC, where bridge netns teardown races — see
+    docs/rework/podman-unprivileged-findings.md) so every slot renders
+    ``Network=host``. The renderer never sniffs podman/LXC itself.
+
+    Empty (the default) means "bridge + loopback PublishPort" — today's
+    behaviour, unchanged. Read fresh each render so a Settings change lands on
+    the next slot (re)start. Fail-soft to "" so a malformed hal0.toml never
+    wedges a slot start (and never silently widens exposure).
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        return (load_hal0_config().slots.network_mode or "").strip()
+    except Exception:
+        log.warning("container.network_mode_load_failed", exc_info=True)
+        return ""
+
+
+# ── host-net loopback fence (podman-unprivileged-findings.md, Issue 1) ───────
+# The slot process's listen-address flags. Under BRIDGE networking the LAN
+# fence is the ``PublishPort=127.0.0.1:<port>:<port>`` pin and the process
+# correctly binds ``0.0.0.0`` inside its own netns. Under ``Network=host``
+# there is NO publish, so the bind itself must be the fence — every backend
+# templates its listen address as one of these flags.
+_BIND_FLAGS = ("--host", "--listen")
+_LAN_BIND = "0.0.0.0"
+_LOOPBACK_BIND = "127.0.0.1"
+
+
+def _loopback_fence_command(command: list[str]) -> list[str]:
+    """Flip any ``0.0.0.0`` bind in *command* to loopback (host-net fence).
+
+    THE single chokepoint coupling ``Network=host`` to a loopback process bind
+    (podman-unprivileged-findings.md, Issue 1, operator-validated on halo143):
+    under host networking there is no ``PublishPort=127.0.0.1:…`` fencing the
+    raw slot port off the LAN, so an unflipped ``--host 0.0.0.0`` would bind the
+    CT's LAN IP and expose the unauthenticated slot port. Applied uniformly to
+    EVERY backend's plan, so a host-net plan can never render a 0.0.0.0 bind
+    regardless of which provider built the argv:
+
+      * llama-server / FLM / Kokoro / Qwen3-TTS template ``--host 0.0.0.0``
+        (two argv tokens);
+      * ComfyUI templates ``--listen 0.0.0.0`` inside a ``bash -lc`` payload
+        string (one token).
+
+    Both the split-token and embedded-in-a-shell-string forms (and the inline
+    ``--host=0.0.0.0`` form) are rewritten. hal0-api, sharing the CT netns,
+    still reaches the slot at ``127.0.0.1:<port>`` — dispatch is unchanged.
+    Bridge-mode plans never call this.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        tok = command[i]
+        # Split-token form: `--host 0.0.0.0` / `--listen 0.0.0.0`.
+        if tok in _BIND_FLAGS and i + 1 < n and command[i + 1] == _LAN_BIND:
+            out.append(tok)
+            out.append(_LOOPBACK_BIND)
+            i += 2
+            continue
+        # Inline `--host=0.0.0.0` and shell-payload `--listen 0.0.0.0`
+        # embedded inside a single token (ComfyUI's bash -lc string).
+        rewritten = tok
+        for flag in _BIND_FLAGS:
+            rewritten = rewritten.replace(f"{flag}={_LAN_BIND}", f"{flag}={_LOOPBACK_BIND}")
+            rewritten = rewritten.replace(f"{flag} {_LAN_BIND}", f"{flag} {_LOOPBACK_BIND}")
+        out.append(rewritten)
+        i += 1
+    return out
 
 
 # Health-check tuning: poll GET /health on the slot port.
@@ -512,241 +603,187 @@ def _resolve_model_path(model_info: dict[str, Any]) -> str:
     return str(path)
 
 
-def _unit_skeleton(
-    slot_name: str,
-    runtime: str,
-    exec_start: str,
+def _render_quadlet_from_plan(
+    instance_token: str,
+    plan: RuntimeLaunchPlan,
     *,
-    mount_sources: list[str] | None = None,
-    mkdir_sources: list[str] | None = None,
+    publish_host: str = "127.0.0.1",
+    network_mode_default: str = "",
 ) -> str:
-    """Wrap an ExecStart line in the shared ``[Unit]/[Service]`` skeleton.
+    """Render a Podman Quadlet ``.container`` unit from a launch plan.
 
-    Single source of truth for the systemd unit shape used by both
-    :func:`_render_unit` (llama-server path) and
-    :func:`_render_unit_from_spec` (generic ContainerSpec path).
-    ExecStop / ExecStopPost are derived from ``runtime`` + container name.
+    The ONE renderer for every container slot — GPU/llama-server, FLM NPU,
+    Kokoro / Qwen3-TTS, and ComfyUI all flow through here. It replaces the
+    hand-rendered ``podman run …`` ExecStart string assembly: every flag becomes
+    a typed ``[Container]`` key (``Image=`` / ``AddDevice=`` / ``GroupAdd=`` /
+    ``SecurityOpt=`` / ``Volume=`` / ``Environment=`` / ``PublishPort=`` /
+    ``Health*=``), and podman's systemd generator emits the ``[Unit]/[Service]``
+    skeleton + the ``podman run`` itself. Quadlet auto-removes the prior
+    container on start (no more ``--replace`` / ``ExecStartPre rm`` dance) and
+    orders the unit after its bind mounts (auto-emitted ``RequiresMountsFor=``).
 
-    ``mount_sources`` (every bind source) become ``RequiresMountsFor=`` so a
-    slot on an external store (e.g. /mnt/ai-models) orders after — and pulls
-    in — the backing mount at boot instead of racing it. ``mkdir_sources``
-    (writable bind sources only) get a tolerant ``ExecStartPre=-mkdir -p``:
-    a bind source that vanished across a reboot otherwise fails the run with
-    podman exit 125 (``statfs ... no such file or directory``) forever.
-    Read-only sources are deliberately NOT auto-created — silently mounting
-    an empty model store would mask a broken mount with a confusing
-    model-not-found error further down.
-
-    An unclean shutdown can leave a stale same-name container record behind
-    (``--rm`` never ran), which fails the next start with "name already in
-    use" (#721). ``_render_unit_from_plan`` handles this for podman via
-    ``--replace`` (docker has no such flag), so EVERY runtime also gets a
-    tolerant ``ExecStartPre=-{runtime} rm -f <container_name>`` here — a
-    no-op when no stale record exists, and the only cleanup docker gets.
+    Args:
+        instance_token: The name-based instance token today (§11.1 M5 flips it
+                        to the slot id via :func:`hal0.slots.naming`). Used for
+                        the ``ContainerName=`` (``hal0-slot-<token>``), the
+                        ``Description=``, and the ``SyslogIdentifier=``.
+        plan:           :class:`RuntimeLaunchPlan` from a provider's
+                        ``container_spec``.
+        publish_host:   Host address the slot port publishes on
+                        (``PublishPort=<host>:<port>:<port>``). Defaults to
+                        ``127.0.0.1`` (loopback); ``load_sync`` widens it from
+                        the live ``[slots].publish_host``.
+        network_mode_default:
+                        Box-default podman network mode from
+                        ``[slots].network_mode`` (deploy-time config, threaded
+                        in by ``_render_quadlet_text``). Used ONLY when the
+                        plan does not itself pin a mode — a provider that
+                        REQUIRES host net (ComfyUI) always wins. When the
+                        effective mode is ``host`` this couples two things in
+                        one place: ``Network=host`` + no ``PublishPort`` (the
+                        publish would be a no-op), and the process bind is
+                        flipped to loopback (:func:`_loopback_fence_command`)
+                        so the raw slot port is never LAN-exposed
+                        (podman-unprivileged-findings.md, Issue 1).
     """
-    container_name = f"hal0-slot-{slot_name}"
-    exec_stop = f"{runtime} stop -t 20 {container_name}"
-    unit_lines = [
-        "[Unit]",
-        f"Description=hal0 container inference slot ({slot_name})",
-        "After=network-online.target",
-    ]
-    if mount_sources:
-        joined = " ".join(shlex.quote(s) if " " in s else s for s in mount_sources)
-        unit_lines.append(f"RequiresMountsFor={joined}")
-    service_lines = [
-        "[Service]",
-        "Type=simple",
-        "Restart=no",
-        f"SyslogIdentifier=hal0-slot-{slot_name}",
-        "StandardOutput=journal",
-        "StandardError=journal",
+    container_name = slot_container_name(instance_token)
+    # Effective network mode: an explicit per-plan mode (e.g. ComfyUI's
+    # required ``host``) wins; otherwise the deploy-time box default. This is a
+    # PURE function of (plan, params) — the config value is resolved upstream
+    # in _render_quadlet_text, never sniffed here.
+    effective_network_mode = plan.network_mode or network_mode_default
+
+    lines: list[str] = [
+        "# hal0 container slot — generated by ContainerProvider (Podman Quadlet).",
+        "# Do not edit manually; regenerated on every slot load.",
         "",
-        f"ExecStartPre=-{runtime} rm -f {container_name}",
+        "[Unit]",
+        f"Description=hal0 container inference slot ({instance_token})",
+        # StartLimit*= are [Unit]-section directives (systemd.unit(5)), not
+        # [Service]. Quadlet passes [Unit] through verbatim to the generated
+        # unit, so they belong here — emitting them under [Service] makes
+        # systemd log "Unknown key" and SILENTLY DROP them, disabling the
+        # slot's restart rate-limiting (install-validation m2, halo150,
+        # 2026-07-19). Restart=/RestartSec= stay in [Service] below — those
+        # ARE Service-section keys.
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
+        "",
+        "[Container]",
+        f"Image={plan.image}",
+        f"ContainerName={container_name}",
+        # ``LogDriver=none`` keeps conmon→journal the single sink so
+        # ``journalctl -u`` isn't double-fed (podman's own journald driver
+        # would tag a second copy — the old B3 note).
+        "LogDriver=none",
     ]
-    if mkdir_sources:
-        joined = " ".join(shlex.quote(s) if " " in s else s for s in mkdir_sources)
-        service_lines.append(f"ExecStartPre=-/usr/bin/mkdir -p {joined}")
-    return "\n".join(
+    # ── ONE quadlet render for every substrate (halo150/143 O8+O11) ──────
+    # DELIBERATE: no native AutoRemove=/GroupAdd=/SecurityOpt= keys and no
+    # podman-version branch. Rationale, proven on real hardware 2026-07-18:
+    #   * 4.x generators HARD-FAIL the conversion on those keys (halo150,
+    #     podman 4.9.3 — the lxc105 live-reference substrate) → no unit.
+    #   * The native render's systemd lifecycle breaks on unprivileged
+    #     podman-5-in-LXC (halo143, 5.7): netavark teardown races
+    #     /run/user/0/netns and the unit exits 5, while the SAME container
+    #     runs clean under manual podman run — the unit shape, not the
+    #     flags, is the problem. The compat render ran healthy there.
+    #   * ``PodmanArgs=`` is the documented, version-stable escape hatch and
+    #     is semantically identical for --group-add/--security-opt.
+    # AutoRemove/--rm is dropped everywhere: stop-cleanup rides the generated
+    # unit's own cidfile ExecStopPost rm; crash-path auto-remove hid failure
+    # logs and fed the netns race. One render = one behavior to validate
+    # (both-boxes policy). If a future podman makes native keys strictly
+    # better, reintroduce them fleet-wide with hardware evidence, not a
+    # version sniff.
+    compat_args: list[str] = []
+    if effective_network_mode:
+        lines.append(f"Network={effective_network_mode}")
+    # Explicit device nodes (podman won't recurse /dev/dri, #674); CDI names
+    # (nvidia.com/gpu=all) pass through the same key.
+    for dev in plan.devices:
+        lines.append(f"AddDevice={dev}")
+    # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
+    for gid in plan.group_add:
+        compat_args += ["--group-add", str(gid)]
+    for cap in plan.cap_add:
+        lines.append(f"AddCapability={cap}")
+    for opt in plan.security_opt:
+        compat_args += ["--security-opt", str(opt)]
+    if compat_args:
+        lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in compat_args))
+    # Read-only + SELinux ``:z`` are first-class Mount flags; render_quadlet omits
+    # the relabel on NFS sources (chcon ENOTSUP there).
+    for mount in plan.mounts:
+        lines.append(f"Volume={Mount.coerce(mount).render_quadlet()}")
+    for k, v in plan.env.items():
+        lines.append(f"Environment={k}={v}")
+    # Publish derived from plan.port (declarative). Skipped under host networking
+    # where port publishing is meaningless. ``publish_host`` defaults to loopback;
+    # an operator widens it via [slots].publish_host.
+    if plan.port and effective_network_mode != "host":
+        lines.append(f"PublishPort={publish_host}:{plan.port}:{plan.port}")
+    # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK on a
+    # hardcoded port; the slot runs on its own port, so override it declaratively.
+    if plan.health is not None:
+        lines.extend(plan.health.render_quadlet())
+    # extra_args escape hatch (e.g. ``--ipc=host``, ``--ulimit memlock=-1``):
+    # Quadlet has no typed key for arbitrary ``podman run`` flags, so they pass
+    # through ``PodmanArgs=`` verbatim. DEPRECATED — kept working for one release
+    # so an operator's hand-authored extra_args survives the Quadlet upgrade.
+    podman_args: list[str] = []
+    for extra in plan.extra_args:
+        podman_args.extend(shlex.split(extra))
+    if podman_args:
+        log.warning(
+            "container.extra_args_deprecated",
+            extra={
+                "slot": instance_token,
+                "podman_args": podman_args,
+                "hint": "extra_args is deprecated; move these to a "
+                "hal0-slot@<token>.container.d/ drop-in with typed Quadlet keys",
+            },
+        )
+        lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in podman_args))
+    # Exec = the in-container argv (after the image). Every token is
+    # ``shlex.quote``-d — NOT the old "quote only if it has a space" rule — so a
+    # space-less token carrying shell/systemd-special characters (notably a JSON
+    # blob like ``--chat-template-kwargs '{"enable_thinking":false}'``) survives
+    # systemd's Exec= word-splitter with its double quotes intact. The bare form
+    # let systemd strip the inner quotes → invalid JSON → slot never starts
+    # (regression #, pinned by tests/providers/test_container.py).
+    if plan.command:
+        # host-net LAN fence (coupled to Network=host above): with no
+        # PublishPort to pin the port to loopback, the process bind IS the
+        # fence — flip 0.0.0.0 → 127.0.0.1 for EVERY backend so a host-net plan
+        # can never render a 0.0.0.0 bind. Bridge mode keeps 0.0.0.0 (the
+        # 127.0.0.1 PublishPort pins it). See podman-unprivileged-findings.md.
+        command = (
+            _loopback_fence_command(plan.command)
+            if effective_network_mode == "host"
+            else plan.command
+        )
+        lines.append("Exec=" + " ".join(shlex.quote(t) for t in command))
+
+    # Restart=always lets systemd own crash recovery (the old hand-rendered
+    # Restart=no forced the manager to reap+restart every failed slot). The
+    # StartLimit caps (emitted in [Unit] above — systemd.unit(5), not
+    # [Service]) match the manager-driven behaviour it replaces.
+    lines.extend(
         [
-            "# hal0 container slot — generated by ContainerProvider",
-            "# Do not edit manually; regenerated on every slot load.",
             "",
-            *unit_lines,
-            "",
-            *service_lines,
-            f"ExecStart={exec_start}",
-            f"ExecStop={exec_stop}",
-            f"ExecStopPost=-{runtime} rm -f {container_name}",
+            "[Service]",
+            "Restart=always",
+            "RestartSec=3",
+            f"SyslogIdentifier={container_name}",
+            "StandardOutput=journal",
+            "StandardError=journal",
             "",
             "[Install]",
-            "WantedBy=multi-user.target",
+            "WantedBy=hal0.target",
             "",
         ]
     )
-
-
-def _render_unit_from_plan(
-    slot_name: str,
-    plan: RuntimeLaunchPlan,
-    *,
-    runtime_bin: str | None = None,
-    publish_host: str = "127.0.0.1",
-) -> str:
-    """Render a complete self-contained systemd unit from a launch plan.
-
-    This is the ONE argv builder for every container slot — GPU/llama-server,
-    FLM NPU, Kokoro TTS, and ComfyUI all flow through here.  It is the
-    systemd/podman *adapter*: the plan carries the launch facts, this turns
-    them into ``hal0-slot@<name>.service`` unit text.  Producing a single
-    self-contained unit means the manager never needs a parent
-    ``hal0-slot@.service`` template (retired in the v0.2 migration, PR-9).
-
-    Args:
-        slot_name:   Slot identifier; used in the container name,
-                     SyslogIdentifier, and the unit name.
-        plan:        :class:`RuntimeLaunchPlan` produced by a provider's
-                     ``container_spec``.
-        runtime_bin: Override the container runtime binary.  Defaults to
-                     :func:`_container_runtime`.  Pass explicitly in tests to
-                     avoid requiring podman/docker in the test environment.
-        publish_host: Host address the slot port is published on
-                     (``--publish=<host>:<port>:<port>``).  Defaults to
-                     ``127.0.0.1`` (loopback-only); ``load_sync`` overrides it
-                     with the live ``[slots].publish_host`` so an operator can
-                     opt into ``0.0.0.0`` (LAN-exposed) or a specific address.
-    """
-    runtime = runtime_bin or _container_runtime()
-    container_name = f"hal0-slot-{slot_name}"
-    # docker has no --replace flag ("unknown flag: --replace") — a plain
-    # docker run aborts outright, which took EVERY slot down on a docker-only
-    # host. podman gets --replace; docker instead relies on the
-    # ExecStartPre=-{runtime} rm -f cleanup _unit_skeleton emits for every
-    # runtime (same #721 stale-record fix, docker-safe).
-    is_podman = "docker" not in os.path.basename(runtime)
-
-    argv: list[str] = [
-        runtime,
-        "run",
-        "--rm",
-        f"--name={container_name}",
-    ]
-    if is_podman:
-        # Unclean shutdown leaves a stale same-name container record (--rm
-        # never ran) → exit 125 "name already in use" at next boot (#721).
-        # --replace removes it first; no-op when no stale record exists.
-        argv.append("--replace")
-    # B3: the unit already routes conmon's inherited container stdout to
-    # journald via StandardOutput=journal. podman's DEFAULT journald log
-    # driver ALSO writes the same stdout to journald (tagged CONTAINER_NAME),
-    # so `journalctl -u hal0-slot@<name>` matched both copies and every
-    # line appeared twice. Disable podman's own log driver so conmon→unit
-    # is the single sink. (docker ignores an unknown value gracefully; it
-    # accepts --log-driver=none too.)
-    argv.append("--log-driver=none")
-    if plan.network_mode:
-        argv.append(f"--network={plan.network_mode}")
-    # Explicit device nodes (podman won't recurse the /dev/dri directory, #674).
-    for dev in plan.devices:
-        argv.append(f"--device={dev}")
-    # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
-    for gid in plan.group_add:
-        argv.append(f"--group-add={gid}")
-    for cap in plan.cap_add:
-        argv.append(f"--cap-add={cap}")
-    for opt in plan.security_opt:
-        argv.append(f"--security-opt={opt}")
-    # Read-only is a first-class Mount flag (no more ":ro" target smuggling);
-    # legacy (src, dst) tuples are coerced — a ":ro" target suffix still maps
-    # to read_only so older callers keep rendering correctly.
-    for mount in plan.mounts:
-        argv.append(f"--volume={Mount.coerce(mount).render()}")
-    for k, v in plan.env.items():
-        argv.append(f"--env={k}={v}")
-    # Publish derived from plan.port (declarative — plans no longer
-    # hand-roll "-p ..." in extra_args).  ``publish_host`` defaults to
-    # loopback (127.0.0.1); an operator can widen it to 0.0.0.0 / a specific
-    # address via [slots].publish_host.  Skipped under host networking where
-    # port publishing is meaningless.
-    if plan.port and plan.network_mode != "host":
-        argv.append(f"--publish={publish_host}:{plan.port}:{plan.port}")
-    # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK that
-    # probes a hardcoded port, but a slot runs its server on its own port — so
-    # the image check fails forever and `podman ps` shows a permanent
-    # unhealthy. The plan carries the override so it renders before the image
-    # (health flags are podman-run options). hal0's own ContainerProvider.health()
-    # remains the dashboard truth.
-    if plan.health is not None:
-        argv.extend(plan.health.render_flags())
-    # extra_args escape hatch (e.g. "--ulimit memlock=-1")
-    for extra in plan.extra_args:
-        argv.extend(shlex.split(extra))
-    argv.append(plan.image)
-    argv.extend(plan.command)
-
-    # ExecStart is a single long line; systemd accepts bare argv tokens.
-    exec_start = " ".join(shlex.quote(a) if " " in a else a for a in argv)
-    coerced = [Mount.coerce(m) for m in plan.mounts]
-    return _unit_skeleton(
-        slot_name,
-        runtime,
-        exec_start,
-        mount_sources=[m.source for m in coerced],
-        mkdir_sources=[m.source for m in coerced if not m.read_only],
-    )
-
-
-def _render_unit(
-    slot_name: str,
-    image: str,
-    port: int,
-    model_path: str,
-    flags_str: str,
-    runtime_bin: str | None = None,
-    device_paths: list[str] | None = None,
-    context_size: int | None = None,
-    extra_args: str | None = None,
-    model_alias: str | None = None,
-) -> str:
-    """Render a GPU/llama-server slot unit (back-compat scalar-arg shim).
-
-    Retained for callers/tests that pass scalar launch parameters.  Builds a
-    :class:`RuntimeLaunchPlan` from those scalars and delegates to the single
-    builder :func:`_render_unit_from_plan`, so the legacy llama path and the
-    spec path render through identical code.
-
-    ``device_paths`` defaults to :func:`resolve_gpu_device_paths`; ``context_size``
-    and ``extra_args`` (``[server].extra_args``) are appended after the profile
-    flags so slot-level overrides win.
-    """
-    devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
-    plan = _llama_launch_plan(
-        image=image,
-        port=port,
-        model_path=model_path,
-        flags_str=flags_str,
-        devices=list(devices),
-        group_ids=[str(g) for g in resolve_gpu_group_ids()],
-        context_size=context_size,
-        extra_args=extra_args,
-        model_alias=model_alias,
-    )
-    return _render_unit_from_plan(slot_name, plan, runtime_bin=runtime_bin)
-
-
-def _render_unit_from_spec(
-    slot_name: str,
-    spec: RuntimeLaunchPlan,
-    *,
-    runtime_bin: str | None = None,
-) -> str:
-    """Back-compat alias for :func:`_render_unit_from_plan`.
-
-    A ``ContainerSpec``/``RuntimeLaunchPlan`` *is* the launch plan, so this is
-    a straight delegation kept for callers/tests that still import the old
-    name.
-    """
-    return _render_unit_from_plan(slot_name, spec, runtime_bin=runtime_bin)
+    return "\n".join(lines)
 
 
 def _llama_argv_segments(
@@ -770,17 +807,36 @@ def _llama_argv_segments(
     provenance) consume THESE segments, so what an operator previews via
     ``GET /api/slots`` / ``.../resolved`` is exactly what launches.
 
+    FLAGS-own (spec-flags-ownership §2/§4): launch flags attach ONLY to models.
+    The ``profile`` segment and the slot ``slot_overrides`` / ``extra_args``
+    segments have been REMOVED from this chain — a profile is now a
+    copy-on-stamp template (read at stamp time, never at launch) and a slot
+    carries no flag surface. The model's materialized tune is the whole story:
+    the trusted schema field ``defaults.n_gpu_layers`` (``model_defaults``
+    segment) plus the free-form ``defaults.extra_args`` (``model_extra_args``
+    segment, still screened against the §21.7 managed-arg denylist by
+    :func:`~hal0.slots.argv.resolve_argv`).
+
     Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
     LAST occurrence of each canonical flag)::
 
-        base < profile < model_defaults < chat_template < mmproj
-             < slot_overrides < extra_args
+        base < model_extra_args < model_defaults < chat_template < mmproj
 
-    Rationale: profile flags are generic bench-tuning; per-model registry
-    ``defaults`` should override the profile; the chat-template / mmproj the
-    slot+model resolve to come next; a slot-level ``[model].n_gpu_layers`` beats
-    the model default; and a hand-authored ``[server].extra_args`` always wins.
+    Golden path #5: with the ``profile`` segment gone, launch never resolves a
+    profile's flags — the stamped model tune is the sole source.
+
+    ``profile_flags`` / ``slot_n_gpu_layers`` / ``slot_parallel`` / ``extra_args``
+    are accepted-and-ignored (kept for call-site compat until the sunset ratchet
+    drops the plumbing). The migrator
+    (:mod:`hal0.config.migrations.slot_flags_fold`) folds each slot's effective
+    tune into its model's ``defaults`` during the deploy window; until then a
+    stale slot flag simply does not reach launch.
     """
+    # HAL0-SUNSET: v1.0.0 — slots lost the flag surface (spec-flags-ownership
+    # §2/§4). These params are inert; drop them (and the callers threading them)
+    # once the migrator has folded every live slot's tune into its model.
+    del profile_flags, slot_n_gpu_layers, slot_parallel, extra_args
+
     base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
     if model_path:
         base += ["--model", model_path]
@@ -793,49 +849,36 @@ def _llama_argv_segments(
     if context_size is not None:
         base += ["--ctx-size", str(context_size)]
 
-    profile_tokens = shlex.split(profile_flags) if profile_flags and profile_flags.strip() else []
-
     # Model-registry defaults: shlex-split extra_args + `-ngl <n>` from
     # defaults.n_gpu_layers. rope_freq_base is intentionally NOT emitted
     # (reachable via extra_args only — see ModelDefaults deprecation note).
-    md_tokens: list[str] = []
+    #
+    # The free-form ``defaults.extra_args`` is caller-supplied, so it rides its
+    # own ``model_extra_args`` segment which ``resolve_argv`` screens against
+    # the managed-arg denylist (argv.UNTRUSTED_SEGMENT_LABELS) — a model whose
+    # extra_args smuggles ``--port``/``--model``/… fails loudly at launch, not
+    # silently redirected. The ``-ngl`` derived from the schema field
+    # ``defaults.n_gpu_layers`` is hal0-computed and legitimately sets a managed
+    # flag, so it stays in the TRUSTED ``model_defaults`` segment.
+    md_extra_tokens: list[str] = []
+    md_ngl_tokens: list[str] = []
     if model_defaults:
         md_extra = model_defaults.get("extra_args")
         if md_extra and str(md_extra).strip():
-            md_tokens += shlex.split(str(md_extra))
+            md_extra_tokens += shlex.split(str(md_extra))
         md_ngl = model_defaults.get("n_gpu_layers")
         if md_ngl is not None:
-            md_tokens += ["-ngl", str(int(md_ngl))]
+            md_ngl_tokens += ["-ngl", str(int(md_ngl))]
 
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
 
-    # Slot-level overrides (schema fields), emitted just before extra_args so
-    # they beat the profile / model defaults but a hand-authored extra_args
-    # still wins. [model].n_gpu_layers (schema default -1 = unset) and the
-    # continuous-batching `parallel` field.
-    slot_override_tokens: list[str] = []
-    if slot_n_gpu_layers is not None and int(slot_n_gpu_layers) >= 0:
-        slot_override_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
-    if slot_parallel is not None and int(slot_parallel) >= 1:
-        slot_override_tokens += ["--parallel", str(int(slot_parallel))]
-        if int(slot_parallel) > 1:
-            # Unified KV so --ctx-size stays a SHARED pool (each request may use
-            # up to the full context) instead of being silently split to ctx/N
-            # per sequence slot — the surprise the resolved-command work exists
-            # to prevent. See the concurrency-batching plan (D2).
-            slot_override_tokens += ["--kv-unified"]
-
-    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
-
     return [
         ("base", base),
-        ("profile", profile_tokens),
-        ("model_defaults", md_tokens),
+        ("model_extra_args", md_extra_tokens),
+        ("model_defaults", md_ngl_tokens),
         ("chat_template", chat_tokens),
         ("mmproj", mmproj_tokens),
-        ("slot_overrides", slot_override_tokens),
-        ("extra_args", extra_tokens),
     ]
 
 
@@ -859,9 +902,9 @@ def _llama_launch_plan(
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
-    Single source of the llama-server launch shape — used by both
-    :meth:`ContainerProvider.container_spec` (the load path) and the
-    :func:`_render_unit` scalar shim.  The in-container argv is assembled from
+    Single source of the llama-server launch shape — used by
+    :meth:`ContainerProvider.container_spec` (the load path).  The in-container
+    argv is assembled from
     :func:`_llama_argv_segments` and collapsed by :func:`normalize_argv`
     (last-wins, effective-value-preserving) so cross-segment duplicates become
     one auditable source of truth.  llama-server takes space-separated args
@@ -886,12 +929,16 @@ def _llama_launch_plan(
     # and preview render byte-identical commands.
     command = resolve_argv(segments).argv
 
-    # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
-    # default aligned with the write side — see hal0.config.store).
-    # Mounted identical-path, read-only, via the shared `mount_for` factory
-    # (ML-3) — which omits the SELinux relabel on NFS (chcon ENOTSUP there)
-    # instead of unconditionally appending ``:z``.
-    model_store = model_store_root()
+    # Model-store roots (honours [models].store / HAL0_MODEL_STORE AND
+    # [models].pull_root — the external tree registry paths point at, e.g.
+    # /mnt/ai-models). Mounting ONLY the effective store left model files under
+    # pull_root unreachable → llama exits ~90ms after start → slot flaps
+    # error↔warming (rework O25). Each root is mounted identical-path,
+    # read-only, via the shared `mount_for` factory (ML-3) — which omits the
+    # SELinux relabel on NFS (chcon ENOTSUP there) instead of unconditionally
+    # appending ``:z``. `model_mount_roots()` dedups equal/nested roots so
+    # store==pull_root renders exactly ONE Volume.
+    model_stores = model_mount_roots()
 
     return RuntimeLaunchPlan(
         image=image,
@@ -899,7 +946,7 @@ def _llama_launch_plan(
         # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
         # operators can tune the runtime without forking the image.
         env=dict(env) if env else {},
-        mounts=[model_store_module.mount_for(model_store, read_only=True)],
+        mounts=[model_store_module.mount_for(root, read_only=True) for root in model_stores],
         devices=list(devices),
         group_add=list(group_ids),
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],
@@ -1034,33 +1081,24 @@ def _resolve_llama_scalars(
     VALUES are identical on both paths, preserving launch/preview parity.
     """
     # SINGLE SOURCE for "which runner's capabilities gate this launch" — the
-    # same runner backs the image resolution inside _profile_image_and_flags
-    # (via _resolve_image_ref) and the mtp/jinja capability gates below, so
-    # they can never drift onto two different runners (§7.1a / ML-5).
+    # same runner backs the image resolution (:func:`_resolve_image_ref`) and
+    # the mtp/jinja capability gates below, so they can never drift onto two
+    # different runners (§7.1a / ML-5).
     runner = _effective_runner(slot_cfg, profile, model_info)
     effective_mtp = _effective_mtp(
         slot_cfg.get("mtp"), model_info, runner, log_ineligible=for_launch
     )
-    image, flags_str = _profile_image_and_flags(
-        profile, effective_mtp, slot_cfg=slot_cfg, model_info=model_info
-    )
+    # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
+    # resolving the profile's flags — the profile flag resolver
+    # (:func:`resolve_profile_flags`) is NOT consulted at launch. The model's
+    # materialized ``defaults`` is the whole tune; a profile is a copy-on-stamp
+    # template read only in the drawer, never on the launch/preview path.
+    image = _resolve_image_ref(slot_cfg, profile, model_info=model_info)
+    # ``flags_str`` retained (empty) for dict-shape/caller compat; profile flags
+    # no longer enter the argv chain (see _llama_argv_segments).
+    flags_str = ""
 
-    slot_parallel = _effective_parallel(slot_cfg)
     if for_launch:
-        if effective_mtp and slot_parallel is not None and slot_parallel > 1:
-            # MTP x continuous batching runs on current llama.cpp master
-            # (parallel drafting merged 2026-05) but is perf-unproven on
-            # gfx1151 and needs a build new enough to allow n_parallel>1 with
-            # draft-mtp. Surface it; don't refuse (the plan's D3, bench-gated).
-            log.info(
-                "mtp.batched_speculation",
-                extra={
-                    "slot": str(slot_cfg.get("name") or ""),
-                    "parallel": slot_parallel,
-                    "hint": "batched slot — MTP speculation gain unverified here; "
-                    "requires a build that allows draft-mtp with --parallel>1",
-                },
-            )
         workers = slot_cfg.get("workers")
         if workers is not None and int(workers or 1) != 1:
             log.warning(
@@ -1134,13 +1172,14 @@ def _resolve_llama_scalars(
     # profile segment, still loses to a hand-authored [model].defaults
     # extra_args or [server].extra_args later in the precedence chain).
     #
-    # Never injected for an --embedding/--reranking profile: jinja chat-
+    # Never injected for an --embedding/--reranking model: jinja chat-
     # template rendering is meaningless there (llama-server's --jinja is a
-    # chat-completions feature) — every embed/rerank seed profile
-    # deliberately omitted --jinja even before this lane, so this mirrors
-    # that intentional exclusion instead of regressing it.
-    profile_tokens_for_mode = set(shlex.split(flags_str)) if flags_str.strip() else set()
-    is_embed_or_rerank_mode = bool(profile_tokens_for_mode & {"--embedding", "--reranking"})
+    # chat-completions feature). FLAGS-own: the mode marker now rides the
+    # model's materialized tune (``defaults.extra_args``, family-merged above),
+    # NOT a live profile flag string — so read it from there.
+    mode_tune = (model_defaults or {}).get("extra_args") or ""
+    mode_tokens = set(shlex.split(mode_tune)) if mode_tune.strip() else set()
+    is_embed_or_rerank_mode = bool(mode_tokens & {"--embedding", "--reranking"})
     model_jinja = defaults.get("jinja") if isinstance(defaults, dict) else None
     effective_jinja = (
         bool(getattr(runner.supports, "jinja", False))
@@ -1152,6 +1191,22 @@ def _resolve_llama_scalars(
             model_defaults = {}
         existing = model_defaults.get("extra_args") or ""
         model_defaults["extra_args"] = f"{existing} --jinja".strip()
+
+    # MTP draft-speculation bundle (§7.1a / ML-5, FLAGS-own): MTP is a MODEL
+    # capability (``defaults.mtp`` / the registry ``mtp`` tag) gated by the
+    # launching runner — the profile no longer carries it. Previously the
+    # ``--spec-draft-*`` bundle was appended inside ``resolve_profile_flags``
+    # (the now-severed profile-flag path); inject it here instead, computed
+    # from the model-resolved ``effective_mtp`` + the backend's draft device.
+    # PREPENDED so a model's own ``defaults.extra_args`` spec-draft overrides
+    # still win (last-wins). Draft device tracks the profile backend (device
+    # axis, unchanged). Never for an embed/rerank mode (no chat drafting).
+    if effective_mtp and not is_embed_or_rerank_mode:
+        bundle = build_mtp_flag_bundle(getattr(profile, "backend", None))
+        if model_defaults is None:
+            model_defaults = {}
+        existing = model_defaults.get("extra_args") or ""
+        model_defaults["extra_args"] = f"{bundle} {existing}".strip()
 
     slot_n_gpu_layers = model_table.get("n_gpu_layers")
 
@@ -1175,8 +1230,11 @@ def _resolve_llama_scalars(
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
+        # FLAGS-own: slot flag surface is inert — these keys are retained for
+        # dict-shape/caller compat but no longer reach the argv chain (the
+        # migrator folds a slot's effective tune into its model's defaults).
         "slot_n_gpu_layers": slot_n_gpu_layers,
-        "slot_parallel": slot_parallel,
+        "slot_parallel": None,
         "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
         # GPU vendor discriminator: the profile's declared backend (rocm /
         # vulkan / cuda / None) — configuration, not host probing.
@@ -1300,10 +1358,24 @@ class ContainerProvider(Provider):
     # ── ContainerProvider-specific control plane ──────────────────────────────
 
     def _unit_name(self, slot_name: str) -> str:
-        return f"hal0-slot@{slot_name}.service"
+        """The systemd **service** name for a slot (``systemctl`` verbs target it).
+
+        Routed through :func:`hal0.slots.naming.slot_unit_name` — the ONE seam
+        §11.1's M5 downtime window re-points from name to id. Kept the
+        ``hal0-slot@<token>.service`` shape (Quadlet generates it) so every
+        existing call site + the hal0-systemctl seam stay valid.
+        """
+        return slot_unit_name(slot_name)
 
     def _unit_path(self, slot_name: str) -> Path:
-        return _SYSTEMD_SYSTEM_DIR / self._unit_name(slot_name)
+        """The Quadlet ``.container`` source file this slot's unit is written to.
+
+        Was ``/etc/systemd/system/hal0-slot@<name>.service``; is now
+        ``/etc/containers/systemd/hal0-slot@<token>.container`` (P3-quadlet).
+        Kept the ``_unit_path`` name — it is the write/remove target both
+        ``load_sync`` and ``unload_sync`` route through the seam.
+        """
+        return _QUADLET_DIR / slot_quadlet_name(slot_name)
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         """Run a subprocess synchronously (load/unload are blocking ops anyway).
@@ -1400,20 +1472,22 @@ class ContainerProvider(Provider):
         )
 
     def _write_and_start_unit(self, slot_name: str, unit_text: str) -> None:
-        """Write unit file then daemon-reload + enable + restart (shared by all load paths).
+        """Write the Quadlet ``.container`` file, daemon-reload, start.
 
-        Extracted from :meth:`load_sync` so both the llama-server path and the
-        spec-rendered NPU path share a single systemd interaction sequence.
-        ``unload_sync`` continues to work unchanged — it uses
-        :meth:`_unit_name` / :meth:`_unit_path` which are common.
+        The Quadlet sequence that replaces the old write→daemon-reload→enable→
+        restart triple: the ``.container`` file is the source of truth, podman's
+        generator emits ``hal0-slot@<token>.service`` on ``daemon-reload``, and
+        ``[Install] WantedBy=hal0.target`` in the unit handles boot-enable — so
+        no per-load ``systemctl enable``. ``restart`` (not bare ``start``) keeps
+        this idempotent: it starts a stopped slot and restarts a running one,
+        exactly as before. All writes route through the hal0-systemctl seam.
         """
         unit_path = self._unit_path(slot_name)
         dropin_dir = unit_path.with_name(unit_path.name + ".d")
         if dropin_dir.is_dir():
-            # Legacy (pre-container) render_systemd_override drop-ins carry
-            # dead EnvironmentFile refs that fail container units (#694 — hit
-            # live on the Phase B tts deploy). The container unit is fully
-            # self-contained; no drop-in is ever legitimate here.
+            # A stale ``hal0-slot@<token>.container.d/`` drop-in from a prior
+            # render (or a legacy override) could carry dead keys; the generated
+            # unit is fully self-contained, so no drop-in is legitimate here.
             shutil.rmtree(dropin_dir)
             log.info(
                 "container.stale_dropin_removed",
@@ -1423,18 +1497,17 @@ class ContainerProvider(Provider):
             "container.unit_write",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
         )
-        _SYSTEMCTL_SEAM.write_unit(unit_path, unit_text)
+        _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text)
+        # daemon-reload runs the Quadlet generator, materialising the .service.
         self._run("systemctl", "daemon-reload")
-        # Enable so it survives reboots (best-effort — don't fail if already enabled).
-        self._run("systemctl", "enable", self._unit_name(slot_name), check=False)
         self._run("systemctl", "restart", self._unit_name(slot_name))
         log.info(
             "container.unit_started",
             extra={"slot": slot_name, "unit": self._unit_name(slot_name)},
         )
 
-    def _render_unit_text(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> str:
-        """Render the desired systemd unit text for a slot — the ONE renderer.
+    def _render_quadlet_text(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> str:
+        """Render the desired Quadlet ``.container`` text for a slot — the ONE renderer.
 
         Sole producer of slot-unit text: both :meth:`load_sync` (first install)
         and :meth:`rerender_unit_sync` (update) render through here, so a fresh
@@ -1442,8 +1515,8 @@ class ContainerProvider(Provider):
         config (#1103). Resolves the slot's runtime family to a provider via
         :func:`_spec_provider_for` (FLM/NPU, Kokoro/TTS, ComfyUI/img — else this
         GPU/llama-server provider), builds its :class:`RuntimeLaunchPlan` via
-        ``container_spec``, and turns it into ``hal0-slot@<name>.service`` text
-        via the one adapter :func:`_render_unit_from_plan`.
+        ``container_spec``, and turns it into ``hal0-slot@<token>.container`` text
+        via the one adapter :func:`_render_quadlet_from_plan`.
 
         Crucially it threads the live ``[slots].publish_host`` into every
         render. The update path used to drop that argument and fall back to the
@@ -1451,24 +1524,24 @@ class ContainerProvider(Provider):
         (``publish_host = 0.0.0.0``) silently narrowed the bind back to
         ``127.0.0.1`` — the exact fresh-vs-updated divergence WS-J removes.
         """
-        slot_name: str = str(slot_cfg.get("name", ""))
+        token = slot_instance_token(slot_cfg)
         provider = _spec_provider_for(slot_cfg) or self
         plan = provider.container_spec(slot_cfg, model_info)
         log.info(
             "container.unit_render",
             extra={
-                "slot": slot_name,
-                "unit_path": str(self._unit_path(slot_name)),
+                "slot": token,
+                "unit_path": str(self._unit_path(token)),
                 "image": plan.image,
                 "port": plan.port,
                 "provider": getattr(provider, "name", type(provider).__name__),
             },
         )
-        return _render_unit_from_plan(
-            slot_name,
+        return _render_quadlet_from_plan(
+            token,
             plan,
-            runtime_bin=_container_runtime(),
             publish_host=_slot_publish_host(),
+            network_mode_default=_slot_network_mode(),
         )
 
     def load_sync(
@@ -1483,11 +1556,11 @@ class ContainerProvider(Provider):
         via ``await self._spawn_locked(...)``).
 
         Single launch path: unit text comes from the one renderer
-        :meth:`_render_unit_text` (shared with the update-time re-render), and
+        :meth:`_render_quadlet_text` (shared with the update-time re-render), and
         this method layers on the install-only steps — the NPU loud-fail guard
-        plus writing the file and enabling/starting the service.
+        plus writing the Quadlet file and starting the service.
         """
-        slot_name: str = str(slot_cfg.get("name", ""))
+        token = slot_instance_token(slot_cfg)
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
@@ -1503,41 +1576,43 @@ class ContainerProvider(Provider):
             if not tag:
                 raise ValueError("npu slot has no FLM model tag — set [model].default")
 
-        unit_text = self._render_unit_text(slot_cfg, model_info)
-        self._write_and_start_unit(slot_name, unit_text)
+        unit_text = self._render_quadlet_text(slot_cfg, model_info)
+        self._write_and_start_unit(token, unit_text)
 
     def rerender_unit_sync(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
         """Re-render an EXISTING unit file through current code — without
         touching the running service.
 
         The unit bakes the launch argv at load time, so after a hal0 update the
-        on-disk ExecStart still carries pre-update flags: a bare ``systemctl
-        restart`` (or a reboot!) re-runs stale config. This rewrites the unit
-        via the same renderer as :meth:`load_sync` — :meth:`_render_unit_text`,
-        the sole producer of slot-unit text — but deliberately does NOT
-        enable/restart: serving is never bounced by an update; the new argv
-        applies on the next start from any path. Callers batch one
+        on-disk ``Exec=`` still carries pre-update flags: a bare ``systemctl
+        restart`` (or a reboot!) re-runs stale config. This rewrites the
+        ``.container`` via the same renderer as :meth:`load_sync` —
+        :meth:`_render_quadlet_text`, the sole producer of slot-unit text — but
+        deliberately does NOT restart: serving is never bounced by an update;
+        the new argv applies on the next start from any path. Callers batch one
         ``daemon_reload`` after a sweep.
 
-        Because both paths render through :meth:`_render_unit_text`, the unit an
-        update writes is byte-identical to the one a fresh install would write
-        for the same slot config — the WS-J guarantee (#1103).
+        Because both paths render through :meth:`_render_quadlet_text`, the unit
+        an update writes is byte-identical to the one a fresh install would write
+        for the same slot config — the WS-J guarantee (#1103); Quadlet's
+        deterministic generator preserves it end-to-end.
 
         Returns True when the unit file changed. No-ops (False) when the slot
         has no unit on disk (never rendered → nothing stale) or the fresh
-        render is byte-identical.
+        render is byte-identical — so a convergent rerun never rewrites (nor
+        rebuilds) an unchanged unit.
         """
-        slot_name: str = str(slot_cfg.get("name", ""))
-        unit_path = self._unit_path(slot_name)
+        token = slot_instance_token(slot_cfg)
+        unit_path = self._unit_path(token)
         if not unit_path.exists():
             return False
-        unit_text = self._render_unit_text(slot_cfg, model_info)
+        unit_text = self._render_quadlet_text(slot_cfg, model_info)
         if unit_path.read_text() == unit_text:
             return False
-        _SYSTEMCTL_SEAM.write_unit(unit_path, unit_text)
+        _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text)
         log.info(
             "container.unit_rerendered",
-            extra={"slot": slot_name, "unit_path": str(unit_path)},
+            extra={"slot": token, "unit_path": str(unit_path)},
         )
         return True
 
@@ -1563,21 +1638,22 @@ class ContainerProvider(Provider):
         return list(plan.command)
 
     def unload_sync(self, slot_cfg: dict[str, Any]) -> None:
-        """Stop and clean up the container unit (synchronous)."""
-        slot_name: str = str(slot_cfg.get("name", ""))
-        unit = self._unit_name(slot_name)
-        log.info("container.unit_stop", extra={"slot": slot_name, "unit": unit})
+        """Stop and clean up the slot's Quadlet unit (synchronous).
+
+        Quadlet teardown: stop the generated service, delete the ``.container``
+        source, then ``daemon-reload`` — the generator drops the now-sourceless
+        ``.service`` and Quadlet stops+removes the container by unit basename
+        (no more ``reset-failed`` / ``disable``; those cleared ``.service``
+        StartLimit + enable state the generated unit no longer carries).
+        """
+        token = slot_instance_token(slot_cfg)
+        unit = self._unit_name(token)
+        log.info("container.unit_stop", extra={"slot": token, "unit": unit})
         self._run("systemctl", "stop", unit, check=False)
-        # Clear a ``failed`` sub-state left by a crash-looped/OOM-killed unit
-        # (#1224). Without this, systemd's StartLimit can refuse the next
-        # ``systemctl restart``, wedging a slot that a restart should recover.
-        self._run("systemctl", "reset-failed", unit, check=False)
-        # Disable so it doesn't re-start on reboot.
-        self._run("systemctl", "disable", unit, check=False)
-        # Remove unit file so daemon-reload leaves no stale entry.
-        unit_path = self._unit_path(slot_name)
+        # Remove the Quadlet source so daemon-reload regenerates without it.
+        unit_path = self._unit_path(token)
         if unit_path.exists():
-            _SYSTEMCTL_SEAM.remove_unit(unit_path)
+            _SYSTEMCTL_SEAM.remove_quadlet(unit_path)
             self._run("systemctl", "daemon-reload")
 
     def is_active(self, slot_name: str) -> bool:
@@ -1617,7 +1693,7 @@ class ContainerProvider(Provider):
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = f"hal0-slot-{slot_name}"
+        container_name = slot_container_name(slot_name)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{.ImageName}}"],
@@ -1645,7 +1721,7 @@ class ContainerProvider(Provider):
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = f"hal0-slot-{slot_name}"
+        container_name = slot_container_name(slot_name)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{json .Config.Cmd}}"],
@@ -1892,8 +1968,8 @@ def resolved_argv_detail_for_slot(
 
 __all__ = [
     "ContainerProvider",
-    "_render_unit_from_plan",
-    "_render_unit_from_spec",
+    "_loopback_fence_command",
+    "_render_quadlet_from_plan",
     "_spec_provider_for",
     "container_provider",
     "resolved_argv_detail_for_slot",

@@ -94,6 +94,30 @@ class BadRequest(Hal0Error):
     status = 400
 
 
+class MultiStatus(Hal0Error):
+    """207 — the operation partially succeeded; ``details`` enumerates what did
+    not complete and why.
+
+    Use when a mutation is best-effort across several resources and some
+    sub-operations failed while others succeeded — the caller needs an honest
+    per-item breakdown rather than an all-or-nothing 2xx/5xx. The canonical
+    case is an uninstall that removed most of an agent's tree but hit entries
+    the service user can't delete (e.g. root-owned files): report a 207 with the
+    residual paths instead of a bare 500.
+
+    Example::
+
+        raise MultiStatus(
+            "uninstall incomplete",
+            code="agent.uninstall_incomplete",
+            details={"removed": True, "residual": [{"path": ..., "reason": ...}]},
+        )
+    """
+
+    code = "resource.partial"
+    status = 207
+
+
 class Unauthorized(Hal0Error):
     """401 — no valid credentials presented.
 
@@ -149,6 +173,26 @@ class Conflict(Hal0Error):
     status = 409
 
 
+class TooManyRequests(Hal0Error):
+    """429 — the caller has exceeded a rate budget and should back off.
+
+    Use for brute-force / abuse throttles (e.g. the login endpoint's
+    per-IP attempt limiter). Carry a ``retry_after_s`` hint in ``details``
+    so a client can pace its next attempt.
+
+    Example::
+
+        raise TooManyRequests(
+            "too many login attempts",
+            code="auth.rate_limited",
+            details={"retry_after_s": 42},
+        )
+    """
+
+    code = "system.rate_limited"
+    status = 429
+
+
 class UnsupportedMediaType(Hal0Error):
     """415 — the request body's media type is not one the route can handle.
 
@@ -200,7 +244,9 @@ __all__ = [
     "Conflict",
     "Forbidden",
     "Hal0Error",
+    "MultiStatus",
     "NotFound",
+    "TooManyRequests",
     "Unauthorized",
     "UnprocessableEntity",
     "UnsupportedMediaType",

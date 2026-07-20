@@ -1,0 +1,19 @@
+# hal0 slots target (r5-sync-assessment §6.1, launch-blocker #1).
+#
+# Every rendered per-slot Quadlet unit declares
+# ``[Install] WantedBy=hal0.target`` (src/hal0/providers/container.py) so
+# `systemctl enable hal0-slot@<token>.service` creates its boot-enable
+# symlink under hal0.target.wants/ instead of multi-user.target.wants/ —
+# but until this unit exists and is itself enabled, nothing ever pulls
+# hal0.target in at boot, so no slot symlinked under it starts after a
+# reboot even though it looked healthy (and was `systemctl enable`-d)
+# before the reboot. This unit is the missing anchor: install.sh installs
+# + `systemctl enable`s it, so multi-user.target pulls hal0.target in,
+# which in turn starts every enabled hal0-slot@ unit.
+[Unit]
+Description=hal0 slots target
+Wants=network-online.target
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

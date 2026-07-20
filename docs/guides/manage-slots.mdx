@@ -78,7 +78,7 @@ hal0 slot create embed \
 
 <Steps>
 
-1. **`name`** (positional) — the slot id, e.g. `primary`, `embed`, `stt`.
+1. **`name`** (positional) — the slot id, e.g. `agent`, `embed`, `stt`.
 
 2. **`--type` / `-t`** — how the dispatcher routes requests. One of
    `llm` (default), `embedding`, `reranking`, `transcription`, `tts`,
@@ -125,9 +125,9 @@ compute device and let `--type` select the provider.
 <TabItem label="Load">
 
 ```sh
-hal0 slot load primary
+hal0 slot load agent
 # or assign a model at load time:
-hal0 slot load primary --model qwen3.6-27b
+hal0 slot load agent --model qwen3.6-27b
 ```
 
 Loads the slot's container and waits for it to go healthy. A bad
@@ -138,7 +138,7 @@ out the health timeout on a typo.
 <TabItem label="Restart">
 
 ```sh
-hal0 slot restart primary
+hal0 slot restart agent
 ```
 
 Unloads then reloads — used after editing config that the running
@@ -148,7 +148,7 @@ container baked in (ports, backend, ctx size).
 <TabItem label="Unload">
 
 ```sh
-hal0 slot unload primary
+hal0 slot unload agent
 ```
 
 Stops the container gracefully and returns the slot to `offline`.
@@ -159,7 +159,7 @@ Stops the container gracefully and returns the slot to `offline`.
 ## Swap the model
 
 ```sh
-hal0 slot swap primary --model qwen3.5-9b
+hal0 slot swap agent --model qwen3.5-9b
 ```
 
 A swap does two things by default:
@@ -172,7 +172,7 @@ A swap does two things by default:
 Pass `--no-persist` to try a model briefly without changing the default:
 
 ```sh
-hal0 slot swap primary --model phi3-mini --no-persist
+hal0 slot swap agent --model phi3-mini --no-persist
 ```
 
 If the hot-swap succeeds but the persist step fails, the runtime swap is
@@ -188,7 +188,7 @@ override can't crash the next launch.
 ## Edit slot config
 
 ```sh
-hal0 slot edit primary --ctx-size 32768
+hal0 slot edit agent --ctx-size 32768
 hal0 slot edit embed --hardware rocm
 ```
 
@@ -406,13 +406,13 @@ instead of a fake reading when a metric isn't available on your host.
 
 ```sh
 # last 200 lines
-hal0 slot logs primary
+hal0 slot logs agent
 
 # follow live (SSE tail)
-hal0 slot logs primary --follow
+hal0 slot logs agent --follow
 
 # more history
-hal0 slot logs primary --lines 1000
+hal0 slot logs agent --lines 1000
 ```
 
 Logs come from the slot's `hal0-slot@<name>.service` journal. On a host

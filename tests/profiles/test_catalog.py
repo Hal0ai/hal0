@@ -173,3 +173,19 @@ def test_used_by_lists_bound_slots(tmp_hal0_home: str) -> None:
     assert sorted(by_name["rocm"].used_by) == ["agent", "primary"]
     assert by_name["vulkan"].used_by == ()
     assert by_name["rocm"].to_dict()["used_by"] == ["agent", "primary"]
+
+
+def test_used_by_lists_bound_slots_id_keyed(tmp_hal0_home: str) -> None:
+    # P3-runtime-db inc4: an id-keyed slot TOML (stem is the digit id, name
+    # lives inside the file) must still be reported by its real display name,
+    # not the digit stem — the "list_slots CLI/portable callers" id-awareness
+    # fix deferred from inc1.
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "143.toml").write_text(
+        "\n".join(["[slot]", "id = 143", 'name = "brain"', "port = 8081", 'profile = "rocm"', ""]),
+        encoding="utf-8",
+    )
+    by_name = {p.name: p for p in ProfileCatalog().list()}
+    assert by_name["rocm"].used_by == ("brain",)
+    assert by_name["rocm"].to_dict()["used_by"] == ["brain"]

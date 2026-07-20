@@ -359,7 +359,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     gpu_rc=0
     HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
-        err "GPU passthrough is broken: the render device is visible but its gid maps to no group in this container."
+        err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
         exit 1
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
@@ -503,6 +503,23 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
+# O13: the runtime state trees (slots/, registry/, models/) are born root:root
+# from the mkdir above, but hal0-api runs User=hal0 and must create
+# slots/<id>/state.json, write the registry, and write pulled model files
+# there. Left root:root, every slot degrades to `error` on a fresh box, and
+# default-store pulls fail with PermissionError (r5-sync-assessment §6.2).
+# The `doctor perms --fix` backstop (Service start) also heals these via
+# their OwnershipStore rows (src/hal0/install/perms.py), but chown here so
+# they're born correct before the daemon's first touch. Prod-only + hal0-gated:
+# the service user doesn't exist in dev mode. ${VAR_DIR}/models is the
+# OwnershipStore row's FHS-default target — chowned explicitly (not
+# ${MODELS_DIR}, which may point off-tree via --models-dir/HAL0_MODELS_DIR;
+# an external store's ownership is out of scope here).
+if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
+    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
+    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
+fi
+
 # Production (FHS, #495) ships the source tree into the versioned dir
 # ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
 # `hal0 update` can atomically swap `current` to a new versioned tree.
@@ -625,6 +642,13 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
 else
     ui_spinner_run "Installing hal0 from ${REPO_ROOT}" \
         "${PIP}" install "${REPO_ROOT}"
+    # Same-version --source git re-run: pip sees the version satisfied and
+    # SKIPS, leaving OLD code in the venv (halo143 finding, 2026-07-19). The
+    # refresh must gate on tree contents, not the version string — force the
+    # hal0 code reinstall; deps were just resolved by the line above so
+    # --no-deps keeps this fast and offline-safe.
+    ui_spinner_run "Refreshing hal0 code in venv" \
+        "${PIP}" install --force-reinstall --no-deps "${REPO_ROOT}"
 fi
 
 if [[ ! -x "${HAL0_BIN}" ]]; then
@@ -685,8 +709,23 @@ ui_step "Dashboard UI"
 
 UI_DIR="${REPO_ROOT}/ui"
 UI_DIST="${UI_DIR}/dist"
-if [[ -f "${UI_DIST}/index.html" ]]; then
-    info "ui/dist already built — left alone"
+# Staleness gate (same class as the venv same-version trap): "dist exists"
+# is NOT "dist is current" — a bare index.html check kept the FIRST build a
+# box ever produced alive through every later redeploy, silently serving an
+# old dashboard. Stamp the built dist with the ui/ tree hash and skip only
+# on an exact match; no git / no stamp → rebuild (safe default).
+_ui_tree_hash=""
+if command -v git >/dev/null 2>&1; then
+    _ui_tree_hash="$(git -C "${REPO_ROOT}" rev-parse HEAD:ui 2>/dev/null || true)"
+fi
+_ui_dist_current=0
+if [[ -f "${UI_DIST}/index.html" && -n "${_ui_tree_hash}" \
+      && -f "${UI_DIST}/.hal0-build-stamp" \
+      && "$(cat "${UI_DIST}/.hal0-build-stamp" 2>/dev/null)" == "${_ui_tree_hash}" ]]; then
+    _ui_dist_current=1
+fi
+if [[ "${_ui_dist_current}" -eq 1 ]]; then
+    info "ui/dist already built for this ui/ tree (${_ui_tree_hash:0:12}) — left alone"
 elif command -v npm >/dev/null 2>&1; then
     # ui/package.json pins vite ^6.0.3 + @tailwindcss/vite ^4.2.2, both of
     # which need a modern Node; `command -v npm` alone doesn't catch a Node
@@ -719,6 +758,7 @@ elif command -v npm >/dev/null 2>&1; then
                 bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund" \
             && ui_spinner_run "Building dashboard (npm run build)" \
                 bash -c "cd '${UI_DIR}' && npm run build"; then
+            [[ -n "${_ui_tree_hash}" ]] && printf '%s\n' "${_ui_tree_hash}" > "${UI_DIST}/.hal0-build-stamp"
             info "wrote ${UI_DIST}"
         else
             warn "dashboard build failed — the API still serves; the UI at :${HAL0_PORT}/ will 404 until you build it"
@@ -966,6 +1006,22 @@ API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
 rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
 rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
 
+# hal0.target (r5-sync-assessment §6.1, launch-blocker #1): every rendered
+# per-slot Quadlet declares `[Install] WantedBy=hal0.target`
+# (src/hal0/providers/container.py) but nothing ever shipped the target
+# itself — slots silently stayed down after every reboot. Ship + enable it
+# unconditionally (System mode only; harmless idempotent re-write on
+# upgrade) so multi-user.target pulls it in, which in turn starts every
+# enabled hal0-slot@ unit.
+TARGET_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0.target"
+TARGET_UNIT_DST="${UNIT_DIR}/hal0.target"
+if [[ -f "${TARGET_UNIT_SRC}" ]]; then
+    cp "${TARGET_UNIT_SRC}" "${TARGET_UNIT_DST}"
+    info "wrote ${TARGET_UNIT_DST}"
+else
+    warn "${TARGET_UNIT_SRC} not found — hal0.target not installed; slots will not autostart after reboot"
+fi
+
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
 # pin per release (#79) — single source of truth for the OpenWebUI image
@@ -996,6 +1052,45 @@ if [[ -f "${PODMAN_FWD_UNIT_SRC}" ]]; then
     cp "${PODMAN_FWD_UNIT_SRC}" "${PODMAN_FWD_UNIT_DST}"
     info "wrote ${PODMAN_FWD_UNIT_DST}"
 fi
+
+# Legacy slot-unit cleanup (R3 quadlet migration). Pre-quadlet installs
+# shipped a static hal0-slot@.service template (+ per-slot drop-ins). Static
+# units in /etc/systemd/system SHADOW podman's generator units, so a leftover
+# template breaks every quadlet slot with "Failed to load environment files"
+# (halo150 Phase-2 finding: the generator accepted hal0-slot@qtest.container
+# and produced the service, but the docker-era template won the name).
+# Convergent: remove if present, no-op otherwise.
+LEGACY_SLOT_UNIT="${UNIT_DIR}/hal0-slot@.service"
+if [[ -f "${LEGACY_SLOT_UNIT}" ]]; then
+    rm -f "${LEGACY_SLOT_UNIT}"
+    info "removed legacy static ${LEGACY_SLOT_UNIT} (shadowed quadlet generator units)"
+fi
+for LEGACY_SLOT_DROPIN in "${UNIT_DIR}"/hal0-slot@*.service.d; do
+    if [[ -d "${LEGACY_SLOT_DROPIN}" ]]; then
+        rm -rf "${LEGACY_SLOT_DROPIN}"
+        info "removed legacy slot drop-in ${LEGACY_SLOT_DROPIN}"
+    fi
+done
+
+# Stale hal0-agent@ drop-in cleanup (RATIFIED 2026-07-18, halo150 O3). systemd
+# merges EVERY *.conf under hal0-agent@<id>.service.d/, so a drop-in an OLD
+# installer left behind still applies after the current template overwrites
+# override.conf. A stale `ConfigurationDirectory=` fragment brick-loops the unit
+# with status=241/CONFIGURATION_DIRECTORY (the current template ships no such
+# directive). Convergent: remove non-shipped fragments carrying that directive,
+# report each, no-op on a clean box. `override.conf` (the shipped drop-in) is
+# rewritten from the template below and never removed here.
+for AGENT_DROPIN_DIR in "${UNIT_DIR}"/hal0-agent@*.service.d; do
+    [[ -d "${AGENT_DROPIN_DIR}" ]] || continue
+    for AGENT_DROPIN in "${AGENT_DROPIN_DIR}"/*.conf; do
+        [[ -f "${AGENT_DROPIN}" ]] || continue
+        [[ "$(basename "${AGENT_DROPIN}")" == "override.conf" ]] && continue
+        if grep -q "ConfigurationDirectory=" "${AGENT_DROPIN}" 2>/dev/null; then
+            rm -f "${AGENT_DROPIN}"
+            info "removed stale agent drop-in ${AGENT_DROPIN} (241/CONFIGURATION_DIRECTORY class)"
+        fi
+    done
+done
 
 # hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
 # generic per-agent runner; the drop-in pins hermes-specific env.
@@ -1236,6 +1331,38 @@ PYEOF
             warn "${SYSTEMCTL_SUDOERS_SRC} not found — systemctl sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #5 (O12): hal0-podman-ro covers READ-ONLY podman
+    # introspection (image presence today) against ROOT's podman store — the
+    # store slots actually populate via Quadlet, NOT hal0-api's own rootless
+    # store. Narrow + hardcoded (no shell, no wildcards, no operator-supplied
+    # podman flags) — see the wrapper source.
+    PODMAN_RO_SRC="${REPO_ROOT}/installer/wrappers/hal0-podman-ro"
+    if [[ -f "${PODMAN_RO_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${PODMAN_RO_SRC}" "${LIB_DIR}/bin/hal0-podman-ro"
+        info "wrote ${LIB_DIR}/bin/hal0-podman-ro"
+    else
+        warn "${PODMAN_RO_SRC} not found — podman introspection seam helper not installed"
+    fi
+
+    # sudoers grant for the podman introspection seam. Real installs only;
+    # visudo-validate before activating so a malformed drop-in can never wedge
+    # sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        PODMAN_RO_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-podman-ro"
+        PODMAN_RO_SUDOERS_DST="/etc/sudoers.d/hal0-podman-ro"
+        if [[ -f "${PODMAN_RO_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${PODMAN_RO_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${PODMAN_RO_SUDOERS_SRC}" "${PODMAN_RO_SUDOERS_DST}"
+                info "wrote ${PODMAN_RO_SUDOERS_DST}"
+            else
+                warn "${PODMAN_RO_SUDOERS_SRC} failed visudo check — podman introspection sudoers grant not installed"
+            fi
+        else
+            warn "${PODMAN_RO_SUDOERS_SRC} not found — podman introspection sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi
@@ -1243,6 +1370,24 @@ fi
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload"
+fi
+
+# AppArmor preflight for podman on unconfined LXC (RATIFIED 2026-07-18,
+# halo150 R4). A privileged LXC with `apparmor.profile: unconfined` cannot load
+# podman's default AppArmor profile, so `podman run` dies with exit 243
+# ("install profile containers-default apparmor") and NO slot ever starts. The
+# convergent fix writes `[containers] apparmor_profile="unconfined"` to
+# /etc/containers/containers.conf and retries — detected from the podman SMOKE
+# FAILURE (not OS/LXC sniffing), idempotent, unit-tested against recorded fakes
+# (see src/hal0/agents/containers_apparmor.py). Runs the shared, tested Python
+# module via the FHS venv so bash and Python never diverge.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1 \
+    && [[ -x "${VENV_DIR}/bin/python" ]]; then
+    if "${VENV_DIR}/bin/python" -m hal0.agents.containers_apparmor; then
+        :
+    else
+        warn "podman apparmor preflight could not resolve the profile-load failure — slots may not start; see the detail above"
+    fi
 fi
 
 # Kick off a background pull of the OpenWebUI image so the unit start
@@ -1816,6 +1961,18 @@ else
         warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
     fi
 
+    # hal0.target (§6.1 above): enable so multi-user.target pulls it in at
+    # boot; `--now` also starts it right away, which pulls in whichever
+    # hal0-slot@ units are ALREADY enabled (WantedBy=hal0.target) on this
+    # box — harmless no-op on a fresh install with no slots yet.
+    if [[ -f "${TARGET_UNIT_DST}" ]]; then
+        if systemctl enable --now hal0.target; then
+            info "hal0.target enabled — slots will autostart after reboot"
+        else
+            warn "'systemctl enable --now hal0.target' failed; slots will not autostart after reboot — check 'systemctl status hal0.target'"
+        fi
+    fi
+
     # ── Memory engine (Hindsight) ─────────────────────────────────────────────
     # Stand up the local hindsight-api daemon (the shared memory brain) and seed
     # the global shared bank + the hermes private bank. The unit ships in
@@ -2063,8 +2220,27 @@ else
         # Redirecting from /dev/null turns that crash into a clean EOF.
         GATEWAY_UNIT_DST="${UNIT_DIR}/hermes-gateway.service"
         info "installing system-scope hermes gateway (User=hal0)"
-        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
-            || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        # m1 fix: this script runs as root, so a bare `env -u HERMES_HOME
+        # hermes ...` here resolves `~/.hermes` to /root/.hermes — the exact
+        # "split-brain" root-owned tree `hal0 doctor perms` flags as Hermes
+        # ownership drift (check_hermes_ownership's stray_home check; see
+        # installer/lib/run-as-hal0.sh's docstring, which names this same
+        # failure mode #843). Drop to hal0 first (same runuser -> setpriv ->
+        # sudo cascade run-as-hal0.sh uses) so this subprocess never runs as
+        # root and never creates /root/.hermes.
+        if command -v runuser >/dev/null 2>&1; then
+            runuser -u hal0 -- env -u HERMES_HOME HOME=/var/lib/hal0 \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        elif command -v setpriv >/dev/null 2>&1; then
+            setpriv --reuid hal0 --regid hal0 --init-groups -- env -u HERMES_HOME HOME=/var/lib/hal0 \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        else
+            sudo -H -u hal0 -- env -u HERMES_HOME \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        fi
         # Only enable/start if hermes actually laid down the unit. If the
         # install genuinely failed the file is absent; `systemctl enable` would
         # otherwise emit a scary "Unit file … does not exist" error and trip

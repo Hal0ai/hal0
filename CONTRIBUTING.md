@@ -78,6 +78,23 @@ enforces the ones marked **(gated)**.
    [`ARCHITECTURE.md`](./ARCHITECTURE.md). Touched documentation must match
    the code it describes.
 
+10. **Test behavior, not framework internals.** Probe routes and effects
+    through the public surface; never assert on `app.routes` shape or other
+    framework-internal structures that shift between dependency versions.
+    CI installs from the lockfile (`uv sync --frozen`) so CI and local do
+    not skew. This class bit twice: a floating FastAPI gave CI lazy
+    `_IncludedRouter` wrappers (zero `app.routes`) while local synced eager
+    routes — sinking a route-collision test and a golden-path assertion that
+    were CI-only. Assert on behavior, pin the environment.
+
+11. **Find the owner before adding a parallel.** Before you add a test, a
+    migration, a config table, or a module for some fact, grep for an
+    existing owner. A duplicate that later drifts is a scar (see rule 1). A
+    board row once dispatched a route-collision test that already existed;
+    the duplicate failed CI and had to be removed. Migration numbers are
+    allocated once, at dispatch, on the board — two files at one version is a
+    broken migrate.
+
 ## Developer Certificate of Origin (DCO)
 
 hal0 uses the [Developer Certificate of Origin](https://developercertificate.org/)

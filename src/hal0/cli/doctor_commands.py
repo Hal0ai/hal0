@@ -54,6 +54,7 @@ from rich.console import Console
 from rich.table import Table
 
 import hal0
+from hal0.cli.doctor_diagnosis import Diagnosis, Evidence, NextStep, render_json
 from hal0.config.loader import load_manifest
 
 app = typer.Typer(
@@ -214,7 +215,13 @@ def doctor(
 
 
 @app.command("verify")
-def doctor_verify_cmd() -> None:
+def doctor_verify_cmd(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit {'verdict','diagnoses'} Diagnosis JSON instead of the report card.",
+    ),
+) -> None:
     """Render the post-setup report card (checks + live URLs + doc links).
 
     First-class home for what used to be reachable only via the hidden
@@ -225,7 +232,7 @@ def doctor_verify_cmd() -> None:
     """
     from hal0.cli.doctor_verify import run_verify
 
-    raise typer.Exit(run_verify(console=console))
+    raise typer.Exit(run_verify(console=console, json_output=json_output))
 
 
 # ── hal0 doctor logs ─────────────────────────────────────────────────────────
@@ -258,7 +265,14 @@ def doctor_logs(
     Thin client over ``GET /api/logs`` (and ``/api/logs/stream`` with
     ``--follow``), the same endpoints the dashboard's log panel uses.
     """
-    from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
+    from hal0.cli._shared import (
+        CliApiError,
+        _api_base,
+        _api_unreachable,
+        api_get,
+        die,
+        follow_sse_logs,
+    )
 
     url = _api_base()
     if _api_unreachable(url):
@@ -290,18 +304,7 @@ def doctor_logs(
         stream_params["level"] = level
     if since is not None:
         stream_params["since"] = since
-    try:
-        with httpx.stream("GET", url + "/api/logs/stream", params=stream_params, timeout=None) as r:
-            for raw in r.iter_lines():
-                if not raw or not raw.startswith("data:"):
-                    continue
-                payload = raw[5:].strip()
-                try:
-                    console.print(jsonlib.loads(payload))
-                except ValueError:
-                    console.print(payload)
-    except (httpx.HTTPError, KeyboardInterrupt):
-        return
+    follow_sse_logs("/api/logs/stream", console=console, params=stream_params)
 
 
 # ── hal0 doctor toolbox-pull ──────────────────────────────────────────────────
@@ -459,8 +462,6 @@ def toolbox_pull(
       1 — at least one image could not be reached.
       2 — manifest.json is empty or has no toolbox_images entries.
     """
-    import json as jsonlib
-
     manifest = load_manifest(manifest_path) if manifest_path else load_manifest()
     images = manifest.get("toolbox_images") or {}
     if not isinstance(images, dict) or not images:
@@ -580,6 +581,46 @@ def check_hermes_ownership(
 def has_ownership_drift(rows: list[dict[str, str]]) -> bool:
     """True iff any row is in the ``drift`` state."""
     return any(r["status"] == "drift" for r in rows)
+
+
+def _diagnose_audit_rows(
+    rows: list[dict[str, str]],
+    *,
+    diagnosis_id: str,
+    ok_summary: str,
+    next_steps: list[NextStep] | None = None,
+) -> list[Diagnosis]:
+    """Convert ``ok``/``drift``/``absent`` audit rows into ``Diagnosis`` rows.
+
+    :func:`check_hermes_ownership`, :func:`check_tree_group_share`, and
+    ``hal0.install.perms.audit_rows`` all share this exact row vocabulary
+    (``{path,label,status,detail}``), so one adapter covers every
+    ``doctor perms`` sub-check (§2.1). ``absent`` rows carry no finding.
+    ``drift`` rows each become one ``fail`` Diagnosis; when nothing drifted,
+    a single ``HAL0-DOCTOR-OK`` info row is emitted instead of an empty list
+    so a clean ``--json`` run still has something to show.
+    """
+    drift = [r for r in rows if r["status"] == "drift"]
+    if not drift:
+        return [
+            Diagnosis(id="HAL0-DOCTOR-OK", severity="info", confidence="high", summary=ok_summary)
+        ]
+    return [
+        Diagnosis(
+            id=diagnosis_id,
+            severity="fail",
+            confidence="high",
+            summary=f"{r['label']}: {r['detail']}",
+            detail=r["detail"],
+            evidence=[
+                Evidence(
+                    kind="file", summary=r["detail"], data={"path": r["path"], "label": r["label"]}
+                )
+            ],
+            next_steps=next_steps or [],
+        )
+        for r in drift
+    ]
 
 
 # ── editable-checkout group-share — the #843 root-clobber *fix* surface ───────
@@ -736,6 +777,14 @@ def perms(
             "if a box needs to verify/restore the pre-flip layout."
         ),
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit stable Diagnosis JSON (HAL0-PERMS-*) instead of the human tables. "
+            "Implies audit-only — --fix is ignored under --json."
+        ),
+    ),
 ) -> None:
     """Audit ownership for the root-clobber regression (#843) + the path table.
 
@@ -748,7 +797,10 @@ def perms(
     table (both need root, and both prompt for confirmation unless
     ``--force``/``-f`` is also passed); Hermes drift is still reconciled via
     ``sudo hal0 agent bootstrap hermes --repair``. This command is audit-only by
-    default — nothing is ever written without ``--fix``.
+    default — nothing is ever written without ``--fix``. ``--json`` prints the
+    §21.4 ``Diagnosis`` rows (``HAL0-PERMS-HERMES-DRIFT`` /
+    ``HAL0-PERMS-TREE-NOT-SHARED`` / ``HAL0-PERMS-PATH-OWNERSHIP-DRIFT``)
+    instead and never applies ``--fix``, even if it was also passed.
     """
 
     def _owner(p: Path) -> str | None:
@@ -782,7 +834,8 @@ def perms(
 
     # 1) Hermes runtime ownership (read-only; repair via bootstrap --repair).
     hermes_rows = check_hermes_ownership(owner_of=_owner, exists=lambda p: p.exists())
-    _render_audit("Hermes ownership audit (#843)", hermes_rows)
+    if not json_output:
+        _render_audit("Hermes ownership audit (#843)", hermes_rows)
 
     # 2) Editable-checkout group-share (read-only audit; --fix repairs).
     root = detect_editable_root(Path(hal0.__file__).resolve())
@@ -793,7 +846,8 @@ def perms(
         mode_of=_mode,
         git_shared_of=_git_shared,
     )
-    _render_audit("Editable checkout group-share (#843)", tree_rows)
+    if not json_output:
+        _render_audit("Editable checkout group-share (#843)", tree_rows)
     tree_drift = has_ownership_drift(tree_rows)
 
     # 3) Canonical path-ownership table (read-only audit; --fix applies it).
@@ -811,8 +865,51 @@ def perms(
         if table_root
         else "Path ownership table (P3-perms)"
     )
-    _render_audit(_table_title, own_rows)
+    if not json_output:
+        _render_audit(_table_title, own_rows)
     own_drift = has_ownership_drift(own_rows)
+
+    if json_output:
+        diagnoses = (
+            _diagnose_audit_rows(
+                hermes_rows,
+                diagnosis_id="HAL0-PERMS-HERMES-DRIFT",
+                ok_summary="Hermes ownership clean",
+                next_steps=[
+                    NextStep(
+                        kind="command",
+                        label="sudo hal0 agent bootstrap hermes --repair",
+                        target="hal0 agent bootstrap hermes --repair",
+                    )
+                ],
+            )
+            + _diagnose_audit_rows(
+                tree_rows,
+                diagnosis_id="HAL0-PERMS-TREE-NOT-SHARED",
+                ok_summary="editable checkout group-share clean",
+                next_steps=[
+                    NextStep(
+                        kind="command",
+                        label="sudo hal0 doctor perms --fix",
+                        target="hal0 doctor perms --fix",
+                    )
+                ],
+            )
+            + _diagnose_audit_rows(
+                own_rows,
+                diagnosis_id="HAL0-PERMS-PATH-OWNERSHIP-DRIFT",
+                ok_summary="path-ownership table clean",
+                next_steps=[
+                    NextStep(
+                        kind="command",
+                        label="sudo hal0 doctor perms --fix",
+                        target="hal0 doctor perms --fix",
+                    )
+                ],
+            )
+        )
+        console.print_json(render_json(diagnoses))
+        raise typer.Exit(1 if (has_ownership_drift(hermes_rows) or tree_drift or own_drift) else 0)
 
     if fix:
         if root is None:
@@ -1019,6 +1116,231 @@ def repair_flm_store(
 # ── hal0 doctor models ────────────────────────────────────────────────────────
 
 
+def _dangling_registry_entries(local: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Registry entries (``{id,path,...}``) whose file no longer exists on disk."""
+    return [m for m in local if not Path(str(m["path"])).exists()]
+
+
+def _models_outside_mount_roots(
+    local: list[dict[str, Any]], mount_roots: list[str]
+) -> list[dict[str, Any]]:
+    """Registry entries whose file path is NOT under any mounted model root.
+
+    O25 guard: the slot container bind-mounts ``model_mount_roots()`` (the
+    effective ``[models].store`` PLUS ``[models].pull_root``). A registered
+    model whose absolute path lives outside *every* mounted root is unreachable
+    in-container — llama-server exits ~90ms after start and the slot flaps
+    ``error``↔``warming``, never ``ready`` (a config sets ``store`` off to the
+    side while models live under ``pull_root``). Pure — mirrors the renderer's
+    mount set, no I/O. Empty ``mount_roots`` (config unreadable) → no findings.
+    """
+    if not mount_roots:
+        return []
+    norm_roots = [os.path.normpath(r) for r in mount_roots if r]
+    out: list[dict[str, Any]] = []
+    for m in local:
+        p = str(m.get("path") or "")
+        if not p:
+            continue
+        pn = os.path.normpath(p)
+        covered = any(pn == r or pn.startswith(r.rstrip("/") + "/") for r in norm_roots)
+        if not covered:
+            out.append(m)
+    return out
+
+
+def _unregistered_store_files(
+    store_dir: Path, exts: set[str], registered_paths: set[str]
+) -> list[str]:
+    """Model files physically in ``store_dir`` that no registry entry names."""
+    if not store_dir.is_dir():
+        return []
+    return [
+        str(f)
+        for f in store_dir.rglob("*")
+        if f.is_file()
+        and f.suffix.lower() in exts
+        and not f.name.startswith(".")
+        and str(f) not in registered_paths
+    ]
+
+
+def _diagnose_models(
+    *,
+    dangling: list[dict[str, Any]],
+    unregistered: list[str],
+    store_missing: bool,
+    unmounted: list[dict[str, Any]] | None = None,
+    mount_roots: list[str] | None = None,
+    effective: str,
+    divergence: dict[str, str] | None,
+    mount_warn: dict[str, str] | None,
+    flm_dir: Path,
+    writ: dict[str, object] | None,
+) -> list[Diagnosis]:
+    """Assemble the §21.4 ``HAL0-MODEL-*`` Diagnosis rows from the evidence
+    ``doctor_models`` already gathered (§2.2). Pure — no I/O."""
+    diagnoses: list[Diagnosis] = []
+    for m in dangling:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-FILE-MISSING",
+                severity="fail",
+                confidence="high",
+                summary=f"registry entry {m.get('id')} points at a missing file",
+                detail=str(m.get("path")),
+                evidence=[
+                    Evidence(
+                        kind="file",
+                        summary=str(m.get("path")),
+                        data={"model_id": m.get("id"), "path": m.get("path")},
+                    )
+                ],
+                next_steps=[
+                    NextStep(
+                        kind="command",
+                        label="hal0 model rm <id> && hal0 model scan",
+                        target=f"hal0 model rm {m.get('id')} && hal0 model scan",
+                    )
+                ],
+            )
+        )
+    if store_missing:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-STORE-MISSING",
+                severity="fail",
+                confidence="high",
+                summary=f"effective store {effective} does not exist",
+                detail=effective,
+                evidence=[Evidence(kind="file", summary=effective, data={"store_path": effective})],
+            )
+        )
+    roots_str = ", ".join(mount_roots) if mount_roots else "(none)"
+    for m in unmounted or []:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-STORE-UNMOUNTED",
+                severity="fail",
+                confidence="high",
+                summary=f"registry entry {m.get('id')} lives outside every mounted model root",
+                detail=(
+                    f"{m.get('path')} is under no mounted root ({roots_str}) — the slot "
+                    "container can't see the file; llama exits ~90ms after start (O25)"
+                ),
+                evidence=[
+                    Evidence(
+                        kind="file",
+                        summary=str(m.get("path")),
+                        data={
+                            "model_id": m.get("id"),
+                            "path": m.get("path"),
+                            "mount_roots": list(mount_roots or []),
+                        },
+                    )
+                ],
+                next_steps=[
+                    NextStep(
+                        kind="manual",
+                        label="mount the model's tree",
+                        target=(
+                            "set [models].store / [models].pull_root to cover the model path "
+                            "(or move the model under a mounted root)"
+                        ),
+                    )
+                ],
+            )
+        )
+    for f in unregistered:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-UNREGISTERED",
+                severity="warn",
+                confidence="high",
+                summary="model file present but not registered",
+                detail=f,
+                evidence=[Evidence(kind="file", summary=f, data={"file_path": f})],
+                next_steps=[
+                    NextStep(kind="command", label="hal0 model scan", target="hal0 model scan")
+                ],
+            )
+        )
+    if divergence:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-FLM-STORE-DIVERGED",
+                severity="warn",
+                confidence="high",
+                summary="FLM store env var diverges from hal0.toml",
+                detail=divergence["detail"],
+                evidence=[Evidence(kind="config", summary=divergence["detail"])],
+                fixable=False,
+            )
+        )
+    if mount_warn:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-FLM-STORE-UNMOUNTED",
+                severity="warn",
+                confidence="high",
+                summary=f"FLM store {flm_dir} not backed by a live mount",
+                detail=mount_warn["detail"],
+                evidence=[
+                    Evidence(
+                        kind="file",
+                        summary=mount_warn["detail"],
+                        data={"store_path": str(flm_dir)},
+                    )
+                ],
+                next_steps=[
+                    NextStep(
+                        kind="manual",
+                        label="order the slot after the mount",
+                        target=(
+                            "add RequiresMountsFor= to the systemd unit, or move the "
+                            "store onto the root fs"
+                        ),
+                    )
+                ],
+            )
+        )
+    if writ is not None:
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-MODEL-FLM-STORE-NOT-WRITABLE",
+                severity="fail",
+                confidence="high",
+                summary=f"FLM store {flm_dir} not writable by the container uid",
+                detail=str(writ["detail"]),
+                evidence=[
+                    Evidence(
+                        kind="file",
+                        summary=str(writ["detail"]),
+                        data={"uid": writ.get("uid"), "mode": writ.get("mode")},
+                    )
+                ],
+                next_steps=[
+                    NextStep(
+                        kind="command",
+                        label="sudo hal0 doctor models --fix",
+                        target="hal0 doctor models --fix",
+                    )
+                ],
+                fixable=True,
+            )
+        )
+    if not diagnoses:
+        return [
+            Diagnosis(
+                id="HAL0-DOCTOR-OK",
+                severity="info",
+                confidence="high",
+                summary="model pipeline clean",
+            )
+        ]
+    return diagnoses
+
+
 @app.command("models")
 def doctor_models(
     fix: bool = typer.Option(
@@ -1031,6 +1353,14 @@ def doctor_models(
         "--force",
         "-f",
         help="Skip the confirmation prompt before applying --fix.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit stable Diagnosis JSON (HAL0-MODEL-*) instead of the human report. "
+            "Implies audit-only — --fix is ignored under --json."
+        ),
     ),
 ) -> None:
     """Audit the model pipeline: registry paths, store/roots agreement, FLM dir.
@@ -1051,6 +1381,8 @@ def doctor_models(
     ``--fix`` repairs FLM store ownership/mode drift in place (chown 1000:hal0,
     chmod 2775 — needs root, and prompts for confirmation unless ``--force``/
     ``-f`` is also passed). Exits non-zero when anything actionable is found.
+    ``--json`` prints the §21.4 ``Diagnosis`` rows instead and never applies
+    ``--fix``, even if it was also passed.
     """
     from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get
     from hal0.config import paths as cfg_paths
@@ -1070,18 +1402,49 @@ def doctor_models(
         raise typer.Exit(2) from exc
     rows = data.get("models", data) if isinstance(data, dict) else data
     local = [m for m in rows if isinstance(m, dict) and m.get("path")]
-    dangling = [m for m in local if not Path(str(m["path"])).exists()]
+    dangling = _dangling_registry_entries(local)
     if dangling:
         problems += len(dangling)
-        console.print(f"[red]✗[/red]  {len(dangling)} registry entr(y/ies) point at missing files:")
-        for m in dangling:
-            console.print(f"      {m.get('id')} → {m.get('path')}")
-        console.print(
-            "      Fix: hal0 model rm <id> && hal0 model scan   (re-register from disk)\n"
-            "      or point the store at the real location: hal0 model store <dir>"
-        )
-    else:
+        if not json_output:
+            console.print(
+                f"[red]✗[/red]  {len(dangling)} registry entr(y/ies) point at missing files:"
+            )
+            for m in dangling:
+                console.print(f"      {m.get('id')} → {m.get('path')}")
+            console.print(
+                "      Fix: hal0 model rm <id> && hal0 model scan   (re-register from disk)\n"
+                "      or point the store at the real location: hal0 model store <dir>"
+            )
+    elif not json_output:
         console.print(f"[green]✓[/green]  all {len(local)} registered model file(s) exist on disk.")
+
+    # 1b. Mount reachability (O25): a model file present on disk but outside
+    # every root the slot container bind-mounts (store + pull_root) is
+    # unreachable in-container — llama exits ~90ms after start. Report the
+    # present-but-unmounted entries (dangling ones are already covered above).
+    try:
+        mount_roots = cfg_paths.model_mount_roots()
+    except Exception:
+        mount_roots = []
+    dangling_paths = {str(m.get("path")) for m in dangling}
+    unmounted = [
+        m
+        for m in _models_outside_mount_roots(local, mount_roots)
+        if str(m.get("path")) not in dangling_paths
+    ]
+    if unmounted:
+        problems += len(unmounted)
+        if not json_output:
+            console.print(
+                f"[red]✗[/red]  {len(unmounted)} model file(s) live outside every mounted root "
+                f"({', '.join(mount_roots) or '(none)'}):"
+            )
+            for m in unmounted:
+                console.print(f"      {m.get('id')} → {m.get('path')}")
+            console.print(
+                "      Fix: set [models].store / [models].pull_root to cover the model path "
+                "(the slot container mounts those roots)."
+            )
 
     # 2. Store/roots agreement + unregistered files in the store.
     try:
@@ -1090,33 +1453,32 @@ def doctor_models(
         effective = cfg.models.effective_store()
         exts = {e.lower() for e in cfg.models.file_extensions}
     except Exception as exc:  # config unreadable — report, keep going
-        console.print(f"[yellow]![/yellow]  could not read hal0.toml: {exc}")
+        if not json_output:
+            console.print(f"[yellow]![/yellow]  could not read hal0.toml: {exc}")
         scan_roots, effective, exts = [], "", {".gguf", ".safetensors"}
+    unregistered: list[str] = []
+    store_missing = False
     if effective:
         registered_paths = {str(m.get("path")) for m in local}
         store_dir = Path(effective)
-        unregistered: list[str] = []
-        if store_dir.is_dir():
-            for f in store_dir.rglob("*"):
-                if (
-                    f.is_file()
-                    and f.suffix.lower() in exts
-                    and not f.name.startswith(".")
-                    and str(f) not in registered_paths
-                ):
-                    unregistered.append(str(f))
-        else:
+        if not store_dir.is_dir():
+            store_missing = True
             problems += 1
-            console.print(f"[red]✗[/red]  effective store {effective} does not exist.")
+            if not json_output:
+                console.print(f"[red]✗[/red]  effective store {effective} does not exist.")
+        else:
+            unregistered = _unregistered_store_files(store_dir, exts, registered_paths)
         if unregistered:
             problems += 1
-            console.print(
-                f"[yellow]![/yellow]  {len(unregistered)} model file(s) in the store are "
-                f"not registered — run: hal0 model scan"
-            )
-            for f in unregistered[:10]:
-                console.print(f"      {f}")
-        console.print(f"[dim]store: {effective}  ·  scan roots: {', '.join(scan_roots)}[/dim]")
+            if not json_output:
+                console.print(
+                    f"[yellow]![/yellow]  {len(unregistered)} model file(s) in the store are "
+                    f"not registered — run: hal0 model scan"
+                )
+                for f in unregistered[:10]:
+                    console.print(f"      {f}")
+        if not json_output:
+            console.print(f"[dim]store: {effective}  ·  scan roots: {', '.join(scan_roots)}[/dim]")
 
     # 3a. FLM store divergence: env var silently overriding the TOML field.
     env_flm = os.environ.get("HAL0_FLM_MODELS_DIR")
@@ -1126,48 +1488,68 @@ def doctor_models(
     divergence = flm_store_divergence(env_flm, toml_flm)
     if divergence:
         problems += 1
-        console.print(f"[yellow]![/yellow]  {divergence['detail']}")
+        if not json_output:
+            console.print(f"[yellow]![/yellow]  {divergence['detail']}")
 
     # 3b. FLM (NPU) store: mount-backed, exists, writable by the container uid.
     flm_dir = Path(cfg_paths.flm_models_dir())
     mount_warn = flm_mount_guard(flm_dir)
     if mount_warn:
         problems += 1
-        console.print(f"[yellow]![/yellow]  {mount_warn['detail']}")
+        if not json_output:
+            console.print(f"[yellow]![/yellow]  {mount_warn['detail']}")
 
+    writ: dict[str, object] | None = None
     if flm_dir.exists():
         writ = flm_store_writability(flm_dir, stat_of=lambda p: p.stat())
-        if writ is None:
-            console.print(f"[green]✓[/green]  FLM store {flm_dir} present.")
-        elif fix:
-            if os.geteuid() != 0:
-                problems += 1
-                console.print(
-                    f"[red]✗[/red]  FLM store {flm_dir}: {writ['detail']}\n"
-                    "      --fix needs root — re-run `sudo hal0 doctor models --fix`."
-                )
-            elif not force and not typer.confirm(
-                f"Apply chown {_FLM_CONTAINER_UID}:hal0 + chmod 2775 to {flm_dir}? "
-                f"(currently: {writ['detail']})",
-                default=False,
-            ):
-                problems += 1
-                console.print(f"[dim]FLM store repair skipped (not confirmed): {flm_dir}[/dim]")
-            else:
-                ok, msg = repair_flm_store(flm_dir)
-                if ok:
-                    console.print(f"[green]✓[/green]  repaired {msg}")
-                else:
-                    problems += 1
-                    console.print(f"[red]✗[/red]  repair failed: {msg}")
-        else:
+        if writ is not None:
             problems += 1
+
+    if json_output:
+        diagnoses = _diagnose_models(
+            dangling=dangling,
+            unregistered=unregistered,
+            store_missing=store_missing,
+            unmounted=unmounted,
+            mount_roots=mount_roots,
+            effective=effective,
+            divergence=divergence,
+            mount_warn=mount_warn,
+            flm_dir=flm_dir,
+            writ=writ,
+        )
+        console.print_json(render_json(diagnoses))
+        raise typer.Exit(1 if problems else 0)
+
+    if writ is None:
+        if flm_dir.exists():
+            console.print(f"[green]✓[/green]  FLM store {flm_dir} present.")
+    elif fix:
+        if os.geteuid() != 0:
             console.print(
-                f"[yellow]![/yellow]  FLM store {flm_dir} {writ['detail']}.\n"
-                "      Fix: sudo hal0 doctor models --fix   "
-                f"(chown {_FLM_CONTAINER_UID}:hal0 + chmod 2775)"
+                f"[red]✗[/red]  FLM store {flm_dir}: {writ['detail']}\n"
+                "      --fix needs root — re-run `sudo hal0 doctor models --fix`."
             )
-    elif not mount_warn:
+        elif not force and not typer.confirm(
+            f"Apply chown {_FLM_CONTAINER_UID}:hal0 + chmod 2775 to {flm_dir}? "
+            f"(currently: {writ['detail']})",
+            default=False,
+        ):
+            console.print(f"[dim]FLM store repair skipped (not confirmed): {flm_dir}[/dim]")
+        else:
+            ok, msg = repair_flm_store(flm_dir)
+            if ok:
+                console.print(f"[green]✓[/green]  repaired {msg}")
+                problems -= 1
+            else:
+                console.print(f"[red]✗[/red]  repair failed: {msg}")
+    else:
+        console.print(
+            f"[yellow]![/yellow]  FLM store {flm_dir} {writ['detail']}.\n"
+            "      Fix: sudo hal0 doctor models --fix   "
+            f"(chown {_FLM_CONTAINER_UID}:hal0 + chmod 2775)"
+        )
+    if writ is None and not flm_dir.exists() and not mount_warn:
         console.print(
             f"[dim]FLM store {flm_dir} absent (fine unless you use the NPU slot — "
             f"it is created on the next NPU slot start).[/dim]"
@@ -1212,8 +1594,64 @@ def pending_layout_migration() -> tuple[int, int] | None:
     return (create, overwrite)
 
 
+def _diagnose_migration(pending: tuple[int, int] | None) -> list[Diagnosis]:
+    """One ``HAL0-MIGRATION-PENDING`` row (always ``warn`` — operator-initiated),
+    or ``HAL0-DOCTOR-OK``/``HAL0-DOCTOR-SKIPPED`` when there's nothing to do."""
+    if pending is None:
+        return [
+            Diagnosis(
+                id="HAL0-DOCTOR-SKIPPED",
+                severity="info",
+                confidence="high",
+                summary="model-layout migration planner unavailable — skipped",
+            )
+        ]
+    create, overwrite = pending
+    if not create and not overwrite:
+        return [
+            Diagnosis(
+                id="HAL0-DOCTOR-OK",
+                severity="info",
+                confidence="high",
+                summary="model layout is current — no migration pending",
+            )
+        ]
+    detail = f"{create} link(s) to create"
+    if overwrite:
+        detail += f", {overwrite} to overwrite (needs --force)"
+    return [
+        Diagnosis(
+            id="HAL0-MIGRATION-PENDING",
+            severity="warn",
+            confidence="high",
+            summary="v0.1→v0.2 model-layout migration pending",
+            detail=detail,
+            evidence=[
+                Evidence(
+                    kind="command",
+                    summary=detail,
+                    data={"create_count": create, "overwrite_count": overwrite},
+                )
+            ],
+            next_steps=[
+                NextStep(
+                    kind="command",
+                    label="hal0 migrate model-layout --apply",
+                    target="hal0 migrate model-layout --apply",
+                )
+            ],
+        )
+    ]
+
+
 @app.command("migrations")
-def doctor_migrations() -> None:
+def doctor_migrations(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit stable Diagnosis JSON (HAL0-MIGRATION-PENDING) instead of the human line.",
+    ),
+) -> None:
     """Surface a pending v0.1→v0.2 model-layout migration (read-only).
 
     The canonical ``<recipe>/<capability>/`` symlink farm is populated by
@@ -1227,6 +1665,9 @@ def doctor_migrations() -> None:
       1 — links are pending (advisory; run the apply command to reconcile).
     """
     pending = pending_layout_migration()
+    if json_output:
+        console.print_json(render_json(_diagnose_migration(pending)))
+        raise typer.Exit(0 if pending is None or pending == (0, 0) else 1)
     if pending is None:
         console.print("[dim]model-layout migration: planner unavailable — skipped.[/dim]")
         raise typer.Exit(0)
@@ -1377,8 +1818,64 @@ def _render_profiles(title: str, rows: list[dict[str, str]]) -> None:
             console.print(f"  {badge[r['status']]}  {r['label']} — {r['detail']}")
 
 
+def _diagnose_profiles(
+    ref_rows: list[dict[str, str]], img_rows: list[dict[str, str]]
+) -> list[Diagnosis]:
+    """§2.4: dangling slot→profile refs (fail) + un-pulled images (warn)."""
+    diagnoses: list[Diagnosis] = [
+        Diagnosis(
+            id="HAL0-PROFILE-REF-DANGLES",
+            severity="fail",
+            confidence="high",
+            summary=f"slot {r['label']} references a missing profile",
+            detail=r["detail"],
+            evidence=[Evidence(kind="table_row", summary=r["detail"], data=r)],
+            next_steps=[
+                NextStep(
+                    kind="command",
+                    label=f"hal0 slot edit {r['label']} --profile <name>",
+                    target=f"hal0 slot edit {r['label']} --profile <name>",
+                )
+            ],
+        )
+        for r in ref_rows
+        if r["status"] == "drift"
+    ]
+    diagnoses += [
+        Diagnosis(
+            id="HAL0-PROFILE-IMAGE-MISSING",
+            severity="warn",
+            confidence="medium",
+            summary=f"profile {r['label']} image not pulled locally",
+            detail=r["detail"],
+            evidence=[Evidence(kind="table_row", summary=r["detail"], data=r)],
+            next_steps=[
+                NextStep(kind="command", label="podman pull <image>", target="podman pull <image>")
+            ],
+        )
+        for r in img_rows
+        if r["status"] == "warn"
+    ]
+    if not diagnoses:
+        return [
+            Diagnosis(
+                id="HAL0-DOCTOR-OK",
+                severity="info",
+                confidence="high",
+                summary="every slot resolves to a real profile",
+            )
+        ]
+    return diagnoses
+
+
 @app.command("profiles")
-def doctor_profiles() -> None:
+def doctor_profiles(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=("Emit stable Diagnosis JSON (HAL0-PROFILE-*) instead of the human tables."),
+    ),
+) -> None:
     """Audit the slot↔profile layer: dangling references + un-pulled images.
 
     Two checks, surfaced before a slot has to fail on start:
@@ -1410,6 +1907,12 @@ def doctor_profiles() -> None:
 
     # Scan slots → (slot, profile_name) here (not via the catalog's private
     # helper) so a malformed slot is surfaced, not silently skipped.
+    #
+    # id-aware (P3-runtime-db inc4): list_slots() enumerates on-disk stems,
+    # which on an id-keyed box are digit ids, not display names. load_slot_config
+    # still needs the raw stem to find the file, but the reported identity is
+    # always cfg.name — the real display name a bilingual TOML embeds
+    # regardless of which stem it lives under.
     slot_profiles: list[tuple[str, str | None]] = []
     for slot_name in list_slots():
         try:
@@ -1419,15 +1922,20 @@ def doctor_profiles() -> None:
                 f"[yellow]![/yellow]  slot {slot_name}: unreadable TOML ({exc}) — skipped."
             )
             continue
-        slot_profiles.append((slot_name, cfg.profile))
+        slot_profiles.append((cfg.name, cfg.profile))
 
     ref_rows = check_slot_profile_refs(slot_profiles, valid_names)
     img_rows = check_profile_images_present(profiles, _local_image_repos())
 
+    broken = [r for r in ref_rows if r["status"] == "drift"]
+
+    if json_output:
+        console.print_json(render_json(_diagnose_profiles(ref_rows, img_rows)))
+        raise typer.Exit(1 if broken else 0)
+
     _render_profiles("Slot → profile references", ref_rows)
     _render_profiles("Profile images (in-use)", img_rows)
 
-    broken = [r for r in ref_rows if r["status"] == "drift"]
     if broken:
         console.print(
             f"\n[red]✗[/red]  {len(broken)} slot(s) reference a missing profile — "
@@ -1446,3 +1954,12 @@ def doctor_profiles() -> None:
 from hal0.cli.doctor_all import doctor_all_cmd as _doctor_all_cmd  # noqa: E402
 
 app.command("all")(_doctor_all_cmd)
+
+# ── hal0 doctor bundle — the support-bundle generator (§21.4 §3) ──────────────
+#
+# Same import-cycle-free pattern as `all` above: doctor_bundle.py pulls the
+# `_diagnose_*` / audit helpers from THIS module lazily (inside
+# _write_diagnostics_section), so importing it here at module scope is safe.
+from hal0.cli.doctor_bundle import doctor_bundle_cmd as _doctor_bundle_cmd  # noqa: E402
+
+app.command("bundle")(_doctor_bundle_cmd)

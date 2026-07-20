@@ -166,8 +166,12 @@ Each spike: confirm a REAL source exists, propose the exact endpoint + effort, r
 
 > Authored & frozen by the UI lead from SPEC §4. The board UI reaches `/api/board/*`
 > via the typed-hook + React Query pattern (`useBoard.ts`) over the existing Vite proxy.
-> hal0-api is a thin audited proxy → Hermes kanban (`/api/plugins/kanban/*`). No kanban
-> data lives in hal0; Hermes owns the DB. Neither team changes a shape here without re-freeze.
+> hal0 OWNS the operator board (rework R4 §Agents-and-brain) — these routes read/write
+> hal0's own SQLite-backed `BoardStore`, not a Hermes proxy. Hermes is an OPTIONAL
+> executor: its kanban plugin only seeds the store on first boot when present, and the
+> board works without it. Paths, methods, payload shapes, status codes, and WS events
+> stay FROZEN unchanged from the earlier proxy-forward era; neither team changes a shape
+> here without re-freeze.
 
 ## Hard rules (board)
 - **NO STUB DATA.** Every rendered value comes from a real `/api/board/*` response or is gated.
@@ -212,8 +216,13 @@ Move a task = `PATCH /api/board/tasks/{id} {status}`. `done` completes; `blocked
 | `/runs/{id}` | GET | — |
 | `/config` | GET | — (read-only knobs: tick-interval/failure-limit/claim-TTL/max-in-flight) |
 | `/orchestration` | GET / PUT | — / board.orchestration.update (4 knobs: orchestrator_profile, default_assignee, auto_decompose, auto_promote_children) |
-| `/events` | WS ?token=&since=&board=&tenant= | — |
+| `/events` | WS ?since=&board= | — |
 | `/chat` | POST(SSE) | board.chat.turn per board mutation · platform.chat.turn per slot mutation (reads unaudited) |
+
+`/profiles/{name}` (PATCH) and `/diagnostics` (GET) are live routes with no
+`endpoints.ts` constant yet — genuinely unconsumed backend surface (route
+exists, no UI caller), not a doc gap. Adopt-or-defer per the owning lane
+before wiring speculatively.
 
 ## Wire shapes (board task — the canonical card/drawer shape)
 A `Task` from `/board` lanes + `/tasks/{id}`:

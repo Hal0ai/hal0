@@ -34,10 +34,12 @@ from hal0.config.schema import (
 
 
 class TestBrainChatConfig:
-    def test_defaults_are_permissive_and_stable(self) -> None:
+    def test_defaults_are_safe_and_stable(self) -> None:
         bc = BrainChatConfig()
         assert bc.enabled is True
-        assert bc.read_only is False
+        # KB-2/3: the steward SHIPS read-only; mutations need an explicit
+        # [brain_chat] read_only=false opt-in.
+        assert bc.read_only is True
         assert bc.model == ""
         assert bc.max_rounds == 8
         assert bc.completion_timeout_s == 300.0
@@ -401,6 +403,17 @@ class TestHal0Config:
         with pytest.raises(ValidationError) as ei:
             SlotsConfig(port_range_start=8090, port_range_end=8085)
         assert "port_range_end" in str(ei.value)
+
+    def test_slots_network_mode_default_is_bridge(self) -> None:
+        assert SlotsConfig().network_mode == ""
+
+    def test_slots_network_mode_accepts_host(self) -> None:
+        assert SlotsConfig(network_mode="host").network_mode == "host"
+
+    def test_slots_network_mode_rejects_unknown(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            SlotsConfig(network_mode="bridge")
+        assert "network_mode" in str(ei.value)
 
     def test_extra_allow_keeps_unknown_keys(self) -> None:
         c = Hal0Config.model_validate({"future_section": {"foo": 1}})

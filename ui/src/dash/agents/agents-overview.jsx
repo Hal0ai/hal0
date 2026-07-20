@@ -134,18 +134,22 @@ function _fmtK(n) {
   return String(Math.round(n));
 }
 
-// Resolve the LLM slot Hermes orchestrates (its throughput/ctx source). The
-// runtime names it `agent` (the GPU agent slot); fall back through the other
-// chat-capable names, then any LLM slot. There is no `primary`/`isDefault`
-// marker in the live topology, so name + type are the only honest signals.
+// Resolve the LLM slot Hermes orchestrates (its throughput/ctx source).
+// Prefer the real role discriminators — `group`/`type` (backend-classified,
+// see useSlots.ts inferSlotShape) plus `isDefault` — over the slot's
+// display NAME, which is operator-renamable (useSlotRename) and therefore
+// not a stable marker of "this is the chat slot". Name literals are kept
+// only as a last-resort fallback for responses so sparse even group/type
+// inference couldn't run.
 function _primarySlot(slots) {
   if (!Array.isArray(slots)) return null;
   return (
+    slots.find((s) => s.isDefault && (s.group === "chat" || s.type === "llm")) ||
+    slots.find((s) => s.group === "chat" && s.type === "llm") ||
+    slots.find((s) => s.type === "llm") ||
     slots.find((s) => s.name === "primary") ||
     slots.find((s) => s.name === "agent") ||
     slots.find((s) => s.name === "chat") ||
-    slots.find((s) => s.isDefault) ||
-    slots.find((s) => s.type === "llm") ||
     null
   );
 }

@@ -323,12 +323,18 @@ export function slotCtrlPhase(slot) {
 export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) {
   const dot = dotCls(ind)
   const ph = phase || slotCtrlPhase(s)
+  // A live-ish card whose /api/slots enrichment hasn't landed yet (bare
+  // /api/status union entry) — pulse the metrics area so the values reading
+  // as "—" are legible as loading, not as a real zero. `_enriched === false`
+  // is only ever set by reconcileEnrichment; undefined (e.g. NPU/stack cards
+  // that never union with /api/status) never trips this.
+  const pending = s._enriched === false && ph !== 'off'
   const memGb = typeof s.mem_mb === 'number' && s.mem_mb > 0 ? round1(s.mem_mb / 1024) : null
   const tps = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
   const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
   return (
     <div
-      className={'scard ' + dot + (ph === 'off' ? ' dim' : '')}
+      className={'scard ' + dot + (ph === 'off' ? ' dim' : '') + (pending ? ' pending' : '')}
       data-testid={`infer-slot-${s.name}`}
     >
       <div className="scard-h">
@@ -368,9 +374,18 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
   )
 }
 
-function SlotCards({ rows, full, models, busyName, handlers }) {
-  if (!rows.length)
+function SlotCards({ rows, full, models, busyName, handlers, loading }) {
+  if (!rows.length) {
+    if (loading)
+      return (
+        <div className={'scards ' + (full ? 'full' : 'compact')}>
+          {[0, 1].map((i) => (
+            <div key={i} className="slot-skeleton" />
+          ))}
+        </div>
+      )
     return <div className="scards-empty">no inference slots — create one to start</div>
+  }
   return (
     <div className={'scards ' + (full ? 'full' : 'compact')}>
       {rows.map(({ s, ind }) => {
@@ -481,6 +496,10 @@ export function InferencePane() {
   // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
   // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
+  // Cold start: no cached data yet. Render neutral skeletons instead of the
+  // "no inference slots — create one" empty state, which would otherwise flash
+  // in for one poll before the first payload lands and get replaced.
+  const loading = slotsQuery.isLoading && !slotsQuery.data
   const nonImg = allSlots.filter((s) => String(s?.type) !== 'image')
   const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
   const npuN = nonImg.length - slots.length
@@ -591,6 +610,7 @@ export function InferencePane() {
               <SlotCards
                 rows={headlineRows}
                 full
+                loading={loading}
                 models={modelsQuery.data}
                 busyName={busyName}
                 handlers={handlers}

@@ -73,8 +73,19 @@ import './dash/dashboard.jsx'
 import './dash/dashboard-redesign.jsx'
 import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
+// D2 (post-R3 surface rework): slot surfaces decomposed out of the
+// slot-modals.jsx god-module. Each publishes its window global; they load after
+// slot-modals.jsx so window.CreateSlotModal points at the simplified create flow
+// and EditSlotDrawer can render the extracted rename/delete dialogs.
+import './dash/slots/CreateSlotModal.jsx'
+import './dash/slots/RenameSlotDialog.jsx'
+import './dash/slots/DeleteSlotDialog.jsx'
 import './dash/models.jsx'
 import './dash/model-modals.jsx'
+// D1 (post-R3 surface rework): the model editor drawer — "the model is the
+// launchable thing". Publishes window.ModelDrawer, which models.jsx renders in
+// place of RecipeEditorModal. Loads after model-modals.jsx (reuses its hooks).
+import './dash/model-drawer.jsx'
 // Connections surface: local OpenAI endpoints + folded-in MCP servers
 // (connections-overhaul). The old standalone MCP page is removed; #mcp aliases
 // to this view.

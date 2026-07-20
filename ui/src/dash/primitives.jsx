@@ -368,6 +368,21 @@ const BANNER_CATALOG = [
       { label: "View slots", primary: true, onClick: () => window.location.hash = "#slots" },
     ],
   },
+  {
+    // D5 (post-R3 surface rework): flag-migration refusal. The live surface is
+    // <MigrationBanner> (reads useMigrationReport); this catalog entry is the
+    // Tweaks-panel demo toggle, and its Resolve fires the window event
+    // <MigrationResolveHost> listens for to open the resolution view off the
+    // demo report. Carries the same HAL0 id as the doctor diagnosis.
+    id: "migration-unresolved", scope: "global", kind: "warn",
+    eyebrow: "Migration · needs resolution",
+    heading: "2 models need flag-migration resolution",
+    body: "Slots shared them with different launch overrides. They keep their old behavior until you resolve. (HAL0-0142)",
+    actions: [
+      { label: "Resolve", primary: true, onClick: () => window.dispatchEvent(new CustomEvent("hal0:migration-resolve")) },
+      { label: "Snooze" },
+    ],
+  },
   // Slots view
   {
     id: "npu-swap", scope: "slots", kind: "warn",

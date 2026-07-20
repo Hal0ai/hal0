@@ -121,6 +121,14 @@ _APPROVAL_PING_EVERY_S = 15.0
 # tool calls.
 _MAX_COMPLETION_TOKENS = 4096
 
+# Pre-flight context estimate: ~4 chars/token (the standard GPT-family rule of
+# thumb) plus a small per-message overhead for the role/formatting tokens the
+# chat template adds. Deliberately rough — it only gates the pre-flight check
+# (which fires BEFORE a guaranteed 400 exceed_context), so an approximate
+# ceiling beats an exact tokenizer round-trip on every turn.
+_CHARS_PER_TOKEN = 4
+_MSG_TOKEN_OVERHEAD = 4
+
 # The slot the steward drives. Points at the dedicated `brain` slot (the
 # hal0-brain profile's default model) — the resolver's generalized chain
 # (`hal0/<slot>` → (<slot>, agent)) falls back to the `agent` slot when no
@@ -221,6 +229,49 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
 #: LLM backend signature: an OpenAI chat-completion request body in, the
 #: parsed response dict out.
 LlmFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+# ── internal self-HTTP auth (O17) ───────────────────────────────────────────
+#
+# Every call the steward makes back to the box's OWN API (/v1 completion, the
+# platform self-API, the admin-MCP hops) must carry a bearer on an auth-enabled
+# box (the default on non-loopback binds) — otherwise `/v1` and `/api/*` reject
+# it with `auth.required` and the steward is dead out of the box. Precedence:
+# forward the CALLER's inbound Authorization when the request carries one; else
+# present the box service identity from `hal0.service_identity` (env → api.env,
+# the SAME seam the CLI uses). `prefer` picks the least-privilege tier for the
+# surface — "client" for the /v1 inference call, "admin" for the platform/admin
+# surfaces that include slot mutations and per-slot reads. Key values are never
+# logged or echoed.
+
+
+def _inbound_bearer(request: Request) -> str | None:
+    """The caller's bearer token (sans ``Bearer `` prefix), or ``None``."""
+    raw = request.headers.get("Authorization", "") or ""
+    return raw.removeprefix("Bearer ").strip() or None
+
+
+def _self_call_headers(request: Request, *, prefer: str) -> dict[str, str]:
+    """Authorization for one internal self-HTTP call (forward-caller, else service)."""
+    raw = request.headers.get("Authorization", "") or ""
+    if raw.strip():
+        return {"Authorization": raw}
+    from hal0.service_identity import service_auth_headers
+
+    return service_auth_headers(prefer=prefer)
+
+
+def _self_call_bearer(request: Request, *, prefer: str) -> str | None:
+    """Bearer token for an internal call that takes a bare token (admin dispatch).
+
+    Forwards the caller's inbound token when present; else the box service key.
+    """
+    inbound = _inbound_bearer(request)
+    if inbound is not None:
+        return inbound
+    from hal0.service_identity import service_key
+
+    return service_key(prefer=prefer)
 
 
 # ── tool definitions (1:1 with the audited board mutations) ─────────────────
@@ -439,10 +490,13 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "hardware_probe",
         # memory_* ride the profile's own namespace (private:hermes__hal0-brain)
         # via Hindsight, not the agent memory engine's MCP dispatcher
+        # (memory_recall added to the admin catalog in §4.3 — same
+        # exclusion rationale applies)
         "memory_add",
         "memory_search",
         "memory_list",
         "memory_delete",
+        "memory_recall",
     }
 )
 
@@ -549,7 +603,9 @@ async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]
     queue = getattr(request.app.state, "approval_queue", None)
     if queue is None:
         return {"error": f"{name}: admin tools unavailable (no approval queue)"}
-    bearer = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None
+    # O17: forward the caller's bearer; else fall back to the box admin
+    # identity so the admin-MCP self-hops authenticate on an auth-on box.
+    bearer = _self_call_bearer(request, prefer="admin")
     base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
     return await admin.dispatch(
         tool=name,
@@ -657,10 +713,15 @@ def _resolve_platform_tool(name: str, args: dict[str, Any]) -> tuple[str | None,
     return None, "", False
 
 
-async def _platform_request(http: httpx.AsyncClient, method: str, path: str) -> Any:
+async def _platform_request(
+    http: httpx.AsyncClient,
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+) -> Any:
     """One self-HTTP call, mapped to a tool-result the loop can step against."""
     try:
-        resp = await http.request(method, path)
+        resp = await http.request(method, path, headers=headers or None)
     except httpx.HTTPError as exc:
         return {"error": f"platform API unreachable: {exc}"}
     if resp.status_code >= 400:
@@ -688,9 +749,13 @@ async def _dispatch_platform_tool(
     if owns:
         base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
         http = httpx.AsyncClient(base_url=base.rstrip("/"), timeout=60.0)
+    # O17: the platform surface spans CLIENT reads (list_slots) AND ADMIN ops
+    # (get_slot, slot load/unload/restart) — present the admin identity so the
+    # whole surface authenticates; the caller's own bearer wins when inbound.
+    headers = _self_call_headers(request, prefer="admin")
     try:
         if not mutating:
-            return await _platform_request(http, method, path)
+            return await _platform_request(http, method, path, headers)
         async with record_action(
             request,
             category="platform",
@@ -698,7 +763,7 @@ async def _dispatch_platform_tool(
             target=args.get("name"),
             message=f"chat:{name}",
         ) as rec:
-            result = await _platform_request(http, method, path)
+            result = await _platform_request(http, method, path, headers)
             rec.after = result if isinstance(result, dict) else {"result": result}
             return result
     finally:
@@ -766,9 +831,10 @@ def _resolve_tool(
 def _brain_chat_config(request: Request) -> Any:
     """The ``[brain_chat]`` config off app.state, or defaults.
 
-    Falls back to a fresh ``BrainChatConfig()`` (enabled, not read-only, 8
-    rounds, 300 s) when app.state carries no ``hal0_config`` — so bare test
-    apps and older configs behave exactly as before.
+    Falls back to a fresh ``BrainChatConfig()`` (enabled, READ-ONLY, 8
+    rounds, 300 s) when app.state carries no ``hal0_config`` — a bare app
+    gets the shipped safe default; mutation harnesses opt in explicitly
+    with ``read_only=False`` (spec-kb23 §4b).
     """
     from hal0.config.schema import BrainChatConfig
 
@@ -907,13 +973,40 @@ def _resolve_llm(request: Request) -> LlmFn:
 
     base_url = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
     timeout_s = _brain_chat_config(request).completion_timeout_s
+    # O17: /v1/chat/completions is CLIENT-gated when auth is on (the default on
+    # non-loopback binds). Without a bearer the slot 401s `auth.required` and
+    # the steward is dead out of the box. Forward the caller's inbound bearer;
+    # else present the box service identity at the least-privilege CLIENT tier.
+    headers = _self_call_headers(request, prefer="client")
 
     async def _primary_completion(body: dict[str, Any]) -> dict[str, Any]:
+        tried_model = body.get("model")
+        if not isinstance(tried_model, str) or not tried_model:
+            # Nothing to dispatch to — short-circuit before the self-call so an
+            # empty resolution doesn't burn a network round trip just to fail.
+            return {"error": _unrouteable_model_error(tried_model or "(no model set)")}
         async with httpx.AsyncClient(timeout=timeout_s) as http:
             try:
-                resp = await http.post(f"{base_url.rstrip('/')}/v1/chat/completions", json=body)
+                resp = await http.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=body,
+                    headers=headers or None,
+                )
             except httpx.HTTPError as exc:
+                # Genuine transport failure (connection refused, DNS, timeout —
+                # the box's own /v1 never answered). Kept distinguishable from
+                # the unrouteable-model case below: this text always says
+                # "transport failure", the other never does.
                 return {"error": f"primary slot transport failure: {exc}"}
+            if resp.status_code == 404:
+                # Unrouteable: the resolver chain (hal0/<slot> -> agent) found
+                # no loaded slot to serve `tried_model`, so the self /v1 call
+                # 404s with dispatch.no_route — a CONFIGURATION gap, not a
+                # transport failure. Surface actionable guidance instead of
+                # the raw dispatch envelope (finding: docs/rework/
+                # r4-stage-validation.md "steward config note" — a fresh box
+                # with [brain_chat] model="" 404s with no path forward).
+                return {"error": _unrouteable_model_error(tried_model)}
         if not (200 <= resp.status_code < 300):
             return {"error": f"primary slot HTTP {resp.status_code}: {resp.text[:300]}"}
         try:
@@ -924,11 +1017,135 @@ def _resolve_llm(request: Request) -> LlmFn:
     return _primary_completion
 
 
+def _unrouteable_model_error(tried_model: str) -> str:
+    """Actionable text for a 404/no-slot dispatch failure (unrouteable model).
+
+    Replaces the raw ``dispatch.no_route`` transport envelope with guidance
+    an operator can act on directly: which model id the steward tried, and
+    the two ways to fix it (load a slot, or point the config at one that IS
+    loaded). See the fresh-box finding this closes: docs/rework/
+    r4-stage-validation.md "steward config note" — ``[brain_chat] model=""``
+    still drives the ``hal0/brain`` -> ``agent`` resolver chain (see
+    :mod:`hal0.normalize.resolver`), but when neither slot is loaded the
+    chat dead-ends with no indication of what to do.
+    """
+    return (
+        f"the hal0-brain chat could not route to a model — {tried_model!r} has no "
+        "loaded slot behind it. Fix: load a `brain` or `agent` inference slot "
+        "from the dashboard's Slots panel (either backs the steward via the "
+        "resolver's hal0/brain -> agent chain), or set [brain_chat] model in "
+        "hal0.toml to a slot that IS loaded. A slot serving the steward needs "
+        "at least 8k context — the hal0-brain system prompt alone is ~7.3k "
+        "tokens."
+    )
+
+
 # ── SSE framing helpers ─────────────────────────────────────────────────────
 
 
 def _sse(obj: dict[str, Any]) -> str:
     return f"data: {json.dumps(obj)}\n\n"
+
+
+# ── pre-flight context guard ─────────────────────────────────────────────────
+#
+# The steward's system prompt alone is ~7.3k tokens; a brain slot loaded at a
+# small context window (e.g. the on-box `chat@4096` incident, or a slot whose
+# ctx drifted below the config) 400s the completion with `exceed_context`
+# AFTER the round-trip has been paid for. Estimate the assembled prompt against
+# the resolved slot's context_length and emit the documented `error` frame with
+# an actionable fix instead of burning the round-trip.
+
+
+def _estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
+    """Rough token estimate for the assembled prompt (chars/4 + per-msg overhead)."""
+    total = 0
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, str):
+            total += len(content) // _CHARS_PER_TOKEN
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total += len(part["text"]) // _CHARS_PER_TOKEN
+        total += _MSG_TOKEN_OVERHEAD
+    return total
+
+
+async def _resolved_context_length(request: Request, model: Any) -> int | None:
+    """Context window of the slot ``model`` resolves to, or None when unknown.
+
+    Best-effort: reuses the same ``LiveSlotResolver`` inputs the /v1 path uses
+    (``hal0/<slot>`` → live slot). Returns None for a non-virtual model, an
+    unresolvable name, or any lookup failure — the pre-check then simply does
+    not fire (never blocks a valid chat).
+    """
+    if not isinstance(model, str) or not model:
+        return None
+    try:
+        from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
+        from hal0.normalize.resolver import LiveSlotResolver
+
+        views = await _normalize_slot_views(request)
+        resolver = LiveSlotResolver(
+            slot_views_provider=lambda: views,
+            loaded_models_provider=lambda: _normalize_loaded_models(request),
+        )
+        res = await resolver.resolve(model)
+    except Exception:
+        return None
+    if res is None or not res.context_length:
+        return None
+    return int(res.context_length)
+
+
+def _context_exceeded_error(prompt_tokens: int, context_length: int, model: Any) -> str:
+    """Actionable text for the pre-flight context-overflow guard."""
+    return (
+        f"the assembled prompt (~{prompt_tokens} tokens) exceeds the resolved slot's "
+        f"context window ({context_length} tokens) for {model!r} — the completion would "
+        "400 with exceed_context. Fix: raise [model].context_size on the backing slot and "
+        "reload it, or point [brain_chat] model at a slot with a larger context window."
+    )
+
+
+# ── outbound message framing (O18) ──────────────────────────────────────────
+#
+# Chat templates with a user-query guard (e.g. qwen3.5's `multi_step_tool`,
+# which 500s with "No user query found in messages") reject a completion
+# request that carries no user-role turn. Two shapes tripped this:
+#   1) a client POSTing the singular `{"message": "..."}` convenience field,
+#      which the old framing dropped — leaving a SYSTEM-ONLY turn; and
+#   2) any `messages` list that arrives without a user turn.
+# `_frame_messages` reconciles both into a template-safe first round: system
+# prompt first (seeded only when the client didn't send its own), the singular
+# `message` folded in as a trailing user turn, and a guaranteed user-role
+# entry. The tool loop only ever APPENDS assistant + `role: tool` messages
+# between rounds (see toolloop/engine.run_tool_loop), so this user turn
+# persists — no continuation round can regress to zero user-role entries, and
+# the trailing `role: tool` shape continuation rounds carry is what such
+# templates expect after a tool result.
+
+
+def _frame_messages(payload: dict[str, Any], system_prompt: str) -> list[dict[str, Any]]:
+    """Build the first-round messages list, guaranteed template-safe (O18)."""
+    messages: list[dict[str, Any]] = [
+        m for m in (payload.get("messages") or []) if isinstance(m, dict)
+    ]
+    # Accept the singular `message` field as a trailing user turn — the
+    # dashboard sends `messages`, but curl/tests/other clients POST
+    # {"message": "..."} and it must not be silently dropped.
+    singular = payload.get("message")
+    if isinstance(singular, str) and singular.strip():
+        messages.append({"role": "user", "content": singular})
+    # Seed the system prompt unless the client leads with its own.
+    if not messages or messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": system_prompt})
+    # Guarantee at least one user-role turn so the request never lands as a
+    # system-only (or assistant/tool-tail-only) turn that the template rejects.
+    if not any(m.get("role") == "user" for m in messages):
+        messages.append({"role": "user", "content": ""})
+    return messages
 
 
 def _surfaced_tool_names(request: Request) -> frozenset[str]:
@@ -961,11 +1178,9 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     llm = _resolve_llm(request)
     board = payload.get("board")
     system_prompt, default_model = _resolve_profile(request)
-    messages: list[dict[str, Any]] = list(payload.get("messages") or [])
-    # Seed the system prompt unless the client sent its own — the model needs
-    # the lane vocabulary and the read-before-write rule to act on the board.
-    if not messages or not (isinstance(messages[0], dict) and messages[0].get("role") == "system"):
-        messages.insert(0, {"role": "system", "content": system_prompt})
+    # Frame the messages template-safely (system seed + a guaranteed user turn,
+    # accepting the singular `message` field) — see _frame_messages / O18.
+    messages = _frame_messages(payload, system_prompt)
 
     tools = _surfaced_tool_schemas(request)
     # Model precedence: an explicit per-request model wins; then — because the
@@ -980,6 +1195,20 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
         "messages": messages,
         "max_tokens": int(payload.get("max_tokens") or _MAX_COMPLETION_TOKENS),
     }
+
+    # Pre-flight context guard: if the assembled prompt already exceeds the
+    # resolved slot's context window, the completion is a guaranteed 400
+    # exceed_context — surface the actionable error frame instead of burning
+    # the round-trip (the steward system prompt alone is ~7.3k tokens).
+    ctx_len = await _resolved_context_length(request, model)
+    if ctx_len:
+        prompt_tokens = _estimate_prompt_tokens(messages)
+        if prompt_tokens > ctx_len:
+            yield _sse(
+                {"type": "error", "message": _context_exceeded_error(prompt_tokens, ctx_len, model)}
+            )
+            yield _sse({"type": "done"})
+            return
 
     dispatch_fn = functools.partial(_dispatch_round, request, client, board)
     try:
@@ -1137,6 +1366,7 @@ __all__ = [
     "_dispatch_platform_tool",
     "_dispatch_tool",
     "_extract_tool_calls",
+    "_frame_messages",
     "_is_read_tool",
     "_parse_text_tool_calls",
     "_resolve_platform_tool",
@@ -1145,6 +1375,7 @@ __all__ = [
     "_split_thinking",
     "_surfaced_tool_schemas",
     "_tool_schemas",
+    "_unrouteable_model_error",
     "run_board_chat",
     "run_brain_chat",
 ]

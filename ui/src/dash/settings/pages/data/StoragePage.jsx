@@ -13,14 +13,11 @@
 // propagation / migration plumbing.
 import { useState, useEffect } from 'react'
 import {
-  useSettings,
-  useSettingsUpdate,
-  useSettingsReload,
   useModelStore,
   useModelStoreSet,
   useModelStoreMigrate,
-  useApplyPlan,
 } from '@/api/hooks/useSettings'
+import { useSettingsClient } from '../../data/settingsClient.js'
 import { ConfirmDialog } from '../../../primitives.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
@@ -34,14 +31,12 @@ function _fmtBytes(n) {
 }
 
 export function StoragePage() {
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const reload = useSettingsReload();
+  // R5 data seam: one typed client for settings/update/reload/registry; the
+  // model-store migrate hooks stay dedicated (separate typed surface).
+  const { settings, update, reload, registry } = useSettingsClient();
   const storeQuery = useModelStore();
   const storeSet = useModelStoreSet();
   const storeMigrate = useModelStoreMigrate();
-  const applyPlanQuery = useApplyPlan();
-  const registry = applyPlanQuery.data?.registry || {};
   const liveModels = settings.data?.models;
   const storeState = storeQuery.data;
 

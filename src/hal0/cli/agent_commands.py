@@ -39,7 +39,7 @@ approvals_app = typer.Typer(help="Manage agent approval requests (gated destruct
 app.add_typer(approvals_app, name="approvals")
 
 # Bootstrap sub-sub-app — ``hal0 agent bootstrap hermes`` runs the
-# Hermes provisioning state machine (v0.3 Phase 10 stream).
+# Hermes provisioning (linear convergent install_hermes since inc-2).
 bootstrap_app = typer.Typer(help="Run bundled-agent bootstrap pipelines (Phase 10).")
 app.add_typer(bootstrap_app, name="bootstrap")
 
@@ -78,13 +78,17 @@ def agent_install(
             "without the messaging bridge."
         ),
     ),
-    adopt: bool = typer.Option(
+    reset_personas: bool = typer.Option(
         False,
-        "--adopt",
+        "--reset-personas",
         help=(
-            "Hermes only: capture an existing (foreign) install — back up "
-            "$HERMES_HOME, import its .env tokens, then claim it. Without this, "
-            "a foreign home or a live foreign gateway aborts provisioning."
+            "Hermes only: force-overwrite the default personas (hermes, "
+            "hal0-brain) and the active.txt pointer back to canonical, even "
+            "over operator edits. Without this flag, personas are only ever "
+            "seeded idempotently (missing defaults added, existing files "
+            "untouched) — this is the explicit, opt-in reset that "
+            "--repair used to do implicitly before RELOCATE(brain-lane) "
+            "moved persona seeding out of the install pipeline."
         ),
     ),
 ) -> None:
@@ -103,7 +107,7 @@ def agent_install(
     #1102 / decision Q9.
     """
     if name == "hermes":
-        _install_hermes(switch=switch, gateway=gateway, adopt=adopt)
+        _install_hermes(switch=switch, gateway=gateway, reset_personas=reset_personas)
         return
 
     url = _api_base()
@@ -124,15 +128,15 @@ def agent_install(
     )
 
 
-def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) -> None:
+def _install_hermes(*, switch: bool, gateway: bool = True, reset_personas: bool = False) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
-    Five steps, all local + foreground:
+    Six steps, all local + foreground:
 
     0. **Single-pick** — :func:`_enforce_hermes_single_pick` refuses (or,
        with ``--switch``, uninstalls) a different incumbent bundled agent
        BEFORE any provisioning side effect — see its docstring for why this
-       can't wait for the daemon call in step 3.
+       can't wait for the daemon call in step 4.
     1. **Toolchain** — ``installer/agents/hermes-prereqs.sh`` ensures
        python3 (>=3.11), python3-venv (the clean-Ubuntu trap), python3-pip
        and pipx via the distro helper. Idempotent.
@@ -140,10 +144,15 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
        pip-installs hermes-agent into it, installs the
        ``/usr/local/bin/hermes`` shim, and writes the manager seed
        (registers the agent).
-    3. **Switch** — best-effort daemon call so ``--switch`` still does the
+    3. **Reset personas** — (``reset_personas=True``, opt-in) force-overwrite
+       the default personas + ``active.txt`` pointer to canonical via
+       :func:`_reset_hermes_personas`. Skipped by default: personas are
+       otherwise only ever idempotently seeded (by the hal0-api boot
+       lifespan's ``_boot_seeds`` phase), never overwritten.
+    4. **Switch** — best-effort daemon call so ``--switch`` still does the
        atomic single-pick swap; provisioning already registered hermes, so
        a daemon hiccup here doesn't un-provision it.
-    4. **Gateway** — (``gateway=True``, the default) install + enable the
+    5. **Gateway** — (``gateway=True``, the default) install + enable the
        Telegram/Discord gateway, the same wiring installer/install.sh runs
        inline at install time. This is what makes the DEFERRED path (run
        manually after ``HAL0_SKIP_HERMES=1``) lossless vs. install-time
@@ -189,7 +198,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
     # §7.4: when invoked as root this drops to the hal0 user so every HERMES_HOME
     # write is born hal0:hal0 (root-only prelude + re-exec). Non-root runs the
     # pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes(adopt=adopt)
+    rc = _provision_hermes()
     if rc != 0:
         die(
             "Hermes provisioning failed — inspect `hal0 agent status hermes` / `hal0 agent log hermes`."
@@ -198,6 +207,13 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
 
     # §7.4 F.7: no chown-back — provisioning drops to hal0 (see _provision_hermes)
     # so the trees are born hal0:hal0.
+
+    # Explicit, opt-in canonical reset — see _reset_hermes_personas docstring.
+    # Runs AFTER provisioning (HERMES_HOME + the personas dir now exist) and
+    # BEFORE the register/gateway steps so a fresh install with --reset-personas
+    # and a repeat install both converge on the same canonical persona state.
+    if reset_personas:
+        _reset_hermes_personas()
 
     # Register + honour --switch via the daemon (venv now present → gate passes).
     url = _api_base()
@@ -225,6 +241,43 @@ def _install_hermes(*, switch: bool, gateway: bool = True, adopt: bool = False) 
             border_style="green",
         )
     )
+
+
+def _reset_hermes_personas() -> None:
+    """Force-overwrite the default personas + ``active.txt`` pointer to canonical.
+
+    ``--reset-personas`` is the explicit, opt-in replacement for the
+    force-reset ``hal0 agent install hermes --repair`` used to do implicitly
+    before RELOCATE(brain-lane) moved persona seeding out of
+    ``hermes_provision._INSTALL_STEPS`` and into the hal0-api boot lifespan's
+    ``_boot_seeds`` phase (which seeds idempotently — ``overwrite=False`` —
+    and never resets an operator's edits). That overwrite behaviour still
+    exists: :func:`hal0.agents.hermes_provision._phase_persona_seed` (kept
+    importable specifically for this — see its module comment) sets
+    ``overwrite = ctx.repair``, so constructing a ``_StepCtx`` with
+    ``repair=True`` and calling it directly re-triggers the exact same
+    overwrite path with no persona-writing logic duplicated here.
+
+    Resolves ``$HERMES_HOME`` the same way the boot lifespan's ``_boot_seeds``
+    does (``paths.var_lib() / ".hermes"``) so an install-time reset and the
+    next boot-time idempotent seed agree on one persona root — including
+    under ``HAL0_HOME``-scoped dev/test installs.
+    """
+    from hal0.agents.hermes_provision import (
+        BootstrapState,
+        InstallIO,
+        _phase_persona_seed,
+        _StepCtx,
+    )
+    from hal0.config import paths as _hal0_paths
+
+    console.print("[bold]--reset-personas[/bold]: overwriting default personas to canonical…")
+    hermes_home = _hal0_paths.var_lib() / ".hermes"
+    state = BootstrapState(hermes_home=str(hermes_home))
+    ctx = _StepCtx(state=state, io=InstallIO(), repair=True)
+    result = _phase_persona_seed(ctx)
+    seeded = result.details.get("seeded") or []
+    console.print(f"[dim]personas reset to canonical: {', '.join(seeded) or '(none)'}[/dim]")
 
 
 def _bundled_agent_manager() -> Any:
@@ -385,7 +438,7 @@ def _hermes_root_prelude() -> None:
             console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
-def _run_as_hal0(argv: list[str]) -> int:
+def _run_as_hal0(argv: list[str], *, stdin: int | None = None) -> int:
     """Run ``argv`` as the hal0 service user, returning its exit code.
 
     Sanitizes the env (strips ``HERMES_HOME``, sets ``HOME`` to hal0's home) and
@@ -394,6 +447,10 @@ def _run_as_hal0(argv: list[str]) -> int:
     All three tools wrap the command in the same ``env_argv`` so HOME/HERMES_HOME
     are set identically regardless of which tool is available. The caller
     guarantees ``euid == 0``.
+
+    ``stdin`` is forwarded to ``subprocess.run`` (e.g. ``subprocess.DEVNULL`` for
+    a caller like ``hermes gateway install`` that prompts interactively with no
+    bypass flag — a real TTY would block, and a closed fd 0 crashes it).
     """
     import pwd as _pwd
     import shutil as _shutil
@@ -421,13 +478,12 @@ def _run_as_hal0(argv: list[str]) -> int:
         # env_argv already sets HOME explicitly, so no -H needed (and HOME is
         # consistent with the runuser/setpriv paths).
         cmd = ["sudo", "-u", _AGENT_RUNTIME_USER, "--", *env_argv]
-    return _subprocess.run(cmd, check=False).returncode  # nosec B603 — fixed argv
+    return _subprocess.run(cmd, stdin=stdin, check=False).returncode  # nosec B603 — fixed argv
 
 
 def _provision_hermes(
     *,
     repair: bool = False,
-    adopt: bool = False,
     dry_run: bool = False,
     skip_phases: tuple[str, ...] = (),
     offline: bool = False,
@@ -447,7 +503,6 @@ def _provision_hermes(
     if _os.geteuid() != 0:
         return bootstrap_cli(
             repair=repair,
-            adopt=adopt,
             dry_run=dry_run,
             skip_phases=tuple(skip_phases),
             verbose=verbose,
@@ -458,8 +513,6 @@ def _provision_hermes(
     argv = [hal0_bin, "agent", "bootstrap", "hermes"]
     if repair:
         argv.append("--repair")
-    if adopt:
-        argv.append("--adopt")
     if dry_run:
         argv.append("--dry-run")
     for phase in skip_phases:
@@ -559,17 +612,32 @@ def _install_hermes_gateway() -> None:
 
     # HERMES_HOME is unset so the generator bakes the hal0 default
     # (~/.hermes) rather than a value inherited from the invoking shell.
-    env = dict(_os.environ)
-    env.pop("HERMES_HOME", None)
+    #
+    # m1 fix: "the hal0 default (~/.hermes)" is only actually hal0's home
+    # when THIS process is already running as hal0. `hal0 agent install
+    # hermes` (and installer/install.sh's equivalent inline block) run as
+    # root, so unqualified `~` resolved to /root — writing a stray
+    # root-owned /root/.hermes (the exact "split-brain" ownership drift
+    # `hal0 doctor perms` flags via check_hermes_ownership's stray_home
+    # check, and installer/lib/run-as-hal0.sh's own docstring calls out
+    # by name as the "root-clobber regression" #843). Drop to hal0 first,
+    # same seam `_provision_hermes` already uses, so this subprocess never
+    # runs as root in the first place.
+    gateway_argv = [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"]
     # `hermes gateway install` prompts interactively with no bypass flag;
     # stdin=DEVNULL gives a clean EOF so it falls back to its built-in
     # defaults (install + enable on boot + start now) instead of blocking.
-    rc = _subprocess.run(  # nosec B603 — fixed argv, known path
-        [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"],
-        stdin=_subprocess.DEVNULL,
-        env=env,
-        check=False,
-    ).returncode
+    if _os.geteuid() == 0:
+        rc = _run_as_hal0(gateway_argv, stdin=_subprocess.DEVNULL)
+    else:
+        env = dict(_os.environ)
+        env.pop("HERMES_HOME", None)
+        rc = _subprocess.run(  # nosec B603 — fixed argv, known path
+            gateway_argv,
+            stdin=_subprocess.DEVNULL,
+            env=env,
+            check=False,
+        ).returncode
     if rc != 0:
         console.print(
             "[yellow]hermes gateway install failed — Telegram/Discord bridge "
@@ -1119,36 +1187,17 @@ def agent_peers() -> None:
     console.print(table)
 
 
-@bootstrap_app.command(
-    "hermes",
-    epilog=(
-        "CAPTURE: a populated $HERMES_HOME that hal0 didn't create, or a live "
-        "foreign hermes-gateway (e.g. a `systemctl --user` unit), aborts the run. "
-        "Pass --adopt to capture it safely: hal0 backs up the tree to "
-        "<home>.pre-hal0-<UTC>, imports its .env tokens into the vault, then "
-        "claims it. Operator config overrides deep-merge from "
-        "/etc/hal0/agents/hermes/overrides.yaml (applied last)."
-    ),
-)
+@bootstrap_app.command("hermes")
 def bootstrap_hermes(
     repair: bool = typer.Option(
         False,
         "--repair",
-        help="Re-run every phase regardless of checkpoint state (forces full rerun).",
-    ),
-    adopt: bool = typer.Option(
-        False,
-        "--adopt",
-        help=(
-            "Capture an existing (foreign) hermes install: back up $HERMES_HOME, "
-            "import its .env tokens into the vault, then claim it. Without this, a "
-            "foreign home or a live foreign gateway aborts the run."
-        ),
+        help="Force every step to re-run its writes (root: also reconciles ownership).",
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Run phases but don't persist provision.json.",
+        help="Run the pass but don't persist the provision.json report.",
     ),
     skip_phase: list[str] = typer.Option(
         [],
@@ -1162,7 +1211,7 @@ def bootstrap_hermes(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
 ) -> None:
-    """Run the Hermes-Agent bootstrap state machine."""
+    """Run the Hermes-Agent install — one linear convergent pass."""
     # Late import keeps the CLI startup snappy on hosts where the
     # hermes_provision module's downstream slices grow heavier deps.
     import os as _os
@@ -1173,7 +1222,6 @@ def bootstrap_hermes(
     # as hal0), else runs the pipeline in-process. See _provision_hermes.
     rc = _provision_hermes(
         repair=repair,
-        adopt=adopt,
         dry_run=dry_run,
         skip_phases=tuple(skip_phase),
         offline=offline,
@@ -1185,19 +1233,50 @@ def bootstrap_hermes(
 # ── Bootstrap status / log / upgrade / uninstall (Phase 10, #246) ───────────
 
 
+def _agent_provision_state_file(name: str) -> Any:
+    """Path to ``<name>``'s ``provision.json`` snapshot.
+
+    Factored out as a seam (mirrors :func:`_bundled_agent_manager` above)
+    so tests can monkeypatch ``ac._agent_provision_state_file`` to point
+    at a tmp_path fixture instead of the real root-owned
+    ``/var/lib/hal0`` tree.
+    """
+    from pathlib import Path
+
+    return Path(f"/var/lib/hal0/state/agents/{name}/provision.json")
+
+
 @app.command("status")
 def agent_status(
     name: str = typer.Argument("hermes", help="Bundled agent name (default: hermes)."),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw provision.json snapshot as JSON for CI/pipe use (no Rich table).",
+    ),
 ) -> None:
-    """Pretty-print the agent's provision.json checkpoint."""
+    """Pretty-print the agent's last provision report (provision.json snapshot)."""
     import json as _json
-    from pathlib import Path
 
-    state_file = Path(f"/var/lib/hal0/state/agents/{name}/provision.json")
+    state_file = _agent_provision_state_file(name)
     if not state_file.exists():
+        if json_out:
+            # Mirror the "not yet bootstrapped" case as valid, parseable
+            # JSON instead of leaving stdout empty. Before this fix
+            # `--json` wasn't a recognized option at all, so Typer/Click
+            # raised a UsageError to stderr and stdout stayed empty
+            # (the exact symptom from live install-validation m4).
+            typer.echo(_json.dumps({"name": name, "provisioned": False, "phases": {}}, indent=2))
+            raise typer.Exit(0)
         console.print(f"[dim]{name}: no provision.json yet (run bootstrap first).[/dim]")
         raise typer.Exit(0)
     data = _json.loads(state_file.read_text())
+    if json_out:
+        # Same data the table below renders, just machine-readable — no
+        # separate source of truth to drift out of sync with the table.
+        payload = {"name": name, "provisioned": True, **data}
+        typer.echo(_json.dumps(payload, indent=2))
+        return
     table = Table(title=f"{name} bootstrap status")
     table.add_column("Phase", style="bold")
     table.add_column("Status")
@@ -1271,10 +1350,12 @@ def agent_upgrade(
     raise typer.Exit(rc)
 
 
-# Note: there is no `rotate-token` subcommand. The hal0
-# daemon has no auth; agent identity flows via the X-hal0-Agent header
-# the wrapper exports from $HAL0_AGENT_ID. See #246 sharpening's second
-# correction comment for the supersede.
+# Note: there is no per-agent `rotate-token` subcommand here — agent
+# identity flows via the X-hal0-Agent header the wrapper exports from
+# $HAL0_AGENT_ID (see #246 sharpening's second correction comment), which
+# is orthogonal to the box-level bearer credential. The daemon DOES have
+# auth (KB-1/§1, opt-in via [security].require_auth): rotate the admin or
+# client box key with `hal0 auth rotate <admin|client>`.
 
 
 # ── Reprovision (PR-3, v0.3) ────────────────────────────────────────────────
@@ -1297,13 +1378,13 @@ def agent_reprovision(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Re-run the bootstrap state machine idempotently.
+    """Re-run the convergent install idempotently.
 
     Wrapper over ``hal0 agent bootstrap hermes`` that's name-stable
     across v0.4 agents (only flag the difference: this is the
-    "re-converge" verb, not the "first install" verb). Phases that
-    already produced their on-disk artefacts are skipped; phases whose
-    inputs drifted re-run.
+    "re-converge" verb, not the "first install" verb). Steps whose
+    on-disk artefacts already match are skipped; steps whose inputs
+    drifted re-run.
     """
     if name != "hermes":
         die(f"reprovision currently only supports `hermes`; got {name!r}.")

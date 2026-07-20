@@ -40,7 +40,7 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -50,11 +50,6 @@ from hal0.security.exposure import AuthClass, classify
 log = structlog.get_logger(__name__)
 
 Tier = Literal["anon", "client", "admin"]
-
-# Mirrors config/network.py's private _LOOPBACK_BIND_HOSTS. Duplicated
-# rather than imported because network.py doesn't export it and this
-# module may not add new exports to a file outside its owned set.
-_LOOPBACK_BIND_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -133,13 +128,21 @@ def _tier_for_key(candidate: str) -> Tier | None:
 def require_auth_enabled() -> bool:
     """The rollout posture: should the enforcement middleware do anything?
 
-    ``HAL0_REQUIRE_AUTH`` (``1``/``true``/``yes``/``on`` or
-    ``0``/``false``/``no``/``off``) is an explicit override. Unset derives
-    the default: enforce when the API is bound somewhere other than
-    loopback, OR when an operator has configured either key. Loopback +
-    no keys configured is dev-open -- this is what keeps the existing
-    TestClient suite (which runs on neither) green without every one of
-    ~700 tests needing to know auth exists.
+    Precedence (highest first):
+
+    1. ``HAL0_REQUIRE_AUTH`` env var (``1``/``true``/``yes``/``on`` or
+       ``0``/``false``/``no``/``off``) — an explicit runtime override.
+    2. The persisted ``[security].require_auth`` config toggle the
+       dashboard Security page writes (``PUT /api/auth/require``).
+    3. **OFF** — the shipped default (operator decision 2026-07-19): hal0
+       runs trusted-LAN-open unless auth is explicitly enabled.
+
+    This inverts KB-1's original derived default (auto-enable on a
+    non-loopback bind OR when a key was configured). That auto-on locked
+    operators out of a dashboard that shipped no login UI (finding O19),
+    so they disabled auth wholesale to use the product — the posture
+    defeated itself. Auth is now explicit-enable only; the enforcement
+    machinery, keys, and login flow are all unchanged once it IS enabled.
     """
     raw = os.environ.get("HAL0_REQUIRE_AUTH", "").strip().lower()
     if raw in _TRUE_VALUES:
@@ -147,11 +150,50 @@ def require_auth_enabled() -> bool:
     if raw in _FALSE_VALUES:
         return False
 
-    from hal0.config import network
+    persisted = _config_require_auth()
+    if persisted is not None:
+        return persisted
 
-    if network.bind_host() not in _LOOPBACK_BIND_HOSTS:
-        return True
-    return has_admin_key() or _client_key() is not None
+    return False
+
+
+# Cheap live read of the persisted ``[security].require_auth`` toggle for
+# the per-request enforcement hot path. Cached on ``(path, mtime)`` so the
+# common configured-box case doesn't re-parse hal0.toml on every request,
+# yet a Security-page toggle (which rewrites the file, bumping its mtime)
+# is picked up on the very next request — no restart, no reload call.
+_require_auth_cache: tuple[str, float, bool | None] | None = None
+
+
+def _config_require_auth() -> bool | None:
+    """Return the persisted ``[security].require_auth`` value, or ``None``.
+
+    ``None`` means *unset* (no config file, no ``[security]`` table, or a
+    malformed config) — the caller then applies the OFF default. This is
+    best-effort by design: a broken hal0.toml must never make the auth
+    gate raise on the request path.
+    """
+    global _require_auth_cache
+    try:
+        from hal0.config import paths
+
+        target = str(paths.hal0_toml())
+        try:
+            mtime = os.stat(target).st_mtime
+        except OSError:
+            return None  # no config file on disk → unset
+
+        cached = _require_auth_cache
+        if cached is not None and cached[0] == target and cached[1] == mtime:
+            return cached[2]
+
+        from hal0.config.loader import load_hal0_config
+
+        value = load_hal0_config().security.require_auth
+        _require_auth_cache = (target, mtime, value)
+        return value
+    except Exception:  # pragma: no cover - defensive; never fail the gate
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +274,55 @@ def resolve_principal_from_scope(scope: Any) -> AuthPrincipal:
 
 
 # ---------------------------------------------------------------------------
+# Origin defence-in-depth (CSRF / drive-by-WS belt-and-suspenders)
+
+# Methods that can change server state. Safe methods (GET/HEAD/OPTIONS) are
+# exempt: they carry no side effect, and OPTIONS is the CORS preflight.
+_STATE_CHANGING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _origin_allowed(scope: dict[str, Any]) -> bool:
+    """Belt-and-suspenders Origin check for browser-driven requests.
+
+    This runs *alongside* the tier auth above, not instead of it. The threat
+    it closes is the browser-only one: a malicious page in the operator's own
+    browser driving a state-changing request or opening a WebSocket against
+    hal0 using the operator's ambient session cookie (classic CSRF / drive-by
+    WS). Token-bearing programmatic callers (curl, the OpenAI SDK) are NOT the
+    target — they have to steal a key first, and a stolen key works from
+    anywhere regardless of Origin.
+
+    Policy:
+
+    * No ``Origin`` header  -> allow. Only browsers set ``Origin`` on
+      cross-origin/WS requests; its absence means a same-origin navigation or
+      a non-browser client, neither of which is a cross-site vector.
+    * ``Origin`` in the shared allowlist (``HAL0_ALLOWED_ORIGINS`` /
+      :func:`hal0.api.agents._auth.allowed_origins`) -> allow. One allowlist
+      for both this gate and the chat-proxy WS gate.
+    * ``Origin`` whose scheme://host[:port] equals the request ``Host``
+      -> allow (genuine same-origin: the dashboard served from the very host
+      it is calling, regardless of which LAN name/IP that is).
+    * otherwise -> deny.
+    """
+    headers = _headers_from_scope(scope)
+    origin = headers.get("origin", "")
+    if not origin:
+        return True
+
+    from hal0.api.agents._auth import allowed_origins
+
+    if origin in allowed_origins():
+        return True
+
+    # Same-origin: compare the Origin's netloc against the Host header. The
+    # browser always sends both; equality means the request targets its own
+    # origin, which no cross-site attacker page can forge.
+    host = headers.get("host", "")
+    return bool(host) and urlsplit(origin).netloc == host
+
+
+# ---------------------------------------------------------------------------
 # Enforcement decision
 
 
@@ -309,6 +400,34 @@ class AuthEnforcementMiddleware:
         # is no scope["method"] for a websocket scope, so classify() gets
         # the same pseudo-method the exposure-CI test uses.
         method = scope.get("method", "GET") if scope_type == "http" else "GET"
+
+        # Origin defence-in-depth: reject browser cross-site WebSocket
+        # upgrades and state-changing requests BEFORE tier auth. Requests
+        # with no Origin (SDKs/curl/same-origin) pass through untouched --
+        # see _origin_allowed for the full policy.
+        origin_gated = scope_type == "websocket" or method in _STATE_CHANGING_METHODS
+        if origin_gated and not _origin_allowed(scope):
+            log.info(
+                "hal0.auth.origin_rejected",
+                path=path,
+                method=method,
+                scope_type=scope_type,
+            )
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 4403})
+                return
+            payload = json.dumps(_envelope("auth.origin_forbidden", "origin not allowed")).encode(
+                "utf-8"
+            )
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": payload})
+            return
 
         auth_class = classify(method, path)
         principal = resolve_principal(scope)

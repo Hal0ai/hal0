@@ -168,9 +168,9 @@ class ReaperHost(Protocol):
     patches the *manager instance* — keeps working unchanged.
     """
 
-    _last_used: dict[str, float]
-    _states: dict[str, SlotStateRecord]
-    _serving_count: dict[str, int]
+    _last_used: dict[int, float]
+    _states: dict[int, SlotStateRecord]
+    _serving_count: dict[int, int]
     _idle_after_s: float
     _evict_after_s: float
     _evict_pressure_mb: float
@@ -179,6 +179,8 @@ class ReaperHost(Protocol):
 
     def _current_state(self, name: str) -> SlotState: ...
     def _resolve_alias(self, name: str) -> str: ...
+    def _key(self, name: str) -> int: ...
+    def _name_for_key(self, key: int) -> str: ...
     def _probe_host_free_mb(self) -> float: ...
     def _probe_host_total_mb(self) -> float: ...
     async def _load_slot_config(self, name: str) -> dict[str, Any]: ...
@@ -297,9 +299,17 @@ class SlotReaper:
         serving-count guards still apply on top.
         """
         host = self._host
-        candidates = dict(host._last_used)
-        for name, rec in list(host._states.items()):
-            if name in candidates:
+        # ``_last_used`` / ``_states`` are id-keyed (rework §11.1); resolve each
+        # handle back to its display name at this boundary so the rest of the
+        # reaper (config load, unload, pin check, logging) stays name-based.
+        candidates: dict[str, float] = {}
+        for key, ts in host._last_used.items():
+            name = host._name_for_key(key)
+            if name:
+                candidates[name] = ts
+        for key, rec in list(host._states.items()):
+            name = host._name_for_key(key)
+            if not name or name in candidates:
                 continue
             if rec.state not in (SlotState.READY, SlotState.IDLE):
                 continue
@@ -327,7 +337,7 @@ class SlotReaper:
         now = time.time()
         for slot_name, ts in self.sweep_candidates().items():
             idle_for = now - ts
-            if host._serving_count.get(slot_name, 0) > 0:
+            if host._serving_count.get(host._key(slot_name), 0) > 0:
                 continue
             state = host._current_state(slot_name)
             if state not in (SlotState.READY, SlotState.IDLE):
@@ -404,7 +414,7 @@ class SlotReaper:
         # transition, so pressure eviction can also reclaim those.
         candidates: list[tuple[float, str]] = []
         for slot_name, ts in self.sweep_candidates().items():
-            if host._serving_count.get(slot_name, 0) > 0:
+            if host._serving_count.get(host._key(slot_name), 0) > 0:
                 continue
             canonical = host._resolve_alias(slot_name)
             state = host._current_state(slot_name)
@@ -427,7 +437,7 @@ class SlotReaper:
             # Re-check serving guard and state — may have changed since
             # the list was built (another coroutine may have started a
             # request or the TTL sweep may have evicted it already).
-            if host._serving_count.get(slot_name, 0) > 0:
+            if host._serving_count.get(host._key(slot_name), 0) > 0:
                 continue
             state = host._current_state(slot_name)
             if state not in (SlotState.READY, SlotState.IDLE):

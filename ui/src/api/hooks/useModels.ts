@@ -28,6 +28,8 @@ export interface Model {
   ns: 'blessed' | 'pulled' | string
   installed: boolean
   runtime: string
+  /** True when this model is its dispatcher type's default (per-type marker). */
+  default?: boolean
 }
 
 const MODELS_POLL_MS = 30_000
@@ -191,6 +193,60 @@ export function useModelUpdate() {
   return useMutation<Model, Hal0Error, { id: string; body: Record<string, unknown> }>({
     mutationFn: ({ id, body }) =>
       apiPut<Model>(ENDPOINTS.model(id), body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+  })
+}
+
+export interface ModelDefaultResult {
+  model_id: string
+  type: string
+  default: boolean
+  demoted: string[]
+  changed: boolean
+}
+
+export function useModelSetDefault() {
+  // POST /api/models/{id}/default — promote (default:true, demoting the current
+  // holder of this type) or clear (default:false) a model's per-type default.
+  // The server enforces the single-holder invariant; we just invalidate the
+  // catalog so every row's badge reflects the new holder on the next render.
+  const qc = useQueryClient()
+  return useMutation<ModelDefaultResult, Hal0Error, { id: string; default: boolean }>({
+    mutationFn: ({ id, default: isDefault }) =>
+      apiPost<ModelDefaultResult>(ENDPOINTS.modelSetDefault(id), { default: isDefault }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+  })
+}
+
+// ─── Duplicate (UI-API-1, models.py:674 `duplicate_model`) ───────────────
+
+export interface ModelDuplicateRequest {
+  /** Source model id — the row whose weights/metadata get copied. */
+  id: string
+  /** New registry id. Required; must differ from `id`. */
+  new_id: string
+  /** Optional profile whose flags get stamped into the new row's defaults. */
+  profile?: string
+}
+
+export interface ModelDuplicateResponse extends Model {
+  duplicated_from: string
+  files_refcounted: number
+}
+
+export function useModelDuplicate() {
+  // POST /api/models/{id}/duplicate — refcounted weight-sharing duplicate
+  // (no byte copy); optionally stamps a profile's flags into the new row.
+  // endpoints.ts has no `modelDuplicate` const yet (flagged for the
+  // CONTRACTS lane) — built inline off the existing `model(id)` helper,
+  // same route family as useModelDelete/useModelUpdate above.
+  const qc = useQueryClient()
+  return useMutation<ModelDuplicateResponse, Hal0Error, ModelDuplicateRequest>({
+    mutationFn: ({ id, new_id, profile }) =>
+      apiPost<ModelDuplicateResponse>(
+        `${ENDPOINTS.model(id)}/duplicate`,
+        profile ? { new_id, profile } : { new_id },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
   })
 }

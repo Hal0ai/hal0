@@ -44,11 +44,11 @@ async def _wait_for_state(
     """Poll the manager's in-memory state until ``target`` or timeout."""
     deadline = asyncio.get_event_loop().time() + timeout_s
     while asyncio.get_event_loop().time() < deadline:
-        rec = sm._states.get(name)
+        rec = sm._states.get(sm._key(name))
         if rec is not None and rec.state == target:
             return rec.state
         await asyncio.sleep(0.05)
-    rec = sm._states.get(name)
+    rec = sm._states.get(sm._key(name))
     return rec.state if rec is not None else SlotState.OFFLINE
 
 
@@ -70,8 +70,8 @@ async def test_fail_watcher_pushes_offline_when_unit_stops(
     snap = await sm.load("chat")
     assert snap.state == SlotState.READY
     # The watcher should be alive and tracked.
-    assert "chat" in sm._fail_watchers
-    assert not sm._fail_watchers["chat"].done()
+    assert sm._key("chat") in sm._fail_watchers
+    assert not sm._fail_watchers[sm._key("chat")].done()
 
     # Simulate the unit stopping out-of-band. No call to status() —
     # the push-driven watcher is what should react.
@@ -82,12 +82,12 @@ async def test_fail_watcher_pushes_offline_when_unit_stops(
         f"watcher failed to push OFFLINE within 5s; final state={observed}"
     )
 
-    rec = sm._states["chat"]
+    rec = sm._states[sm._key("chat")]
     assert "stopped" in rec.message.lower() or "auto-reload" in rec.message.lower(), (
         f"OFFLINE record should explain the stopped unit (got {rec.message!r})"
     )
     # Watcher is one-shot — it should have exited after firing.
-    watcher = sm._fail_watchers.get("chat")
+    watcher = sm._fail_watchers.get(sm._key("chat"))
     if watcher is not None:
         for _ in range(20):
             if watcher.done():
@@ -131,14 +131,14 @@ async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(
     """A clean unload() must cancel the watcher; no spurious ERROR push."""
     sm = SlotManager()
     await sm.load("chat")
-    assert "chat" in sm._fail_watchers
+    assert sm._key("chat") in sm._fail_watchers
     await sm.unload("chat")
     # Watcher must be gone (or done) after the slot left live-state.
-    watcher = sm._fail_watchers.get("chat")
+    watcher = sm._fail_watchers.get(sm._key("chat"))
     assert watcher is None or watcher.done()
     # Give any stray watcher time to misbehave; then assert OFFLINE held.
     await asyncio.sleep(0.6)  # > _FAIL_WATCH_INTERVAL_S
-    assert sm._states["chat"].state == SlotState.OFFLINE
+    assert sm._states[sm._key("chat")].state == SlotState.OFFLINE
 
 
 async def test_fail_watcher_demotes_to_error_when_health_fails(
@@ -157,12 +157,12 @@ async def test_fail_watcher_demotes_to_error_when_health_fails(
     """
     sm = SlotManager()
     await sm.load("chat")
-    assert "chat" in sm._fail_watchers
+    assert sm._key("chat") in sm._fail_watchers
     # Unit stays active, but the model server stops answering /health.
     container_stub.healthy = False
     observed = await _wait_for_state(sm, "chat", SlotState.ERROR, timeout_s=5.0)
     assert observed == SlotState.ERROR
-    rec = sm._states["chat"]
+    rec = sm._states[sm._key("chat")]
     assert rec.extra.get("health_ok") is False
 
 
@@ -174,7 +174,7 @@ async def test_fail_watcher_keeps_ready_while_health_ok(
     """Guard: a healthy active slot must NOT be demoted by the watcher."""
     sm = SlotManager()
     await sm.load("chat")
-    assert "chat" in sm._fail_watchers
+    assert sm._key("chat") in sm._fail_watchers
     # Let several poll intervals elapse with the unit active + healthy.
     await asyncio.sleep(0.8)  # > 3 * _FAIL_WATCH_INTERVAL_S (0.2)
-    assert sm._states["chat"].state == SlotState.READY
+    assert sm._states[sm._key("chat")].state == SlotState.READY

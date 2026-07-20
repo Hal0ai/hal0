@@ -218,6 +218,33 @@ def load_slot_config(slot_name: str, path: Path | None = None) -> SlotConfig:
         ) from exc
 
 
+def load_slot_config_by_id(slot_id: int, path: Path | None = None) -> SlotConfig:
+    """Load and validate an id-keyed slot TOML (``slots/<slot_id>.toml``).
+
+    The id-keyed sibling of :func:`load_slot_config`. An id-keyed TOML is
+    self-describing: the migrator (and every bilingual writer) embeds both the
+    stable ``id`` and the human ``name``, so the returned :class:`SlotConfig`
+    carries the real display ``name`` — never the digit filename. The digit
+    stem is passed to ``_flatten_slot_toml`` only as the *last-resort* fallback
+    for a genuinely nameless file; a well-formed id-keyed TOML overrides it from
+    its embedded ``name``.
+
+    Raises:
+        ConfigNotFound: If the id TOML doesn't exist.
+        ConfigParseError: If the TOML is malformed or fails validation.
+    """
+    target = path if path is not None else paths.slots_config_dir() / f"{slot_id}.toml"
+    raw = _read_toml(Path(target))
+    flattened = _flatten_slot_toml(raw, slot_name=str(slot_id))
+    try:
+        return SlotConfig.model_validate(flattened)
+    except Exception as exc:
+        raise ConfigParseError(
+            f"failed to validate id-keyed slot config {slot_id!r} at {target}: {exc}",
+            details={"path": str(target), "slot_id": slot_id, "reason": str(exc)},
+        ) from exc
+
+
 def save_slot_config(cfg: SlotConfig, path: Path | None = None) -> None:
     """Atomically write a slot config TOML.
 
@@ -225,22 +252,55 @@ def save_slot_config(cfg: SlotConfig, path: Path | None = None) -> None:
     that haloai writes ([slot] / [model] sections) so hand-edits stay
     readable.
 
+    Bilingual key (P3-runtime-db): the on-disk stem is the stable ``cfg.id``
+    when one is set (id-keyed layout, post-M5-migration) and the mutable
+    ``cfg.name`` otherwise (name-keyed, the pre-migration default). Either way
+    the serialized ``[slot]`` table embeds BOTH ``id`` (when present) and
+    ``name`` so the file is self-describing and a reader recovers the display
+    name without the identity DB. An explicit *path* overrides the derivation
+    untouched.
+
     Args:
         cfg: Validated SlotConfig to persist.
-        path: Override path.  If None, derives from
-              paths.slots_config_dir() / f"{cfg.name}.toml".
+        path: Override path.  If None, derives the stem from ``cfg.id`` (when
+              set) else ``cfg.name``.
     """
-    target = path if path is not None else paths.slots_config_dir() / f"{cfg.name}.toml"
+    if path is not None:
+        target = path
+    else:
+        stem = cfg.id if cfg.id is not None else cfg.name
+        target = paths.slots_config_dir() / f"{stem}.toml"
     data = _unflatten_slot_toml(cfg)
     write_toml_atomic(target, data)
 
 
 def list_slots() -> list[str]:
-    """Return all configured slot names (stems of /etc/hal0/slots/*.toml)."""
+    """Return all configured slot *stems* of /etc/hal0/slots/*.toml, sorted.
+
+    NAME-KEYED public wrapper — preserved verbatim for the callers (doctor
+    bundle, portable export, slot-flags migration) that still address slots by
+    their on-disk stem. On a name-keyed box every stem IS the slot name; on an
+    id-keyed box a stem may be a digit id (see :func:`list_slot_layout` for the
+    per-stem classification, and the bilingual manager enumerator for the
+    id→name recovery those callers migrate to in the follow lane).
+    """
     d = paths.slots_config_dir()
     if not d.exists():
         return []
     return sorted(p.stem for p in d.glob("*.toml"))
+
+
+def list_slot_layout() -> dict[str, str]:
+    """Classify every slots/*.toml stem as ``"id"`` or ``"name"``.
+
+    The bilingual enumerator split out of :func:`list_slots`: a thin wrapper
+    over :func:`hal0.slots.layout.classify_layout` so a caller can tell an
+    id-keyed stem (``"143"``) from a name-keyed one (``"brain"``) without
+    re-deriving the all-digit rule. Empty when the dir is absent.
+    """
+    from hal0.slots.layout import classify_layout
+
+    return classify_layout(paths.slots_config_dir())
 
 
 # ── slot TOML shape helpers ──────────────────────────────────────────────────
@@ -309,6 +369,16 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
     if isinstance(model_section, dict):
         out["model"] = model_section
 
+    # Heal-on-load (O23): a type-less, llm-shaped slot defaults to type="llm"
+    # so hal0/<slot> aliases resolve on boxes whose TOML predates the seeded
+    # type key. Skip when raw carries an [image] table (image-gen slot) — that
+    # table lands in ``extra`` here, so guard on ``raw`` explicitly (the
+    # comfyui provider guards it too).
+    from hal0.slots._cfg_helpers import heal_missing_llm_type
+
+    if not isinstance(raw.get("image"), dict):
+        heal_missing_llm_type(out)
+
     # Anything not already hoisted (sibling tables like [defaults],
     # [server], [npu], [image]; and, in the legacy shape, stray top-level
     # scalars) lands in `extra` so we don't lose it on round-trip.
@@ -333,16 +403,23 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
     round-trip.
     """
     data = cfg.model_dump(mode="python", exclude_none=False)
+    slot_tbl: dict[str, Any] = {
+        "name": data["name"],
+        "port": data["port"],
+        "device": data["device"],
+        "provider": data["provider"],
+        "enabled": data["enabled"],
+        "workers": data["workers"],
+        "idle_timeout_s": data["idle_timeout_s"],
+    }
+    # Bilingual self-description (P3-runtime-db): stamp the stable ``id`` into
+    # the [slot] table whenever one is assigned, so an id-keyed file names its
+    # own row and a name-keyed file (id is None) round-trips byte-identically
+    # to the pre-id shape (no stray ``id`` key).
+    if data.get("id") is not None:
+        slot_tbl["id"] = data["id"]
     out: dict[str, Any] = {
-        "slot": {
-            "name": data["name"],
-            "port": data["port"],
-            "device": data["device"],
-            "provider": data["provider"],
-            "enabled": data["enabled"],
-            "workers": data["workers"],
-            "idle_timeout_s": data["idle_timeout_s"],
-        },
+        "slot": slot_tbl,
         "model": data["model"],
     }
     # context_size is Optional (unset → derived at load by the provider);
@@ -820,6 +897,7 @@ __all__ = [
     "ConfigNotFound",
     "ConfigParseError",
     "list_agent_configs",
+    "list_slot_layout",
     "list_slots",
     "load_agent_config",
     "load_hal0_config",
@@ -828,6 +906,7 @@ __all__ = [
     "load_profiles_config",
     "load_providers_config",
     "load_slot_config",
+    "load_slot_config_by_id",
     "load_upstreams_config",
     "manifest_image_ref",
     "resolve_profile",

@@ -18,6 +18,7 @@ from hal0.agents.manager import (
     AgentManager,
     AgentNotFoundError,
     AgentRecord,
+    AgentUninstallIncompleteError,
     HermesNotHal0AwareError,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "AgentManager",
     "AgentNotFoundError",
     "AgentRecord",
+    "AgentUninstallIncompleteError",
     "HermesNotHal0AwareError",
 ]

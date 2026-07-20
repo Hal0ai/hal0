@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hal0.registry.curated import CURATED_MODELS
+from hal0.registry.fallback import fallback_local_model
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
@@ -27,6 +28,7 @@ def _add_model(
     exists: bool = True,
     suffix: str = ".gguf",
     tags: list[str] | None = None,
+    default: bool = False,
 ) -> str:
     """Register a Model under HAL0_HOME, optionally materialising its file."""
     model_file = Path(home) / f"{id}{suffix}"
@@ -40,6 +42,7 @@ def _add_model(
             size_bytes=size_bytes,
             capabilities=[capability],
             tags=tags or [],
+            default=default,
         )
     )
     return id
@@ -190,3 +193,104 @@ def test_size_tiebreak_when_no_name_similarity(tmp_hal0_home):
     big = _add_model(tmp_hal0_home, id="beta-chat", capability="chat", size_bytes=9_000_000_000)
     cfg = _llm_cfg("zeta-ghost-id")
     assert _mgr()._resolve_servable_model("zeta-ghost-id", cfg) == big
+
+
+# ── model-default-type consumer wiring: fallback_local_model prefers the
+# per-type default when it's set AND servable ─────────────────────────────────
+#
+# NOTE: pytest derives ``tmp_hal0_home`` from the test's own name, and every
+# registered model's path lives under that dir — so a test name containing
+# "diffus"/"lora"/"unet"/"controlnet" would false-trip
+# looks_diffusion_or_nontext's path-substring guard. Avoid those tokens in
+# names below (say "video model" instead of the "d-word").
+
+
+def test_fallback_prefers_type_default_over_name_similarity_and_size(tmp_hal0_home):
+    # The default-marked model wins even though a *larger*, *closer-named*
+    # peer is also on disk — an operator's explicit default beats every
+    # heuristic signal.
+    _add_model(
+        tmp_hal0_home,
+        id="gemma-4-12b-it-ud-q4-k-xl",
+        capability="chat",
+        size_bytes=30_000_000_000,
+    )
+    default_id = _add_model(
+        tmp_hal0_home,
+        id="unrelated-small-chat",
+        capability="chat",
+        size_bytes=1_000_000_000,
+        default=True,
+    )
+    result = fallback_local_model("chat", "gemma-4-12b-it")
+    assert result is not None
+    assert result.id == default_id
+
+
+def test_fallback_heuristic_unchanged_when_no_default_set(tmp_hal0_home):
+    # No model carries the per-type default flag → falls through to the
+    # existing name-similarity/size heuristic, verbatim.
+    lookalike_id = _add_model(
+        tmp_hal0_home, id="gemma-4-12b-it-ud-q4-k-xl", capability="chat", size_bytes=6_900_000_000
+    )
+    _add_model(tmp_hal0_home, id="qwen3-coder-30b", capability="chat", size_bytes=30_000_000_000)
+    result = fallback_local_model("chat", "gemma-4-12b-it")
+    assert result is not None
+    assert result.id == lookalike_id
+
+
+def test_fallback_skips_default_when_not_servable_falls_back_to_heuristic(tmp_hal0_home):
+    # A default is set on a disk-missing model (registered, no file) — it's
+    # not in the servable candidate pool, so the heuristic picks the real
+    # on-disk look-alike instead.
+    _add_model(
+        tmp_hal0_home,
+        id="ghost-default-chat",
+        capability="chat",
+        size_bytes=6_000_000_000,
+        exists=False,
+        default=True,
+    )
+    lookalike_id = _add_model(
+        tmp_hal0_home, id="gemma-4-12b-it-ud-q4-k-xl", capability="chat", size_bytes=6_900_000_000
+    )
+    result = fallback_local_model("chat", "gemma-4-12b-it")
+    assert result is not None
+    assert result.id == lookalike_id
+
+
+def test_fallback_skips_default_marked_video_model_falls_back_to_heuristic(tmp_hal0_home):
+    # A default flag on a video artifact (mislabelled chat) must not be
+    # honoured — it's filtered by the diffusion/non-text guard same as any
+    # other candidate, so the heuristic runs as if no default existed.
+    _add_model(
+        tmp_hal0_home,
+        id="ltx-2-19b-dev-fp8",
+        capability="chat",
+        size_bytes=25_000_000_000,
+        default=True,
+    )
+    real_id = _add_model(
+        tmp_hal0_home, id="gemma-4-12b-it-ud-q4-k-xl", capability="chat", size_bytes=6_900_000_000
+    )
+    result = fallback_local_model("chat", "gemma-4-12b-it")
+    assert result is not None
+    assert result.id == real_id
+
+
+def test_fallback_default_of_other_capability_not_honoured(tmp_hal0_home):
+    # A default marked on an embed-capability model must never leak into a
+    # chat-capability fallback lookup, even though both share this registry.
+    _add_model(
+        tmp_hal0_home, id="embed-default", capability="embed", size_bytes=500_000_000, default=True
+    )
+    chat_id = _add_model(tmp_hal0_home, id="only-chat", capability="chat", size_bytes=2_000_000_000)
+    result = fallback_local_model("chat", "ghost-id")
+    assert result is not None
+    assert result.id == chat_id
+
+
+def test_fallback_local_model_returns_none_when_only_default_missing(tmp_hal0_home):
+    # No candidates at all (nothing local) → still None, default-lookup path
+    # doesn't change the empty case.
+    assert fallback_local_model("chat", "ghost-id") is None

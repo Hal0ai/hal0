@@ -22,17 +22,17 @@ import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
   'General', 'Security',
-  'Loaded Models', 'Library & Downloads',
-  'Hardware Tuning', 'NPU', 'Voice', 'Image-gen',
+  'Loaded Models', 'Library & Downloads', 'Model Defaults',
+  'Backend & GPU', 'Hardware Tuning', 'NPU', 'Voice', 'Image-gen',
   'Agents / Brain',
   'Health & Stats',
   'Storage', 'Memory',
-  'Doctor', 'Updates', 'Advanced', 'About',
+  'Doctor', 'Updates', 'Runtimes', 'Advanced', 'About',
   'Secrets',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
-  test('renders rail nav with all 17 sections', async ({ page }) => {
+  test('renders rail nav with all sections', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.view .vh h1')).toHaveText('Settings')
     const nav = page.locator('.settings-nav .nav-item')
@@ -53,8 +53,65 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Updates')
   })
 
-  test('no Runtime section remains (#687 Phase E)', async ({ page }) => {
+  test('no legacy "Runtime" section remains (#687 Phase E)', async ({ page }) => {
     await page.goto('/#settings')
-    await expect(page.locator('.settings-nav .nav-item', { hasText: 'Runtime' })).toHaveCount(0)
+    // The old singular "Runtime" page is gone; the new D3 "Runtimes" evidence
+    // page is a different section (exact-match so it isn't caught here).
+    await expect(page.locator('.settings-nav .nav-item', { hasText: /^Runtime$/ })).toHaveCount(0)
+  })
+
+  // ML-4-unblocked pages (R5 data seam): both mount without a runtime error
+  // (spec risk #5 — the ESM split must thread the old window-globals or pages
+  // blow up at click time with no compile error).
+  test('Model Defaults section mounts', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Model Defaults' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Model Defaults')
+  })
+
+  test('Backend & GPU section mounts', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Backend & GPU' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Backend & GPU')
+  })
+
+  // Phase-2 settings-seam lane (SWEEP §5): these two sections were bare
+  // "not yet wired — placeholder" stubs. Both now mount real, typed hooks
+  // (useModels/DownloadsPane for Library & Downloads; useHealthSystem/
+  // useStatsHardware/useStatsPower/useRequestsRollup/useServicesHealth for
+  // Health & Stats) — assert they mount without a runtime error AND that
+  // the placeholder string is actually gone (the fix this test guards).
+  test('Library & Downloads section mounts and drops the placeholder string', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Library & Downloads' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Library & Downloads')
+    await expect(page.locator('.settings-content')).not.toContainText('not yet wired')
+  })
+
+  test('Health & Stats section mounts and drops the placeholder string', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Health & Stats' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Health & Stats')
+    await expect(page.locator('.settings-content')).not.toContainText('not yet wired')
+  })
+
+  // VERS-flash (docs/rework/handoff-r5-drive2.md §3): index.html no longer
+  // hardcodes a version literal — the build-time stamp (ui/package.json,
+  // reconciled to the backend release) is what first paints, and App()
+  // then syncs document.title to the *live* `/api/updates/state` value
+  // (mocked here as hal0.current, see src/api/mock.ts) once it resolves.
+  // Asserting against the live-mocked version (not the build-time stamp)
+  // proves the post-mount sync actually runs, not just the HTML bake.
+  test('document.title syncs to the live hal0 version, not a stale literal', async ({ page }) => {
+    await page.goto('/#settings')
+    await expect(page).toHaveTitle(/v0\.3\.0-alpha\.1/)
+    await expect(page).not.toHaveTitle(/v0\.5\.0-alpha\.1/)
+  })
+
+  test('About section shows the same live version as the tab title', async ({ page }) => {
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'About' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('About')
+    await expect(page.locator('.s-panel')).toContainText('0.3.0-alpha.1')
   })
 })

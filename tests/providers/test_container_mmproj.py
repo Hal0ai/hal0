@@ -102,11 +102,12 @@ class TestLlamaLaunchPlanMmproj:
         )
         assert "--mmproj" not in plan.command
 
-    def test_mmproj_override_in_extra_args_wins(self) -> None:
-        """A manual ``--mmproj`` in [server].extra_args overrides the sidecar.
-        normalize_argv dedups to one --mmproj whose value is the extra_args
-        override (last-wins) — the documented precedence, sans duplicate."""
-        override = "/mnt/ai-models/override/mmproj.gguf"
+    def test_mmproj_sidecar_wins_over_tune_duplicate(self) -> None:
+        """FLAGS-own: the mmproj sidecar rides the typed ``mmproj`` segment,
+        which sits AFTER ``model_extra_args``. So a redundant ``--mmproj``
+        smuggled into the model's freeform ``defaults.extra_args`` is deduped
+        away and the resolved sidecar wins (the sidecar is model-intrinsic)."""
+        smuggled = "/mnt/ai-models/override/mmproj.gguf"
         plan = _llama_launch_plan(
             image="img:latest",
             port=8095,
@@ -114,13 +115,13 @@ class TestLlamaLaunchPlanMmproj:
             flags_str="",
             devices=[],
             group_ids=[],
-            extra_args=f"--mmproj {override}",
+            model_defaults={"extra_args": f"--mmproj {smuggled}"},
             mmproj=_SIDECAR,
         )
         cmd = plan.command
         assert cmd.count("--mmproj") == 1
         idx = cmd.index("--mmproj")
-        assert cmd[idx + 1] == override
+        assert cmd[idx + 1] == _SIDECAR  # resolved sidecar wins, smuggled deduped
 
 
 # ── container_spec integration tests ─────────────────────────────────────────

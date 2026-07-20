@@ -305,7 +305,7 @@ def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
             }
         )
     )
-    io = hp.PhaseIO(
+    io = hp.InstallIO(
         fetch_slots=lambda: [
             {
                 "name": "primary",
@@ -320,7 +320,7 @@ def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "nope")
 
     state = hp.BootstrapState(hermes_home=str(home))
-    res = hp._phase_context_link(hp.context_for("context_link", state, io=io))
+    res = hp._phase_context_link(hp._StepCtx(state=state, io=io))
     assert res.status == hp.PhaseStatus.OK
     # STATE.md written with the live model.
     assert (tmp_path / "STATE.md").exists()

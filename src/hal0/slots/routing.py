@@ -366,7 +366,7 @@ async def add_slot(
     type: str,
     model: str,
     device: str = "gpu-rocm",
-    port: int = 8081,
+    port: int | None = None,
 ) -> Slot:
     """Programmatic ``hal0 slot add`` (plan §4.3).
 
@@ -384,7 +384,12 @@ async def add_slot(
         device: Hardware preference (``gpu-rocm | gpu-vulkan | cpu
             | npu``); see ``map_backend_to_device``. Default
             ``gpu-rocm`` matches Strix Halo seed semantics.
-        port: SlotConfig.port — the container's loopback port.
+        port: SlotConfig.port — the container's loopback port. ``None``
+            (the default, rework §11.2) auto-assigns the lowest free port
+            from the pool rather than baking in a fixed ``8081`` that
+            collided with an existing slot; when the manager has a live
+            :class:`hal0.ports.authority.PortAuthority`, ``create`` then
+            re-issues the authoritative claim on top of this seed.
     """
     if not _SLOT_NAME_RE.match(name):
         raise SlotConfigError(
@@ -405,6 +410,23 @@ async def add_slot(
             f"slot type {type!r} is not one of {sorted(_VALID_SLOT_TYPES)}",
             details={"slot": name, "type": type},
         )
+    if port is None:
+        # Auto-assign the lowest free pool port (rework §11.2 — no baked-in
+        # 8081 default). Falls back to the pool floor if the harvester can't
+        # answer; create() re-issues the authoritative claim when wired.
+        from hal0.config.paths import slots_config_dir
+        from hal0.config.schema import _SLOT_PORT_MIN, _SLOT_PORT_POOL_END
+        from hal0.ports import collect_claims, next_free
+
+        try:
+            claims = collect_claims(
+                slots_dir=slots_config_dir(),
+                pool=(_SLOT_PORT_MIN, _SLOT_PORT_POOL_END),
+                reserved={8080: "api"},
+            )
+            port = next_free(claims, _SLOT_PORT_MIN, _SLOT_PORT_POOL_END) or _SLOT_PORT_MIN
+        except Exception:
+            port = _SLOT_PORT_MIN
     cfg = {
         "name": name,
         "port": port,

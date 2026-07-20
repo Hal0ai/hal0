@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
-from hal0.api.routes import models as model_routes
+from hal0.registry import pull_jobs as pull_jobs_module
 from hal0.registry.pull import PullJob
 
 pytestmark = pytest.mark.usefixtures("tmp_hal0_home")
@@ -61,7 +61,7 @@ def hanging_run_pull(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             job._signal()
             raise
 
-    monkeypatch.setattr(model_routes, "run_pull", fake)
+    monkeypatch.setattr(pull_jobs_module, "run_pull", fake)
     return state
 
 
@@ -201,7 +201,7 @@ def test_startup_auto_resumes_interrupted_pull(tmp_hal0_home: str) -> None:
     import pytest as _pytest
 
     mp = _pytest.MonkeyPatch()
-    mp.setattr(model_routes, "run_pull", fake_run_pull)
+    mp.setattr(pull_jobs_module, "run_pull", fake_run_pull)
     try:
         app = create_app()
         with TestClient(app) as c:
@@ -246,7 +246,7 @@ def test_startup_does_not_auto_resume_a_completed_pull(tmp_hal0_home: str) -> No
         calls.append(kw)
 
     mp = pytest.MonkeyPatch()
-    mp.setattr(model_routes, "run_pull", fake_run_pull)
+    mp.setattr(pull_jobs_module, "run_pull", fake_run_pull)
     try:
         app = create_app()
         with TestClient(app):

@@ -69,7 +69,7 @@ def test_state_cache_hit_returns_cached_state(tmp_hal0_home: str) -> None:
         message="",
         extra={},
     )
-    sm._states["chat"] = rec
+    sm._states[sm._key("chat")] = rec
     assert sm.state("chat") is SlotState.READY
 
 
@@ -103,7 +103,7 @@ def test_state_resolves_alias(tmp_hal0_home: str) -> None:
         message="",
         extra={},
     )
-    sm._states["agent"] = rec
+    sm._states[sm._key("agent")] = rec
     assert sm.state("agent-hermes") is SlotState.SERVING
 
 
@@ -138,7 +138,7 @@ def test_is_ready_for_dispatch_parametrized(tmp_hal0_home: str, state: SlotState
         message="",
         extra={},
     )
-    sm._states["chat"] = rec
+    sm._states[sm._key("chat")] = rec
     expected = state in _READY_STATES
     assert sm.is_ready_for_dispatch("chat") is expected
 

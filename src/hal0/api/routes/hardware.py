@@ -9,6 +9,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
+from pydantic import BaseModel
 
 try:
     import psutil as _psutil
@@ -23,6 +24,8 @@ from hal0.config import paths
 from hal0.config.loader import load_hardware_info
 from hal0.hardware import gpu_view
 from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.providers import podman_introspect
+from hal0.providers.podman_introspect import PodmanImagesResult
 
 log = structlog.get_logger(__name__)
 
@@ -700,6 +703,47 @@ async def stats_endpoint(
     )
 
 
+class RequestsEndpointCount(BaseModel):
+    path: str
+    count: int
+
+
+class RequestsRollup(BaseModel):
+    """``GET /api/stats/requests`` -- frozen client shape, see
+    ``ui/src/api/hooks/useRequestsRollup.ts``."""
+
+    window_s: int
+    req_per_min: float | None
+    p50_ms: float | None
+    p95_ms: float | None
+    endpoints: list[RequestsEndpointCount]
+    errors: int | None
+    dedupe: bool = False
+
+
+@router.get("/stats/requests", response_model=RequestsRollup)
+async def stats_requests_endpoint(request: Request, window_s: int = 60) -> RequestsRollup:
+    """``GET /api/stats/requests`` -- dispatcher-side rollup over the last
+    ``window_s`` seconds (default 60, matching the dashboard's "requests &
+    latency" card -- see ``useRequestsRollup.ts``).
+    """
+    from hal0.metrics import read as metrics_read
+
+    service = getattr(request.app.state, "metrics_service", None)
+    path = service.writer.db_path if service is not None else None
+    payload = await asyncio.to_thread(metrics_read.requests_rollup, path, window_s=window_s)
+
+    # Single-flight dedupe signal (Tier 3 coalescing) -- best-effort: any key
+    # currently in-flight on the dispatcher's coalescing group. Optional in
+    # the frozen client shape; absence of a dispatcher just reads as False.
+    dispatcher = getattr(request.app.state, "dispatcher", None)
+    single_flight = getattr(dispatcher, "_single_flight", None) if dispatcher is not None else None
+    if single_flight is not None:
+        payload["dedupe"] = bool(single_flight.in_flight_keys())
+
+    return RequestsRollup(**payload)
+
+
 @router.get("/system-stats")
 async def system_stats_endpoint(request: Request) -> dict[str, Any]:
     """``GET /api/system-stats`` — latest fleet + per-slot sample snapshot."""
@@ -729,3 +773,121 @@ async def models_health_endpoint(request: Request) -> dict[str, Any]:
     service = getattr(request.app.state, "metrics_service", None)
     path = service.writer.db_path if service is not None else None
     return await asyncio.to_thread(metrics_read.models_health, slots, db_path=path)
+
+
+# ── GET /api/system-info (§21.3) ────────────────────────────────────────────
+#
+# One consolidated read surface folding /api/hardware + /api/features +
+# per-runner local backend-lifecycle state, per hal0-rework-plan.md §21.3:
+# "one consolidated endpoint ... rather than three overlapping surfaces.
+# Feeds a future setup-wizard 'install this backend' action." ADMIN-vs-CLIENT
+# exposure: classified CLIENT in security/exposure.py (pre-existing rule,
+# landed with the OBS-1 /api/system-stats classification — this route just
+# fills in the handler the rule was already anticipating).
+
+
+def _image_repo(ref: str) -> str:
+    """Strip the tag/digest → the bare ``registry/repo`` of an image ref.
+
+    Mirrors ``hal0.cli.doctor_commands._image_repo`` — kept as a tiny local
+    copy rather than an api->cli import (wrong dependency direction for a
+    two-line helper).
+    """
+    body = ref.split("@", 1)[0]
+    head, _, tail = body.rpartition("/")
+    tail = tail.split(":", 1)[0]
+    return f"{head}/{tail}" if head else tail
+
+
+def _local_image_repos() -> PodmanImagesResult | None:
+    """``podman images`` → the local ``registry/repo`` set + which store it
+    came from (O12: slots run ROOTFUL podman; hal0-api runs as the
+    unprivileged ``hal0`` user, whose OWN podman calls hit a different,
+    rootless store — see :mod:`hal0.providers.podman_introspect`).
+
+    Returns ``None`` when podman is unreachable in EITHER context so every
+    backend degrades to ``"unavailable"`` rather than a false "installable"
+    — this dev sandbox (no podman) is exactly that case, per §21.4 HARD
+    REQUIREMENT #5 (graceful degrade, never crash).
+    """
+    return podman_introspect.images()
+
+
+def _backend_state(image: str, local_repos: set[str] | None) -> str:
+    """``"installed"`` / ``"installable"`` / ``"unavailable"`` for one runner.
+
+    Local-only: this endpoint reports what's already on disk, not remote
+    reachability or digest drift — ``hal0 doctor toolbox-pull`` already owns
+    the ghcr.io reachability + pinned-digest-drift check (§21.4
+    ``HAL0-TOOLBOX-IMAGE-*``); duplicating a remote registry probe on every
+    dashboard poll would be needless network chatter. ``update_available``/
+    ``update_required`` (the plan's §21.6 SHOULD-tier states) are therefore
+    NOT surfaced here — a deliberate, documented scope trim.
+    """
+    if local_repos is None:
+        return "unavailable"
+    return "installed" if _image_repo(image) in local_repos else "installable"
+
+
+@router.get("/system-info")
+async def system_info_endpoint(request: Request) -> dict[str, Any]:
+    """``GET /api/system-info`` — hardware + feature flags + backend state.
+
+    Consolidates ``GET /api/hardware`` + ``GET /api/features`` + one
+    ``installed``/``installable``/``unavailable`` state per
+    ``hal0.runners.RUNNER_IMAGES`` entry (computed from local ``podman
+    images`` presence only — see :func:`_backend_state`), so a future setup
+    wizard has one place to ask "what can this box run right now". Never
+    raises: hardware/features reuse the already-tolerant handlers above, and
+    a podman-less box degrades every backend to ``"unavailable"``.
+
+    ``podman_context`` (O12) tells the caller/UI which store the backend
+    ``state`` values actually came from: ``"rootful"`` (root's store — the
+    one slots actually use, reached via the ``hal0-podman-ro`` sudo -n seam)
+    is authoritative; ``"rootless"`` means the seam wasn't usable (dev box,
+    missing grant) and the read fell back to hal0-api's OWN store, which may
+    disagree with what's actually installed for slots; ``"unavailable"``
+    means neither context could reach podman at all.
+    """
+    from hal0.api.routes.health import list_features
+    from hal0.runners import RUNNER_IMAGES, resolve_runner_image
+
+    hardware = await get_hardware(request)
+    features = await list_features(request)
+    images_result = await asyncio.to_thread(_local_image_repos)
+    local_repos = images_result.repos if images_result is not None else None
+    podman_context = images_result.context if images_result is not None else "unavailable"
+
+    backends: dict[str, Any] = {}
+    for key, runner in RUNNER_IMAGES.items():
+        try:
+            image = resolve_runner_image(runner)
+        except Exception:
+            image = runner.image
+        backends[key] = {
+            "image": image,
+            "runtime_family": runner.runtime_family,
+            "device_class": runner.device_class,
+            "backend": runner.backend,
+            # Per-runner capability metadata (UI-API-1 item 2 / spec §7): expose
+            # what the runner registry actually knows so the model drawer can
+            # filter its runner-override dropdown to COMPATIBLE runners. Only
+            # the typed launch-capability gates exist today
+            # (hal0.runners.RunnerSupports); a format/arch-support field (the
+            # lxc105 "forks reject newer GGUFs" finding) is NOT yet in the
+            # registry, so it is deliberately omitted here rather than faked —
+            # tracked as an increment-2 gap.
+            "supports": {
+                "mtp": runner.supports.mtp,
+                "jinja": runner.supports.jinja,
+                "mmproj": runner.supports.mmproj,
+            },
+            "state": _backend_state(image, local_repos),
+        }
+
+    return {
+        "hardware": hardware,
+        "features": features,
+        "backends": backends,
+        "podman_context": podman_context,
+    }

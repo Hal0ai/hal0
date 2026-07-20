@@ -87,7 +87,7 @@ def _rerank_load_count(fake: FakeContainerProvider) -> int:
 
 
 async def _evict(sm: SlotManager) -> None:
-    sm._last_used["rerank"] = 0.0  # ancient — well past the 0.01s TTL
+    sm._last_used[sm._key("rerank")] = 0.0  # ancient — well past the 0.01s TTL
     await sm._sweep_idle_once()
 
 

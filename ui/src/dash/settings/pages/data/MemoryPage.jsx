@@ -4,15 +4,15 @@
 // (P3-ui split phase 1). The `id` stays "memory" (unchanged) so
 // #settings/memory deep links keep working.
 import { useState, useEffect } from 'react'
-import { useSettings, useSettingsUpdate, useSettingsSchema, useApplyPlan } from '@/api/hooks/useSettings'
+import { useSettingsClient } from '../../data/settingsClient.js'
 import { useMemoryGraphStatus, useRetryFailedExtractions, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce, _advInputStyle } from '../../shared/SchemaRow.jsx'
 
 export function MemoryPage() {
-  const applyPlanQuery = useApplyPlan();
-  const registry = applyPlanQuery.data?.registry || {};
+  // R5 data seam: one typed client supplies the merged reload-class registry.
+  const { registry } = useSettingsClient();
 
   return (
     <div className="s-section">
@@ -36,9 +36,7 @@ const MEMORY_ENGINE_DESC_OVERRIDE =
   "pgvector is an in-memory, NON-DURABLE fallback — existing memories are not migrated and won't be visible while selected.";
 
 function MemoryEnginePanel({ registry }) {
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const schemaQuery = useSettingsSchema();
+  const { settings, update, schema: schemaQuery } = useSettingsClient({ schema: true });
   const schema = schemaQuery.data || null;
   const live = settings.data || null;
 
@@ -155,9 +153,7 @@ function HonchoSecretRow({ dotKey, label, sub, live, buf, onChange, registry }) 
 }
 
 function HonchoPanel({ registry }) {
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const schemaQuery = useSettingsSchema();
+  const { settings, update, schema: schemaQuery } = useSettingsClient({ schema: true });
   const schema = schemaQuery.data || null;
   const live = settings.data || null;
 
@@ -253,9 +249,7 @@ function HonchoPanel({ registry }) {
 }
 
 function MemoryRerankerPanel({ registry }) {
-  const settings = useSettings();
-  const update = useSettingsUpdate();
-  const schemaQuery = useSettingsSchema();
+  const { settings, update, schema: schemaQuery } = useSettingsClient({ schema: true });
   const schema = schemaQuery.data || null;
   const live = settings.data || null;
 

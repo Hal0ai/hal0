@@ -1,10 +1,14 @@
-{%- set template_version = "qwen3.6-froggeric-v20" %}
+{# hal0 bundled chat template — froggeric Qwen-Fixed-Chat-Templates v21.3 (unified Qwen 3.5/3.6). #}
+{# Source: https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates · License: Apache-2.0 #}
+{# Upstream version tracked by the `template_version` set below; render-check-clean under hal0. #}
+{%- set template_version = "qwen3.6-froggeric-v21.3" %}
+{%- set _tool_format = tool_call_format if tool_call_format is defined else 'xml' %}
 {%- set image_count = namespace(value=0) %}
 {%- set video_count = namespace(value=0) %}
 {%- set add_vision_id = add_vision_id if add_vision_id is defined else false %}
 {%- set enable_thinking = enable_thinking if enable_thinking is defined else true %}
 {%- set auto_disable_thinking_with_tools = auto_disable_thinking_with_tools if auto_disable_thinking_with_tools is defined else false %}
-{%- set _preserve_thinking = preserve_thinking if preserve_thinking is defined else false %}
+{%- set _preserve_thinking = preserve_thinking if preserve_thinking is defined else true %}
 {%- set max_tool_arg_chars = max_tool_arg_chars if max_tool_arg_chars is defined else 0 %}
 {%- set max_tool_response_chars = max_tool_response_chars if max_tool_response_chars is defined else 0 %}
 {%- set _has_tools = (tools is defined and tools and tools is iterable and tools is not mapping) %}
@@ -88,6 +92,14 @@
     {%- set tool_instructions %}
 If you choose to call a function ONLY reply in the following format with NO suffix:
 
+{%- if _tool_format == 'json' %}
+<think>
+Brief explanation of tool call
+</think>
+<tool_call>
+{"name": "example_function_name", "arguments": {"example_parameter_1": "value_1", "example_parameter_2": "This is the value for the second parameter"}}
+</tool_call>
+{%- else %}
 <think>
 Brief explanation of tool call
 </think>
@@ -103,16 +115,25 @@ multiple lines
 </parameter>
 </function>
 </tool_call>
+{%- endif %}
 
 <IMPORTANT>
 Reminder:
 - You can use the <think></think> block to plan your next tool call OR to synthesize data and formulate your final response to the user.
 - ALL explanation and reasoning MUST be placed strictly inside the <think></think> block.
+{%- if _tool_format == 'json' %}
+- Function calls MUST follow the specified format: a single JSON object with "name" and "arguments" keys inside <tool_call></tool_call> XML tags.
+{%- else %}
 - Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags.
-- If you choose to call a tool, you MUST output the <tool_call> block IMMEDIATELY after closing </think>. Do NOT output any conversational text before the tool call.
+{%- endif %}
+- If you choose to call a tool, you MUST output the <tool_call> block IMMEDIATELY after thinking, with NO conversational text before it.
+{%- if _tool_format == 'json' %}
+- The <tool_call> tag MUST be at the very beginning of a new line, with NO spaces or indentation before it.
+{%- else %}
 - The <tool_call> and <function> tags MUST be at the very beginning of a new line, with NO spaces or indentation before them.
+{%- endif %}
 - To call multiple functions, output a separate, completely closed <tool_call></tool_call> block for EACH function. Do NOT nest <tool_call> blocks.
-- If you have gathered all necessary data and do not need to call a tool, answer the question like normal and provide your final response to the user IMMEDIATELY after closing </think>.
+- If you have all necessary data, provide your final answer directly to the user without any tool call.
 </IMPORTANT>
     {%- endset %}
     {{- '\n\n' ~ tool_instructions | trim }}
@@ -148,12 +169,14 @@ Reminder:
 {%- for message in _msgs %}
     {%- set is_system = (message.role == "system" or message.role == "developer") %}
     {%- set content = render_content(message.content, true, is_system) | trim %}
-    {%- if '<|think_off|>' in content %}
-        {%- set ns_state.thinking = false %}
-        {%- set content = content.split('<|think_off|>') | join('') | trim %}
-    {%- elif '<|think_on|>' in content %}
-        {%- set ns_state.thinking = true %}
-        {%- set content = content.split('<|think_on|>') | join('') | trim %}
+    {%- if is_system or message.role == 'user' %}
+        {%- if '<|think_off|>' in content %}
+            {%- set ns_state.thinking = false %}
+            {%- set content = content.split('<|think_off|>') | join('') | trim %}
+        {%- elif '<|think_on|>' in content %}
+            {%- set ns_state.thinking = true %}
+            {%- set content = content.split('<|think_on|>') | join('') | trim %}
+        {%- endif %}
     {%- endif %}
     {%- if is_system %}
         {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
@@ -168,19 +191,29 @@ Reminder:
             {%- else %}
                 {%- set reasoning_content = message.reasoning_content | string %}
             {%- endif %}
+        {%- elif message.thinking is defined and message.thinking is not none %}
+            {%- if message.thinking is string %}
+                {%- set reasoning_content = message.thinking %}
+            {%- else %}
+                {%- set reasoning_content = message.thinking | string %}
+            {%- endif %}
         {%- else %}
             {%- set _think_end = '' %}
-            {%- if '</think>' in content %}
+            {%- if content.startswith('</think>') %}
                 {%- set _think_end = '</think>' %}
-            {%- elif '</thinking>' in content %}
+            {%- elif content.startswith('</thinking>') %}
                 {%- set _think_end = '</thinking>' %}
-            {%- elif '</ think>' in content %}
-                {%- set _think_end = '</ think>' %}
-            {%- elif '</think >' in content %}
-                {%- set _think_end = '</think >' %}
+            {%- elif '\n</think>' in content %}
+                {%- set _think_end = '\n</think>' %}
+            {%- elif '\n</thinking>' in content %}
+                {%- set _think_end = '\n</thinking>' %}
+            {%- elif '\n</ think>' in content %}
+                {%- set _think_end = '\n</ think>' %}
+            {%- elif '\n</think >' in content %}
+                {%- set _think_end = '\n</think >' %}
             {%- endif %}
             {%- if _think_end %}
-                {%- if _think_end == '</thinking>' %}
+                {%- if 'thinking' in _think_end %}
                     {%- set _think_start = '<thinking>' %}
                 {%- else %}
                     {%- set _think_start = '<think>' %}
@@ -205,38 +238,49 @@ Reminder:
                 {%- else %}
                     {%- set tc = tool_call %}
                 {%- endif %}
-                {%- if loop.first %}
-                    {%- if content | trim %}
-                        {{- '\n\n<tool_call>\n<function=' + tc.name + '>\n' }}
+                {%- if _tool_format == 'json' %}
+                    {%- if not loop.first or content | trim %}
+                        {{- '\n\n' }}
+                    {%- endif %}
+                    {%- set _args = '{}' %}
+                    {%- if tc.arguments is defined and tc.arguments is not none %}
+                        {%- if tc.arguments is mapping %}
+                            {%- set _args = tc.arguments | tojson %}
+                        {%- elif tc.arguments is string and tc.arguments %}
+                            {%- set _args = tc.arguments %}
+                        {%- endif %}
+                    {%- endif %}
+                    {{- '<tool_call>\n{"name": ' }}{{- tc.name | tojson }}{{- ', "arguments": ' }}{{- _args }}{{- '}\n</tool_call>' }}
+                {%- else %}
+                    {%- if loop.first %}
+                        {%- if content | trim %}
+                            {{- '\n\n<tool_call>\n<function=' + tc.name + '>\n' }}
+                        {%- else %}
+                            {{- '<tool_call>\n<function=' + tc.name + '>\n' }}
+                        {%- endif %}
                     {%- else %}
-                        {{- '<tool_call>\n<function=' + tc.name + '>\n' }}
+                        {{- '\n\n<tool_call>\n<function=' + tc.name + '>\n' }}
                     {%- endif %}
-                {%- else %}
-                    {{- '\n\n<tool_call>\n<function=' + tc.name + '>\n' }}
-                {%- endif %}
-                {%- if tc.arguments is defined and tc.arguments is not none %}
-                    {%- if tc.arguments is mapping %}
-                        {%- for args_name, args_value in tc.arguments.items() %}
-                            {{- '<parameter=' + args_name + '>\n' }}
-                            {%- if args_value is mapping or (args_value is sequence and args_value is not string) %}
-                                {%- set _av = args_value | tojson %}
-                            {%- else %}
-                                {%- set _av = args_value | string %}
-                            {%- endif %}
-                            {%- if max_tool_arg_chars > 0 and _av | length > max_tool_arg_chars %}
-                                {{- _av[:max_tool_arg_chars] + '\n[TRUNCATED — original length ' ~ (_av | length | string) ~ ' chars]' }}
-                            {%- else %}
-                                {{- _av }}
-                            {%- endif %}
-                            {{- '\n</parameter>\n' }}
-                        {%- endfor %}
-                    {%- elif tc.arguments is string and tc.arguments %}
-                        {{- tc.arguments }}
+                    {%- if tc.arguments is defined and tc.arguments is not none %}
+                        {%- if tc.arguments is mapping %}
+                            {%- for args_name, args_value in tc.arguments.items() %}
+                                {{- '<parameter=' + args_name + '>\n' }}
+                                {%- if args_value is mapping or (args_value is sequence and args_value is not string) %}
+                                    {%- set _av = args_value | tojson %}
+                                {%- else %}
+                                    {%- set _av = args_value | string %}
+                                {%- endif %}
+                                {%- if max_tool_arg_chars > 0 and _av | length > max_tool_arg_chars %}
+                                    {{- _av[:max_tool_arg_chars] + '\n[TRUNCATED — original length ' ~ (_av | length | string) ~ ' chars]' }}
+                                {%- else %}
+                                    {{- _av }}
+                                {%- endif %}
+                                {{- '\n</parameter>\n' }}
+                            {%- endfor %}
+                        {%- elif tc.arguments is string and tc.arguments %}
+                            {{- tc.arguments }}
+                        {%- endif %}
                     {%- endif %}
-                {%- endif %}
-                {%- if loop.last %}
-                    {{- '</function>\n</tool_call>\n' }}
-                {%- else %}
                     {{- '</function>\n</tool_call>' }}
                 {%- endif %}
             {%- endfor %}
@@ -244,7 +288,8 @@ Reminder:
         {{- '<|im_end|>\n' }}
     {%- elif message.role == 'tool' %}
         {%- set _content_lower = content | lower %}
-        {%- if content | length < 500 and '$ ' not in content and 'took ' not in _content_lower and ('"error":' in _content_lower or 'error:' in _content_lower or 'exception:' in _content_lower or 'traceback' in _content_lower or 'command not found' in _content_lower or 'invalid syntax' in _content_lower or 'failed to' in _content_lower) %}
+        {%- set _content_head = _content_lower[:80] %}
+        {%- if content | length < 500 and '$ ' not in content and 'took ' not in _content_lower and ('"error":' in _content_head or 'error:' in _content_head or 'err!' in _content_head or 'fatal:' in _content_head or 'exception:' in _content_head or 'traceback' in _content_head or 'command not found' in _content_head or 'invalid syntax' in _content_head or 'failed to' in _content_head) %}
             {%- set ns2.consecutive_failures = ns2.consecutive_failures + 1 %}
         {%- else %}
             {%- set ns2.consecutive_failures = 0 %}
@@ -278,9 +323,9 @@ Reminder:
 {%- if add_generation_prompt %}
     {{- '<|im_start|>assistant\n' }}
     {%- if not ns_state.thinking %}
-        {{- '<think>\n</think>\n' }}
+        {{- '<think>\n\n</think>\n\n' }}
     {%- elif ns2.consecutive_failures >= 2 %}
-        {{- '<think>\n</think>\n' }}
+        {{- '<think>\n\n</think>\n\n' }}
     {%- else %}
         {{- '<think>\n' }}
     {%- endif %}

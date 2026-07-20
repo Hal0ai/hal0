@@ -93,6 +93,37 @@ async def test_real_drift_still_detected_across_spellings(
     assert {"key": "-b", "running": "512", "rendered": "2048"} in drift["diffs"]
 
 
+async def test_ctx_size_change_surfaces_as_drift(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """O25 follow-up: a running container serving a STALE --ctx-size (e.g. 4096)
+    while the config now renders 64000 must surface as drift (needs-restart),
+    not read silently 'ready'. --ctx-size is a container-restart-required arg,
+    so it is one of the compared _CONFIG_DRIFT_KEYS."""
+    assert "--ctx-size" in _CONFIG_DRIFT_KEYS
+    container_stub.expected_argv_by_slot["chat"] = [
+        "--model",
+        "/mnt/ai-models/qwen.gguf",
+        "--ctx-size",
+        "64000",
+    ]
+    container_stub.running_argv_by_slot["chat"] = [
+        "--model",
+        "/mnt/ai-models/qwen.gguf",
+        "--ctx-size",
+        "4096",
+    ]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None and drift["drifted"] is True
+    assert {"key": "--ctx-size", "running": "4096", "rendered": "64000"} in drift["diffs"]
+
+
 async def test_no_false_drift_for_registry_id_model_and_alias(
     slot_root: Path,
     container_stub: FakeContainerProvider,

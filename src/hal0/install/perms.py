@@ -38,6 +38,10 @@ Design notes:
     ``hal0`` uid differs.
   - A row may be ``optional`` (skipped when absent — e.g. ``secrets/`` only
     exists once an agent is provisioned) or a ``glob`` (``slots/*.toml``).
+    A glob is single-level by default; ``recursive=True`` walks every depth
+    instead (``slots/`` runtime state — see the O13 follow-up note below the
+    ``slots/`` row) and ``child_file_mode`` gives recursed FILES a mode
+    distinct from recursed dirs (``child_mode``).
   - Stat/chown/chmod are injected seams so the plan/diff/audit logic is unit
     tested without a real privileged filesystem.
 """
@@ -76,7 +80,17 @@ class PermRow:
     group: str
     mode: int  # the dir's / file's own mode
     glob: str | None = None  # when set, ``target`` is a dir and this globs its children
-    child_mode: int | None = None  # mode for globbed children (dirs and files differ)
+    child_mode: int | None = (
+        None  # mode for globbed children (dirs; files when child_file_mode unset)
+    )
+    child_file_mode: int | None = None  # mode for FILES matched by a recursive glob (O13 follow-up:
+    # a plain (non-recursive) row applies ``child_mode`` to whatever it matches, unchanged — this
+    # field only takes effect when ``recursive=True`` finds a file, so it never alters an existing
+    # single-level row's behavior. Falls back to ``child_mode`` when unset.
+    recursive: bool = False  # when True with ``glob`` set, walk EVERY depth (``rglob`` instead of
+    # ``glob``) so nested files below the first level (e.g. ``slots/<id>/state.json``) are covered
+    # too, not just the immediate children. Defaults False so every pre-existing glob row keeps its
+    # single-level behavior byte-for-byte.
     optional: bool = True  # skip silently when the path is absent
     role: str = ""  # human label for the audit table
 
@@ -175,6 +189,22 @@ def ownership_table(
             optional=False,
             role="slots/ (+ *.toml)",
         ),
+        # *.lock siblings — advisory RMW locks (config/locking.py) created on
+        # demand by WHOEVER writes first. A root-run install that touches the
+        # slot store leaves e.g. slots.lock root:root and the hal0-run API can
+        # then never open it (halo150 Phase-2 finding: POST /api/slots 500 on
+        # a fresh box; doctor perms --fix missed it because no row covered
+        # lock files). 0664: owner+group writable — root and hal0 both hold
+        # the flock across the seam.
+        PermRow(
+            etc,
+            etc_owner,
+            etc_group,
+            etc_dir_mode,
+            glob="*.lock",
+            child_mode=0o664,
+            role="/etc/hal0 *.lock (advisory RMW locks)",
+        ),
         # agents/ is the dashboard-only Hermes world — pinned root:root (#843),
         # under the flip too: the API only reads it.
         PermRow(paths.agents_config_dir(), "root", "root", 0o755, role="agents/"),
@@ -187,12 +217,143 @@ def ownership_table(
             optional=False,
             role="/var/lib/hal0 (state root)",
         ),
+        # *.lock siblings under the state root — same root-run-install hazard
+        # as the /etc/hal0 lock row above. `.first-run.lock` needs its own row:
+        # pathlib glob's `*` never matches a leading dot.
+        PermRow(
+            var_lib,
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.lock",
+            child_mode=0o664,
+            role="/var/lib/hal0 *.lock (advisory RMW locks)",
+        ),
+        PermRow(
+            paths.var_lib() / ".first-run.lock",
+            state_owner,
+            service_group,
+            0o664,
+            role=".first-run.lock",
+        ),
         PermRow(
             paths.var_lib() / ".hermes",
             state_owner,
             service_group,
             0o700,
             role="HERMES_HOME",
+        ),
+        # slots/ (runtime slot state) — the per-slot working dirs +
+        # ``<slot>/state.json`` the User=hal0 daemon writes at load time.
+        # install.sh `mkdir -p ${VAR_DIR}/slots` creates it root:root at
+        # install (born under root's umask), but hal0-api runs as hal0 and must
+        # create ``slots/<id>/`` + write state.json there — a root:root slots/
+        # leaves every slot unable to persist state and they degrade to
+        # ``error`` on a fresh box (O13). The previous table only covered the
+        # /etc/hal0/slots *config* dir (slots_config_dir above), NOT this
+        # runtime state tree, so `doctor perms --fix` never healed it. setgid
+        # 2775 (mirrors the benchmarks/ row) so state files inherit the shared
+        # hal0 group; the glob heals any pre-existing root-owned per-slot dir.
+        #
+        # O13 follow-up (r4-stage-validation.md): the single-level glob above
+        # healed the DIR (``slots/<id>/``) but never recursed into
+        # ``slots/<id>/state.json`` one level deeper — an operator still had to
+        # run a manual ``chown -R``. ``recursive=True`` walks every depth;
+        # ``child_file_mode=0o600`` matches (does not fight) the ACTUAL mode
+        # ``hal0.slots.state.write_state_atomic`` births state.json with —
+        # it writes via ``tempfile.mkstemp`` + ``os.replace``, and mkstemp
+        # always creates its tempfile 0600 regardless of umask (verified:
+        # same pattern as ``hal0.toml``/``profiles.toml`` above, both 0600 for
+        # the identical reason). Only the ``hal0`` daemon ever reads/writes
+        # state.json, so 0600 is also functionally correct — no other user or
+        # group member needs access.
+        PermRow(
+            var_lib / "slots",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*",
+            child_mode=0o2775,
+            child_file_mode=0o600,
+            recursive=True,
+            optional=False,
+            role="slots/ (runtime slot state, recursive)",
+        ),
+        # registry/ — the model registry, also born root:root from the same
+        # install.sh mkdir and also written by the User=hal0 daemon. Same O13
+        # birth-ownership class as slots/ above; heal the dir. registry/ is
+        # flat (no per-item subdirs like slots/<id>/), so its 3 known files —
+        # each written by a different mechanism with a different birth mode —
+        # get their own explicit (non-recursive, non-glob) rows below rather
+        # than one blanket recursive glob, to match each writer instead of
+        # fighting it:
+        #   * registry.toml    — hal0.registry.import_toml / store, written via
+        #     the same write_toml_atomic tempfile.mkstemp path as hal0.toml
+        #     above -> born 0600.
+        #   * registry.toml.lock — hal0.registry.store.registry_write_lock,
+        #     opened via ``os.open(..., 0o644)``; declared 0664 here (not its
+        #     0644 birth mode) to match the SAME cross-process-shared
+        #     rationale as the *.lock rows above — a root-run tool may create
+        #     it first, and the hal0 daemon must still be able to flock it.
+        #   * hal0.db — hal0.registry.sqlite_store, opened via sqlite3.connect
+        #     -> born 0644 (verified locally); single writer (the hal0
+        #     daemon), so 0644 is both the birth mode and functionally
+        #     sufficient.
+        PermRow(
+            var_lib / "registry",
+            state_owner,
+            service_group,
+            0o2775,
+            optional=False,
+            role="registry/ (model registry)",
+        ),
+        PermRow(
+            var_lib / "registry" / "registry.toml",
+            state_owner,
+            service_group,
+            0o600,
+            role="registry/registry.toml",
+        ),
+        PermRow(
+            var_lib / "registry" / "registry.toml.lock",
+            state_owner,
+            service_group,
+            0o664,
+            role="registry/registry.toml.lock",
+        ),
+        PermRow(
+            var_lib / "registry" / "hal0.db",
+            state_owner,
+            service_group,
+            0o644,
+            role="registry/hal0.db",
+        ),
+        # models/ — the default model-store directory (paths.models_dir()),
+        # born root:root 0755 by the SAME install.sh mkdir as slots/ and
+        # registry/ above (O13 class). No row existed for it: `doctor perms
+        # --fix` could not heal it, and a default-store pull
+        # (registry/pull_jobs.py:222 writes ``models_dir()/<model_id>/<file>``
+        # via a plain ``open(part, "wb")`` — born 0644 under the User=hal0
+        # unit's default umask 0022, with intermediate dirs made on demand)
+        # fails with PermissionError the moment the User=hal0 daemon tries to
+        # create a subdir under a root:root parent. (Live boxes mostly point
+        # [models].store at /mnt/ai-models instead, so this default path was
+        # plausibly never exercised — r5-sync-assessment §6.2.) Recursive +
+        # setgid 2775 like the slots/ row above so nested per-model dirs
+        # inherit the shared hal0 group; child files get 0644 (matches the
+        # plain-open() birth mode, not 0600 — weight files have no secrecy
+        # requirement and are read by the slot container's bind-mounted view).
+        PermRow(
+            var_lib / "models",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*",
+            child_mode=0o2775,
+            child_file_mode=0o644,
+            recursive=True,
+            optional=False,
+            role="models/ (default model store, recursive)",
         ),
         # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
         # User=hal0 unit needs to traverse INTO its own home without being able
@@ -356,25 +517,51 @@ class OwnershipPlan:
         return tuple(d for d in self.diffs if d.changed)
 
 
+def _child_mode_for(row: PermRow, child: Path) -> int:
+    """Resolve the effective mode for one glob-matched child.
+
+    Directories always use ``child_mode`` (falling back to the row's own
+    ``mode``). Files use ``child_file_mode`` when the row set one, else fall
+    back to the SAME ``child_mode`` value — that fallback is what keeps every
+    pre-existing (non-recursive) glob row's behavior byte-identical, since
+    those rows only ever declared a single ``child_mode`` and relied on it
+    covering whatever type actually matched (e.g. the ``*.lock``/``*.env``
+    rows only ever match files).
+    """
+    dir_mode = row.child_mode if row.child_mode is not None else row.mode
+    if child.is_dir():
+        return dir_mode
+    return row.child_file_mode if row.child_file_mode is not None else dir_mode
+
+
 def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
-    """Expand a glob row to one (path, row) per match; identity for plain rows."""
+    """Expand a glob row to one (path, row) per match; identity for plain rows.
+
+    Non-recursive rows (the default) use a single-level ``Path.glob`` — exactly
+    the prior behavior. ``recursive=True`` rows use ``Path.rglob`` instead, so
+    matches at every depth are covered (O13 follow-up: a bare single-level glob
+    on ``slots/`` heals the per-slot ``slots/<id>/`` dirs but never reaches
+    ``slots/<id>/state.json`` one level deeper).
+    """
     if row.glob is None:
         return [(row.target, row)]
     if not row.target.is_dir():
         return [(row.target, row)]  # the dir itself (absent/optional handled in plan)
     out: list[tuple[Path, PermRow]] = [(row.target, row)]
-    child_mode = row.child_mode if row.child_mode is not None else row.mode
-    for child in sorted(row.target.glob(row.glob)):
+    matches = row.target.rglob(row.glob) if row.recursive else row.target.glob(row.glob)
+    for child in sorted(matches):
         out.append(
             (
                 child,
                 replace(
                     row,
                     target=child,
-                    mode=child_mode,
+                    mode=_child_mode_for(row, child),
                     glob=None,
                     child_mode=None,
-                    role=f"{row.label} :: {child.name}",
+                    child_file_mode=None,
+                    recursive=False,
+                    role=f"{row.label} :: {child.relative_to(row.target)}",
                 ),
             )
         )

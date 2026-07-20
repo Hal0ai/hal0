@@ -108,7 +108,7 @@ class DeviceMeta:
 #: generalization wave), with per-device metadata.
 #: Ordering is presentation order for pickers: recommended first, then the
 #: fallbacks (Vulkan, then the experimental CUDA path), then the non-GPU
-#: devices. Per CONTEXT.md (spike data): ``gpu-rocm`` is the recommended
+#: devices. Per ARCHITECTURE.md (spike data): ``gpu-rocm`` is the recommended
 #: default on Strix Halo; ``gpu-vulkan`` is the slower fallback.
 CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
     DeviceMeta(

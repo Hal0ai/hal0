@@ -98,3 +98,49 @@ def test_skills_catalog_names_unique(client: TestClient) -> None:
     skills = client.get("/api/agents/skills").json()["skills"]
     names = [s["name"] for s in skills]
     assert len(names) == len(set(names)), "duplicate skill names"
+
+
+# ── DELETE /api/agents/{name} — O16 uninstall surface ────────────────────────
+
+
+def test_delete_agent_partial_removal_returns_207_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O16: a partial uninstall (root-owned entries the service can't remove)
+    surfaces a typed 207 with the residual — never a bare 500."""
+    from hal0.agents import AgentUninstallIncompleteError
+
+    residual = [
+        {"path": "/var/lib/hal0/.hermes/runtime.json", "reason": "PermissionError: [Errno 13]"}
+    ]
+
+    class _FakeMgr:
+        def uninstall(self, name: str) -> bool:
+            raise AgentUninstallIncompleteError(name, residual=residual, had_artifacts=True)
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
+
+    res = client.delete("/api/agents/hermes")
+    assert res.status_code == 207
+    body = res.json()
+    assert body["error"]["code"] == "agent.uninstall_incomplete"
+    details = body["error"]["details"]
+    assert details["removed"] is True
+    assert details["status"] == "partially_uninstalled"
+    assert details["residual"] == residual
+
+
+def test_delete_agent_clean_uninstall_returns_200(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean uninstall keeps the 200 ``uninstalled`` / ``not_installed`` shape."""
+
+    class _FakeMgr:
+        def uninstall(self, name: str) -> bool:
+            return True
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
+
+    res = client.delete("/api/agents/hermes")
+    assert res.status_code == 200
+    assert res.json() == {"name": "hermes", "status": "uninstalled"}

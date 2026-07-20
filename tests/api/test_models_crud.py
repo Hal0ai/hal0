@@ -302,6 +302,296 @@ def test_update_changed_fields_only_lists_actual_changes(
     )
 
 
+# ── Deliverable 1: stamp semantics — a profile change must NOT re-materialize ──
+
+
+def test_put_profile_change_does_not_rematerialize_extra_args(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """spec-flags-ownership §3: the server never re-materializes flags from a
+    profile on save — the client copies explicitly. A PUT that changes
+    ``defaults.profile`` while re-sending the SAME ``extra_args`` must leave
+    that text verbatim (proof the server did not resolve the profile and
+    overwrite the tune)."""
+    fpath = crud_models_root / "stamp.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={
+            "id": "stamp",
+            "path": str(fpath),
+            "defaults": {"profile": "old-profile", "extra_args": "-b 1024 -fa on"},
+        },
+    )
+    # Point the pointer at a DIFFERENT profile name but keep the same text.
+    # A re-materializing server would try to resolve 'ghost-profile' and either
+    # error or replace extra_args; the correct server keeps the text as sent.
+    r = crud_client.put(
+        "/api/models/stamp",
+        json={"defaults": {"profile": "ghost-profile", "extra_args": "-b 1024 -fa on"}},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["defaults"]["profile"] == "ghost-profile"
+    assert body["defaults"]["extra_args"] == "-b 1024 -fa on"
+
+
+# ── Deliverable 2: preferred_runner is writable + validated ────────────────────
+
+
+def test_put_preferred_runner_valid_key_persists(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "pr.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "pr", "path": str(fpath)})
+    r = crud_client.put("/api/models/pr", json={"preferred_runner": "cpu"})
+    assert r.status_code == 200, r.text
+    assert r.json()["preferred_runner"] == "cpu"
+
+
+def test_put_preferred_runner_unknown_key_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "pr2.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "pr2", "path": str(fpath)})
+    r = crud_client.put("/api/models/pr2", json={"preferred_runner": "does-not-exist"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.unknown_runner"
+
+
+def test_put_preferred_runner_null_clears(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "pr3.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={"id": "pr3", "path": str(fpath), "preferred_runner": "cpu"},
+    )
+    r = crud_client.put("/api/models/pr3", json={"preferred_runner": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["preferred_runner"] is None
+
+
+# ── Deliverable 4: O10 guard — bare double-quoted JSON eaten by the shell ──────
+
+
+def test_put_bare_double_quoted_json_extra_args_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A JSON value whose double quotes the shell would strip is rejected with
+    the actionable single-quote message (spec §3 JSON-token integrity)."""
+    fpath = crud_models_root / "o10a.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "o10a", "path": str(fpath)})
+    r = crud_client.put(
+        "/api/models/o10a",
+        json={"defaults": {"extra_args": '--chat-template-kwargs {"enable_thinking":false}'}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.extra_args_json_quoting"
+
+
+def test_put_single_quoted_json_extra_args_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """The correctly single-quoted JSON value survives shlex-splitting and is
+    accepted unchanged."""
+    fpath = crud_models_root / "o10b.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "o10b", "path": str(fpath)})
+    good = "--chat-template-kwargs '{\"enable_thinking\":false}'"
+    r = crud_client.put("/api/models/o10b", json={"defaults": {"extra_args": good}})
+    assert r.status_code == 200, r.text
+    assert r.json()["defaults"]["extra_args"] == good
+
+
+# ── Deliverable 1: create screens too, + dry-run /validate ────────────────────
+
+
+def test_create_screens_managed_extra_args(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """POST create screens defaults.extra_args like PUT does — a smuggled
+    managed flag fails the write instead of persisting a row that rebinds a
+    slot at launch."""
+    fpath = crud_models_root / "cs1.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "cs1",
+            "path": str(fpath),
+            "defaults": {"extra_args": "--flash-attn on --port 9"},
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    # And nothing was written.
+    assert crud_client.get("/api/models/cs1").status_code == 404
+
+
+def test_create_screens_unknown_preferred_runner(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "cs2.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "cs2", "path": str(fpath), "preferred_runner": "does-not-exist"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.unknown_runner"
+
+
+def test_validate_accepts_clean_body(crud_client: TestClient) -> None:
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"defaults": {"extra_args": "-b 8192 --flash-attn on"}, "preferred_runner": "cpu"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
+def test_validate_rejects_managed_extra_args_without_writing(crud_client: TestClient) -> None:
+    """/validate is a dry run: it screens with the same envelope as create/PUT
+    and never touches the registry (no id required, nothing persisted)."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"id": "should-not-persist", "defaults": {"extra_args": "--model /etc/passwd"}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    assert crud_client.get("/api/models/should-not-persist").status_code == 404
+
+
+# ── Deliverable 3: duplicate-model endpoint ────────────────────────────────────
+
+
+def test_duplicate_creates_new_row_sharing_weights(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A duplicate is a new registry id pointing at the SAME path, copying
+    metadata/capabilities/backends. Hand-registered sources carry no
+    model_file rows, so files_refcounted is 0 (nothing to refcount)."""
+    fpath = crud_models_root / "dup-src.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={
+            "id": "dup-src",
+            "path": str(fpath),
+            "name": "Source",
+            "capabilities": ["chat"],
+            "backends": ["vulkan", "rocm"],
+        },
+    )
+    pre = _max_event_id(crud_client)
+    r = crud_client.post("/api/models/dup-src/duplicate", json={"new_id": "dup-copy"})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["id"] == "dup-copy"
+    assert body["path"] == str(fpath)  # SAME weights, no byte copy
+    assert body["capabilities"] == ["chat"]
+    assert set(body["backends"]) == {"vulkan", "rocm"}
+    assert body["duplicated_from"] == "dup-src"
+    assert body["files_refcounted"] == 0
+
+    # Both rows are independently retrievable.
+    assert crud_client.get("/api/models/dup-src").status_code == 200
+    assert crud_client.get("/api/models/dup-copy").status_code == 200
+
+    events = _events_since(crud_client, pre, "model.registered")
+    assert any(
+        ev["data"].get("id") == "dup-copy" and ev["data"].get("source") == "duplicate"
+        for ev in events
+    ), events
+
+
+def test_duplicate_with_profile_stamps_flags_into_defaults(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """The optional ``profile`` materializes that profile's flags into the new
+    row's defaults (copy-not-layer). The source is untouched."""
+    from hal0.profiles import ProfileCatalog
+
+    fpath = crud_models_root / "dup-prof.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "dup-prof", "path": str(fpath)})
+
+    resolved = ProfileCatalog().resolve("cpu-llm")
+    r = crud_client.post(
+        "/api/models/dup-prof/duplicate",
+        json={"new_id": "dup-prof-cpu", "profile": "cpu-llm"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["defaults"]["profile"] == "cpu-llm"
+    assert body["defaults"]["extra_args"] == resolved.flags
+
+    # Source keeps no stamped defaults — it was never mutated.
+    src = crud_client.get("/api/models/dup-prof").json()
+    assert not (src.get("defaults") or {}).get("extra_args")
+
+
+def test_duplicate_unknown_profile_404(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "dup-badprof.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "dup-badprof", "path": str(fpath)})
+    r = crud_client.post(
+        "/api/models/dup-badprof/duplicate",
+        json={"new_id": "dup-badprof-x", "profile": "no-such-profile"},
+    )
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "profiles.not_found"
+
+
+def test_duplicate_unknown_source_404(crud_client: TestClient) -> None:
+    r = crud_client.post("/api/models/ghost-src/duplicate", json={"new_id": "whatever"})
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "model.not_found"
+
+
+def test_duplicate_conflicting_new_id_409(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "dup-c.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "dup-c", "path": str(fpath)})
+    crud_client.post("/api/models", json={"id": "dup-c-taken", "path": str(fpath)})
+    r = crud_client.post("/api/models/dup-c/duplicate", json={"new_id": "dup-c-taken"})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "model.already_exists"
+
+
+def test_duplicate_same_id_400(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "dup-self.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "dup-self", "path": str(fpath)})
+    r = crud_client.post("/api/models/dup-self/duplicate", json={"new_id": "dup-self"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.invalid"
+
+
 # ── DELETE cascade ─────────────────────────────────────────────────────────
 
 

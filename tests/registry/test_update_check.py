@@ -110,6 +110,31 @@ def test_evaluate_no_local_sha_never_flags_update() -> None:
     assert verdict["remote_sha256"] == SHA_B
 
 
+def test_evaluate_basename_fallback_resolves_subdir_hosted_file() -> None:
+    """A row whose stored hf_filename dropped the upstream subdir prefix
+    still resolves via a unique basename match, so it isn't a false negative."""
+    verdict = evaluate_model_update(
+        _model(),  # hf_filename="qwen3-4b.gguf" (bare)
+        {"Qwen/Qwen3-4B-GGUF": {"UD-Q4_K_XL/qwen3-4b.gguf": SHA_B}},
+    )
+    assert verdict is not None
+    assert verdict["update_available"] is True
+    assert verdict["remote_sha256"] == SHA_B
+
+
+def test_evaluate_basename_fallback_skips_ambiguous_match() -> None:
+    """When two tree files share the basename with DIFFERENT shas, the
+    fallback must not guess — leave it unresolved rather than compare
+    against the wrong quant."""
+    verdict = evaluate_model_update(
+        _model(),
+        {"Qwen/Qwen3-4B-GGUF": {"a/qwen3-4b.gguf": SHA_A, "b/qwen3-4b.gguf": SHA_B}},
+    )
+    assert verdict is not None
+    assert verdict["update_available"] is False
+    assert verdict["reason"] == "file_missing_or_not_lfs"
+
+
 # ── fetch_remote_lfs_shas ────────────────────────────────────────────────────
 
 

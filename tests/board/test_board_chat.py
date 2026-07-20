@@ -178,6 +178,10 @@ def _make_app(
     store.init_schema()
     app.state.audit = store
     app.state.board_chat_llm = stub
+    # This harness exercises the mutation tools directly, so it opts out of
+    # the shipped read-only default (spec-kb23 §4b). Tests that probe the
+    # guardrail itself override this via _set_brain_chat_config.
+    app.state.hal0_config = Hal0Config(brain_chat=BrainChatConfig(read_only=False))
     # Isolate from any real hal0-brain persona on the test box — an empty
     # root makes _resolve_profile fall back to the built-in prompt/model.
     app.state.brain_persona_root = tmp_path / "personas"
@@ -897,11 +901,13 @@ def _set_brain_chat_config(app, **kwargs) -> None:
 
 
 def test_config_accessor_defaults_when_absent(tmp_path) -> None:
-    # The harness never sets app.state.hal0_config → defaults, behaviour-identical.
+    # With no hal0_config on app.state the accessor returns the SHIPPED
+    # defaults — read_only=True since KB-2/3 (safe-by-default steward).
     rec = _Recorder()
     app, _client = _make_app(rec, _StubLLM([]), tmp_path)
+    app.state.hal0_config = None  # the harness opts mutation tests in; undo that here
     cfg = _brain_chat_config(_FakeRequest(app))
-    assert (cfg.enabled, cfg.read_only, cfg.max_rounds) == (True, False, 8)
+    assert (cfg.enabled, cfg.read_only, cfg.max_rounds) == (True, True, 8)
 
 
 def test_kill_switch_disables_chat_before_any_llm_call(tmp_path) -> None:
