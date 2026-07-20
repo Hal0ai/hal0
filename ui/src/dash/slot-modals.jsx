@@ -899,10 +899,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Image</span>
+										<span>Container Image</span>
 										<span className="sub">
-											⟳ Pin a specific container image instead of the default
-											release
+											⟳ Override the container image for this slot
 										</span>
 									</div>
 									<div className="form-ctl">
@@ -917,11 +916,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												setFieldErrs((p) => ({ ...p, imagePin: undefined }));
 											}}
 											placeholder={
-												binary
-													? `default: ${backends[binary]?.image || "—"}`
-													: "auto (from device) — pin to override"
+												binary && backends[binary]?.image
+													? backends[binary].image
+													: "will resolve from selected profile"
 											}
 											spellCheck={false}
+											style={imagePin ? {} : { color: "var(--fg-4)" }}
 										/>
 										{fieldErrs.imagePin ? (
 											<div className="hint" style={{ color: "var(--err)" }}>
@@ -929,8 +929,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											</div>
 										) : (
 											<div className="hint">
-												Pin a custom image to test a build or roll back. Empty =
-												use the default release.
+												Override the container image for a debug build, A/B
+												test, or rollback. Empty uses the profile's default
+												image.
 											</div>
 										)}
 									</div>
