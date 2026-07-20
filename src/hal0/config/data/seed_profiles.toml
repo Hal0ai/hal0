@@ -63,30 +63,40 @@ quant = ""
 # CPU-safe chat. --threads-batch is llama-server specific (sets the number
 # of threads to use for batch processing; distinct from --threads which
 # sets total CPU threads). --threads stays on the slot.
+#
+# device_class = "cpu" preserves the existing fit-gating semantics: this
+# profile's CPU-tuned flags don't make sense on a GPU runtime. The slot
+# is free to override (operator-custom slot TOML), but the default-seed
+# adoption path rejects applying this profile to a gpu-* slot.
+device_class = "cpu"
 flags = "--threads-batch 8 --jinja -b 256 -ub 256"
 mtp = false
 intent = "CPU-safe chat"
 quant = ""
 
 [profile.flm]
+device_class = "npu"
 flags = ""
 mtp = false
 intent = "FLM NPU (chat/embed/STT)"
 quant = "W4ABF16"
 
 [profile.kokoro]
+device_class = "cpu"
 flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 mtp = false
 intent = "Kokoro TTS"
 quant = ""
 
 [profile.qwen3-tts]
+device_class = "gpu"
 flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
 mtp = false
 intent = "Qwen3-TTS"
 quant = "BF16"
 
 [profile.comfyui]
+device_class = "img"
 flags = "--disable-mmap --bf16-vae --cache-none"
 mtp = false
 intent = "ComfyUI"
