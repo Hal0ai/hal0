@@ -1188,8 +1188,8 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     # turns to a capable, tool-format-compatible model when the brain slot's
     # own model can't emit parseable calls); then the [brain_chat] model
     # override (e.g. hal0/npu); then the persona's preferred_model / default.
-    tool_model = cfg.tool_model if (tools and cfg.tool_model) else ""
-    model = payload.get("model") or (tool_model or None) or (cfg.model or None) or default_model
+    # model selection (brain handles tool calls internally — no model swap).
+    model = payload.get("model") or cfg.model or default_model
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
