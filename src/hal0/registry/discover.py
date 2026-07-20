@@ -495,11 +495,128 @@ def backfill_coordless(registry: ModelRegistry) -> list[str]:
     return repaired
 
 
-def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
+def prune_missing(
+    registry: ModelRegistry,
+    *,
+    protected_ids: set[str],
+    dry_run: bool = False,
+) -> dict:
+    """Remove registry rows whose backing path no longer exists on disk.
+
+    A row is pruned only if BOTH: its resolved path is missing AND its id is
+    not in ``protected_ids`` (slot/stack-referenced ids). Protected-but-missing
+    rows are returned under ``missing_referenced`` so callers can surface them
+    as drift needing repair rather than silently deleting a referenced model.
+    Returns {"pruned": [...ids...], "missing_referenced": [...ids...], "kept": int}.
+    """
+    pruned: list[str] = []
+    missing_referenced: list[str] = []
+    kept = 0
+    for m in registry.list():
+        # ``p.exists()`` is authoritative: do NOT special-case size_bytes==0
+        # (that's stale metadata — the weights may well still be on disk).
+        try:
+            present = Path(m.path).exists()
+        except OSError:
+            present = False
+        if present:
+            kept += 1
+            continue
+        # Path is missing on disk.
+        if m.id in protected_ids:
+            # Referenced by a live slot or a stack — this is functional drift
+            # that needs a repair, not a deletion. Report, never remove.
+            missing_referenced.append(m.id)
+            continue
+        pruned.append(m.id)
+        if not dry_run:
+            try:
+                registry.remove(m.id)
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning("discover.prune_remove_failed id=%s err=%s", m.id, exc)
+    return {"pruned": pruned, "missing_referenced": missing_referenced, "kept": kept}
+
+
+def referenced_model_ids() -> set[str]:
+    """Model ids referenced by any configured slot or any stack.
+
+    Union of: each slot's default model (plus its capability child models from
+    the live capabilities config) and every model id referenced by a stack
+    (slot primaries + capability rows). Best-effort — each per-slot / per-stack /
+    per-config load is wrapped so a single malformed config can't blow up the
+    whole scan. Missing subsystems are simply skipped.
+    """
+    ids: set[str] = set()
+
+    # ── Slots (+ live capability child selections) ────────────────────────
+    try:
+        from hal0.config.loader import list_slots, load_slot_config
+
+        for slot_name in list_slots():
+            try:
+                slot = load_slot_config(slot_name)
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning("discover.ref_slot_load_failed slot=%s err=%s", slot_name, exc)
+                continue
+            model_id = getattr(getattr(slot, "model", None), "default", "") or ""
+            if model_id:
+                ids.add(model_id)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("discover.ref_slots_failed err=%s", exc)
+
+    # Capability child selections (live [selections.<slot>.<child>] rows).
+    try:
+        from hal0.capabilities.config import load_capabilities_config
+
+        cap_cfg = load_capabilities_config()
+        for children in getattr(cap_cfg, "selections", {}).values():
+            for sel in children.values():
+                child_model = getattr(sel, "model", "") or ""
+                if child_model:
+                    ids.add(child_model)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("discover.ref_capabilities_failed err=%s", exc)
+
+    # ── Stacks (slot primaries + capability rows) ─────────────────────────
+    try:
+        from hal0.stacks import StacksCatalog
+        from hal0.stacks.portable import _referenced_model_ids
+
+        for stack in StacksCatalog().list():
+            try:
+                # ResolvedStack duck-types StackConfig for _referenced_model_ids
+                # (both expose ``.slots`` of StackSlotEntry).
+                ids |= _referenced_model_ids(stack)
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning(
+                    "discover.ref_stack_failed stack=%s err=%s",
+                    getattr(stack, "slug", "?"),
+                    exc,
+                )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("discover.ref_stacks_failed err=%s", exc)
+
+    return ids
+
+
+def scan_and_register(
+    registry: ModelRegistry,
+    cfg: ModelsConfig,
+    *,
+    prune: bool = False,
+    protected_ids: set[str] | None = None,
+) -> dict:
     """Discover candidates under ``cfg.roots`` and register the new ones.
 
     Returns a result dict shaped for both the API surface and the
     startup log line.
+
+    When ``prune`` is True, also run :func:`prune_missing` after the add pass
+    to drop registry rows whose backing file no longer exists — except rows in
+    ``protected_ids`` (slot/stack-referenced), which are reported under
+    ``missing_referenced`` for repair. The ``pruned`` / ``missing_referenced``
+    keys are always present (both ``[]`` when ``prune`` is False) so the return
+    shape is stable.
     """
     known_paths: set[str] = set()
     for existing in registry.list():
@@ -549,11 +666,24 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
             log.warning("discover.register_failed path=%s err=%s", cand.path, exc)
             skipped.append({"path": str(cand.path), "reason": f"register_failed:{exc}"})
 
+    pruned: list[str] = []
+    missing_referenced: list[str] = []
+    if prune:
+        prune_result = prune_missing(
+            registry,
+            protected_ids=protected_ids or set(),
+            dry_run=False,
+        )
+        pruned = prune_result["pruned"]
+        missing_referenced = prune_result["missing_referenced"]
+
     return {
         "added": added,
         "backfilled": backfilled,
         "skipped": skipped,
         "scanned_roots": [str(r) for r in roots],
+        "pruned": pruned,
+        "missing_referenced": missing_referenced,
     }
 
 
@@ -569,6 +699,8 @@ __all__ = [
     "backfill_coordless",
     "find_candidates",
     "is_skippable",
+    "prune_missing",
+    "referenced_model_ids",
     "register_candidate",
     "scan_and_register",
 ]
