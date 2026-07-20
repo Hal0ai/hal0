@@ -1,8 +1,19 @@
 """One-shot migrator — fold each slot's flag/tune surface into its model.
 
-FLAGS-own (spec-flags-ownership §5). Launch flags now attach ONLY to models
-(see :func:`hal0.providers.container._llama_argv_segments`, which no longer
-reads a profile or slot flag segment). Live boxes still have slot TOMLs
+FLAGS-own (spec-flags-ownership §5 + §7 slot-purity fold). Launch flags now
+attach ONLY to models. The §7 slot-purity increment extends the fold to
+``chat_template`` — a model-intrinsic knob (which template the artifact needs).
+The per-slot ``chat_template`` override is sunset (inert at launch); the
+migrator folds its effective value into ``model.defaults.chat_template`` so the
+model owns the template, and two slots sharing a model with divergent templates
+refuse exactly like a divergent flag tune. ``slot.device`` and the raw slot/
+profile container-image override are NOT folded here — see the §7 handback note
+in this lane's report (device is a cross-subsystem orchestration primitive, not
+a launch override; the image string is already an expiring shim resolved by
+``providers.container._resolve_image_ref``).
+
+The launch argv path (:func:`hal0.providers.container._llama_argv_segments`) no
+longer reads a profile or slot flag segment. Live boxes still have slot TOMLs
 carrying ``[server].extra_args`` / ``[model].n_gpu_layers`` / ``[model].
 context_size`` / ``parallel`` overrides plus a ``profile`` reference whose
 bench-tuned ``flags`` used to layer in at launch. This migrator materializes
@@ -85,10 +96,19 @@ class FoldedTune:
     :func:`hal0.providers.container._resolve_context_size`), so folding it in
     would be launch-inert and comparing on it would spuriously refuse slots
     that only diverge on their own context window.
+
+    ``chat_template`` (spec-flags-ownership §7) IS a fold output: it is
+    model-intrinsic (which template the artifact needs), so the slot override
+    is sunset and the model's ``defaults.chat_template`` becomes the single
+    launch source (:func:`hal0.config.schema.resolve_chat_template`). Two slots
+    sharing one model with divergent templates therefore refuse, exactly like a
+    divergent flag tune. ``'auto'``/empty normalize to ``None`` so an explicit
+    ``auto`` and an implicit unset do not read as a spurious disagreement.
     """
 
     extra_args: str | None
     n_gpu_layers: int | None
+    chat_template: str | None = None
 
     def as_defaults_updates(self) -> dict[str, Any]:
         """The ``defaults`` sub-keys this fold sets (omitting ``None``)."""
@@ -97,6 +117,8 @@ class FoldedTune:
             out["extra_args"] = self.extra_args
         if self.n_gpu_layers is not None:
             out["n_gpu_layers"] = self.n_gpu_layers
+        if self.chat_template is not None:
+            out["chat_template"] = self.chat_template
         return out
 
 
@@ -160,6 +182,20 @@ def _int_or_none(val: Any, *, floor: int) -> int | None:
     return n if n >= floor else None
 
 
+def _chat_template_or_none(val: Any) -> str | None:
+    """Normalize a chat-template id: ``'auto'``/empty/None → None (GGUF-embedded).
+
+    Mirrors :func:`hal0.config.schema.resolve_chat_template` so an explicit
+    ``auto`` and an unset field fold to the same (None) value — otherwise two
+    slots sharing a model, one with ``chat_template='auto'`` and one with it
+    absent, would read as a divergent share and spuriously refuse.
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s and s != "auto" else None
+
+
 def _slot_flag_tokens(slot_cfg: Mapping[str, Any]) -> tuple[list[str], int | None, int | None]:
     """Extract a slot's flag-surface contribution as (extra_tokens, ngl, ctx).
 
@@ -216,6 +252,14 @@ def compute_folded_tune(
     """
     md = model_defaults if isinstance(model_defaults, Mapping) else {}
 
+    # chat_template (spec §7): model-intrinsic, slot override > existing model
+    # default (same precedence resolve_chat_template used before the slot tier
+    # was sunset). 'auto'/empty normalize to None on both sides.
+    slot_ct = _chat_template_or_none(slot_cfg.get("chat_template"))
+    chat_template = (
+        slot_ct if slot_ct is not None else _chat_template_or_none(md.get("chat_template"))
+    )
+
     prof_tokens = shlex.split(profile_flags) if profile_flags and profile_flags.strip() else []
     md_extra = md.get("extra_args")
     md_extra_tokens = shlex.split(str(md_extra)) if md_extra and str(md_extra).strip() else []
@@ -262,7 +306,7 @@ def compute_folded_tune(
         i += 1
 
     extra_args = " ".join(shlex.quote(t) for t in remainder) if remainder else None
-    return FoldedTune(extra_args=extra_args, n_gpu_layers=ngl)
+    return FoldedTune(extra_args=extra_args, n_gpu_layers=ngl, chat_template=chat_template)
 
 
 def _merge_new_defaults(existing: Mapping[str, Any] | None, folded: FoldedTune) -> dict[str, Any]:

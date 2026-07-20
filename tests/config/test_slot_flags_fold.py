@@ -70,6 +70,83 @@ def test_parallel_folds_with_kv_unified():
     assert "--kv-unified" in ft.extra_args
 
 
+# ── chat_template fold (spec §7 slot-purity) ──────────────────────────────────
+
+
+def test_chat_template_folds_into_model_defaults():
+    """A slot's chat_template override materializes into model.defaults so the
+    model owns the (model-intrinsic) template — spec §7."""
+    plan = plan_slot_flags_fold(
+        [{"name": "s", "model": {"default": "m"}, "chat_template": "qwen3"}],
+        {},
+        {"m": None},
+    )
+    assert not plan.refusals
+    assert len(plan.folds) == 1
+    assert plan.folds[0].new_defaults["chat_template"] == "qwen3"
+
+
+def test_chat_template_auto_folds_to_nothing():
+    """'auto'/absent normalize to None → no chat_template written, no refusal."""
+    ft = compute_folded_tune(
+        {"name": "s", "model": {"default": "m"}, "chat_template": "auto"},
+        profile_flags="",
+        model_defaults=None,
+    )
+    assert ft.chat_template is None
+    assert "chat_template" not in ft.as_defaults_updates()
+
+
+def test_slot_chat_template_beats_stale_model_default():
+    """Slot override > existing model default (the old resolve precedence,
+    now materialized by the fold rather than read at launch)."""
+    ft = compute_folded_tune(
+        {"name": "s", "model": {"default": "m"}, "chat_template": "qwen3"},
+        profile_flags="",
+        model_defaults={"chat_template": "chatml"},
+    )
+    assert ft.chat_template == "qwen3"
+
+
+def test_divergent_chat_template_is_refused():
+    """Two slots sharing one model with conflicting templates → refuse, don't
+    silently pick one (spec §7 divergent-share refusal, same path as flags)."""
+    slots = [
+        {"name": "a", "model": {"default": "shared"}, "chat_template": "qwen3"},
+        {"name": "b", "model": {"default": "shared"}, "chat_template": "chatml"},
+    ]
+    plan = plan_slot_flags_fold(slots, {}, {"shared": None})
+    assert plan.folds == []
+    assert len(plan.refusals) == 1
+    ref = plan.refusals[0]
+    assert ref.model_id == "shared"
+    assert {t.chat_template for t in ref.slot_tunes.values()} == {"qwen3", "chatml"}
+    assert not plan.ok
+
+
+def test_auto_vs_absent_chat_template_is_not_divergent():
+    """One slot with chat_template='auto' and one absent both normalize to None
+    → consensus, not a spurious refusal."""
+    slots = [
+        {"name": "a", "model": {"default": "shared"}, "chat_template": "auto"},
+        {"name": "b", "model": {"default": "shared"}},
+    ]
+    plan = plan_slot_flags_fold(slots, {}, {"shared": None})
+    assert not plan.refusals
+    # Neither slot contributes a template and the model has none → pure no-op.
+    assert plan.folds == [] or all("chat_template" not in f.new_defaults for f in plan.folds)
+
+
+def test_chat_template_fold_is_idempotent():
+    """Re-running with the model already carrying the folded template → no-op."""
+    slot = {"name": "s", "model": {"default": "m"}, "chat_template": "qwen3"}
+    plan = plan_slot_flags_fold([slot], {}, {"m": None})
+    folded = plan.folds[0].new_defaults
+    plan2 = plan_slot_flags_fold([slot], {}, {"m": folded})
+    assert plan2.folds == []
+    assert any("no-op" in reason for _mid, reason in plan2.skipped)
+
+
 # ── sole-slot fold ────────────────────────────────────────────────────────────
 
 

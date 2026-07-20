@@ -420,12 +420,21 @@ class SlotConfig(BaseModel):
             "Retained for TOML round-trip."
         ),
     )
+    # HAL0-SUNSET: v1.0.0 — chat_template is model-intrinsic and folds into the
+    # model (spec-flags-ownership §7 slot-purity). INERT at launch: the slot
+    # tier was removed from resolve_chat_template, so model.defaults.chat_template
+    # is the single source. The one-shot migrator folds each slot's effective
+    # template into its bound model (divergent-share refusal). Retained for TOML
+    # round-trip until the sunset ratchet drops it.
     chat_template: str | None = Field(
         default=None,
         description=(
-            "Per-slot chat-template override (id from /api/chat-templates, or "
-            "'auto'/None for the GGUF-embedded template). Wins over the model's "
-            "default. See resolve_chat_template."
+            "SUNSET (spec-flags-ownership §7): per-slot chat-template override "
+            "(id from /api/chat-templates, or 'auto'/None for the GGUF-embedded "
+            "template). INERT at launch — the chat template is now model-intrinsic "
+            "and read only from model.defaults.chat_template; the migrator folds "
+            "this into the bound model. Round-trips for one release. See "
+            "resolve_chat_template and slot_flags_fold."
         ),
     )
     vision: bool = Field(
@@ -1378,17 +1387,25 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
 
 
 def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
-    """Effective chat-template id: slot override > model default > None (auto).
+    """Effective chat-template id: model default > None (auto).
+
+    FLAGS-own §7 (slot-purity fold): the chat template is model-intrinsic — it
+    is a property of the artifact, not the slot — so the model's
+    ``defaults.chat_template`` is now the single launch source. The per-slot
+    ``chat_template`` override is sunset (inert at launch); the one-shot
+    migrator (:mod:`hal0.config.migrations.slot_flags_fold`) folds each slot's
+    effective template into its bound model, refusing any model whose slots
+    carry divergent templates. ``slot_cfg`` is retained in the signature for
+    the container provider's call-site shape (and so a future reader can key
+    other model-vs-slot resolution here) but its ``chat_template`` key is no
+    longer consulted.
 
     'auto' (or empty/None) means use the GGUF-embedded template (no
     ``--chat-template-file``). Returns the template id string otherwise.
     """
-    for val in (
-        slot_cfg.get("chat_template"),
-        (model_info.get("defaults") or {}).get("chat_template"),
-    ):
-        if val and val != "auto":
-            return str(val)
+    val = (model_info.get("defaults") or {}).get("chat_template")
+    if val and val != "auto":
+        return str(val)
     return None
 
 
