@@ -19,7 +19,7 @@ def test_seed_rerank_toml_validates() -> None:
     assert slot.runtime == "container"
     assert slot.profile == "reranking"
     assert slot.device == "gpu-vulkan"
-    assert slot.port == 8083
+    assert slot.port == 8086  # drifted from 8083 per spec §5.4 (port fix for _SETUP_SLOTS[embed] conflict)
     assert "--reranking" in (slot.server.extra_args or "")
     # Clean seed (WS-E, #1107): no model pin — boots grey, no surprise download.
     assert slot.model.default == ""
@@ -79,8 +79,8 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
     """No two shipped seed slot TOMLs may bind the same port.
 
     Deconfliction today is enforced only by hand-written comments in the TOMLs
-    (agent 8081, rerank 8083, tts 8084, flm 8088, brain 8089, utility 8090,
-    qwen3tts 8095, img 8188). A future seed addition (or an edit reusing a port)
+    (agent 8081, rerank 8086, tts 8085, flm 8088, brain 8089, utility 8090,
+    qwen3tts 8095, img 8188, coder 8082, embed 8083). A future seed addition (or an edit reusing a port)
     that collides two shipped slots would otherwise ship silently and crash-loop
     the second container on a fresh box. The glob includes the opt-in qwen3tts
     template (it is shipped, and its 8095 is distinct).
