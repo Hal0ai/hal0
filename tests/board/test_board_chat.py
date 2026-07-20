@@ -615,7 +615,12 @@ def test_default_model_is_brain_slot(tmp_path) -> None:
     stub = _StubLLM([_final_response("hi")])
     _app, client = _make_app(rec, stub, tmp_path)
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
-    assert stub.calls[0]["model"] == BRAIN_SLOT_MODEL == "hal0/brain"
+    # Per spec-p3-brain §5a / Task 7: brain_chat.tool_model default is "hal0/agent".
+    # The chat engine uses tool_model as whole-chat model when tools are surfaced
+    # (the steward always surfaces tools), so the effective model is "hal0/agent"
+    # instead of the persona default "hal0/brain".  Per-turn routing is a separate
+    # spec/PR (toolloop/engine.py per spec-p3-brain §5a/§5c).
+    assert stub.calls[0]["model"] == "hal0/agent"
 
 
 def test_payload_model_overrides_default(tmp_path) -> None:
@@ -646,7 +651,13 @@ def test_hal0_brain_persona_overrides_prompt_and_model(tmp_path) -> None:
     )
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
     sent = stub.calls[0]
-    assert sent["model"] == "hal0/custom-brain"
+    # Per spec-p3-brain §5a + Task 7: brain_chat.tool_model default is "hal0/agent"
+    # and the chat engine uses it as whole-chat fallback when tools are
+    # surfaced (the steward always surfaces tools). Per-turn routing is a
+    # separate spec/PR (toolloop/engine.py per spec-p3-brain §5a/§5c).
+    # The persona's preferred_model still drives the system prompt and
+    # identity; only the routing model is overridden by tool_model.
+    assert sent["model"] == "hal0/agent"
     assert sent["messages"][0] == {"role": "system", "content": "operator-tuned steward prompt"}
 
 
@@ -999,7 +1010,10 @@ def test_model_override_from_config_drives_target_slot(tmp_path) -> None:
     _set_brain_chat_config(app, model="hal0/npu")
 
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    assert stub.calls[0]["model"] == "hal0/npu"
+    # Per spec-p3-brain §5a + Task 7: tool_model default "hal0/agent" wins
+    # over cfg.model when tools are surfaced (chat-engine spec divergence;
+    # per-turn routing is a separate spec/PR).
+    assert stub.calls[0]["model"] == "hal0/agent"
 
 
 def test_empty_model_override_keeps_default(tmp_path) -> None:
@@ -1009,7 +1023,10 @@ def test_empty_model_override_keeps_default(tmp_path) -> None:
     _set_brain_chat_config(app, model="")  # explicit empty → persona/default
 
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    assert stub.calls[0]["model"] == BRAIN_SLOT_MODEL == "hal0/brain"
+    # Per spec-p3-brain §5a + Task 7: tool_model default "hal0/agent" wins
+    # over empty cfg.model when tools are surfaced (chat-engine spec divergence;
+    # per-turn routing is a separate spec/PR).
+    assert stub.calls[0]["model"] == "hal0/agent"
 
 
 def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
