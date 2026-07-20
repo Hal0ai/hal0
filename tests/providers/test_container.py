@@ -1031,24 +1031,29 @@ class TestFamilyDefaults:
         assert model_family(None) is None
 
     def test_family_flags_lookup(self) -> None:
-        assert "gemma" in FAMILY_DEFAULTS
-        assert family_flags("gemma-4-12b-it") == FAMILY_DEFAULTS["gemma"]
-        assert "-ctk f16" in family_flags("gemma-4-12b-it")
-        assert family_flags("qwen3-27b") == ""  # no qwen entry today
+        # Per spec §1.2: family_defaults.toml data cleared for 1.0
+        # (gemma f16 KV override gone; family-specific quirks live in
+        # profile.<family>-<variant> entries instead).
+        assert "gemma" not in FAMILY_DEFAULTS
+        assert family_flags("gemma-4-12b-it") == ""
+        assert family_flags("qwen3-27b") == ""  # no qwen entry
         assert family_flags(None) == ""
 
     def test_gemma_on_q8_profile_pins_f16_kv(self) -> None:
-        """A gemma model on a q8 profile resolves to f16 KV — profile's
-        -ctk q8_0 is overridden and deduped away by the family layer."""
+        """Per spec §1.2: family_defaults cleared for 1.0. A gemma model
+        on a q8 profile no longer gets the gemma f16 KV override — the
+        profile's q8_0 KV is preserved (no family override to dedup)."""
         profile = _moe_profile()  # ships -ctk q8_0 -ctv q8_0
         cfg = {"profile": "rocm", "port": 8095, "model": {"default": "gemma-4-12b-it"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
-        assert "q8_0" not in argv  # deduped: family f16 wins, no stale q8 dup
-        assert argv[argv.index("-ctk") + 1] == "f16"
-        assert argv[argv.index("-ctv") + 1] == "f16"
-        assert "--cache-reuse" in argv and argv[argv.index("--cache-reuse") + 1] == "0"
+        # Profile's q8_0 KV is preserved (no family override).
+        assert argv[argv.index("-ctk") + 1] == "q8_0"
+        assert argv[argv.index("-ctv") + 1] == "q8_0"
+        # The gemma-specific --cache-reuse 0 override is gone (no family entry).
+        # Profile doesn't carry --cache-reuse, so it should NOT appear in argv.
+        assert "--cache-reuse" not in argv
 
     def test_non_gemma_gets_no_family_kv_leak(self) -> None:
         """A qwen model has no FAMILY_DEFAULTS entry, so no family KV is forced.
@@ -1064,9 +1069,11 @@ class TestFamilyDefaults:
         assert "f16" not in argv  # no gemma family leak
 
     def test_slot_extra_args_is_inert_family_wins(self) -> None:
-        """FLAGS-own: a slot [server].extra_args no longer beats the family
-        default — it is inert. The gemma family f16 KV wins; a model that truly
-        wants q4_0 carries it in its own defaults.extra_args (migrator-folded)."""
+        """FLAGS-own: a slot [server].extra_args is INERT at launch.
+        Per spec §1.2: family_defaults cleared for 1.0, so no family override
+        applies. The profile's q8_0 KV wins; the slot's q4_0 extra_args is
+        ignored (inert). A model that truly wants q4_0 carries it in its
+        own defaults.extra_args (migrator-folded)."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
@@ -1077,8 +1084,9 @@ class TestFamilyDefaults:
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
-        assert argv[argv.index("-ctk") + 1] == "f16"  # family wins, slot inert
-        assert "q4_0" not in argv
+        # No family entry → no override. Profile's q8_0 wins.
+        assert argv[argv.index("-ctk") + 1] == "q8_0"
+        assert "q4_0" not in argv  # slot extra_args inert
 
     def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
         """The vulkan seed ships minimal flags with NO forced KV quant.
