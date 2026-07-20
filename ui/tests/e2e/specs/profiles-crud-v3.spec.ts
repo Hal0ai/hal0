@@ -112,17 +112,19 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await page.click('[data-testid="pf-btn-new"]')
     await expect(page.locator('.pf-form-panel')).toBeVisible()
 
+    // spec-hw-slot-ownership §3: a profile is a device-agnostic tune template —
+    // the image field was removed (image belongs to the runner). Name is the
+    // only required field now.
     await page.fill('[data-testid="pf-input-name"]', 'test-profile')
-    await page.fill('[data-testid="pf-input-image"]', 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
     await page.click('[data-testid="pf-btn-submit"]')
 
     // Wait for drawer to close.
     await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
 
-    // Assert POST was fired with correct body.
+    // Assert POST was fired with correct body (no image key).
     expect(posts).toHaveLength(1)
     expect(posts[0].name).toBe('test-profile')
-    expect(posts[0].image).toBe('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
+    expect(posts[0]).not.toHaveProperty('image')
   })
 
   // ── Create validation ────────────────────────────────────────────────────────
@@ -137,7 +139,6 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await gotoProfiles(page)
     await page.click('[data-testid="pf-btn-new"]')
     await page.fill('[data-testid="pf-input-name"]', 'INVALID NAME!')
-    await page.fill('[data-testid="pf-input-image"]', 'some/image:tag')
     await page.click('[data-testid="pf-btn-submit"]')
 
     // Error hint should appear, form stays open.
@@ -190,19 +191,18 @@ test.describe('Profiles CRUD — Phase C6', () => {
     // Form is the create flow titled as an edit-a-copy of the seed.
     await expect(page.locator('.pf-form-title')).toHaveText('Edit a copy · vulkan')
 
-    // Name prefilled as "<seed>-custom", editable; image carried over.
+    // Name prefilled as "<seed>-custom", editable. (Profiles no longer carry an
+    // image — spec-hw-slot-ownership §3.)
     const nameInput = page.locator('[data-testid="pf-input-name"]')
     await expect(nameInput).toHaveValue('vulkan-custom')
     await expect(nameInput).not.toBeDisabled()
-    const imageInput = page.locator('[data-testid="pf-input-image"]')
-    await expect(imageInput).toHaveValue('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
 
     await page.click('[data-testid="pf-btn-submit"]')
     await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
 
     expect(posts).toHaveLength(1)
     expect(posts[0].name).toBe('vulkan-custom')
-    expect(posts[0].image).toBe('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
+    expect(posts[0]).not.toHaveProperty('image')
     expect(posts[0].cloned_from).toBe('vulkan')
   })
 
@@ -229,9 +229,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     const nameInput = page.locator('[data-testid="pf-input-name"]')
     await expect(nameInput).toHaveValue('my-custom-copy')
 
-    // Image should be pre-filled from the source.
-    const imageInput = page.locator('[data-testid="pf-input-image"]')
-    await expect(imageInput).toHaveValue('ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server')
+    // (No image field — profiles are device-agnostic tune templates now, §3.)
 
     // Submit.
     await page.click('[data-testid="pf-btn-submit"]')

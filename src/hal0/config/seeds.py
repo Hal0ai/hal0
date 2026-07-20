@@ -23,14 +23,10 @@ body has reached its own bottom-of-file import of ``seeds`` -- see spec risk
 R2 and ``tests/config/test_seeds_data.py`` for the cold-import regression
 test).
 
-Image-pin sentinels: ``seed_profiles.toml`` cannot hardcode the resolved
-ROCmFPX/Vulkan-fallback image digests -- that would fork the pin the
-ML-runner registry (§7.1b) is about to own. Instead the TOML carries a
-placeholder string prefixed with ``@`` (e.g. ``"@DEFAULT_ROCMFPX_IMAGE"``)
-and :func:`_resolve_image_sentinel` substitutes the live value from the
-still-in-schema.py constant at read time. When ML-runner lands
-``RUNNER_IMAGES``, the resolver's lookup table below is the one place that
-changes (schema.* -> runners.RUNNER_IMAGES[...]).
+spec-hw-slot-ownership §3: profiles no longer carry an ``image`` — the image
+is slot-owned (``slot.image_pin or RUNNER_IMAGES[slot.binary]``). ``seed_profiles()``
+drops any ``image`` key still present in the bundled ``seed_profiles.toml`` so
+each seed validates against the image-less ``ProfileConfig``.
 """
 
 from __future__ import annotations
@@ -44,7 +40,6 @@ if TYPE_CHECKING:
     from hal0.config.schema import StackConfig
 
 _DATA_PACKAGE = "hal0.config.data"
-_SENTINEL_PREFIX = "@"
 
 #: Marker used in seed_stacks.toml for the slot that carries the shared
 #: embed+rerank capability pair (see :func:`_embed_rerank_rows`).
@@ -56,32 +51,6 @@ def _read_toml(filename: str) -> dict[str, Any]:
     editable checkout and an installed wheel identically -- see spec §A.1)."""
     text = files(_DATA_PACKAGE).joinpath(filename).read_text(encoding="utf-8")
     return tomllib.loads(text)
-
-
-def _resolve_image_sentinel(value: str) -> str:
-    """Resolve an ``@NAME`` sentinel to the live ``hal0.config.schema`` constant.
-
-    Non-sentinel values (literal image refs -- flm/kokoro/qwen3tts/the
-    upstream CUDA image/the comfyui digest) pass through unchanged.
-    """
-    if not isinstance(value, str) or not value.startswith(_SENTINEL_PREFIX):
-        return value
-    name = value[len(_SENTINEL_PREFIX) :]
-    from hal0.config import schema  # local import: breaks the schema<->seeds cycle
-
-    try:
-        resolved = getattr(schema, name)
-    except AttributeError as exc:
-        raise ValueError(
-            f"seed_profiles.toml references unknown image sentinel {value!r} "
-            f"(no such constant hal0.config.schema.{name})"
-        ) from exc
-    if not isinstance(resolved, str):
-        raise ValueError(
-            f"seed_profiles.toml image sentinel {value!r} resolved to a "
-            f"non-string constant ({resolved!r})"
-        )
-    return resolved
 
 
 def _embed_rerank_rows(device: str = "gpu-rocm") -> list[dict[str, Any]]:
@@ -130,8 +99,10 @@ def seed_profiles() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for name, entry in profiles.items():
         entry = dict(entry)
-        if "image" in entry:
-            entry["image"] = _resolve_image_sentinel(entry["image"])
+        # spec-hw-slot-ownership §3: profiles carry no image — drop any that a
+        # (bundled or hand-edited) seed_profiles.toml still lists, so the seed
+        # validates against the image-less ProfileConfig.
+        entry.pop("image", None)
         out[name] = entry
     return out
 

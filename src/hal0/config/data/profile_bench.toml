@@ -12,18 +12,15 @@
 # cards intentionally carry no hero entry (they render "-"); their decode
 # numbers live on the per-model roster.
 
-[bench.rocm]
+[bench.chat]
 tps = 52.8
-
-[bench.vulkan]
-tps = 41.0
 
 [bench.flm]
 tps = 38.6
 
-[bench.tts]
+[bench.kokoro]
 rtf = 0.18
 
-[bench.tts-qwen3]
+[bench.qwen3-tts]
 # Native gfx1151 ~2.1x realtime -> rtf ~= 1/2.1 (memory qwen3tts-voice-ct105).
 rtf = 0.48

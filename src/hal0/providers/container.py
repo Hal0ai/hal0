@@ -122,7 +122,7 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
 
         backend = str(slot_cfg.get("backend") or "")
         catalog = load_profiles_config().profile
-        base = backend if backend in catalog else "rocm"
+        base = "chat" if "chat" in catalog else (backend if backend in catalog else "rocm")
         # An empty profile is a legitimate "no profile declared" slot running
         # on the default toolbox — not a stale/renamed profile. Falling back is
         # expected, so don't warn on every health probe (#1226); reserve the
@@ -144,44 +144,49 @@ def _effective_backend_and_device_class(
     backend = getattr(profile, "backend", None)
     device_class = getattr(profile, "device_class", None)
     if isinstance(slot_cfg, Mapping):
-        sb = slot_cfg.get("backend")
-        if isinstance(sb, str) and sb:
-            backend = sb
+        # 1.0 profiles do not select hardware. Derive the runtime backend
+        # from the slot's authoritative device; retain the legacy backend
+        # mirror only for pre-pivot TOMLs that have no device.
+        device = slot_cfg.get("device")
+        if isinstance(device, str) and device:
+            from hal0.model_meta import device_to_backend
+
+            _recipe, backend = device_to_backend(device)
+            device_class = "npu" if _recipe == "flm" else ("cpu" if device == "cpu" else "gpu")
+        else:
+            sb = slot_cfg.get("backend")
+            if isinstance(sb, str) and sb:
+                backend = sb
     return backend, device_class
 
 
-def _preferred_runner_if_fits(
-    model_info: Mapping[str, Any] | None,
-    *,
-    backend: str | None,
-    device_class: str | None,
-) -> Any | None:
-    """``model_info["preferred_runner"]`` resolved to a ``Runner``, or ``None``.
+def _binary_runner(slot_cfg: Mapping[str, Any] | None) -> Any | None:
+    """The slot's ``BINARY`` field resolved to a :class:`~hal0.runners.Runner`.
 
-    Only returns a runner when the key names a real ``llama-server``-family
-    runner AND it fits this lane's device_class/backend
-    (:func:`hal0.runners.runner_matches`) — an FLM/kokoro/qwen3tts/comfyui
-    key, a stale/unknown key, or a cross-backend key returns ``None`` rather
-    than launching the wrong runtime. Shared by :func:`_effective_runner`
-    and :func:`_resolve_image_ref`'s tier 3 so the two never drift.
+    spec-hw-slot-ownership §2/§3: the slot owns the runner as the typed
+    ``binary`` field (a key into :data:`~hal0.runners.RUNNER_IMAGES`),
+    replacing the sunset ``model.preferred_runner``. Returns ``None`` when
+    ``binary`` is unset/empty or names an unknown key — the caller then falls
+    back to the HW-gated default (:func:`hal0.runners.runner_for_backend`).
+
+    BINARY is authoritative and honored directly (the ``(device, BINARY)``
+    fit-check WARNS at assignment, not at spawn — spec §4), so unlike the
+    prior ``preferred_runner`` shim this does NOT re-gate the chosen runner
+    against the lane's backend/device_class; only a genuinely unknown key
+    (get_runner miss) is skipped.
     """
-    if not isinstance(model_info, Mapping):
+    if not isinstance(slot_cfg, Mapping):
         return None
-    preferred = model_info.get("preferred_runner")
-    if not (isinstance(preferred, str) and preferred):
+    binary = slot_cfg.get("binary")
+    if not (isinstance(binary, str) and binary):
         return None
     from hal0.errors import NotFound
-    from hal0.runners import get_runner, runner_matches
+    from hal0.runners import get_runner
 
     try:
-        preferred_runner = get_runner(preferred)
+        return get_runner(binary)
     except NotFound:
         return None
-    if preferred_runner.runtime_family == "llama-server" and runner_matches(
-        preferred_runner, device_class=device_class, backend=backend
-    ):
-        return preferred_runner
-    return None
 
 
 def _effective_runner(
@@ -191,34 +196,26 @@ def _effective_runner(
 ) -> Any:
     """The :class:`~hal0.runners.Runner` that actually applies to this launch.
 
-    §7.1a / ML-5: SINGLE SOURCE for "which runner's capabilities gate this
-    slot" — shared by :func:`_resolve_image_ref` (tiers 3 + 5, the
-    runner-derived image tiers) and the mtp/jinja capability gates in
-    :func:`_effective_mtp` / :func:`_resolve_llama_scalars`, so the image
-    that launches and the capabilities that gate its flags can never drift
-    onto two different runners.
+    SINGLE SOURCE for "which runner's capabilities gate this slot" — shared by
+    :func:`_resolve_image_ref` (the runner-derived image) and the mtp/jinja
+    capability gates in :func:`_effective_mtp` / :func:`_resolve_llama_scalars`,
+    so the image that launches and the capabilities that gate its flags can
+    never drift onto two different runners.
 
-    Deliberately independent of ``slot.image`` / ``profile.image`` STRING
-    overrides (tiers 1/2/4 of :func:`_resolve_image_ref`) — those only pin
-    which literal image ref pulls, they carry no capability information of
-    their own. A capability (does this launch support ``--jinja``, can it
-    draft MTP) is a property of the *backend/device_class lane* (or an
-    explicit ``model.preferred_runner``), not of an opaque image string, so
-    this resolver always returns a real ``Runner`` regardless of whether an
-    image string override is in play.
+    Resolution (spec-hw-slot-ownership §2/§3): the slot's ``binary`` field when
+    it names a known :data:`~hal0.runners.RUNNER_IMAGES` key
+    (:func:`_binary_runner`) — else :func:`hal0.runners.runner_for_backend`,
+    the HW-gated default derived from the lane's backend/device_class.
 
-    Resolution: ``model_info["preferred_runner"]`` when it names a real
-    ``llama-server``-family runner that fits this lane's device_class/
-    backend (:func:`hal0.runners.runner_matches`) — else
-    :func:`hal0.runners.runner_for_backend`, the HW-gated default.
+    ``model_info`` is retained for call-site compatibility but no longer
+    consulted: the runner is a slot-owned physical fact now, not a model one.
     """
-    backend, device_class = _effective_backend_and_device_class(slot_cfg, profile)
-    preferred_runner = _preferred_runner_if_fits(
-        model_info, backend=backend, device_class=device_class
-    )
-    if preferred_runner is not None:
-        return preferred_runner
+    del model_info  # runner is slot-owned (BINARY), no longer model-derived
+    runner = _binary_runner(slot_cfg)
+    if runner is not None:
+        return runner
 
+    backend, device_class = _effective_backend_and_device_class(slot_cfg, profile)
     from hal0.runners import runner_for_backend
 
     return runner_for_backend(backend, device_class)
@@ -232,81 +229,43 @@ def _resolve_image_ref(
 ) -> str:
     """Resolve the container image ref for a slot launch.
 
-    Resolution order (§7.1b / ML-4 — the runner-image registry):
+    Resolution (spec-hw-slot-ownership §3 — collapses the prior §7.1b chain)::
 
-      1. ``slot_cfg["image"]`` (top-level string override in the slot TOML).
-      2. ``slot_cfg["slot"]["image"]`` (nested under the ``[slot]`` table).
-      3. ``model_info["preferred_runner"]`` — a per-model runner-key
-         preference (``registry.model.Model.preferred_runner``), resolved
-         through :func:`hal0.runners.resolve_runner_image`. Only honored
-         when it names a real ``llama-server``-family runner AND fits this
-         lane's device_class/backend (:func:`hal0.runners.runner_matches`)
-         — an FLM/kokoro/qwen3tts/comfyui key, a stale/unknown key (e.g.
-         the fileset auto-detector's ``"llama-server"`` family-only hint,
-         which is not itself a ``RUNNER_IMAGES`` key), or a cross-backend
-         key is silently skipped rather than launching the wrong runtime.
-      4. ``profile.image`` (a deliberate profile/operator pin) — honored
-         verbatim, unresolved. NOTE (spec deviation, see handback):
-         ProfileConfig.image is NOT removed by ML-4 (that's ML-5/P3-schema
-         scope), so it stays in the chain here rather than being dropped —
-         dropping it now would silently break every custom profile's image
-         pin (the updater's stale-pin escape hatch depends on this exact
-         "honored verbatim" contract) a full lane before ML-5 removes the
-         field.
-      5. :func:`hal0.runners.runner_for_backend` (+
-         :func:`hal0.runners.resolve_runner_image`) — the HW-gated default:
-         the rocmfpx runner on an AMD GPU lane, the lean toolbox (or cuda /
-         cpu image) elsewhere. Replaces the old direct
-         :func:`~hal0.config.schema.resolve_default_image` call — same
-         values, now also honoring an env-var override per runner.
+        image_default = RUNNER_IMAGES[slot.BINARY]     (code registry)
+        effective     = slot.image_pin or image_default
 
-    Tiers 3 + 5 both resolve through :func:`_effective_runner` (the same
-    runner :func:`_resolve_llama_scalars` uses to gate mtp/jinja
-    capabilities), then :func:`hal0.runners.resolve_runner_image`.
+      1. ``slot_cfg["image_pin"]`` — the single canonical escape hatch (debug
+         build / A-B / rollback-to-last-known-good). A non-empty string is
+         honored verbatim, never re-resolved. Promotes the former
+         ``_resolve_image_ref`` tiers 1-2 (``slot.image`` / ``[slot].image``)
+         to a first-class typed field; those old nestings are folded into
+         ``image_pin`` by the migration lane, not read here.
+      2. ``image_default`` — :func:`hal0.runners.resolve_runner_image` of the
+         :func:`_effective_runner` (the slot's ``binary`` when set, else the
+         HW-gated default via :func:`hal0.runners.runner_for_backend`). Same
+         runner :func:`_resolve_llama_scalars` uses to gate mtp/jinja, so the
+         launched image and its capability gates never drift.
 
-    Only STRING values are treated as image-ref overrides. The
-    ``[image]`` TOML section that holds image-gen settings (#599) shares
-    the ``image`` key — treating that dict as a ref renders ``str(dict)``
-    into ExecStart and podman fails with 'invalid reference format'.
+    DELETED vs the prior chain: the ``profile.image`` tier (spec §3 — profiles
+    are device-agnostic tune templates carrying no image) and the raw
+    ``slot.image`` / ``[slot].image`` string reads (collapsed into
+    ``image_pin``). Because ``image_pin`` is its own typed ``str | None`` field
+    — disjoint from the ``[image]`` image-gen table (#599, the ``image_gen``
+    field) — the prior ``str(dict)`` overload of the shared ``image`` key can
+    no longer happen.
+
+    ``model_info`` is retained for call-site compatibility but no longer read.
     """
-    # HAL0-SUNSET: v1.0.0 — images belong to RUNNERS (spec-flags-ownership §7).
-    # The slot ``image`` string override (tiers 1-2 below) is an expiring shim:
-    # neither slots nor profiles should carry raw image strings once the
-    # Runtimes-panel flow lands. Honored for now so live slot TOMLs pinning an
-    # image keep launching; the sunset ratchet drops the override read.
-    if slot_cfg is not None:
-        # Walk both possible nestings; first non-empty string wins.
-        candidates: list[Any] = []
-        for key in ("image",):
-            v = slot_cfg.get(key)  # type: ignore[union-attr]
-            if v is not None:
-                candidates.append(v)
-        nested = slot_cfg.get("slot") if isinstance(slot_cfg, Mapping) else None
-        if isinstance(nested, Mapping):
-            v = nested.get("image")
-            if v is not None:
-                candidates.append(v)
-        for c in candidates:
-            if isinstance(c, str) and c:
-                return c
+    del model_info  # image is a slot-owned physical fact now (BINARY/image_pin)
+    if isinstance(slot_cfg, Mapping):
+        pin = slot_cfg.get("image_pin")
+        if isinstance(pin, str) and pin:
+            return pin  # escape hatch — honored verbatim, never re-resolved
 
-    backend, device_class = _effective_backend_and_device_class(slot_cfg, profile)
-    preferred_runner = _preferred_runner_if_fits(
-        model_info, backend=backend, device_class=device_class
-    )
-    if preferred_runner is not None:
-        from hal0.runners import resolve_runner_image
-
-        return resolve_runner_image(preferred_runner)
-
-    profile_image = getattr(profile, "image", None)
-    if isinstance(profile_image, str) and profile_image:
-        return profile_image  # deliberate profile/operator pin — honored verbatim
-
-    # No image pin anywhere → HW-gated default via the runner registry.
+    # image_default = RUNNER_IMAGES[slot.BINARY] (or the HW-gated default).
     from hal0.runners import resolve_runner_image
 
-    return resolve_runner_image(_effective_runner(slot_cfg, profile, model_info))
+    return resolve_runner_image(_effective_runner(slot_cfg, profile))
 
 
 def _profile_image_and_flags(
@@ -318,9 +277,9 @@ def _profile_image_and_flags(
 ) -> tuple[str, str]:
     """Extract ``(image, resolved_flags)`` for a slot launch.
 
-    Image resolution walks the priority chain in :func:`_resolve_image_ref`:
-    slot-level override → model.preferred_runner → profile.image → the
-    runner-registry HW-gated default.
+    Image resolution walks the chain in :func:`_resolve_image_ref`
+    (spec-hw-slot-ownership §3): ``slot.image_pin`` escape hatch → the
+    ``slot.binary``-resolved image (or the HW-gated default).
 
     Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
     ``resolved_flags`` is already MTP-expanded) and a plain ``ProfileConfig``
@@ -335,10 +294,10 @@ def _profile_image_and_flags(
     ``ResolvedProfile`` and ``ProfileConfig`` expose ``.flags`` and ``.mtp``,
     so this path works for both types.
 
-    ``model_info`` is optional (defaults to ``None``, matching every
-    existing call site) — it's the registry model dict, threaded through
-    from :func:`_resolve_llama_scalars` so :func:`_resolve_image_ref` can
-    read ``model_info["preferred_runner"]``.
+    ``model_info`` is retained for call-site compatibility (threaded through
+    from :func:`_resolve_llama_scalars`) but is no longer read by image
+    resolution — the image is a slot-owned physical fact now (BINARY /
+    image_pin), not a model one.
     """
     if mtp_override is not None:
         # Slot override wins over any pre-expanded resolved_flags: recompute
@@ -797,6 +756,7 @@ def _llama_argv_segments(
     chat_template_path: str | None = None,
     mmproj: str | None = None,
     slot_n_gpu_layers: int | None = None,
+    slot_threads: int | None = None,
     slot_parallel: int | None = None,
     extra_args: str | None = None,
 ) -> list[tuple[str, list[str]]]:
@@ -807,35 +767,34 @@ def _llama_argv_segments(
     provenance) consume THESE segments, so what an operator previews via
     ``GET /api/slots`` / ``.../resolved`` is exactly what launches.
 
-    FLAGS-own (spec-flags-ownership §2/§4): launch flags attach ONLY to models.
-    The ``profile`` segment and the slot ``slot_overrides`` / ``extra_args``
-    segments have been REMOVED from this chain — a profile is now a
-    copy-on-stamp template (read at stamp time, never at launch) and a slot
-    carries no flag surface. The model's materialized tune is the whole story:
-    the trusted schema field ``defaults.n_gpu_layers`` (``model_defaults``
-    segment) plus the free-form ``defaults.extra_args`` (``model_extra_args``
-    segment, still screened against the §21.7 managed-arg denylist by
-    :func:`~hal0.slots.argv.resolve_argv`).
+    Ownership split (spec-hw-slot-ownership §2, reversing spec-flags-ownership
+    §5): the SLOT owns the physical hardware grid (NGL → ``-ngl``, THREADS →
+    ``--threads``; ``-dev`` rides the GPU-visibility path, not here) as typed
+    fields, emitted in a TRUSTED ``slot_hardware`` segment. The MODEL still owns
+    the logical, device-agnostic tune — free-form ``defaults.extra_args``
+    (``model_extra_args`` segment, still screened against the §21.7 managed-arg
+    denylist by :func:`~hal0.slots.argv.resolve_argv`). The ``profile`` segment
+    stays removed — a profile is a copy-on-stamp template, read at stamp time,
+    never at launch.
 
     Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
     LAST occurrence of each canonical flag)::
 
-        base < model_extra_args < model_defaults < chat_template < mmproj
+        base < model_extra_args < slot_hardware < chat_template < mmproj
 
-    Golden path #5: with the ``profile`` segment gone, launch never resolves a
-    profile's flags — the stamped model tune is the sole source.
+    The slot hardware segment sits AFTER ``model_extra_args`` so the slot's
+    typed ``-ngl``/``--threads`` win over any collision a model tune smuggled in
+    (defense in depth — the model/profile flag save also hard-rejects
+    hardware flags, spec §5).
 
-    ``profile_flags`` / ``slot_n_gpu_layers`` / ``slot_parallel`` / ``extra_args``
-    are accepted-and-ignored (kept for call-site compat until the sunset ratchet
-    drops the plumbing). The migrator
-    (:mod:`hal0.config.migrations.slot_flags_fold`) folds each slot's effective
-    tune into its model's ``defaults`` during the deploy window; until then a
-    stale slot flag simply does not reach launch.
+    ``profile_flags`` / ``slot_parallel`` / ``extra_args`` are accepted-and-
+    ignored (kept for call-site compat until the sunset ratchet drops the
+    plumbing).
     """
-    # HAL0-SUNSET: v1.0.0 — slots lost the flag surface (spec-flags-ownership
-    # §2/§4). These params are inert; drop them (and the callers threading them)
-    # once the migrator has folded every live slot's tune into its model.
-    del profile_flags, slot_n_gpu_layers, slot_parallel, extra_args
+    # HAL0-SUNSET: v1.0.0 — profile flags + slot parallel/extra_args lost their
+    # launch surface (spec-flags-ownership §2/§4). These params are inert; drop
+    # them (and the callers threading them) once the sunset ratchet lands.
+    del profile_flags, slot_parallel, extra_args
 
     base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
     if model_path:
@@ -849,26 +808,32 @@ def _llama_argv_segments(
     if context_size is not None:
         base += ["--ctx-size", str(context_size)]
 
-    # Model-registry defaults: shlex-split extra_args + `-ngl <n>` from
-    # defaults.n_gpu_layers. rope_freq_base is intentionally NOT emitted
-    # (reachable via extra_args only — see ModelDefaults deprecation note).
-    #
-    # The free-form ``defaults.extra_args`` is caller-supplied, so it rides its
-    # own ``model_extra_args`` segment which ``resolve_argv`` screens against
-    # the managed-arg denylist (argv.UNTRUSTED_SEGMENT_LABELS) — a model whose
-    # extra_args smuggles ``--port``/``--model``/… fails loudly at launch, not
-    # silently redirected. The ``-ngl`` derived from the schema field
-    # ``defaults.n_gpu_layers`` is hal0-computed and legitimately sets a managed
-    # flag, so it stays in the TRUSTED ``model_defaults`` segment.
+    # Model logical tune: the free-form ``defaults.extra_args``. It is
+    # caller-supplied, so it rides its own ``model_extra_args`` segment which
+    # ``resolve_argv`` screens against the managed-arg denylist
+    # (argv.UNTRUSTED_SEGMENT_LABELS) — a model whose extra_args smuggles
+    # ``--port``/``--model``/… fails loudly at launch, not silently redirected.
+    # rope_freq_base is intentionally NOT emitted (reachable via extra_args
+    # only — see ModelDefaults deprecation note). ``-ngl`` NO LONGER comes from
+    # the model (defaults.n_gpu_layers is deleted); it is a slot-owned field.
     md_extra_tokens: list[str] = []
-    md_ngl_tokens: list[str] = []
     if model_defaults:
         md_extra = model_defaults.get("extra_args")
         if md_extra and str(md_extra).strip():
             md_extra_tokens += shlex.split(str(md_extra))
-        md_ngl = model_defaults.get("n_gpu_layers")
-        if md_ngl is not None:
-            md_ngl_tokens += ["-ngl", str(int(md_ngl))]
+
+    # Slot hardware grid (spec-hw-slot-ownership §2): the slot owns the physical
+    # knobs as typed fields — NGL → ``-ngl``, THREADS → ``--threads``. These are
+    # hal0-computed from typed SlotConfig fields, so they ride a TRUSTED segment
+    # (not screened against the managed-arg denylist). ``-ngl -1`` (all layers)
+    # is a legitimate explicit value. ``--threads`` is omitted when unset (0) so
+    # the runtime picks its own default. ``-dev`` is emitted from the device
+    # enum on the GPU-visibility path (gpu_visibility_env), not in this segment.
+    slot_hw_tokens: list[str] = []
+    if slot_n_gpu_layers is not None:
+        slot_hw_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
+    if slot_threads is not None and int(slot_threads) > 0:
+        slot_hw_tokens += ["--threads", str(int(slot_threads))]
 
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
@@ -876,7 +841,7 @@ def _llama_argv_segments(
     return [
         ("base", base),
         ("model_extra_args", md_extra_tokens),
-        ("model_defaults", md_ngl_tokens),
+        ("slot_hardware", slot_hw_tokens),
         ("chat_template", chat_tokens),
         ("mmproj", mmproj_tokens),
     ]
@@ -897,6 +862,7 @@ def _llama_launch_plan(
     mmproj: str | None = None,
     model_defaults: dict[str, Any] | None = None,
     slot_n_gpu_layers: int | None = None,
+    slot_threads: int | None = None,
     slot_parallel: int | None = None,
     env: dict[str, str] | None = None,
 ) -> RuntimeLaunchPlan:
@@ -920,6 +886,7 @@ def _llama_launch_plan(
         chat_template_path=chat_template_path,
         mmproj=mmproj,
         slot_n_gpu_layers=slot_n_gpu_layers,
+        slot_threads=slot_threads,
         slot_parallel=slot_parallel,
         extra_args=extra_args,
     )
@@ -1145,9 +1112,9 @@ def _resolve_llama_scalars(
 
     # Family-architecture overrides (e.g. gemma → f16 KV): the middle layer
     # between the profile's generic flags and the slot's own [model].defaults.
-    # Prepended INSIDE the model_defaults segment so it beats the profile
-    # (later segment, normalize_argv last-wins) but a per-slot extra_args in
-    # [model].defaults still wins over the family default. §7.1a / ML-5:
+    # Prepended INSIDE defaults.extra_args (the model_extra_args segment) so a
+    # per-slot extra_args still wins over the family default (last-wins). §7.1a /
+    # ML-5:
     # re-keyed off the registry's authoritative Model.architecture first
     # (model_family/family_flags fall back to the filename/id token scan
     # only when architecture is unset — see hal0.config.schema.model_family).
@@ -1168,9 +1135,9 @@ def _resolve_llama_scalars(
     # --jinja in their flags — there is no --no-jinja negation, so this must
     # be injected conditionally, never removed post-hoc). Default true for
     # a runner that supports it, suppressible per-model via
-    # defaults.jinja=false; landed in the model_defaults segment (beats the
-    # profile segment, still loses to a hand-authored [model].defaults
-    # extra_args or [server].extra_args later in the precedence chain).
+    # defaults.jinja=false; appended to defaults.extra_args (the
+    # model_extra_args segment), so a hand-authored extra_args flag later in
+    # that string still wins (last-wins).
     #
     # Never injected for an --embedding/--reranking model: jinja chat-
     # template rendering is meaningless there (llama-server's --jinja is a
@@ -1208,7 +1175,12 @@ def _resolve_llama_scalars(
         existing = model_defaults.get("extra_args") or ""
         model_defaults["extra_args"] = f"{bundle} {existing}".strip()
 
-    slot_n_gpu_layers = model_table.get("n_gpu_layers")
+    # Slot hardware grid (spec-hw-slot-ownership §2): NGL + THREADS are now
+    # authoritative slot-TOP-LEVEL typed fields (SlotConfig.n_gpu_layers /
+    # .threads), NOT the sunset nested [model].n_gpu_layers. The emission lane
+    # (_llama_argv_segments' slot_hardware segment) renders -ngl / --threads.
+    slot_n_gpu_layers = slot_cfg.get("n_gpu_layers")
+    slot_threads = slot_cfg.get("threads")
 
     # Multi-GPU pinning (SlotConfig.gpu_index): affects env/devices only —
     # never argv — so launch/preview argv parity is untouched.
@@ -1230,10 +1202,11 @@ def _resolve_llama_scalars(
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
-        # FLAGS-own: slot flag surface is inert — these keys are retained for
-        # dict-shape/caller compat but no longer reach the argv chain (the
-        # migrator folds a slot's effective tune into its model's defaults).
+        # Slot-owned hardware grid (spec-hw-slot-ownership §2): NGL + THREADS
+        # reach the argv chain via _llama_argv_segments' slot_hardware segment.
         "slot_n_gpu_layers": slot_n_gpu_layers,
+        "slot_threads": slot_threads,
+        # slot_parallel stays inert (spec-flags-ownership §2 — sunset).
         "slot_parallel": None,
         "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
         # GPU vendor discriminator: the profile's declared backend (rocm /
@@ -1351,6 +1324,7 @@ class ContainerProvider(Provider):
             mmproj=scalars["mmproj"],
             model_defaults=scalars["model_defaults"],
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+            slot_threads=scalars["slot_threads"],
             slot_parallel=scalars["slot_parallel"],
             env=merged_env or None,
         )
@@ -1934,6 +1908,7 @@ def _resolve_slot_argv(
         chat_template_path=scalars["chat_template_path"],
         mmproj=scalars["mmproj"],
         slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+        slot_threads=scalars["slot_threads"],
         slot_parallel=scalars["slot_parallel"],
         extra_args=scalars["extra_args"],
     )
@@ -1948,8 +1923,8 @@ def resolved_argv_detail_for_slot(
 
     Returns ``{"argv", "provenance", "removed"}`` where ``provenance`` lists each
     surviving flag with the segment that set its final value (``base`` /
-    ``profile`` / ``model_defaults`` / ``chat_template`` / ``mmproj`` /
-    ``slot_overrides`` / ``extra_args``) — so an operator can see exactly which
+    ``model_extra_args`` / ``slot_hardware`` / ``chat_template`` / ``mmproj``) —
+    so an operator can see exactly which
     source won each flag and how many duplicates were collapsed. The UI renders
     these labels generically. ``None`` for a slot with no profile.
     """

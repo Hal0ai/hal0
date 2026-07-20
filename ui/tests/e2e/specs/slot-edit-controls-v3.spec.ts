@@ -5,10 +5,12 @@
  *   C3. enabled toggle on the slot CARD → PUT /config { enabled } + fade.
  *   C4. enable_thinking toggle in the edit DRAWER (llm slots only) →
  *       PUT /config { enable_thinking } instantly.
- *   C5. n_gpu_layers in the drawer Advanced section is an EDITABLE per-slot
- *       override persisted via PATCH /defaults ([model].n_gpu_layers);
- *       -1/empty = unset (null on the wire) and an untouched field never
- *       rides the PATCH. ctx_size shares the same PATCH.
+ *   C5. NGL lives in the typed Hardware grid (spec-hw-slot-ownership §2),
+ *       a TOP-LEVEL slot-owned field persisted via PUT /config { n_gpu_layers }
+ *       (reversing the §5 fold into [model].n_gpu_layers). -1/empty = the "all
+ *       layers" default; an untouched field never rides the PUT. ctx_size keeps
+ *       its own PATCH /defaults path. The grid also carries device / THREADS /
+ *       BINARY / image_pin, with a non-blocking fit-check warning (§4).
  *   C6. enabled slots sort before disabled ones in the grid.
  *
  * The dashboard renders the slot LIST from in-bundle HAL0_DATA
@@ -89,59 +91,106 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
   })
 
-  test('C5 — n_gpu_layers is editable with the unset helper text', async ({ page }) => {
+  test('C5 — NGL lives in the HW grid, editable with the -1 default', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    // The Advanced section is collapsed by default — open the disclosure.
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    const row = page.locator('.drawer .form-row', { hasText: 'n_gpu_layers' })
-    await expect(row).toBeVisible()
-    await expect(row.locator('.form-lbl .sub')).toContainText('-1 / empty = use model default / profile')
-    const input = page.getByTestId('n-gpu-layers-input')
+    // NGL moved out of Advanced into the top-level Hardware grid
+    // (spec-hw-slot-ownership §2) — no disclosure to open.
+    const input = page.getByTestId('slot-hw-ngl')
+    await expect(input).toBeVisible()
     await expect(input).not.toHaveAttribute('readonly', '')
     await expect(input).toHaveValue('-1')
+    const row = page.locator('.drawer .form-row', { hasText: 'NGL' })
+    await expect(row.locator('.form-lbl .sub')).toContainText('emits -ngl')
   })
 
-  test('C5 — editing n_gpu_layers Save PATCHes /defaults { n_gpu_layers }', async ({ page }) => {
-    const patches: any[] = []
-    await page.route('**/api/slots/primary/defaults', async (route) => {
-      patches.push(JSON.parse(route.request().postData() || '{}'))
+  test('C5 — editing NGL Save PUTs /config { n_gpu_layers } (top-level)', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') {
+        puts.push(JSON.parse(route.request().postData() || '{}'))
+      }
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await page.route('**/api/slots/primary/config', (route) =>
+    // ctx_size keeps its own /defaults path — stub it so an unrelated write
+    // never falls through to real fetch.
+    await page.route('**/api/slots/primary/defaults', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
     )
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    await page.getByTestId('n-gpu-layers-input').fill('24')
+    await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => patches.length).toBeGreaterThan(0)
-    expect(patches[0].n_gpu_layers).toBe(24)
-    // Untouched ctx_size must not ride along (dirty-tracking contract).
-    expect(patches[0]).not.toHaveProperty('ctx_size')
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].n_gpu_layers).toBe(24)
+    // NGL is a TOP-LEVEL slot field now, not a [model] default — the untouched
+    // ctx_size must not ride the /config PUT.
+    expect(puts[0]).not.toHaveProperty('ctx_size')
   })
 
-  test('C5 — clearing n_gpu_layers back to -1/empty PATCHes null (unset)', async ({ page }) => {
-    const patches: any[] = []
-    await page.route('**/api/slots/primary/defaults', async (route) => {
-      patches.push(JSON.parse(route.request().postData() || '{}'))
+  test('C5 — clearing NGL back to empty PUTs the -1 default (unset)', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') {
+        puts.push(JSON.parse(route.request().postData() || '{}'))
+      }
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await page.route('**/api/slots/primary/config', (route) =>
+    await page.route('**/api/slots/primary/defaults', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
     )
-    // Baseline has an explicit override (24) — clearing the field unsets it.
+    // Baseline has an explicit override (24) — clearing resets to the -1 "all
+    // layers" default (spec-hw-slot-ownership §2; empty ⇒ -1).
     await seedSlots(page, [{ ...PRIMARY, n_gpu_layers: 24 }, EMBED])
 
     await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    await page.getByTestId('n-gpu-layers-input').fill('')
+    await page.getByTestId('slot-hw-ngl').fill('')
     await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => patches.length).toBeGreaterThan(0)
-    expect(patches[0]).toHaveProperty('n_gpu_layers', null)
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
+  })
+
+  test('HW grid — the 4 typed fields + image_pin render (§2)', async ({ page }) => {
+    await seedSlots(page, [PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-image-pin')).toBeVisible()
+  })
+
+  test('HW grid — fit-check warns when device backend ∉ BINARY supported_backends (§4)', async ({ page }) => {
+    // rocmfpx serves rocm/vulkan; a cpu-device slot pinned to it does not fit →
+    // non-blocking warning. system-info supplies the supported_backends the
+    // fit-check reads (spec-hw-slot-ownership §4).
+    await page.route('**/api/system-info', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          hardware: {},
+          features: {},
+          podman_context: 'rootless',
+          backends: {
+            rocmfpx: {
+              image: 'ghcr.io/hal0ai/tb:rocm',
+              runtime_family: 'llamacpp',
+              device_class: 'gpu',
+              backend: 'rocm',
+              supported_backends: ['rocm', 'vulkan'],
+              format_arch: 'gguf',
+              state: 'installed',
+            },
+          },
+        }),
+      }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'rocmfpx' }, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.getByTestId('slot-hw-fit-warning')).toBeVisible()
   })
 
   test('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {

@@ -63,7 +63,6 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "source_repo",
     "revision",
     "path",
-    "preferred_runner",
     "mmproj",
     "architecture",
     "context_length",
@@ -76,7 +75,6 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "hf_filename",
     "profile",
     "extra_args",
-    "n_gpu_layers",
     "chat_template",
     "context_size",
     "rope_freq_base",
@@ -93,10 +91,15 @@ MODEL_COLUMNS: tuple[str, ...] = (
 #: iff at least one of these is non-NULL. ``mtp``/``jinja`` (§7.1a / ML-5)
 #: are tri-state (NULL/0/1 -> None/False/True) — pydantic's lax bool
 #: validator coerces the raw sqlite int back to bool on reconstruction.
+# NOTE (spec-hw-slot-ownership §6): ``n_gpu_layers`` is NO LONGER a
+# ModelDefaults field (NGL is slot-owned now). Its SQL column is KEPT (nulled by
+# current code; the deploy-window fold reads it, and the physical DROP is
+# deferred post-1.0 to avoid a same-release fold-vs-drop hazard) — it is neither
+# written from the model nor folded back into ModelDefaults on read, hence its
+# absence here.
 _DEFAULTS_COLUMNS: tuple[str, ...] = (
     "profile",
     "extra_args",
-    "n_gpu_layers",
     "chat_template",
     "context_size",
     "rope_freq_base",
@@ -122,14 +125,16 @@ def model_to_row(
     ``updated_at`` advances); on an INSERT both default to "now".
 
     §7.1 ``revision`` has no ``Model`` field yet — always writes NULL, a
-    ready-made landing spot for a future lane. ``architecture``,
-    ``preferred_runner``, and ``mtp``/``jinja`` (folded from
-    ``ModelDefaults``) ARE populated here — §7.1d lands ``architecture``,
-    ML-4 lands ``preferred_runner``, ML-5 lands ``mtp``/``jinja`` (see
+    ready-made landing spot for a future lane. ``architecture`` and
+    ``mtp``/``jinja`` (folded from ``ModelDefaults``) ARE populated here —
+    §7.1d lands ``architecture``, ML-5 lands ``mtp``/``jinja`` (see
     ``ModelDefaults.mtp``/``.jinja`` — tri-state, sqlite stores them as
     NULL/0/1 in the INTEGER columns; ``defaults.mtp``/``.jinja`` pass
     straight through since sqlite3 adapts a Python ``bool`` to 0/1
     natively, same as any other int).
+    ``preferred_runner`` / ``n_gpu_layers`` are gone from the model (hardware is
+    slot-owned now); their SQL columns are KEPT-but-unbound (nulled; physical
+    DROP deferred post-1.0 — the deploy-window fold reads them first).
     ``capability_flags``/``modalities_override`` have no reserved column
     yet, so they fold into the ``extra`` JSON blob under the reserved keys
     above instead of a schema migration.
@@ -157,7 +162,9 @@ def model_to_row(
         "source_repo": model.hf_repo or None,
         "revision": None,
         "path": model.path,
-        "preferred_runner": model.preferred_runner,
+        # spec-hw-slot-ownership §6: the runner is slot-owned (SlotConfig.binary)
+        # now — the model carries no preferred_runner, so this KEPT-but-unbound
+        # SQL column is no longer written (stays NULL; drop deferred post-1.0).
         "mmproj": model.mmproj,
         "architecture": model.architecture,
         "context_length": context_length,
@@ -170,7 +177,9 @@ def model_to_row(
         "hf_filename": model.hf_filename,
         "profile": defaults.profile,
         "extra_args": defaults.extra_args,
-        "n_gpu_layers": defaults.n_gpu_layers,
+        # NGL is slot-owned now (spec-hw-slot-ownership §6); this KEPT-but-unbound
+        # SQL column is no longer written (stays NULL). The deploy-window fold
+        # reads any prior value onto each referencing slot; drop deferred post-1.0.
         "chat_template": defaults.chat_template,
         "context_size": defaults.context_size,
         "rope_freq_base": defaults.rope_freq_base,
@@ -404,7 +413,9 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         backends=list(backends) if backends else [],
         mmproj=row["mmproj"],
         architecture=row["architecture"],
-        preferred_runner=row["preferred_runner"],
+        # preferred_runner / n_gpu_layers are NOT read into Model — the fields are
+        # gone (hardware is slot-owned). The columns are KEPT-but-unbound (nulled;
+        # drop deferred post-1.0); the deploy-window fold reads them directly.
         capability_flags=capability_flags,
         modalities_override=modalities_override,
         defaults=defaults,

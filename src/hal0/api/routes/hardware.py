@@ -869,14 +869,19 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "runtime_family": runner.runtime_family,
             "device_class": runner.device_class,
             "backend": runner.backend,
+            # Fit-check metadata (spec-hw-slot-ownership §4): the backends this
+            # runner image can serve + the GGUF/format arch it accepts (the
+            # lxc105 "forks reject newer GGUFs" finding). RUNNER_IMAGES now
+            # carries both — surface them so the UI slot-HW-grid fit-check
+            # (device.backend ∈ supported_backends) and the Runtimes panel can
+            # read the registry truth instead of assuming a single backend.
+            "supported_backends": list(runner.supported_backends),
+            "format_arch": runner.format_arch,
             # Per-runner capability metadata (UI-API-1 item 2 / spec §7): expose
             # what the runner registry actually knows so the model drawer can
             # filter its runner-override dropdown to COMPATIBLE runners. Only
             # the typed launch-capability gates exist today
-            # (hal0.runners.RunnerSupports); a format/arch-support field (the
-            # lxc105 "forks reject newer GGUFs" finding) is NOT yet in the
-            # registry, so it is deliberately omitted here rather than faked —
-            # tracked as an increment-2 gap.
+            # (hal0.runners.RunnerSupports).
             "supports": {
                 "mtp": runner.supports.mtp,
                 "jinja": runner.supports.jinja,

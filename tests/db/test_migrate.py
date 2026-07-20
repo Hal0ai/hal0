@@ -117,6 +117,38 @@ class TestPackagedRegistryMigration:
             migrate(conn)
             assert migrate(conn) == []
 
+    def test_model_hw_columns_kept_in_schema_not_dropped(self, tmp_path: Path) -> None:
+        """spec-hw-slot-ownership: the model-owned runner/NGL columns are KEPT in
+        SQL (nulled by current code; physical DROP deferred post-1.0 to avoid a
+        same-release fold-vs-drop hazard). The deploy-window fold reads them, so
+        they must still exist after the full migration chain."""
+        with connect(tmp_path / "t.db") as conn:
+            migrate(conn)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(model)")}
+            assert "preferred_runner" in cols
+            assert "n_gpu_layers" in cols
+            assert migrate(conn) == []
+
+    def test_registry_round_trips_without_binding_hw_columns(self, tmp_path: Path) -> None:
+        """A Model still adds + reads back through the SqliteModelRegistry: the
+        HW columns exist but repository.MODEL_COLUMNS no longer binds them (they
+        stay NULL), and no ModelDefaults NGL/runner field is reconstructed."""
+        from hal0.registry.model import Model, ModelDefaults
+        from hal0.registry.sqlite_store import SqliteModelRegistry
+
+        reg = SqliteModelRegistry(db_path=str(tmp_path / "reg.db"))
+        reg.add(
+            Model(
+                id="m1",
+                path="/models/m1.gguf",
+                defaults=ModelDefaults(context_size=8192),
+            )
+        )
+        got = reg.get("m1")
+        assert got.id == "m1"
+        assert got.defaults is not None
+        assert got.defaults.context_size == 8192
+
 
 class TestPackagedStoreMigration:
     """003_store.sql (ML-3) — deliberately "003" not "002" (OBS-1 owns 002,

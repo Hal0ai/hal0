@@ -1325,12 +1325,14 @@ def _register_pulled_fileset(
                 role=entry.role,
                 shard_index=entry.shard_index,
             )
-        # `revision`/`preferred_runner` are §7.1 reserved columns with no
-        # Model field yet (ML-1's DDL comment) — written directly until
-        # that lane lands a pydantic field for them.
+        # `revision` is a §7.1 reserved column with no Model field yet (ML-1's
+        # DDL comment) — written directly until that lane lands a pydantic field.
+        # (`preferred_runner` is no longer written here: the runner is slot-owned
+        # now (spec-hw-slot-ownership §6); its column is KEPT-but-unbound, nulled,
+        # with the physical drop deferred post-1.0.)
         conn.execute(
-            "UPDATE model SET revision = ?, preferred_runner = COALESCE(preferred_runner, ?) WHERE id = ?",
-            (fileset.revision, fileset.runner_hint, model_id),
+            "UPDATE model SET revision = ? WHERE id = ?",
+            (fileset.revision, model_id),
         )
 
 

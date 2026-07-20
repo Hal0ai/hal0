@@ -28,8 +28,7 @@ from hal0.profiles.portable import (
 def _profile() -> ProfileConfig:
     """A custom (non-seed) profile with a representative mix of fields."""
     return ProfileConfig(
-        image="ghcr.io/hal0ai/test:custom",
-        flags="-fa on -ngl 99",
+        flags="-fa on",
         mtp=True,
         device_class="gpu",
         backend="rocm",
@@ -65,7 +64,6 @@ class TestRoundTrip:
 
         imported = dst.resolve("copied")
         original = _profile()
-        assert imported.image == original.image
         assert imported.flags == original.flags
         assert imported.mtp == original.mtp
         assert imported.device_class == original.device_class
@@ -91,15 +89,14 @@ class TestExportEnvelope:
     def test_profile_body_has_expected_fields(self, tmp_hal0_home: str) -> None:
         env = export_envelope("orig", _profile(), exported_at="t")
         body = env["profile"]
-        assert body["image"] == "ghcr.io/hal0ai/test:custom"
-        assert body["flags"] == "-fa on -ngl 99"
+        assert body["flags"] == "-fa on"
         assert body["mtp"] is True
         assert body["device_class"] == "gpu"
         assert body["backend"] == "rocm"
 
     def test_exclude_none_drops_unset_optional_fields(self, tmp_hal0_home: str) -> None:
         # A bare profile leaves backend/cloned_from None → exclude_none drops them.
-        env = export_envelope("bare", ProfileConfig(image="ghcr.io/x/y:z"), exported_at="t")
+        env = export_envelope("bare", ProfileConfig(), exported_at="t")
         body = env["profile"]
         assert None not in body.values()
         assert "backend" not in body
@@ -142,7 +139,7 @@ class TestParseEnvelope:
         env = export_envelope("orig", _profile(), exported_at="t")
         parsed = parse_envelope(env)
         assert parsed.kind == "hal0.profile"
-        assert parsed.profile.image == "ghcr.io/hal0ai/test:custom"
+        assert parsed.profile.flags == "-fa on"
 
     def test_non_dict_rejected(self, tmp_hal0_home: str) -> None:
         with pytest.raises(BadRequest) as exc:
@@ -151,18 +148,12 @@ class TestParseEnvelope:
 
     def test_wrong_kind_rejected(self, tmp_hal0_home: str) -> None:
         with pytest.raises(BadRequest) as exc:
-            parse_envelope({"kind": "not-a-profile", "profile": {"image": "ghcr.io/x/y:z"}})
+            parse_envelope({"kind": "not-a-profile", "profile": {}})
         assert exc.value.code == "profiles.bad_envelope"
 
     def test_missing_profile_rejected(self, tmp_hal0_home: str) -> None:
         with pytest.raises(BadRequest) as exc:
             parse_envelope({"kind": ENVELOPE_KIND})
-        assert exc.value.code == "profiles.bad_envelope"
-
-    def test_invalid_profile_rejected(self, tmp_hal0_home: str) -> None:
-        # image is required by ProfileConfig → empty inner profile is invalid.
-        with pytest.raises(BadRequest) as exc:
-            parse_envelope({"kind": ENVELOPE_KIND, "profile": {"image": ""}})
         assert exc.value.code == "profiles.bad_envelope"
 
 
@@ -184,7 +175,7 @@ class TestImportProfile:
 
     def test_duplicate_name_raises_conflict(self, tmp_hal0_home: str) -> None:
         catalog = _catalog(tmp_hal0_home)
-        catalog.create("taken", ProfileConfig(image="ghcr.io/x/y:z"))
+        catalog.create("taken", ProfileConfig())
         env = export_envelope("orig", _profile(), exported_at="t")
         with pytest.raises(Conflict) as exc:
             import_profile(env, "taken", catalog)

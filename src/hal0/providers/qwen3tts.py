@@ -12,7 +12,7 @@ Image API surface (packaging/toolbox/qwen3tts.Dockerfile):
 
   The server is the ENTRYPOINT, so ``container_spec.command`` carries
   flags only — no binary path or subcommand prefix.  Flags come from the
-  resolved ``tts-qwen3`` profile (profiles.toml), which bakes
+  resolved ``qwen3-tts`` profile (profiles.toml), which bakes
   ``--model_path`` plus the default voice/language.
 
 GPU passthrough (mirrors the llama-server / agent slot path):
@@ -58,7 +58,7 @@ from hal0.runners import RUNNER_IMAGES
 _DEFAULT_QWEN3TTS_IMAGE = RUNNER_IMAGES["qwen3tts"].image
 
 # Default profile name if the slot TOML omits one.
-_DEFAULT_PROFILE = "tts-qwen3"
+_DEFAULT_PROFILE = "qwen3-tts"
 
 # Default slot port (slot TOML normally pins this; mirrors the live
 # standalone deployment's 8095 so a profile-less default lands where the
@@ -142,10 +142,10 @@ class Qwen3TTSProvider(Provider):
         """
         override: Any = None
         if isinstance(slot_cfg, dict):
-            override = slot_cfg.get("image")
+            override = slot_cfg.get("image_pin")
             if not (isinstance(override, str) and override):
                 nested = slot_cfg.get("slot")
-                override = nested.get("image") if isinstance(nested, dict) else None
+                override = nested.get("image_pin") if isinstance(nested, dict) else None
         if isinstance(override, str) and override:
             return override
 
@@ -163,7 +163,7 @@ class Qwen3TTSProvider(Provider):
         The toolbox image ENTRYPOINT is ``python3 qwen3tts_server.py``, so
         ``command`` carries only flags (no binary path / subcommand).
 
-        Flags come from the resolved profile (``tts-qwen3`` by default),
+        Flags come from the resolved profile (``qwen3-tts`` by default),
         which bakes ``--model_path`` + ``--default_voice`` + ``--default_language``.
         ``--host`` and ``--port`` are always appended so the operator cannot
         accidentally omit them (argparse last-wins, so the slot's --port beats

@@ -127,10 +127,10 @@ class KokoroProvider(Provider):
         """
         override: Any = None
         if isinstance(slot_cfg, dict):
-            override = slot_cfg.get("image")
+            override = slot_cfg.get("image_pin")
             if not (isinstance(override, str) and override):
                 nested = slot_cfg.get("slot")
-                override = nested.get("image") if isinstance(nested, dict) else None
+                override = nested.get("image_pin") if isinstance(nested, dict) else None
         if isinstance(override, str) and override:
             return override
 

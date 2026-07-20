@@ -289,8 +289,29 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # Surfaced so the edit-drawer Template row seeds its override select
         # from disk instead of defaulting to "auto" on every reopen.
         entry["chat_template"] = cfg.get("chat_template")
-        n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
-        entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
+        # NGL — spec-hw-slot-ownership §2: NGL is now a TOP-LEVEL slot-owned
+        # hardware field. Prefer the top-level value; fall back to the prior
+        # nested [model].n_gpu_layers for pre-migration slots (the §6 migration
+        # folds it up), then the -1 "all layers" sentinel.
+        top_ngl = cfg.get("n_gpu_layers")
+        nested_ngl = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
+        if isinstance(top_ngl, int):
+            entry["n_gpu_layers"] = top_ngl
+        elif isinstance(nested_ngl, int):
+            entry["n_gpu_layers"] = nested_ngl
+        else:
+            entry["n_gpu_layers"] = -1
+        # THREADS / BINARY / image_pin — the rest of the slot HW grid
+        # (spec-hw-slot-ownership §2/§3), all top-level. Surfaced verbatim
+        # (absent → null) so the edit-drawer dirty-tracks real on-disk state:
+        #   threads: 0 = unset (runtime default)
+        #   binary:  "" = derive the HW-gated default from device
+        #   image_pin: null = release default (RUNNER_IMAGES[binary])
+        threads_val = cfg.get("threads")
+        entry["threads"] = threads_val if isinstance(threads_val, int) else None
+        binary_val = cfg.get("binary")
+        entry["binary"] = binary_val if isinstance(binary_val, str) else None
+        entry["image_pin"] = cfg.get("image_pin")
         # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
         # it and avoid clobbering the on-disk value on unrelated saves.
         # Absent (None) is surfaced as-is — frontend treats null as "use
@@ -479,7 +500,10 @@ async def container_enrichment(
 
                 catalog = load_profiles_config()
                 prof = catalog.profile.get(profile_name)
-                image = prof.image if prof else None
+                if prof is not None:
+                    from hal0.providers.container import _resolve_image_ref
+
+                    image = _resolve_image_ref(cfg, prof)
                 entry["image"] = image
                 # Lift device_class + backend from the resolved profile so the
                 # UI groups by silicon class and colours by GPU runtime without

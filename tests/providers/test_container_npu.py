@@ -210,7 +210,6 @@ class TestLoadSyncNpuBranch:
 
         provider = ContainerProvider()
         profile = ProfileConfig(
-            image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
             flags="-fa on",
             mtp=False,
         )
@@ -237,7 +236,7 @@ class TestLoadSyncNpuBranch:
                 {
                     "name": "chat",
                     "port": 8095,
-                    "profile": "rocm",
+                    "profile": "chat",
                     "device": "gpu-rocm",
                 },
                 {"path": "/mnt/ai-models/model.gguf", "_model_key": "my-model"},

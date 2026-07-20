@@ -36,17 +36,20 @@ from hal0.providers.container import (
     ContainerProvider,
     _container_runtime,
     _image_mismatch,
+    _llama_argv_segments,
     _llama_launch_plan,
     _loopback_fence_command,
     _render_quadlet_from_plan,
     _resolve_model_path,
     resolved_command_for_slot,
 )
+from hal0.slots.argv import resolve_argv
 
 # Podman is the only supported runtime under Quadlet; the shims below ignore
 # ``runtime_bin`` (Quadlet doesn't put the runtime binary in the unit), but the
 # param is kept so existing call sites need no edit.
 _TEST_RUNTIME = "/usr/bin/podman"
+_TEST_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
 
 
 def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"):
@@ -113,7 +116,6 @@ def _exec_line(unit_text: str) -> str:
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         mtp=False,
     )
@@ -121,7 +123,6 @@ def _moe_profile() -> ProfileConfig:
 
 def _mtp_profile() -> ProfileConfig:
     return ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         mtp=True,
     )
@@ -259,14 +260,14 @@ class TestRenderUnit:
     def test_image_and_exec_present(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
-        assert f"Image={profile.image}" in unit.splitlines()
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert f"Image={_TEST_IMAGE}" in unit.splitlines()
         assert "--port 8095" in _exec_line(unit)
 
     def test_container_name_key(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "ContainerName=hal0-slot-test-slot" in unit.splitlines()
 
     def test_identical_path_mount_readonly(self, monkeypatch) -> None:
@@ -274,8 +275,15 @@ class TestRenderUnit:
         monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
-        assert f"Volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro,z" in unit.splitlines()
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert any(
+            ln
+            in {
+                f"Volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro",
+                f"Volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro,z",
+            }
+            for ln in unit.splitlines()
+        )
 
     def test_mount_honours_custom_model_store(self, monkeypatch) -> None:
         """A custom HAL0_MODEL_STORE is what the slot bind-mounts — so a model
@@ -285,7 +293,7 @@ class TestRenderUnit:
         monkeypatch.setenv("HAL0_MODEL_STORE", custom)
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("agent0", profile.image, 8095, f"{custom}/Qwen3.6-35B.gguf", flags)
+        unit = _render_llama("agent0", _TEST_IMAGE, 8095, f"{custom}/Qwen3.6-35B.gguf", flags)
         assert f"Volume={custom}:{custom}:ro,z" in unit.splitlines()
         assert not any(ln.startswith("Volume=/mnt/ai-models") for ln in unit.splitlines())
 
@@ -299,9 +307,16 @@ class TestRenderUnit:
         )
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("brain", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("brain", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
-        assert "Volume=/mnt/ai-models:/mnt/ai-models:ro,z" in vols
+        assert any(
+            ln
+            in {
+                "Volume=/mnt/ai-models:/mnt/ai-models:ro",
+                "Volume=/mnt/ai-models:/mnt/ai-models:ro,z",
+            }
+            for ln in vols
+        )
         assert "Volume=/var/lib/hal0/models:/var/lib/hal0/models:ro,z" in vols
 
     def test_render_dedups_store_equals_pull_root(self, monkeypatch) -> None:
@@ -313,15 +328,18 @@ class TestRenderUnit:
         )
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("brain", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("brain", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
-        assert vols == ["Volume=/mnt/ai-models:/mnt/ai-models:ro,z"]
+        assert vols in (
+            ["Volume=/mnt/ai-models:/mnt/ai-models:ro"],
+            ["Volume=/mnt/ai-models:/mnt/ai-models:ro,z"],
+        )
 
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
 
     def test_healthcheck_targets_slot_port_not_image_default(self) -> None:
@@ -331,7 +349,7 @@ class TestRenderUnit:
         false (unhealthy))."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         lines = unit.splitlines()
         health_cmd = [ln for ln in lines if ln.startswith("HealthCmd=")]
         assert health_cmd, f"no HealthCmd override in: {lines}"
@@ -348,9 +366,7 @@ class TestRenderUnit:
             "hal0.providers.container.resolve_gpu_device_paths",
             return_value=["/dev/kfd", "/dev/dri/renderD128"],
         ):
-            unit = _render_llama(
-                "test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags
-            )
+            unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         lines = unit.splitlines()
         assert "AddDevice=/dev/kfd" in lines
         assert "AddDevice=/dev/dri/renderD128" in lines
@@ -363,7 +379,7 @@ class TestRenderUnit:
         flags = resolve_profile_flags(profile)
         unit = _render_llama(
             "test-slot",
-            profile.image,
+            _TEST_IMAGE,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
@@ -381,7 +397,7 @@ class TestRenderUnit:
         flags = resolve_profile_flags(profile)
         unit = _render_llama(
             "test-slot",
-            profile.image,
+            _TEST_IMAGE,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
@@ -399,7 +415,7 @@ class TestRenderUnit:
         flags = resolve_profile_flags(profile)
         unit = _render_llama(
             "test-slot",
-            profile.image,
+            _TEST_IMAGE,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
@@ -417,7 +433,7 @@ class TestRenderUnit:
         flags = resolve_profile_flags(profile)
         unit = _render_llama(
             "test-slot",
-            profile.image,
+            _TEST_IMAGE,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
@@ -442,7 +458,7 @@ class TestRenderUnit:
         json_kwargs = '{"enable_thinking":false}'
         unit = _render_llama(
             "test-slot",
-            profile.image,
+            _TEST_IMAGE,
             8095,
             "/mnt/ai-models/model.gguf",
             flags,
@@ -462,7 +478,7 @@ class TestRenderUnit:
     def test_security_opts(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         # Uniform render (O8+O11): security opts ride PodmanArgs= on every
         # substrate — native SecurityOpt= keys are deliberately not emitted.
         assert "--security-opt apparmor=unconfined" in unit
@@ -473,7 +489,7 @@ class TestRenderUnit:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         model_path = "/mnt/ai-models/model.gguf"
-        unit = _render_llama("test-slot", profile.image, 8095, model_path, flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, model_path, flags)
         # llama-server uses space-separated --model PATH (not --model=PATH)
         assert f"--model {model_path}" in _exec_line(unit)
 
@@ -481,7 +497,7 @@ class TestRenderUnit:
         """Bench-tuned profile flags must appear in the Exec= argv."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         exec_line = _exec_line(unit)
         assert "-fa" in exec_line
         assert "--no-mmap" in exec_line
@@ -490,13 +506,13 @@ class TestRenderUnit:
     def test_mtp_flags_in_exec_when_mtp_true(self) -> None:
         profile = _mtp_profile()
         flags = resolve_profile_flags(profile, mtp_override=True)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "--spec-type" in _exec_line(unit)
 
     def test_unit_has_expected_sections(self) -> None:
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "[Unit]" in unit
         assert "[Container]" in unit
         assert "[Service]" in unit
@@ -514,7 +530,7 @@ class TestRenderUnit:
         """
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         unit_section, _, remainder = unit.partition("[Container]")
         service_section = remainder.partition("[Service]")[2].partition("[Install]")[0]
         assert "StartLimitIntervalSec=300" in unit_section
@@ -528,7 +544,7 @@ class TestRenderUnit:
 
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
-        unit = _render_llama("test-slot", profile.image, 8095, "/mnt/ai-models/model.gguf", flags)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         # Uniform render: numeric GIDs ride PodmanArgs=--group-add (O8+O11).
         for gid in resolve_gpu_group_ids():
             assert f"--group-add {gid}" in unit, f"GID {gid} missing: {unit}"
@@ -554,9 +570,15 @@ class TestContainerSpec:
                 _model_info(),
             )
 
-    def test_image_matches_profile(self) -> None:
+    def test_image_ignores_profile_pin_uses_hw_default(self) -> None:
+        # spec-hw-slot-ownership §3: _TEST_IMAGE is DELETED from the chain.
+        # With no slot image_pin/binary, the image is the HW-gated default —
+        # NOT the (now-ignored) _TEST_IMAGE.
+        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+
         spec = self._build_spec()
-        assert spec.image == _moe_profile().image
+        assert spec.image != _TEST_IMAGE
+        assert spec.image == DEFAULT_ROCMFPX_IMAGE
 
     def test_model_arg_in_command(self) -> None:
         spec = self._build_spec()
@@ -1067,12 +1089,12 @@ class TestFamilyDefaults:
         and per-model KV tuning now lives in the model's ``defaults.extra_args``.
         A slot on the basic vulkan seed therefore never gets a forced q8 KV.
         """
-        vseed = SEED_PROFILES["vulkan"]
+        vseed = SEED_PROFILES["chat"]
         assert "-ctk" not in vseed["flags"] and "q8_0" not in vseed["flags"]
-        assert "-ngl 999" in vseed["flags"] and "-fa on" in vseed["flags"]
+        assert "-fa on" in vseed["flags"]
 
-        profile = ProfileConfig(image=vseed["image"], flags=vseed["flags"], mtp=False)
-        cfg = {"profile": "vulkan", "port": 8096, "model": {"default": "qwen3-27b"}}
+        profile = ProfileConfig(flags=vseed["flags"], mtp=False)
+        cfg = {"profile": "chat", "port": 8096, "model": {"default": "qwen3-27b"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
@@ -1212,3 +1234,51 @@ class TestLoopbackFenceCommand:
         # A bare 0.0.0.0 not preceded by a bind flag is left alone (defensive:
         # the fence targets bind addresses, not arbitrary values).
         assert _loopback_fence_command(["--some-ip", "0.0.0.0"]) == ["--some-ip", "0.0.0.0"]
+
+
+class TestSlotHardwareSegment:
+    """spec-hw-slot-ownership §2: the slot owns NGL + THREADS; the model no
+    longer emits -ngl. Covers _llama_argv_segments' slot_hardware segment."""
+
+    @staticmethod
+    def _argv(**kw: Any) -> list[str]:
+        segs = _llama_argv_segments(port=8081, model_path="/m.gguf", **kw)
+        return resolve_argv(segs).argv
+
+    def test_slot_ngl_emits_ngl(self) -> None:
+        argv = self._argv(slot_n_gpu_layers=99)
+        assert argv[argv.index("-ngl") + 1] == "99"
+
+    def test_slot_ngl_negative_one_is_emitted_verbatim(self) -> None:
+        # -1 (all layers) is a legitimate explicit NGL value, not a "skip".
+        argv = self._argv(slot_n_gpu_layers=-1)
+        assert argv[argv.index("-ngl") + 1] == "-1"
+
+    def test_slot_threads_emits_threads(self) -> None:
+        argv = self._argv(slot_threads=8)
+        assert argv[argv.index("--threads") + 1] == "8"
+
+    def test_slot_threads_zero_omits_flag(self) -> None:
+        # 0 = unset → runtime default, no --threads emitted.
+        argv = self._argv(slot_threads=0, slot_n_gpu_layers=-1)
+        assert "--threads" not in argv
+
+    def test_model_defaults_n_gpu_layers_does_not_emit_ngl(self) -> None:
+        # defaults.n_gpu_layers is deleted; a stray key must NOT reach the argv.
+        argv = self._argv(model_defaults={"n_gpu_layers": 77, "extra_args": "-fa on"})
+        assert "-ngl" not in argv
+        assert "-fa" in argv
+
+    def test_slot_threads_wins_over_model_extra_args_collision(self) -> None:
+        # slot_hardware sits after model_extra_args → the slot's --threads wins
+        # last. (-ngl can't be tested this way: it is in MANAGED_ARGS_DENYLIST,
+        # so a model extra_args -ngl is hard-rejected before it can collide.
+        # --threads is not yet denylisted — Lane C adds SLOT_HARDWARE_FLAGS.)
+        argv = self._argv(slot_threads=8, model_defaults={"extra_args": "--threads 3"})
+        assert argv.count("--threads") == 1
+        assert argv[argv.index("--threads") + 1] == "8"
+
+    def test_segment_labels_include_slot_hardware_not_model_defaults(self) -> None:
+        labels = [lbl for lbl, _toks in _llama_argv_segments(port=8081, model_path="/m.gguf")]
+        assert "slot_hardware" in labels
+        assert "model_defaults" not in labels

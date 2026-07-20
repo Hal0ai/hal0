@@ -67,10 +67,6 @@ class ModelDefaults(BaseModel):
         default=None,
         description="Default n_ctx the launcher should use when this model is bound.",
     )
-    n_gpu_layers: int | None = Field(
-        default=None,
-        description="Default --n-gpu-layers; -1 = all, 0 = CPU only.",
-    )
     rope_freq_base: float | None = Field(
         default=None,
         description=(
@@ -261,20 +257,6 @@ class Model(BaseModel):
             "'gpt-oss', 'qwen3next', 'mamba'). Replaces the dead 'moe' "
             "curated tag — drives FAMILY_DEFAULTS keying + dense/moe "
             "context sizing (hardware/recommend.is_moe)."
-        ),
-    )
-
-    preferred_runner: str | None = Field(
-        default=None,
-        description=(
-            "A key into hal0.runners.RUNNER_IMAGES (§7.1b / ML-4) — the "
-            "runner this model prefers to launch under, e.g. 'rocmfpx' or "
-            "'flm'. Consulted by providers.container._resolve_image_ref "
-            "ahead of the profile/HW-gated default, but only when the "
-            "runner's runtime_family/device_class/backend actually fits "
-            "the launching slot (hal0.runners.runner_matches) — an "
-            "incompatible or unknown key is silently skipped rather than "
-            "launching the wrong runtime. None = no preference."
         ),
     )
 

@@ -67,20 +67,6 @@ def test_images_skipped_entirely_when_podman_unavailable() -> None:
     assert check_profile_images_present([p], None) == []
 
 
-def test_images_warn_when_in_use_image_not_pulled() -> None:
-    p = _profile("rocm", image="ghcr.io/hal0ai/tb:v1", used_by=("primary",))
-    rows = check_profile_images_present([p], set())
-    assert rows[0]["status"] == "warn"
-    assert "not pulled" in rows[0]["detail"]
-
-
-def test_images_ok_when_repo_present_regardless_of_tag() -> None:
-    # Local box has the repo at a different tag — still counts as present.
-    p = _profile("rocm", image="ghcr.io/hal0ai/tb:v2", used_by=("primary",))
-    rows = check_profile_images_present([p], {"ghcr.io/hal0ai/tb"})
-    assert rows[0]["status"] == "ok"
-
-
 def test_images_ignore_unused_profiles() -> None:
     # An unused profile whose image is absent is not a live problem.
     p = _profile("rocm", image="ghcr.io/hal0ai/tb:v1", used_by=())

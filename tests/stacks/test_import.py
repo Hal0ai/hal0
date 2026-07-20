@@ -122,9 +122,7 @@ class TestImportStack:
         from hal0.config.schema import ProfileConfig
 
         env = export_envelope(_stack(), exported_at="t", registry=reg)
-        env["stack"]["profiles"] = {
-            "custom-x": ProfileConfig(image="ghcr.io/c:x").model_dump(mode="python")
-        }
+        env["stack"]["profiles"] = {"custom-x": ProfileConfig().model_dump(mode="python")}
         env["stack"]["slots"][0]["profile"] = "custom-x"
         catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
         import_stack(env, "s2", catalog, registry=reg)

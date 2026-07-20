@@ -62,26 +62,37 @@ function useBackendMeta() {
 
 // `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
 
-const BLANK = { name: '', intent: '', image: '', backend: 'rocm', quant: '', flags: '', mtp: false };
+const BLANK = { name: '', intent: '', backend: 'rocm', quant: '', flags: '', mtp: false };
 
 function bk(name, meta) { return meta[name] || meta.cpu; }
 
 // Display backend for a profile: the explicit GPU backend (rocm|vulkan) when
 // set, otherwise mapped from device_class so npu/cpu/img still get a hue.
+// (spec-hw-slot-ownership §3: profiles no longer carry an image, so the old
+// vulkan-from-image-string inference is gone.)
 function backendOf(p, meta) {
   if (p.backend && meta[p.backend]) return p.backend;
   if (p.device_class === 'img') return 'img';
   if (p.device_class === 'npu') return 'npu';
   if (p.device_class === 'cpu') return 'cpu';
-  if ((p.image || '').toLowerCase().includes('vulkan')) return 'vulkan';
-  return 'rocm';
+  return 'cpu';
+}
+
+function runtimeLabel(p) {
+  return {
+    'llama-server': 'llama-server · slot hardware',
+    flm: 'FLM · slot binary',
+    kokoro: 'Kokoro · slot binary',
+    qwen3tts: 'Qwen3-TTS · slot binary',
+    comfyui: 'ComfyUI · slot binary',
+  }[p.runtime_family] || 'slot-selected runtime';
 }
 
 // Card headline. Prefer the server-authored intent; fall back to a pretty
 // profile name (#751 shared map) so un-labelled custom profiles read well.
 function intentOf(p) {
   if (p.intent) return p.intent;
-  const base = p.image ? p.image.split(':').pop() : prettyProfile(p.name);
+  const base = prettyProfile(p.name);
   return p.mtp ? `${base} · MTP` : base;
 }
 
@@ -131,7 +142,7 @@ function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
         </div>
         <div className="pf-card-meta">
           <span className="stk-tag pf-bk" style={{ '--bk': meta.color, color: meta.color, borderColor: 'color-mix(in srgb, ' + meta.color + ' 34%, transparent)', background: 'color-mix(in srgb, ' + meta.color + ' 10%, transparent)' }}>
-            {meta.label}
+            {runtimeLabel(p)}
           </span>
           {metric && <span className="mono pf-card-metric">{metric}</span>}
         </div>
@@ -140,8 +151,7 @@ function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
       <div className="stk-lib-slotlist">
         {p.quant && <PfRow label="quant" value={p.quant} />}
         {p.mtp && <PfRow label="mtp" value="speculative" hue="var(--accent)" />}
-        <PfRow label="image" value={p.image} />
-        {p.resolved_flags && <PfRow label="flags" value={p.resolved_flags} />}
+        <PfRow label="flags" value={p.resolved_flags || p.flags || '—'} />
       </div>
 
       <div className="stk-lib-f">
@@ -200,16 +210,14 @@ function validateForm(form, existing) {
   if (!name) errs.name = 'Name is required';
   else if (!NAME_RE.test(name)) errs.name = 'lowercase · digits · - · _ · must start alphanumeric';
   else if (existing.includes(name)) errs.name = `“${name}” already exists`;
-  if (!(form.image || '').trim()) errs.image = 'Image is required';
+  // spec-hw-slot-ownership §3: profiles no longer carry an image — only a name
+  // + device-agnostic tune. Image lives on the runner (RUNNER_IMAGES[binary]).
   return errs;
 }
 
-function warnForm(form) {
-  const warns = {};
-  const img = (form.image || '').trim();
-  // A tag is the part after the last ':' that isn't part of a host:port.
-  if (img && !/:[\w][\w.-]*$/.test(img)) warns.image = 'no tag — will resolve to :latest';
-  return warns;
+// No warnings today (the image-tag warning was removed with the image field).
+function warnForm(_form) {
+  return {};
 }
 
 // The editor drawer. Consumes the shared FormDrawer shell + useForm hook +
@@ -225,8 +233,6 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
     const base = {
       name: source.name,
       intent: source.intent || '',
-      image: source.image || '',
-      backend: backendOf(source, BACKEND_META),
       quant: source.quant || '',
       flags: source.flags || '',
       mtp: !!source.mtp,
@@ -250,12 +256,11 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   });
   const form = f.values;
   const errs = f.errors;
-  const warns = f.warns;
   const blocking = f.blocking;
   const show = f.show;
   const set = f.set;
   const touch = f.touch;
-  const meta = bk(form.backend, BACKEND_META);
+  const meta = bk('cpu', BACKEND_META);
   const nameValid = !errs.name && (form.name || '').trim().length > 0;
   const nameLen = (form.name || '').length;
 
@@ -268,14 +273,10 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
       return;
     }
     f.setSubmitting(true);
-    const choice = bk(form.backend, BACKEND_META);
     const body = {
       name: form.name.trim(),
-      image: form.image.trim(),
       flags: form.flags ?? '',
       mtp: !!form.mtp,
-      device_class: choice.device_class,
-      backend: choice.backendField,
       intent: form.intent ?? '',
       quant: form.quant ?? '',
       ...(form.cloned_from ? { cloned_from: form.cloned_from } : {}),
@@ -350,41 +351,12 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             placeholder="MoE agents · long-ctx" data-testid="pf-input-intent" />
         </FormRow>
 
-        <FormRow label="Image" req sub="container image URI"
-          error={show('image') ? errs.image : null}
-          warn={!errs.image ? warns.image : null}
-          ok={!!(form.image || '').trim() && !errs.image && !warns.image}>
-          <input className={'pf-input mono' + (show('image') && errs.image ? ' err' : '')} value={form.image}
-            onChange={e => set('image', e.target.value)} onBlur={() => touch('image')}
-            placeholder="ghcr.io/hal0ai/…:tag" aria-invalid={!!(show('image') && errs.image)}
-            data-testid="pf-input-image" />
-        </FormRow>
+        {/* Image field removed (spec-hw-slot-ownership §3): a profile is a
+            device-agnostic tune template only. The container image lives on the
+            runner (RUNNER_IMAGES[slot.binary]); the per-slot escape hatch is
+            slot.image_pin in the slot editor. */}
 
-        <FormRow label="Backend" sub="runtime path">
-          <div>
-            <div className="pf-seg" data-testid="pf-seg-backend">
-              {Object.keys(BACKEND_META).map(k => (
-                <button type="button" key={k} className={'pf-seg-btn' + (form.backend === k ? ' on' : '')}
-                  style={{ '--bk': BACKEND_META[k].color }} onClick={() => set('backend', k)}
-                  title={BACKEND_META[k].description || BACKEND_META[k].label}>
-                  <span className="pf-chip-dot" />{BACKEND_META[k].label}
-                  {BACKEND_META[k].recommended && <span title="Recommended" aria-label="recommended"> ★</span>}
-                </button>
-              ))}
-            </div>
-            {/* Meta-driven guidance for the picked runtime path — the enums
-                endpoint flags gpu-rocm as recommended and labels vulkan as the
-                fallback; surface that at the moment of choice. */}
-            {(meta.recommended || meta.description) && (
-              <div className="mono" data-testid="pf-backend-hint" style={{
-                marginTop: 6, fontSize: 10.5, lineHeight: 1.5,
-                color: meta.recommended ? 'var(--ok)' : 'var(--fg-4)',
-              }}>
-                {meta.recommended ? '★ recommended · ' : ''}{meta.description}
-              </div>
-            )}
-          </div>
-        </FormRow>
+        <div className="mono pf-hint">Hardware, runner binary, and image are selected on the slot.</div>
 
         <FormRow label="Quant" sub="weight format">
           <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}

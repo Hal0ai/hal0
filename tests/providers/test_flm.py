@@ -115,7 +115,9 @@ def test_image_ref_is_hal0ai_flm(provider: FLMProvider, tmp_hal0_home: str) -> N
 
 def test_image_ref_honors_slot_override(provider: FLMProvider, tmp_hal0_home: str) -> None:
     """§7.1b / ML-4 fix: FLM previously ignored slot.image entirely."""
-    assert provider.image_ref({"image": "ghcr.io/dev/flm-pin:test"}) == "ghcr.io/dev/flm-pin:test"
+    assert (
+        provider.image_ref({"image_pin": "ghcr.io/dev/flm-pin:test"}) == "ghcr.io/dev/flm-pin:test"
+    )
 
 
 def test_container_spec_passes_through_accel_device(

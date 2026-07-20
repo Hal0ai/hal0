@@ -75,7 +75,7 @@ async def test_apply_setup_creates_chat_slot_and_plans_pull(tmp_hal0_home):
         write_sentinel=False,
     )
     assert sm.created["chat"]["device"] == "gpu-rocm"
-    assert sm.created["chat"]["profile"] == "rocm"
+    assert sm.created["chat"]["profile"] == "chat"
     out = res.slots[0]
     assert out.created is True and out.skipped is None
     assert "qwen3-4b" in res.model_ids
@@ -103,7 +103,7 @@ async def test_apply_setup_scaffolds_modelless_slot_without_pull(tmp_hal0_home):
         write_sentinel=False,
     )
     assert sm.created["embed"]["device"] == "gpu-rocm"
-    assert sm.created["embed"]["profile"] == "embed"
+    assert sm.created["embed"]["profile"] == "embedding"
     assert sm.created["embed"]["model"]["default"] == ""  # empty scaffold
     out = res.slots[0]
     assert out.created is True and out.skipped is None

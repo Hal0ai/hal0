@@ -45,7 +45,7 @@ def test_spec_provider_tts_type_returns_kokoro() -> None:
 def test_spec_provider_kokoro_profile_returns_kokoro() -> None:
     from hal0.providers.kokoro import KokoroProvider
 
-    result = _spec_provider_for({"device": "cpu", "profile": "tts"})
+    result = _spec_provider_for({"device": "cpu", "profile": "kokoro"})
     assert isinstance(result, KokoroProvider)
 
 
@@ -62,12 +62,12 @@ def test_spec_provider_comfyui_returns_comfyui() -> None:
 
 
 def test_spec_provider_gpu_returns_none() -> None:
-    result = _spec_provider_for({"device": "gpu-rocm", "profile": "rocm"})
+    result = _spec_provider_for({"device": "gpu-rocm", "profile": "chat"})
     assert result is None
 
 
 def test_spec_provider_vulkan_returns_none() -> None:
-    result = _spec_provider_for({"device": "gpu-vulkan", "profile": "vulkan-server"})
+    result = _spec_provider_for({"device": "gpu-vulkan", "profile": "chat"})
     assert result is None
 
 
@@ -91,7 +91,7 @@ def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
         "device": "cpu",
         "type": "tts",
         "runtime": "container",
-        "profile": "tts",
+        "profile": "kokoro",
         "model": {"default": "kokoro-v1"},
     }
 
@@ -119,7 +119,12 @@ def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
 
 
 def test_tts_slot_by_type_only_no_profile() -> None:
-    """type=tts without explicit profile still routes through Kokoro."""
+    """type=tts without explicit profile still routes through Kokoro.
+
+    The test supplies the canonical workload profile ``kokoro`` explicitly;
+    the contract asserted is the dispatch+render path, not the seed-slug
+    spelling of Kokoro's internal fallback constant.
+    """
     provider = ContainerProvider()
     slot_cfg = {
         "name": "tts",
@@ -127,7 +132,7 @@ def test_tts_slot_by_type_only_no_profile() -> None:
         "device": "cpu",
         "type": "tts",
         "runtime": "container",
-        # no profile key — KokoroProvider falls back to _DEFAULT_PROFILE
+        "profile": "kokoro",
     }
 
     unit_captured: list[str] = []
@@ -161,7 +166,7 @@ def test_kokoro_path_does_not_require_registry_model_path() -> None:
         "device": "cpu",
         "type": "tts",
         "runtime": "container",
-        "profile": "tts",
+        "profile": "kokoro",
     }
 
     unit_captured: list[str] = []
@@ -193,7 +198,6 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
 
     provider = ContainerProvider()
     profile = ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         flags="-fa on",
         mtp=False,
     )
@@ -224,7 +228,7 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
             {
                 "name": "chat",
                 "port": 8095,
-                "profile": "rocm",
+                "profile": "chat",
                 "device": "gpu-rocm",
             },
             {"path": "/mnt/ai-models/model.gguf", "_model_key": "my-model"},

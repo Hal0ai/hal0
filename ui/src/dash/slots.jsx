@@ -276,38 +276,51 @@ function SlotCard({
             container
           </span>
         )}
-        {/* Container: image-tag chip (replaces device chip + backend mismatch block).
-            Show the image tag truncated; full ref on hover.
-            NOTE: `image` and `profile` are TOML fields that as_dict() does not
-            yet serialise in /api/slots — tracked in #658 (backend: emit runtime
-            + image + profile in slot serialisation). The chip degrades gracefully
-            to "no image" until that lands. container_status is always present. */}
+        {/* Hardware grid chips (spec-hw-slot-ownership §2/§8): device + NGL are
+            slot-owned hardware. Device chip is always shown; NGL only when it's
+            an explicit offload count (not the -1 "all layers" default). */}
         {(() => {
-          const imgFull = slot.image || slot.profile || null;
-          const imgShort = imgFull ? imgFull.split("/").pop() : null;
-          // #663: surface running-vs-configured image drift on the container
-          // chip. actual_image + image_mismatch come from
-          // _container_state_enrichment via `podman inspect`.
+          const dev = slot.device || null;
+          if (!dev) return null;
+          return (
+            <span className={"chip dev-" + String(dev).replace("gpu-", "")} title={`device · ${dev}`}>
+              {dev}
+            </span>
+          );
+        })()}
+        {(() => {
+          const ngl = slot.n_gpu_layers;
+          if (ngl == null || ngl === -1) return null;
+          return (
+            <span className="chip mono" title="NGL — layers offloaded to GPU (slot hardware)">
+              ngl {ngl}
+            </span>
+          );
+        })()}
+        {/* image_pin drift chip (spec-hw-slot-ownership §3): shown ONLY when a
+            non-default image is pinned on the slot — drift is never hidden. The
+            release-default image (RUNNER_IMAGES[binary]) is not shown here; the
+            Runtimes page owns the per-runner image evidence. Falls back to the
+            legacy `image` field until the backend rename lands. #663:
+            actual_image drift folds onto the same chip. */}
+        {(() => {
+          const pinFull = slot.image_pin || slot.image || null;
+          if (!pinFull) return null;
+          const pinShort = pinFull.split("/").pop();
           const imgMismatch = !!slot.image_mismatch && !!slot.actual_image;
           const runShort = slot.actual_image ? slot.actual_image.split("/").pop() : null;
-          if (!imgShort) {
-            return (
-              <span className="chip dim" title="Image/profile not yet emitted by backend (#658)">
-                {slot.profile ? `profile:${slot.profile}` : "no image"}
-              </span>
-            );
-          }
           return (
             <span
               className="chip slot-image-tag mono"
+              data-testid="slot-image-pin"
               title={imgMismatch
-                ? `Configured ${imgFull} but running ${slot.actual_image} — reload the slot to apply the declared image.`
-                : imgFull}
+                ? `Pinned ${pinFull} but running ${slot.actual_image} — reload the slot to apply the pinned image.`
+                : `image_pin · ${pinFull} (non-default — release default overridden)`}
               style={imgMismatch
                 ? {maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderColor: "var(--warn-line)", background: "var(--warn-soft)"}
-                : {maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}
+                : {maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderColor: "var(--accent-line)", background: "var(--accent-soft)"}}
             >
-              {imgShort}
+              📌 {pinShort}
               {imgMismatch && <span style={{color: "var(--warn)", marginLeft: 4}}>≠ running {runShort}</span>}
             </span>
           );

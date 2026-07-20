@@ -329,6 +329,44 @@ class TestConfigEnrichment:
         assert e["llamacpp_args"] == "--flash-attn on"
         assert e["npu"] == {"asr": True, "embed": False, "chat": True}
 
+    def test_hw_grid_fields_surfaced_top_level(self) -> None:
+        # spec-hw-slot-ownership §2/§3: NGL / THREADS / BINARY / image_pin are
+        # top-level slot-owned hardware fields lifted for the edit-drawer grid.
+        cfg = _llm_cfg(
+            n_gpu_layers=99,
+            threads=8,
+            binary="rocmfpx",
+            image_pin="ghcr.io/owner/repo:dbg",
+        )
+        e = config_enrichment([cfg])["chat"]
+        assert e["n_gpu_layers"] == 99
+        assert e["threads"] == 8
+        assert e["binary"] == "rocmfpx"
+        assert e["image_pin"] == "ghcr.io/owner/repo:dbg"
+
+    def test_hw_grid_fields_absent_surface_as_null(self) -> None:
+        # Absent HW fields surface as null (threads/binary/image_pin) so the
+        # drawer dirty-tracks real on-disk state; NGL keeps its -1 sentinel.
+        e = config_enrichment([_llm_cfg()])["chat"]
+        assert e["n_gpu_layers"] == -1
+        assert e["threads"] is None
+        assert e["binary"] is None
+        assert e["image_pin"] is None
+
+    def test_ngl_prefers_top_level_over_nested(self) -> None:
+        # Migration compat: a slot with BOTH the legacy nested
+        # [model].n_gpu_layers and the new top-level field surfaces the
+        # top-level value (the §6 migration folds nested → top-level).
+        cfg = _llm_cfg(n_gpu_layers=40)
+        cfg["model"]["n_gpu_layers"] = 12
+        assert config_enrichment([cfg])["chat"]["n_gpu_layers"] == 40
+
+    def test_ngl_falls_back_to_nested_when_no_top_level(self) -> None:
+        # Pre-migration slot: only the legacy nested value exists → surface it.
+        cfg = _llm_cfg()
+        cfg["model"]["n_gpu_layers"] = 12
+        assert config_enrichment([cfg])["chat"]["n_gpu_layers"] == 12
+
     def test_ctx_max_from_context_size(self) -> None:
         # The Inference engine pane reads ctx_max to render "ctx used / max".
         # Canonical key is [model].context_size.
@@ -419,22 +457,23 @@ class TestContainerEnrichment:
         assert e["image"] is None
         assert e["resolved_command"] is None
 
-    async def test_device_class_and_backend_lifted_from_profile(self, tmp_hal0_home: str) -> None:
-        # A profile-backed GPU slot surfaces device_class + backend from the
-        # resolved profile so the UI groups/colours without re-deriving.
+    async def test_device_class_lifted_from_profile(self, tmp_hal0_home: str) -> None:
+        # A profile-backed GPU slot surfaces profile device_class so the UI can
+        # group logical workload families. Backend remains slot hardware state,
+        # not a profile-derived selector.
         out = await container_enrichment(
-            [_container_cfg(profile="rocm")],
+            [_container_cfg(profile="chat")],
             pull_jobs={},
             provider=FakeContainerProvider(active=True, healthy=True),
         )
         e = out["gpu-chat"]
         assert e["device_class"] == "gpu"
-        assert e["backend"] == "rocm"
+        assert e["backend"] is None
 
     async def test_device_class_for_non_gpu_profile(self, tmp_hal0_home: str) -> None:
         # Non-GPU profile: device_class drives display; backend is None.
         out = await container_enrichment(
-            [_container_cfg(name="tts-slot", profile="tts")],
+            [_container_cfg(name="tts-slot", profile="kokoro")],
             pull_jobs={},
             provider=FakeContainerProvider(active=True, healthy=True),
         )

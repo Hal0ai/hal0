@@ -1,7 +1,10 @@
 // hal0 v3 dashboard — profiles hook (issue #658).
 //
-// Fetches /api/profiles — the list of named container-slot profiles
-// (image + bench-tuned flags) seeded by profiles.toml.
+// Fetches /api/profiles — the list of named, device-agnostic tune templates
+// (bench-tuned flag text only) seeded by profiles.toml. spec-hw-slot-ownership
+// §3/§8: the `image` field is DELETED — a profile no longer carries a container
+// image (the escape hatch moved to `slot.image_pin`); image resolution is
+// RUNNER_IMAGES[slot.binary]. A profile is a device-agnostic tune template.
 //
 // CRUD mutations (Phase C6): create (POST), update (PUT), delete (DELETE).
 // Seeds are immutable server-side (409 profiles.seed_immutable); the UI
@@ -13,7 +16,6 @@ import { ENDPOINTS } from '../endpoints'
 
 export interface Profile {
   name: string
-  image: string
   flags: string
   mtp: boolean
   resolved_flags: string
@@ -39,7 +41,6 @@ export interface Profile {
 
 export interface ProfileBody {
   name: string
-  image: string
   flags?: string
   mtp?: boolean
   device_class?: string

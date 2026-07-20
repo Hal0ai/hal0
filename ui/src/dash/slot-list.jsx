@@ -139,6 +139,22 @@ function SlotRow({ s, pinned, onTogglePin }) {
         {/* col 4: device chip (auto) */}
         <DevChip s={s} />
 
+        {/* HW grid (spec-hw-slot-ownership §2): NGL chip when an explicit
+            offload count is set (not the -1 "all layers" default), and a pin
+            marker when the slot pins a non-default image (image_pin). */}
+        {s.n_gpu_layers != null && s.n_gpu_layers !== -1 && (
+          <span className="sl-dchip mono" title="NGL — GPU offload layers (slot hardware)">
+            ngl {s.n_gpu_layers}
+          </span>
+        )}
+        {(s.image_pin || s.image) && (
+          <span
+            className="sl-dchip mono"
+            data-testid="sl-image-pin"
+            title={`image_pin · ${s.image_pin || s.image} (non-default)`}
+          >📌 pinned</span>
+        )}
+
         {/* col 5: mem (58px) */}
         <span className="sl-metric">
           <span className="sl-ml">mem</span>

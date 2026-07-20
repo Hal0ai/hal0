@@ -99,6 +99,20 @@ class Runner:
     device_class: str  # "gpu" | "cpu" | "npu" | "img"
     backend: str | None = None  # "rocm" | "vulkan" | "cuda" | None
     manifest_key: str | None = None  # key into manifest.json's toolbox_images
+    #: Backends this image's runner binary can actually execute — the
+    #: fit-check metadata for spec-hw-slot-ownership §4. A slot's
+    #: ``(device, BINARY)`` pair is compatible iff the device's backend is a
+    #: member here; an incompatible pair WARNS at assignment (not at spawn).
+    #: This is metadata, NOT a selector: ``rocmfpx``/``vulkanfpx`` share one
+    #: Vulkan-portable image and therefore both list ``("rocm", "vulkan")`` —
+    #: the concrete backend is chosen by the slot's typed ``device``, never by
+    #: which key was picked. Empty ``()`` = backend-agnostic (no veto).
+    supported_backends: tuple[str, ...] = ()
+    #: Model-file format / arch family this runner consumes (``"gguf"`` for the
+    #: llama-server fork family, else the single-purpose runtime's own format).
+    #: Carries the lxc105 finding — GGUF forks can reject newer GGUF arch
+    #: versions — as a coarse first-class marker for the §4 fit-check to refine.
+    format_arch: str | None = None
 
 
 RUNNER_IMAGES: dict[str, Runner] = {
@@ -110,6 +124,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "gpu",
         "rocm",
         None,
+        supported_backends=("rocm", "vulkan"),
+        format_arch="gguf",
     ),
     "vulkanfpx": Runner(
         "vulkanfpx",
@@ -119,6 +135,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "gpu",
         "vulkan",
         None,
+        supported_backends=("rocm", "vulkan"),
+        format_arch="gguf",
     ),
     "cuda": Runner(
         "cuda",
@@ -128,6 +146,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "gpu",
         "cuda",
         None,
+        supported_backends=("cuda",),
+        format_arch="gguf",
     ),
     "cpu": Runner(
         "cpu",
@@ -137,6 +157,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "cpu",
         None,
         None,
+        supported_backends=("cpu",),
+        format_arch="gguf",
     ),
     "flm": Runner(
         "flm",
@@ -146,6 +168,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "npu",
         None,
         "flm",
+        supported_backends=("npu",),
+        format_arch="flm",
     ),
     "kokoro": Runner(
         "kokoro",
@@ -155,6 +179,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "cpu",
         None,
         "kokoro",
+        supported_backends=("cpu",),
+        format_arch="kokoro",
     ),
     "qwen3tts": Runner(
         "qwen3tts",
@@ -164,6 +190,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "gpu",
         "rocm",
         "qwen3tts",
+        supported_backends=("rocm",),
+        format_arch="qwen3tts",
     ),
     "comfyui": Runner(
         "comfyui",
@@ -173,6 +201,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "img",
         None,
         "comfyui",
+        supported_backends=("rocm",),
+        format_arch="safetensors",
     ),
 }
 
@@ -259,11 +289,9 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
     ``device_class`` is matched exactly when provided; ``backend`` is only
     checked when BOTH the runner and the caller declare one (npu/cpu/img
     runners are backend-agnostic, and a caller with no opinion on backend
-    never vetoes a runner over it). Shared by
-    :func:`hal0.providers.container._resolve_image_ref`'s
-    ``model.preferred_runner`` tier and
-    :func:`hal0.slots.profile_adopt.runner_fits_slot` so the two "does this
-    runner fit here" checks can never drift.
+    never vetoes a runner over it). Shared "does this runner fit this device/
+    backend lane" predicate — used by the slot ``binary`` fit-check
+    (spec-hw-slot-ownership §4) and :func:`hal0.slots.profile_adopt.runner_fits_slot`.
     """
     if device_class and runner.device_class != device_class:
         return False

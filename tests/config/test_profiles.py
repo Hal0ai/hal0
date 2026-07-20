@@ -25,55 +25,46 @@ from hal0.config.schema import (
 
 class TestProfileConfigValidation:
     def test_valid_profile(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on", mtp=False)
-        assert p.image == "ghcr.io/hal0ai/foo:bar"
+        p = ProfileConfig(flags="-fa on", mtp=False)
         assert p.flags == "-fa on"
         assert p.mtp is False
 
     def test_mtp_default_false(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
+        p = ProfileConfig()
         assert p.mtp is False
 
     def test_flags_default_empty(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
+        p = ProfileConfig()
         assert p.flags == ""
 
     def test_backend_default_none(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
+        p = ProfileConfig()
         assert p.backend is None
 
     def test_backend_accepts_rocm_and_vulkan(self) -> None:
-        assert ProfileConfig(image="x", backend="rocm").backend == "rocm"
-        assert ProfileConfig(image="x", backend="vulkan").backend == "vulkan"
+        assert ProfileConfig(backend="rocm").backend == "rocm"
+        assert ProfileConfig(backend="vulkan").backend == "vulkan"
         # cuda joined the valid set with the gpu-cuda device (GPU generalization).
-        assert ProfileConfig(image="x", backend="cuda").backend == "cuda"
+        assert ProfileConfig(backend="cuda").backend == "cuda"
 
     def test_backend_rejects_unknown(self) -> None:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            ProfileConfig(image="x", backend="metal")
+            ProfileConfig(backend="metal")
 
-    def test_empty_image_raises(self) -> None:
-        with pytest.raises(Exception, match="image"):
-            ProfileConfig(image="")
-
-    def test_whitespace_image_raises(self) -> None:
-        with pytest.raises(Exception, match="image"):
-            ProfileConfig(image="   ")
-
-    def test_missing_image_raises(self) -> None:
+    def test_image_is_not_a_profile_field(self) -> None:
         from pydantic import ValidationError
 
-        with pytest.raises(ValidationError):
-            ProfileConfig.model_validate({"flags": "-fa on"})
+        with pytest.raises(ValidationError, match="image"):
+            ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
 
     def test_extra_fields_forbidden(self) -> None:
         """extra='forbid' catches typos in profile toml keys."""
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            ProfileConfig.model_validate({"image": "ghcr.io/hal0ai/foo:bar", "unknown_key": "bad"})
+            ProfileConfig.model_validate({"unknown_key": "bad"})
 
 
 # ── ProfilesConfig ────────────────────────────────────────────────────────────
@@ -89,7 +80,6 @@ class TestProfilesConfig:
             {
                 "profile": {
                     "test": {
-                        "image": "ghcr.io/hal0ai/test:v1",
                         "flags": "-fa on",
                         "mtp": False,
                     }
@@ -97,7 +87,7 @@ class TestProfilesConfig:
             }
         )
         assert "test" in cfg.profile
-        assert cfg.profile["test"].image == "ghcr.io/hal0ai/test:v1"
+        assert cfg.profile["test"].flags == "-fa on"
 
 
 # ── resolve_profile_flags ─────────────────────────────────────────────────────
@@ -105,7 +95,7 @@ class TestProfilesConfig:
 
 class TestResolveProfileFlags:
     def test_mtp_false_returns_base_flags(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on -b 512", mtp=False)
+        p = ProfileConfig(flags="-fa on -b 512", mtp=False)
         result = resolve_profile_flags(p)
         assert result == "-fa on -b 512"
         assert "--spec-type" not in result
@@ -114,7 +104,7 @@ class TestResolveProfileFlags:
         """§7.1a / ML-5: profile.mtp is informational only — resolve_profile_flags
         needs an explicit mtp_override=True now (the real decision lives in
         providers.container._effective_mtp, driven by the model + runner)."""
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on -b 512", mtp=True)
+        p = ProfileConfig(flags="-fa on -b 512", mtp=True)
         result = resolve_profile_flags(p, mtp_override=True)
         # base flags are preserved verbatim and the MTP bundle is present. The
         # bundle now leads (it supplies defaults the profile's explicit flags
@@ -125,7 +115,7 @@ class TestResolveProfileFlags:
     def test_mtp_true_profile_but_no_override_no_longer_expands(self) -> None:
         """profile.mtp=True alone (no explicit mtp_override) no longer
         expands the bundle — MTP moved off the profile entirely."""
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on -b 512", mtp=True)
+        p = ProfileConfig(flags="-fa on -b 512", mtp=True)
         result = resolve_profile_flags(p)
         assert result == "-fa on -b 512"
         assert "--spec-type" not in result
@@ -135,7 +125,6 @@ class TestResolveProfileFlags:
         bundle only fills the gaps. Regression: the bundle used to be appended
         verbatim and silently clobbered explicit profile spec flags."""
         p = ProfileConfig(
-            image="ghcr.io/hal0ai/foo:bar",
             flags="-fa on --spec-draft-type-k f16 --spec-draft-type-v f16 --spec-draft-p-min 0.25",
             mtp=True,
         )
@@ -152,7 +141,7 @@ class TestResolveProfileFlags:
         assert "--spec-draft-n-max 4" in result
 
     def test_mtp_true_contains_all_key_flags(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on", mtp=True)
+        p = ProfileConfig(flags="-fa on", mtp=True)
         result = resolve_profile_flags(p, mtp_override=True)
         assert "--spec-draft-device ROCm0" in result
         assert "--spec-draft-ngl all" in result
@@ -164,21 +153,21 @@ class TestResolveProfileFlags:
 
     def test_mtp_bundle_literal_match(self) -> None:
         """MTP_FLAG_BUNDLE constant is verbatim in the resolved string."""
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on", mtp=True)
+        p = ProfileConfig(flags="-fa on", mtp=True)
         result = resolve_profile_flags(p, mtp_override=True)
         assert MTP_FLAG_BUNDLE in result
 
     def test_empty_flags_mtp_false_returns_empty(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="", mtp=False)
+        p = ProfileConfig(flags="", mtp=False)
         assert resolve_profile_flags(p) == ""
 
     def test_empty_flags_mtp_true_returns_bundle(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="", mtp=True)
+        p = ProfileConfig(flags="", mtp=True)
         result = resolve_profile_flags(p, mtp_override=True)
         assert result == MTP_FLAG_BUNDLE
 
     def test_flags_stripped(self) -> None:
-        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="  -fa on  ", mtp=False)
+        p = ProfileConfig(flags="  -fa on  ", mtp=False)
         assert resolve_profile_flags(p) == "-fa on"
 
 
@@ -199,41 +188,26 @@ class TestLoadProfilesConfig:
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert "rocm" in cfg.profile
-        assert "vulkan" in cfg.profile
-        # 2x2 ROCmFPX grid (backend x {dense,moe}); replaced the retired
-        # rocmfpx-rocm / vkfpx-* slugs (consolidated 0.9.5).
-        for name in ("rocm-dense", "rocm-moe", "vulkan-dense", "vulkan-moe"):
+        for name in ("chat", "chat-long-context", "moe", "dense"):
             assert name in cfg.profile
 
     def test_seed_rocm_mtp_false(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["rocm"].mtp is False
+        assert cfg.profile["chat"].mtp is False
 
     def test_seed_rocmfpx_grid_mtp_true(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        for name in ("rocm-dense", "rocm-moe", "vulkan-dense", "vulkan-moe"):
-            assert cfg.profile[name].mtp is True
+        for name in SEED_PROFILES:
+            assert cfg.profile[name].mtp is False
 
     def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
-        """The basic vulkan profile pins the universal rocmfpx runner (rocmfpx is
-        Vulkan-portable, so it is the default for every AMD GPU lane)."""
-        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
-
+        """Canonical GPU seeds do not pin a backend or runner image."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["vulkan"].image == DEFAULT_ROCMFPX_IMAGE
+        assert cfg.profile["chat"].backend is None
 
     def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["rocm"].backend == "rocm"
-        assert cfg.profile["rocm-dense"].backend == "rocm"
-        assert cfg.profile["rocm-moe"].backend == "rocm"
-        assert cfg.profile["vulkan"].backend == "vulkan"
-        assert cfg.profile["vulkan-dense"].backend == "vulkan"
-        assert cfg.profile["vulkan-moe"].backend == "vulkan"
-        assert cfg.profile["flm"].backend is None
-        assert cfg.profile["tts"].backend is None
-        assert cfg.profile["comfyui"].backend is None
+        assert all(profile.backend is None for profile in cfg.profile.values())
 
     def test_load_valid_file(self, tmp_path: Path) -> None:
         toml_content = (
@@ -245,13 +219,15 @@ class TestLoadProfilesConfig:
         assert "custom" in cfg.profile
         assert cfg.profile["custom"].flags == "-fa on"
 
-    def test_missing_image_raises_config_parse_error(self, tmp_path: Path) -> None:
-        """``image`` is required — missing it must surface as ConfigParseError."""
-        toml_content = '[profile.bad]\nflags = "-fa on"\nmtp = false\n'
+    def test_missing_image_loads_with_empty_default(self, tmp_path: Path) -> None:
+        """spec-hw-slot-ownership §3: ``image`` is optional/inert now — a profile
+        without it loads (default "") rather than raising, so a migration that
+        deleted a folded image pin doesn't break config load."""
+        toml_content = '[profile.ok]\nflags = "-fa on"\nmtp = false\n'
         p = tmp_path / "profiles.toml"
         p.write_bytes(toml_content.encode())
-        with pytest.raises(ConfigParseError):
-            load_profiles_config(path=p)
+        cfg = load_profiles_config(path=p)
+        assert cfg.profile["ok"].flags == "-fa on"
 
     def test_invalid_toml_raises_config_parse_error(self, tmp_path: Path) -> None:
         p = tmp_path / "profiles.toml"
@@ -277,7 +253,7 @@ class TestLoadProfilesConfig:
         """A profiles.toml with only one profile still exposes every seed."""
         # Write a file with just the 'rocm' seed — everything else is missing.
         toml_content = (
-            "[profile.rocm]\n"
+            "[profile.chat]\n"
             'image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"\n'
             'flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"\n'
             "mtp = false\n"
@@ -319,10 +295,8 @@ class TestLoadProfilesConfig:
         cfg = load_profiles_config(path=p)
 
         # The code seed wins — the stale on-disk copy is discarded.
-        assert cfg.profile["rocm"].image == SEED_PROFILES["rocm"]["image"], (
-            "virtual-seed overlay failed: a stale on-disk seed shadowed the code definition"
-        )
-        assert cfg.profile["rocm"].flags == SEED_PROFILES["rocm"]["flags"]
+        assert cfg.profile["chat"].backend == SEED_PROFILES["chat"].get("backend")
+        assert cfg.profile["chat"].flags == SEED_PROFILES["chat"]["flags"]
 
     def test_partial_file_custom_profile_preserved(self, tmp_path: Path) -> None:
         """A non-seed (operator-created) profile survives the additive merge."""
@@ -340,7 +314,7 @@ class TestLoadProfilesConfig:
 
         # Operator's custom profile survives.
         assert "my-special" in cfg.profile
-        assert cfg.profile["my-special"].image == "ghcr.io/my-org/special:v42"
+        assert cfg.profile["my-special"].flags == "--special-flag"
         # Seeds are also present.
         assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys())
 
@@ -393,9 +367,9 @@ class TestSeedFileParity:
 # ── tts (kokoro) seed profile ─────────────────────────────────────────────────
 
 
-def test_tts_seed_profile() -> None:
-    prof = SEED_PROFILES["tts"]
-    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+def test_kokoro_seed_profile() -> None:
+    prof = SEED_PROFILES["kokoro"]
+    assert "image" not in prof
     assert "--model_path" in prof["flags"]
     assert prof["mtp"] is False
 
@@ -404,44 +378,29 @@ def test_tts_seed_profile() -> None:
 
 
 def test_profile_device_class_defaults_gpu() -> None:
-    assert ProfileConfig(image="x").device_class == "gpu"
+    assert ProfileConfig().device_class == "gpu"
 
 
 def test_seed_device_classes() -> None:
-    assert SEED_PROFILES["vulkan"]["device_class"] == "gpu"
-    assert SEED_PROFILES["rocm"]["device_class"] == "gpu"
-    assert SEED_PROFILES["rocm-dense"]["device_class"] == "gpu"
-    assert SEED_PROFILES["rocm-moe"]["device_class"] == "gpu"
-    assert SEED_PROFILES["vulkan-dense"]["device_class"] == "gpu"
-    assert SEED_PROFILES["vulkan-moe"]["device_class"] == "gpu"
+    for name in ("chat", "chat-long-context", "moe", "dense"):
+        assert SEED_PROFILES[name]["device_class"] == "gpu"
     assert SEED_PROFILES["flm"]["device_class"] == "npu"
-    assert SEED_PROFILES["tts"]["device_class"] == "cpu"
+    assert SEED_PROFILES["kokoro"]["device_class"] == "cpu"
     assert SEED_PROFILES["comfyui"]["device_class"] == "img"
 
 
 def test_seed_backends() -> None:
-    assert SEED_PROFILES["rocm"]["backend"] == "rocm"
-    assert SEED_PROFILES["rocm-dense"]["backend"] == "rocm"
-    assert SEED_PROFILES["rocm-moe"]["backend"] == "rocm"
-    assert SEED_PROFILES["vulkan"]["backend"] == "vulkan"
-    assert SEED_PROFILES["vulkan-dense"]["backend"] == "vulkan"
-    assert SEED_PROFILES["vulkan-moe"]["backend"] == "vulkan"
-    # non-GPU profiles carry no backend (device_class drives display)
-    assert SEED_PROFILES["flm"].get("backend") is None
-    assert SEED_PROFILES["tts"].get("backend") is None
-    assert SEED_PROFILES["comfyui"].get("backend") is None
+    assert all(profile.get("backend") is None for profile in SEED_PROFILES.values())
 
 
 def test_device_default_profiles_map() -> None:
     from hal0.config.schema import DEVICE_DEFAULT_PROFILES
 
     assert DEVICE_DEFAULT_PROFILES == {
-        "gpu-rocm": "rocm",
-        "gpu-vulkan": "vulkan",
-        "gpu-cuda": "cuda",
-        # PS-1: a GPU-less host must default to a chat-capable CPU profile,
-        # not the Kokoro TTS engine.
-        "cpu": "cpu-llm",
+        "gpu-rocm": "chat",
+        "gpu-vulkan": "chat",
+        "gpu-cuda": "chat",
+        "cpu": "cpu-chat",
         "npu": "flm",
     }
 

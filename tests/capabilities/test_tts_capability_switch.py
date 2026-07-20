@@ -49,7 +49,7 @@ def test_kokoro_row_offers_cpu_backend(tmp_hal0_home: str) -> None:
     assert backends["cpu"]["provider"] == "kokoro"
     # The CPU engine resolves the Kokoro profile, not a llama profile.
     assert backends["cpu"]["runtime_family"] == "kokoro"
-    assert backends["cpu"]["profile"] == "tts"
+    assert backends["cpu"]["profile"] == "kokoro"
 
 
 def test_qwen3_row_offers_gpu_rocm_backend(tmp_hal0_home: str) -> None:
@@ -62,7 +62,7 @@ def test_qwen3_row_offers_gpu_rocm_backend(tmp_hal0_home: str) -> None:
     # The GPU engine resolves the Qwen3 TTS profile (→ Qwen3TTSProvider),
     # NOT the generic rocm llama profile.
     assert backends["gpu-rocm"]["runtime_family"] == "qwen3tts"
-    assert backends["gpu-rocm"]["profile"] == "tts-qwen3"
+    assert backends["gpu-rocm"]["profile"] == "qwen3-tts"
 
 
 # ── _profile_for_fit (catalog + orchestrator must agree) ─────────────────────
@@ -74,14 +74,14 @@ def test_qwen3_row_offers_gpu_rocm_backend(tmp_hal0_home: str) -> None:
 def test_catalog_profile_for_fit_tts_gpu_is_qwen3(tmp_hal0_home: str) -> None:
     profile = catalog_mod._profile_for_fit("tts", "gpu-rocm")
     assert profile is not None
-    assert profile.name == "tts-qwen3"
+    assert profile.name == "qwen3-tts"
     assert profile.runtime_family == "qwen3tts"
 
 
 def test_catalog_profile_for_fit_tts_cpu_is_kokoro(tmp_hal0_home: str) -> None:
     profile = catalog_mod._profile_for_fit("tts", "cpu")
     assert profile is not None
-    assert profile.name == "tts"
+    assert profile.name == "kokoro"
     assert profile.runtime_family == "kokoro"
 
 
@@ -89,7 +89,7 @@ def test_orchestrator_profile_for_fit_tts_gpu_is_qwen3(tmp_hal0_home: str) -> No
     orch = CapabilityOrchestrator.__new__(CapabilityOrchestrator)
     profile = orch._profile_for_fit("tts", "gpu-rocm")
     assert profile is not None
-    assert profile.name == "tts-qwen3"
+    assert profile.name == "qwen3-tts"
     assert profile.runtime_family == "qwen3tts"
 
 
@@ -97,17 +97,18 @@ def test_orchestrator_profile_for_fit_tts_cpu_is_kokoro(tmp_hal0_home: str) -> N
     orch = CapabilityOrchestrator.__new__(CapabilityOrchestrator)
     profile = orch._profile_for_fit("tts", "cpu")
     assert profile is not None
-    assert profile.name == "tts"
+    assert profile.name == "kokoro"
     assert profile.runtime_family == "kokoro"
 
 
 def test_orchestrator_profile_for_fit_non_tts_gpu_unchanged(tmp_hal0_home: str) -> None:
     # Regression guard: non-TTS gpu selections still resolve a llama-server
-    # profile — the tts special-case must not leak. `chat` takes the plain
-    # rocm base; `embed` takes its dedicated (still llama-server) embed lane.
+    # profile — the tts special-case must not leak. `chat` takes the
+    # canonical chat base; `embed` takes its dedicated (still llama-server)
+    # embedding lane.
     orch = CapabilityOrchestrator.__new__(CapabilityOrchestrator)
-    assert orch._profile_for_fit("chat", "gpu-rocm").name == "rocm"
-    assert orch._profile_for_fit("embed", "gpu-rocm").name == "embed"
+    assert orch._profile_for_fit("chat", "gpu-rocm").name == "chat"
+    assert orch._profile_for_fit("embed", "gpu-rocm").name == "embedding"
 
 
 # ── tts_profile_for_device (the shared device→profile mapping) ────────────────
@@ -116,10 +117,10 @@ def test_orchestrator_profile_for_fit_non_tts_gpu_unchanged(tmp_hal0_home: str) 
 def test_tts_profile_for_device_mapping() -> None:
     from hal0.capabilities.catalog import tts_profile_for_device
 
-    assert tts_profile_for_device("cpu") == "tts"
-    assert tts_profile_for_device("gpu-rocm") == "tts-qwen3"
+    assert tts_profile_for_device("cpu") == "kokoro"
+    assert tts_profile_for_device("gpu-rocm") == "qwen3-tts"
     # Any GPU backend resolves the Qwen3 engine; unknown/empty → safe CPU default.
-    assert tts_profile_for_device("gpu-vulkan") == "tts-qwen3"
+    assert tts_profile_for_device("gpu-vulkan") == "qwen3-tts"
     assert tts_profile_for_device("") == "tts"
 
 
@@ -157,17 +158,17 @@ def _write_tts_slot(home: str, *, device: str, profile: str) -> None:
 def test_apply_selecting_qwen3_gpu_swaps_tts_slot_to_qwen3_profile(
     tmp_hal0_home: str,
 ) -> None:
-    """Picking qwen3 / gpu-rocm rewrites the ``tts`` slot's profile to tts-qwen3.
+    """Picking qwen3 / gpu-rocm rewrites the ``tts`` slot's profile to qwen3-tts.
 
-    The slot starts on Kokoro (profile=tts, device=cpu). After the apply the
-    SAME slot TOML must carry profile=tts-qwen3, device=gpu-rocm, and
+    The slot starts on Kokoro (profile=kokoro, device=cpu). After the apply the
+    SAME slot TOML must carry profile=qwen3-tts, device=gpu-rocm, and
     provider=qwen3tts — so the next spawn routes through Qwen3TTSProvider.
     This is the selection-within-the-single-tts-slot contract.
     """
     from hal0.capabilities.config import CapabilitySelection
     from hal0.slot_config import SlotConfigStore, SlotSelection
 
-    _write_tts_slot(tmp_hal0_home, device="cpu", profile="tts")
+    _write_tts_slot(tmp_hal0_home, device="cpu", profile="kokoro")
     store = SlotConfigStore()
     selection = CapabilitySelection.model_validate(
         {
@@ -181,7 +182,7 @@ def test_apply_selecting_qwen3_gpu_swaps_tts_slot_to_qwen3_profile(
     store.commit(cs)
 
     on_disk = _read_tts_slot(tmp_hal0_home)
-    assert on_disk["profile"] == "tts-qwen3", f"engine not swapped to qwen3: {on_disk!r}"
+    assert on_disk["profile"] == "qwen3-tts", f"engine not swapped to qwen3: {on_disk!r}"
     assert on_disk["device"] == "gpu-rocm", on_disk
     assert on_disk["provider"] == "qwen3tts", on_disk
     assert on_disk["model"]["default"] == "qwen3-tts", on_disk
@@ -193,12 +194,12 @@ def test_apply_selecting_kokoro_cpu_swaps_tts_slot_back_to_kokoro_profile(
     """Picking kokoro / cpu reverts the ``tts`` slot to the Kokoro profile.
 
     Starting from the GPU engine state, selecting CPU Kokoro must rewrite the
-    same slot to profile=tts, device=cpu, provider=kokoro.
+    same slot to profile=kokoro, device=cpu, provider=kokoro.
     """
     from hal0.capabilities.config import CapabilitySelection
     from hal0.slot_config import SlotConfigStore, SlotSelection
 
-    _write_tts_slot(tmp_hal0_home, device="gpu-rocm", profile="tts-qwen3")
+    _write_tts_slot(tmp_hal0_home, device="gpu-rocm", profile="qwen3-tts")
     store = SlotConfigStore()
     selection = CapabilitySelection.model_validate(
         {"device": "cpu", "provider": "kokoro", "model": "kokoro-v1", "enabled": True}
@@ -207,7 +208,7 @@ def test_apply_selecting_kokoro_cpu_swaps_tts_slot_back_to_kokoro_profile(
     store.commit(cs)
 
     on_disk = _read_tts_slot(tmp_hal0_home)
-    assert on_disk["profile"] == "tts", f"engine not reverted to kokoro: {on_disk!r}"
+    assert on_disk["profile"] == "kokoro", f"engine not reverted to kokoro: {on_disk!r}"
     assert on_disk["device"] == "cpu", on_disk
     assert on_disk["provider"] == "kokoro", on_disk
 
@@ -222,7 +223,7 @@ def test_apply_disabled_tts_selection_does_not_rewrite_profile(tmp_hal0_home: st
     from hal0.capabilities.config import CapabilitySelection
     from hal0.slot_config import SlotConfigStore, SlotSelection
 
-    _write_tts_slot(tmp_hal0_home, device="cpu", profile="tts")
+    _write_tts_slot(tmp_hal0_home, device="cpu", profile="kokoro")
     before = _read_tts_slot(tmp_hal0_home)
     store = SlotConfigStore()
     selection = CapabilitySelection.model_validate(

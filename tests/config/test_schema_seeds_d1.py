@@ -18,7 +18,6 @@ _SEEDED_SLOTS_DIR = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
 def test_comfyui_seed_profile() -> None:
     p = SEED_PROFILES["comfyui"]
     assert p["device_class"] == "img"
-    assert "kyuz0/amd-strix-halo-comfyui" in p["image"]
 
 
 def test_seed_img_toml_validates() -> None:

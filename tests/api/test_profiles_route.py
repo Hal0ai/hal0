@@ -57,27 +57,22 @@ class TestListProfiles:
         """
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 17
+        assert len(data) == len(SEED_PROFILES)
 
-    def test_no_jinja_flag_in_any_seed_profile(self, client: TestClient) -> None:
-        """§7.1a / ML-5: --jinja is injected as a runner capability at launch
-        time (providers.container._resolve_llama_scalars) — no seed profile
-        carries it in `flags` anymore (there is no --no-jinja negation, so
-        it must never be a static profile tune)."""
+    def test_no_slot_hardware_flags_in_any_seed_profile(self, client: TestClient) -> None:
+        """Seed flags are logical workload tuning; slots own physical facts."""
         data = client.get("/api/profiles").json()
+        forbidden = {"-ngl", "--n-gpu-layers", "-dev", "--device", "--threads", "-t"}
         for item in data:
-            assert "--jinja" not in item["flags"], item["name"]
+            assert not forbidden.intersection(item["flags"].split()), item["name"]
 
     def test_dense_family_variant_seeds_present(self, client: TestClient) -> None:
-        """rocm-longctx (the surviving dense-family variant) ships as a
-        seed: gpu, mtp False (informational — see test_seeds_parity), q8_0
-        KV pinned."""
+        """The long-context seed remains a device-agnostic GPU tune."""
         by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
-        assert by_name["rocm-longctx"]["seed"] is True
-        assert by_name["rocm-longctx"]["mtp"] is False
-        assert by_name["rocm-longctx"]["device_class"] == "gpu"
-        assert by_name["rocm-longctx"]["backend"] == "rocm"
-        assert "-ctk q8_0" in by_name["rocm-longctx"]["flags"]
+        assert by_name["chat-long-context"]["seed"] is True
+        assert by_name["chat-long-context"]["mtp"] is False
+        assert by_name["chat-long-context"]["device_class"] == "gpu"
+        assert "-ctk q8_0" in by_name["chat-long-context"]["flags"]
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""
@@ -88,7 +83,7 @@ class TestListProfiles:
     def test_kokoro_cpu_seed_present(self, client: TestClient) -> None:
         """Phase B added the tts TTS profile to the seeds."""
         data = client.get("/api/profiles").json()
-        kokoro = next(item for item in data if item["name"] == "tts")
+        kokoro = next(item for item in data if item["name"] == "kokoro")
         assert kokoro["mtp"] is False
         assert "--model_path" in kokoro["flags"]
 
@@ -101,7 +96,7 @@ class TestListProfiles:
         data = client.get("/api/profiles").json()
         for item in data:
             assert "name" in item
-            assert "image" in item
+            assert "image" not in item
             assert "flags" in item
             assert "mtp" in item
             assert "device_class" in item
@@ -111,7 +106,7 @@ class TestListProfiles:
     def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
         """Phase C6: the UI keys immutability off the serialized seed flag."""
         data = client.get("/api/profiles").json()
-        vulkan = next(item for item in data if item["name"] == "vulkan")
+        vulkan = next(item for item in data if item["name"] == "chat")
         assert vulkan["seed"] is True
 
     def test_device_class_values(self, client: TestClient) -> None:
@@ -119,42 +114,31 @@ class TestListProfiles:
         data = client.get("/api/profiles").json()
         flm = next(item for item in data if item["name"] == "flm")
         assert flm["device_class"] == "npu"
-        kokoro = next(item for item in data if item["name"] == "tts")
+        kokoro = next(item for item in data if item["name"] == "kokoro")
         assert kokoro["device_class"] == "cpu"
-        vulkan = next(item for item in data if item["name"] == "vulkan")
+        vulkan = next(item for item in data if item["name"] == "chat")
         assert vulkan["device_class"] == "gpu"
 
     def test_backend_values(self, client: TestClient) -> None:
         """backend surfaces in the route response (rocm|vulkan|None)."""
         data = client.get("/api/profiles").json()
         by_name = {item["name"]: item for item in data}
-        assert by_name["rocm"]["backend"] == "rocm"
-        assert by_name["rocm-dense"]["backend"] == "rocm"
-        assert by_name["rocm-moe"]["backend"] == "rocm"
-        assert by_name["vulkan"]["backend"] == "vulkan"
-        assert by_name["vulkan-dense"]["backend"] == "vulkan"
-        assert by_name["vulkan-moe"]["backend"] == "vulkan"
-        assert by_name["flm"]["backend"] is None
-        assert by_name["tts"]["backend"] is None
-        assert by_name["comfyui"]["backend"] is None
+        assert all(item["backend"] is None for item in by_name.values())
 
     def test_moe_rocmfp4_mtp_false(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        moe = next(item for item in data if item["name"] == "rocm")
+        moe = next(item for item in data if item["name"] == "chat")
         assert moe["mtp"] is False
 
     def test_dense_mtp_rocmfp4_mtp_true(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-dense")
-        assert dense["mtp"] is True
+        dense = next(item for item in data if item["name"] == "chat-long-context")
+        assert dense["mtp"] is False
 
-    def test_vulkan_std_image_is_rocmfpx_default(self, client: TestClient) -> None:
-        # The vulkan lane now pins the universal rocmfpx runner (Vulkan-portable).
-        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
-
+    def test_vulkan_profile_is_device_agnostic(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        vulkan = next(item for item in data if item["name"] == "vulkan")
-        assert vulkan["image"] == DEFAULT_ROCMFPX_IMAGE
+        vulkan = next(item for item in data if item["name"] == "chat")
+        assert "image" not in vulkan
 
     def test_mtp_true_seed_resolved_flags_no_longer_bundle_expanded(
         self, client: TestClient
@@ -166,14 +150,14 @@ class TestListProfiles:
         like rocm-dense. See providers.container._effective_mtp for where
         the real, model-aware decision now lives."""
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-dense")
-        assert dense["mtp"] is True  # informational field, unchanged
+        dense = next(item for item in data if item["name"] == "chat-long-context")
+        assert dense["mtp"] is False
         assert "--spec-type" not in dense["resolved_flags"]
         assert MTP_FLAG_BUNDLE not in dense["resolved_flags"]
 
     def test_mtp_false_resolved_flags_no_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        moe = next(item for item in data if item["name"] == "rocm")
+        moe = next(item for item in data if item["name"] == "chat")
         assert "--spec-type" not in moe["resolved_flags"]
 
     def test_resolved_flags_equals_flags_for_every_seed(self, client: TestClient) -> None:
@@ -190,10 +174,7 @@ class TestListProfiles:
         profiles_path = Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml"
         profiles_path.parent.mkdir(parents=True, exist_ok=True)
         profiles_path.write_text(
-            "[profile.custom-only]\n"
-            'image = "ghcr.io/hal0ai/test:custom"\n'
-            'flags = "-b 128"\n'
-            "mtp = false\n",
+            '[profile.custom-only]\nflags = "-b 128"\nmtp = false\n',
             encoding="utf-8",
         )
         app = create_app()
@@ -215,18 +196,17 @@ class TestEnrichedFields:
     def test_seed_items_expose_intent_quant_bench(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
         by_name = {p["name"]: p for p in data}
-        rocm = by_name["rocm"]
-        assert rocm["intent"] == "ROCm"
-        assert rocm["quant"] == "FP4"
+        rocm = by_name["chat"]
+        assert rocm["intent"] == "General chat"
+        assert rocm["quant"] == ""
         assert rocm["tps"] == 52.8
         assert rocm["rtf"] is None
         assert rocm["used_by"] == []
-        assert by_name["tts"]["rtf"] == 0.18
+        assert by_name["kokoro"]["rtf"] == 0.18
 
     def test_create_round_trips_intent_and_quant(self, client: TestClient) -> None:
         body = {
             "name": "my-tuned",
-            "image": "ghcr.io/x/y:z",
             "intent": "My workload",
             "quant": "Q5_K_M",
         }

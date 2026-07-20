@@ -33,8 +33,7 @@ def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"
 
 def _gpu_profile(**overrides: Any) -> ProfileConfig:
     base: dict[str, Any] = dict(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        flags="-fa on -ctk q8_0 -b 512 --parallel 1 --threads 8",
+        flags="-fa on -ctk q8_0 -b 512 --parallel 1",
         mtp=False,
         device_class="gpu",
         backend="rocm",
@@ -49,23 +48,27 @@ def _gpu_profile(**overrides: Any) -> ProfileConfig:
 def test_preview_equals_launch_full_slot() -> None:
     """resolved_command_for_slot renders the exact argv container_spec launches
     for a slot exercising the mtp override, model-registry defaults, a
-    chat-template, an mmproj sidecar, a slot ngl override, and extra_args."""
+    chat-template, an mmproj sidecar, the slot HW grid (NGL + threads), and
+    extra_args."""
     cfg = {
         "name": "agent",
         "port": 8101,
         "profile": "rocm",
         "device": "gpu-rocm",
+        # spec-hw-slot-ownership §2: NGL + threads are slot-top-level fields.
+        "n_gpu_layers": 88,
+        "threads": 8,
         "mtp": True,
         "chat_template": "chatml",
         "vision": True,
-        "model": {"default": "my-model", "context_size": 40000, "n_gpu_layers": 88},
+        "model": {"default": "my-model", "context_size": 40000},
         "server": {"extra_args": "-b 8192 --jinja"},
     }
     model_info = {
         "_model_key": "my-model",
         "path": "/mnt/ai-models/my-model.gguf",
         "mmproj": "/mnt/ai-models/my-model/mmproj-f16.gguf",
-        "defaults": {"extra_args": "--rope-scaling linear", "n_gpu_layers": 40},
+        "defaults": {"extra_args": "--rope-scaling linear"},
         "metadata": {"context_length": 262144},
     }
 
@@ -82,9 +85,15 @@ def test_preview_equals_launch_full_slot() -> None:
         launch_plan = ContainerProvider().container_spec(cfg, model_info)
 
     assert preview is not None
-    # preview = [image, *argv]; launch command excludes the image.
-    assert preview[0] == profile.image
+    # preview = [image, *argv]; launch command excludes the image. Image is the
+    # HW-gated default now (profile.image is ignored — spec §3), so assert
+    # parity against the launch plan's own image rather than profile.image.
+    assert preview[0] == launch_plan.image
     assert preview[1:] == launch_plan.command
+    # The slot HW grid reached launch: -ngl 88 --threads 8.
+    assert _ngl(launch_plan.command) == "88"
+    assert "--threads" in launch_plan.command
+    assert launch_plan.command[launch_plan.command.index("--threads") + 1] == "8"
 
 
 # ── 2. model-default / ngl precedence ─────────────────────────────────────────
@@ -112,24 +121,26 @@ def test_ngl_in_model_extra_args_is_denied() -> None:
     assert exc_info.value.code == "slot.managed_arg_denied"
 
 
-def test_slot_ngl_is_inert_model_default_wins() -> None:
-    """FLAGS-own: the slot ``[model].n_gpu_layers`` no longer reaches launch —
-    the model's typed ``defaults.n_gpu_layers`` is the sole -ngl source (the
-    migrator folds a slot's effective -ngl into the model)."""
+def test_slot_ngl_wins_and_model_ngl_key_ignored() -> None:
+    """spec-hw-slot-ownership §2 (reverses the §5 fold): the slot owns NGL. The
+    slot's ``-ngl`` reaches launch; a stray ``defaults.n_gpu_layers`` key on the
+    model is ignored (that field was deleted) and never emits ``-ngl``."""
     plan = _llama_launch_plan(
         image="i:1",
         port=8095,
         model_path="/m.gguf",
-        flags_str="-ngl 10",  # inert profile flag
+        flags_str="-ngl 10",  # inert profile flag (profile flags don't launch)
         devices=[],
         group_ids=[],
-        model_defaults={"n_gpu_layers": 20},
-        slot_n_gpu_layers=30,  # inert slot override
+        model_defaults={"n_gpu_layers": 20},  # deleted field's key — ignored
+        slot_n_gpu_layers=30,  # authoritative slot NGL
     )
-    assert _ngl(plan.command) == "20"  # model default, not slot 30 nor profile 10
+    assert _ngl(plan.command) == "30"  # slot wins; not model 20, not profile 10
 
 
-def test_ngl_precedence_model_default_beats_profile() -> None:
+def test_model_defaults_ngl_key_never_emits_without_slot_ngl() -> None:
+    """With no slot NGL supplied, a leftover ``defaults.n_gpu_layers`` key does
+    NOT resurrect a model ``-ngl`` — model NGL ownership is gone entirely."""
     plan = _llama_launch_plan(
         image="i:1",
         port=8095,
@@ -138,9 +149,9 @@ def test_ngl_precedence_model_default_beats_profile() -> None:
         devices=[],
         group_ids=[],
         model_defaults={"n_gpu_layers": 20},
-        slot_n_gpu_layers=-1,  # unset sentinel → no slot override
+        slot_n_gpu_layers=None,  # no slot NGL → no -ngl at all
     )
-    assert _ngl(plan.command) == "20"
+    assert _ngl(plan.command) is None
 
 
 def _parval(command: list[str]) -> str | None:

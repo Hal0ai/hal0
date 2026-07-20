@@ -27,7 +27,6 @@ from hal0.updater import updater as updater_mod
 from hal0.updater.updater import rerender_slot_units
 
 _PROFILE = ProfileConfig(
-    image="ghcr.io/test/toolbox:v2",
     flags="-fa on -b 1024",
     mtp=False,
     device_class="gpu",

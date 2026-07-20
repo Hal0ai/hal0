@@ -76,7 +76,6 @@ def test_npu_chat_default_on() -> None:
 
 def test_flm_npu_seed_profile() -> None:
     prof = SEED_PROFILES["flm"]
-    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
     assert prof["flags"] == ""
     assert prof["mtp"] is False
 
@@ -104,6 +103,6 @@ def test_seed_tts_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "tts.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "tts"
+    assert slot.profile == "kokoro"
     assert slot.device == "cpu"
     assert slot.port == 8084

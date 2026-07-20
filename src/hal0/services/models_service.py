@@ -1188,30 +1188,27 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
     ``POST /api/models``, ``PUT /api/models/{id}`` and ``POST /api/models/validate``
     so the three can never drift (UI-API-1 item 1). Screens:
 
-    * ``preferred_runner`` — must be a known ``RUNNER_IMAGES`` key, or ``None``/""
-      to clear the preference. Only checked when ``runner_images`` is supplied.
-    * ``defaults.extra_args`` — shell-quoting integrity (O10) then the managed-arg
-      denylist (§21.7), so a smuggled ``--model``/``--host``/``--port``/
-      ``--ctx-size``/``-ngl``/``--alias`` fails at SAVE with the same
-      ``slot.managed_arg_denied`` code the launcher raises, instead of persisting
-      a row that can never load (or silently rebinds a slot).
-    """
-    from hal0.errors import BadRequest
+    * ``defaults.extra_args`` — shell-quoting integrity (O10), then the slot-
+      hardware partition guard (spec-hw-slot-ownership §5: ``-ngl``/``-dev``/
+      ``--threads`` belong on the slot, not the device-agnostic model — raised as
+      ``slot.hardware_flag_denied``), then the managed-arg denylist (§21.7), so a
+      smuggled ``--model``/``--host``/``--port``/``--ctx-size``/``--alias`` fails
+      at SAVE with the same ``slot.managed_arg_denied`` code the launcher raises,
+      instead of persisting a row that can never load (or silently rebinds a slot).
 
-    if runner_images is not None and "preferred_runner" in body:
-        pr = body["preferred_runner"]
-        if pr is not None and (not isinstance(pr, str) or pr not in runner_images):
-            raise BadRequest(
-                f"preferred_runner {pr!r} is not a known runner key",
-                code="model.unknown_runner",
-                details={"preferred_runner": pr, "available": sorted(runner_images)},
-            )
+    spec-hw-slot-ownership: ``preferred_runner`` is no longer a model field (the
+    runner is slot-owned via ``SlotConfig.binary``) — it is neither validated nor
+    persisted here; a stray key in the body is silently ignored. ``runner_images``
+    is retained (accepted, unused) so the three call sites need no change.
+    """
+    del runner_images  # preferred_runner is gone from the model — nothing to screen
+    from hal0.errors import BadRequest
 
     defaults = body.get("defaults")
     if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
         import shlex
 
-        from hal0.slots.argv import _deny_managed_flags
+        from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
 
         seg = "model defaults.extra_args"
         # O10 guard (spec §3): catch a bare double-quoted JSON value the shell
@@ -1225,6 +1222,11 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
                 f"defaults.extra_args is not parseable as a flag string: {exc}",
                 code="model.extra_args_unparseable",
             ) from exc
+        # spec-hw-slot-ownership §5: reject the grid-owned hardware flags FIRST so
+        # ``-ngl``/``-dev``/``--threads`` get the "belongs on the slot" message
+        # (mirrors the client-side model-drawer reject) rather than the generic
+        # managed-arg one — ``-ngl`` is in both sets.
+        _deny_slot_hardware_flags(tokens, segment=seg)
         _deny_managed_flags(tokens, segment=seg)
 
 

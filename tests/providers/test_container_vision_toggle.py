@@ -19,7 +19,6 @@ _SIDECAR = "/mnt/ai-models/qwopus3.6-27b-v2/mmproj-F32.mmproj"
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         flags="-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         mtp=False,
     )

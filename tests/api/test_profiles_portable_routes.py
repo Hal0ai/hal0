@@ -41,7 +41,6 @@ def _create_custom(client: TestClient, name: str = "my-custom") -> None:
         "/api/profiles",
         json={
             "name": name,
-            "image": "ghcr.io/x/y:z",
             "flags": "-fa on",
             "mtp": True,
             "device_class": "gpu",
@@ -65,7 +64,7 @@ class TestExportRoute:
         assert env["kind"] == "hal0.profile"
         assert env["name"] == name
         assert env["checksum"].startswith("sha256:")
-        assert env["profile"]["image"]
+        assert "image" not in env["profile"]
 
     def test_export_custom_profile_200_valid_envelope(self, client: TestClient) -> None:
         _create_custom(client)

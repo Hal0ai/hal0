@@ -37,34 +37,34 @@ def test_chat_on_rocm_box_picks_rocm():
     # plain `rocm` profile; MTP dense now lives on rocmfpx-rocm (opt-in only).
     hw = _hw(compute=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
-    assert derive_profile("chat", "gpu-rocm") == "rocm"
+    assert derive_profile("chat", "gpu-rocm") == "chat"
 
 
 def test_chat_on_vulkan_only_box_picks_vulkan():
     hw = _hw(compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
-    assert derive_profile("chat", "gpu-vulkan") == "vulkan"
+    assert derive_profile("chat", "gpu-vulkan") == "chat"
 
 
 def test_embed_on_rocm_box_uses_embed_profile():
     # Embeddings take the dedicated GPU embed profile (llama-server --embedding),
     # never the chat-tuned plain `rocm` and never the MTP profile.
-    assert derive_profile("embed", "gpu-rocm") == "embed"
+    assert derive_profile("embed", "gpu-rocm") == "embedding"
 
 
 def test_rerank_on_rocm_box_uses_rerank_profile():
-    assert derive_profile("rerank", "gpu-rocm") == "rerank"
+    assert derive_profile("rerank", "gpu-rocm") == "reranking"
 
 
 def test_embed_on_vulkan_box_uses_vulkan_embed_profile():
     # A Vulkan-only GPU box must get a dedicated Vulkan embed lane, NOT the plain
     # `vulkan` chat profile (which never emits --embedding and would silently
     # serve /v1/completions instead of /v1/embeddings). Backend-coherent per #807.
-    assert derive_profile("embed", "gpu-vulkan") == "vulkan-embed"
+    assert derive_profile("embed", "gpu-vulkan") == "embedding"
 
 
 def test_rerank_on_vulkan_box_uses_vulkan_rerank_profile():
-    assert derive_profile("rerank", "gpu-vulkan") == "vulkan-rerank"
+    assert derive_profile("rerank", "gpu-vulkan") == "reranking"
 
 
 def test_npu_chat_lane_requires_present_and_optin():
@@ -92,7 +92,7 @@ def test_embed_on_npu_box_derives_to_gpu_not_npu():
     never to the NPU (design 2026-06-15)."""
     hw = _hw(npu=True, compute=True)
     assert derive_device("embed", hw, npu_opt_in=True) == "gpu-rocm"
-    assert derive_profile("embed", "gpu-rocm") == "embed"
+    assert derive_profile("embed", "gpu-rocm") == "embedding"
 
 
 def test_npu_takes_utility_when_present_and_optin():
@@ -137,7 +137,7 @@ def test_npu_healthy_requires_present_and_validated_true():
 
 def test_tts_is_cpu_kokoro():
     assert derive_device("tts", _hw(), npu_opt_in=False) == "cpu"
-    assert derive_profile("tts", "cpu") == "tts"
+    assert derive_profile("tts", "cpu") == "kokoro"
 
 
 def test_strix_platform_forces_rocm_even_if_compute_flag_missing():
@@ -175,30 +175,30 @@ def test_cpu_host_chat_derives_cpu_llm_profile():
     This test fails on the old code where cpu→non-tts returned 'vulkan',
     causing the #807 coherence check to reject device=cpu + profile=vulkan.
     """
-    assert derive_profile("chat", "cpu") == "cpu-llm"
+    assert derive_profile("chat", "cpu") == "cpu-chat"
 
 
 def test_cpu_host_coder_derives_cpu_llm_profile():
     """coder capability on a CPU host must also derive to 'cpu-llm'."""
-    assert derive_profile("coder", "cpu") == "cpu-llm"
+    assert derive_profile("coder", "cpu") == "cpu-chat"
 
 
 def test_cpu_host_embed_derives_cpu_llm_profile():
     """embed capability on a CPU host must derive to 'cpu-llm', not 'vulkan'."""
-    assert derive_profile("embed", "cpu") == "cpu-llm"
+    assert derive_profile("embed", "cpu") == "cpu-chat"
 
 
 def test_cpu_host_tts_still_derives_tts_profile():
     """tts capability on a CPU host must still derive to 'tts' (kokoro), unchanged."""
-    assert derive_profile("tts", "cpu") == "tts"
+    assert derive_profile("tts", "cpu") == "kokoro"
 
 
 def test_cpu_llm_profile_exists_in_seed_profiles():
     """The 'cpu-llm' seed profile must exist and have backend=None (cpu-coherent)."""
     from hal0.config.schema import SEED_PROFILES
 
-    assert "cpu-llm" in SEED_PROFILES
-    profile = SEED_PROFILES["cpu-llm"]
+    assert "cpu-chat" in SEED_PROFILES
+    profile = SEED_PROFILES["cpu-chat"]
     assert profile.get("backend") is None, (
         "cpu-llm profile must have backend=None so the #807 coherence check passes"
     )

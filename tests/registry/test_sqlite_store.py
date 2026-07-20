@@ -255,23 +255,23 @@ class TestReloadAndOnChange:
 
 class TestModelDefaultsRoundTrip:
     def test_full_defaults_round_trip(self, reg: ModelRegistry) -> None:
+        # NGL is slot-owned now (spec-hw-slot-ownership) — no longer a
+        # ModelDefaults field; the model tune is the logical flags only.
         reg.add(
             _model(
                 "a",
                 defaults=ModelDefaults(
                     context_size=8192,
-                    n_gpu_layers=-1,
                     rope_freq_base=1000000.0,
-                    extra_args="--threads 8",
+                    extra_args="-b 8192",
                 ),
             )
         )
         got = reg.get("a")
         assert got.defaults is not None
         assert got.defaults.context_size == 8192
-        assert got.defaults.n_gpu_layers == -1
         assert got.defaults.rope_freq_base == 1000000.0
-        assert got.defaults.extra_args == "--threads 8"
+        assert got.defaults.extra_args == "-b 8192"
 
     def test_defaults_none_stays_none(self, reg: ModelRegistry) -> None:
         reg.add(_model("a", defaults=None))
@@ -284,14 +284,14 @@ class TestModelDefaultsRoundTrip:
         reg.add(_model("a", defaults=ModelDefaults()))
         assert reg.get("a").defaults is None
 
-    def test_falsy_but_set_n_gpu_layers_is_not_dropped(self, reg: ModelRegistry) -> None:
-        """Regression: n_gpu_layers=0 is a legitimate, meaningful value
-        (CPU-only) and must not be treated as 'unset' by the has-any-
-        default check."""
-        reg.add(_model("a", defaults=ModelDefaults(n_gpu_layers=0)))
+    def test_falsy_but_set_context_size_is_not_dropped(self, reg: ModelRegistry) -> None:
+        """Regression: a falsy-but-set default (here rope_freq_base=0.0 paired
+        with a real context_size) must not be treated as 'unset' by the
+        has-any-default check. (NGL, the original example, is slot-owned now.)"""
+        reg.add(_model("a", defaults=ModelDefaults(context_size=2048, rope_freq_base=0.0)))
         got = reg.get("a")
         assert got.defaults is not None
-        assert got.defaults.n_gpu_layers == 0
+        assert got.defaults.context_size == 2048
 
 
 # ── concurrency (adversarial per the ML-1 spec's explicit call-out) ─────────

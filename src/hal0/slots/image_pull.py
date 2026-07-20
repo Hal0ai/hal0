@@ -88,7 +88,7 @@ async def run_image_pull(job: ImagePullJob, request: Any = None) -> None:
 
 
 async def resolve_slot_image(sm: Any, name: str) -> str | None:
-    """Resolve slot ``name``'s container image via its profile, or None.
+    """Resolve slot ``name``'s effective image, or None.
 
     Fail-soft: any config/profile lookup error yields None so the caller
     reports a clean 400 / ``missing`` rather than 500-ing.
@@ -101,11 +101,12 @@ async def resolve_slot_image(sm: Any, name: str) -> str | None:
                 profile_name = str(cfg.get("profile") or "")
                 if profile_name:
                     from hal0.config.loader import load_profiles_config
+                    from hal0.providers.container import _resolve_image_ref
 
                     catalog = load_profiles_config()
                     prof = catalog.profile.get(profile_name)
                     if prof:
-                        image = prof.image
+                        image = _resolve_image_ref(cfg, prof)
                 break
     except Exception:
         pass

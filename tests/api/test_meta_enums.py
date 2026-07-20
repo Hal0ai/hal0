@@ -103,7 +103,7 @@ def test_payload_matches_canonical_taxonomy(client: TestClient) -> None:
     assert body["device_default_profiles"] == model_meta.DEVICE_TO_DEFAULT_PROFILE
     # The cpu default profile is the deliberate "cpu-llm" unification
     # (the stacks route used to carry a divergent "" entry).
-    assert body["device_default_profiles"]["cpu"] == "cpu-llm"
+    assert body["device_default_profiles"]["cpu"] == "cpu-chat"
 
 
 def test_capability_aliases_point_at_canonical_spellings(client: TestClient) -> None:

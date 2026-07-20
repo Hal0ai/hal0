@@ -164,12 +164,12 @@ def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
     equivalent RuntimeLaunchPlan and rendering it — proving the legacy llama
     path is now just the spec path with a thin adapter."""
     monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
-    profile = ProfileConfig(image="ghcr.io/x:server", flags="-fa on --no-mmap", mtp=False)
+    profile = ProfileConfig(flags="-fa on --no-mmap", mtp=False)
     flags = resolve_profile_flags(profile)
 
     shim_unit = _render_llama(
         "chat",
-        profile.image,
+        "ghcr.io/hal0ai/hal0-toolbox:v1",
         8095,
         "/mnt/ai-models/m.gguf",
         flags,
@@ -179,7 +179,7 @@ def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
     )
 
     equivalent = RuntimeLaunchPlan(
-        image=profile.image,
+        image="ghcr.io/hal0ai/hal0-toolbox:v1",
         command=[
             "--host",
             "0.0.0.0",
@@ -213,7 +213,7 @@ def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
 class TestSpecProviderRuntimeFamily:
     def test_kokoro_profile_routes_by_family(self) -> None:
         # Profile present, no type/device hint — family alone must decide.
-        assert isinstance(_spec_provider_for({"profile": "tts"}), KokoroProvider)
+        assert isinstance(_spec_provider_for({"profile": "kokoro"}), KokoroProvider)
 
     def test_comfyui_profile_routes_by_family(self) -> None:
         assert isinstance(_spec_provider_for({"profile": "comfyui"}), ComfyUIProvider)

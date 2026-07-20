@@ -35,7 +35,7 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
         "device": "cpu",
         "type": "tts",
         "runtime": "container",
-        "profile": "tts",
+        "profile": "kokoro",
         "model": {"default": "kokoro-v1"},
     }
     base.update(overrides)

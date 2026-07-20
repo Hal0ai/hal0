@@ -45,22 +45,22 @@ class TestNewFieldsRoundTrip:
         assert got.backends == ["vulkan", "rocm", "cuda", "cpu"]
 
     def test_defaults_full_round_trip(self, reg: ModelRegistry) -> None:
+        # NGL is slot-owned now (spec-hw-slot-ownership) — not a ModelDefaults
+        # field. The model tune is logical flags only.
         m = _model(
             "a",
             defaults=ModelDefaults(
                 context_size=8192,
-                n_gpu_layers=-1,
                 rope_freq_base=1000000.0,
-                extra_args="--threads 8",
+                extra_args="-b 8192",
             ),
         )
         reg.add(m)
         got = reg.get("a")
         assert got.defaults is not None
         assert got.defaults.context_size == 8192
-        assert got.defaults.n_gpu_layers == -1
         assert got.defaults.rope_freq_base == 1000000.0
-        assert got.defaults.extra_args == "--threads 8"
+        assert got.defaults.extra_args == "-b 8192"
 
     def test_defaults_partial_round_trip(self, reg: ModelRegistry) -> None:
         """Only some ModelDefaults fields set — others stay None."""
@@ -69,7 +69,6 @@ class TestNewFieldsRoundTrip:
         got = reg.get("a")
         assert got.defaults is not None
         assert got.defaults.context_size == 4096
-        assert got.defaults.n_gpu_layers is None
         assert got.defaults.rope_freq_base is None
         assert got.defaults.extra_args is None
 
@@ -175,6 +174,9 @@ class TestLegacyMigration:
             'backends = ["vulkan", "rocm"]\n'
             "[models.new.defaults]\n"
             "context_size = 4096\n"
+            # A prior n_gpu_layers key under defaults is TOLERATED (ignored) —
+            # NGL is slot-owned now (spec-hw-slot-ownership); no longer a
+            # ModelDefaults field.
             "n_gpu_layers = -1\n"
             "[models.new.metadata]\n"
             "context_length = 4096\n"
@@ -187,7 +189,7 @@ class TestLegacyMigration:
         assert new.backends == ["vulkan", "rocm"]
         assert new.defaults is not None
         assert new.defaults.context_size == 4096
-        assert new.defaults.n_gpu_layers == -1
+        assert not hasattr(new.defaults, "n_gpu_layers")  # field is gone
         assert new.metadata.get("context_length") == 4096
 
 

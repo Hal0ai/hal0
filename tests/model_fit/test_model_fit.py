@@ -15,7 +15,7 @@ class FakeRegistry:
 
 def test_allows_matching_llm_gpu_profile(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
-    profile = catalog.resolve("rocm")
+    profile = catalog.resolve("chat")
 
     fit = evaluate_model_fit(
         model_id="qwen3-4b",
@@ -31,7 +31,7 @@ def test_allows_matching_llm_gpu_profile(tmp_hal0_home: str) -> None:
 
 
 def test_blocks_model_slot_type_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("rocm")
+    profile = ProfileCatalog().resolve("chat")
 
     fit = evaluate_model_fit(
         model_id="nomic-embed",
@@ -46,7 +46,7 @@ def test_blocks_model_slot_type_mismatch(tmp_hal0_home: str) -> None:
 
 
 def test_blocks_profile_slot_type_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("tts")
+    profile = ProfileCatalog().resolve("kokoro")
 
     fit = evaluate_model_fit(
         model_id="qwen3-4b",
@@ -80,7 +80,6 @@ def test_degrades_gpu_cpu_profile_mismatch(tmp_hal0_home: str) -> None:
     profile = catalog.create(
         "cpu-llama",
         ProfileConfig(
-            image="ghcr.io/x/llama-cpu:z",
             flags="",
             device_class="cpu",
         ),

@@ -17,7 +17,7 @@ name = "agent"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "vulkan"
+profile = "chat"
 enabled = false
 port = 8081
 

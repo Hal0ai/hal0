@@ -1663,6 +1663,12 @@ class Updater:
             # Non-fatal: the affected slot simply fails to load until the
             # operator flips MTP to Auto/Off in the drawer.
 
+        # spec-hw-slot-ownership §6 one-shot folds are NOT auto-run on update:
+        # they are deploy-window gated + dry-run by default and live in the
+        # standalone hal0.config.migrations.hw_slot_ownership module, invoked
+        # manually via `hal0 slot migrate-hw` (mirrors slot_flags_fold). Auto-
+        # running an irreversible hardware re-partition on every update is unsafe.
+
         # Step 7d: roll stale former-default runner-image pins to the current
         # DEFAULT_ROCMFPX_IMAGE (runs before the unit re-render below so the
         # rewritten units carry the new ref; applies on next slot start).

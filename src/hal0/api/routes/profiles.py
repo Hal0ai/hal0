@@ -53,7 +53,6 @@ class ProfileBody(BaseModel):
         ...,
         description="Profile key (kebab-case, ≤32 chars, leading alphanumeric).",
     )
-    image: str = Field(..., description="Container image ref (non-empty).")
     flags: str = Field(default="", description="Bench-tuned llama-server CLI flags.")
     mtp: bool = Field(default=False, description="Append MTP bundle to flags when True.")
     device_class: Literal["gpu", "cpu", "npu", "img"] = Field(
@@ -80,18 +79,10 @@ class ProfileBody(BaseModel):
             )
         return v
 
-    @field_validator("image")
-    @classmethod
-    def image_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("profile image must not be empty")
-        return v
-
 
 class ProfileUpdateBody(BaseModel):
     """Body for PUT /api/profiles/{name} — name is taken from the URL."""
 
-    image: str | None = Field(default=None, description="Container image ref (non-empty).")
     flags: str | None = Field(default=None, description="Bench-tuned llama-server CLI flags.")
     mtp: bool | None = Field(default=None, description="MTP toggle.")
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
@@ -105,13 +96,6 @@ class ProfileUpdateBody(BaseModel):
     intent: str | None = Field(default=None, description="Human label for the card headline.")
     quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")
 
-    @field_validator("image")
-    @classmethod
-    def image_nonempty(cls, v: str | None) -> str | None:
-        if v is not None and not v.strip():
-            raise ValueError("profile image must not be empty")
-        return v
-
 
 # ── routes ────────────────────────────────────────────────────────────────────
 
@@ -124,7 +108,6 @@ def list_profiles() -> list[dict[str, Any]]:
 
         {
             "name":           "rocm",
-            "image":          "ghcr.io/hal0ai/...:rocm-7.2.4-rocmfp4-server",
             "flags":          "-fa on ...",
             "mtp":            false,
             "device_class":   "gpu",          # gpu | cpu | npu | img
@@ -143,6 +126,32 @@ def list_profiles() -> list[dict[str, Any]]:
     return [profile.to_dict() for profile in ProfileCatalog().list()]
 
 
+def _screen_profile_flags(flags: str | None) -> None:
+    """Reject grid-owned hardware flags in a profile's freeform ``flags`` text.
+
+    spec-hw-slot-ownership §5: a profile is a device-agnostic tune template, so
+    its ``flags`` must not carry the slot-hardware flags (``-ngl``/``--device``/
+    ``--threads``). Symmetric to the model ``defaults.extra_args`` guard in
+    :func:`hal0.services.models_service.screen_model_write`; raises the same
+    ``slot.hardware_flag_denied`` BadRequest so both surfaces render one path.
+    Empty / unset flags are a no-op; an unparseable flag string is left to the
+    ProfileConfig schema to reject.
+    """
+    if not flags or not flags.strip():
+        return
+    import shlex
+
+    from hal0.slots.argv import _deny_slot_hardware_flags
+
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        # Malformed quoting — defer to the pydantic/config layer's own error
+        # rather than masking it with a partition message.
+        return
+    _deny_slot_hardware_flags(tokens, segment="profile flags")
+
+
 @router.post("", status_code=201)
 async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
     """Create a custom profile.
@@ -151,15 +160,17 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
 
     Raises:
         409 profiles.exists: name already exists (seed or custom).
-        422: pydantic validation failure (empty image, bad name, …).
+        422: pydantic validation failure (bad name, …).
+        400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
     """
+    # spec-hw-slot-ownership §5: reject slot-hardware flags before persisting.
+    _screen_profile_flags(body.flags)
     async with record_action(
         request, category="profile", action="profile.create", target=body.name
     ) as rec:
         profile = ProfileCatalog().create(
             body.name,
             ProfileConfig(
-                image=body.image,
                 flags=body.flags,
                 mtp=body.mtp,
                 device_class=body.device_class,
@@ -171,7 +182,6 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
         )
         rec.after = {
             "name": body.name,
-            "image": body.image,
             "device_class": body.device_class,
             "backend": body.backend,
         }
@@ -262,7 +272,6 @@ def export_profile(name: str) -> dict[str, Any]:
     """
     resolved = ProfileCatalog().resolve(name)
     cfg = ProfileConfig(
-        image=resolved.image,
         flags=resolved.flags,
         mtp=resolved.mtp,
         device_class=resolved.device_class,
@@ -284,7 +293,10 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
         422: pydantic validation failure.
+        400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
     """
+    # spec-hw-slot-ownership §5: reject slot-hardware flags before persisting.
+    _screen_profile_flags(body.flags)
     catalog = ProfileCatalog()
     before = None
     existing = next((p for p in catalog.list() if p.name == name), None)
@@ -300,7 +312,6 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         profile = catalog.update(
             name,
             ProfilePatch(
-                image=body.image,
                 flags=body.flags,
                 mtp=body.mtp,
                 device_class=body.device_class,

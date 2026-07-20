@@ -30,7 +30,6 @@ def _profile(mtp: bool = False) -> ProfileConfig:
     # mtp is kept on the fixture only to prove it's now INERT for flag
     # resolution — resolve_profile_flags no longer reads it.
     return ProfileConfig(
-        image="img",
         flags="-fa on -b 512",
         mtp=mtp,
         device_class="gpu",
@@ -64,7 +63,7 @@ def test_override_none_never_expands_even_when_profile_mtp_true():
 
 
 def test_profile_image_and_flags_honors_override():
-    p = ProfileConfig(image="img", flags="-fa on", mtp=False, device_class="gpu", backend="rocm")
+    p = ProfileConfig(flags="-fa on", mtp=False, device_class="gpu", backend="rocm")
     _, on = _profile_image_and_flags(p, True)
     assert MTP_FLAG_BUNDLE in on
     _, off = _profile_image_and_flags(p, None)
@@ -88,7 +87,7 @@ def test_bundle_unknown_backend_defaults_rocm0():
 
 
 def test_vulkan_profile_drafts_on_vulkan_device():
-    p = ProfileConfig(image="img", flags="-fa on", mtp=True, device_class="gpu", backend="vulkan")
+    p = ProfileConfig(flags="-fa on", mtp=True, device_class="gpu", backend="vulkan")
     out = resolve_profile_flags(p, mtp_override=True)
     assert "--spec-draft-device Vulkan0" in out
     assert "--spec-draft-device ROCm0" not in out

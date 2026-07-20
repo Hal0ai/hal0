@@ -145,7 +145,7 @@ def test_cpu_only_host_seeds_chat_capable_profile(tmp_path) -> None:
     rec = recommend_primary_slot(_cpu_only_host(64))
     # No GPU → device is plain "cpu"; its default profile must be chat-capable.
     assert rec["device"] == "cpu"
-    assert rec["profile"] == "cpu-llm"
+    assert rec["profile"] == "cpu-chat"
 
     # Resolve the seeded profile (empty tmp path → seed defaults) and confirm
     # it advertises "llm" support, i.e. it is a real chat runtime family.
@@ -174,9 +174,9 @@ def test_cpu_only_host_seeds_chat_capable_profile(tmp_path) -> None:
 def test_seeded_slot_carries_container_runtime_and_profile() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
     assert rec["runtime"] == "container"
-    # Strix-Halo-class AMD UMA → vulkan device → vulkan profile.
+    # Strix-Halo-class AMD UMA → vulkan device → chat profile (device-agnostic).
     assert rec["device"] == "gpu-vulkan"
-    assert rec["profile"] == "vulkan"
+    assert rec["profile"] == "chat"
 
 
 def test_seeded_slot_profile_is_a_known_seed_profile() -> None:
@@ -193,5 +193,5 @@ def test_seeded_slot_validates_as_slotconfig() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
     rec.pop("_meta", None)
     slot = SlotConfig.model_validate(rec)
-    assert slot.profile == "vulkan"
+    assert slot.profile == "chat"
     assert slot.runtime == "container"

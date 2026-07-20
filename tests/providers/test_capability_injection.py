@@ -21,13 +21,13 @@ from hal0.slots.argv import resolve_argv
 
 
 def _rocm_profile(**overrides) -> ProfileConfig:
-    base = dict(image="img", flags="-fa on -b 512", mtp=False, device_class="gpu", backend="rocm")
+    base = dict(flags="-fa on -b 512", mtp=False, device_class="gpu", backend="rocm")
     base.update(overrides)
     return ProfileConfig(**base)
 
 
 def _cuda_profile(**overrides) -> ProfileConfig:
-    base = dict(image="img", flags="-fa on", mtp=False, device_class="gpu", backend="cuda")
+    base = dict(flags="-fa on", mtp=False, device_class="gpu", backend="cuda")
     base.update(overrides)
     return ProfileConfig(**base)
 
@@ -124,20 +124,20 @@ def test_slot_mtp_true_forces_bundle_even_on_cuda():
     assert "--spec-type draft-mtp" in _extra_args(scalars)
 
 
-# ── model tune drives -ngl; slot/profile inert ───────────────────────────────
+# ── slot owns -ngl; model/profile inert ───────────────────────────────────────
 
 
-def test_model_default_ngl_wins_slot_and_profile_inert():
-    """FLAGS-own: profile ``-ngl`` and slot ``[model].n_gpu_layers`` are inert —
-    only the model's typed ``defaults.n_gpu_layers`` (trusted ``model_defaults``
-    segment) reaches the final resolved argv. (The migrator folds a slot's
-    effective -ngl into the model, so 'the model owns it' holds.)"""
+def test_slot_ngl_wins_model_and_profile_inert():
+    """spec-hw-slot-ownership §2 (reverses the §5 fold): the SLOT's top-level
+    ``n_gpu_layers`` owns ``-ngl`` (trusted ``slot_hardware`` segment). A profile
+    ``-ngl`` is inert (profile flags don't launch) and the deleted
+    ``defaults.n_gpu_layers`` key on the model no longer emits anything."""
     profile = _rocm_profile(flags="-ngl 10 -fa on")  # inert
     model = _plain_model(
-        defaults={"extra_args": "", "n_gpu_layers": 20},
+        defaults={"extra_args": "", "n_gpu_layers": 20},  # deleted-field key, ignored
         architecture="gemma3",  # exercises the family-defaults tier too
     )
-    slot_cfg = {"name": "s", "model": {"n_gpu_layers": 30}}  # inert
+    slot_cfg = {"name": "s", "n_gpu_layers": 30}  # authoritative slot NGL
     scalars = _resolve_llama_scalars(slot_cfg, model, profile)
     segments = _llama_argv_segments(
         port=8080,
@@ -145,9 +145,10 @@ def test_model_default_ngl_wins_slot_and_profile_inert():
         profile_flags=scalars["flags_str"],
         model_defaults=scalars["model_defaults"],
         slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
+        slot_threads=scalars["slot_threads"],
     )
     resolved = resolve_argv(segments)
-    assert resolved.argv[resolved.argv.index("-ngl") + 1] == "20"  # model, not slot 30/profile 10
+    assert resolved.argv[resolved.argv.index("-ngl") + 1] == "30"  # slot, not model 20/profile 10
 
 
 def test_precedence_chain_family_beats_profile_but_loses_to_model_extra_args():

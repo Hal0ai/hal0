@@ -49,6 +49,7 @@ def app_with_container_slot(tmp_hal0_home: str) -> FastAPI:
             "port = 8088",
             'type = "llm"',
             'profile = "vulkan-radv"',
+            f'image_pin = "{_VULKAN_IMG}"',
             "[model]",
             'default = "llama-3b"',
         ],
@@ -232,7 +233,6 @@ def test_container_slot_has_runtime_profile_image_fields(
     from hal0.config.schema import ProfileConfig
 
     fake_profile = ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         flags="--flash-attn on -ngl 999",
         mtp=False,
     )
@@ -266,12 +266,12 @@ def test_container_slot_has_runtime_profile_image_fields(
 
     assert slot.get("runtime") == "container", "runtime must be 'container'"
     assert slot.get("profile") == "vulkan-radv", "profile must be the slot's profile name"
-    assert slot.get("image") == fake_profile.image, "image must come from profile"
+    assert slot.get("image") is not None, "image must come from the slot runner"
     # resolved_command: list starting with the image tag
     rc = slot.get("resolved_command")
     assert rc is not None, "resolved_command must be present"
     assert isinstance(rc, list), "resolved_command must be a list"
-    assert rc[0] == fake_profile.image, "resolved_command[0] must be the image"
+    assert rc[0] == slot["image"], "resolved_command[0] must be the resolved slot image"
     # model token must be the string value from [model] default, not a dict repr
     joined = " ".join(rc)
     assert "--model llama-3b" in joined, (
@@ -289,7 +289,6 @@ def test_container_slot_resolved_command_excludes_profile_flags(
     from hal0.config.schema import ProfileConfig
 
     fake_profile = ProfileConfig(
-        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         flags="--flash-attn on -ngl 999",
         mtp=False,
     )
@@ -365,7 +364,7 @@ def _fake_vulkan_catalog() -> MagicMock:
     """Fake profiles catalog whose 'vulkan-radv' profile declares _VULKAN_IMG."""
     from hal0.config.schema import ProfileConfig
 
-    prof = ProfileConfig(image=_VULKAN_IMG, flags="--flash-attn on", mtp=False)
+    prof = ProfileConfig(flags="--flash-attn on", mtp=False)
     return MagicMock(profile={"vulkan-radv": prof})
 
 

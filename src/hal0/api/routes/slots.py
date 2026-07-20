@@ -457,6 +457,44 @@ def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
         )
 
 
+def _device_backend(device: str | None) -> str:
+    """Bare backend token for a slot ``device`` enum (mirrors the UI helper).
+
+    gpu-rocm → rocm, gpu-vulkan → vulkan, gpu-cuda → cuda, cpu → cpu, npu → npu.
+    """
+    d = str(device or "").lower()
+    if not d:
+        return ""
+    return d[4:] if d.startswith("gpu-") else d
+
+
+def _fit_check_warning(device: str | None, binary: str | None) -> str | None:
+    """Non-blocking hardware fit-check (spec-hw-slot-ownership §4).
+
+    WARN (never reject) when the slot's device backend is not in the chosen
+    BINARY runner's ``supported_backends``. Mirrors the UI slot-HW-grid warning
+    and the "warn at assignment, not at spawn" rule. Returns a message string or
+    ``None``. No BINARY (empty) = HW-gated default derived from ``device`` → no
+    check; an unknown BINARY key is left to the launch path to report.
+    """
+    if not binary:
+        return None
+    from hal0.runners import RUNNER_IMAGES
+
+    runner = RUNNER_IMAGES.get(str(binary))
+    if runner is None:
+        return None
+    supported = tuple(runner.supported_backends)
+    backend = _device_backend(device)
+    if backend and supported and backend not in supported:
+        return (
+            f'device backend "{backend}" is not in {binary}\'s supported '
+            f"backends ({', '.join(supported)}); the slot may fall back or "
+            "fail at spawn"
+        )
+    return None
+
+
 def _normalize_create_body(
     body: dict[str, Any],
     *,
@@ -575,6 +613,14 @@ async def create_slot(request: Request) -> dict[str, object]:
         _rec.after = {"config": body}
 
     out = _slot_to_dict(snap, request)
+
+    # Fit-check (spec-hw-slot-ownership §4): warn — never reject — when the
+    # created slot's (device, BINARY) pair is incompatible. Attached to the
+    # response like ``default_promotion`` below so the UI can surface a soft
+    # notice; mirrors the client-side slot-HW-grid warning.
+    fit_warn = _fit_check_warning(body.get("device"), body.get("binary"))
+    if fit_warn:
+        out["fit_warning"] = fit_warn
 
     # Post-create model-default promotion. The slot is the primary object and is
     # already persisted — a promotion failure (unresolved / unregistered model,
@@ -1003,7 +1049,18 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         }
         if snap.state in _LIVE:
             snap = await sm.unload(name)
-    return _slot_to_dict(snap, request)
+    out = _slot_to_dict(snap, request)
+    # Fit-check (spec-hw-slot-ownership §4): warn — never reject — when the
+    # slot's post-save (device, BINARY) pair is incompatible. Compute over the
+    # merged pair (this write's values win over the pre-write config) so a HW
+    # edit that touches only one of the two still checks against the other.
+    _before = before or {}
+    merged_device = body.get("device", _before.get("device"))
+    merged_binary = body.get("binary", _before.get("binary"))
+    fit_warn = _fit_check_warning(merged_device, merged_binary)
+    if fit_warn:
+        out["fit_warning"] = fit_warn
+    return out
 
 
 @router.patch("/{name}/defaults")
