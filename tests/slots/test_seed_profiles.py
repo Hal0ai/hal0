@@ -24,7 +24,7 @@ SLOT_HARDWARE_FLAG_FRAGMENTS = (
 )
 OPERATIONAL_FLAG_FRAGMENTS = (
     "--parallel", "--metrics", "--no-webui",
-    "--poll", "--slot-prompt-similarity", "--no-mmap",
+    "--poll", "--poll-batch", "--slot-prompt-similarity", "--no-mmap",
 )
 
 ALL_16_PROFILES = [
