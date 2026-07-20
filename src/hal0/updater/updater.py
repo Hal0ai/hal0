@@ -47,11 +47,11 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import structlog
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 import hal0
 from hal0.config import paths
@@ -155,7 +155,27 @@ class ReleaseManifest(BaseModel):
 
     schema_id: str = Field(default="hal0.releases.v1", alias="_schema")
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
-    channel: str = Field(default="stable", description="Release channel (stable).")
+    channel: str = Field(default="stable", description="Release channel.")
+    release_kind: Literal["stable", "nightly", "preview"] = Field(
+        default="stable",
+        description="Kind of release: stable, nightly, or preview.",
+    )
+    prerelease_stage: Literal["alpha", "beta", "rc"] | None = Field(
+        default=None,
+        description="Prerelease stage for preview releases (alpha/beta/rc).",
+    )
+    rollback_policy: Literal["safe", "backup-required", "blocked"] = Field(
+        default="safe",
+        description="Rollback policy for this release.",
+    )
+    upgrade_from: str = Field(
+        default="",
+        description="Version constraint for supported upgrade paths, e.g. '>=0.9.8'.",
+    )
+    operator_migrations: list[str] = Field(
+        default_factory=list,
+        description="Operator-visible migration steps required for this release.",
+    )
     url: str = Field(..., description="Tarball download URL (https or file).")
     bundle_url: str = Field(
         ...,
@@ -214,6 +234,47 @@ class ReleaseManifest(BaseModel):
         if not re.fullmatch(r"[0-9a-f]{64}", s):
             raise ValueError(f"digest_sha256 must be a 64-char hex string, got {v!r}")
         return s
+
+    @model_validator(mode="after")
+    def _validate_release_policy(self) -> ReleaseManifest:
+        """Cross-field validation for preview/release-kind consistency.
+
+        Rules:
+        - preview requires prerelease_stage in (alpha, beta, rc) and channel="preview".
+        - stable/nightly require no prerelease_stage and channel matches release_kind.
+        - non-empty operator_migrations require rollback_policy in
+          ("backup-required", "blocked").
+        """
+        if self.release_kind == "preview":
+            if self.prerelease_stage is None:
+                raise ValueError(
+                    "preview release_kind requires a prerelease_stage (alpha, beta, or rc)"
+                )
+            if self.channel != "preview":
+                raise ValueError(
+                    f"preview release_kind requires channel='preview', got {self.channel!r}"
+                )
+        if self.release_kind in ("stable", "nightly"):
+            if self.prerelease_stage is not None:
+                raise ValueError(
+                    f"{self.release_kind} release_kind must not have a "
+                    f"prerelease_stage, got {self.prerelease_stage!r}"
+                )
+            if self.channel != self.release_kind:
+                raise ValueError(
+                    f"{self.release_kind} release_kind requires "
+                    f"channel={self.release_kind!r}, got {self.channel!r}"
+                )
+        if self.operator_migrations and self.rollback_policy not in (
+            "backup-required",
+            "blocked",
+        ):
+            raise ValueError(
+                "non-empty operator_migrations requires rollback_policy "
+                "to be 'backup-required' or 'blocked', "
+                f"got {self.rollback_policy!r}"
+            )
+        return self
 
 
 @dataclasses.dataclass(frozen=True)

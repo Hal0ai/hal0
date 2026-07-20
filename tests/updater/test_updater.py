@@ -272,6 +272,142 @@ def test_manifest_schema_accepts_revoked(tmp_path: Path) -> None:
     assert m.revoked_reason == "bad cosign cert"
 
 
+# ── preview / release-kind manifest validation ────────────────────────────────
+
+
+def test_manifest_schema_accepts_alpha_preview() -> None:
+    """A full alpha preview manifest parses with new fields."""
+    manifest = ReleaseManifest.model_validate(
+        {
+            "_schema": "hal0.releases.v1",
+            "version": "1.0.0-alpha.1",
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+            "rollback_policy": "safe",
+            "upgrade_from": ">=0.9.8",
+            "operator_migrations": [],
+            "url": "https://example.test/hal0.tar.gz",
+            "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+            "digest_sha256": "0" * 64,
+            "signer_identity": "release-workflow",
+        }
+    )
+    assert manifest.prerelease_stage == "alpha"
+    assert manifest.release_kind == "preview"
+    assert manifest.rollback_policy == "safe"
+    assert manifest.upgrade_from == ">=0.9.8"
+    assert manifest.operator_migrations == []
+
+
+def test_manifest_schema_rejects_preview_without_stage() -> None:
+    """A preview manifest without a prerelease_stage raises ValueError."""
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(
+            {
+                "_schema": "hal0.releases.v1",
+                "version": "1.0.0",
+                "channel": "preview",
+                "release_kind": "preview",
+                "url": "https://example.test/hal0.tar.gz",
+                "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+                "digest_sha256": "0" * 64,
+                "signer_identity": "release-workflow",
+            }
+        )
+
+
+def test_manifest_schema_rejects_preview_with_wrong_channel() -> None:
+    """A preview manifest with channel='stable' raises ValueError."""
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(
+            {
+                "_schema": "hal0.releases.v1",
+                "version": "1.0.0-alpha.1",
+                "channel": "stable",
+                "release_kind": "preview",
+                "prerelease_stage": "alpha",
+                "url": "https://example.test/hal0.tar.gz",
+                "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+                "digest_sha256": "0" * 64,
+                "signer_identity": "release-workflow",
+            }
+        )
+
+
+def test_manifest_schema_rejects_stable_with_prerelease_stage() -> None:
+    """A stable manifest with a prerelease_stage raises ValueError."""
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(
+            {
+                "_schema": "hal0.releases.v1",
+                "version": "1.0.0",
+                "channel": "stable",
+                "release_kind": "stable",
+                "prerelease_stage": "rc",
+                "url": "https://example.test/hal0.tar.gz",
+                "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+                "digest_sha256": "0" * 64,
+                "signer_identity": "release-workflow",
+            }
+        )
+
+
+def test_manifest_schema_rejects_stable_with_wrong_channel() -> None:
+    """A stable release_kind with channel='nightly' raises ValueError."""
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(
+            {
+                "_schema": "hal0.releases.v1",
+                "version": "1.0.0",
+                "channel": "nightly",
+                "release_kind": "stable",
+                "url": "https://example.test/hal0.tar.gz",
+                "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+                "digest_sha256": "0" * 64,
+                "signer_identity": "release-workflow",
+            }
+        )
+
+
+def test_manifest_schema_rejects_migrations_with_safe_rollback() -> None:
+    """Non-empty operator_migrations requires backup-required or blocked rollback."""
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(
+            {
+                "_schema": "hal0.releases.v1",
+                "version": "1.0.0",
+                "channel": "stable",
+                "release_kind": "stable",
+                "rollback_policy": "safe",
+                "operator_migrations": ["migrate-db"],
+                "url": "https://example.test/hal0.tar.gz",
+                "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+                "digest_sha256": "0" * 64,
+                "signer_identity": "release-workflow",
+            }
+        )
+
+
+def test_manifest_schema_defaults_for_old_stable() -> None:
+    """An old stable v1 manifest without new fields parses with safe defaults."""
+    payload = {
+        "_schema": "hal0.releases.v1",
+        "version": "0.5.0",
+        "channel": "stable",
+        "url": "https://example.test/hal0.tar.gz",
+        "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+        "digest_sha256": "0" * 64,
+        "signer_identity": "^https://github\\.example/haloai/hal0/.*",
+    }
+    m = _parse_manifest(payload)
+    assert m.release_kind == "stable"
+    assert m.prerelease_stage is None
+    assert m.rollback_policy == "safe"
+    assert m.upgrade_from == ""
+    assert m.operator_migrations == []
+
+
 # ── check ──────────────────────────────────────────────────────────────────────
 
 

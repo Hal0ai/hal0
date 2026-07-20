@@ -69,7 +69,7 @@ def _git_changelog(tag: str, *, nightly: bool) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate RELEASE_NOTES.md + release.json")
     ap.add_argument("--tag", required=True, help="release tag, e.g. v0.10.0")
-    ap.add_argument("--channel", default="stable", choices=["stable", "nightly"])
+    ap.add_argument("--channel", default="stable", choices=["stable", "nightly", "preview"])
     ap.add_argument("--out-dir", required=True, help="tarball root dir to write into")
     ap.add_argument("--changelog", default="CHANGELOG.md")
     args = ap.parse_args()
@@ -97,6 +97,19 @@ def main() -> int:
     if not markdown:
         markdown = _git_changelog(args.tag, nightly=(args.channel == "nightly"))
         source = "git-log"
+
+    # Preview notes: add required headings when absent.
+    if args.channel == "preview":
+        required_headings = [
+            "Audience",
+            "Known issues",
+            "Supported upgrades",
+            "Operator migrations",
+            "Rollback",
+        ]
+        for heading in required_headings:
+            if f"## {heading}" not in markdown:
+                markdown += f"\n## {heading}\n\nTBD\n"
 
     (out / "RELEASE_NOTES.md").write_text(markdown, encoding="utf-8")
     release = {"version": version, "channel": args.channel, "source": source, **structured}
