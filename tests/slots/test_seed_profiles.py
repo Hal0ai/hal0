@@ -9,10 +9,10 @@ Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md:
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 SEED_PROFILES_PATH = Path(__file__).resolve().parents[2] / "src/hal0/config/data/seed_profiles.toml"
 
