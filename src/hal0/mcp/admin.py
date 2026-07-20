@@ -332,9 +332,12 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
 # (reversible, scoped, low blast radius).
 AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
     {
-        # Model. model_scan only ADDS registry entries for files already
-        # on disk (reversible via model_delete); model_pull_cancel stops
-        # an in-flight download the agent (or operator) started.
+        # Model. model_scan ADDS registry entries for files on disk
+        # (reversible via model_delete); with prune=true it also removes
+        # rows whose file is missing on disk — but slot/stack-referenced
+        # rows are protected and only reported, never auto-deleted, so the
+        # blast radius stays low. model_pull_cancel stops an in-flight
+        # download the agent (or operator) started.
         "model_swap",
         "model_assign",
         "model_edit",
@@ -431,183 +434,314 @@ GATED_TOOLS: frozenset[str] = frozenset(
 
 # ── REST passthrough mapping ─────────────────────────────────────────────────
 #
-# Each autonomous-read tool maps to an existing /api/* route. The MCP
-# server forwards through httpx with the agent's Bearer; the REST layer
-# owns authorization + validation. We do NOT duplicate that logic here.
+# Each tool maps to an existing /api/* route. The MCP server forwards
+# through httpx with the agent's Bearer; the REST layer owns authorization
+# + validation. We do NOT duplicate that logic here. The map is no longer
+# hand-maintained: it is derived from the live route table below, so the
+# tool name may differ from its HTTP target (e.g. ``model_swap`` ->
+# ``POST /api/slots/{name}/swap``, ``version_info`` -> ``GET /api/status``)
+# — the divergence lives in the ``route_id`` an alias points at, not a
+# separate table that could drift.
 
-# (method, path-template). Path templates use ``{arg_name}`` placeholders
-# that we resolve from the tool call's args dict.
-# NOTE — drift between the original tool-catalog spec and live REST routes (2026-05-22):
+# ── Route-map autogen (spec §4.4 — deny-by-default, route-id keyed) ───────────
 #
-# The original spec names a few routes that don't exist verbatim. Where the
-# spec's stated URL doesn't match what ``hal0.api.routes`` actually
-# exposes, we route to the live URL and flag the divergence in
-# WAVE1_MCP_PENDING.md. The tool catalog itself stays spec-faithful so
-# agents see the documented names; only the HTTP target moves.
+# ``_REST_MAP`` / ``_PATH_ARGS`` are no longer hand-authored. They are
+# DERIVED at boot from the live FastAPI route table by
+# :func:`build_admin_route_map`, then re-keyed onto stable tool names via
+# the hand-authored :data:`TOOL_NAME_ALIASES` overlay. Three ratified
+# invariants (spec-mcp-autogen-addendum.final.md):
 #
-#   Spec                                Live route                    Note
-#   ──────────────────────────────────  ─────────────────────────────  ────────────────
-#   model_swap → /api/slots/{n}/model   /api/slots/{n}/swap           name diff
-#   model_pull → /api/models/pull       /api/models/{id}/pull         id-in-path
-#   capability_set → /api/capabilities  /api/capabilities/{slot}/{c}  composite key
-#   provider_credential_write → /api/providers/{n}/credentials  live (providers.py)
-#   version_info → /api/version         /api/status                   name diff
+#   Gap 1 — deny-by-default. Autogen emits route SCAFFOLDING only; a route
+#     with no ``TOOL_NAME_ALIASES`` entry is HIDDEN from tools/list (never an
+#     MCP tool), NOT fatal, and surfaced in the unclassified-routes report
+#     (:data:`_UNCLASSIFIED_ROUTES`). The classification frozensets stay the
+#     single source of exposure truth.
+#   Gap 2 — transport exclusion. Streaming/SSE/WS routes (log tails,
+#     pull-progress, events, board WS) are not request/response tools and are
+#     skipped (:func:`_is_transport_excluded`); they are NOT counted as
+#     "unclassified". PATCH joins the supported verb set.
+#   Gap 3 — route-id re-key. The canonical identity is
+#     ``route_id = "<METHOD>:<path-template>"``. ``TOOL_NAME_ALIASES`` maps
+#     route_id -> stable tool name(s) so tools/list names never churn (agents
+#     cache schemas). A collision is explicit: ``slot_edit`` + ``model_assign``
+#     both alias ``PUT:/api/slots/{name}/config``.
 
-_REST_MAP: dict[str, tuple[str, str]] = {
-    # ── Slots ──────────────────────────────────────────────────────────
-    "slot_list": ("GET", "/api/slots"),
-    "slot_status": ("GET", "/api/slots/{name}"),
-    "slot_metrics": ("GET", "/api/slots/metrics"),
-    "slot_capacity": ("GET", "/api/slots/capacity"),
-    "port_list": ("GET", "/api/ports"),
-    "slot_by_name": ("GET", "/api/slots/by-name/{name}"),
-    "slot_by_id": ("GET", "/api/slots/by-id/{slot_id}"),
-    "slot_resolved": ("GET", "/api/slots/{name}/resolved"),
-    "slot_state": ("GET", "/api/slots/{name}/state"),
-    "slot_rename": ("POST", "/api/slots/{name}/rename"),
-    "slot_set_defaults": ("PATCH", "/api/slots/{name}/defaults"),
-    "slot_load": ("POST", "/api/slots/{name}/load"),
-    "slot_unload": ("POST", "/api/slots/{name}/unload"),
-    "slot_edit": ("PUT", "/api/slots/{name}/config"),
-    "slot_logs": ("GET", "/api/slots/{name}/logs"),
-    # ── Models ─────────────────────────────────────────────────────────
-    "model_list": ("GET", "/api/models"),
-    "model_show": ("GET", "/api/models/{model_id}"),
-    "model_scan": ("POST", "/api/models/scan"),
-    "model_scan_preview": ("POST", "/api/models/scan/preview"),
-    "model_catalogue": ("GET", "/api/models/catalogue"),
-    "model_update_check": ("GET", "/api/models/updates/check"),
-    "model_pulls_list": ("GET", "/api/models/pulls"),
-    "model_pull_status": ("GET", "/api/models/{model_id}/pull/status"),
-    # model_inspect is a read-shaped POST — fetches HF repo metadata and
-    # returns detection rows without touching the registry.
-    "model_inspect": ("POST", "/api/models/inspect"),
-    "model_store": ("GET", "/api/settings/models/store"),
-    "model_pull_delete": ("DELETE", "/api/models/pulls/{model_id}"),
-    "model_set_default": ("POST", "/api/models/{model_id}/default"),
-    "model_duplicate": ("POST", "/api/models/{model_id}/duplicate"),
-    # ── Profiles ───────────────────────────────────────────────────────
-    "profile_list": ("GET", "/api/profiles"),
-    "profile_status": ("GET", "/api/profiles/{name}"),
-    "profile_export": ("POST", "/api/profiles/{name}/export"),
-    # ── Stacks ─────────────────────────────────────────────────────────
-    "stack_list": ("GET", "/api/stacks"),
-    "stack_status": ("GET", "/api/stacks/{slug}"),
-    # ── Settings ───────────────────────────────────────────────────────
-    "settings_get": ("GET", "/api/settings"),
-    "settings_schema": ("GET", "/api/settings/schema"),
-    "settings_apply_plan": ("GET", "/api/settings/apply-plan"),
-    "settings_reload": ("POST", "/api/settings/reload"),
-    # ── Benchmarks ─────────────────────────────────────────────────────
-    "bench_runs": ("GET", "/api/benchmarks/runs"),
-    "bench_run_status": ("GET", "/api/benchmarks/runs/{run_id}"),
-    "bench_queue": ("GET", "/api/benchmarks/queue"),
-    "bench_enqueue": ("POST", "/api/benchmarks/queue"),
-    "bench_control": ("POST", "/api/benchmarks/control"),
-    "bench_queue_delete": ("DELETE", "/api/benchmarks/queue/{item_id}"),
-    # ── System ─────────────────────────────────────────────────────────
-    "version_info": ("GET", "/api/status"),
-    "system_info": ("GET", "/api/system-info"),
-    "upstream_list": ("GET", "/api/upstreams"),
-    "hardware_probe": ("GET", "/api/stats/hardware"),
-    "logs_tail": ("GET", "/api/logs"),
-    "capability_list": ("GET", "/api/capabilities"),
-    "provider_list": ("GET", "/api/providers"),
-    # ── Autonomous write ───────────────────────────────────────────────
-    "model_swap": ("POST", "/api/slots/{name}/swap"),
-    "model_assign": ("PUT", "/api/slots/{name}/config"),
-    # model_edit is the metadata PUT (name/caps/tags/mmproj enrichment);
-    # model_update (gated, below) is the in-place HF re-pull POST — the
-    # two routes are easy to cross, keep them adjacent to the comment.
-    "model_edit": ("PUT", "/api/models/{model_id}"),
-    "model_pull_cancel": ("POST", "/api/models/{model_id}/pull/cancel"),
-    # ── Gated write ────────────────────────────────────────────────────
-    "model_pull": ("POST", "/api/models/{model_id}/pull"),
-    "model_delete": ("DELETE", "/api/models/{model_id}"),
-    "model_register": ("POST", "/api/models"),
-    "model_add": ("POST", "/api/models/add-from-path"),
-    "model_store_set": ("POST", "/api/settings/models/store"),
-    "model_store_migrate": ("POST", "/api/settings/models/store/migrate"),
-    "model_update": ("POST", "/api/models/{model_id}/update"),
-    "slot_create": ("POST", "/api/slots"),
-    "slot_delete": ("DELETE", "/api/slots/{name}"),
-    "slot_restart": ("POST", "/api/slots/{name}/restart"),
-    "capability_set": ("POST", "/api/capabilities/{slot}/{child}"),
-    "config_write": ("PUT", "/api/settings"),
-    "stack_create": ("POST", "/api/stacks"),
-    "stack_update": ("PUT", "/api/stacks/{slug}"),
-    "stack_apply": ("POST", "/api/stacks/{slug}/apply"),
-    "stack_import": ("POST", "/api/stacks/import"),
-    "stack_export": ("POST", "/api/stacks/{slug}/export"),
-    "stack_snapshot": ("POST", "/api/stacks/snapshot"),
-    "stack_delete": ("DELETE", "/api/stacks/{slug}"),
-    "profile_create": ("POST", "/api/profiles"),
-    "profile_update": ("PUT", "/api/profiles/{name}"),
-    "profile_import": ("POST", "/api/profiles/import"),
-    "profile_delete": ("DELETE", "/api/profiles/{name}"),
-    "provider_credential_write": ("POST", "/api/providers/{name}/credentials"),
-    # Upstream CRUD (upstream_list is in the System section above)
-    "upstream_get": ("GET", "/api/upstreams/{name}"),
-    "upstream_create": ("POST", "/api/upstreams"),
-    "upstream_update": ("PATCH", "/api/upstreams/{name}"),
-    "upstream_delete": ("DELETE", "/api/upstreams/{name}"),
-    "upstream_test": ("POST", "/api/upstreams/{name}/test"),
+# route_id -> stable tool name(s). Hand-authored: the ONLY place a route
+# becomes an agent-visible tool and the ONLY place a tool name is pinned.
+# Adding a FastAPI route does NOT add a tool until it is named here AND
+# classified in a security frozenset (both guarded by _validate_catalog).
+TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "GET:/api/slots": ("slot_list",),
+    "GET:/api/slots/{name}": ("slot_status",),
+    "GET:/api/slots/metrics": ("slot_metrics",),
+    "GET:/api/slots/capacity": ("slot_capacity",),
+    "GET:/api/ports": ("port_list",),
+    "GET:/api/slots/by-name/{name}": ("slot_by_name",),
+    "GET:/api/slots/by-id/{slot_id}": ("slot_by_id",),
+    "GET:/api/slots/{name}/resolved": ("slot_resolved",),
+    "GET:/api/slots/{name}/state": ("slot_state",),
+    "POST:/api/slots/{name}/rename": ("slot_rename",),
+    "PATCH:/api/slots/{name}/defaults": ("slot_set_defaults",),
+    "POST:/api/slots/{name}/load": ("slot_load",),
+    "POST:/api/slots/{name}/unload": ("slot_unload",),
+    "PUT:/api/slots/{name}/config": (
+        "slot_edit",
+        "model_assign",
+    ),  # collision — 2 tool names, 1 route_id
+    "GET:/api/slots/{name}/logs": ("slot_logs",),
+    "GET:/api/models": ("model_list",),
+    "GET:/api/models/{model_id}": ("model_show",),
+    "POST:/api/models/scan": ("model_scan",),
+    "POST:/api/models/scan/preview": ("model_scan_preview",),
+    "GET:/api/models/catalogue": ("model_catalogue",),
+    "GET:/api/models/updates/check": ("model_update_check",),
+    "GET:/api/models/pulls": ("model_pulls_list",),
+    "GET:/api/models/{model_id}/pull/status": ("model_pull_status",),
+    "POST:/api/models/inspect": ("model_inspect",),
+    "GET:/api/settings/models/store": ("model_store",),
+    "DELETE:/api/models/pulls/{model_id}": ("model_pull_delete",),
+    "POST:/api/models/{model_id}/default": ("model_set_default",),
+    "POST:/api/models/{model_id}/duplicate": ("model_duplicate",),
+    "GET:/api/profiles": ("profile_list",),
+    "GET:/api/profiles/{name}": ("profile_status",),
+    "POST:/api/profiles/{name}/export": ("profile_export",),
+    "GET:/api/stacks": ("stack_list",),
+    "GET:/api/stacks/{slug}": ("stack_status",),
+    "GET:/api/settings": ("settings_get",),
+    "GET:/api/settings/schema": ("settings_schema",),
+    "GET:/api/settings/apply-plan": ("settings_apply_plan",),
+    "POST:/api/settings/reload": ("settings_reload",),
+    "GET:/api/benchmarks/runs": ("bench_runs",),
+    "GET:/api/benchmarks/runs/{run_id}": ("bench_run_status",),
+    "GET:/api/benchmarks/queue": ("bench_queue",),
+    "POST:/api/benchmarks/queue": ("bench_enqueue",),
+    "POST:/api/benchmarks/control": ("bench_control",),
+    "DELETE:/api/benchmarks/queue/{item_id}": ("bench_queue_delete",),
+    "GET:/api/status": ("version_info",),
+    "GET:/api/system-info": ("system_info",),
+    "GET:/api/upstreams": ("upstream_list",),
+    "GET:/api/stats/hardware": ("hardware_probe",),
+    "GET:/api/logs": ("logs_tail",),
+    "GET:/api/capabilities": ("capability_list",),
+    "GET:/api/providers": ("provider_list",),
+    "POST:/api/slots/{name}/swap": ("model_swap",),
+    "PUT:/api/models/{model_id}": ("model_edit",),
+    "POST:/api/models/{model_id}/pull/cancel": ("model_pull_cancel",),
+    "POST:/api/models/{model_id}/pull": ("model_pull",),
+    "DELETE:/api/models/{model_id}": ("model_delete",),
+    "POST:/api/models": ("model_register",),
+    "POST:/api/models/add-from-path": ("model_add",),
+    "POST:/api/settings/models/store": ("model_store_set",),
+    "POST:/api/settings/models/store/migrate": ("model_store_migrate",),
+    "POST:/api/models/{model_id}/update": ("model_update",),
+    "POST:/api/slots": ("slot_create",),
+    "DELETE:/api/slots/{name}": ("slot_delete",),
+    "POST:/api/slots/{name}/restart": ("slot_restart",),
+    "POST:/api/capabilities/{slot}/{child}": ("capability_set",),
+    "PUT:/api/settings": ("config_write",),
+    "POST:/api/stacks": ("stack_create",),
+    "PUT:/api/stacks/{slug}": ("stack_update",),
+    "POST:/api/stacks/{slug}/apply": ("stack_apply",),
+    "POST:/api/stacks/import": ("stack_import",),
+    "POST:/api/stacks/{slug}/export": ("stack_export",),
+    "POST:/api/stacks/snapshot": ("stack_snapshot",),
+    "DELETE:/api/stacks/{slug}": ("stack_delete",),
+    "POST:/api/profiles": ("profile_create",),
+    "PUT:/api/profiles/{name}": ("profile_update",),
+    "POST:/api/profiles/import": ("profile_import",),
+    "DELETE:/api/profiles/{name}": ("profile_delete",),
+    "POST:/api/providers/{name}/credentials": ("provider_credential_write",),
+    "GET:/api/upstreams/{name}": ("upstream_get",),
+    "POST:/api/upstreams": ("upstream_create",),
+    "PATCH:/api/upstreams/{name}": ("upstream_update",),
+    "DELETE:/api/upstreams/{name}": ("upstream_delete",),
+    "POST:/api/upstreams/{name}/test": ("upstream_test",),
 }
 
 
-# Path-arg keys per tool — pulled out of ``args`` for URL substitution;
-# the remainder become query string (GET) or JSON body (POST/PUT/DELETE).
-_PATH_ARGS: dict[str, tuple[str, ...]] = {
-    # Slots
-    "slot_status": ("name",),
-    "slot_by_name": ("name",),
-    "slot_by_id": ("slot_id",),
-    "slot_resolved": ("name",),
-    "slot_state": ("name",),
-    "slot_rename": ("name",),
-    "slot_set_defaults": ("name",),
-    "slot_load": ("name",),
-    "slot_unload": ("name",),
-    "slot_edit": ("name",),
-    "slot_logs": ("name",),
-    "slot_restart": ("name",),
-    "slot_delete": ("name",),
-    "model_swap": ("name",),
-    "model_assign": ("name",),
-    # Models
-    "model_show": ("model_id",),
-    "model_pull": ("model_id",),
-    "model_pull_status": ("model_id",),
-    "model_pull_cancel": ("model_id",),
-    "model_pull_delete": ("model_id",),
-    "model_set_default": ("model_id",),
-    "model_duplicate": ("model_id",),
-    "model_delete": ("model_id",),
-    "model_edit": ("model_id",),
-    "model_update": ("model_id",),
-    # Benchmarks
-    "bench_run_status": ("run_id",),
-    "bench_queue_delete": ("item_id",),
-    # Profiles
-    "profile_status": ("name",),
-    "profile_export": ("name",),
-    "profile_update": ("name",),
-    "profile_delete": ("name",),
-    # Stacks
-    "stack_status": ("slug",),
-    "stack_apply": ("slug",),
-    "stack_export": ("slug",),
-    "stack_update": ("slug",),
-    "stack_delete": ("slug",),
-    # Upstream providers
-    "upstream_get": ("name",),
-    "upstream_update": ("name",),
-    "upstream_delete": ("name",),
-    "upstream_test": ("name",),
-    # Misc
-    "capability_set": ("slot", "child"),
-    "provider_credential_write": ("name",),
-}
+# HTTP verbs the autogen forwards (Gap 2 added PATCH — §4.1 once shipped it
+# unforwardable via upstream_update). HEAD/OPTIONS are Starlette auto-adds.
+_SUPPORTED_VERBS: frozenset[str] = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+
+# Path prefixes never walked for tool generation: the MCP mounts, the
+# OpenAPI/doc surfaces, and the dashboard-plugin static server. (The SPA
+# catch-all is matched structurally by :func:`_is_spa_catchall`.)
+_SKIP_PATH_PREFIXES: tuple[str, ...] = (
+    "/mcp",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/dashboard-plugins",
+)
+
+# Gap-2 path-SUFFIX markers for streaming/SSE/WS tails. Applied ONLY to
+# routes NOT pinned in TOOL_NAME_ALIASES, so a classified snapshot read that
+# ends in ``/logs`` (logs_tail = GET /api/logs, slot_logs = GET
+# /api/slots/{name}/logs) is never excluded — the alias is exposure truth.
+_STREAM_PATH_SUFFIXES: tuple[str, ...] = ("/stream", "/events", "/logs", "/ws")
+
+# Gap-2 (c): explicit non-tool endpoints that no marker catches. Empty today
+# (the suffix + no-methods-route predicates cover every current stream), but
+# wired so a future odd endpoint can be named without touching the walker.
+EXCLUDED_ROUTES: frozenset[str] = frozenset()
+
+
+def _normalize_path(path: str) -> str:
+    """Strip Starlette path-converter suffixes (``{id:path}`` -> ``{id}``).
+
+    route_id keys use the bare ``{placeholder}`` form so they match the
+    hand-authored ``TOOL_NAME_ALIASES``; live routes occasionally carry a
+    ``:path`` / ``:int`` converter (e.g. ``/v1/models/{model_id:path}``).
+    """
+    return re.sub(r"{(\w+):[^}]+}", r"{\1}", path)
+
+
+def _is_spa_catchall(raw_path: str) -> bool:
+    """The Vue SPA fallback (``/{full_path:path}``) — a root-level catch-all."""
+    return re.fullmatch(r"/\{\w+:path\}", raw_path) is not None
+
+
+def _placeholders(path: str) -> tuple[str, ...]:
+    """Ordered ``{placeholder}`` names in a normalized path template."""
+    return tuple(re.findall(r"{(\w+)}", path))
+
+
+def _is_transport_excluded(route: object, path: str) -> bool:
+    """Gap-2: a streaming/SSE/WS route, not a request/response tool?"""
+    if path in EXCLUDED_ROUTES:
+        return True
+    if any(path.endswith(suffix) for suffix in _STREAM_PATH_SUFFIXES):
+        return True
+    # Defence-in-depth: a route whose declared response class is a stream.
+    response_cls = getattr(route, "response_class", None)
+    cls_name = getattr(response_cls, "__name__", "")
+    return "Stream" in cls_name or "EventSource" in cls_name
+
+
+def build_admin_route_map(
+    app: object,
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]:
+    """Walk ``app.routes`` -> ``(route_map, route_path_args)`` keyed by route_id.
+
+    ``route_map`` is the full scaffolding: ``route_id -> (method, path)`` for
+    every request/response route with a supported verb, minus the skip
+    prefixes / SPA catch-all / transport excludes. Exposure is NOT decided
+    here (Gap 1) — that is the classification overlay's job. A route pinned in
+    :data:`TOOL_NAME_ALIASES` is ALWAYS kept, so an over-broad exclude can
+    never silently drop a live, classified tool.
+    """
+    routes = getattr(app, "routes", app)
+    route_map: dict[str, tuple[str, str]] = {}
+    route_path_args: dict[str, tuple[str, ...]] = {}
+    for route in routes:
+        raw_path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        if not raw_path or not methods:
+            # Mounts / WebSocket routes carry no ``methods`` — never tools.
+            continue
+        path = _normalize_path(raw_path)
+        placeholders = _placeholders(path)
+        for method in methods:
+            verb = method.upper()
+            if verb not in _SUPPORTED_VERBS:
+                continue
+            route_id = f"{verb}:{path}"
+            if route_id not in TOOL_NAME_ALIASES:
+                if _is_spa_catchall(raw_path):
+                    continue
+                if any(path.startswith(prefix) for prefix in _SKIP_PATH_PREFIXES):
+                    continue
+                if _is_transport_excluded(route, path):
+                    continue
+            route_map[route_id] = (verb, path)
+            if placeholders:
+                route_path_args[route_id] = placeholders
+    return route_map, route_path_args
+
+
+# ── Lazy route map (populated by install/set from the live app) ──────────────
+#
+# These stay REAL mutable module dicts for back-compat: callers + tests read
+# ``admin._REST_MAP`` / ``admin._PATH_ARGS`` directly and monkeypatch them.
+# They are EMPTY at import and populated by :func:`install_admin_route_map`
+# (create_app, before build_server reads them) or :func:`set_admin_route_map`
+# (tests). The route-half of :func:`_validate_catalog` only fires once a map
+# is installed.
+
+#: route_id -> (method, path): the full generated scaffolding.
+_ROUTE_MAP: dict[str, tuple[str, str]] = {}
+#: route_id -> path-arg names.
+_ROUTE_PATH_ARGS: dict[str, tuple[str, ...]] = {}
+#: tool_name -> (method, path): alias-resolved view the dispatch path forwards.
+_REST_MAP: dict[str, tuple[str, str]] = {}
+#: tool_name -> path-arg names (alias-resolved).
+_PATH_ARGS: dict[str, tuple[str, ...]] = {}
+#: generated route_ids with no TOOL_NAME_ALIASES entry (Gap-1 CI report):
+#: hidden from tools/list, never fatal.
+_UNCLASSIFIED_ROUTES: list[str] = []
+
+
+def _reconstruct_tool_map(
+    route_map: dict[str, tuple[str, str]],
+    route_path_args: dict[str, tuple[str, ...]],
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]:
+    """Re-key route_id scaffolding onto tool names via TOOL_NAME_ALIASES."""
+    rest: dict[str, tuple[str, str]] = {}
+    path_args: dict[str, tuple[str, ...]] = {}
+    for route_id, tool_names in TOOL_NAME_ALIASES.items():
+        target = route_map.get(route_id)
+        if target is None:
+            continue  # missing live route — _validate_catalog raises on this
+        for tool_name in tool_names:
+            rest[tool_name] = target
+            if route_id in route_path_args:
+                path_args[tool_name] = route_path_args[route_id]
+    return rest, path_args
+
+
+def _apply_route_map(
+    route_map: dict[str, tuple[str, str]],
+    route_path_args: dict[str, tuple[str, ...]],
+) -> None:
+    """Install a generated route map into the module-level lazy dicts + validate."""
+    rest, path_args = _reconstruct_tool_map(route_map, route_path_args)
+    for stash, fresh in (
+        (_ROUTE_MAP, route_map),
+        (_ROUTE_PATH_ARGS, route_path_args),
+        (_REST_MAP, rest),
+        (_PATH_ARGS, path_args),
+    ):
+        stash.clear()
+        stash.update(fresh)
+    _UNCLASSIFIED_ROUTES[:] = sorted(set(route_map) - set(TOOL_NAME_ALIASES))
+    _validate_catalog()
+
+
+def install_admin_route_map(app: object) -> None:
+    """Build + install the admin route map from a live FastAPI ``app``.
+
+    Called once from :func:`hal0.api.mcp_mount.mount_mcp_servers` (in
+    create_app), BEFORE ``build_server`` reads ``_PATH_ARGS`` to advertise
+    per-tool schemas in tools/list.
+    """
+    _apply_route_map(*build_admin_route_map(app))
+
+
+def set_admin_route_map(*source: object) -> None:
+    """Test helper: install from an app/routes OR prebuilt dicts.
+
+    ``set_admin_route_map(app)`` / ``set_admin_route_map(routes)`` builds the
+    map first; ``set_admin_route_map(route_map, route_path_args)`` installs
+    prebuilt dicts (spec §4.3 signature) — lets tests exercise the catalog
+    without booting the full lifespan.
+    """
+    if len(source) == 2:
+        route_map, route_path_args = source  # type: ignore[assignment]
+    elif len(source) == 1:
+        route_map, route_path_args = build_admin_route_map(source[0])
+    else:  # pragma: no cover — misuse
+        raise TypeError("set_admin_route_map takes (app) | (routes) | (map, path_args)")
+    _apply_route_map(route_map, route_path_args)
 
 
 # ── Per-tool call-arg schemas (shared with the dashboard agent chat) ─────────
@@ -648,6 +782,18 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "Exact .gguf filename in the repo (from model_inspect)",
             },
             "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
+        },
+    },
+    "model_scan": {
+        "properties": {
+            "prune": {
+                "type": "boolean",
+                "description": (
+                    "Also remove registry rows whose file is missing on disk; "
+                    "slot/stack-referenced rows are protected and only reported "
+                    "(missing_referenced), never deleted. Default false = add-only."
+                ),
+            },
         },
     },
     "model_swap": {
@@ -777,8 +923,12 @@ def tool_param_schema(tool: str) -> dict[str, Any]:
     calls out (e.g. ``slot_edit``'s arbitrary config keys) without the
     schema rejecting them. Returns the object schema itself; callers wrap
     it into their own envelope.
+
+    Path args come from the installed map when present, else from the tool's
+    ``TOOL_NAME_ALIASES`` route_id — so the advertised schema is correct even
+    if a caller (e.g. brain chat) builds it before the map is installed.
     """
-    path_args = _PATH_ARGS.get(tool, ())
+    path_args = _declared_path_args(tool)
     properties: dict[str, Any] = {arg: {"type": "string"} for arg in path_args}
     required = list(path_args)
     hint = TOOL_PARAM_HINTS.get(tool)
@@ -1608,7 +1758,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Args: name=SLOT name (not the model!), model=registered model id."
     ),
     "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
-    "model_scan": "Walk the configured model roots + store and register newly-found files.",
+    "model_scan": (
+        "Walk the configured model roots + store and register newly-found files. "
+        "Pass prune=true to also remove registry rows whose file is missing on disk "
+        "(slot/stack-referenced rows are protected and only reported)."
+    ),
     "model_pull_cancel": "Cancel an in-flight model pull job.",
     "model_pull_delete": (
         "Clear a TERMINAL pull job's record from memory + disk (409s if still queued/running)."
@@ -1755,14 +1909,26 @@ EXCLUDED_TOOLS: dict[str, str] = {
 
 # ── Catalog consistency guard ────────────────────────────────────────────────
 #
-# The tool surface is spread over four tables (classification frozensets,
-# _REST_MAP, _PATH_ARGS, _ANNOTATIONS) plus the _register calls in
-# build_server. A tool landing in some tables but not others fails at
-# call time with an opaque envelope — validate coherence at import so
-# drift surfaces in CI, not in an agent's chat.
+# The tool surface is spread over the classification frozensets, the
+# hand-authored TOOL_NAME_ALIASES / TOOL_PARAM_HINTS / _ANNOTATIONS /
+# TOOL_DESCRIPTIONS overlays, and the autogen route map. A tool landing in
+# some tables but not others fails at call time with an opaque envelope.
+#
+# Split by dependency: :func:`_validate_overlay` checks only the
+# app-INDEPENDENT overlays and runs at import (fail-fast on a hand-authored
+# mistake). :func:`_validate_catalog` adds the route-map checks and runs
+# once a live map is installed (:func:`_apply_route_map`) — so drift between
+# the classification overlay and the live FastAPI routes surfaces in CI.
 
 
-def _validate_catalog() -> None:
+def _routed_catalog() -> set[str]:
+    """Catalog tools that forward over REST (exclude memory_* + host probes)."""
+    catalog = AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS
+    return {t for t in catalog if not t.startswith("memory_")} - PROBE_TOOLS
+
+
+def _validate_overlay() -> None:
+    """App-independent overlay coherence — safe to run before a map installs."""
     catalog = AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS
     problems: list[str] = []
 
@@ -1779,13 +1945,6 @@ def _validate_catalog() -> None:
             f"labels in both EXCLUDED_TOOLS and the live catalog: {sorted(excluded_overlap)}"
         )
 
-    # memory_* dispatch in-process (or report unconfigured); probes never
-    # touch REST. Everything else must route somewhere.
-    routed = {t for t in catalog if not t.startswith("memory_")} - PROBE_TOOLS
-    if unmapped := routed - set(_REST_MAP):
-        problems.append(f"classified but missing from _REST_MAP: {sorted(unmapped)}")
-    if unclassified := set(_REST_MAP) - catalog:
-        problems.append(f"in _REST_MAP but never classified: {sorted(unclassified)}")
     if unannotated := catalog - set(_ANNOTATIONS):
         problems.append(f"classified but missing ToolAnnotations: {sorted(unannotated)}")
     if set(TOOL_DESCRIPTIONS) != catalog:
@@ -1794,6 +1953,64 @@ def _validate_catalog() -> None:
             f"missing: {sorted(catalog - set(TOOL_DESCRIPTIONS))}, "
             f"extra: {sorted(set(TOOL_DESCRIPTIONS) - catalog)}"
         )
+
+    # TOOL_NAME_ALIASES is the tool-name overlay: it must name exactly the
+    # REST-routed catalog (Gap 3). A name it lists that isn't routed, or a
+    # routed tool it forgets, would detach a tool from its route.
+    alias_tools = {t for names in TOOL_NAME_ALIASES.values() for t in names}
+    routed = _routed_catalog()
+    if stray_alias := alias_tools - routed:
+        problems.append(f"TOOL_NAME_ALIASES names non-routed tools: {sorted(stray_alias)}")
+    if uncovered := routed - alias_tools:
+        problems.append(f"routed tools missing a TOOL_NAME_ALIASES entry: {sorted(uncovered)}")
+    if bad_ids := [rid for rid in TOOL_NAME_ALIASES if not re.fullmatch(r"[A-Z]+:/\S*", rid)]:
+        problems.append(f"malformed TOOL_NAME_ALIASES route_id keys: {sorted(bad_ids)}")
+
+    # Param hints must reference real catalog tools, and every 'required'
+    # field they add must actually be declared (as a hint property or a
+    # path arg) — else the shared schema advertises a required field with
+    # no matching property.
+    if stray := set(TOOL_PARAM_HINTS) - catalog:
+        problems.append(f"TOOL_PARAM_HINTS references unknown tools: {sorted(stray)}")
+    for tool, hint in TOOL_PARAM_HINTS.items():
+        declared = set(hint.get("properties", {})) | set(_declared_path_args(tool))
+        if orphan := set(hint.get("required", ())) - declared:
+            problems.append(
+                f"{tool}: TOOL_PARAM_HINTS required {sorted(orphan)} not in properties/path args"
+            )
+
+    if problems:
+        raise RuntimeError("hal0.mcp.admin overlay drift: " + " | ".join(problems))
+
+
+def _declared_path_args(tool: str) -> tuple[str, ...]:
+    """Path args for ``tool`` — from the installed map, else its alias route."""
+    if tool in _PATH_ARGS:
+        return _PATH_ARGS[tool]
+    for route_id, names in TOOL_NAME_ALIASES.items():
+        if tool in names:
+            return _placeholders(route_id.split(":", 1)[1])
+    return ()
+
+
+def _validate_catalog() -> None:
+    """Full guard: overlay coherence + the installed route map (Gap 1/3)."""
+    _validate_overlay()
+    problems: list[str] = []
+
+    # Gap 3 — every classified route must resolve to a LIVE route_id. Replaces
+    # the old "classified but missing from _REST_MAP" import check + the
+    # separate route-sync test's job.
+    if missing_live := [rid for rid in TOOL_NAME_ALIASES if rid not in _ROUTE_MAP]:
+        problems.append(f"classified route_id with no live route: {sorted(missing_live)}")
+
+    routed = _routed_catalog()
+    if unmapped := routed - set(_REST_MAP):
+        problems.append(f"classified but missing from _REST_MAP: {sorted(unmapped)}")
+    if unclassified := set(_REST_MAP) - (
+        AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS
+    ):
+        problems.append(f"in _REST_MAP but never classified: {sorted(unclassified)}")
 
     for tool, (method, template) in _REST_MAP.items():
         placeholders = set(re.findall(r"{(\w+)}", template))
@@ -1809,24 +2026,14 @@ def _validate_catalog() -> None:
                 f"(supported: {sorted(_REST_VERB_PAYLOAD_KWARG)})"
             )
 
-    # Param hints must reference real catalog tools, and every 'required'
-    # field they add must actually be declared (as a hint property or a
-    # path arg) — else the shared schema advertises a required field with
-    # no matching property.
-    if stray := set(TOOL_PARAM_HINTS) - catalog:
-        problems.append(f"TOOL_PARAM_HINTS references unknown tools: {sorted(stray)}")
-    for tool, hint in TOOL_PARAM_HINTS.items():
-        declared = set(hint.get("properties", {})) | set(_PATH_ARGS.get(tool, ()))
-        if orphan := set(hint.get("required", ())) - declared:
-            problems.append(
-                f"{tool}: TOOL_PARAM_HINTS required {sorted(orphan)} not in properties/path args"
-            )
-
     if problems:
         raise RuntimeError("hal0.mcp.admin catalog drift: " + " | ".join(problems))
 
 
-_validate_catalog()
+# Import-time: only the hand-authored overlays exist yet (the route map is
+# installed later by create_app / a test helper), so validate those now and
+# defer the route checks to :func:`_apply_route_map`.
+_validate_overlay()
 
 
 # ── FastMCP server builder ───────────────────────────────────────────────────
@@ -1907,15 +2114,20 @@ def build_server(
 __all__ = [
     "AUTONOMOUS_READ_TOOLS",
     "AUTONOMOUS_WRITE_TOOLS",
+    "EXCLUDED_ROUTES",
     "EXCLUDED_TOOLS",
     "GATED_TOOLS",
     "POLICY_NO_LOOSEN",
     "TOOL_DESCRIPTIONS",
+    "TOOL_NAME_ALIASES",
     "TOOL_PARAM_HINTS",
     "_ANNOTATIONS",
     "ToolPolicy",
+    "build_admin_route_map",
     "build_server",
     "dispatch",
+    "install_admin_route_map",
     "is_gated",
+    "set_admin_route_map",
     "tool_param_schema",
 ]
