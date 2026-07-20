@@ -1,8 +1,8 @@
 {
   "_schema": "hal0.manifest.v1",
-  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release — the runtime then pulls by tag and emits a warning. Run `scripts/update-toolbox-digests.sh` on main before cutting a release: it queries ghcr.io for each image's published content digest and patches this file in place so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See PLAN.md §12 (toolbox images) and §17 (Risks).",
-  "version": "0.9.6.1",
-  "channel": "stable",
+  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release \u2014 the runtime then pulls by tag and emits a warning. Run `scripts/update-toolbox-digests.sh` on main before cutting a release: it queries ghcr.io for each image's published content digest and patches this file in place so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See PLAN.md \u00a712 (toolbox images) and \u00a717 (Risks).",
+  "version": "1.0.0-alpha.1",
+  "channel": "preview",
   "toolbox_images": {
     "vulkan": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
@@ -17,7 +17,7 @@
     "flm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
       "digest": "sha256:49c175ce799061b07d3c84b1bdece9d8dcb74be5f9717f95fb52f51bd5020fc9",
-      "_notes": "FastFlowLM v0.9.44 on AMD XDNA2 NPU (toolbox rebuilt from packaging/toolbox/flm.Dockerfile FLM_REF=v0.9.44 — `flm version` inside reports v0.9.44). Requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest via scripts/update-toolbox-digests.sh accept-set (confirmed post-push 2026-07-10)."
+      "_notes": "FastFlowLM v0.9.44 on AMD XDNA2 NPU (toolbox rebuilt from packaging/toolbox/flm.Dockerfile FLM_REF=v0.9.44 \u2014 `flm version` inside reports v0.9.44). Requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest via scripts/update-toolbox-digests.sh accept-set (confirmed post-push 2026-07-10)."
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
