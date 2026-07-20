@@ -18,16 +18,16 @@ SLOTS_DIR = Path(__file__).resolve().parents[2] / "installer/etc-hal0/slots"
 
 EXPECTED_MAPPING = {
     # slot name: (port, device, profile)
-    "brain":     (8089, "gpu-vulkan",  "brain"),
-    "agent":     (8081, "gpu-vulkan",  "chadrock-moe"),
-    "utility":   (8090, "gpu-vulkan",  "chat"),
-    "flm":       (8088, "npu",         "flm"),
-    "img":       (8188, "gpu-rocm",    "comfyui"),
-    "qwen3tts":  (8095, "gpu-rocm",    "qwen3-tts"),
-    "tts":       (8085, "cpu",         "kokoro"),    # port drift fix (was 8084)
-    "rerank":    (8086, "gpu-vulkan",  "reranking"), # port drift fix (was 8083)
-    "coder":     (8082, "gpu-vulkan",  "coding"),    # NEW static seed (Task 5)
-    "embed":     (8083, "gpu-vulkan",  "embedding"), # NEW static seed (Task 5)
+    "brain": (8089, "gpu-vulkan", "brain"),
+    "agent": (8081, "gpu-vulkan", "chadrock-moe"),
+    "utility": (8090, "gpu-vulkan", "chat"),
+    "flm": (8088, "npu", "flm"),
+    "img": (8188, "gpu-rocm", "comfyui"),
+    "qwen3tts": (8095, "gpu-rocm", "qwen3-tts"),
+    "tts": (8085, "cpu", "kokoro"),  # port drift fix (was 8084)
+    "rerank": (8086, "gpu-vulkan", "reranking"),  # port drift fix (was 8083)
+    "coder": (8082, "gpu-vulkan", "coding"),  # NEW static seed (Task 5)
+    "embed": (8083, "gpu-vulkan", "embedding"),  # NEW static seed (Task 5)
 }
 
 
@@ -69,9 +69,7 @@ def test_static_seed_slot_populates_hw_grid(slot_name: str, expected: tuple) -> 
         )
     # threads: 0 for gpu-*/npu (let runtime pick), 8 for cpu
     if cfg.device == "cpu":
-        assert cfg.threads == 8, (
-            f"{slot_name} device=cpu but threads={cfg.threads} (expected 8)"
-        )
+        assert cfg.threads == 8, f"{slot_name} device=cpu but threads={cfg.threads} (expected 8)"
     else:
         assert cfg.threads == 0, (
             f"{slot_name} device={cfg.device} but threads={cfg.threads} (expected 0)"
