@@ -1058,7 +1058,6 @@ def slot_migrate_id_keying(
     console.print(
         "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the id-keyed layout.[/yellow]"
     )
-<<<<<<< HEAD
 
 
 # ── migrate-hw (spec-hw-slot-ownership §6 — hardware sticks to slots) ─────────

@@ -129,5 +129,4 @@ hal0 setup --auto --no-pull --no-extensions
 | `slot metrics [name]` | Live per-slot runtime metrics (tok/s, KV%, mem, uptime, queue depth). Omit `name` for all slots. | `--json` |
 | `slot capacity` | Per-slot resident memory + the `[slots].max_slots` budget. | `--json` |
 | `slot migrate-id-keying` | One-shot, operator-run: flip every slot artefact from name-keyed to id-keyed on disk. Destructive (backs itself up first); needs hal0 stopped. See the [migration runbook](/docs/operate/slot-id-keying-migration). | `--dry-run`, `--yes`/`-y`, `--stop-services` |
-<<<<<<< HEAD
 | `slot migrate-hw` | One-shot, operator-run: unwind the flags-fold so hardware sticks to slots (folds model NGL/runner + profile/slot image pins onto each slot's typed HW grid). Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |

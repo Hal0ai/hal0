@@ -5,24 +5,24 @@
 // `useSlots` mutation hooks — no toast-only stubs survive in this file.
 
 import {
-	useSlotEdit,
-	useSlotDefaults,
-	useSlotImagePull,
-	useSlotRestart,
-	useSlotLoad,
-	useSlotSwap,
-	useSlotResolved,
-} from "@/api/hooks/useSlots";
-import { useHardware } from "@/api/hooks/useHardware";
-import { useModels, usePullJob } from "@/api/hooks/useModels";
-import { useProfiles } from "@/api/hooks/useProfiles";
-import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
-import { useChatTemplates } from "@/api/hooks/useChatTemplates";
-import { useMetaEnums } from "@/api/hooks/useMeta";
-import { useSlotLogsStream } from "@/api/hooks/useLogs";
-import { ENDPOINTS } from "@/api/endpoints";
-import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from "@/lib/normalizeApiModel";
-import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
+  useSlotEdit,
+  useSlotDefaults,
+  useSlotImagePull,
+  useSlotRestart,
+  useSlotLoad,
+  useSlotSwap,
+  useSlotResolved,
+} from '@/api/hooks/useSlots'
+import { useHardware } from '@/api/hooks/useHardware'
+import { useModels, usePullJob } from '@/api/hooks/useModels'
+import { useProfiles } from '@/api/hooks/useProfiles'
+import { useSystemInfo, deviceBackend } from '@/api/hooks/useRuntimes'
+import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { useMetaEnums } from '@/api/hooks/useMeta'
+import { useSlotLogsStream } from '@/api/hooks/useLogs'
+import { ENDPOINTS } from '@/api/endpoints'
+import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from '@/lib/normalizeApiModel'
+import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
 const {
 	useState: useStateSM,
@@ -104,22 +104,22 @@ function validateExtraArgs(s) {
 }
 
 function EditSlotDrawer({ open, slot, onClose }) {
-	// Hooks must execute every render — early `return null` would skip
-	// them; render the drawer shell with a sentinel slot instead.
-	const editMut = useSlotEdit();
-	const defaultsMut = useSlotDefaults();
-	// Delete + rename are owned by their extracted dialogs (D2 decomposition):
-	// dash/slots/DeleteSlotDialog.jsx and dash/slots/RenameSlotDialog.jsx.
-	const [renameOpen, setRenameOpen] = useStateSM(false);
-	const restartMut = useSlotRestart();
-	const swapMut = useSlotSwap();
-	const profilesQuery = useProfiles();
-	const modelsQuery = useModels();
-	const chatTemplatesQuery = useChatTemplates(open);
-	// HW grid (spec-hw-slot-ownership §2): device enum from meta, BINARY options +
-	// fit-check metadata from system-info (RUNNER_IMAGES).
-	const metaEnums = useMetaEnums();
-	const systemInfoQuery = useSystemInfo();
+  // Hooks must execute every render — early `return null` would skip
+  // them; render the drawer shell with a sentinel slot instead.
+  const editMut = useSlotEdit();
+  const defaultsMut = useSlotDefaults();
+  // Delete + rename are owned by their extracted dialogs (D2 decomposition):
+  // dash/slots/DeleteSlotDialog.jsx and dash/slots/RenameSlotDialog.jsx.
+  const [renameOpen, setRenameOpen] = useStateSM(false);
+  const restartMut = useSlotRestart();
+  const swapMut = useSlotSwap();
+  const profilesQuery = useProfiles();
+  const modelsQuery = useModels();
+  const chatTemplatesQuery = useChatTemplates(open);
+  // HW grid (spec-hw-slot-ownership §2): device enum from meta, BINARY options +
+  // fit-check metadata from system-info (RUNNER_IMAGES).
+  const metaEnums = useMetaEnums();
+  const systemInfoQuery = useSystemInfo();
 
 	// Seed from the slot list payload when available (PR #587 — same fix
 	// class as #584). llamacpp_args (profile base flags) is read-only;
@@ -128,96 +128,92 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const initialExtraArgs =
 		slot?.llamacpp_args != null ? slot.llamacpp_args : "";
 
-	// Seed from the PERSISTED context window (slot.ctx_max, from
-	// [model].context_size) first — NOT the live runtime metric, which is 0
-	// whenever the slot isn't actively serving and would otherwise snap the
-	// field to a fabricated 16k on every cold (re)load. Fall back to the live
-	// metric, then the backend's safe 8192 floor.
-	const [ctx, setCtx] = useStateSM(
-		slot?.ctx_max ?? (slot?.metrics?.ctx || 8192),
-	);
-	// C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
-	// button through PATCH /defaults ([model].n_gpu_layers; -1/empty = unset →
-	// sends null). Both seed from the slot list payload.
-	const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
-	const [thinkingPending, setThinkingPending] = useStateSM(false);
-	// ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────────
-	// The slot owns the physical layer as typed fields: device (enum) · NGL ·
-	// THREADS · BINARY (runner image ref) + an optional image_pin escape hatch.
-	// NGL rides the Save button as a TOP-LEVEL slot config key (reversing the §5
-	// fold into [model].n_gpu_layers).
-	const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
-	const [nGpuLayers, setNGpuLayers] = useStateSM(
-		slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1",
-	);
-	const [threads, setThreads] = useStateSM(
-		slot?.threads != null ? String(slot.threads) : "0",
-	);
-	const [binary, setBinary] = useStateSM(slot?.binary || "");
-	// image_pin — optional escape hatch. Empty = release default
-	// (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
-	const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
-	// Continuous batching: --parallel sequence slots. Empty = inherit the
-	// profile (today: 1). Rides the Save button (PUT /config {parallel}),
-	// restart-required. See the concurrency-batching plan.
-	const [parallel, setParallel] = useStateSM(
-		slot?.parallel != null ? String(slot.parallel) : "",
-	);
-	const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
-	const [submitErr, setSubmitErr] = useStateSM(null);
-	// Dirty-close confirms through the shared ConfirmDialog (state-driven),
-	// replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
-	// backdrop) funnels through requestClose below.
-	const [discardOpen, setDiscardOpen] = useStateSM(false);
-	// UI-5 (state-driven): swapping the model on a LIVE container slot
-	// cold-restarts it — stash the picked {id, label} here and confirm through
-	// ConfirmDialog before firing the swap. null = no confirm pending.
-	const [pendingSwap, setPendingSwap] = useStateSM(null);
-	// Enable/disable is instant-apply via its own PUT (mirrors the slot card's
-	// pill toggle, which the redesigned cards dropped). `enableBusy` gates the
-	// header toggle against a double-trigger while the mutation is in flight.
-	const [enableBusy, setEnableBusy] = useStateSM(false);
-	// UI-16: destructive delete confirms through the shared ConfirmDialog
-	// (type-to-confirm the slot name), mirroring DeleteModelDialog — replaces
-	// the raw window.confirm that used to gate onDeleteClick.
-	const [delOpen, setDelOpen] = useStateSM(false);
-	// Inline error for the instant-apply thinking toggle (task 3): surface the
-	// failure next to the control instead of only reverting state silently.
-	const [thinkingErr, setThinkingErr] = useStateSM(null);
-	// Per-field validation errors for numeric inputs (#548).
-	const [fieldErrs, setFieldErrs] = useStateSM({});
-	// Task 5: per-slot chat_template override.
-	// chatTemplate seeds from slot.chat_template (empty = no override).
-	// overrideOpen tracks whether the user has clicked [Override] to reveal the select.
-	const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
-	const [overrideOpen, setOverrideOpen] = useStateSM(!!slot?.chat_template);
-	// MTP local state — TRI-STATE after the profile↔model separation:
-	// null = Auto (defer to model-eligibility × profile opt-in), true = force on,
-	// false = force off. Seeds from slot.mtp (undefined/null → Auto). Optimistic
-	// set-before-mutate / revert-on-error, mirroring the reasoning toggle.
-	const [mtp, setMtp] = useStateSM(slot?.mtp ?? null);
-	// #901: per-slot vision toggle (instant-apply + cold restart). Default-ON:
-	// the mmproj sidecar loads unless explicitly disabled, so null/undefined →
-	// on. Optimistic local state with revert-on-error (mirrors reasoning).
-	const [vision, setVision] = useStateSM(slot?.vision !== false);
-	const [visionPending, setVisionPending] = useStateSM(false);
-	const [visionErr, setVisionErr] = useStateSM(null);
-	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
-	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
-	// revert-on-error.
-	const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
-	const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
-	const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
-	const [npuChatModel, setNpuChatModel] = useStateSM(
-		slot?.model_id || slot?.model || "qwen3:4b",
-	);
-	const [npuPending, setNpuPending] = useStateSM(false);
-	const [npuErr, setNpuErr] = useStateSM(null);
-	const [flmModels, setFlmModels] = useStateSM([]);
-	// Pull-on-select: usePullJob owns one FLM download (SSE progress). pullTarget
-	// remembers which role+tag is downloading so we auto-apply it on completion.
-	const pull = usePullJob();
-	const [pullTarget, setPullTarget] = useStateSM(null); // {role, field, tag} | null
+  // Seed from the PERSISTED context window (slot.ctx_max, from
+  // [model].context_size) first — NOT the live runtime metric, which is 0
+  // whenever the slot isn't actively serving and would otherwise snap the
+  // field to a fabricated 16k on every cold (re)load. Fall back to the live
+  // metric, then the backend's safe 8192 floor.
+  const [ctx, setCtx] = useStateSM(slot?.ctx_max ?? (slot?.metrics?.ctx || 8192));
+  // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
+  // button through PATCH /defaults ([model].n_gpu_layers; -1/empty = unset →
+  // sends null). Both seed from the slot list payload.
+  const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
+  const [thinkingPending, setThinkingPending] = useStateSM(false);
+  // ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────────
+  // The slot owns the physical layer as typed fields: device (enum) · NGL ·
+  // THREADS · BINARY (runner image ref) + an optional image_pin escape hatch.
+  // NGL rides the Save button as a TOP-LEVEL slot config key (reversing the §5
+  // fold into [model].n_gpu_layers).
+  const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
+  const [nGpuLayers, setNGpuLayers] = useStateSM(
+    slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
+  );
+  const [threads, setThreads] = useStateSM(
+    slot?.threads != null ? String(slot.threads) : "0"
+  );
+  const [binary, setBinary] = useStateSM(slot?.binary || "");
+  // image_pin — optional escape hatch. Empty = release default
+  // (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
+  const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
+  // Continuous batching: --parallel sequence slots. Empty = inherit the
+  // profile (today: 1). Rides the Save button (PUT /config {parallel}),
+  // restart-required. See the concurrency-batching plan.
+  const [parallel, setParallel] = useStateSM(
+    slot?.parallel != null ? String(slot.parallel) : ""
+  );
+  const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
+  const [submitErr, setSubmitErr] = useStateSM(null);
+  // Dirty-close confirms through the shared ConfirmDialog (state-driven),
+  // replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
+  // backdrop) funnels through requestClose below.
+  const [discardOpen, setDiscardOpen] = useStateSM(false);
+  // UI-5 (state-driven): swapping the model on a LIVE container slot
+  // cold-restarts it — stash the picked {id, label} here and confirm through
+  // ConfirmDialog before firing the swap. null = no confirm pending.
+  const [pendingSwap, setPendingSwap] = useStateSM(null);
+  // Enable/disable is instant-apply via its own PUT (mirrors the slot card's
+  // pill toggle, which the redesigned cards dropped). `enableBusy` gates the
+  // header toggle against a double-trigger while the mutation is in flight.
+  const [enableBusy, setEnableBusy] = useStateSM(false);
+  // UI-16: destructive delete confirms through the shared ConfirmDialog
+  // (type-to-confirm the slot name), mirroring DeleteModelDialog — replaces
+  // the raw window.confirm that used to gate onDeleteClick.
+  const [delOpen, setDelOpen] = useStateSM(false);
+  // Inline error for the instant-apply thinking toggle (task 3): surface the
+  // failure next to the control instead of only reverting state silently.
+  const [thinkingErr, setThinkingErr] = useStateSM(null);
+  // Per-field validation errors for numeric inputs (#548).
+  const [fieldErrs, setFieldErrs] = useStateSM({});
+  // Task 5: per-slot chat_template override.
+  // chatTemplate seeds from slot.chat_template (empty = no override).
+  // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
+  const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
+  const [overrideOpen, setOverrideOpen] = useStateSM(!!(slot?.chat_template));
+  // MTP local state — TRI-STATE after the profile↔model separation:
+  // null = Auto (defer to model-eligibility × profile opt-in), true = force on,
+  // false = force off. Seeds from slot.mtp (undefined/null → Auto). Optimistic
+  // set-before-mutate / revert-on-error, mirroring the reasoning toggle.
+  const [mtp, setMtp] = useStateSM(slot?.mtp ?? null);
+  // #901: per-slot vision toggle (instant-apply + cold restart). Default-ON:
+  // the mmproj sidecar loads unless explicitly disabled, so null/undefined →
+  // on. Optimistic local state with revert-on-error (mirrors reasoning).
+  const [vision, setVision] = useStateSM(slot?.vision !== false);
+  const [visionPending, setVisionPending] = useStateSM(false);
+  const [visionErr, setVisionErr] = useStateSM(null);
+  // Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
+  // device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
+  // revert-on-error.
+  const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
+  const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
+  const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
+  const [npuChatModel, setNpuChatModel] = useStateSM(slot?.model_id || slot?.model || 'qwen3:4b');
+  const [npuPending, setNpuPending] = useStateSM(false);
+  const [npuErr, setNpuErr] = useStateSM(null);
+  const [flmModels, setFlmModels] = useStateSM([]);
+  // Pull-on-select: usePullJob owns one FLM download (SSE progress). pullTarget
+  // remembers which role+tag is downloading so we auto-apply it on completion.
+  const pull = usePullJob();
+  const [pullTarget, setPullTarget] = useStateSM(null); // {role, field, tag} | null
 
 	// Fetch the full FLM catalogue (installed + downloadable) when the NPU slot
 	// editor is open. Extracted so we can re-fetch after a download completes
@@ -322,198 +318,176 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
 
-	useEffectSM(() => {
-		if (slot) {
-			setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
-			setThinking(slot.enable_thinking === true);
-			setThinkingPending(false);
-			// HW grid re-seed from the (possibly-updated) slot prop.
-			setDevice(slot.device || "gpu-rocm");
-			setNGpuLayers(
-				slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1",
-			);
-			setThreads(slot.threads != null ? String(slot.threads) : "0");
-			setBinary(slot.binary || "");
-			setImagePin(slot.image_pin || "");
-			setParallel(slot.parallel != null ? String(slot.parallel) : "");
-			// #587: re-seed from the slot prop so the drawer tracks the real
-			// on-disk values.
-			setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
-			setSubmitErr(null);
-			setDiscardOpen(false);
-			setPendingSwap(null);
-			setThinkingErr(null);
-			setFieldErrs({});
-			// Task 5: re-seed chat_template override from the slot prop.
-			setChatTemplate(slot.chat_template || "");
-			setOverrideOpen(!!slot.chat_template);
-			// Wave 8: re-seed the instant-apply toggles from the (possibly-updated)
-			// slot prop.
-			setMtp(slot.mtp ?? null);
-			setVision(slot.vision !== false);
-			setVisionPending(false);
-			setVisionErr(null);
-			setNpuAsr(slot.npu?.asr === true);
-			setNpuEmbed(slot.npu?.embed === true);
-			// Re-seed the chat pill + all three model selects too, so a save +
-			// refetch keeps the drawer in sync with server truth instead of
-			// drifting until the drawer is remounted.
-			setNpuChat(slot.npu?.chat !== false);
-			setNpuChatModel(slot.model_id || slot.model || "qwen3:4b");
-			setNpuPending(false);
-			setNpuErr(null);
-		}
-	}, [slot?.name]);
+  useEffectSM(() => {
+    if (slot) {
+      setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
+      setThinking(slot.enable_thinking === true);
+      setThinkingPending(false);
+      // HW grid re-seed from the (possibly-updated) slot prop.
+      setDevice(slot.device || "gpu-rocm");
+      setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
+      setThreads(slot.threads != null ? String(slot.threads) : "0");
+      setBinary(slot.binary || "");
+      setImagePin(slot.image_pin || "");
+      setParallel(slot.parallel != null ? String(slot.parallel) : "");
+      // #587: re-seed from the slot prop so the drawer tracks the real
+      // on-disk values.
+      setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
+      setSubmitErr(null);
+      setDiscardOpen(false);
+      setPendingSwap(null);
+      setThinkingErr(null);
+      setFieldErrs({});
+      // Task 5: re-seed chat_template override from the slot prop.
+      setChatTemplate(slot.chat_template || "");
+      setOverrideOpen(!!(slot.chat_template));
+      // Wave 8: re-seed the instant-apply toggles from the (possibly-updated)
+      // slot prop.
+      setMtp(slot.mtp ?? null);
+      setVision(slot.vision !== false);
+      setVisionPending(false);
+      setVisionErr(null);
+      setNpuAsr(slot.npu?.asr === true);
+      setNpuEmbed(slot.npu?.embed === true);
+      // Re-seed the chat pill + all three model selects too, so a save +
+      // refetch keeps the drawer in sync with server truth instead of
+      // drifting until the drawer is remounted.
+      setNpuChat(slot.npu?.chat !== false);
+      setNpuChatModel(slot.model_id || slot.model || 'qwen3:4b');
+      setNpuPending(false);
+      setNpuErr(null);
+    }
+  }, [slot?.name]);
 
 	if (!slot) return null;
 
-	async function onSaveClick() {
-		setSubmitErr(null);
-		// Issue #548: validate numeric fields before any network call.
-		// Invalid values surface inline and block Save.
-		const ctxNum = Number(ctx);
-		const errs = {};
-		if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
-			errs.ctx = "Must be an integer ≥ 128";
-		}
-		// NGL (HW grid, spec-hw-slot-ownership §2): a slot-owned TOP-LEVEL int.
-		// -1 or empty = "all layers" default; otherwise an integer ≥ -1.
-		const nglRaw = String(nGpuLayers).trim();
-		const nglNum = nglRaw === "" ? null : Number(nglRaw);
-		if (
-			nglRaw !== "" &&
-			(!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1)
-		) {
-			errs.ngl = "Must be an integer ≥ -1 (or empty)";
-		}
-		// THREADS (HW grid): 0 = unset (runtime default); otherwise integer ≥ 0.
-		const thrRaw = String(threads).trim();
-		const thrNum = thrRaw === "" ? 0 : Number(thrRaw);
-		if (
-			thrRaw !== "" &&
-			(!Number.isFinite(thrNum) || !Number.isInteger(thrNum) || thrNum < 0)
-		) {
-			errs.threads = "Must be an integer ≥ 0 (0 = runtime default)";
-		}
-		// parallel (--parallel/-np): empty = inherit default; else integer ≥ 1.
-		const parRaw = String(parallel).trim();
-		const parNum = parRaw === "" ? null : Number(parRaw);
-		if (
-			parRaw !== "" &&
-			(!Number.isFinite(parNum) || !Number.isInteger(parNum) || parNum < 1)
-		) {
-			errs.parallel =
-				"Must be an integer ≥ 1 (or empty to inherit the default)";
-		}
-		// image_pin: empty is allowed (release default). When set, must look like a
-		// registry ref — contains ":" (host:tag or repo:tag) and no whitespace.
-		const pinTrim = (imagePin || "").trim();
-		if (pinTrim && (!pinTrim.includes(":") || /\s/.test(pinTrim))) {
-			errs.imagePin =
-				"Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
-		}
-		// Block Save on malformed extra_args (unbalanced quotes) the same way
-		// numeric fields block — the resolved command can't be built from it.
-		if (extraArgsErr) {
-			errs.extraArgs = extraArgsErr;
-		}
-		if (Object.keys(errs).length > 0) {
-			setFieldErrs(errs);
-			return;
-		}
-		setFieldErrs({});
-		// Task 5: include chat_template only when the user has set/changed an override.
-		const chatTemplateChanged =
-			overrideOpen && chatTemplate !== (slot.chat_template || "");
-		// Per-slot extra_args override — ship only when changed, nested under
-		// [server] so the backend one-level merge preserves sibling server keys.
-		const extraArgsChanged = extraArgs !== extraArgsBaseline;
-		// Only write ctx_size when the operator actually changed it. Gate on the
-		// persisted baseline (ctxBaseline).
-		const ctxChanged = ctxNum !== Number(ctxBaseline);
-		// HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS are
-		// top-level slot config ints now (reversing the §5 fold). -1/empty NGL and
-		// 0/empty THREADS normalize to the "unset" defaults.
-		const nglValue = nglRaw === "" ? -1 : nglNum;
-		const thrValue = thrRaw === "" ? 0 : thrNum;
-		const pinValue = pinTrim === "" ? null : pinTrim;
-		const deviceChanged = device !== (slot.device || "gpu-rocm");
-		const nglChanged = nglValue !== (slot.n_gpu_layers ?? -1);
-		const threadsChanged = thrValue !== (slot.threads ?? 0);
-		const binaryChanged = binary !== (slot.binary || "");
-		const imagePinChanged = pinValue !== (slot.image_pin ?? null);
-		// A hardware change (device/NGL/threads/binary/image_pin) needs a cold
-		// restart, same as a chat_template change.
-		const hwChanged =
-			deviceChanged ||
-			nglChanged ||
-			threadsChanged ||
-			binaryChanged ||
-			imagePinChanged;
-		try {
-			// Two-step: defaults (ctx_size lives under [model]) + slot config for the
-			// top-level keys (device / NGL / threads / binary / image_pin /
-			// chat_template / server). These are fast on-disk writes.
-			const slotBody = {};
-			if (deviceChanged) slotBody.device = device;
-			if (nglChanged) slotBody.n_gpu_layers = nglValue;
-			if (threadsChanged) slotBody.threads = thrValue;
-			if (binaryChanged) slotBody.binary = binary;
-			if (imagePinChanged) slotBody.image_pin = pinValue;
-			if (chatTemplateChanged) {
-				slotBody.chat_template = chatTemplate;
-			}
-			if (extraArgsChanged) {
-				slotBody.server = { extra_args: extraArgs };
-			}
-			// parallel is a top-level slot field. Empty → null (inherit; the
-			// None-means-delete merge clears any persisted override).
-			const parValue = parRaw === "" ? null : parNum;
-			if (parValue !== (slot.parallel ?? null)) {
-				slotBody.parallel = parValue;
-			}
-			const defaultsBody = {};
-			if (ctxChanged) defaultsBody.ctx_size = ctxNum;
-			if (Object.keys(defaultsBody).length > 0) {
-				await defaultsMut.mutateAsync({
-					name: slot.name,
-					body: defaultsBody,
-				});
-			}
-			await editMut.mutateAsync({
-				name: slot.name,
-				body: slotBody,
-			});
-		} catch (err) {
-			setSubmitErr(err?.message || "save failed");
-			return;
-		}
-		// Non-blocking apply: a hardware or chat_template change requires a cold
-		// restart that can take model-load seconds-to-minutes. Fire it in the
-		// BACKGROUND (do NOT await) and close the drawer immediately.
-		if (hwChanged || chatTemplateChanged) {
-			restartMut.mutate(slot.name, {
-				onError: (err) =>
-					window.__hal0Toast &&
-					window.__hal0Toast(
-						`Slot "${slot.name}" restart failed — ${err?.message || "see logs"}`,
-						"err",
-					),
-			});
-			window.__hal0Toast &&
-				window.__hal0Toast(
-					`Slot "${slot.name}" saved — restarting in the background`,
-					"info",
-				);
-		} else {
-			window.__hal0Toast &&
-				window.__hal0Toast(
-					`Slot "${slot.name}" saved — restart required to apply changes`,
-					"warn",
-				);
-		}
-		onClose();
-	}
+  async function onSaveClick() {
+    setSubmitErr(null);
+    // Issue #548: validate numeric fields before any network call.
+    // Invalid values surface inline and block Save.
+    const ctxNum = Number(ctx);
+    const errs = {};
+    if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
+      errs.ctx = "Must be an integer ≥ 128";
+    }
+    // NGL (HW grid, spec-hw-slot-ownership §2): a slot-owned TOP-LEVEL int.
+    // -1 or empty = "all layers" default; otherwise an integer ≥ -1.
+    const nglRaw = String(nGpuLayers).trim();
+    const nglNum = nglRaw === "" ? null : Number(nglRaw);
+    if (nglRaw !== "" && (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1)) {
+      errs.ngl = "Must be an integer ≥ -1 (or empty)";
+    }
+    // THREADS (HW grid): 0 = unset (runtime default); otherwise integer ≥ 0.
+    const thrRaw = String(threads).trim();
+    const thrNum = thrRaw === "" ? 0 : Number(thrRaw);
+    if (thrRaw !== "" && (!Number.isFinite(thrNum) || !Number.isInteger(thrNum) || thrNum < 0)) {
+      errs.threads = "Must be an integer ≥ 0 (0 = runtime default)";
+    }
+    // parallel (--parallel/-np): empty = inherit default; else integer ≥ 1.
+    const parRaw = String(parallel).trim();
+    const parNum = parRaw === "" ? null : Number(parRaw);
+    if (parRaw !== "" && (!Number.isFinite(parNum) || !Number.isInteger(parNum) || parNum < 1)) {
+      errs.parallel = "Must be an integer ≥ 1 (or empty to inherit the default)";
+    }
+    // image_pin: empty is allowed (release default). When set, must look like a
+    // registry ref — contains ":" (host:tag or repo:tag) and no whitespace.
+    const pinTrim = (imagePin || "").trim();
+    if (pinTrim && (!pinTrim.includes(":") || /\s/.test(pinTrim))) {
+      errs.imagePin = "Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
+    }
+    // Block Save on malformed extra_args (unbalanced quotes) the same way
+    // numeric fields block — the resolved command can't be built from it.
+    if (extraArgsErr) {
+      errs.extraArgs = extraArgsErr;
+    }
+    if (Object.keys(errs).length > 0) {
+      setFieldErrs(errs);
+      return;
+    }
+    setFieldErrs({});
+    // Task 5: include chat_template only when the user has set/changed an override.
+    const chatTemplateChanged = overrideOpen && chatTemplate !== (slot.chat_template || "");
+    // Per-slot extra_args override — ship only when changed, nested under
+    // [server] so the backend one-level merge preserves sibling server keys.
+    const extraArgsChanged = extraArgs !== extraArgsBaseline;
+    // Only write ctx_size when the operator actually changed it. Gate on the
+    // persisted baseline (ctxBaseline).
+    const ctxChanged = ctxNum !== Number(ctxBaseline);
+    // HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS are
+    // top-level slot config ints now (reversing the §5 fold). -1/empty NGL and
+    // 0/empty THREADS normalize to the "unset" defaults.
+    const nglValue = nglRaw === "" ? -1 : nglNum;
+    const thrValue = thrRaw === "" ? 0 : thrNum;
+    const pinValue = pinTrim === "" ? null : pinTrim;
+    const deviceChanged = device !== (slot.device || "gpu-rocm");
+    const nglChanged = nglValue !== (slot.n_gpu_layers ?? -1);
+    const threadsChanged = thrValue !== (slot.threads ?? 0);
+    const binaryChanged = binary !== (slot.binary || "");
+    const imagePinChanged = pinValue !== (slot.image_pin ?? null);
+    // A hardware change (device/NGL/threads/binary/image_pin) needs a cold
+    // restart, same as a chat_template change.
+    const hwChanged = deviceChanged || nglChanged || threadsChanged || binaryChanged || imagePinChanged;
+    try {
+      // Two-step: defaults (ctx_size lives under [model]) + slot config for the
+      // top-level keys (device / NGL / threads / binary / image_pin /
+      // chat_template / server). These are fast on-disk writes.
+      const slotBody = {};
+      if (deviceChanged) slotBody.device = device;
+      if (nglChanged) slotBody.n_gpu_layers = nglValue;
+      if (threadsChanged) slotBody.threads = thrValue;
+      if (binaryChanged) slotBody.binary = binary;
+      if (imagePinChanged) slotBody.image_pin = pinValue;
+      if (chatTemplateChanged) {
+        slotBody.chat_template = chatTemplate;
+      }
+      if (extraArgsChanged) {
+        slotBody.server = { extra_args: extraArgs };
+      }
+      // parallel is a top-level slot field. Empty → null (inherit; the
+      // None-means-delete merge clears any persisted override).
+      const parValue = parRaw === "" ? null : parNum;
+      if (parValue !== (slot.parallel ?? null)) {
+        slotBody.parallel = parValue;
+      }
+      const defaultsBody = {};
+      if (ctxChanged) defaultsBody.ctx_size = ctxNum;
+      if (Object.keys(defaultsBody).length > 0) {
+        await defaultsMut.mutateAsync({
+          name: slot.name,
+          body: defaultsBody,
+        });
+      }
+      await editMut.mutateAsync({
+        name: slot.name,
+        body: slotBody,
+      });
+    } catch (err) {
+      setSubmitErr(err?.message || "save failed");
+      return;
+    }
+    // Non-blocking apply: a hardware or chat_template change requires a cold
+    // restart that can take model-load seconds-to-minutes. Fire it in the
+    // BACKGROUND (do NOT await) and close the drawer immediately.
+    if (hwChanged || chatTemplateChanged) {
+      restartMut.mutate(slot.name, {
+        onError: (err) =>
+          window.__hal0Toast && window.__hal0Toast(
+            `Slot "${slot.name}" restart failed — ${err?.message || "see logs"}`,
+            "err",
+          ),
+      });
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restarting in the background`,
+        "info",
+      );
+    } else {
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restart required to apply changes`,
+        "warn",
+      );
+    }
+    onClose();
+  }
 
 	// Regenerate: persist the slot's freeform extra_args overlay (NOT the
 	// profile) and let useSlotEdit's invalidation refetch the slot, which
@@ -572,60 +546,56 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 	};
 
-	// extra_args dirty-tracking: the resolved command is server-computed from the
-	// persisted config, so any unsaved edit makes the displayed command stale.
-	// Baseline is the on-disk value surfaced as `llamacpp_args` (wire key for
-	// [server].extra_args). `validateExtraArgs` is a cheap client guard (balanced
-	// quotes) — the backend shlex parse is the real validator.
-	const extraArgsBaseline =
-		slot.llamacpp_args != null ? slot.llamacpp_args : "";
-	const extraArgsDirty = extraArgs !== extraArgsBaseline;
-	const extraArgsErr = validateExtraArgs(extraArgs);
-	// ctx dirty-tracking baseline: the PERSISTED context window (slot.ctx_max),
-	// mirroring how the seed value is derived. Falls back to the live metric then
-	// the 8192 floor only when nothing is persisted, so an untouched field on a
-	// cold slot is never counted dirty (and never written — see ctxChanged).
-	const ctxBaseline = slot.ctx_max ?? (slot.metrics?.ctx || 8192);
-	// HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS normalize
-	// their "unset" seeds (-1 NGL, 0 THREADS) so an untouched field never counts
-	// dirty. Baselines compare against the slot's persisted top-level HW fields.
-	const nglRawNow = String(nGpuLayers).trim();
-	const nglValueNow = nglRawNow === "" ? -1 : Number(nglRawNow);
-	const nglDirty = nglValueNow !== (slot.n_gpu_layers ?? -1);
-	const thrRawNow = String(threads).trim();
-	const thrValueNow = thrRawNow === "" ? 0 : Number(thrRawNow);
-	const threadsDirty = thrValueNow !== (slot.threads ?? 0);
-	const deviceDirty = device !== (slot.device || "gpu-rocm");
-	const binaryDirty = binary !== (slot.binary || "");
-	const imagePinDirty = (imagePin.trim() || null) !== (slot.image_pin ?? null);
+  // extra_args dirty-tracking: the resolved command is server-computed from the
+  // persisted config, so any unsaved edit makes the displayed command stale.
+  // Baseline is the on-disk value surfaced as `llamacpp_args` (wire key for
+  // [server].extra_args). `validateExtraArgs` is a cheap client guard (balanced
+  // quotes) — the backend shlex parse is the real validator.
+  const extraArgsBaseline = slot.llamacpp_args != null ? slot.llamacpp_args : "";
+  const extraArgsDirty = extraArgs !== extraArgsBaseline;
+  const extraArgsErr = validateExtraArgs(extraArgs);
+  // ctx dirty-tracking baseline: the PERSISTED context window (slot.ctx_max),
+  // mirroring how the seed value is derived. Falls back to the live metric then
+  // the 8192 floor only when nothing is persisted, so an untouched field on a
+  // cold slot is never counted dirty (and never written — see ctxChanged).
+  const ctxBaseline = slot.ctx_max ?? (slot.metrics?.ctx || 8192);
+  // HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS normalize
+  // their "unset" seeds (-1 NGL, 0 THREADS) so an untouched field never counts
+  // dirty. Baselines compare against the slot's persisted top-level HW fields.
+  const nglRawNow = String(nGpuLayers).trim();
+  const nglValueNow = nglRawNow === "" ? -1 : Number(nglRawNow);
+  const nglDirty = nglValueNow !== (slot.n_gpu_layers ?? -1);
+  const thrRawNow = String(threads).trim();
+  const thrValueNow = thrRawNow === "" ? 0 : Number(thrRawNow);
+  const threadsDirty = thrValueNow !== (slot.threads ?? 0);
+  const deviceDirty = device !== (slot.device || "gpu-rocm");
+  const binaryDirty = binary !== (slot.binary || "");
+  const imagePinDirty = (imagePin.trim() || null) !== (slot.image_pin ?? null);
 
-	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
-	// grid, extra_args, ctx, parallel, chat_template override). The instant-apply
-	// toggles (thinking / MTP / enable) fire their own PUT/POST outside Save and
-	// are intentionally excluded — a flipped toggle is already persisted.
-	// ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
-	// onSaveClick: Number(ctx) !== Number(ctxBaseline)).
-	const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
-	const parRawNow = String(parallel).trim();
-	const parValueNow = parRawNow === "" ? null : Number(parRawNow);
-	const parallelDirty = parValueNow !== (slot.parallel ?? null);
-	const dirty =
-		extraArgsDirty ||
-		ctxDirty ||
-		nglDirty ||
-		threadsDirty ||
-		deviceDirty ||
-		binaryDirty ||
-		imagePinDirty ||
-		parallelDirty ||
-		(overrideOpen && chatTemplate !== (slot.chat_template || ""));
-	const requestClose = () => {
-		if (dirty) {
-			setDiscardOpen(true);
-			return;
-		}
-		onClose();
-	};
+  // UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
+  // grid, extra_args, ctx, parallel, chat_template override). The instant-apply
+  // toggles (thinking / MTP / enable) fire their own PUT/POST outside Save and
+  // are intentionally excluded — a flipped toggle is already persisted.
+  // ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
+  // onSaveClick: Number(ctx) !== Number(ctxBaseline)).
+  const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
+  const parRawNow = String(parallel).trim();
+  const parValueNow = parRawNow === "" ? null : Number(parRawNow);
+  const parallelDirty = parValueNow !== (slot.parallel ?? null);
+  const dirty =
+    extraArgsDirty ||
+    ctxDirty ||
+    nglDirty ||
+    threadsDirty ||
+    deviceDirty ||
+    binaryDirty ||
+    imagePinDirty ||
+    parallelDirty ||
+    (overrideOpen && chatTemplate !== (slot.chat_template || ""));
+  const requestClose = () => {
+    if (dirty) { setDiscardOpen(true); return; }
+    onClose();
+  };
 
 	// Fire the model swap (POST /slots/{name}/swap). Non-blocking: a swap
 	// cold-restarts container slots to load the model (slow) — fire it and let
@@ -750,43 +720,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					/>
 				</div>
 
-				{/* Runner + image status strip — read-only. Runner (BINARY) resolves the
-          launch image (RUNNER_IMAGES[binary]); image_pin overrides it (§3).
-          image status keyed to slot_id so the operator knows which slot owns it. */}
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "1fr 1fr",
-						gap: 0,
-						border: "1px solid var(--line-soft)",
-						borderRadius: "var(--rad-sm)",
-						overflow: "hidden",
-						marginBottom: 16,
-					}}
-				>
-					<ReadOnlyStrip
-						k="runner · binary"
-						v={slot.binary || `auto · ${deviceBackend(device) || device}`}
-					/>
-					<ReadOnlyStrip
-						k="image status"
-						v={
-							<span data-testid="slot-image-status">
-								{slotButtonPhase(slot) === "running"
-									? (slot.actual_image ||
-											slot.image_pin ||
-											slot.image ||
-											"present") +
-										(slot.id != null
-											? ` · #${slot.id}`
-											: slot.slot_id != null
-												? ` · #${slot.slot_id}`
-												: "")
-									: "—"}
-							</span>
-						}
-					/>
-				</div>
+      {/* Runner + image status strip — read-only. Runner (BINARY) resolves the
+          launch image (RUNNER_IMAGES[binary]); image_pin overrides it (§3). */}
+      <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
+        <ReadOnlyStrip k="runner · binary" v={slot.binary || "auto (from device)"} />
+        <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
+      </div>
 
 				{/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
           The slot owns the physical/placement layer as 4 typed fields:
@@ -890,90 +829,156 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									</div>
 								</div>
 
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Container Image</span>
-										<FieldInfoIcon description="⟳ Override the container image for this slot" />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.imagePin ? " input-err" : "")
-											}
-											data-testid="slot-hw-image-pin"
-											value={imagePin}
-											onChange={(e) => {
-												setImagePin(e.target.value);
-												setFieldErrs((p) => ({ ...p, imagePin: undefined }));
-											}}
-											placeholder={
-												binary && backends[binary]?.image
-													? backends[binary].image
-													: "will resolve from selected profile"
-											}
-											spellCheck={false}
-											style={imagePin ? {} : { color: "var(--fg-4)" }}
-										/>
-										{fieldErrs.imagePin ? (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.imagePin}
-											</div>
-										) : (
-											<div className="hint">
-												Override the container image for a debug build, A/B
-												test, or rollback. Empty uses the profile's default
-												image.
-											</div>
-										)}
-									</div>
-								</div>
+      </FieldGroup>
 
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Binary</span>
-										<FieldInfoIcon description="⟳ Which runner build to use. Empty = auto-detect from
-											device. (The bound runner shows on the slot card chip —
-											change it by picking a different model.)" />
-									</div>
-									<div className="form-ctl">
-										<select
-											className={"input mono" + (fitWarn ? " input-err" : "")}
-											data-testid="slot-hw-binary"
-											value={binary}
-											onChange={(e) => setBinary(e.target.value)}
-										>
-											<option value="">— default (from device) —</option>
-											{/* keep an out-of-vocab persisted binary selectable */}
-											{binary && !binaryKeys.includes(binary) && (
-												<option value={binary}>{binary}</option>
-											)}
-											{binaryKeys.map((k) => (
-												<option key={k} value={k}>
-													{k}
-													{backends[k]?.backend
-														? ` · ${backends[k].backend}`
-														: ""}
-												</option>
-											))}
-										</select>
-										{fitWarn && (
-											<div
-												className="hint"
-												data-testid="slot-hw-fit-warning"
-												style={{
-													marginTop: 6,
-													padding: "6px 10px",
-													borderRadius: "var(--rad-sm)",
-													color: "var(--warn)",
-													border: "1px solid var(--warn-line)",
-													background: "var(--warn-soft)",
-												}}
-											>
-												⚠ {fitWarn}
-											</div>
-										)}
-									</div>
-								</div>
+      {/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
+          The slot owns the physical/placement layer as 4 typed fields:
+          device · NGL · THREADS · BINARY, plus an optional image_pin escape
+          hatch. Replaces the per-slot profile selector + freeform image
+          override (those left the slot per §2/§7 — the model is device-
+          agnostic; the runner image comes from RUNNER_IMAGES[binary]). Every
+          HW change is a cold restart, applied on Save. */}
+      <FieldGroup label="Hardware" hint="device · placement · runner">
+        {(() => {
+          const devices = Array.isArray(metaEnums?.devices) ? metaEnums.devices : [];
+          const backends = systemInfoQuery.data?.backends ?? {};
+          const binaryKeys = Object.keys(backends);
+          const devBackend = deviceBackend(device);
+          // Fit-check (§4): the selected device's backend must be in the chosen
+          // BINARY's supported_backends. WARN at assignment, never block. Only
+          // when a BINARY is explicitly picked (empty = HW-gated default).
+          const selRunner = binary ? backends[binary] : null;
+          const supported =
+            selRunner && Array.isArray(selRunner.supported_backends) && selRunner.supported_backends.length
+              ? selRunner.supported_backends
+              : selRunner && selRunner.backend
+                ? [selRunner.backend]
+                : null;
+          const fitWarn =
+            binary && devBackend && supported && !supported.includes(devBackend)
+              ? `Device backend "${devBackend}" is not in ${binary}'s supported backends (${supported.join(", ")}). The slot may fall back or fail at spawn.`
+              : null;
+          return (
+            <>
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>device</span>
+                  <span className="sub warn">⟳ restart required · class + backend (rocm/vulkan/cpu/npu)</span>
+                </div>
+                <div className="form-ctl">
+                  <select
+                    className="input mono"
+                    data-testid="slot-hw-device"
+                    value={device}
+                    onChange={e => setDevice(e.target.value)}
+                  >
+                    {/* keep an out-of-vocab persisted device selectable */}
+                    {device && !devices.some(d => d.id === device) && (
+                      <option value={device}>{device}</option>
+                    )}
+                    {devices.map(d => (
+                      <option key={d.id} value={d.id} title={d.description}>
+                        {d.label}{d.recommended ? " ★" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>NGL</span>
+                  <span className="sub">layers offloaded to GPU · -1 = all, 0 = CPU only · emits -ngl</span>
+                </div>
+                <div className="form-ctl">
+                  <input
+                    className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
+                    data-testid="slot-hw-ngl"
+                    value={nGpuLayers}
+                    onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
+                    placeholder="-1"
+                    inputMode="numeric"
+                  />
+                  {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>THREADS</span>
+                  <span className="sub">CPU threads for the runner · 0 = runtime default · emits --threads</span>
+                </div>
+                <div className="form-ctl">
+                  <input
+                    className={"input mono" + (fieldErrs.threads ? " input-err" : "")}
+                    data-testid="slot-hw-threads"
+                    value={threads}
+                    onChange={e => { setThreads(e.target.value); setFieldErrs(p => ({...p, threads: undefined})); }}
+                    placeholder="0"
+                    inputMode="numeric"
+                  />
+                  {fieldErrs.threads && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.threads}</div>}
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>BINARY</span>
+                  <span className="sub warn">⟳ restart required · runner image (RUNNER_IMAGES) · empty = default from device</span>
+                </div>
+                <div className="form-ctl">
+                  <select
+                    className={"input mono" + (fitWarn ? " input-err" : "")}
+                    data-testid="slot-hw-binary"
+                    value={binary}
+                    onChange={e => setBinary(e.target.value)}
+                  >
+                    <option value="">— default (from device) —</option>
+                    {/* keep an out-of-vocab persisted binary selectable */}
+                    {binary && !binaryKeys.includes(binary) && (
+                      <option value={binary}>{binary}</option>
+                    )}
+                    {binaryKeys.map(k => (
+                      <option key={k} value={k}>
+                        {k}{backends[k]?.backend ? ` · ${backends[k].backend}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {fitWarn && (
+                    <div
+                      className="hint"
+                      data-testid="slot-hw-fit-warning"
+                      style={{marginTop: 6, padding: "6px 10px", borderRadius: "var(--rad-sm)", color: "var(--warn)", border: "1px solid var(--warn-line)", background: "var(--warn-soft)"}}
+                    >
+                      ⚠ {fitWarn}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-lbl">
+                  <span>image_pin</span>
+                  <span className="sub warn">⟳ restart required · overrides the release default · empty = release default</span>
+                </div>
+                <div className="form-ctl">
+                  <input
+                    className={"input mono" + (fieldErrs.imagePin ? " input-err" : "")}
+                    data-testid="slot-hw-image-pin"
+                    value={imagePin}
+                    onChange={e => { setImagePin(e.target.value); setFieldErrs(p => ({...p, imagePin: undefined})); }}
+                    placeholder="release default — e.g. ghcr.io/owner/repo:tag"
+                    spellCheck={false}
+                  />
+                  {fieldErrs.imagePin
+                    ? <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.imagePin}</div>
+                    : <div className="hint">Escape hatch for a debug build / A-B / rollback. A non-default pin is shown on the slot card.</div>}
+                </div>
+              </div>
+            </>
+          );
+        })()}
+      </FieldGroup>
 
 								<div className="form-row">
 									<div className="form-lbl">
@@ -1045,71 +1050,59 @@ function EditSlotDrawer({ open, slot, onClose }) {
           Swap is its own POST /slots/{name}/swap (not part of the batched
           Save); container slots cold-restart to load, so we toast like the
           popover does. */}
-						{(() => {
-							const isContainer = slot.runtime === "container";
-							// Derive the backend from the SELECTED device (reactive) so the rocmfp4
-							// filter re-evaluates immediately when the operator switches the HW-grid
-							// device — before Save is clicked. (Device is the single owner of the
-							// rocm/vulkan axis now — spec-hw-slot-ownership §2.)
-							const selBackend = deviceBackend(device) || slot.backend;
-							const compatible = compatibleModels(modelsQuery.data, {
-								type: slot.type,
-								backend: selBackend,
-							});
-							const cur = slot.model_id || slot.model || "";
-							const has = compatible.some((m) => m.id === cur);
-							// A background swap is in flight — the select stays usable, but show a
-							// "Swapping…" hint so the operator knows the load is happening.
-							const swapping = swapMut.isPending;
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Model</span>
-										<FieldInfoIcon description="{isContainer
-												? &quot;Swap restarts the container to load the new model&quot;
-												: &quot;Applies immediately&quot;}" />
-									</div>
-									<div className="form-ctl">
-										<select
-											className="input mono"
-											value={cur}
-											disabled={saving}
-											aria-label={`Model for ${slot.name}`}
-											onChange={(e) => {
-												const id = e.target.value;
-												if (!id || id === cur) return;
-												const picked = compatible.find((m) => m.id === id);
-												const label = picked?.longName || id;
-												// UI-5: swapping the model on a LIVE container slot cold-restarts
-												// it (~model-load seconds). Confirm through the shared
-												// ConfirmDialog before firing — stashing the pick re-renders the
-												// select back to `cur` (value={cur}), so cancel needs no manual
-												// revert. Mirrors the delete/dirty-close confirm gates.
-												const live = slotButtonPhase(slot) === "running";
-												if (isContainer && live) {
-													setPendingSwap({ id, label });
-													return;
-												}
-												fireSwap(id, label);
-											}}
-										>
-											{cur && !has && (
-												<option value={cur}>
-													{slot.modelLong || slot.model || cur}
-												</option>
-											)}
-											{!cur && <option value="">—</option>}
-											{compatible.map((m) => (
-												<option key={m.id} value={m.id}>
-													{m.longName || m.id}
-												</option>
-											))}
-										</select>
-										{swapping && <div className="hint">Swapping…</div>}
-									</div>
-								</div>
-							);
-						})()}
+      {(() => {
+        const isContainer = slot.runtime === "container";
+        // Derive the backend from the SELECTED device (reactive) so the rocmfp4
+        // filter re-evaluates immediately when the operator switches the HW-grid
+        // device — before Save is clicked. (Device is the single owner of the
+        // rocm/vulkan axis now — spec-hw-slot-ownership §2.)
+        const selBackend = deviceBackend(device) || slot.backend;
+        const compatible = compatibleModels(modelsQuery.data, { type: slot.type, backend: selBackend });
+        const cur = slot.model_id || slot.model || "";
+        const has = compatible.some(m => m.id === cur);
+        // A background swap is in flight — the select stays usable, but show a
+        // "Swapping…" hint so the operator knows the load is happening.
+        const swapping = swapMut.isPending;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Model</span>
+              <span className="sub">
+                {isContainer ? "swap restarts the container to load" : "applies immediately"}
+              </span>
+            </div>
+            <div className="form-ctl">
+              <select
+                className="input mono"
+                value={cur}
+                disabled={saving}
+                aria-label={`Model for ${slot.name}`}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (!id || id === cur) return;
+                  const picked = compatible.find(m => m.id === id);
+                  const label = picked?.longName || id;
+                  // UI-5: swapping the model on a LIVE container slot cold-restarts
+                  // it (~model-load seconds). Confirm through the shared
+                  // ConfirmDialog before firing — stashing the pick re-renders the
+                  // select back to `cur` (value={cur}), so cancel needs no manual
+                  // revert. Mirrors the delete/dirty-close confirm gates.
+                  const live = slotButtonPhase(slot) === "running";
+                  if (isContainer && live) { setPendingSwap({ id, label }); return; }
+                  fireSwap(id, label);
+                }}
+              >
+                {cur && !has && <option value={cur}>{slot.modelLong || slot.model || cur}</option>}
+                {!cur && <option value="">—</option>}
+                {compatible.map(m => (
+                  <option key={m.id} value={m.id}>{m.longName || m.id}</option>
+                ))}
+              </select>
+              {swapping && <div className="hint">Swapping…</div>}
+            </div>
+          </div>
+        );
+      })()}
 
 						<div className="form-row">
 							<div className="form-lbl">
@@ -1249,366 +1242,155 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							);
 						})()}
 
-						{/* Continuous batching — the --parallel / -np sequence-slot count. Rides
-          Save + a cold restart. */}
-						{(() => {
-							const t = slot.type || "llm";
-							if (
-								!["llm", "embedding", "reranking"].includes(t) ||
-								slot.device === "npu"
-							)
-								return null;
-							const parNum = Number(String(parallel).trim());
-							const showPool = Number.isInteger(parNum) && parNum > 1;
-							const ctxNow = Number(String(ctx).trim()) || 0;
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Parallel</span>
-										<FieldInfoIcon description="⟳ How many requests can run at once. Empty = use the
-											profile default." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.parallel ? " input-err" : "")
-											}
-											type="number"
-											min="1"
-											step="1"
-											placeholder="1 (profile default)"
-											value={parallel}
-											onChange={(e) => {
-												setParallel(e.target.value);
-												setFieldErrs((p) => ({ ...p, parallel: undefined }));
-											}}
-										/>
-										<div className="hint">
-											How many requests can share the loaded model at once.
-											Leave empty to use the profile default. Higher values =
-											more concurrent users but lower per-request speed.
-										</div>
-										{showPool && (
-											<div className="hint mono">
-												{parNum} slots share the{" "}
-												{ctxNow ? `${ctxNow.toLocaleString()}-token ` : ""}
-												context pool (--kv-unified); worst case, {parNum}{" "}
-												simultaneous full-context requests get ~
-												{ctxNow
-													? Math.floor(ctxNow / parNum).toLocaleString()
-													: `ctx/${parNum}`}{" "}
-												each.
-											</div>
-										)}
-										{fieldErrs.parallel && (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.parallel}
-											</div>
-										)}
-									</div>
-								</div>
-							);
-						})()}
-
-						{/* Per-slot freeform override. Persisted to [server].extra_args. */}
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Extra Args</span>
-								<FieldInfoIcon description="extra_args — per-slot override flags appended to the runner
-									argv. Takes precedence over the profile defaults." />
-							</div>
-							<div className="form-ctl">
-								<input
-									className="input mono"
-									value={extraArgs}
-									onChange={(e) => setExtraArgs(e.target.value)}
-									placeholder="--flag value  (one-off, no new profile)"
-									spellCheck={false}
-									data-testid="extra-args-input"
-								/>
-								{extraArgsErr && (
-									<div
-										style={{
-											color: "var(--err)",
-											fontSize: 11,
-											paddingTop: 4,
-											fontFamily: "var(--jbm)",
-										}}
-									>
-										{extraArgsErr}
-									</div>
-								)}
-							</div>
-						</div>
-					</FieldGroup>
-				)}
-				{/* NPU capability matrix — replaces Model+Template for NPU slots */}
-				{slot.device === "npu" &&
-					(() => {
-						// Full catalogue per lane (installed + downloadable) — NOT filtered by
-						// `installed`, so any tag can be picked and pulled on demand. Lane
-						// split by tag family (whisper → ASR, embed → Embed, else Chat).
-						const chatModels = flmModels.filter(
-							(m) =>
-								m.model &&
-								!m.model?.toLowerCase().includes("whisper") &&
-								!m.model?.toLowerCase().includes("embed"),
-						);
-						// Non-installed options carry a ⬇ marker; picking one downloads first.
-						const optLabel = (m) =>
-							m.installed ? m.model : `${m.model}  ⬇ download`;
-						// True while THIS tag is downloading (used to gate + show progress).
-						const pulling = (tag) => pull.inFlight && pull.modelId === tag;
-						const pullPct = pull.pct != null ? `${pull.pct}%` : "…";
-						return (
-							<>
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>NPU · Chat</span>
-										<FieldInfoIcon description="NPU language model. Pick any model — downloads
-											automatically." />
-									</div>
-									<div className="form-ctl">
-										<span
-											style={{ display: "flex", alignItems: "center", gap: 8 }}
-										>
-											<PillToggle
-												on={npuChat}
-												disabled={npuPending || saving}
-												label="Chat"
-												stateText={npuChat ? "On" : "Off"}
-												onToggle={(next) => {
-													setNpuChat(next);
-													applyNpu({ chat: next }, "chat");
-												}}
-											/>
-											<select
-												className="input mono"
-												style={{ width: 200 }}
-												value={npuChatModel}
-												onChange={(e) =>
-													onPickNpuModel("chat", "chatModel", e.target.value)
-												}
-												disabled={
-													npuPending || saving || !npuChat || pull.inFlight
-												}
-											>
-												{chatModels.map((m) => (
-													<option key={m.model} value={m.model}>
-														{optLabel(m)}
-													</option>
-												))}
-											</select>
-											{pulling(npuChatModel) && (
-												<span style={{ fontSize: 11, color: "var(--accent)" }}>
-													⬇ {pullPct}
-												</span>
-											)}
-										</span>
-									</div>
-								</div>
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>NPU · ASR</span>
-										<FieldInfoIcon description="Speech-to-text on the NPU (whisper). Shares the NPU
-											process." />
-									</div>
-									<div className="form-ctl">
-										<span
-											style={{ display: "flex", alignItems: "center", gap: 8 }}
-										>
-											<PillToggle
-												on={npuAsr}
-												disabled={npuPending || saving || pull.inFlight}
-												label="ASR"
-												stateText={npuAsr ? "On" : "Off"}
-												onToggle={(next) => {
-													setNpuAsr(next);
-													applyNpu({ asr: next }, "ASR");
-												}}
-											/>
-											<span style={{ fontSize: 11, color: "var(--fg-5)" }}>
-												whisper-v3 (fixed)
-											</span>
-										</span>
-									</div>
-								</div>
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>NPU · Embed</span>
-										<FieldInfoIcon description="Text embeddings on the NPU (embed-gemma). Shares the NPU
-											process." />
-									</div>
-									<div className="form-ctl">
-										<span
-											style={{ display: "flex", alignItems: "center", gap: 8 }}
-										>
-											<PillToggle
-												on={npuEmbed}
-												disabled={npuPending || saving || pull.inFlight}
-												label="Embed"
-												stateText={npuEmbed ? "On" : "Off"}
-												onToggle={(next) => {
-													setNpuEmbed(next);
-													applyNpu({ embed: next }, "Embed");
-												}}
-											/>
-											<span style={{ fontSize: 11, color: "var(--fg-5)" }}>
-												embed-gemma (fixed)
-											</span>
-										</span>
-									</div>
-								</div>
-								{npuErr && (
-									<div className="hint" style={{ color: "var(--err)" }}>
-										{npuErr}
-									</div>
-								)}
-							</>
-						);
-					})()}
-
-				<FieldGroup label="Inference" hint="behavior">
-					{/* C4 — Reasoning pill (llm slots only). Instant-apply via
-          PUT /config { enable_thinking }; the server reads it live on the next
-          request, no restart needed. Optimistic set-before-mutate +
-          revert-on-error (mirrors MTP/Vision). Default-OFF: null/undefined
-          on disk renders as off. */}
-					{slot.type === "llm" && (
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Reasoning</span>
-								<FieldInfoIcon description="Stream reasoning before the answer. Off = faster, direct
-									replies. Applies to the next message." />
-							</div>
-							<div className="form-ctl">
-								<PillToggle
-									on={thinking}
-									disabled={thinkingPending || saving}
-									label="Reasoning"
-									stateText={thinking ? "On" : "Off"}
-									onToggle={async (next) => {
-										setThinking(next);
-										setThinkingPending(true);
-										setSubmitErr(null);
-										setThinkingErr(null);
-										try {
-											await editMut.mutateAsync({
-												name: slot.name,
-												body: { enable_thinking: next },
-											});
-											window.__hal0Toast &&
-												window.__hal0Toast(
-													`${slot.name} reasoning ${next ? "on" : "off"} — applies to next message`,
-													"ok",
-												);
-										} catch (err) {
-											setThinking(!next);
-											setThinkingErr(
-												err?.message || "reasoning toggle failed",
-											);
-										} finally {
-											setThinkingPending(false);
-										}
-									}}
-								/>
-								{thinkingErr && (
-									<div className="hint" style={{ color: "var(--err)" }}>
-										{thinkingErr}
-									</div>
-								)}
-							</div>
-						</div>
-					)}
-					{/* MTP — tri-state (Auto / On / Off) after the profile↔model separation.
-          Renders whenever the slot is an LLM (operator feedback: hiding the
-          row when the model was ineligible left the state undiscoverable —
-          you couldn't see WHY MTP was off, couldn't find Auto, and the
-          force-on escape hatch had no UI). Non-LLM slot types
-          (embed/rerank/tts/…) skip the row, where MTP is meaningless.
-          Auto (null) defers to model-eligibility × profile opt-in; the
-          MtpControl surfaces whether Auto is currently effective so "Auto"
-          never masks an inactive state. Instant-apply via PUT /config +
-          non-blocking cold restart. */}
-					{slot.type === "llm" &&
-						(() => {
-							const cur = slot.model_id || slot.model || "";
-							const m = (modelsQuery.data ?? [])
-								.map(normalizeApiModel)
-								.find((x) => x.id === cur);
-							// Same eligibility rule as the server
-							// (`model_is_mtp_eligible`): the `mtp` tag OR a delimited MTP name
-							// marker on the model.
-							const modelEligible = isMtpEligibleModel(m);
-							// Auto is effective only when the model is eligible AND the slot's
-							// profile opts into MTP — mirror the server's _effective_mtp rule so
-							// the hint never disagrees with what actually launches.
-							const prof = (profilesQuery.data ?? []).find(
-								(p) => p.name === slot.profile,
-							);
-							const profileOptsIn = !!prof?.mtp;
-							const autoActive = modelEligible && profileOptsIn;
-							const inactiveReason = !modelEligible && !profileOptsIn
-								? "model has no MTP heads and profile doesn't enable MTP"
-								: !modelEligible
-									? "model has no MTP heads"
-									: "profile doesn't enable MTP";
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>MTP</span>
-										<FieldInfoIcon description="Multi-token speculative decoding. Auto follows the model
-											+ profile; On/Off force it. Restarts the container." />
-									</div>
-									<div className="form-ctl">
-										<MtpControl
-											value={mtp}
-											autoActive={autoActive}
-											inactiveReason={inactiveReason}
-											forceOnRisky={!modelEligible}
-											disabled={saving}
-											onChange={async (next) => {
-												// Optimistic — set local state before the PUT, revert on
-												// error (mirrors Vision).
-												const prev = mtp;
-												setMtp(next);
-												setSubmitErr(null);
-												const word = next == null
-													? "auto"
-													: next
-														? "on"
-														: "off";
-												try {
-													await editMut.mutateAsync({
-														name: slot.name,
-														body: { mtp: next },
-													});
-													restartMut.mutate(slot.name, {
-														onError: (err) =>
-															window.__hal0Toast &&
-																	window.__hal0Toast(
-																		`MTP restart failed — ${err?.message || "see logs"}`,
-																		"err",
-																	),
-													});
-													window.__hal0Toast &&
-														window.__hal0Toast(
-															`${slot.name} MTP ${word} — restarting in the background`,
-															"info",
-														);
-												} catch (err) {
-													setMtp(prev);
-													setSubmitErr(
-														err?.message || "MTP change failed",
-													);
-												}
-											}}
-										/>
-									</div>
-								</div>
-							);
-						})()}
-					{/* #901: Vision pill — gated to slots whose bound model carries an mmproj
+      <FieldGroup label="Inference" hint="behavior">
+      {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
+          own PUT /config), no restart: _slot_thinking_default reads it live
+          on the next request. */}
+      {slot.type === "llm" && (
+        <div className="form-row">
+          <div className="form-lbl">
+            <span>Reasoning</span>
+            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies. Applies to the next message.</span>
+          </div>
+          <div className="form-ctl">
+            <PillToggle
+              on={thinking}
+              disabled={thinkingPending}
+              label="Reasoning"
+              stateText={thinking ? "On" : "Off"}
+              onToggle={async (next) => {
+                setThinking(next);
+                setThinkingPending(true);
+                setSubmitErr(null);
+                setThinkingErr(null);
+                try {
+                  await editMut.mutateAsync({ name: slot.name, body: { enable_thinking: next } });
+                  window.__hal0Toast && window.__hal0Toast(`${slot.name} reasoning ${next ? "on" : "off"} — applies to next message`, "ok");
+                } catch (err) {
+                  setThinking(!next);
+                  setThinkingErr(err?.message || "reasoning toggle failed");
+                } finally {
+                  setThinkingPending(false);
+                }
+              }}
+            />
+            {thinkingErr && <div className="hint" style={{ color: "var(--err)" }}>{thinkingErr}</div>}
+          </div>
+        </div>
+      )}
+      {/* MTP — tri-state (Auto/On/Off) after the profile↔model separation.
+          Renders when the loaded model is MTP-ELIGIBLE (carries the "mtp" tag)
+          OR the slot already has an explicit override, so a forced state is
+          always adjustable. NOT gated on rocm any more — the draft device now
+          tracks the profile backend, so MTP works wherever an MTP profile runs.
+          Auto (null) defers to model-eligibility × profile opt-in; the control
+          shows whether Auto is currently effective. Instant-apply via PUT
+          /config + non-blocking restart. */}
+      {(() => {
+        // ALWAYS visible on LLM slots (operator feedback): hiding the row when
+        // the model is ineligible left the state undiscoverable — you couldn't
+        // see WHY MTP was off, couldn't find Auto, and the force-on escape
+        // hatch (for models the eligibility heuristics miss) had no UI. The
+        // tri-state + reason line explains itself; only non-LLM slot types
+        // (embed/rerank/tts/…) skip the row, where MTP is meaningless.
+        if ((slot.type || "llm") !== "llm") return null;
+        const cur = slot.model_id || slot.model || "";
+        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
+        // Same eligibility rule as the server (`model_is_mtp_eligible`): the
+        // `mtp` tag OR a delimited MTP name marker.
+        const modelEligible = isMtpEligibleModel(m);
+        // Auto is effective only when the model is eligible AND the slot's
+        // profile opts into MTP — mirror the server's _effective_mtp rule so
+        // the hint never disagrees with what actually launches.
+        const prof = (profilesQuery.data ?? []).find(p => p.name === slot.profile);
+        const profileOptsIn = !!prof?.mtp;
+        const autoActive = modelEligible && profileOptsIn;
+        const inactiveReason = !modelEligible && !profileOptsIn
+          ? "model has no MTP heads and profile doesn't enable MTP"
+          : !modelEligible
+            ? "model has no MTP heads"
+            : "profile doesn't enable MTP";
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>MTP</span>
+              <span className="sub">Multi-token speculative decoding. Auto follows the model + profile; On/Off force it. Restarts the container.</span>
+            </div>
+            <div className="form-ctl">
+              <MtpControl
+                value={mtp}
+                autoActive={autoActive}
+                inactiveReason={inactiveReason}
+                forceOnRisky={!modelEligible}
+                disabled={saving}
+                onChange={async (next) => {
+                  // Optimistic — set local state before the PUT, revert on error.
+                  const prev = mtp;
+                  setMtp(next);
+                  setSubmitErr(null);
+                  const word = next == null ? "auto" : (next ? "on" : "off");
+                  try {
+                    await editMut.mutateAsync({ name: slot.name, body: { mtp: next } });
+                    restartMut.mutate(slot.name, {
+                      onError: (err) => window.__hal0Toast && window.__hal0Toast(`MTP restart failed — ${err?.message || "see logs"}`, "err"),
+                    });
+                    window.__hal0Toast && window.__hal0Toast(`${slot.name} MTP ${word} — restarting in the background`, "info");
+                  } catch (err) {
+                    setMtp(prev);
+                    setSubmitErr(err?.message || "MTP change failed");
+                  }
+                }}
+              />
+            </div>
+          </div>
+        );
+      })()}
+      {/* Continuous batching — the --parallel / -np sequence-slot count. Shown
+          for llama-server slots (llm/embed/rerank), not tts/image/npu (the NPU
+          admits a single LLM context). Rides Save + a cold restart. When >1 the
+          backend also emits --kv-unified so --ctx-size stays a shared pool. */}
+      {(() => {
+        const t = slot.type || "llm";
+        if (!["llm", "embedding", "reranking"].includes(t) || slot.device === "npu") return null;
+        const parNum = Number(String(parallel).trim());
+        const showPool = Number.isInteger(parNum) && parNum > 1;
+        const ctxNow = Number(String(ctx).trim()) || 0;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Parallel</span>
+              <span className="sub warn">⟳ restart required on change</span>
+            </div>
+            <div className="form-ctl">
+              <input
+                className={"input mono" + (fieldErrs.parallel ? " input-err" : "")}
+                type="number"
+                min="1"
+                step="1"
+                placeholder="1 (profile default)"
+                value={parallel}
+                onChange={e => { setParallel(e.target.value); setFieldErrs(p => ({...p, parallel: undefined})); }}
+              />
+              <div className="hint">
+                Sequence slots for continuous batching — concurrent requests share the
+                loaded weights instead of serializing. Empty = inherit the profile.
+                Interactive slots want 1–2 (per-stream speed ≈ 1/N); agent fan-in wants 4–8.
+              </div>
+              {showPool && (
+                <div className="hint mono">
+                  {parNum} slots share the {ctxNow ? `${ctxNow.toLocaleString()}-token ` : ""}context pool
+                  (--kv-unified); worst case, {parNum} simultaneous full-context requests get ~
+                  {ctxNow ? Math.floor(ctxNow / parNum).toLocaleString() : `ctx/${parNum}`} each.
+                </div>
+              )}
+              {fieldErrs.parallel && (
+                <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.parallel}</div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+      {/* #901: Vision pill — gated to slots whose bound model carries an mmproj
           sidecar (the registry Model.mmproj presence flag). Toggling drops or
           adds the ~0.9 GB projector; instant-apply via PUT /config {vision}
           plus a non-blocking cold restart (mirrors MTP). Default-ON, so a
@@ -1688,8 +1470,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						Advanced
 					</summary>
 
-					{/* Ngl, Parallel, and Extra Args moved to the Model section above.
-          (rope_freq_base was removed — deprecated; set it via extra_args.) */}
+      {/* n_gpu_layers moved to the Hardware grid above (spec-hw-slot-ownership
+          §2): NGL is a top-level slot-owned HW field now, not a [model] default.
+          (rope_freq_base was removed — deprecated; advanced users set it via
+          extra_args below.) */}
 
 					{/* Flags preview — backend-provided resolved_command (real podman argv).
           The resolved command is computed SERVER-SIDE (profile + MTP + image
