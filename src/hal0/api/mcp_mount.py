@@ -248,6 +248,15 @@ def mount_mcp_servers(
     the memory MCP itself uses.
     """
     from hal0.mcp.admin import build_server as build_admin_server
+    from hal0.mcp.admin import install_admin_route_map
+
+    # Autogenerate the admin route map from the LIVE route table before the
+    # server is built. ``build_admin_server`` reads ``_PATH_ARGS`` to advertise
+    # each tool's schema in tools/list, so the map MUST be installed first. By
+    # this point every ``/api/*`` router is included (only the SPA catch-all +
+    # the /mcp mounts land afterwards, and both are skipped by the walker), so
+    # every classified route resolves (spec §4.4, route-id keyed, deny-by-default).
+    install_admin_route_map(app)
 
     # DNS-rebinding allowlist for every mounted FastMCP sub-app. Set on
     # the server's settings *before* ``streamable_http_app()`` builds the
