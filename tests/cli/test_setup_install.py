@@ -155,3 +155,75 @@ async def test_apply_via_api_non_conflict_error_still_raises(monkeypatch):
         pass
     else:  # pragma: no cover - defensive
         raise AssertionError("expected HTTPStatusError for a 500 response")
+
+
+# ── _apply_via_api: timeout configuration (issue: 150lxc installer) ───────
+
+
+def test_setup_http_timeout_default_is_300():
+    """Default timeout is 300s (was 30s, too tight for cold-start apply)."""
+    import hal0.cli.setup_install as m
+
+    assert m.SETUP_HTTP_TIMEOUT_SECS == 300.0
+
+
+def test_setup_http_timeout_env_var_override(monkeypatch):
+    """Operators on slow hardware can raise (or lower) the timeout via env."""
+    import importlib
+
+    import hal0.cli.setup_install as m
+
+    monkeypatch.setenv("HAL0_SETUP_TIMEOUT_SECS", "45.5")
+    importlib.reload(m)
+    try:
+        assert m.SETUP_HTTP_TIMEOUT_SECS == 45.5
+    finally:
+        # Restore default for other tests in this module.
+        monkeypatch.delenv("HAL0_SETUP_TIMEOUT_SECS", raising=False)
+        importlib.reload(m)
+
+
+def test_setup_http_timeout_bad_env_falls_back_to_default(monkeypatch):
+    """A non-numeric HAL0_SETUP_TIMEOUT_SECS falls back to 300s, not a crash."""
+    import importlib
+
+    import hal0.cli.setup_install as m
+
+    monkeypatch.setenv("HAL0_SETUP_TIMEOUT_SECS", "not-a-number")
+    importlib.reload(m)
+    try:
+        assert m.SETUP_HTTP_TIMEOUT_SECS == 300.0
+    finally:
+        monkeypatch.delenv("HAL0_SETUP_TIMEOUT_SECS", raising=False)
+        importlib.reload(m)
+
+
+async def test_apply_via_api_uses_configured_timeout(monkeypatch):
+    """The HTTP client must use SETUP_HTTP_TIMEOUT_SECS, not a hardcoded value."""
+    import hal0.cli.setup_install as m
+
+    monkeypatch.setattr(m, "SETUP_HTTP_TIMEOUT_SECS", 123.0)
+
+    captured_timeout: dict = {}
+
+    class _CapturingClient(_FakeAsyncClient):
+        def __init__(self, *args, **kwargs):
+            # ``_dashboard_url`` also instantiates a client; key the capture to
+            # the POST path only by inspecting the caller's stack frame via the
+            # last kwarg passed to ``post`` upstream is fragile, so just take
+            # the FIRST client (the POST) and reuse the same fake for the GET.
+            if "value" not in captured_timeout:
+                captured_timeout["value"] = kwargs.get("timeout")
+
+    resp = httpx.Response(
+        200,
+        json={"model_ids": [], "slots": []},
+        request=httpx.Request("POST", "http://127.0.0.1:8080/api/install/apply-selections"),
+    )
+    _FakeAsyncClient._post_response = resp
+    monkeypatch.setattr("hal0.cli.setup_install.httpx.AsyncClient", _CapturingClient)
+
+    await _apply_via_api(_empty_selections())
+
+    assert captured_timeout["value"] is not None
+    assert captured_timeout["value"].connect == 123.0
