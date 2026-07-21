@@ -21,7 +21,7 @@ import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
-import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
+import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
 
 const {
@@ -788,7 +788,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					/>
 				</div>
 
-				<FieldGroup label="Slot" hint="this instance">
+				{/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
+          The slot owns the physical/placement layer as 4 typed fields:
+          DEVICE · IMAGE · BINARY · THREADS · NGL. Every
+          HW change is a cold restart, applied on Save. */}
+				<FieldGroup
+					label="Slot"
+					hint="device · image · binary · threads · ngl"
+				>
 					<div className="form-row">
 						<div className="form-lbl">
 							<span>Name</span>
@@ -831,16 +838,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</div>
 						</div>
 					</div>
-				</FieldGroup>
-
-				{/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
-          The slot owns the physical/placement layer as 4 typed fields:
-          DEVICE · IMAGE · Profile · THREADS · NGL. Every
-          HW change is a cold restart, applied on Save. */}
-				<FieldGroup
-					label="Hardware"
-					hint="device · image · profile · threads · ngl"
-				>
 					{(() => {
 						const devices = Array.isArray(metaEnums?.devices)
 							? metaEnums.devices
@@ -939,10 +936,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Profile</span>
+										<span>Binary</span>
 										<span className="sub">
 											⟳ Which runner build to use. Empty = auto-detect from
-											device.
+											device. (The bound runner shows on the slot card chip —
+											change it by picking a different model.)
 										</span>
 									</div>
 									<div className="form-ctl">
@@ -1019,7 +1017,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									<div className="form-lbl">
 										<span>Ngl</span>
 										<span className="sub">
-											GPU layers to offload. -1 = all layers, 0 = CPU only.
+											GPU layers to offload — emits -ngl to the runner.
+											-1 = all layers, 0 = CPU only.
 										</span>
 									</div>
 									<div className="form-ctl">
@@ -1129,7 +1128,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Context</span>
-								<span className="sub">⟳ (~model-load seconds)</span>
+								<span className="sub">
+									⟳ ctx_size — context window in tokens. PATCHes /defaults;
+									takes effect on next request. (~model-load seconds)
+								</span>
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1333,8 +1335,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							<div className="form-lbl">
 								<span>Extra Args</span>
 								<span className="sub">
-									Extra flags to pass to the runner. These override profile
-									defaults.
+									extra_args — per-slot override flags appended to the runner
+									argv. Takes precedence over the profile defaults.
 								</span>
 							</div>
 							<div className="form-ctl">
@@ -1495,6 +1497,149 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					})()}
 
 				<FieldGroup label="Inference" hint="behavior">
+					{/* C4 — Reasoning pill (llm slots only). Instant-apply via
+          PUT /config { enable_thinking }; the server reads it live on the next
+          request, no restart needed. Optimistic set-before-mutate +
+          revert-on-error (mirrors MTP/Vision). Default-OFF: null/undefined
+          on disk renders as off. */}
+					{slot.type === "llm" && (
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Reasoning</span>
+								<span className="sub">
+									Stream reasoning before the answer. Off = faster, direct
+									replies. Applies to the next message.
+								</span>
+							</div>
+							<div className="form-ctl">
+								<PillToggle
+									on={thinking}
+									disabled={thinkingPending || saving}
+									label="Reasoning"
+									stateText={thinking ? "On" : "Off"}
+									onToggle={async (next) => {
+										setThinking(next);
+										setThinkingPending(true);
+										setSubmitErr(null);
+										setThinkingErr(null);
+										try {
+											await editMut.mutateAsync({
+												name: slot.name,
+												body: { enable_thinking: next },
+											});
+											window.__hal0Toast &&
+												window.__hal0Toast(
+													`${slot.name} reasoning ${next ? "on" : "off"} — applies to next message`,
+													"ok",
+												);
+										} catch (err) {
+											setThinking(!next);
+											setThinkingErr(
+												err?.message || "reasoning toggle failed",
+											);
+										} finally {
+											setThinkingPending(false);
+										}
+									}}
+								/>
+								{thinkingErr && (
+									<div className="hint" style={{ color: "var(--err)" }}>
+										{thinkingErr}
+									</div>
+								)}
+							</div>
+						</div>
+					)}
+					{/* MTP — tri-state (Auto / On / Off) after the profile↔model separation.
+          Renders whenever the slot is an LLM (operator feedback: hiding the
+          row when the model was ineligible left the state undiscoverable —
+          you couldn't see WHY MTP was off, couldn't find Auto, and the
+          force-on escape hatch had no UI). Non-LLM slot types
+          (embed/rerank/tts/…) skip the row, where MTP is meaningless.
+          Auto (null) defers to model-eligibility × profile opt-in; the
+          MtpControl surfaces whether Auto is currently effective so "Auto"
+          never masks an inactive state. Instant-apply via PUT /config +
+          non-blocking cold restart. */}
+					{slot.type === "llm" &&
+						(() => {
+							const cur = slot.model_id || slot.model || "";
+							const m = (modelsQuery.data ?? [])
+								.map(normalizeApiModel)
+								.find((x) => x.id === cur);
+							// Same eligibility rule as the server
+							// (`model_is_mtp_eligible`): the `mtp` tag OR a delimited MTP name
+							// marker on the model.
+							const modelEligible = isMtpEligibleModel(m);
+							// Auto is effective only when the model is eligible AND the slot's
+							// profile opts into MTP — mirror the server's _effective_mtp rule so
+							// the hint never disagrees with what actually launches.
+							const prof = (profilesQuery.data ?? []).find(
+								(p) => p.name === slot.profile,
+							);
+							const profileOptsIn = !!prof?.mtp;
+							const autoActive = modelEligible && profileOptsIn;
+							const inactiveReason = !modelEligible && !profileOptsIn
+								? "model has no MTP heads and profile doesn't enable MTP"
+								: !modelEligible
+									? "model has no MTP heads"
+									: "profile doesn't enable MTP";
+							return (
+								<div className="form-row">
+									<div className="form-lbl">
+										<span>MTP</span>
+										<span className="sub">
+											Multi-token speculative decoding. Auto follows the model
+											+ profile; On/Off force it. Restarts the container.
+										</span>
+									</div>
+									<div className="form-ctl">
+										<MtpControl
+											value={mtp}
+											autoActive={autoActive}
+											inactiveReason={inactiveReason}
+											forceOnRisky={!modelEligible}
+											disabled={saving}
+											onChange={async (next) => {
+												// Optimistic — set local state before the PUT, revert on
+												// error (mirrors Vision).
+												const prev = mtp;
+												setMtp(next);
+												setSubmitErr(null);
+												const word = next == null
+													? "auto"
+													: next
+														? "on"
+														: "off";
+												try {
+													await editMut.mutateAsync({
+														name: slot.name,
+														body: { mtp: next },
+													});
+													restartMut.mutate(slot.name, {
+														onError: (err) =>
+															window.__hal0Toast &&
+																	window.__hal0Toast(
+																		`MTP restart failed — ${err?.message || "see logs"}`,
+																		"err",
+																	),
+													});
+													window.__hal0Toast &&
+														window.__hal0Toast(
+															`${slot.name} MTP ${word} — restarting in the background`,
+															"info",
+														);
+												} catch (err) {
+													setMtp(prev);
+													setSubmitErr(
+														err?.message || "MTP change failed",
+													);
+												}
+											}}
+										/>
+									</div>
+								</div>
+							);
+						})()}
 					{/* #901: Vision pill — gated to slots whose bound model carries an mmproj
           sidecar (the registry Model.mmproj presence flag). Toggling drops or
           adds the ~0.9 GB projector; instant-apply via PUT /config {vision}

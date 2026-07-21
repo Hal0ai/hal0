@@ -21,6 +21,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **Slot drawer — restore the per-slot `Reasoning` and `MTP` controls** (fixes γ-suite, #1333). The `feat(ui): slot drawer & model drawer rework` landed with Reasoning + MTP removed from the slot drawer under "now model-owned"; the model drawer carries model-level defaults but operators need a per-slot override. Re-added the Reasoning pill (llm slots only, instant-apply via `PUT /config { enable_thinking }`) and the MTP pill (llm slots only, tri-state Auto/On/Off, instant-apply via `PUT /config { mtp }` + non-blocking cold restart) into the `Inference` FieldGroup. Renamed the HW grid `Hardware` FieldGroup → `Slot` (the drawer is now Slot / Model / Inference) and the runner-binary select label `Profile` → `Binary` (the bound runner stays on the slot card chip — no editable profile select in the drawer). The 12 γ-suite slot-drawer tests that were red on main since 2026-07-20 (#1333) all pass.
+
 ## [1.0.0] — unreleased (R5 · the rework release)
 
 The R5 rework puts the platform back together as a genuine 1.0: memory and
@@ -31,6 +35,7 @@ unprivileged/podman-5.7 substrates — clean install and in-place upgrade, exit 
 Full operator walkthrough: `docs/hal0-install-migration-guide.html`.
 
 ### Highlights
+
 - **FLAGS-own — flags belong to models.** Launch flags, device, and chat-template now live on the model; a slot is just `(id, name, model, port, state)`. Profiles became copy-on-stamp templates. The argv resolver stops reading profile/slot overrides at launch; `model.defaults` carries the materialized tune. The managed-arg denylist now also screens a model's `defaults.extra_args` (closing a bypass where a denied flag reached the container).
 - **Memory is Hindsight-only.** Honcho removed. Tools renamed to the upstream surface — `hindsight_recall` / `hindsight_retain` / `hindsight_reflect` (old `hal0_memory_*` kept as aliases); `reflect` implemented; config moved to `~/.hermes/hindsight/config.json` (`local_external`).
 - **Hermes brain-lane relocated into the api boot lifespan** — persona seed + identity/brain-profile registration + self-report now run on every restart (the one hook fresh/update/dev share), reached in-process rather than over loopback HTTP.
@@ -39,11 +44,13 @@ Full operator walkthrough: `docs/hal0-install-migration-guide.html`.
 - **Boot split into 14 named, observable phases** with a typed `BootState`; drift-watch fixtures + a `hermes-bump` runbook added.
 
 ### Breaking
+
 - **Launch flags/device/chat-template moved off slots onto models.** Existing slot TOMLs with those fields still load (config is `extra="allow"`) and are ignored at launch until you run the fold migrator — but the slot-level surface is deprecated and `HAL0-SUNSET`-stamped for removal.
 - **Honcho removed** as a memory engine; **`hal0_memory_*` tools renamed** to `hindsight_*` (aliases retained this release).
 - Deprecated surfaces machine-stamped `HAL0-SUNSET: v1.0.0` for scheduled removal: the `--backend` flag (use `--provider`), `SlotConfig.runtime`/`workers`, the `cognee` engine literal, and several legacy CLI aliases.
 
 ### Migrations
+
 - **Upgrade in place** — re-run the installer (or `hal0 update`); it is idempotent + non-destructive and never clobbers existing config. No reinstall.
 - **Honcho → Hindsight** (only boxes that ran Honcho): `hal0 memory migrate --from honcho --to hindsight` before upgrading. Boxes already on Hindsight are a no-op.
 - **Slot-flag fold** (operator-run): the migrator folds slot tunes into model defaults; it **refuses the whole run** (no partial write) if slots share a model with divergent tunes — resolve each shared model (canonicalize or split) first. Dry-run by default; back up `hal0.db` + slot dirs before applying.
@@ -58,23 +65,28 @@ update); and a memory security fix stops one agent deleting another's private
 memories.
 
 ### Highlights
+
 - **Turnstone — a second heavyweight bundled agent** joins Hermes: a native `turnstone-server` on loopback :9129, installed into its own managed PyPI venv, coexisting with Hermes via relaxed single-pick (#1299).
 - **Turnstone is a first-class companion service** — it shows in the Services pane and the Overview health card with start/stop/restart controls, next to Hermes/Hindsight/OpenWebUI.
 - **hal0-rocmfpx is now the universal default runner for AMD GPUs** — one unified image (Vulkan/RADV + HIP) replaces the per-lane toolboxes; CUDA and CPU-only lanes keep their lean images (#1297).
 - **Memory: private-visibility is now enforced on delete** — in unified-bank mode one agent could delete another agent's `visibility:private` memory by id; `delete` now applies the same fail-closed ACL as read/search/list.
 
 ### Migrations
+
 - `hal0 update` automatically re-pins existing AMD-GPU slots from the old `amd-strix-halo-toolboxes` images to the unified `hal0-rocmfpx` runner (no-op on CUDA/CPU lanes) (#1297).
 
 ### Added
+
 - **Turnstone bundled agent** — provisioning pipeline (managed PyPI venv, JWT-secret generation, model automap) plus hal0 provider/memory wiring, coexisting with Hermes (#1299).
 - **Turnstone companion-service registration** — a `ServiceDef` + systemd health probe, so turnstone appears in `/api/services` (Services pane, full lifecycle actions) and `/api/services/health` (Overview card + sidebar status).
 
 ### Changed
+
 - **hal0-rocmfpx as the default AMD-GPU image** — basic seed profiles defer to a manifest-driven resolver that returns the unified runner for AMD lanes, the CUDA image for NVIDIA, and the lean toolbox for CPU-only (#1297).
 - PyPI distribution is published under the name **`hal0ai`** (the import package and `hal0`/`hal0-agent` console scripts are unchanged) (#1298).
 
 ### Fixed
+
 - **Memory delete ACL** — `delete` enforces the `visibility:private` owner check in unified-bank mode, so an agent can no longer delete another agent's private memory by (guessable) document id; unresolved ids are withheld fail-closed (#1302).
 
 ## [0.9.7.3] — 2026-07-12
@@ -87,6 +99,7 @@ the unified per-agent memory model, and a large batch of install/setup/agent
 fixes surfaced by end-to-end reinstall testing on a clean box.
 
 ### Highlights
+
 - **Installs self-heal across environments** — auto-provision Python 3.12 and Node 20 LTS when missing, tolerate podman or docker, and survive hardened/root umasks (#1291, #1289).
 - **`hal0 doctor` and bundled-agent installs work on packaged installs** — FHS-aware resolution fixes the "packaged without scripts" and "could not locate preflight.sh" failures on non-editable installs (#1284, #1285).
 - **Crash-safe agent switching** — a failed `agent install --switch` no longer bricks the running agent; it verifies the target first and rolls back on failure (#1285).
@@ -94,12 +107,14 @@ fixes surfaced by end-to-end reinstall testing on a clean box.
 - **pi-coder and opencode join Hermes** as bundled, single-pick agents (#1254, #1271).
 
 ### Added
+
 - **Node.js LTS auto-provisioning** in the installer (the dashboard build and pi-coder/opencode all need npm) plus a curated `qwen3-embedding-0-6b` model for the memory pipeline (#1291, #1294).
 - **Unified per-agent memory** — self-hosted Honcho v3 provider and a unified-bank model with server-side tagging, plus `hal0 memory bank/ops/mm/recall` and `migrate unify` CLI (#1243, #1244, #1257).
 - **pi-coder** agent (provisioning, hal0 provider/memory plugins, live dashboard card) and the **opencode** bundled agent (#1254, #1271).
 - **hal0-brain** as a first-class profile (#1258), **upstream controls** CLI and UI (#1279), and a **bench queue** dropdown with lane/tool-eval/tune options (#1255).
 
 ### Fixed
+
 - **Installer/preflight robustness** — Python floor raised to 3.12 with auto-install, hardened-umask permissions, a container-runtime smoke test that no longer false-fails, and Node/disk/graphroot preflight gaps (#1291, #1292).
 - **Honcho standup** — unbound-var abort, pgvector embedding-dim reconcile, compose-provider and migration ordering, AppArmor-in-LXC, and full `--purge` teardown (#1293, #1294, #1295, #1287).
 - **docker/podman portability** — runtime-appropriate slot units and a PATH-based runtime probe (#1289).
@@ -108,6 +123,7 @@ fixes surfaced by end-to-end reinstall testing on a clean box.
 - **CLI** — editable-install `hal0 update` refusal, footgun confirmation gates, and command consolidation (#1274).
 
 ### Changed
+
 - **comfyui**, **doctor**, and **agent** helpers resolve bundled scripts and assets FHS-aware so they work on packaged (non-editable) installs (#1286, #1284, #1285).
 - Docs — ADR/Cognee→Hindsight sweep, `hal0/chat`→`hal0/agent` alias, fresh-box first-run journey, and a loud LAN-only bind warning (#1280, #1276, #1275).
 
@@ -118,26 +134,31 @@ Hotfix for a fresh-install blocker — Hermes never auto-provisioned on a clean
 improvements merged since 0.9.7.
 
 ### Highlights
+
 - **Hermes now auto-provisions on a fresh install** — no more manual `--adopt`/`--repair`; all bootstrap phases complete and the gateway comes up managed, idle until a bot token is added (#1239).
 - **MiniMax and DeepSeek** are now one-click options in the upstream provider catalog (#1236).
 - **Keyboard-driven `hal0 setup`** — the guided setup TUI gets real arrow-key navigation and a clearer model picker (#1237).
 - **Memory subsystem toggle** — `hal0 memory enable` / `disable` / `status` replace the old install-time env flag (#1240).
 
 ### Added
+
 - **MiniMax + DeepSeek** upstream catalog entries (OpenAI-compatible, bearer auth) — selectable in Slots ▸ Endpoints ▸ Add upstream with prefilled URL and auth (#1236).
 - **Arrow-key navigation in the guided-setup TUI**: ↑↓/jk move, space toggles apps/agents, enter selects; scaffold/skip are clean navigable rows; numbered entry still works over a pipe or in CI (#1237).
 - **`hal0 memory enable` / `disable` / `status`** commands, plus the `[memory].enabled` config flag (#1240).
 - **Retry failed graph extractions** — a Memory-tab button that re-runs Hindsight's failed extraction operations, plus mental-model delete (#1235).
 
 ### Fixed
+
 - **Hermes fresh-install provisioning** (#1239, closes #1238). Two chained bugs aborted provisioning on every clean install: the api-lifespan seed populated `HERMES_HOME` before the bootstrap could claim it ("unclaimed HERMES_HOME"), and the gateway installer started a unit that hal0 then flagged as its own "foreign" gateway. The lifespan now stamps `.hal0-managed` before seeding and pre-writes the gateway secrets drop-in before the unit starts.
 - **Model-filters spacing** in the Endpoints upstream pane — the filter inputs no longer sit flush against the panel border (#1236).
 - **Graph-extraction consolidation reliability** in the Memory tab (#1235).
 
 ### Changed
+
 - The memory subsystem is now gated by **`[memory].enabled` in `hal0.toml`** (default on) instead of the installer-written `HAL0_MEMORY_ENABLED` env var; toggle it with `hal0 memory enable` / `disable` (#1240).
 
 ### Migrations
+
 - If you had disabled memory with `HAL0_MEMORY_ENABLED=0`, that env var is now ignored (memory defaults on) — run `hal0 memory disable` to keep it off (#1240).
 
 ## [0.9.7] — 2026-07-11
@@ -148,6 +169,7 @@ LLM providers get a first-class management surface, and the FLM/NPU
 stack settles onto canonical names with an automatic migration.
 
 ### Highlights
+
 - **hal0-brain steward.** The top-bar agent chat now drives every platform surface: it runs the full 74-tool `hal0-admin` MCP catalog under a per-persona tool policy, **pauses turns on gated tools** for inline approve/deny, replays tool history across turns, and renders reasoning + tool cards inline (#1208, #1215, #1221, #1222, #1223).
 - **Upstream model controls.** A full management surface for external providers (OpenRouter, Anthropic, OpenAI, Google AI Studio, Ollama, custom) — reactive CRUD, per-upstream model filters, an `enabled` kill-switch, and CLI + MCP + dashboard parity (#1228).
 - **Graceful restarts keep your downloads.** Model pulls no longer block a clean `hal0-api` shutdown, so restarting mid-download no longer trips the 90s SIGKILL that was killing in-flight pulls (#1225).
@@ -156,6 +178,7 @@ stack settles onto canonical names with an automatic migration.
 - **`hal0 update` verification actually works again.** Release signing now dual-emits a Sigstore bundle (with an embedded Rekor timestamp) so cosign verification survives the short-lived Fulcio cert's expiry — `curl … | bash` installs and in-app updates were failing verification 100% of the time on v0.9.2/0.9.3/0.9.5. Fully back-compatible with already-deployed clients (#1159).
 
 ### Added
+
 - **hal0-brain steward / agent chat as a control surface.** The dashboard's top-bar agent chat becomes a first-class operator for the whole platform:
   - **Full `hal0-admin` platform surface (#1208).** The admin MCP catalog grew from **28 to 74 tools**, replacing the slide-out's old hardcoded ~25-tool list, so the Brain can drive every surface end-to-end:
     - *Models* — `model_inspect` (read an HF repo before pulling), register / add-from-path, metadata edit (PUT), in-place HF re-pull (`model_update`), pull status/cancel, scan (+preview), catalogue, update-check, and store show/set/migrate. Pulls always land in the operator's configured `[models].store` (re-read per call; the tool descriptions state the contract).
@@ -190,11 +213,13 @@ stack settles onto canonical names with an automatic migration.
 - **`scripts/push-dev.sh`** — a push-based inner-loop deploy onto an editable box (#1193).
 
 ### Changed
+
 - The default LLM anchor is the seeded **`agent`** slot; the `coder` seed is retired and `hal0/chat` resolves to `hal0/agent`, on every install path (#1204, #1217).
 - The NPU trio's shadow slots are canonicalized to `flm-stt` / `flm-embed`, with a startup reconcile that migrates legacy names (#1210).
 - FLM host pulls land in the operator's resolved model store (#1211).
 
 ### Fixed
+
 - Model pulls no longer block a graceful `hal0-api` restart — the shutdown path drains pulls instead of being SIGKILLed at the 90s deadline, which was killing in-flight downloads (#1225).
 - FLM model pulls that died instantly in production — uvloop rejects the user/group spawn kwargs the pull worker passed (#1192).
 - FLM host pulls now land in the resolved store with robust 0-byte progress reporting (#1211).
@@ -207,22 +232,26 @@ stack settles onto canonical names with an automatic migration.
 - **Release signing survives Fulcio cert expiry (#1159).** Keyless cosign signing issues a ~10-minute Fulcio certificate; the old detached `.sig` + `.crt` carried no Rekor Signed Entry Timestamp, so `curl … | bash` installs and in-app `hal0 update` — which run hours or days after signing — had no trusted timestamp to anchor the signature and failed `verify-blob` **100% of the time** on v0.9.2/0.9.3/0.9.5 (the in-CI self-verify passed only because it ran seconds after signing). Releases now **dual-emit** a Sigstore bundle (`.tar.gz.bundle`, embedding the cert + signature + Rekor SET) alongside the legacy pair; the manifest carries `bundle_url` next to `sig_url`/`cert_url`, and `installer/bootstrap.sh` + the updater prefer `cosign verify-blob --bundle`, falling back to the legacy pair on manifests without it — so already-deployed (≤ v0.9.6.1) clients keep verifying through the transition. The legacy fields drop once fleet adoption is confirmed.
 
 ### Migrations
+
 - **FLM / NPU naming migration (#1229).** Existing NPU-trio installs move from the legacy shadow-slot names to canonical `flm-stt` / `flm-embed`. The migration runs automatically on startup, and `hal0 doctor` audits + repairs any slot left on the old scheme. Custom `profiles.toml` overrides that reference the old names should be updated.
 - **Agent replaces chat as the LLM anchor (#1204, #1217).** The `coder` seed is retired and `hal0/chat` now resolves to `hal0/agent`. Operators who pinned `hal0/chat` in a custom config should confirm the `agent` slot is seeded (it is, on startup) or repoint to `hal0/agent`.
 
 ## [0.9.6.1] — 2026-07-11
 
 ### Added
+
 - Model updates surface in the topbar notification bell: the update check now runs app-level, so "N model updates available" appears (with an Update all action) without opening the Models page, and the row self-clears once updates land. The Models page gains an always-visible "Check updates" button that bypasses the check's TTL cache when nothing is currently flagged.
 - `hal0-brain` agent profile: a third seeded persona (alongside `hermes` and `coder`) that stewards the platform from the dashboard's agent-chat slide-out — its own memory namespace (`private:hal0-brain`), a hal0-heavy system prompt (slot lifecycle, model setup, benchmarking), and the dedicated `brain` slot (`hal0/brain`) as the default model.
 - Board/agent chat streams a `{type:"thinking"}` SSE frame: explicit `reasoning_content` and inline `<think>…</think>` blocks are split out of the reply and rendered as a folded "thinking" section instead of raw tags.
 
 ### Changed
+
 - The top-bar agent chat now embodies the `hal0-brain` profile: it runs on `hal0/brain` (falls back to the `agent` slot via the resolver chain), and an operator-edited `hal0-brain` persona TOML overrides its system prompt/model without a code change.
 - Agent-chat suggestion chips are now platform-steward starters ("Help me create a new slot", "Download and set up a model", "Benchmark the model on a slot", "How's the hardware doing?").
 - Agent-chat replies render markdown (fences, lists, headings, bold/italic/inline code, links); tool calls render as structured cards with args, live status, and a folded result — replacing the raw `→ tool({json})` text rows.
 
 ### Fixed
+
 - FLM NPU slots no longer wedge in `warming` forever: the warm→ready inference sentinel now probes the slot's **assigned** model instead of `models[0]` from FLM's full catalogue. Probing an arbitrary other model forced FLM to reload the wrong weights onto its single NPU context mid-gate and deadlocked the load (#1171).
 - `hal0 setup` no longer aborts with a raw `HTTPStatusError` traceback when `apply-selections` returns `409 Conflict`: the setup CLI now treats a 409 (install already applied / a concurrent apply in flight) as a recoverable no-op with a clean message, and still raises on genuine errors (#1158).
 - Unified the dashboard warming-state color to a single canonical `--warn: #f2792b` token in `dashboard.css`, removing the divergent local redefinitions in `engine-panes.css`/`overhaul.css` so every warming indicator renders the same orange-yellow (#1156, #1155).
@@ -231,6 +260,7 @@ stack settles onto canonical names with an automatic migration.
 ## [0.9.6] — 2026-07-10
 
 ### Highlights
+
 - FLM NPU trio: the edit-slot drawer's Chat/ASR/Embed toggles now drive the running `flm serve` process, with a full-catalogue chat model picker that downloads on demand.
 - FLM can run embed- or STT-primary (chat disabled) — a modality-aware readiness gate promotes the slot instead of wedging on a chat probe.
 - Real FastFlowLM v0.9.44 toolbox image (`ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44`), rebuilt from the actual v0.9.44 binary.
@@ -238,16 +268,19 @@ stack settles onto canonical names with an automatic migration.
 - hal0-bench is now in-tree: the `hal0.bench` engine, `/api/benchmarks`, and a Benchmarks dashboard page.
 
 ### Added
+
 - NPU trio drawer wiring: ASR/Embed on-off toggles + a Chat model picker that lists the full FLM catalogue and pulls a not-yet-downloaded model on select (auto-applies on completion).
 - `FLMProvider.verify_embed` — a one-shot `/v1/embeddings` readiness sentinel used when a slot serves embeddings without chat.
 - hal0-bench in-tree port: `hal0.bench` engine, `/api/benchmarks` routes, and the Benchmarks dashboard tab (roster / runs / evals / run-queue).
 
 ### Changed
+
 - FLM toolbox pinned to `0.9.44` across `manifest.json`, the flm seed profile, and the capabilities catalog (contains FastFlowLM binary v0.9.44).
 - The warm→ready gate for FLM slots picks its sentinel by served modality: chat → `/v1/chat/completions`, chat-off+embed → `/v1/embeddings`, ASR-only → `/v1/models` liveness.
 - `/api/slots/flm/models` returns the full FLM catalogue (installed + downloadable) with accurate `installed` flags, container-exec first with a host-probe fallback.
 
 ### Fixed
+
 - Chat toggle now actually gates the container: `container_spec` no longer passes the positional chat tag when `[npu].chat=false` (it was cosmetic on the container path).
 - Editing an NPU modality no longer clobbers `[model].default`/`context_size` — the drawer sends the model as a nested `[model]` table so the backend merge preserves sibling keys.
 - `/api/npu/occupancy` no longer 500s while the FLM slot is offline (the degraded single-tenant fallback's `zip(..., strict=True)` mismatched `slots_out` vs `flm_slots`).
@@ -256,17 +289,21 @@ stack settles onto canonical names with an automatic migration.
 ## [0.9.5.2] — 2026-07-09
 
 ### Fixed
+
 - **Models → Downloads tab: React invariant 310 ("Rendered more hooks than during the previous render").** The Downloads pane in the Models view called `useStateM(false)` inside a `jobs.map((j) => { … })` callback. React counts hook calls per render, so the moment the downloads list changed length (a pull started, finished, failed, or was cleared) the hook count differed across renders and the entire `<ModelsView>` crashed behind the v3 error boundary — masking the rest of the dashboard. Fix: extract the per-row logic into a `DownloadRow` component that owns its own `cancelling` state, so the hook lives at row-component top level and its count is stable across renders. Pinned by `ui/src/dash/__tests__/react-hooks-order.test.mjs`, a new AST-based static check that walks every JSX/JS file under `src/dash/` and flags any useXxx (incl. the `useStateM`/`useEffectM`/etc. aliases used in this dashboard) called inside an array-iteration callback (`.map`/`.forEach`/`.filter`/`.reduce`/`.some`/`.every`/`.flatMap`/`.find`/`.findIndex`).
 
 ## [0.9.5.1] — 2026-07-09
 
 ### Highlights
+
 - First green build on the 0.9.5 line — v0.9.5 shipped with a red CI (stale tests + lint); this hotfix greens the gate and closes v0.9.5's incomplete consolidations.
 
 ### Added
+
 - **HF inspect recognizes FastFlowLM (NPU) repos.** `POST /api/models/inspect` now detects the FLM model shape (a `config.json` + tokenizer + `…nx` NPU-quant weight directory, e.g. `model.q4nx`) and surfaces one whole-repo variant flagged `flm` routed to the `flm pull` path — previously such repos inspected as "no variants" because the filter only admitted `.gguf`/`.mmproj`. Detection is shape-based (requires the `nx` weight blob) so a plain safetensors/GGUF repo is not misread as FLM.
 
 ### Fixed
+
 - **Profile test suite realigned to the 2×2 seed grid.** v0.9.5 consolidated the retired `rocmfpx-rocm` / `vkfpx-*` slugs into the `{rocm,vulkan} × {dense,moe}` grid but left the tests asserting the old names, so `main` was red. Tests now assert the shipped grid.
 - **Role-retirement cleanup finished.** v0.9.5 retired `SlotConfig.role` but left stale tests/docstrings referencing it (`test_slot_role`, `test_chat_normalization`, `test_llm_slot_views`, `hal0_llm_slot_views`). Removed/updated — slot identity is the name.
 - **Curated catalogue guard for FLM/NPU entries.** FLM-served curated models (empty `hf_repo`) no longer surface in the `pullable` catalogue bucket (nothing to HF-pull), and a new `CuratedModel` validator requires every entry to be deployable — HF coords (`hf_repo` + `hf_file`) or an `npu` tag with `recommended_slot="flm"`.
@@ -276,6 +313,7 @@ stack settles onto canonical names with an automatic migration.
 ## [0.9.5] — 2026-07-08
 
 ### Added
+
 - **NPU chat-first seed (FLM container shape).** `NpuConfig.chat` now
   defaults to `True` so a bare `[npu]` section in a slot TOML is a chat-ready
   NPU slot out of the box. Operators opt out by setting `chat = false` when
@@ -286,6 +324,7 @@ stack settles onto canonical names with an automatic migration.
   `device = "npu"` slots (the NPU capability matrix replaces it).
 
 ### Changed
+
 - **Slot routing key is now the slot `name`, not `role` (ADR-0023 §2.1).**
   The legacy `role` field on `SlotConfig` is gone — slot identity IS the
   routing key for `hal0/<slot>` aliases. Resolution chains in
@@ -301,6 +340,7 @@ stack settles onto canonical names with an automatic migration.
   by its `name`.
 
 ### Highlights
+
 - **New canonical ROCmFPX runner: `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`** —
   built from `Hal0ai/Hal0_ROCmFPX@5b395660` plus a 4-line upstream cherry-pick
   that wires the **minicpm5** pre-tokenizer (upstream PR #23384). Unblocks
@@ -318,6 +358,7 @@ stack settles onto canonical names with an automatic migration.
   button) so operators can pin/clear the override without editing TOMLs.
 
 ### Breaking
+
 - **SEED_PROFILES reshuffled to a clean 2x2 grid.** The three old ROCmFPX
   runner slugs (`rocmfpx-rocm`, `vkfpx-moe`, `vkfpx-dense`) are replaced by
   four explicitly-named profiles that match the 2x2 (backend x {dense,moe})
@@ -343,6 +384,7 @@ stack settles onto canonical names with an automatic migration.
   slot TOML is a single grep hit, a profile clone is a maintenance liability.
 
 ### Migrations
+
 - **Re-pin your custom profiles' images via the slot, not the profile.** Edit
   `/etc/hal0/slots/<name>.toml` and add a top-level `image = "ghcr.io/hal0ai/
   hal0-rocmfpx:vulkan-minicpm5"` line. The slot-level value wins on next
@@ -368,6 +410,7 @@ stack settles onto canonical names with an automatic migration.
 ## [0.9.4.1] — 2026-07-08
 
 ### Changed
+
 - **Idempotent `hal0 setup`** — removed the install-closed guard that blocked
   re-running `hal0 setup` after the first-run sentinel was written (#1161).
   The three provisioning endpoints (`/apply`, `/apply-selections`, `/complete`)
@@ -375,17 +418,20 @@ stack settles onto canonical names with an automatic migration.
   when `install.sh` re-launched the interactive setup after the `--auto` seed.
 
 ### Docs
+
 - **README updated** — corrected version, slot list, setup flow description,
   and agent selection docs to match v0.9.4 reality.
 
 ## [0.9.4] — 2026-07-08
 
 ### Added
+
 - **Downloads pane** in footer with pull job tracking (#1165).
 - **Settings page reorganisation** with improved layout and navigation (#1163).
 - **Configurable `direct_read_timeout`** via `[dispatcher]` TOML section (#1160).
 
 ### Fixed
+
 - **NPU double-free**: stop FLM health poll from double-freeing the NPU slot (#1077).
 - **Vision models**: add missing `mmproj_file` to curated vision model entries (#1162).
 - **Memory tools UI**: make documents card full-width (#1166).
@@ -400,6 +446,7 @@ no longer ships model recommendations — every box starts clean and the
 operator chooses models interactively.
 
 ### Highlights
+
 - **Guided Stage-2 setup TUI** with a review gate and two-stage handoff:
   hardware detection, model selection, capability scaffolding — all
   reviewed before writing config.
@@ -416,6 +463,7 @@ operator chooses models interactively.
   slots, models, and service health.
 
 ### Added
+
 - **Guided Stage-2 setup TUI** with review gate + two-stage handoff (#1144).
 - **Headless answer files** — `hal0 setup --answers` / `--emit-answers`
   round-trip (#1119, #1120).
@@ -455,6 +503,7 @@ operator chooses models interactively.
 - **Runtime `advertise_models` toggle** for upstream catalog entries (#1152).
 
 ### Fixed
+
 - Dashboard URL no longer leaks `hal0.thinmint.dev` as default (#1092).
 - Advertise all enabled LLM slots in `/v1/models` discovery, not just loaded
   ones (#1153).
@@ -472,6 +521,7 @@ operator chooses models interactively.
   `Undefined.__getattr__` raises immediately, bypassing `|default` filters).
 
 ### Migrations
+
 - First-run sentinel closes `/api/install/*` — a one-way gate at install
   time. The guided TUI or headless answer files are the canonical path
   for future configuration changes.
@@ -481,9 +531,11 @@ operator chooses models interactively.
 Hotfix: restore the full model listing in every slot's model picker.
 
 ### Highlights
+
 - Fix collapsed slot model dropdowns — `/api/models` rows again advertise the dispatcher-vocab `type` (`llm`/`embedding`/`reranking`) the pickers join on.
 
 ### Fixed
+
 - **Slot model dropdowns (and the model→slot compatibility list) showed only the currently-assigned model.** `/api/models` stamped local- and upstream-registry rows' `type` with `classify()`'s coarse modality bucket (`chat` / `embed` / `rerank`) instead of the dispatcher vocabulary (`llm` / `embedding` / `reranking`) that the FLM path already emitted and that the UI joins on (`model.type === slot.type`), so every local model failed the picker filter and each dropdown collapsed to its default. Map the modality bucket → dispatcher type at both stamp sites; adds a local-row regression test (the FLM path was already covered, which is how this slipped through).
 
 ## [0.9.1] — 2026-07-05
@@ -491,10 +543,12 @@ Hotfix: restore the full model listing in every slot's model picker.
 ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
 
 ### Highlights
+
 - ROCmFPX runner support: GGUF quant-family detection, `rocmfpx-rocm` / `vkfpx-moe` seed profiles, and a build/quantize agent skill.
 - `hal0 update` now shows cosign-verified release notes and asks before applying (staged prepare → commit).
 
 ### Added
+
 - **Updater `prepare` / `commit` split.** `hal0 update` downloads + cosign-verifies + extracts a release and shows its notes — with breaking/migration callouts — *before* activating anything; `--yes` skips the prompt for headless/cron. Adds `POST /api/updates/prepare` + `/commit` (#1075).
 - **Release notes in the update.** The release build bundles `RELEASE_NOTES.md` + `release.json` into the cosign-verified tarball; a CHANGELOG section's `### Highlights` / `### Breaking` / `### Migrations` subsections become the `hal0 update` callouts (#1078).
 - **ROCmFPX quant detection** — the registry classifies the `ROCmFPX` / `ROCmFP{3,4,6,8}` quant family from a GGUF filename so FPX slots resolve their launch command (#1068).
@@ -519,6 +573,7 @@ ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
   concurrency-batching plan handoff.
 
 ### Changed
+
 - The plain `rocm` / `vulkan` seed profiles are reduced to basic flags
   (`-ngl 999 -fa on --jinja`); per-model KV/batch tuning now lives in the
   model's `defaults.extra_args` (#1076).
@@ -529,11 +584,13 @@ ROCmFPX llama.cpp runner support, plus a safer notes-aware self-update.
   step, so a subsequent restart uses current argv (#1075).
 
 ### Removed
+
 - Legacy MTP toolbox seed profiles `rocm-moe` and `rocm-dnse` (superseded by the
   ROCmFPX profiles); `rocmfpx-moe` renamed to `vkfpx-moe` to indicate its Vulkan
   lane (#1076).
 
 ### Migrations
+
 - Slots pinned to a removed/renamed seed profile (`rocm-moe`, `rocm-dnse`, `rocmfpx-moe`) auto-fall-back to the backend's basic profile (`rocm` / `vulkan`) on launch — existing slots keep working with no operator action (#1076).
 
 ## [v0.9.0] — 2026-07-04
@@ -666,6 +723,7 @@ the one migration (crash-only MTP override defuse) touches exactly the slot
 configs that could not have loaded anyway, with a loud per-slot log.
 
 ### Added
+
 - **Slot units re-render automatically on update.** A slot's systemd unit
   bakes the launch argv at load time, so updating hal0 changed the code that
   WOULD render but not the file that DID — `systemctl restart`, crash
@@ -679,6 +737,7 @@ configs that could not have loaded anyway, with a loud per-slot log.
   window.
 
 ### Fixed
+
 - **Gateway now serves `POST /v1/rerank`.** The dispatcher's capability path
   map already resolved `/rerank` to the rerank slot, but the gateway only
   registered `/v1/rerankings` — so clients using llama-server's / Jina-style
@@ -732,6 +791,7 @@ builds.
 > force-ons (with a loud log) ships in the follow-up.
 
 ### Added
+
 - **GPU generalization — experimental CUDA + multi-GPU.** A dedicated
   `cuda` seed profile (upstream `llama.cpp:server-cuda` image, preferred
   by the installer when NVIDIA CDI is present, Vulkan fallback otherwise)
@@ -778,6 +838,7 @@ builds.
   plus stacks fixes and dialog guards that rode the same change.
 
 ### Changed
+
 - **Seed profiles are now virtual (#1045).** The built-in profile catalog
   (`SEED_PROFILES`) is overlaid from code on every load and never persisted to
   `/etc/hal0/profiles.toml`. Previously the installer materialised every seed
@@ -812,6 +873,7 @@ builds.
   `mtp.auto_off_model_ineligible` when this bites.
 
 ### Fixed
+
 - **MTP auto-off breadcrumb is launch-gated.** The
   `mtp.auto_off_model_ineligible` hint lives inside the shared launch/preview
   scalar resolver, so it fired on every dashboard `GET /api/slots` poll
@@ -830,6 +892,7 @@ builds.
   descriptions, rollback behaviour, and palette ghosts.
 
 ### Docs
+
 - README re-baselined to v0.8.4b1 + full accuracy pass (#1044, #1046):
   canonical `agent`/`utility` seeded slots, real backend-profile and
   hardware-tier tables (experimental CUDA row), removed the
@@ -853,6 +916,7 @@ gains a destructive-op audit trail plus console shape guards. **Safe upgrade
 from v0.8.3b1 — no breaking changes; all additions are additive.**
 
 ### Added
+
 - **Model preferred profile.** A registry model can declare `defaults.profile`
   — the runtime profile it wants loaded with it. A slot adopts it on create
   (when it has no explicit profile) and on **every model swap**, gated on
@@ -881,6 +945,7 @@ from v0.8.3b1 — no breaking changes; all additions are additive.**
   now documented at both call sites.
 
 ### Changed
+
 - **Unified logs/events.** Restores per-slot model-load logs, real source/slot
   attribution, and a channel selector across the logs/events surface.
 - **Memory Overview UI.** The graph-extraction gate now sits beside a shrunk
@@ -888,6 +953,7 @@ from v0.8.3b1 — no breaking changes; all additions are additive.**
   "eyebrow" style; dropped the stray `ADR-0023` label from the extraction title.
 
 ### Fixed
+
 - **Persistent slot context.** The slot edit drawer seeds the context field
   from the persisted `[model].context_size` (not the live runtime metric or a
   hardcoded 16384) and only writes `ctx_size` when it actually changed, so an
@@ -925,6 +991,7 @@ default**; disabling a capability now genuinely stops it serving; and the
 `bge` reranker is now classified and routed as a reranker.
 
 ### Added
+
 - **Dashboard live telemetry, on by default.** The Power & Thermal card
   (GPU clock MHz, temp, power) and the Per-Slot Throughput card are now
   default-on, and the Utilization card shows a live clock/temp caption.
@@ -945,6 +1012,7 @@ default**; disabling a capability now genuinely stops it serving; and the
 - **Host-memory-pressure LRU eviction** of idle slots. (#1003)
 
 ### Changed
+
 - **Retired duplicated logic** that had silently drifted: one
   device→profile derivation, one filename→capability classifier, one
   dispatchable-state predicate, and one slot-projection reconcile. (#1015)
@@ -961,6 +1029,7 @@ default**; disabling a capability now genuinely stops it serving; and the
   (#1017)
 
 ### Fixed
+
 - **Disabling a capability now sticks.** The disable is written through to
   the slot config, so a later request can no longer wake a "disabled" slot
   and serve from it. (#1011)
@@ -1013,6 +1082,7 @@ handful of installer drift bugs surfaced by a codebase assessment sweep.
 Safe upgrade from v0.8.2b3.
 
 ### Changed
+
 - **Docs re-baselined to v0.8.x.** Swept the Lemonade→container-runtime and
   Cognee→Hindsight terminology out of `AGENTS.md`, `ARCHITECTURE.md`,
   `CONTEXT.md`, `PLAN.md`, and `README.md`; corrected the Hermes provisioner
@@ -1025,6 +1095,7 @@ Safe upgrade from v0.8.2b3.
   referenced by number. (In-code citation sweep tracked in #984.)
 
 ### Fixed
+
 - **qwen3tts migration script aligned with the `tts`-slot model.** The
   standalone-to-slot migration script's Guard 1 checked a non-existent
   `qwen3tts` slot (always 404) and Guard 3 checked a removed kokoro `:8084`
@@ -1046,6 +1117,7 @@ one-switch swap between the Kokoro (CPU) and Qwen3-TTS (GPU) engines, plus a
 GPU benchmark harness and dashboard polish. Safe upgrade from v0.8.2b2.
 
 ### Added
+
 - **GPU Qwen3-TTS as a hal0-native slot.** New `Qwen3TTSProvider` serves
   Qwen3-TTS from the `tts` slot, with a `voice.tts` capability switch that swaps
   the engine between Kokoro (CPU) and Qwen3-TTS (GPU) without reconfiguring the
@@ -1058,12 +1130,14 @@ GPU benchmark harness and dashboard polish. Safe upgrade from v0.8.2b2.
   global agent chat, and an Archived lane. (#966)
 
 ### Fixed
+
 - **Dispatcher injects upstream auth headers for remote providers**, so requests
   routed to authenticated remote upstreams carry their credentials. (#973)
 - **UI builds land reliably on deploy** (no-cache index + install to the served
   `dist`). (#969)
 
 ### Docs
+
 - Benchmarking toolbox UI/feature handoff. (#971)
 
 ## [v0.8.2b2] — 2026-06-24
@@ -1073,6 +1147,7 @@ effect, and stacks can pull their referenced models. Safe upgrade from
 v0.8.2b1.
 
 ### Fixed
+
 - **Explicit profile spec flags win over the MTP bundle.** `resolve_profile_flags`
   appended `MTP_FLAG_BUNDLE` after a profile's own flags, so the bundle's
   spec-draft defaults (`--spec-draft-type-k q8_0`, `--spec-draft-p-min 0.0`)
@@ -1088,6 +1163,7 @@ v0.8.2b1.
   `backfill_coordless()` repairs existing coord-less registry rows on rescan. (#964)
 
 ### Changed
+
 - **CI**: cancel superseded PR runs (never `main`); PRs test Python 3.12 only while
   `main` runs 3.12/3.13/3.14 (3.14 non-blocking); least-privilege workflow
   permissions; Node 20 → 22. (#898)
@@ -1098,6 +1174,7 @@ Profiles gain the same portable export/import/sharing model stacks already have.
 Safe upgrade from v0.8.1-beta.2.
 
 ### Added
+
 - **Portable profile export/import.** A profile can now be exported to a
   self-contained, checksummed `.hal0profile.json` envelope and imported on another
   host — the same file-based sharing model stacks use. The envelope carries the
@@ -1117,6 +1194,7 @@ Bugfix on the 0.8.1 beta line — restores fleet auto-update. Safe upgrade from
 v0.8.1-beta.1.
 
 ### Fixed
+
 - **Updater version comparison uses PEP 440.** `hal0 update` compared versions with
   a digit-tuple parser that split on `.` and stripped non-digits per segment, so the
   pip-normalised installed beta `0.8.0b3` parsed to `(0, 8, 3)` and the tag-form
@@ -1135,6 +1213,7 @@ are gone, and a fresh `hal0 agent bootstrap hermes` now provisions a working
 durable-memory provider out of the box.
 
 ### Added
+
 - **Hermes durable memory enabled by default.** Provisioning now ships a working
   `hal0-memory` provider and sets `memory.provider=hal0-memory`, so Hermes gets
   cross-session recall with no manual config. Two banks — `private:hermes`
@@ -1144,6 +1223,7 @@ durable-memory provider out of the box.
   bank) and auto-injects recalled context each turn. (#955)
 
 ### Changed
+
 - **Hermes agent identity is `hermes`** (was `hermes-agent`), matching the
   `hal0 agent` registry. The agent-id is the single source for the
   `X-hal0-Agent` MCP headers, the persona memory namespace, and the prelude. (#955)
@@ -1153,11 +1233,13 @@ durable-memory provider out of the box.
   never loaded. (#955)
 
 ### Removed
+
 - **Hardened (unprivileged hal0-api) mode removed**; hal0-api runs as root.
   Dropped live-hello; fixed ready-summary IPs. (#953)
 - **Dormant slot privilege seam removed** (`hal0-slotctl` + euid routing). (#954)
 
 ### Breaking
+
 - **Hermes memory namespace renamed `private:hermes-agent` → `private:hermes`.**
   Existing `private:hermes-agent` data is not auto-migrated; reprovisioned agents
   start recalling from `private:hermes` + `shared`. (#955)
@@ -1171,6 +1253,7 @@ replacing `chat`) and **`utility`** (the cheap helper, now seeded on every
 install). `chat` and `primary` are retired as slot/role names.
 
 ### Changed
+
 - **Canonical roles are `agent` + `utility`.** `agent` replaces `chat` as the
   default/anchor everywhere (seeded slots, dispatch rule-9 fallback, the default
   pin set, `_configured_primary`). `utility` joins `SEEDED_SLOTS` so a fresh box
@@ -1188,6 +1271,7 @@ install). `chat` and `primary` are retired as slot/role names.
   survives as an alias of `MemoryItem`.
 
 ### Breaking
+
 - **`hal0/chat` is no longer advertised.** Clients pinned to `hal0/chat` (Hermes,
   OpenWebUI, any custom consumer) must repoint to **`hal0/agent`**.
   Hermes `model.default` is now `hal0/agent`.
@@ -1204,6 +1288,7 @@ Bugfix release on the 0.8.0 beta line. No behaviour changes beyond the two
 fixes below — a safe upgrade from v0.8.0-beta.1. First release to carry #948.
 
 ### Fixed
+
 - **Operator Board live updates restored.** The board's events-WS proxy
   (`/api/board/events`) resolved its upstream Hermes session token from the
   `HERMES_SESSION_TOKEN` env var only, while the REST path harvests the
@@ -1227,6 +1312,7 @@ lands end-to-end. One behaviour change to be aware of: the `hal0/primary`
 and `hal0/flm` virtual aliases are gone — see **Changed**.
 
 ### Added
+
 - **Stacks — declarative config SSOT.** A `StackConfig` schema plus a
   `StackApplyEngine` that `plan()`s a Stack into a ChangeSet, `apply_config()`s
   it as an atomic commit with rollback, and `converge()`s the live slot set
@@ -1266,6 +1352,7 @@ and `hal0/flm` virtual aliases are gone — see **Changed**.
   so a broken template can no longer ship silently. (#917)
 
 ### Changed
+
 - **Breaking — `hal0/primary` and `hal0/flm` virtual aliases removed.** Virtual
   model names now map 1:1 to their resolution chains; `hal0/primary` no longer
   resolves (use `hal0/chat`) and `hal0/flm` is gone (use `hal0/npu`). Slot-name
@@ -1279,6 +1366,7 @@ and `hal0/flm` virtual aliases are gone — see **Changed**.
 - Docs mirrored from hal0-web.
 
 ### Fixed
+
 - **Installer** — `setup --storage-dir` is passed as a separate argv token so
   fresh `--models-dir` installs seed slots correctly (#946); the hardened-perms
   flip chowns config + state recursively so a root→hal0 upgrade doesn't strand
@@ -1298,6 +1386,7 @@ finally give their RAM back, and the Operator Board stops crashing on
 task creation.
 
 ### Added
+
 - **Chat-slot vision** — mmproj sidecars are now associated with their parent
   model in the registry, the container provider emits `--mmproj` from that
   sidecar, and vision auto-surfaces as a capability with a per-slot toggle.
@@ -1308,6 +1397,7 @@ task creation.
   `agent:hermes` author tag. (#912)
 
 ### Fixed
+
 - **Operator Board** no longer black-screens (React #31) when adding a task;
   modal styling, drag-to-delete, and the agent-chat drawer are reworked, and
   board chat now runs on the agent slot instead of the (wedged) chat slot.
@@ -1321,6 +1411,7 @@ task creation.
 - **ComfyUI** reads slot logs from journald and reworks its card layout. (#909)
 
 ### Changed
+
 - Docs mirrored from hal0-web.
 
 ## [v0.7.3-beta.1] — 2026-06-19
@@ -1330,6 +1421,7 @@ generation, an agent task board, NPU/FLM slots, and a unified profile-card
 layout — on top of honest slot health and per-slot context derivation.
 
 ### Added
+
 - **ComfyUI generation engine** — full platform integration (model store,
   capability picker, installer wiring, V2 Image-Gen pane). The Image-Gen tab
   collapses its queue/workflows and an Inference-tab dot tracks live state; image
@@ -1351,6 +1443,7 @@ layout — on top of honest slot health and per-slot context derivation.
 - A **generated changelog** is now included in every release (nightly + stable). (#842)
 
 ### Changed
+
 - **Slot health-probe honesty** — a slot is marked ready only once its real
   `/health` passes, not on a systemd snapshot. (#866)
 - Slot context is derived per-slot and never silently inherits llama-server's
@@ -1361,6 +1454,7 @@ layout — on top of honest slot health and per-slot context derivation.
 - Nightly versions carry a sub-day timestamp so same-day re-cuts stay monotonic. (#841)
 
 ### Fixed
+
 - **Hardware:** report the live GTT total instead of a stale cached probe value. (#891)
 - **NPU:** probe AIE columns via a temp file, not `-o /dev/stdout`. (#893)
 - **Slots:** harden container config-drift comparisons and warn on drift. (#880, #869)
@@ -1373,6 +1467,7 @@ layout — on top of honest slot health and per-slot context derivation.
   (#868, #871, #870, #845, #855, #846, #851)
 
 ### Docs
+
 - Restored `doctor perms` + `migrate model-layout` to the CLI reference; added the
   deploy + PR workflow for parallel teammate sessions. (#849, #865)
 
@@ -1382,6 +1477,7 @@ Pre-Alpha. Retires the web FirstRun picker in favour of a terminal `hal0 setup`
 TUI, and adds Ubuntu 26.04 / Python 3.14 install support.
 
 ### Added
+
 - **`hal0 setup` TUI** — replaces the web FirstRun picker with a rich two-column
   terminal setup (storage → Extensions → Main model → Agent model → NPU) over an
   always-on context pane. Hybrid apply (in-process at install time, via the API
@@ -1394,6 +1490,7 @@ TUI, and adds Ubuntu 26.04 / Python 3.14 install support.
   hindsight `--ignore-requires-python`, py-version-agnostic Hermes web_dist (#829).
 
 ### Changed
+
 - A fresh install seeds the hardware-recommended Main slot **non-destructively**
   (only slots whose config is absent) and writes the first-run sentinel via
   `hal0 setup --auto --no-pull` — so `hal0 update`/re-install never overwrites a
@@ -1401,6 +1498,7 @@ TUI, and adds Ubuntu 26.04 / Python 3.14 install support.
   kept dormant for the future *Stacks* feature (#833).
 
 ### Removed
+
 - Web FirstRun picker (`firstrun.jsx` + hooks), the v1 `/api/bundles` surface,
   `bundles/store.py`, and the legacy `/api/install/pick-default` route (#833).
 
@@ -1411,6 +1509,7 @@ memory engine, agents, and Hermes with no manual steps, and the FirstRun wizard
 orchestrates a full multi-slot bring-up from a single bundle pick.
 
 ### Added
+
 - **FirstRun v2** — quick-path wizard + orchestrated multi-slot install from a
   single bundle/kit pick (#809), with an Advanced drawer exposing per-slot
   model/profile overrides (#812).
@@ -1431,12 +1530,14 @@ orchestrates a full multi-slot bring-up from a single bundle pick.
   sidebar sub-links; Memory + MCP unify under a tabbed Agent shell (#817).
 
 ### Fixed
+
 - Non-blocking slot controls + NPU/image-gen toggles; cancel mid-load (#801).
 - Slot edit drawer shows profile intent in its dropdown (#811).
 - Enforce device↔profile backend coherence on slot create/update (#807).
 - Drop the unimplemented `memory migrate --apply` flag (#820).
 
 ### Internal
+
 - Recolor the device palette — free red for errors/stop (#803).
 - CI tests against the latest supported Python (3.12) only (#808).
 - gitignore `.superpowers/` brainstorm scratch (#810).
@@ -1505,7 +1606,7 @@ UI polish, fully-implemented Agents/UI/Install bootstrapped) and v0.5
   Memory tab against `/api/memory/graph/status`; live Skills tab
   against new `GET /api/agents/skills`; PersonaEditModal hydrated
   from new `GET /api/agents/persona-enums`. Server-side TONES + TOOLS
-  + skill catalog moved to `src/hal0/agents/persona.py`.
+  - skill catalog moved to `src/hal0/agents/persona.py`.
 - **Embedding model pinning + rerank wiring** (#365, closes #116).
   New `[memory.embedding]` config block — `model`,
   `rerank_enabled`, `rerank_url`, `rerank_over_fetch_factor`,
@@ -1679,12 +1780,13 @@ into the first patch tag after the v0.3.0-alpha.1 auth/Caddy cut.
 This is a patch-level tag (`0.3.0 → 0.3.1`) by SemVer convention, but
 the scope is closer to a minor release — Hermes, memory graph, and the
 MCP host surface are all new user-facing systems. Future patch tags
+
 ## [v0.3.0-alpha.2] — 2026-05-28 (Hermes integration sweep)
 
 End-to-end Hermes-Agent integration lands. The 12-PR master-plan
 (`docs/internal/scratch/hermes-research-2026-05-28/MASTER-PLAN.md`)
 ships as one mergeable surface: provisioner overhaul, persona TOML,
-hal0-cognee memory plugin, hal0-agent@.service template, chat WS
+hal0-cognee memory plugin, <hal0-agent@.service> template, chat WS
 proxy, plugin host, SidebarAgentBlock, v3 dashboard refactor, HermesChat
 composer/transcript, the missing endpoints (`restart`, `skills`,
 `memory/stats`), tests + docs sweep, and the upstream pin / weekly
@@ -1900,7 +2002,7 @@ locked implementation contract at
 
 - **Lemonade Server unified inference runtime** (PR-3 #156 through
   PR-22). One `lemond` process per host on `127.0.0.1:13305`, cache
-  + config at `/var/lib/hal0/lemonade/`, supervised by
+  - config at `/var/lib/hal0/lemonade/`, supervised by
   `hal0-lemonade.service`.
 - **`LemonadeProvider`** is the only `Provider` in v0.2's dispatch
   path. Capability dispatcher reads `/v1/health` for slot state and
@@ -1970,7 +2072,7 @@ locked implementation contract at
 - **Slot model**: bare-name identity + `type` (Lemonade vocab:
   `llm | embedding | reranking | transcription | tts | image`) +
   `device` (`gpu-rocm | gpu-vulkan | cpu | npu`) + `model` + `enabled`
-  + optional `default` + `group` for dashboard rollup. User-added
+  - optional `default` + `group` for dashboard rollup. User-added
   slots via `hal0 slot add NAME --type TYPE --model MODEL`. Exactly
   one `default = true` per type enforced at save / load.
 - **Canonical model namespace.** `registered` (no prefix, from
@@ -2048,7 +2150,7 @@ locked implementation contract at
 - **FLM .deb install is manual on Linux.** Lemonade's `flm:npu`
   auto-installer is Windows-only as of v0.2. Linux install
   procedure is PPA `lemonade-team/stable` + libxrt-npu2 + ffmpeg6
-  + boost1.83 + fftw3 + FastFlowLM `.deb`. The hal0 installer
+  - boost1.83 + fftw3 + FastFlowLM `.deb`. The hal0 installer
   handles this end-to-end; users running off-script need the
   `hal0_lemonade_flm_npu_install` recipe.
 - **Ongoing pin maintenance** for two upstream artifacts (the
