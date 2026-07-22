@@ -56,7 +56,7 @@ def _make_tree(
         fake_bin / "uv",
         """#!/usr/bin/env bash
 printf "%s|%s|%s\\n" "$PYTHONPATH" "$HAL0_HOME" "$*" >> "$UV_LOG"
-if [[ "$*" != "run --locked "* ]]; then
+if [[ "$*" != "run --isolated --locked --python 3.12 --extra dev "* ]]; then
     printf 'unexpected lock rewrite\\n' > uv.lock
 fi
 """,
@@ -164,11 +164,11 @@ def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Pat
         assert hal0_home != env["HAL0_HOME"]
         assert "hal0-release-check." in hal0_home
         homes.add(hal0_home)
-        assert command.startswith("run --locked ")
+        assert command.startswith("run --isolated --locked --python 3.12 --extra dev ")
     assert len(homes) == 1
     assert not Path(next(iter(homes))).exists()
-    assert any("run --locked pytest" in call for call in uv_calls)
-    assert any("run --locked ruff check" in call for call in uv_calls)
+    assert any("--extra dev pytest" in call for call in uv_calls)
+    assert any("--extra dev ruff check" in call for call in uv_calls)
 
 
 @pytest.mark.parametrize(
@@ -176,7 +176,7 @@ def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Pat
     [
         (None, False),
         ({**_fresh_report(), "generated": int(time.time()) - 25 * 3600}, False),
-        ({**_fresh_report(), "generated": int(time.time()) + 10 * 60}, False),
+        ({**_fresh_report(), "generated": int(time.time()) + 24 * 3600}, False),
         ({**_fresh_report(), "generated": "not-a-timestamp"}, False),
         (_fresh_report(**{"fail": 1, "pass": 0}), False),
         (_fresh_report(), True),
@@ -300,6 +300,9 @@ def test_git_cleanliness_allows_exact_generated_dirt(tmp_path: Path) -> None:
     subagent_log = root / ".pi-subagents" / "worker.log"
     subagent_log.parent.mkdir(parents=True)
     subagent_log.write_text("untracked generated log\n", encoding="utf-8")
+    (root / "graphify-out" / "untracked.json").write_text(
+        "untracked generated graph data\n", encoding="utf-8"
+    )
 
     result = _run(root, env, "--local")
 
@@ -312,13 +315,11 @@ def test_git_cleanliness_allows_exact_generated_dirt(tmp_path: Path) -> None:
     [
         (Path(".pi/shepherd/nearby.json"), True),
         (Path(".pi/shepherd/untracked.json"), False),
-        (Path("graphify-out/untracked.json"), False),
         (Path("src/unexpected.py"), False),
     ],
     ids=[
         "nearby-tracked-shepherd-file",
         "nearby-untracked-shepherd-file",
-        "untracked-graphify-file",
         "source-file",
     ],
 )

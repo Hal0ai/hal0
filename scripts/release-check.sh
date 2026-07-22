@@ -128,7 +128,8 @@ cleanup() {
 trap cleanup EXIT
 
 run_repo_python() {
-	PYTHONPATH="${REPO_ROOT}/src" HAL0_HOME="${HAL0_CHECK_HOME}" uv run --locked "$@"
+	PYTHONPATH="${REPO_ROOT}/src" HAL0_HOME="${HAL0_CHECK_HOME}" \
+		uv run --isolated --locked --python 3.12 --extra dev "$@"
 }
 
 if [[ "${LOCAL}" == true ]]; then
@@ -142,7 +143,7 @@ if command -v uv &>/dev/null; then
 	# Unit tier only — tier β + γ run elsewhere (the integration workflow
 	# and `make release-test` respectively).
 	if run_repo_python pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
-		info "uv run --locked pytest (-m 'not integration'): green"
+		info "isolated locked Python 3.12 pytest (-m 'not integration'): green"
 	else
 		fail "pytest: test failures — fix before release"
 	fi
@@ -170,7 +171,7 @@ step "3. Lint"
 
 if command -v uv &>/dev/null; then
 	if run_repo_python ruff check "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" 2>&1; then
-		info "uv run --locked ruff: clean"
+		info "isolated locked Python 3.12 ruff: clean"
 	else
 		fail "ruff found lint errors"
 	fi
@@ -314,9 +315,9 @@ UNTRACKED_DIRT="$(
 	{
 		git ls-files --others --exclude-standard -- . \
 			':(exclude).pi-subagents/**'
-		# These generated roots are ignored globally, but policy permits only
-		# their already-tracked outputs to change during rehearsal.
-		git ls-files --others -- .pi/shepherd graphify-out
+		# Shepherd is ignored globally, but only its tracked index is allowed
+		# to change. Any additional Shepherd file remains release-blocking.
+		git ls-files --others -- .pi/shepherd
 	}
 )"
 if [[ -z "${TRACKED_DIRT}" && -z "${UNTRACKED_DIRT}" ]]; then
