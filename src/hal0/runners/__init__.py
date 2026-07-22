@@ -44,6 +44,7 @@ keys and are wired accordingly.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -55,6 +56,8 @@ from hal0.config.schema import (
     STALE_ROCMFPX_IMAGE_REFS,
 )
 from hal0.errors import NotFound
+
+log = logging.getLogger(__name__)
 
 #: Kept as a plain local Literal (NOT imported from ``hal0.profiles``) so
 #: this module has zero import-time coupling to the profiles subsystem —
@@ -115,7 +118,144 @@ class Runner:
     format_arch: str | None = None
 
 
-RUNNER_IMAGES: dict[str, Runner] = {
+# ── Derive RUNNER_IMAGES from the bundled lifecycle catalog ────────────────
+# Each runner in the catalog becomes a Runner entry. Fields not tracked in the
+# catalog (supports, manifest_key, hardcoded device_class overrides) are
+# supplied by a static supplement map keyed on runner id.
+#
+# This keeps the call signatures backward-compatible — get_runner(),
+# runner_for_backend(), runner_matches(), and resolve_runner_image() work
+# identically — while the data itself is catalog-sourced and a new "vulkan"
+# runner (stock-gguf via amd-strix-halo-toolboxes) is automatically present.
+
+
+def _build_runners_from_catalog() -> dict[str, Runner]:
+    """Derive RUNNER_IMAGES from the bundled catalog, falling back to static dict."""
+    try:
+        from hal0.lifecycle.catalog import LifecycleCatalog
+
+        catalog = LifecycleCatalog.load_bundled()
+    except Exception:
+        log.info("bundled catalog unavailable — using hardcoded runner registry")
+        return _HARDCODED_RUNNER_IMAGES
+
+    # Static supplement: fields the catalog does not carry.
+    _SUPPLEMENTS: dict[str, dict[str, object]] = {
+        "rocmfpx": {
+            "image_override": DEFAULT_ROCMFPX_IMAGE,
+            "supports": RunnerSupports(mtp=True, jinja=True, mmproj=True),
+            "backend_override": "rocm",
+            "supported_backends_override": ("rocm", "vulkan"),
+            "manifest_key": None,
+            "format_arch": "gguf",
+        },
+        "vulkanfpx": {
+            "image_override": DEFAULT_ROCMFPX_IMAGE,
+            "supports": RunnerSupports(mtp=True, jinja=True, mmproj=True),
+            "backend_override": "vulkan",
+            "supported_backends_override": ("rocm", "vulkan"),
+            "manifest_key": None,
+            "format_arch": "gguf",
+        },
+        "vulkan": {
+            "supports": RunnerSupports(mtp=False, jinja=True, mmproj=True),
+            "backend_override": "vulkan",
+            "manifest_key": None,
+            "format_arch": "gguf",
+        },
+        "cuda": {
+            "image_override": FALLBACK_CUDA_IMAGE,
+            "supports": RunnerSupports(mtp=False, jinja=True, mmproj=True),
+            "backend_override": "cuda",
+            "manifest_key": None,
+            "format_arch": "gguf",
+        },
+        "cpu": {
+            "image_override": FALLBACK_VULKAN_IMAGE,
+            "supports": RunnerSupports(mtp=False, jinja=True, mmproj=True),
+            "backend_override": None,
+            "manifest_key": None,
+            "format_arch": "gguf",
+        },
+        "flm": {
+            "image_override": _FLM_IMAGE,
+            "supports": RunnerSupports(),
+            "backend_override": None,
+            "manifest_key": "flm",
+            "format_arch": "flm",
+        },
+        "kokoro": {
+            "image_override": _KOKORO_IMAGE,
+            "supports": RunnerSupports(),
+            "backend_override": None,
+            "manifest_key": "kokoro",
+            "format_arch": "kokoro",
+        },
+        "qwen3tts": {
+            "image_override": _QWEN3TTS_IMAGE,
+            "supports": RunnerSupports(mtp=False, jinja=False, mmproj=False),
+            "backend_override": "rocm",
+            "manifest_key": "qwen3tts",
+            "format_arch": "qwen3tts",
+        },
+        "comfyui": {
+            "image_override": _COMFYUI_IMAGE,
+            "supports": RunnerSupports(mmproj=False),
+            "backend_override": None,
+            "manifest_key": "comfyui",
+            "format_arch": "safetensors",
+        },
+    }
+
+    # Device class derived from backends — used only when a supplement
+    # does not override.
+    _DEVICE_CLASS_FROM_BACKENDS: dict[frozenset[str], str] = {
+        frozenset({"rocm"}): "gpu",
+        frozenset({"vulkan"}): "gpu",
+        frozenset({"cuda"}): "gpu",
+        frozenset({"cpu"}): "cpu",
+        frozenset({"npu"}): "npu",
+        frozenset({"rocm", "vulkan"}): "gpu",
+    }
+
+    # Per-runner device class overrides (comfyui → img)
+    _DEVICE_CLASS_OVERRIDES: dict[str, str] = {
+        "comfyui": "img",
+    }
+
+    result: dict[str, Runner] = {}
+    for rdef in catalog.envelope.runners:
+        supp = _SUPPLEMENTS.get(rdef.id, {})
+        pkg = catalog._packages[rdef.package]
+        image = supp.get("image_override") or f"{pkg.repository}@{pkg.digest}"
+
+        device_class = _DEVICE_CLASS_OVERRIDES.get(
+            rdef.id,
+            _DEVICE_CLASS_FROM_BACKENDS.get(rdef.backends, "cpu"),
+        )
+        backend = supp.get("backend_override")
+        if backend is None and len(rdef.backends) == 1:
+            backend = next(iter(rdef.backends))
+            # Single-backend "cpu" or "npu" runners keep backend=None per legacy
+            if backend in ("cpu", "npu"):
+                backend = None
+
+        supported_backends: tuple[str, ...] = supp.get("supported_backends_override") or tuple(rdef.backends)  # type: ignore[assignment]
+        result[rdef.id] = Runner(
+            key=rdef.id,
+            image=image,
+            runtime_family=rdef.runtime_family,  # type: ignore[arg-type]
+            supports=supp.get("supports", RunnerSupports()),  # type: ignore[arg-type]
+            device_class=device_class,
+            backend=backend,
+            manifest_key=supp.get("manifest_key"),  # type: ignore[arg-type]
+            supported_backends=supported_backends,
+            format_arch=supp.get("format_arch"),  # type: ignore[arg-type]
+        )
+    return result
+
+
+_HARDCODED_RUNNER_IMAGES: dict[str, Runner] = {
     "rocmfpx": Runner(
         "rocmfpx",
         DEFAULT_ROCMFPX_IMAGE,
@@ -205,6 +345,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         format_arch="safetensors",
     ),
 }
+
+RUNNER_IMAGES: dict[str, Runner] = _build_runners_from_catalog()
 
 #: Back-compat alias — the old name lived on ``hal0.config.schema``; kept
 #: importable from BOTH modules so existing ``from hal0.config.schema

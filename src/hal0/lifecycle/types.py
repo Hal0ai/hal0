@@ -138,3 +138,105 @@ class CompatibilityResult(FrozenModel):
 class CatalogReport(FrozenModel):
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+# ── Resolution domain types ──────────────────────────────────────────────────
+
+
+class HostFacts(FrozenModel):
+    """Resolved host identity used for runner/model selection."""
+
+    host: str
+    device_class: str
+    backend: str | None = None
+    architectures: frozenset[str] = frozenset({"amd64"})
+
+
+class OperatorIntent(FrozenModel):
+    """What the operator wants to accomplish."""
+
+    capabilities: frozenset[str] = frozenset()
+    roles: frozenset[str] = frozenset()
+    purpose: str | None = None
+
+
+class SlotState(FrozenModel):
+    """A single installed slot record snapshot."""
+
+    name: str
+    role: str
+    profile: str | None = None
+    runner: str | None = None
+    model: str | None = None
+    enabled: bool = True
+
+
+class InstalledState(FrozenModel):
+    """Snapshot of currently installed slots and runners."""
+
+    slots: tuple[SlotState, ...] = ()
+    runners: frozenset[str] = frozenset()
+
+
+class ResourceRef(FrozenModel):
+    """A named resource reference by kind and id."""
+
+    kind: str
+    id: str
+
+
+class RejectedCandidate(FrozenModel):
+    """A candidate that was considered but rejected, with a reason."""
+
+    id: str
+    reason_code: str
+    detail: str = ""
+
+
+class SelectionDecision(FrozenModel):
+    """The outcome of a named selection path (e.g. "agent.runner" or "brain.model")."""
+
+    path: str
+    selected: ResourceRef | None = None
+    rejected: tuple[RejectedCandidate, ...] = ()
+
+
+class LifecycleOperation(FrozenModel):
+    """A single lifecycle action to be executed."""
+
+    kind: str
+    resource: ResourceRef | None = None
+    detail: str = ""
+
+
+class ResolutionPlan(FrozenModel):
+    """The full plan produced by resolution."""
+
+    operations: tuple[LifecycleOperation, ...] = ()
+    selections: tuple[SelectionDecision, ...] = ()
+    rejections: tuple[RejectedCandidate, ...] = ()
+    warnings: tuple[str, ...] = ()
+    download_estimate_bytes: int = 0
+
+    def selection(self, path: str) -> SelectionDecision:
+        for sel in self.selections:
+            if sel.path == path:
+                return sel
+        raise KeyError(f"no selection for path {path!r}")
+
+
+class ResolutionRequest(FrozenModel):
+    """Input to the resolution engine."""
+
+    host: HostFacts
+    intent: OperatorIntent = OperatorIntent()
+    installed: InstalledState | None = None
+    purpose: str | None = None
+
+    @classmethod
+    def fresh_install(cls, *, host: HostFacts) -> ResolutionRequest:
+        return cls(host=host, intent=OperatorIntent(), purpose="fresh_install")
+
+    @classmethod
+    def setup(cls, *, host: HostFacts, intent: OperatorIntent) -> ResolutionRequest:
+        return cls(host=host, intent=intent, purpose="setup")
