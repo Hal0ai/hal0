@@ -235,7 +235,7 @@ class LifecycleCatalog:
                     )
                 if not package.replacement and not package.terminal:
                     errors.add(
-                        f"deprecated package {package.id!r} needs replacement or terminal status"
+                        f"inactive package {package.id!r} needs replacement or terminal status"
                     )
         for pair, identifiers in pairs.items():
             if len(identifiers) > 1:
@@ -533,7 +533,7 @@ class LifecycleCatalog:
           2. Runner backend and physical device class match HostFacts
           3. Runner architecture matches HostFacts.architectures
           4. Runner capability includes required_capability
-          5. Runner is not deprecated
+          5. Runner is active
           6. Runner format intersects model formats
           7. Runner is in model's allowlist
         Then rank by runner priority descending, with deterministic tie-break

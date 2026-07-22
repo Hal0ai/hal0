@@ -33,11 +33,12 @@ BASELINE = Path(__file__).resolve().parent / "scar_baseline.txt"
 
 # Keep in lockstep with docs: this is the canonical scar-marker definition.
 SCAR_RE = re.compile(r"removed in #|DEPRECATED|deprecated|\blegacy\b|backward.compat|compat shim")
-CATALOG_STATUS_FILES = frozenset(
-    {
-        Path("src/hal0/lifecycle/catalog.py"),
-        Path("src/hal0/lifecycle/types.py"),
-    }
+CATALOG_TYPES = Path("src/hal0/lifecycle/types.py")
+CATALOG_RESOLVER = Path("src/hal0/lifecycle/catalog.py")
+CATALOG_STATUS_FIELD_RE = re.compile(r"^(\s*)deprecated(?=\s*:\s*bool\b)", re.IGNORECASE)
+CATALOG_STATUS_ACCESS_RE = re.compile(
+    r"\b(?:package|runner|model|r)\.deprecated\b|self\._runners\[rid\]\.deprecated\b",
+    re.IGNORECASE,
 )
 SUNSET_RE = re.compile(r"HAL0-SUNSET:\s*v?(\d+)\.(\d+)(?:\.(\d+))?")
 PROJECT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)$")
@@ -79,11 +80,14 @@ def _py_files() -> list[Path]:
 
 
 def _is_scar_line(path: Path, line: str) -> bool:
-    """Match migration scars without counting catalog lifecycle status vocabulary."""
+    """Match migration scars without counting typed catalog status expressions."""
     relative_path = path.relative_to(ROOT)
-    if relative_path in CATALOG_STATUS_FILES:
-        line = re.sub(r"\bdeprecated\b", "", line, flags=re.IGNORECASE)
-    return SCAR_RE.search(line) is not None
+    code, separator, comment = line.partition("#")
+    if relative_path == CATALOG_TYPES:
+        code = CATALOG_STATUS_FIELD_RE.sub(r"\1catalog_status", code, count=1)
+    elif relative_path == CATALOG_RESOLVER:
+        code = CATALOG_STATUS_ACCESS_RE.sub("catalog_status", code)
+    return SCAR_RE.search(code + separator + comment) is not None
 
 
 def scar_count() -> int:
