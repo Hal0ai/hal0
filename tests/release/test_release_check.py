@@ -294,6 +294,12 @@ def test_git_cleanliness_allows_exact_generated_dirt(tmp_path: Path) -> None:
     (root / ".pi" / "shepherd" / "index.json").write_text(
         "modified generated index\n", encoding="utf-8"
     )
+    (root / ".pi" / "shepherd" / "nearby.json").write_text(
+        "modified tracked run state\n", encoding="utf-8"
+    )
+    shepherd_run = root / ".pi" / "shepherd" / "runs" / "run.json"
+    shepherd_run.parent.mkdir(parents=True)
+    shepherd_run.write_text("untracked run receipt\n", encoding="utf-8")
     (root / "graphify-out" / "graph.json").write_text(
         "modified generated graph\n", encoding="utf-8"
     )
@@ -313,13 +319,11 @@ def test_git_cleanliness_allows_exact_generated_dirt(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("relative_path", "tracked"),
     [
-        (Path(".pi/shepherd/nearby.json"), True),
-        (Path(".pi/shepherd/untracked.json"), False),
+        (Path(".pi/unexpected.json"), False),
         (Path("src/unexpected.py"), False),
     ],
     ids=[
-        "nearby-tracked-shepherd-file",
-        "nearby-untracked-shepherd-file",
+        "unrelated-pi-file",
         "source-file",
     ],
 )

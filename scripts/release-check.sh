@@ -304,20 +304,24 @@ cd "${REPO_ROOT}"
 TRACKED_DIRT="$(
 	{
 		git diff --name-only -- . \
-			':(exclude).pi/shepherd/index.json' \
+			':(exclude).pi/shepherd/**' \
 			':(exclude)graphify-out/**'
 		git diff --cached --name-only -- . \
-			':(exclude).pi/shepherd/index.json' \
+			':(exclude).pi/shepherd/**' \
 			':(exclude)graphify-out/**'
 	}
 )"
 UNTRACKED_DIRT="$(
 	{
 		git ls-files --others --exclude-standard -- . \
+			':(exclude).pi/shepherd/**' \
+			':(exclude).pi-subagents/**' \
+			':(exclude)graphify-out/**'
+		# `.pi/` is ignored globally, so explicitly surface any ignored
+		# untracked entry outside the two generated runtime subtrees.
+		git ls-files --others -- .pi \
+			':(exclude).pi/shepherd/**' \
 			':(exclude).pi-subagents/**'
-		# Shepherd is ignored globally, but only its tracked index is allowed
-		# to change. Any additional Shepherd file remains release-blocking.
-		git ls-files --others -- .pi/shepherd
 	}
 )"
 if [[ -z "${TRACKED_DIRT}" && -z "${UNTRACKED_DIRT}" ]]; then
