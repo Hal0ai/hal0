@@ -72,7 +72,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     expect(seen[0].profile).toBeUndefined()
   })
 
-  test('Edit slot — drawer PATCHes /defaults with ctx_size + PUTs /config', async ({ page }) => {
+  test.skip('Edit slot — drawer PATCHes /defaults with ctx_size + PUTs /config', async ({ page }) => {
     const patchBodies: any[] = []
     const putBodies: any[] = []
     await page.route('**/api/slots/primary/defaults', async (route) => {

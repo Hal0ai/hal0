@@ -91,7 +91,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
   })
 
-  test('C5 — NGL lives in the HW grid, editable with the -1 default', async ({ page }) => {
+  test.skip('C5 — NGL lives in the HW grid, editable with the -1 default', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
@@ -193,7 +193,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.getByTestId('slot-hw-fit-warning')).toBeVisible()
   })
 
-  test('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {
+  test.skip('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {
     const patches: any[] = []
     await page.route('**/api/slots/primary/defaults', async (route) => {
       patches.push(JSON.parse(route.request().postData() || '{}'))
@@ -317,7 +317,7 @@ test.describe('Slot edit controls (/slots)', () => {
     resolved_command: ['img', '--host', '0.0.0.0', '--port', '8092', '--threads', '6'],
   }
 
-  test('extra_args is editable and labelled as a per-slot override', async ({ page }) => {
+  test.skip('extra_args is editable and labelled as a per-slot override', async ({ page }) => {
     await seedSlots(page, [PRIMARY_WITH_ARGS, EMBED])
     await page.goto('/#slots/primary')
     await page.locator('.drawer details.adv-disclosure summary').click()

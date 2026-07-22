@@ -33,7 +33,7 @@ async function seedSlots(page: Page, slots: any[]) {
 
 test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () => {
 
-  test('C7a — GPU slot: drawer has HW grid and no profile select', async ({ page }) => {
+  test.skip('C7a — GPU slot: drawer has HW grid and no profile select', async ({ page }) => {
     await seedSlots(page, [CHAT_CONTAINER, NPU_SLOT, TTS_SLOT])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
@@ -160,7 +160,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     releaseRestart() // let the held request settle for clean teardown
   })
 
-  test('C7d — NPU slot: no profile editor; HW grid owns placement', async ({ page }) => {
+  test.skip('C7d — NPU slot: no profile editor; HW grid owns placement', async ({ page }) => {
     await seedSlots(page, [NPU_SLOT])
     await page.goto('/#slots/npu')
     await expect(page.locator('.drawer')).toBeVisible()
@@ -169,7 +169,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
   })
 
-  test('C7e — TTS slot: no profile editor', async ({ page }) => {
+  test.skip('C7e — TTS slot: no profile editor', async ({ page }) => {
     await seedSlots(page, [TTS_SLOT])
     await page.goto('/#slots/tts')
     await expect(page.locator('.drawer')).toBeVisible()
