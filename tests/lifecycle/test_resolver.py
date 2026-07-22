@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from hal0.lifecycle.catalog import LifecycleCatalog
+from hal0.lifecycle.catalog import CatalogError, LifecycleCatalog
 from hal0.lifecycle.types import (
     HostFacts,
     InstalledState,
     OperatorIntent,
+    ResolutionPlan,
     ResolutionRequest,
     SlotState,
+    UpdatePlan,
 )
 
 
@@ -124,28 +124,49 @@ def test_host_facts_mismatched_architecture_excluded(
     assert decision.selected is None
 
 
-def test_host_facts_backend_mismatch_on_brain_model(
+def test_backend_mismatch_cannot_select_default_rocm_runner(
+    catalog: LifecycleCatalog,
+) -> None:
+    host = HostFacts(host="amd-rocm", device_class="gpu", backend="cuda")
+    with pytest.raises(CatalogError, match="no default runner"):
+        catalog.resolve(ResolutionRequest.fresh_install(host=host))
+
+
+def test_backend_mismatch_cannot_select_brain_rocm_runner(
     catalog: LifecycleCatalog, hermes_intent: OperatorIntent
 ) -> None:
-    """A host whose backend is not available for the first model should reject it."""
-    host = HostFacts(host="amd-vulkan", device_class="gpu", backend="rocm")
+    host = HostFacts(host="amd-rocm", device_class="gpu", backend="cuda")
     plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
-    decision = plan.selection("brain.model")
-    assert decision.selected is not None
-    # The first model (hal0-brain-rocmfpx-agent) needs rocmfpx runner which
-    # supports rocmfpx-gguf; but host backend=rocm, so rejection may differ.
-    # At minimum the plan is deterministic and consistent.
-    assert decision.rejected or decision.selected is not None
+    assert plan.selection("brain.model").selected is None
 
 
-def test_host_facts_inconsistent_device_class(
-    catalog: LifecycleCatalog
+def test_device_class_mismatch_cannot_select_default_gpu_runner(
+    catalog: LifecycleCatalog,
 ) -> None:
-    """A host with device_class=cpu but host=amd-rocm should still resolve."""
     host = HostFacts(host="amd-rocm", device_class="cpu", backend="rocm")
-    plan = catalog.resolve(ResolutionRequest.fresh_install(host=host))
-    # Should still find runners matching host label
-    assert plan.selection("agent.runner").selected is not None
+    with pytest.raises(CatalogError, match="no default runner"):
+        catalog.resolve(ResolutionRequest.fresh_install(host=host))
+
+
+def test_device_class_mismatch_cannot_select_brain_gpu_runner(
+    catalog: LifecycleCatalog, hermes_intent: OperatorIntent
+) -> None:
+    host = HostFacts(host="amd-rocm", device_class="cpu", backend="rocm")
+    plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
+    assert plan.selection("brain.model").selected is None
+
+
+def test_consistent_rocm_host_resolves_default_and_brain(
+    catalog: LifecycleCatalog, hermes_intent: OperatorIntent
+) -> None:
+    host = HostFacts(host="amd-rocm", device_class="gpu", backend="rocm")
+
+    fresh = catalog.resolve(ResolutionRequest.fresh_install(host=host))
+    assert fresh.selection("agent.runner").selected.id == "rocmfpx"
+
+    setup = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
+    assert setup.selection("brain.model").selected.id == "hal0-brain-rocmfpx-agent"
+    assert setup.selection("brain.runner").selected.id == "rocmfpx"
 
 
 # ── Compare tests ────────────────────────────────────────────────────────
@@ -164,6 +185,7 @@ def test_compare_plans_missing_initial_slot(
     """When the bundled initial slot (agent) is missing, compare plans slot.ensure."""
     installed = InstalledState(slots=(), runners=frozenset())
     plan = catalog.compare(installed)
+    assert isinstance(plan, UpdatePlan)
     assert [op.kind for op in plan.operations] == ["slot.ensure"]
     assert plan.operations[0].resource is not None
     assert plan.operations[0].resource.id == "agent"
@@ -219,6 +241,4 @@ def test_resolution_plan_json_serialization_round_trip(
 ) -> None:
     host = HostFacts(host="amd-rocm", device_class="gpu", backend="rocm")
     plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
-    payload = plan.model_dump_json()
-    parsed = json.loads(payload)
-    assert parsed["selections"]
+    assert ResolutionPlan.model_validate_json(plan.model_dump_json()) == plan

@@ -26,6 +26,7 @@ from .types import (
     ResourceRef,
     RunnerDefinition,
     SelectionDecision,
+    UpdatePlan,
 )
 
 _DOCUMENT_NAMES = ("packages", "runners", "models", "profiles", "bootstrap")
@@ -386,7 +387,7 @@ class LifecycleCatalog:
 
         return ResolutionPlan()
 
-    def compare(self, installed: InstalledState) -> ResolutionPlan:
+    def compare(self, installed: InstalledState) -> UpdatePlan:
         """Compare installed state to desired.
 
         Plans ``slot.ensure`` for any bundled initial slot missing from
@@ -408,7 +409,7 @@ class LifecycleCatalog:
                     )
                 )
 
-        return ResolutionPlan(
+        return UpdatePlan(
             operations=tuple(operations),
             selections=(),
             warnings=tuple(warnings),
@@ -426,11 +427,28 @@ class LifecycleCatalog:
 
     # ── Internal resolution helpers ──────────────────────────────────────
 
+    @staticmethod
+    def _runner_matches_hardware(runner: RunnerDefinition, host: HostFacts) -> bool:
+        if host.backend and host.backend not in runner.backends:
+            return False
+
+        gpu_backends = frozenset({"rocm", "vulkan", "cuda"})
+        if not runner.backends.isdisjoint(gpu_backends):
+            device_class = "gpu"
+        elif runner.backends == frozenset({"cpu"}):
+            device_class = "cpu"
+        elif runner.backends == frozenset({"npu"}):
+            device_class = "npu"
+        else:
+            device_class = None
+        return not host.device_class or host.device_class == device_class
+
     def _resolve_default_runner(self, host: HostFacts, *, capability: str) -> str:
         """Find the default runner for a host/capability scope."""
         scope = f"{host.host}/{capability}"
         rdefs = [r for r in self.envelope.runners
                  if scope in r.default_for
+                 and self._runner_matches_hardware(r, host)
                  and not r.architectures.isdisjoint(host.architectures)
                  and not r.deprecated]
         if not rdefs:
@@ -442,6 +460,7 @@ class LifecycleCatalog:
             candidates = [
                 rid for rid in (host_runner_ids & cap_runner_ids & set(policy_runners))
                 if not self._runners[rid].deprecated
+                and self._runner_matches_hardware(self._runners[rid], host)
                 and not self._runners[rid].architectures.isdisjoint(host.architectures)
             ]
             if not candidates:
@@ -511,11 +530,12 @@ class LifecycleCatalog:
 
         Filtering order (plan-specified):
           1. Runner host label matches HostFacts.host
-          2. Runner architecture matches HostFacts.architectures
-          3. Runner capability includes required_capability
-          4. Runner is not deprecated
-          5. Runner format intersects model formats
-          6. Runner is in model's allowlist
+          2. Runner backend and physical device class match HostFacts
+          3. Runner architecture matches HostFacts.architectures
+          4. Runner capability includes required_capability
+          5. Runner is not deprecated
+          6. Runner format intersects model formats
+          7. Runner is in model's allowlist
         Then rank by runner priority descending, with deterministic tie-break
         on runner id (sorted ascending). Returns highest-ranked runner id.
         """
@@ -526,6 +546,9 @@ class LifecycleCatalog:
         candidates: list[tuple[int, str]] = []
         for runner_id in host_runner_ids:
             runner = self._runners[runner_id]
+            # backend and physical device-class filters
+            if not self._runner_matches_hardware(runner, host):
+                continue
             # architecture filter
             if runner.architectures.isdisjoint(host.architectures):
                 continue
