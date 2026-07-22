@@ -7,7 +7,6 @@ GitHub Actions wiring without publishing a release during the test suite.
 import re
 from pathlib import Path
 
-
 WORKFLOW = Path(".github/workflows/release.yml")
 
 
@@ -72,8 +71,19 @@ def test_release_checkouts_pin_canonical_repository_and_immutable_tag() -> None:
 
 def test_preview_release_is_not_latest_and_upload_is_immutable() -> None:
     text = _workflow_text()
-    assert "needs.resolve.outputs.github_prerelease" in text
-    assert "needs.resolve.outputs.github_latest" in text
+    publish = text.split("      - name: Publish GitHub Release", 1)[1].split(
+        "      - name: Record separately verified channel pointer gate", 1
+    )[0]
+    normalized = " ".join(publish.replace("\\\n", " ").split())
+
+    assert "GITHUB_PRERELEASE: ${{ needs.resolve.outputs.github_prerelease }}" in publish
+    assert "GITHUB_LATEST: ${{ needs.resolve.outputs.github_latest }}" in publish
+    assert (
+        'gh release create "${TAG}" --verify-tag --title "hal0 ${TAG}" '
+        '--notes-file "${NOTES_FILE}" --draft=false '
+        '--prerelease="${GITHUB_PRERELEASE}" --latest="${GITHUB_LATEST}"'
+    ) in normalized
+    assert 'gh release upload "${TAG}" "${ASSETS[@]}"' in publish
     assert "--clobber" not in text
     assert 'gh release view "${TAG}"' in text
     assert 'asset collision:' in text
@@ -99,8 +109,15 @@ def test_release_signs_verifies_and_uploads_every_manifest_bundle() -> None:
 
 def test_channel_pointer_advancement_is_a_separate_final_gate() -> None:
     text = _workflow_text()
+    gate = text.split(
+        "      - name: Record separately verified channel pointer gate", 1
+    )[1].split("      - name: Summary", 1)[0]
+
     assert "channel pointer" in text.lower()
     assert "separately verified" in text.lower()
+    assert 'echo "Channel pointer advancement remains external' in gate
+    for publishing_command in ("curl ", "gh ", "git push", "upload", "release create"):
+        assert publishing_command not in gate
 
 
 def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
@@ -109,14 +126,19 @@ def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
         "      - name: Stage release notes", 1
     )[0]
 
-    for copy in (
+    staged_roots = re.findall(
+        r'(?m)^\s*cp -a\s+(\S+)\s+"\$\{STAGE\}/"\s*$', stage
+    )
+    assert staged_roots == [
         "src",
         "manifest.json",
+        "LICENSE",
+        "README.md",
         "pyproject.toml",
         "installer",
         "packaging",
-    ):
-        assert re.search(rf"cp -a {re.escape(copy)}\s+\"\$\{{STAGE\}}/\"", stage)
+        "docs",
+    ]
 
     for required in (
         "src/hal0/updater/updater.py",

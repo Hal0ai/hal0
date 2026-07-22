@@ -189,6 +189,36 @@ def synthetic_release(
     }
 
 
+@pytest.fixture
+def synthetic_preview_release(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Build an entirely local alpha release and signed-manifest fixture."""
+    artifacts = tmp_path / "preview-artifacts"
+    artifacts.mkdir()
+    version = "99.0.0-alpha.1"
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "preview-manifest.json"
+    payload = _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+        },
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", manifest_path.as_uri())
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    return {
+        "version": version,
+        "tarball": tarball,
+        "manifest_path": manifest_path,
+        "payload": payload,
+    }
+
+
 # ── releases_url ───────────────────────────────────────────────────────────────
 
 
@@ -494,6 +524,113 @@ def test_check_returns_typed_release_info(
     assert info.digest_sha256 == synthetic_release["payload"]["digest_sha256"]
     assert info.signer_identity == synthetic_release["payload"]["signer_identity"]
     assert info.update_available is True or info.update_available is False  # type sanity
+
+
+def test_preview_check_and_prepare_verify_local_signed_manifest_without_activation(
+    synthetic_preview_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rehearse preview check + prepare using file:// artifacts only."""
+    verification_calls: list[tuple[str, bytes, bytes, str, str]] = []
+    download_urls: list[str] = []
+    original_download = updater_module._download
+
+    async def record_local_download(url: str, destination: Path) -> None:
+        download_urls.append(url)
+        await original_download(url, destination)
+
+    def record_verification(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        verification_calls.append(
+            (
+                blob.name,
+                blob.read_bytes(),
+                bundle.read_bytes(),
+                identity_regexp,
+                issuer,
+            )
+        )
+
+    monkeypatch.setattr(updater_module, "_download", record_local_download)
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verification)
+
+    updater = Updater(channel="preview")
+    info = asyncio.run(updater.check())
+
+    version = synthetic_preview_release["version"]
+    manifest_path = synthetic_preview_release["manifest_path"]
+    payload = synthetic_preview_release["payload"]
+    assert info.latest == version
+    assert info.channel == "preview"
+    assert info.raw_manifest["release_kind"] == "preview"
+    assert not updater_module._cache_dir(version).exists()
+
+    prepared = asyncio.run(updater.prepare())
+
+    assert prepared["version"] == version
+    assert Path(prepared["install_dir"]).is_dir()
+    assert updater_module._manifest_cache_path(version).is_file()
+    assert not _current_symlink().is_symlink()
+    assert download_urls == [
+        f"{manifest_path.as_uri()}.bundle",
+        f"{manifest_path.as_uri()}.bundle",
+        payload["url"],
+        payload["bundle_url"],
+    ]
+    assert all(url.startswith("file://") for url in download_urls)
+    assert [call[0] for call in verification_calls] == [
+        "manifest.json",
+        "manifest.json",
+        synthetic_preview_release["tarball"].name,
+    ]
+    for call in verification_calls[:2]:
+        assert call[1] == manifest_path.read_bytes()
+        assert call[2] == Path(f"{manifest_path}.bundle").read_bytes()
+        assert call[3:] == (
+            updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP,
+            updater_module._MANIFEST_SIGNER_ISSUER,
+        )
+    assert verification_calls[2][3:] == (
+        payload["signer_identity"],
+        payload["signer_issuer"],
+    )
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_preview_manifest_verification_failure_leaves_no_staged_state(
+    operation: str,
+    synthetic_preview_release: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected channel-manifest bundle cannot reach artifact staging."""
+    download_urls: list[str] = []
+    original_download = updater_module._download
+
+    async def record_local_download(url: str, destination: Path) -> None:
+        download_urls.append(url)
+        await original_download(url, destination)
+
+    def reject_manifest(*args: Any, **kwargs: Any) -> None:
+        raise UpdateCosignFailed("local rehearsal rejected manifest signature")
+
+    monkeypatch.setattr(updater_module, "_download", record_local_download)
+    monkeypatch.setattr(updater_module, "_verify_cosign", reject_manifest)
+
+    updater = Updater(channel="preview")
+    with pytest.raises(UpdateCosignFailed):
+        asyncio.run(getattr(updater, operation)())
+
+    version = synthetic_preview_release["version"]
+    manifest_path = synthetic_preview_release["manifest_path"]
+    assert download_urls == [f"{manifest_path.as_uri()}.bundle"]
+    assert not updater_module._cache_dir(version).exists()
+    assert not _versioned_install_dir(version).exists()
+    assert not _current_symlink().is_symlink()
 
 
 def test_check_uses_pinned_trust_root_for_unauthenticated_manifest(
