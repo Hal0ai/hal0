@@ -5,19 +5,28 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
 # Test collection must not import the application against the host's FHS
 # config. In particular, /etc/hal0/hal0.toml may be root-only on a deployed
 # machine. Set an isolated root before importing hal0.api below.
+_collection_hal0_home: str | None = None
 if not os.environ.get("HAL0_HOME") and not os.access("/etc/hal0/hal0.toml", os.R_OK):
-    os.environ["HAL0_HOME"] = tempfile.mkdtemp(prefix="hal0-pytest-")
+    _collection_hal0_home = tempfile.mkdtemp(prefix="hal0-pytest-")
+    os.environ["HAL0_HOME"] = _collection_hal0_home
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
-from hal0.api import create_app
+from hal0.api import create_app  # noqa: E402
+
+# Keep the isolated root only for application import/collection. Tests that
+# assert default FHS paths must see HAL0_HOME unset; runtime fixtures provide
+# their own temporary roots when isolation is required.
+if _collection_hal0_home is not None:
+    os.environ.pop("HAL0_HOME", None)
 
 # [memory].enabled defaults to True in the schema, so the bulk of the suite
 # — which exercises the memory MCP, the /api/memory/* routes, and the
@@ -81,6 +90,12 @@ def _auth_dev_open_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     bind/key-derived default.
     """
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep tests away from host FHS state, including non-API unit tests."""
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
 
 
 @pytest.fixture(scope="function")

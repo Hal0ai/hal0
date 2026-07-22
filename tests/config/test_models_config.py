@@ -9,14 +9,16 @@ from hal0.config.schema import Hal0Config, ModelsConfig
 
 
 class TestModelsConfigDefaults:
-    def test_defaults(self) -> None:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("HAL0_HOME", raising=False)
         cfg = ModelsConfig()
         assert cfg.roots == ["/var/lib/hal0/models"]
         assert cfg.auto_scan_on_start is True
         assert ".gguf" in cfg.file_extensions
         assert ".safetensors" in cfg.file_extensions
 
-    def test_attached_to_hal0_config(self) -> None:
+    def test_attached_to_hal0_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("HAL0_HOME", raising=False)
         top = Hal0Config()
         assert isinstance(top.models, ModelsConfig)
         assert top.models.roots == ["/var/lib/hal0/models"]
