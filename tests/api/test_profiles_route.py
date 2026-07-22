@@ -112,14 +112,9 @@ class TestListProfiles:
         assert vulkan["seed"] is True
 
     def test_device_class_values(self, client: TestClient) -> None:
-        """Phase C: device_class surfaces in the route response."""
+        """All virtual 1.0 seeds leave device ownership to the slot."""
         data = client.get("/api/profiles").json()
-        flm = next(item for item in data if item["name"] == "flm")
-        assert flm["device_class"] == "npu"
-        kokoro = next(item for item in data if item["name"] == "kokoro")
-        assert kokoro["device_class"] == "cpu"
-        vulkan = next(item for item in data if item["name"] == "chat")
-        assert vulkan["device_class"] is None
+        assert all(item["device_class"] is None for item in data)
 
     def test_backend_values(self, client: TestClient) -> None:
         """backend surfaces in the route response (rocm|vulkan|None)."""

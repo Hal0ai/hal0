@@ -17,8 +17,8 @@ _SEEDED_SLOTS_DIR = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
 
 def test_comfyui_seed_profile() -> None:
     p = SEED_PROFILES["comfyui"]
-    # Per Option B: device-specific profiles declare device_class explicitly.
-    assert p["device_class"] == "img"
+    assert "device_class" not in p
+    assert "--disable-mmap" in p["flags"]
 
 
 def test_seed_img_toml_validates() -> None:

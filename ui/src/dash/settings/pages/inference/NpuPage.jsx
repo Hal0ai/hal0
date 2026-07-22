@@ -83,7 +83,7 @@ export function NpuPage() {
       {npuSlots.length > 0 && (
         <div className="s-panel">
           <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-            <div className="k"><span>FLM slot</span><FieldInfoIcon description="{npuName} · device=npu · profile=flm" /></div>
+            <div className="k"><span>FLM slot</span><FieldInfoIcon description={`${npuName} · device=npu · profile=flm`} /></div>
             <div className="v">
               <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{npuName}</span>
             </div>

@@ -388,39 +388,8 @@ def test_profile_device_class_defaults_none() -> None:
 
 
 def test_seed_device_classes() -> None:
-    """Generic profiles are device-agnostic (slot owns device per §4.1);
-    device-specific profiles declare their class explicitly to preserve
-    the existing fit-gating semantics."""
-    DEVICE_AGNOSTIC = {
-        "chat",
-        "chat-long-context",
-        "moe",
-        "dense",
-        "embedding",
-        "reranking",
-        "brain",
-        "chadrock-dense",
-        "chadrock-moe",
-        "thinking",
-        "coding",
-    }
-    for name in DEVICE_AGNOSTIC:
-        assert "device_class" not in SEED_PROFILES[name], (
-            f"profile {name} should be device-agnostic but has device_class"
-        )
-    # Device-specific profiles declare their class explicitly.
-    DEVICE_SPECIFIC = {
-        "cpu-chat": "cpu",
-        "flm": "npu",
-        "kokoro": "cpu",
-        "qwen3-tts": "gpu",
-        "comfyui": "img",
-    }
-    for name, expected_class in DEVICE_SPECIFIC.items():
-        assert SEED_PROFILES[name]["device_class"] == expected_class, (
-            f"profile {name}: expected device_class={expected_class!r}, "
-            f"got {SEED_PROFILES[name].get('device_class')!r}"
-        )
+    """Every 1.0 seed is device-agnostic; the slot owns the device."""
+    assert all("device_class" not in profile for profile in SEED_PROFILES.values())
 
 
 def test_seed_backends() -> None:

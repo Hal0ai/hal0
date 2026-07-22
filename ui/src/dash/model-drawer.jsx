@@ -804,7 +804,7 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Identity ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>display name</span>
+						<span>Display name</span>
 						<FieldInfoIcon description="empty keeps the model id" />
 					</div>
 					<div className="form-ctl">
@@ -819,7 +819,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>types</span>
+						<span>Types</span>
 						<FieldInfoIcon description="capability tags · drive routing &amp; slot features" />
 					</div>
 					<div
@@ -848,7 +848,7 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Per-type default marker (Set / Remove) ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>default for {typeLabel}</span>
+						<span>Default for {typeLabel}</span>
 						<FieldInfoIcon description="the model this type falls back to · one per type" />
 					</div>
 					<div
@@ -1112,7 +1112,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>mtp</span>
+						<span>MTP</span>
 						<FieldInfoIcon description="Speculative decode. Auto defers to eligibility." />
 					</div>
 					<div className="form-ctl">
@@ -1121,7 +1121,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>jinja</span>
+						<span>Jinja</span>
 						<FieldInfoIcon description="jinja chat-template rendering" />
 					</div>
 					<div className="form-ctl">
@@ -1130,7 +1130,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>chat_template</span>
+						<span>Chat template</span>
 						<FieldInfoIcon description="auto = use the template embedded in the GGUF" />
 					</div>
 					<div className="form-ctl">
@@ -1153,7 +1153,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>modality</span>
+						<span>Modality</span>
 						<FieldInfoIcon description="derived from capabilities" />
 					</div>
 					<div className="form-ctl">
@@ -1178,7 +1178,7 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Numeric tune (typed source of the managed --ctx-size) ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>context_size</span>
+						<span>Context size</span>
 						<FieldInfoIcon description="tokens · empty = launcher default · sets managed --ctx-size" />
 					</div>
 					<div className="form-ctl">
@@ -1202,7 +1202,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>capabilities</span>
+						<span>Capabilities</span>
 						<FieldInfoIcon description="dispatch / omni eligibility · canonical vocab" />
 					</div>
 					<div
@@ -1229,7 +1229,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>backends</span>
+						<span>Backends</span>
 						<FieldInfoIcon description="runners this model can bind · drives compatible-runner filtering" />
 					</div>
 					<div
@@ -1266,7 +1266,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>mmproj</span>
+						<span>MMProj</span>
 						<FieldInfoIcon description="vision projector sidecar path" />
 					</div>
 					<div className="form-ctl">
@@ -1286,7 +1286,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>hf_repo</span>
+						<span>HF repo</span>
 						<FieldInfoIcon description="HuggingFace repo · needed to re-pull" />
 					</div>
 					<div className="form-ctl">
@@ -1301,7 +1301,7 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>hf_filename</span>
+						<span>HF filename</span>
 						<FieldInfoIcon description="variant filename within the repo" />
 					</div>
 					<div className="form-ctl">
