@@ -328,9 +328,7 @@ def test_stable_channel_rejects_preview_manifest() -> None:
 
 
 def test_requested_channel_must_match_manifest_channel() -> None:
-    manifest = _parse_manifest(
-        {**VALID_MANIFEST, "channel": "nightly", "release_kind": "nightly"}
-    )
+    manifest = _parse_manifest({**VALID_MANIFEST, "channel": "nightly", "release_kind": "nightly"})
     with pytest.raises(ValueError, match=r"manifest channel.*nightly"):
         updater_module.validate_manifest_for_channel(manifest, "preview")
 
@@ -518,6 +516,36 @@ def test_check_rejects_wrong_channel_manifest(
 
     assert exc_info.value.code == "system.update_manifest_invalid"
     assert exc_info.value.details["channel"] == "stable"
+
+
+def test_prepare_rejects_wrong_channel_before_download_or_cache_write(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """prepare() validates channel coherence before creating staged state."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version="99.0.0")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version="99.0.0",
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    downloads: list[str] = []
+
+    async def record_download(url: str, destination: Path) -> None:
+        downloads.append(url)
+
+    monkeypatch.setattr(updater_module, "_download", record_download)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(Updater(channel="stable").prepare())
+
+    assert downloads == []
+    assert not updater_module._cache_dir("99.0.0").exists()
 
 
 def test_validate_manifest_for_channel_is_public_export() -> None:

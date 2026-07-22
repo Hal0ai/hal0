@@ -83,6 +83,15 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     return captured
 
 
+def test_preview_channel_posts_preview_payload(stub_api: dict) -> None:
+    assert uc.UpdateChannel.preview.value == "preview"
+
+    result = runner.invoke(app, ["update", "--channel", "preview", "--check"])
+
+    assert result.exit_code == 0, result.output
+    assert stub_api["put_json"] == {"channel": "preview"}
+
+
 def test_restart_slots_flag_present_and_drift_aware() -> None:
     """``--restart-slots`` is back — but drift-aware, via the API (WS-J, #1111).
 

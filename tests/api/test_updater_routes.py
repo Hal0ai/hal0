@@ -42,7 +42,16 @@ def isolated_client(
     """TestClient with HAL0_RELEASES_URL pointing at a tmp file."""
     manifest = _write_manifest(
         tmp_path / "latest.json",
-        {"version": "9.9.9", "url": "https://example.test/hal0-9.9.9.tar.gz"},
+        {
+            "_schema": "hal0.releases.v1",
+            "version": "9.9.9",
+            "channel": "stable",
+            "release_kind": "stable",
+            "url": "https://example.test/hal0-9.9.9.tar.gz",
+            "bundle_url": "https://example.test/hal0-9.9.9.tar.gz.bundle",
+            "digest_sha256": "0" * 64,
+            "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
+        },
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
 
@@ -345,6 +354,11 @@ def test_channel_get_returns_stable_default(isolated_client: TestClient) -> None
 
 def test_channel_put_persists_to_hal0_toml(isolated_client: TestClient, tmp_hal0_home: str) -> None:
     """PUT /api/updates/channel writes telemetry.channel into hal0.toml."""
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(channel="nightly", release_kind="nightly")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     r = isolated_client.put("/api/updates/channel", json={"channel": "nightly"})
     assert r.status_code == 200, r.text
     assert r.json() == {"channel": "nightly"}
@@ -360,6 +374,39 @@ def test_channel_put_persists_to_hal0_toml(isolated_client: TestClient, tmp_hal0
     # GET reflects the change.
     r2 = isolated_client.get("/api/updates/channel")
     assert r2.json() == {"channel": "nightly"}
+
+
+def test_channel_put_accepts_preview(isolated_client: TestClient, tmp_hal0_home: str) -> None:
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        version="9.9.9-alpha.1",
+        channel="preview",
+        release_kind="preview",
+        prerelease_stage="alpha",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"channel": "preview"}
+
+
+def test_channel_put_keeps_previous_channel_when_validation_fails(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+
+    # The preview URL resolves, but serves a stable-channel manifest.
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code in {400, 502}
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.get("/api/updates/channel").json() == {"channel": "stable"}
 
 
 def test_channel_put_invalid_value_returns_envelope(isolated_client: TestClient) -> None:

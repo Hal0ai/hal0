@@ -36,7 +36,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import structlog
 from fastapi import APIRouter, Request
@@ -46,6 +46,7 @@ from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
+from hal0.release.policy import ReleaseKind
 from hal0.updater import Updater, fetch_release_manifest, releases_url
 
 log = structlog.get_logger(__name__)
@@ -55,7 +56,7 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-_VALID_CHANNELS = frozenset({"stable", "nightly"})
+_VALID_CHANNELS = frozenset(get_args(ReleaseKind))
 
 
 class UpdateError(Hal0Error):
@@ -778,7 +779,7 @@ async def rollback_update(request: Request) -> dict[str, Any]:
 
 @router.get("/channel")
 async def get_channel(request: Request) -> dict[str, str]:
-    """Return the configured update channel (stable | nightly)."""
+    """Return the configured update channel (stable | preview | nightly)."""
     return {"channel": _current_channel(request)}
 
 
@@ -788,11 +789,12 @@ async def set_channel(request: Request) -> dict[str, str]:
 
     Body::
 
-        {"channel": "stable"}   # or "nightly"
+        {"channel": "stable"}   # or "preview" / "nightly"
 
-    Persists to ``/etc/hal0/hal0.toml`` (telemetry.channel) via the same
-    atomic write path as ``/api/settings``. The new channel takes effect
-    immediately for subsequent ``/check`` calls.
+    Before switching, validates the target channel's manifest through
+    :meth:`Updater.check`. Only a reachable, schema-valid, channel-coherent
+    manifest is persisted to ``/etc/hal0/hal0.toml`` (telemetry.channel), via
+    the same atomic write path as ``/api/settings``.
     """
     try:
         body = await request.json()
@@ -825,6 +827,12 @@ async def set_channel(request: Request) -> dict[str, str]:
             details={"error": str(exc)},
             code="channel.invalid",
         ) from exc
+
+    # Validate before touching either the file or the app-state cache. A failed
+    # fetch/schema/channel check must leave the previous channel fully intact.
+    if channel != current.telemetry.channel:
+        await Updater(channel=channel).check()
+
     try:
         save_hal0_config(merged)
     except OSError as exc:

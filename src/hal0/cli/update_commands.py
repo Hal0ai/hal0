@@ -53,6 +53,7 @@ update_app = typer.Typer(
 
 class UpdateChannel(StrEnum):
     stable = "stable"
+    preview = "preview"
 
 
 def _print_check(body: dict) -> None:
@@ -238,7 +239,7 @@ def update(
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
-        help="Persist the update channel (stable), then check.",
+        help="Persist the update channel (stable or preview), then check.",
     ),
     check: bool = typer.Option(
         False,
