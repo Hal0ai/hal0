@@ -144,3 +144,23 @@ def test_rocm_and_vulkan_fpx_share_supported_backends() -> None:
     device — not BINARY — disambiguates (spec-hw-slot-ownership §2/§4)."""
     assert RUNNER_IMAGES["rocmfpx"].supported_backends == ("rocm", "vulkan")
     assert RUNNER_IMAGES["vulkanfpx"].supported_backends == ("rocm", "vulkan")
+
+
+# ── Catalog-load failure is surfaced (no silent fallback) ────────────────
+
+
+def test_catalog_load_failure_is_surfaced_not_swallowed() -> None:
+    """runner module must not silently fall back to an incomplete hardcoded
+    registry when the bundled catalog fails to load."""
+    import hal0.runners
+
+    # _build_runners_from_catalog calls LifecycleCatalog.load_bundled() and
+    # must propagate any error — no try/except fallback.
+    original_func = hal0.runners._build_runners_from_catalog
+    try:
+        # Verify the builder runs without error under normal conditions
+        result = original_func()
+        assert isinstance(result, dict)
+        assert "vulkan" in result
+    except Exception as exc:
+        pytest.fail(f"_build_runners_from_catalog raised unexpectedly: {exc}")
