@@ -69,8 +69,8 @@ log = structlog.get_logger(__name__)
 
 
 # Read/install compatibility for nightly manifests published before the current
-# 14-digit timestamp policy. This does not make legacy tags publishable through
-# ReleasePolicy; it only preserves existing manifest and staged-release reads.
+# 14-digit timestamp policy. This does not make older date-only tags publishable
+# through ReleasePolicy; it only preserves existing manifest and staged-release reads.
 _LEGACY_NIGHTLY_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}$")
 
 
@@ -201,9 +201,9 @@ def validate_release_version(version: str) -> str:
     """Return an exact supported updater version or raise ``ValueError``.
 
     ReleasePolicy remains the source of truth for every currently publishable
-    version. The updater additionally accepts the documented, path-safe legacy
-    nightly read/install form ``X.Y.Z-nightly.YYYYMMDD`` for compatibility with
-    existing manifests and staged releases.
+    version. The updater additionally accepts the documented, path-safe date-only
+    nightly read/install form ``X.Y.Z-nightly.YYYYMMDD`` for already-issued
+    manifests and staged releases.
     """
     if not isinstance(version, str):
         raise ValueError(f"release version must be a string, got {type(version).__name__}")
