@@ -66,9 +66,7 @@ def test_fresh_install_plans_only_agent_and_default_runner(
     assert not [op for op in plan.operations if op.kind == "model.pull"]
 
 
-def test_fresh_install_on_cpu_has_no_model_pulls(
-    catalog: LifecycleCatalog
-) -> None:
+def test_fresh_install_on_cpu_has_no_model_pulls(catalog: LifecycleCatalog) -> None:
     host = HostFacts(host="cpu", device_class="cpu", backend=None)
     plan = catalog.resolve(ResolutionRequest.fresh_install(host=host))
     assert not [op for op in plan.operations if op.kind == "model.pull"]
@@ -117,8 +115,9 @@ def test_host_facts_mismatched_architecture_excluded(
     catalog: LifecycleCatalog, hermes_intent: OperatorIntent
 ) -> None:
     """A host with no matching architecture should find no runners."""
-    host = HostFacts(host="amd-vulkan", device_class="gpu", backend="vulkan",
-                     architectures=frozenset({"arm64"}))
+    host = HostFacts(
+        host="amd-vulkan", device_class="gpu", backend="vulkan", architectures=frozenset({"arm64"})
+    )
     plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
     decision = plan.selection("brain.model")
     assert decision.selected is None
@@ -179,9 +178,7 @@ def test_existing_slot_pin_is_never_changed(
     assert not [op for op in plan.operations if op.kind == "slot.runner.set"]
 
 
-def test_compare_plans_missing_initial_slot(
-    catalog: LifecycleCatalog
-) -> None:
+def test_compare_plans_missing_initial_slot(catalog: LifecycleCatalog) -> None:
     """When the bundled initial slot (agent) is missing, compare plans slot.ensure."""
     installed = InstalledState(slots=(), runners=frozenset())
     plan = catalog.compare(installed)
@@ -197,8 +194,7 @@ def test_compare_preserves_operator_runner_pin(
     """When the agent slot exists with a pinned runner, compare does not change it."""
     installed = InstalledState(
         slots=(
-            SlotState(name="agent", role="agent", profile="agent",
-                      runner="rocmfpx", enabled=True),
+            SlotState(name="agent", role="agent", profile="agent", runner="rocmfpx", enabled=True),
         ),
         runners=frozenset({"rocmfpx"}),
     )

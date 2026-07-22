@@ -241,7 +241,9 @@ def _build_runners_from_catalog() -> dict[str, Runner]:
             if backend in ("cpu", "npu"):
                 backend = None
 
-        supported_backends: tuple[str, ...] = supp.get("supported_backends_override") or tuple(rdef.backends)  # type: ignore[assignment]
+        supported_backends: tuple[str, ...] = supp.get("supported_backends_override") or tuple(
+            rdef.backends
+        )  # type: ignore[assignment]
         result[rdef.id] = Runner(
             key=rdef.id,
             image=image,
