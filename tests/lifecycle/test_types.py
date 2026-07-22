@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from pydantic import ValidationError
 
@@ -11,6 +9,7 @@ from hal0.lifecycle.types import (
     ActionRef,
     HostFacts,
     InstalledState,
+    LifecycleOperation,
     OperatorIntent,
     ResolutionRequest,
     ResourceRef,
@@ -27,12 +26,9 @@ def test_action_ref_construction_and_frozen() -> None:
         ref.kind = "other"  # type: ignore[misc]
 
 
-def test_action_ref_json_serialization() -> None:
+def test_action_ref_json_round_trip() -> None:
     ref = ActionRef(kind="slot.ensure", resource=ResourceRef(kind="slot", id="agent"))
-    payload = ref.model_dump_json()
-    data = json.loads(payload)
-    assert data["kind"] == "slot.ensure"
-    assert data["resource"]["id"] == "agent"
+    assert ActionRef.model_validate_json(ref.model_dump_json()) == ref
 
 
 def test_update_plan_construction_and_frozen() -> None:
@@ -47,25 +43,26 @@ def test_update_plan_construction_and_frozen() -> None:
         plan.warnings = ("changed",)  # type: ignore[misc]
 
 
-def test_update_plan_json_serialization() -> None:
+def test_update_plan_json_round_trip() -> None:
     plan = UpdatePlan(
-        operations=(),
+        operations=(
+            LifecycleOperation(
+                kind="slot.ensure",
+                resource=ResourceRef(kind="slot", id="agent"),
+                detail="role=agent",
+            ),
+        ),
         selections=(),
-        warnings=(),
+        warnings=("example",),
     )
-    payload = plan.model_dump_json()
-    data = json.loads(payload)
-    assert "operations" in data
-    assert "selections" in data
+    assert UpdatePlan.model_validate_json(plan.model_dump_json()) == plan
 
 
-def test_resolution_plan_is_serializable_round_trip() -> None:
+def test_resolution_request_json_round_trip() -> None:
     host = HostFacts(host="amd-vulkan", device_class="gpu", backend="vulkan")
     request = ResolutionRequest.fresh_install(host=host)
     payload = request.model_dump_json()
-    # Re-parse
-    parsed = ResolutionRequest.model_validate_json(payload)
-    assert parsed.host.host == "amd-vulkan"
+    assert ResolutionRequest.model_validate_json(payload) == request
 
 
 def test_host_facts_frozen_immutable() -> None:

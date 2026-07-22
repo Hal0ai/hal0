@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from hal0.lifecycle.catalog import LifecycleCatalog
@@ -86,48 +84,39 @@ def test_host_label_never_deployed_triggers_rejection(
 # ── Priority ranking and tie-break tests ─────────────────────────────────
 
 
+def _catalog_with_competing_brain_runners(
+    catalog_source, *, rocmfpx_priority: int, vulkanfpx_priority: int
+) -> LifecycleCatalog:
+    rocmfpx = catalog_source.runner("rocmfpx")
+    vulkanfpx = catalog_source.runner("vulkanfpx")
+    rocmfpx["priority"] = rocmfpx_priority
+    vulkanfpx["priority"] = vulkanfpx_priority
+    vulkanfpx["hosts"] = ["amd-rocm"]
+    vulkanfpx["backends"] = ["rocm"]
+    return LifecycleCatalog.from_documents(catalog_source.documents)
+
+
 def test_brain_model_runner_ranked_by_priority_desc(
-    catalog: LifecycleCatalog, hermes_intent: OperatorIntent
+    catalog_source, hermes_intent: OperatorIntent
 ) -> None:
-    """On a host where a model has multiple compatible runners,
-    the highest-priority runner is chosen (priority desc, ID tie-break)."""
-    # hal0-brain-rocmfpx-agent on amd-vulkan host:
-    # - vulkanfpx supports rocmfpx-gguf format, priority 90
-    # - vulkan supports stock-gguf format only, cannot run this model
-    # The only compatible runner is vulkanfpx, and it is selected.
-    host = HostFacts(host="amd-vulkan", device_class="gpu", backend="vulkan")
+    catalog = _catalog_with_competing_brain_runners(
+        catalog_source, rocmfpx_priority=100, vulkanfpx_priority=101
+    )
+    host = HostFacts(host="amd-rocm", device_class="gpu", backend="rocm")
+
     plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
-    runner_decision = plan.selection("brain.runner")
-    assert runner_decision.selected is not None
-    # vulkanfpx is the only compatible runner; resolved deterministically
-    assert runner_decision.selected.id == "vulkanfpx"
+
+    assert plan.selection("brain.runner").selected.id == "vulkanfpx"
 
 
 def test_priority_tie_broken_deterministically_by_runner_id(
-    catalog: LifecycleCatalog,
+    catalog_source, hermes_intent: OperatorIntent
 ) -> None:
-    """When runners have equal priority, tie-break is deterministic via runner ID."""
-    # Use amd-vulkan where vulkan (priority 100) and rocmfpx is excluded (host mismatch)
-    # Actually: rocmfpx host is amd-rocm, vulkanfpx host is amd-vulkan.
-    # For a host with both, order matters. Use 'cpu' host where cpu runner (pri 100)
-    # is the only one — just prove determinism across calls.
-    host = HostFacts(host="cpu", device_class="cpu", backend=None)
-    intent = OperatorIntent(
-        capabilities=frozenset({"chat", "tool-use"}),
-        roles=frozenset({"brain"}),
+    catalog = _catalog_with_competing_brain_runners(
+        catalog_source, rocmfpx_priority=100, vulkanfpx_priority=100
     )
-    plan1 = catalog.resolve(ResolutionRequest.setup(host=host, intent=intent))
-    plan2 = catalog.resolve(ResolutionRequest.setup(host=host, intent=intent))
-    assert plan1.model_dump_json() == plan2.model_dump_json()
+    host = HostFacts(host="amd-rocm", device_class="gpu", backend="rocm")
 
-
-def test_plan_json_serialization_stable(
-    catalog: LifecycleCatalog, hermes_intent: OperatorIntent
-) -> None:
-    host = HostFacts(host="amd-vulkan", device_class="gpu", backend="vulkan")
     plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
-    payload = plan.model_dump_json()
-    parsed = json.loads(payload)
-    assert isinstance(parsed, dict)
-    assert "selections" in parsed
-    assert "operations" in parsed
+
+    assert plan.selection("brain.runner").selected.id == "rocmfpx"
