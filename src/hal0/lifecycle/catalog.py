@@ -387,14 +387,26 @@ class LifecycleCatalog:
         return ResolutionPlan()
 
     def compare(self, installed: InstalledState) -> ResolutionPlan:
-        """Compare installed state to desired. Existing pinned slots never change."""
+        """Compare installed state to desired.
+
+        Plans ``slot.ensure`` for any bundled initial slot missing from
+        the installed set. Preserves existing operator runner pins —
+        never emits ``slot.runner.set`` for a slot that already has a
+        pinned runner. Returns an ``UpdatePlan`` for diff consumption.
+        """
         operations: list[LifecycleOperation] = []
         warnings: list[str] = []
 
-        for slot in installed.slots:
-            if slot.runner is not None and slot.enabled:
-                # Custom pin → never change runner
-                continue
+        installed_names = {slot.name for slot in installed.slots}
+        for slot_policy in self.envelope.bootstrap.initial_slots:
+            if slot_policy.name not in installed_names:
+                operations.append(
+                    LifecycleOperation(
+                        kind="slot.ensure",
+                        resource=ResourceRef(kind="slot", id=slot_policy.name),
+                        detail=f"role={slot_policy.role}",
+                    )
+                )
 
         return ResolutionPlan(
             operations=tuple(operations),
@@ -417,22 +429,27 @@ class LifecycleCatalog:
     def _resolve_default_runner(self, host: HostFacts, *, capability: str) -> str:
         """Find the default runner for a host/capability scope."""
         scope = f"{host.host}/{capability}"
-        rdefs = [r for r in self.envelope.runners if scope in r.default_for]
+        rdefs = [r for r in self.envelope.runners
+                 if scope in r.default_for
+                 and not r.architectures.isdisjoint(host.architectures)
+                 and not r.deprecated]
         if not rdefs:
-            # Fall back to policy-based resolution
+            # Fall back to policy-based resolution with filtering
             policy = self.envelope.bootstrap.default_runner_policy
             policy_runners = list(self.envelope.runner_policies.get(policy, ()))
             host_runner_ids = set(self._host_runners.get(host.host, ()))
             cap_runner_ids = set(self._capability_runners.get(capability, ()))
-            match_ids = sorted(
-                host_runner_ids & cap_runner_ids & set(policy_runners),
-                key=lambda rid: self._runners[rid].priority,
-                reverse=True,
-            )
-            if match_ids:
-                return match_ids[0]
-            raise CatalogError(f"no default runner for {scope}")
-        by_priority = sorted(rdefs, key=lambda r: r.priority, reverse=True)
+            candidates = [
+                rid for rid in (host_runner_ids & cap_runner_ids & set(policy_runners))
+                if not self._runners[rid].deprecated
+                and not self._runners[rid].architectures.isdisjoint(host.architectures)
+            ]
+            if not candidates:
+                raise CatalogError(f"no default runner for {scope}")
+            # Sort by priority descending, then runner ID ascending
+            candidates.sort(key=lambda rid: (-self._runners[rid].priority, rid))
+            return candidates[0]
+        by_priority = sorted(rdefs, key=lambda r: (-r.priority, r.id))
         return by_priority[0].id
 
     def _resolve_brain_model(self, host: HostFacts) -> SelectionDecision:
@@ -440,6 +457,22 @@ class LifecycleCatalog:
         policy = self.envelope.bootstrap.hermes.model_policy
         model_ids = self.envelope.model_policies.get(policy, ())
         rejected: list[RejectedCandidate] = []
+
+        # Early exit: host label not known to any runner
+        host_runner_ids = self._host_runners.get(host.host, ())
+        if not host_runner_ids:
+            for model_id in model_ids:
+                model = self._models.get(model_id)
+                if model is None:
+                    rejected.append(RejectedCandidate(id=model_id, reason_code="model.unknown"))
+                    continue
+                reason_code = self._rejection_reason(host, model)
+                rejected.append(RejectedCandidate(id=model_id, reason_code=reason_code))
+            return SelectionDecision(
+                path="brain.model",
+                selected=None,
+                rejected=tuple(rejected),
+            )
 
         for model_id in model_ids:
             model = self._models.get(model_id)
@@ -472,30 +505,61 @@ class LifecycleCatalog:
         )
 
     def _find_host_runner_for_model(
-        self, host: HostFacts, model: ModelDefinition
+        self, host: HostFacts, model: ModelDefinition, *, required_capability: str = "chat"
     ) -> str | None:
-        """Find a runner on this host that supports the model. Returns runner id or None."""
-        host_runner_ids = set(self._host_runners.get(host.host, ()))
+        """Find the best runner on this host for a model.
+
+        Filtering order (plan-specified):
+          1. Runner host label matches HostFacts.host
+          2. Runner architecture matches HostFacts.architectures
+          3. Runner capability includes required_capability
+          4. Runner is not deprecated
+          5. Runner format intersects model formats
+          6. Runner is in model's allowlist
+        Then rank by runner priority descending, with deterministic tie-break
+        on runner id (sorted ascending). Returns highest-ranked runner id.
+        """
+        host_runner_ids: tuple[str, ...] = self._host_runners.get(host.host, ())
         if not host_runner_ids:
             return None
 
-        # Filter by model's runner allowlist and format compatibility
-        for runner_id in sorted(host_runner_ids):
+        candidates: list[tuple[int, str]] = []
+        for runner_id in host_runner_ids:
             runner = self._runners[runner_id]
-            if runner_id not in model.runners:
+            # architecture filter
+            if runner.architectures.isdisjoint(host.architectures):
                 continue
+            # capability filter
+            if required_capability not in runner.capabilities:
+                continue
+            # deprecation filter
+            if runner.deprecated:
+                continue
+            # format compatibility
             if model.formats.isdisjoint(runner.model_formats):
                 continue
-            return runner_id
-        return None
+            # model allowlist
+            if runner_id not in model.runners:
+                continue
+            candidates.append((runner.priority, runner_id))
+
+        if not candidates:
+            return None
+
+        # Sort by priority descending, then runner ID ascending (deterministic tie-break)
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        return candidates[0][1]
 
     def _rejection_reason(self, host: HostFacts, model: ModelDefinition) -> str:
         """Compute rejection reason code for a model on a host."""
-        host_runner_ids = self._host_runners.get(host.host, ())
-        host_runner_set = set(host_runner_ids)
         for runner_id in model.runners:
-            if runner_id not in host_runner_set:
+            runner = self._runners.get(runner_id)
+            if runner is None:
+                return f"runner.{runner_id}_missing"
+            if runner_id not in self._host_runners.get(host.host, ()):
                 return f"runner.{runner_id}_unavailable"
+            if runner.architectures.isdisjoint(host.architectures):
+                return f"runner.{runner_id}_arch_mismatch"
         return "runner.none_compatible"
 
     def _resolve_runner_for_model(

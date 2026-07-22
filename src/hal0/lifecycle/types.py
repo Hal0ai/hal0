@@ -225,6 +225,22 @@ class ResolutionPlan(FrozenModel):
         raise KeyError(f"no selection for path {path!r}")
 
 
+class ActionRef(FrozenModel):
+    """A kind+resource pair representing a planned action."""
+
+    kind: str
+    resource: ResourceRef | None = None
+
+
+class UpdatePlan(FrozenModel):
+    """Diff plan produced by compare() — what changed relative to installed state."""
+
+    operations: tuple[LifecycleOperation, ...] = ()
+    selections: tuple[SelectionDecision, ...] = ()
+    warnings: tuple[str, ...] = ()
+    download_estimate_bytes: int = 0
+
+
 class ResolutionRequest(FrozenModel):
     """Input to the resolution engine."""
 

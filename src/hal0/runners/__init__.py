@@ -130,14 +130,14 @@ class Runner:
 
 
 def _build_runners_from_catalog() -> dict[str, Runner]:
-    """Derive RUNNER_IMAGES from the bundled catalog, falling back to static dict."""
-    try:
-        from hal0.lifecycle.catalog import LifecycleCatalog
+    """Derive RUNNER_IMAGES from the bundled catalog.
 
-        catalog = LifecycleCatalog.load_bundled()
-    except Exception:
-        log.info("bundled catalog unavailable — using hardcoded runner registry")
-        return _HARDCODED_RUNNER_IMAGES
+    Bundled catalog is release authority. Any failure is surfaced, not silently
+    swallowed — there is no incomplete hardcoded fallback.
+    """
+    from hal0.lifecycle.catalog import LifecycleCatalog
+
+    catalog = LifecycleCatalog.load_bundled()
 
     # Static supplement: fields the catalog does not carry.
     _SUPPLEMENTS: dict[str, dict[str, object]] = {
@@ -254,97 +254,6 @@ def _build_runners_from_catalog() -> dict[str, Runner]:
         )
     return result
 
-
-_HARDCODED_RUNNER_IMAGES: dict[str, Runner] = {
-    "rocmfpx": Runner(
-        "rocmfpx",
-        DEFAULT_ROCMFPX_IMAGE,
-        "llama-server",
-        RunnerSupports(mtp=True, jinja=True, mmproj=True),
-        "gpu",
-        "rocm",
-        None,
-        supported_backends=("rocm", "vulkan"),
-        format_arch="gguf",
-    ),
-    "vulkanfpx": Runner(
-        "vulkanfpx",
-        DEFAULT_ROCMFPX_IMAGE,
-        "llama-server",
-        RunnerSupports(mtp=True, jinja=True, mmproj=True),
-        "gpu",
-        "vulkan",
-        None,
-        supported_backends=("rocm", "vulkan"),
-        format_arch="gguf",
-    ),
-    "cuda": Runner(
-        "cuda",
-        FALLBACK_CUDA_IMAGE,
-        "llama-server",
-        RunnerSupports(mtp=False, jinja=True, mmproj=True),
-        "gpu",
-        "cuda",
-        None,
-        supported_backends=("cuda",),
-        format_arch="gguf",
-    ),
-    "cpu": Runner(
-        "cpu",
-        FALLBACK_VULKAN_IMAGE,
-        "llama-server",
-        RunnerSupports(mtp=False, jinja=True, mmproj=True),
-        "cpu",
-        None,
-        None,
-        supported_backends=("cpu",),
-        format_arch="gguf",
-    ),
-    "flm": Runner(
-        "flm",
-        _FLM_IMAGE,
-        "flm",
-        RunnerSupports(),
-        "npu",
-        None,
-        "flm",
-        supported_backends=("npu",),
-        format_arch="flm",
-    ),
-    "kokoro": Runner(
-        "kokoro",
-        _KOKORO_IMAGE,
-        "kokoro",
-        RunnerSupports(),
-        "cpu",
-        None,
-        "kokoro",
-        supported_backends=("cpu",),
-        format_arch="kokoro",
-    ),
-    "qwen3tts": Runner(
-        "qwen3tts",
-        _QWEN3TTS_IMAGE,
-        "qwen3tts",
-        RunnerSupports(mtp=False, jinja=False, mmproj=False),
-        "gpu",
-        "rocm",
-        "qwen3tts",
-        supported_backends=("rocm",),
-        format_arch="qwen3tts",
-    ),
-    "comfyui": Runner(
-        "comfyui",
-        _COMFYUI_IMAGE,
-        "comfyui",
-        RunnerSupports(mmproj=False),
-        "img",
-        None,
-        "comfyui",
-        supported_backends=("rocm",),
-        format_arch="safetensors",
-    ),
-}
 
 RUNNER_IMAGES: dict[str, Runner] = _build_runners_from_catalog()
 
