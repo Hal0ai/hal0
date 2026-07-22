@@ -366,26 +366,24 @@ def releases_url(channel: str = "stable") -> str:
     return f"https://releases.hal0.dev/{channel}.json"
 
 
-async def fetch_release_manifest(channel: str = "stable") -> dict[str, Any]:
-    """Fetch and parse the release manifest for ``channel``.
+def _release_manifest_bundle_url(manifest_url: str) -> str:
+    """Return the sibling Sigstore bundle URL for a channel manifest."""
+    parsed = urlparse(manifest_url)
+    if parsed.scheme in ("http", "https", "file"):
+        return parsed._replace(path=f"{parsed.path}.bundle").geturl()
+    return f"{manifest_url}.bundle"
 
-    Returns the parsed JSON dict. Supports both ``http(s)://`` URLs (via
-    httpx) and ``file://`` URLs / bare paths (for tests). Raises
-    ``OSError`` on transport failures and ``ValueError`` on bad JSON so
-    callers can produce typed envelopes.
-    """
+
+async def _fetch_release_manifest_bytes(channel: str = "stable") -> bytes:
+    """Fetch the exact manifest bytes so their sibling bundle can verify them."""
     url = releases_url(channel)
     parsed = urlparse(url)
     if parsed.scheme in ("", "file"):
         path = parsed.path if parsed.scheme == "file" else url
         try:
-            raw = Path(path).read_text(encoding="utf-8")
+            return Path(path).read_bytes()
         except OSError as exc:
             raise OSError(f"could not read release manifest at {path}: {exc}") from exc
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"release manifest at {path} is not valid JSON: {exc}") from exc
 
     import httpx
 
@@ -396,10 +394,30 @@ async def fetch_release_manifest(channel: str = "stable") -> dict[str, Any]:
         raise OSError(f"release manifest fetch failed for {url}: {exc}") from exc
     if resp.status_code != 200:
         raise OSError(f"release manifest fetch returned HTTP {resp.status_code} from {url}")
+    return resp.content
+
+
+def _decode_release_manifest(raw_bytes: bytes, url: str) -> dict[str, Any]:
+    """Decode exact fetched bytes as a JSON object."""
     try:
-        return resp.json()
-    except ValueError as exc:
+        raw = json.loads(raw_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"release manifest at {url} is not valid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"release manifest at {url} must be a JSON object")
+    return raw
+
+
+async def fetch_release_manifest(channel: str = "stable") -> dict[str, Any]:
+    """Fetch and parse the release manifest for ``channel``.
+
+    Returns the parsed JSON dict. Supports both ``http(s)://`` URLs (via
+    httpx) and ``file://`` URLs / bare paths (for tests). Raises
+    ``OSError`` on transport failures and ``ValueError`` on bad JSON so
+    callers can produce typed envelopes.
+    """
+    url = releases_url(channel)
+    return _decode_release_manifest(await _fetch_release_manifest_bytes(channel), url)
 
 
 def _parse_manifest(raw: dict[str, Any]) -> ReleaseManifest:
@@ -650,6 +668,57 @@ def _verify_cosign(
             },
         )
     log.info("updater.cosign_verify_ok", job_id=job_id)
+
+
+async def _fetch_verified_release_manifest(
+    channel: str, *, job_id: str | None = None
+) -> tuple[dict[str, Any], ReleaseManifest, str]:
+    """Fetch, validate, and authenticate a channel manifest and sibling bundle.
+
+    Verification uses the exact fetched JSON bytes and the existing mandatory
+    Cosign/OIDC primitive. Temporary files live outside the updater cache, so a
+    failed channel validation cannot leave staged update state behind.
+    """
+    url = releases_url(channel)
+    try:
+        raw_bytes = await _fetch_release_manifest_bytes(channel)
+        raw = _decode_release_manifest(raw_bytes, url)
+    except OSError as exc:
+        raise UpdateError(
+            f"could not fetch release manifest: {exc}",
+            details={"channel": channel, "url": url, "error": str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise UpdateError(
+            f"release manifest is not valid JSON: {exc}",
+            details={"channel": channel, "url": url, "error": str(exc)},
+        ) from exc
+
+    manifest = _parse_manifest(raw)
+    try:
+        validate_manifest_for_channel(manifest, channel)
+    except ValueError as exc:
+        raise UpdateManifestInvalid(
+            f"release manifest is not accepted for channel {channel!r}: {exc}",
+            details={"channel": channel, "error": str(exc)},
+        ) from exc
+
+    bundle_url = _release_manifest_bundle_url(url)
+    with tempfile.TemporaryDirectory(prefix="hal0-manifest-") as work:
+        manifest_path = Path(work) / "manifest.json"
+        bundle_path = Path(work) / "manifest.json.bundle"
+        manifest_path.write_bytes(raw_bytes)
+        await _download(bundle_url, bundle_path)
+        await asyncio.to_thread(
+            _verify_cosign,
+            manifest_path,
+            bundle_path,
+            identity_regexp=manifest.signer_identity,
+            issuer=manifest.signer_issuer,
+            job_id=job_id,
+        )
+
+    return raw, manifest, url
 
 
 # ── Extraction + migration helpers ─────────────────────────────────────────────
@@ -1510,28 +1579,7 @@ class Updater:
             UpdateManifestInvalid: Manifest is missing required fields.
         """
         ch = channel or self.channel
-        url = releases_url(ch)
-        try:
-            raw = await fetch_release_manifest(ch)
-        except OSError as exc:
-            raise UpdateError(
-                f"could not fetch release manifest: {exc}",
-                details={"channel": ch, "url": url, "error": str(exc)},
-            ) from exc
-        except ValueError as exc:
-            raise UpdateError(
-                f"release manifest is not valid JSON: {exc}",
-                details={"channel": ch, "url": url, "error": str(exc)},
-            ) from exc
-
-        manifest = _parse_manifest(raw)
-        try:
-            validate_manifest_for_channel(manifest, ch)
-        except ValueError as exc:
-            raise UpdateManifestInvalid(
-                f"release manifest is not accepted for channel {ch!r}: {exc}",
-                details={"channel": ch, "error": str(exc)},
-            ) from exc
+        raw, manifest, url = await _fetch_verified_release_manifest(ch, job_id=self.job_id)
 
         latest = manifest.version
         revoked = manifest.revoked
@@ -1596,23 +1644,9 @@ class Updater:
         # silently extract a tarball that is never actually loaded.
         _raise_if_editable_install()
 
-        # Step 1: fetch + validate manifest.
+        # Step 1: fetch, validate, and authenticate the manifest itself.
         log.info("updater.prepare_start", job_id=self.job_id, channel=self.channel, pinned=version)
-        try:
-            raw = await fetch_release_manifest(self.channel)
-        except (OSError, ValueError) as exc:
-            raise UpdateError(
-                f"could not fetch release manifest: {exc}",
-                details={"channel": self.channel, "error": str(exc)},
-            ) from exc
-        manifest = _parse_manifest(raw)
-        try:
-            validate_manifest_for_channel(manifest, self.channel)
-        except ValueError as exc:
-            raise UpdateManifestInvalid(
-                f"release manifest is not accepted for channel {self.channel!r}: {exc}",
-                details={"channel": self.channel, "error": str(exc)},
-            ) from exc
+        raw, manifest, _ = await _fetch_verified_release_manifest(self.channel, job_id=self.job_id)
 
         # Step 2: confirm target version.
         target_version = (version or "").strip() or manifest.version

@@ -53,7 +53,9 @@ def isolated_client(
             "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         },
     )
+    Path(f"{manifest}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+    monkeypatch.setattr("hal0.updater.updater._verify_cosign", lambda *args, **kwargs: None)
 
     app: FastAPI = create_app()
     with TestClient(app) as c:
@@ -407,6 +409,92 @@ def test_channel_put_keeps_previous_channel_when_validation_fails(
     assert response.status_code in {400, 502}
     assert config_path.read_bytes() == previous_contents
     assert isolated_client.get("/api/updates/channel").json() == {"channel": "stable"}
+
+
+def test_same_channel_put_rejects_invalid_manifest_without_mutation(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """An idempotent PUT must still authenticate the current channel manifest."""
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+    previous_config = isolated_client.app.state.hal0_config
+    cache_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "cache"
+    assert not cache_path.exists()
+
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest_path.write_text("{not json", encoding="utf-8")
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "system.update_error"
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.app.state.hal0_config is previous_config
+    assert not cache_path.exists()
+
+
+def test_channel_put_rejects_malformed_target_manifest_without_mutation(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Schema-invalid signing metadata cannot authorize a channel switch."""
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+    previous_config = isolated_client.app.state.hal0_config
+
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(channel="preview", release_kind="preview", prerelease_stage="beta")
+    manifest.pop("bundle_url")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "system.update_manifest_invalid"
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.app.state.hal0_config is previous_config
+
+
+def test_channel_put_rejects_signature_invalid_manifest_without_mutation(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reachable coherent manifest must not persist unless its bundle verifies."""
+    from hal0.updater import UpdateCosignFailed
+
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+    previous_config = isolated_client.app.state.hal0_config
+    cache_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "cache"
+    assert not cache_path.exists()
+
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        version="9.9.9-rc.1",
+        channel="preview",
+        release_kind="preview",
+        prerelease_stage="rc",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def reject_signature(*args: object, **kwargs: object) -> None:
+        raise UpdateCosignFailed("test signature rejected")
+
+    monkeypatch.setattr("hal0.updater.updater._verify_cosign", reject_signature)
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "system.update_cosign_failed"
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.app.state.hal0_config is previous_config
+    assert not cache_path.exists()
 
 
 def test_channel_put_invalid_value_returns_envelope(isolated_client: TestClient) -> None:

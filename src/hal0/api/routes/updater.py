@@ -828,10 +828,10 @@ async def set_channel(request: Request) -> dict[str, str]:
             code="channel.invalid",
         ) from exc
 
-    # Validate before touching either the file or the app-state cache. A failed
-    # fetch/schema/channel check must leave the previous channel fully intact.
-    if channel != current.telemetry.channel:
-        await Updater(channel=channel).check()
+    # Validate before touching either the file or the app-state cache. This is
+    # required even for an idempotent PUT: success authenticates the channel's
+    # current manifest, not merely the requested config value.
+    await Updater(channel=channel).check()
 
     try:
         save_hal0_config(merged)

@@ -128,6 +128,7 @@ def _write_release_manifest(
     if overrides:
         payload.update(overrides)
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    Path(f"{manifest_path}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
     return payload
 
 
@@ -475,7 +476,9 @@ def test_manifest_schema_defaults_for_old_stable() -> None:
 # ── check ──────────────────────────────────────────────────────────────────────
 
 
-def test_check_returns_typed_release_info(synthetic_release: dict[str, Any]) -> None:
+def test_check_returns_typed_release_info(
+    synthetic_release: dict[str, Any], cosign_skip: None
+) -> None:
     """Updater.check() returns a ReleaseInfo dataclass with the manifest fields."""
     info = asyncio.run(Updater().check())
     assert isinstance(info, ReleaseInfo)
@@ -484,6 +487,36 @@ def test_check_returns_typed_release_info(synthetic_release: dict[str, Any]) -> 
     assert info.digest_sha256 == synthetic_release["payload"]["digest_sha256"]
     assert info.signer_identity == synthetic_release["payload"]["signer_identity"]
     assert info.update_available is True or info.update_available is False  # type sanity
+
+
+def test_check_verifies_exact_manifest_bytes_with_sibling_bundle(
+    synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check() authenticates the fetched manifest itself before returning policy."""
+    calls: list[tuple[bytes, bytes, str, str]] = []
+
+    def record_verify(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        calls.append((blob.read_bytes(), bundle.read_bytes(), identity_regexp, issuer))
+
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
+
+    asyncio.run(Updater().check())
+
+    assert calls == [
+        (
+            synthetic_release["manifest_path"].read_bytes(),
+            b"manifest-bundle-placeholder\n",
+            synthetic_release["payload"]["signer_identity"],
+            synthetic_release["payload"]["signer_issuer"],
+        )
+    ]
 
 
 def test_check_handles_missing_manifest(
@@ -558,7 +591,10 @@ def test_validate_manifest_for_channel_is_public_export() -> None:
 
 
 def test_check_does_not_recommend_revoked_latest(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
 ) -> None:
     """A revoked latest manifest is NOT reported as an available update."""
     artifacts = tmp_path / "artifacts"
@@ -582,7 +618,10 @@ def test_check_does_not_recommend_revoked_latest(
 
 
 def test_check_recommends_non_revoked_newer_latest(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
 ) -> None:
     """A non-revoked newer manifest IS reported as an available update."""
     artifacts = tmp_path / "artifacts"
@@ -1138,7 +1177,10 @@ def test_rollback_repip_failure_re_swaps_symlink_forward(
 
 
 def test_check_uses_per_channel_url(
-    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
 ) -> None:
     """The check() method honours its channel argument when looking up the URL."""
     artifacts = tmp_path / "artifacts"
