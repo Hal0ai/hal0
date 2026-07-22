@@ -71,7 +71,9 @@ class TestListProfiles:
         by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
         assert by_name["chat-long-context"]["seed"] is True
         assert by_name["chat-long-context"]["mtp"] is False
-        assert by_name["chat-long-context"]["device_class"] == "gpu"  # post-seeded-profile rework — chat-long-context is a GPU profile
+        assert (
+            by_name["chat-long-context"]["device_class"] == "gpu"
+        )  # post-seeded-profile rework — chat-long-context is a GPU profile
         assert "-ctk q8_0" in by_name["chat-long-context"]["flags"]
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
