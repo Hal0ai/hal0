@@ -68,6 +68,22 @@ from hal0.release.policy import ReleaseKind
 log = structlog.get_logger(__name__)
 
 
+# Client-pinned trust root for authenticating release manifests. Direct release
+# jobs sign at their immutable v... tag ref. The current nightly workflow calls
+# release.yml from main, so GitHub records the reusable job identity at
+# refs/heads/main (see release.yml's signing comments). Keep this independent of
+# signer_identity/signer_issuer in the unauthenticated manifest; those fields are
+# trusted only after this verification and are then used for the release tarball.
+_MANIFEST_SIGNER_IDENTITY_REGEXP = (
+    r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+    r"\.github/workflows/release\.yml@"
+    r"(refs/tags/v\d+\.\d+\.\d+"
+    r"(-(alpha|beta|rc)\.(0|[1-9]\d*)|-nightly\.\d{14})?"
+    r"|refs/heads/main)$"
+)
+_MANIFEST_SIGNER_ISSUER = "https://token.actions.githubusercontent.com"
+
+
 # ── Typed errors (system.update_*) ─────────────────────────────────────────────
 
 
@@ -675,9 +691,11 @@ async def _fetch_verified_release_manifest(
 ) -> tuple[dict[str, Any], ReleaseManifest, str]:
     """Fetch, validate, and authenticate a channel manifest and sibling bundle.
 
-    Verification uses the exact fetched JSON bytes and the existing mandatory
-    Cosign/OIDC primitive. Temporary files live outside the updater cache, so a
-    failed channel validation cannot leave staged update state behind.
+    Verification uses the exact fetched JSON bytes, a client-pinned workflow
+    identity and OIDC issuer, and the existing mandatory Cosign primitive. The
+    manifest's own signer claims remain untrusted until this succeeds. Temporary
+    files live outside the updater cache, so failed validation cannot leave
+    staged update state behind.
     """
     url = releases_url(channel)
     try:
@@ -713,8 +731,8 @@ async def _fetch_verified_release_manifest(
             _verify_cosign,
             manifest_path,
             bundle_path,
-            identity_regexp=manifest.signer_identity,
-            issuer=manifest.signer_issuer,
+            identity_regexp=_MANIFEST_SIGNER_IDENTITY_REGEXP,
+            issuer=_MANIFEST_SIGNER_ISSUER,
             job_id=job_id,
         )
 

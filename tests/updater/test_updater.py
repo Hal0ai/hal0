@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tarfile
 from pathlib import Path
@@ -59,7 +60,10 @@ VALID_MANIFEST: dict[str, Any] = {
     "url": "https://example.test/hal0.tar.gz",
     "bundle_url": "https://example.test/hal0.tar.gz.bundle",
     "digest_sha256": "0" * 64,
-    "signer_identity": "release-workflow",
+    "signer_identity": (
+        r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+        r"\.github/workflows/release\.yml@refs/tags/v1\.0\.0$"
+    ),
 }
 
 
@@ -118,7 +122,10 @@ def _write_release_manifest(
         "url": f"file://{tarball}",
         "bundle_url": f"file://{bundle}",
         "digest_sha256": _sha256_of(tarball),
-        "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
+        "signer_identity": (
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            rf"\.github/workflows/release\.yml@refs/tags/v{re.escape(version)}$"
+        ),
         "signer_issuer": "https://token.actions.githubusercontent.com",
         "min_data_version": 1,
         "released_at": "2026-05-15T12:00:00Z",
@@ -489,10 +496,16 @@ def test_check_returns_typed_release_info(
     assert info.update_available is True or info.update_available is False  # type sanity
 
 
-def test_check_verifies_exact_manifest_bytes_with_sibling_bundle(
+def test_check_uses_pinned_trust_root_for_unauthenticated_manifest(
     synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """check() authenticates the fetched manifest itself before returning policy."""
+    """Manifest-provided signer claims cannot select the manifest trust root."""
+    forged_identity = r"^https://github\.com/attacker/forged/.*$"
+    forged_issuer = "https://attacker.example/oidc"
+    payload = synthetic_release["payload"]
+    payload["signer_identity"] = forged_identity
+    payload["signer_issuer"] = forged_issuer
+    synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
     calls: list[tuple[bytes, bytes, str, str]] = []
 
     def record_verify(
@@ -507,16 +520,43 @@ def test_check_verifies_exact_manifest_bytes_with_sibling_bundle(
 
     monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
 
-    asyncio.run(Updater().check())
+    info = asyncio.run(Updater().check())
 
     assert calls == [
         (
             synthetic_release["manifest_path"].read_bytes(),
             b"manifest-bundle-placeholder\n",
-            synthetic_release["payload"]["signer_identity"],
-            synthetic_release["payload"]["signer_issuer"],
+            updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP,
+            updater_module._MANIFEST_SIGNER_ISSUER,
         )
     ]
+    assert info.signer_identity == forged_identity
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3",
+        "https://github.com/hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3-rc.1",
+        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+    ],
+)
+def test_manifest_pinned_identity_accepts_supported_release_refs(identity: str) -> None:
+    """The trust root covers direct release tags and nightly's reusable caller ref."""
+    assert re.fullmatch(updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP, identity)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "https://github.com/attacker/hal0/.github/workflows/release.yml@refs/tags/v1.2.3",
+        "https://github.com/Hal0ai/hal0/.github/workflows/other.yml@refs/tags/v1.2.3",
+        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/feature",
+        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/not-v1.2.3",
+    ],
+)
+def test_manifest_pinned_identity_rejects_unofficial_subjects(identity: str) -> None:
+    assert re.fullmatch(updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP, identity) is None
 
 
 def test_check_handles_missing_manifest(
