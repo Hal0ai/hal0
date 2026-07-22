@@ -83,6 +83,15 @@ function MemoryTab({ subsection } = {}) { // eslint-disable-line no-unused-vars
 
 // ── ADR-0023 Graph extraction panel ──────────────────────────────────
 // Extraction is routed to a single local enabled-llm slot (extraction_slot).
+function normalizeMemoryGraphSlot(value, availableSlots = []) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const prefix = "hal0/";
+  if (!raw.startsWith(prefix)) return raw;
+  const slotName = raw.slice(prefix.length);
+  return availableSlots.includes(slotName) ? slotName : raw;
+}
+
 function MemoryGraphPanel() {
   const useStatus = window.__hal0UseMemoryGraphStatus;
   const useUpdate = window.__hal0UseUpdateMemoryGraph;
@@ -92,12 +101,18 @@ function MemoryGraphPanel() {
   const enabled = !!(data && data.enabled);
   // ADR-0023: prefer extraction_slot; fall back to the deprecated `route`
   // mirror only if the new field is absent.
-  const extractionSlot = (data && (data.extraction_slot || data.route)) || "utility";
   const slotResolves = !!(data && data.slot_resolves);
   const availableSlots = (data && data.available_slots) || [];
+  const configuredSlot = (data && (data.extraction_slot || data.route)) || "utility";
+  const extractionSlot = normalizeMemoryGraphSlot(configuredSlot, availableSlots);
 
   const [showSlotPicker, setShowSlotPicker] = useStateMT(false);
   const [draftSlot, setDraftSlot] = useStateMT(extractionSlot);
+  const canonicalDraftSlot = normalizeMemoryGraphSlot(draftSlot, availableSlots);
+  const slotOptions =
+    canonicalDraftSlot && !availableSlots.includes(canonicalDraftSlot)
+      ? [canonicalDraftSlot, ...availableSlots]
+      : availableSlots;
 
   const openPanel = () => {
     setDraftSlot(extractionSlot);
@@ -105,7 +120,7 @@ function MemoryGraphPanel() {
   };
 
   const submit = () => {
-    const payload = { enabled: true, extraction_slot: draftSlot };
+    const payload = { enabled: true, extraction_slot: canonicalDraftSlot };
     update.mutate(payload, {
       onSuccess: (resp) => {
         setShowSlotPicker(false);
@@ -218,15 +233,15 @@ function MemoryGraphPanel() {
         <div style={{display: "flex", flexDirection: "column", gap: 14}}>
           <div>
             <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6}}>Extraction slot</div>
-            {availableSlots.length > 0 ? (
+            {slotOptions.length > 0 ? (
               <select
                 data-testid="graph-slot-select"
-                value={draftSlot}
+                value={canonicalDraftSlot}
                 onChange={e => setDraftSlot(e.target.value)}
                 style={{width: "100%", padding: "6px 8px", background: "var(--bg-2)", border: "1px solid var(--line)", color: "var(--fg)", fontFamily: "var(--jbm)", fontSize: 12}}
               >
-                {availableSlots.map(s => (
-                  <option key={s} value={s}>{s}</option>
+                {slotOptions.map(s => (
+                  <option key={s} value={s}>{s}{availableSlots.includes(s) ? "" : " (not running)"}</option>
                 ))}
               </select>
             ) : (
@@ -246,7 +261,7 @@ function MemoryGraphPanel() {
             <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4}}>Routing</div>
             <p style={{fontSize: 12, color: "var(--fg-2)", margin: 0, lineHeight: 1.5}}>
               Graph extraction sends ingested memory text to the&nbsp;
-              <span className="mono" style={{color: "var(--fg)"}}>{draftSlot}</span> slot
+              <span className="mono" style={{color: "var(--fg)"}}>{canonicalDraftSlot}</span> slot
               {" "}for entity + relation extraction. Everything stays on-box — pick a
               cheap local slot (e.g. <span className="mono" style={{color: "var(--fg)"}}>utility</span>)
               to keep extraction light. Quality may vary on small models.

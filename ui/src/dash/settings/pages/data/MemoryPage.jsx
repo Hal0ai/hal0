@@ -9,6 +9,7 @@ import { useMemoryGraphStatus, useRetryFailedExtractions, useUpdateMemoryGraph }
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce, _advInputStyle } from '../../shared/SchemaRow.jsx'
+import { normalizeMemoryGraphSlot } from './memoryGraphSlot.js'
 
 export function MemoryPage() {
   // R5 data seam: one typed client supplies the merged reload-class registry.
@@ -350,29 +351,31 @@ function MemoryGraphPanel() {
   const [enabled, setEnabled] = useState(false);
   const [slot, setSlot] = useState("");
   const [timeoutS, setTimeoutS] = useState("300");
+  const slots = st?.available_slots || [];
+  const currentSlot = normalizeMemoryGraphSlot(st?.extraction_slot || "", slots);
   useEffect(() => {
     if (!st) return;
     setEnabled(!!st.enabled);
-    setSlot(st.extraction_slot || "");
+    setSlot(normalizeMemoryGraphSlot(st.extraction_slot || "", st.available_slots || []));
     if (st.llm_timeout_s != null) setTimeoutS(String(st.llm_timeout_s));
-  }, [st?.enabled, st?.extraction_slot, st?.llm_timeout_s]);
+  }, [st?.enabled, st?.extraction_slot, st?.llm_timeout_s, st?.available_slots]);
 
   const timeoutNum = parseInt(timeoutS, 10);
   const timeoutValid = /^\d+$/.test(timeoutS.trim()) && timeoutNum >= 30 && timeoutNum <= 3600;
+  const canonicalSlot = normalizeMemoryGraphSlot(slot, slots);
   const dirty = !!st && (
     enabled !== !!st.enabled
-    || slot !== (st.extraction_slot || "")
+    || canonicalSlot !== currentSlot
     || (st.llm_timeout_s != null && timeoutS !== String(st.llm_timeout_s))
   );
-  const slots = st?.available_slots || [];
   // Keep the currently-configured slot pickable even when it no longer
   // resolves, so the operator can see (and move off) a stale value.
-  const slotOptions = slot && !slots.includes(slot) ? [slot, ...slots] : slots;
+  const slotOptions = canonicalSlot && !slots.includes(canonicalSlot) ? [canonicalSlot, ...slots] : slots;
 
   const doSave = async () => {
     try {
       const body = { enabled };
-      if (slot) body.extraction_slot = slot;
+      if (canonicalSlot) body.extraction_slot = canonicalSlot;
       if (timeoutValid) body.llm_timeout_s = timeoutNum;
       const resp = await updateGraph.mutateAsync(body);
       const perr = resp?.propagation?.error;
@@ -421,7 +424,13 @@ function MemoryGraphPanel() {
           : "Local LLM slot that runs the extraction prompts"}
         v={
           slotOptions.length > 0 ? (
-            <select value={slot} disabled={!st} onChange={e => setSlot(e.target.value)} style={_advInputStyle}>
+            <select
+              value={canonicalSlot}
+              disabled={!st}
+              onChange={e => setSlot(e.target.value)}
+              style={_advInputStyle}
+              data-testid="graph-slot-select"
+            >
               {slotOptions.map(s => (
                 <option key={s} value={s}>{s}{slots.includes(s) ? "" : " (not running)"}</option>
               ))}
@@ -474,7 +483,7 @@ function MemoryGraphPanel() {
         {dirty && (
           <button className="btn ghost sm" onClick={() => {
             setEnabled(!!st?.enabled);
-            setSlot(st?.extraction_slot || "");
+            setSlot(currentSlot);
             setTimeoutS(st?.llm_timeout_s != null ? String(st.llm_timeout_s) : "300");
           }}>Reset</button>
         )}
