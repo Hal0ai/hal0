@@ -61,7 +61,7 @@ def test_blocks_profile_slot_type_mismatch(tmp_hal0_home: str) -> None:
 
 
 def test_blocks_npu_profile_device_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("flm")
+    profile = ProfileCatalog().create("custom-flm", ProfileConfig(flags="", device_class="npu"))
 
     fit = evaluate_model_fit(
         model_id="gemma3:1b",
