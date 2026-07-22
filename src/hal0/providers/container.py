@@ -914,8 +914,8 @@ def _llama_launch_plan(
         # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
         # operators can tune the runtime without forking the image.
         env={
-                **(env or {}),
-                **({'LLAMA_SET_ROWS': '1'} if llama_set_rows else {}),
+            **(env or {}),
+            **({"LLAMA_SET_ROWS": "1"} if llama_set_rows else {}),
         },
         mounts=[model_store_module.mount_for(root, read_only=True) for root in model_stores],
         devices=list(devices),
