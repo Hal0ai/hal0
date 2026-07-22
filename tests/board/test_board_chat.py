@@ -1032,6 +1032,8 @@ def test_tool_model_routes_tool_turns_to_capable_model(tmp_path) -> None:
     stub = _StubLLM([_final_response("hi")])
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, model="hal0/brain", tool_model="hal0/agent")
+    # After brain-tool-handling fix (973eb28a), brain routes tools internally;
+    # tool_model still beats the chat-only model for routing — check that
 
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
     # tool_model wins over model because tools are surfaced.
