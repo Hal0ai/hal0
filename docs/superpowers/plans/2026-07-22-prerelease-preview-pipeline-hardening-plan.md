@@ -18,6 +18,9 @@
 - Stable clients must never consume preview artifacts; preview may consume preview or a promoted stable artifact.
 - Preserve existing Python, UI, Chromium/Gamma, updater, rollback, and release safety coverage.
 - External `hal0-web` preview-pointer deployment is a required release gate, not an implicit mutation from this repository.
+- Channel selection persists only after the requested channel's current manifest is reachable, signature/schema-valid, and channel-coherent; failures leave the prior channel unchanged.
+- This repository implements the local manifest-bundle contract and verification seams; external hal0-web serving/verification remains a hard prerelease gate.
+- Release tag resolution occurs in a prerequisite `resolve` job; build/publish jobs depend on it and checkout the resolved exact tag.
 
 ---
 
@@ -263,11 +266,13 @@ Expected: the endpoint assertion fails against the current GitHub `/latest` defa
 
 Set the script default to the canonical per-channel endpoint, preserve explicit
 `HAL0_RELEASES_URL` overrides, validate the channel before constructing the URL, and
-keep the current digest/signature verification path. Update the manifest docs to
-state that `channel` is the pointer target and `release_kind` is the artifact kind,
-including the stable artifact promoted to preview case and the external hal0-web
-pointer gate. Update install/update/rollback docs with `HAL0_CHANNEL=preview` and
-explicitly state that stable clients never consume preview.
+keep the current digest/signature verification path. Add the local manifest-bundle
+verification seam used by the updater/bootstrap while leaving external bundle
+serving as a hal0-web release gate. Update the manifest docs to state that `channel`
+is the pointer target and `release_kind` is the artifact kind, including the stable
+artifact promoted to preview case and the external hal0-web pointer gate. Update
+install/update/rollback docs with `HAL0_CHANNEL=preview` and explicitly state that
+stable clients never consume preview.
 
 - [ ] **Step 4: Run tests and shell syntax validation.**
 
@@ -343,9 +348,7 @@ Expected: the current workflow fails the no-`--clobber` and policy-output assert
 
 - [ ] **Step 3: Implement exact ref checkout and policy outputs.**
 
-In the release job, resolve the tag before checkout or add a dedicated exact-ref
-checkout step after tag resolution with `ref: ${{ steps.ver.outputs.tag }}`. Assert
-that `git rev-parse HEAD` equals `git rev-list -n1 "${TAG}"`.
+Add a dedicated `resolve` job before the build job. It resolves the push/dispatch/call tag, runs `ReleasePolicy.to_github_outputs()`, and exposes the outputs. Make the build and PyPI jobs depend on `resolve`; both use `ref: ${{ needs.resolve.outputs.tag }}` in `actions/checkout`. Assert that `git rev-parse HEAD` equals `git rev-list -n1 "${TAG}"`.
 
 Export policy outputs from a single `PYTHONPATH=src python3 -m hal0.release.policy
 "${TAG}" --format github` step. Use those outputs for version checks, manifest
