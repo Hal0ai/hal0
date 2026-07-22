@@ -103,7 +103,7 @@ class TestListProfiles:
                 "device_class" in item
             )  # device_class can be None post-seeded-profile rework — accept absent or null
             assert "resolved_flags" in item
-            assert "seed" in item  # noqa: F631
+            assert "seed" in item
 
     def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
         """Phase C6: the UI keys immutability off the serialized seed flag."""
@@ -115,9 +115,9 @@ class TestListProfiles:
         """Phase C: device_class surfaces in the route response."""
         data = client.get("/api/profiles").json()
         flm = next(item for item in data if item["name"] == "flm")
-        assert flm["device_class"] is None
+        assert flm["device_class"] == "npu"
         kokoro = next(item for item in data if item["name"] == "kokoro")
-        assert kokoro["device_class"] is None
+        assert kokoro["device_class"] == "cpu"
         vulkan = next(item for item in data if item["name"] == "chat")
         assert vulkan["device_class"] is None
 
