@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -34,11 +36,24 @@ def _bootstrap_env(
     *,
     with_cosign: bool = True,
     cosign_rc: int = 1,
+    artifact_fixture: Path | None = None,
+    artifact_url: str = "",
+    artifact_bundle_url: str = "",
 ) -> tuple[dict[str, str], Path, Path]:
     """Build a hermetic PATH that records network and cosign behavior."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for tool in ("bash", "uname", "mktemp", "rm", "tar", "sha256sum", "python3"):
+    for tool in (
+        "awk",
+        "bash",
+        "gzip",
+        "uname",
+        "mktemp",
+        "rm",
+        "tar",
+        "sha256sum",
+        "python3",
+    ):
         target = shutil.which(tool)
         assert target is not None
         os.symlink(target, bin_dir / tool)
@@ -68,6 +83,8 @@ printf '%s\\n' "$url" >> "$CURL_LOG"
 case "$url" in
     *.json|*.json\\?*) {cp} "$MANIFEST_FIXTURE" "$out" ;;
     *.json.bundle|*.json.bundle\\?*) printf 'fixture bundle\\n' > "$out" ;;
+    "$ARTIFACT_URL") {cp} "$ARTIFACT_FIXTURE" "$out" ;;
+    "$ARTIFACT_BUNDLE_URL") printf 'artifact fixture bundle\\n' > "$out" ;;
     *) exit 22 ;;
 esac
 """,
@@ -76,7 +93,7 @@ esac
         _write_executable(
             bin_dir / "cosign",
             """#!/usr/bin/env bash
-printf '%s\\n' "$@" > "$COSIGN_LOG"
+printf '%s\\n' "$@" >> "$COSIGN_LOG"
 exit "$COSIGN_RC"
 """,
         )
@@ -87,14 +104,22 @@ exit "$COSIGN_RC"
         "COSIGN_LOG": str(cosign_log),
         "COSIGN_RC": str(cosign_rc),
         "MANIFEST_FIXTURE": str(manifest_fixture),
+        "ARTIFACT_FIXTURE": str(artifact_fixture or ""),
+        "ARTIFACT_URL": artifact_url,
+        "ARTIFACT_BUNDLE_URL": artifact_bundle_url,
     }
     return env, curl_log, cosign_log
 
 
-def _run_bootstrap(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_bootstrap(
+    env: dict[str, str],
+    *args: str,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/bash", str(_BOOTSTRAP)],
+        ["/bin/bash", str(_BOOTSTRAP), *args],
         env=env,
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -212,4 +237,107 @@ def test_bootstrap_missing_cosign_fails_closed_for_channel_manifest(
     assert curl_log.read_text(encoding="utf-8").splitlines() == [
         "https://releases.hal0.dev/stable.json",
         "https://releases.hal0.dev/stable.json.bundle",
+    ]
+
+
+def test_bootstrap_cleanup_does_not_evaluate_hostile_tmpdir(
+    tmp_path: Path,
+) -> None:
+    env, _, _ = _bootstrap_env(tmp_path, b"{}", cosign_rc=1)
+    marker = tmp_path / "trap-injected"
+    marker.touch()
+    hostile_tmpdir = tmp_path / "hostile'; rm -f trap-injected; : '"
+    hostile_tmpdir.mkdir()
+    env["TMPDIR"] = str(hostile_tmpdir)
+
+    proc = _run_bootstrap(env, cwd=tmp_path)
+
+    assert proc.returncode != 0
+    assert marker.exists()
+    assert list(hostile_tmpdir.iterdir()) == []
+
+
+def test_bootstrap_successfully_verifies_extracts_and_hands_off_fixture(
+    tmp_path: Path,
+) -> None:
+    version = "1.2.3-rc.1"
+    artifact_url = f"https://fixtures.example/hal0-{version}.tar.gz"
+    artifact_bundle_url = f"{artifact_url}.bundle"
+    artifact = tmp_path / f"hal0-{version}.tar.gz"
+    install_log = tmp_path / "install.log"
+
+    install_script = tmp_path / "tree" / f"hal0-{version}" / "installer" / "install.sh"
+    install_script.parent.mkdir(parents=True)
+    _write_executable(
+        install_script,
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'verified=%s\\n' "${HAL0_BOOTSTRAP_VERIFIED:-}" > "$INSTALL_LOG"
+printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
+""",
+    )
+    with tarfile.open(artifact, "w:gz") as archive:
+        archive.add(install_script.parents[1], arcname=f"hal0-{version}")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest = json.dumps(
+        {
+            "version": version,
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "rc",
+            "url": artifact_url,
+            "bundle_url": artifact_bundle_url,
+            "digest_sha256": digest,
+            "signer_identity": _CANONICAL_IDENTITY,
+            "signer_issuer": _CANONICAL_ISSUER,
+        }
+    ).encode()
+    env, curl_log, cosign_log = _bootstrap_env(
+        tmp_path,
+        manifest,
+        cosign_rc=0,
+        artifact_fixture=artifact,
+        artifact_url=artifact_url,
+        artifact_bundle_url=artifact_bundle_url,
+    )
+    env.update(
+        {
+            "HAL0_CHANNEL": "preview",
+            "INSTALL_LOG": str(install_log),
+        }
+    )
+
+    proc = _run_bootstrap(env, "--no-tls", "--models-dir=/fixture")
+
+    assert proc.returncode == 0, proc.stderr
+    assert f"sha256 OK ({digest[:12]}…)" in proc.stdout
+    assert curl_log.read_text(encoding="utf-8").splitlines() == [
+        "https://releases.hal0.dev/preview.json",
+        "https://releases.hal0.dev/preview.json.bundle",
+        artifact_url,
+        artifact_bundle_url,
+    ]
+    cosign_args = cosign_log.read_text(encoding="utf-8").splitlines()
+    assert cosign_args.count("verify-blob") == 2
+    assert cosign_args[1] == "--bundle"
+    assert cosign_args[2].endswith("/manifest.json.bundle")
+    assert cosign_args[3:5] == ["--certificate-identity-regexp", _CANONICAL_IDENTITY]
+    assert cosign_args[5:7] == ["--certificate-oidc-issuer", _CANONICAL_ISSUER]
+    assert cosign_args[7].endswith("/manifest.json")
+    artifact_verify = cosign_args.index("verify-blob", 1)
+    assert cosign_args[artifact_verify + 1] == "--bundle"
+    assert cosign_args[artifact_verify + 2].endswith(f"hal0-{version}.tar.gz.bundle")
+    assert cosign_args[artifact_verify + 3 : artifact_verify + 5] == [
+        "--certificate-identity-regexp",
+        _CANONICAL_IDENTITY,
+    ]
+    assert cosign_args[artifact_verify + 5 : artifact_verify + 7] == [
+        "--certificate-oidc-issuer",
+        _CANONICAL_ISSUER,
+    ]
+    assert cosign_args[artifact_verify + 7].endswith(f"hal0-{version}.tar.gz")
+    assert install_log.read_text(encoding="utf-8").splitlines() == [
+        "verified=1",
+        "arg=--no-tls",
+        "arg=--models-dir=/fixture",
     ]

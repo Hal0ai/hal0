@@ -58,6 +58,13 @@ warn() { printf '%s! %s%s\n'   "${_C_YEL}" "$*" "${_C_RST}" >&2; }
 err()  { printf '%s✗ %s%s\n'   "${_C_RED}" "$*" "${_C_RST}" >&2; }
 die()  { err "$*"; exit 1; }
 
+_BOOTSTRAP_WORK=""
+cleanup_workdir() {
+    if [[ -n "${_BOOTSTRAP_WORK}" ]]; then
+        rm -rf -- "${_BOOTSTRAP_WORK}"
+    fi
+}
+
 banner() {
     printf '\n%shal0%s — open-source home AI inference platform\n' "${_C_BLD}" "${_C_RST}"
     printf '%s%s%s\n\n' "${_C_DIM}" "https://hal0.dev" "${_C_RST}"
@@ -256,7 +263,8 @@ main() {
     local work
     work="$(mktemp -d -t hal0-install-XXXXXX)"
     if [[ "${HAL0_BOOTSTRAP_KEEP_TMP:-0}" != "1" ]]; then
-        trap "rm -rf '${work}'" EXIT
+        _BOOTSTRAP_WORK="${work}"
+        trap cleanup_workdir EXIT
     else
         warn "HAL0_BOOTSTRAP_KEEP_TMP=1 — leaving work dir ${work}"
     fi
