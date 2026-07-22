@@ -40,10 +40,10 @@ def test_model_file_requires_exact_metadata() -> None:
 
 def test_rocmfpx_brain_model_pins_consolidated_agent_artifact(catalog) -> None:
     model = catalog.model("hal0-brain-rocmfpx-agent")
-    assert model.source == "Hal0ai/hal0-brain-sft-fpx8-agent"
+    assert model.source == "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
     assert model.runners == ("rocmfpx", "vulkanfpx")
     assert len(model.files) == 1
     artifact = model.files[0]
-    assert artifact.filename == "model.gguf"
+    assert artifact.filename == "hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf"
     assert artifact.format == "rocmfpx-gguf"
     assert artifact.quantization == "q8_0_rocmfpx_agent"
