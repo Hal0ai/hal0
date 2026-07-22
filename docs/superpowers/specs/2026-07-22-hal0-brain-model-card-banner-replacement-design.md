@@ -6,17 +6,13 @@ Replace the banner displayed at the top of the public Hugging Face model card fo
 
 ## Asset handling
 
-The supplied file contains JPEG data despite its `.png` filename. Publish its bytes unchanged as `hal0-brain-banner.jpg` so the repository filename matches the actual media type. Remove the previous `hal0-brain-banner.png` and change only the README banner reference from the old filename to the new filename.
+The supplied file is a 2298×1856 RGBA PNG with SHA-256 `5dcdba974e04e7bc768752c29bfc2fad3e40a80c92493290f32908b64c725ca0`. Publish its bytes unchanged as `hal0-brain-banner.png`, replacing the previous image at the same path. The README already references this path and does not need to change.
 
 ## Publication scope
 
-Publish one atomic commit to the existing public Hugging Face repository containing:
+Publish one atomic commit to the existing public Hugging Face repository containing only the replacement `hal0-brain-banner.png`, with bytes identical to the supplied image.
 
-- deletion of `hal0-brain-banner.png`;
-- addition of `hal0-brain-banner.jpg` with bytes identical to the supplied image; and
-- the README banner-reference update.
-
-Do not change the three GGUF files, portable profile, model-card prose, or artifact metadata. Do not alter the old misleading Hugging Face repository.
+Do not change the README, three GGUF files, portable profile, model-card prose, or artifact metadata. Do not alter the old misleading Hugging Face repository.
 
 The hal0 lifecycle catalog remains pinned to its already-verified immutable model revision because the model artifact itself is unchanged. The repository's latest revision will display the new banner.
 
@@ -26,11 +22,10 @@ After publication:
 
 1. Confirm the repository remains public.
 2. Record the new immutable Hugging Face revision.
-3. Confirm `hal0-brain-banner.jpg` exists and its remote SHA-256 matches the supplied file.
-4. Confirm `hal0-brain-banner.png` is absent from the new revision.
-5. Confirm the rendered README references `hal0-brain-banner.jpg` and retains the existing documentation.
-6. Confirm all GGUF and profile files remain present with unchanged sizes and LFS SHA-256 hashes.
-7. Update the local publication staging directory and revision record to match the new repository revision.
+3. Confirm `hal0-brain-banner.png` exists and its remote SHA-256 equals `5dcdba974e04e7bc768752c29bfc2fad3e40a80c92493290f32908b64c725ca0`.
+4. Confirm the rendered README still references `hal0-brain-banner.png` and retains the existing documentation.
+5. Confirm all GGUF and profile files remain present with unchanged sizes and LFS SHA-256 hashes.
+6. Update the local publication staging directory and revision record to match the new repository revision.
 
 ## Failure handling
 
