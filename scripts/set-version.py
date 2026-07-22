@@ -246,8 +246,10 @@ def set_version(root: Path, version: str) -> None:
             )
     candidates.append((lock_path, lock_text_new))
 
-    # 3. Write every candidate to a temporary file in a shared tmpdir
-    tmpdir = Path(tempfile.mkdtemp(prefix=".set-version."))
+    # 3. Write every candidate to a shared transaction directory under the
+    # repository root.  Keeping candidates beside their destinations guarantees
+    # os.replace() stays on one filesystem (and cannot fail with EXDEV).
+    tmpdir = Path(tempfile.mkdtemp(prefix=".set-version.", dir=root))
     try:
         temp_paths: list[tuple[Path, Path]] = []
         for dst, content in candidates:

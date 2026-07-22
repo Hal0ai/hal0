@@ -9,6 +9,7 @@ a hyphen.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -186,6 +187,37 @@ class TestSetVersion:
         lock_data = tomllib.loads(lock_text)
         hal0ai = next(p for p in lock_data["package"] if p["name"] == "hal0ai")
         assert hal0ai["version"] == "1.0.0a2"
+
+    def test_transaction_temps_share_repository_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Replacement candidates live under root, independent of TMPDIR."""
+        _populate_project(tmp_path, "1.0.0-alpha.0")
+        mod = _load_set_version()
+        real_mkdtemp = mod.tempfile.mkdtemp
+        real_replace = mod.os.replace
+        temp_parents: list[Path] = []
+        replacement_devices: list[tuple[int, int]] = []
+
+        def recording_mkdtemp(*args: object, **kwargs: object) -> str:
+            temp_dir = Path(real_mkdtemp(*args, **kwargs))
+            temp_parents.append(temp_dir.parent)
+            return str(temp_dir)
+
+        def same_filesystem_replace(src: str, dst: str) -> None:
+            replacement_devices.append((os.stat(src).st_dev, os.stat(Path(dst).parent).st_dev))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(mod.tempfile, "mkdtemp", recording_mkdtemp)
+        monkeypatch.setattr(mod.os, "replace", same_filesystem_replace)
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: None)
+
+        mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        assert temp_parents == [tmp_path]
+        assert replacement_devices
+        assert all(src_device == dst_device for src_device, dst_device in replacement_devices)
+        assert not list(tmp_path.glob(".set-version.*"))
 
     def test_nightly_is_rejected(self, tmp_path: Path) -> None:
         """Nightly versions are rejected because they don't rewrite source."""

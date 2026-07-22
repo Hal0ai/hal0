@@ -5,7 +5,10 @@
 # safety net between "main looks good" and `git tag`.
 #
 # Usage:
-#   bash scripts/release-check.sh [--channel stable|preview|nightly] [--tag vX.Y.Z]
+#   bash scripts/release-check.sh [--local] [--channel stable|preview|nightly] [--tag vX.Y.Z]
+#
+# --local is a non-publishing, read-only rehearsal. It skips the remote tier-γ
+# report gate, so a local pass never authorizes a release.
 #
 # Gates (in order):
 #   1.  Backend tests green (pytest)
@@ -50,6 +53,7 @@ Options:
   --channel stable|preview|nightly  Release channel (default: stable)
   --tag vX.Y.Z                     Proposed immutable release tag
   --dry-run                        Run read-only preflight; never publish or tag
+  --local                          Non-publishing local rehearsal (implies --dry-run)
   -h, --help                       Show this help
 EOF
 }
@@ -58,6 +62,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="${HAL0_CHANNEL:-stable}"
 PROPOSED_TAG=""
 DRY_RUN=false
+LOCAL=false
 FAILURES=0
 
 while [[ $# -gt 0 ]]; do
@@ -84,6 +89,11 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=true
 		shift
 		;;
+	--local)
+		LOCAL=true
+		DRY_RUN=true
+		shift
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -105,19 +115,38 @@ stable | preview | nightly) ;;
 	;;
 esac
 
+# Every Python gate runs from the locked repository environment with an
+# isolated application home. This prevents a global pytest/ruff or an editable
+# checkout elsewhere on the machine from affecting release results.
+CHECK_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/hal0-release-check.XXXXXX")"
+HAL0_CHECK_HOME="${CHECK_TMPDIR}/hal0-home"
+mkdir -p "${HAL0_CHECK_HOME}"
+cleanup() {
+	rm -rf "${CHECK_TMPDIR}"
+}
+trap cleanup EXIT
+
+run_repo_python() {
+	PYTHONPATH="${REPO_ROOT}/src" HAL0_HOME="${HAL0_CHECK_HOME}" uv run "$@"
+}
+
+if [[ "${LOCAL}" == true ]]; then
+	warn "LOCAL rehearsal mode is read-only and non-publishing (--dry-run implied)"
+fi
+
 # ── 1. Backend tests ──────────────────────────────────────────────────────────
 step "1. Backend tests"
 
-if command -v pytest &>/dev/null; then
+if command -v uv &>/dev/null; then
 	# Unit tier only — tier β + γ run elsewhere (the integration workflow
 	# and `make release-test` respectively).
-	if pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
-		info "pytest (-m 'not integration'): green"
+	if run_repo_python pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
+		info "uv run pytest (-m 'not integration'): green"
 	else
 		fail "pytest: test failures — fix before release"
 	fi
 else
-	fail "pytest not installed — required for release-check"
+	fail "uv not installed — repository environment is required for release-check"
 fi
 
 # ── 2. UI build ───────────────────────────────────────────────────────────────
@@ -138,14 +167,14 @@ fi
 # ── 3. Lint ───────────────────────────────────────────────────────────────────
 step "3. Lint"
 
-if command -v ruff &>/dev/null; then
-	if ruff check "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" 2>&1; then
-		info "ruff: clean"
+if command -v uv &>/dev/null; then
+	if run_repo_python ruff check "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" 2>&1; then
+		info "uv run ruff: clean"
 	else
 		fail "ruff found lint errors"
 	fi
 else
-	warn "ruff not installed — skipping Python lint (pip install ruff)"
+	fail "uv not installed — cannot run repository ruff"
 fi
 
 if command -v shellcheck &>/dev/null; then
@@ -204,7 +233,10 @@ fi
 step "5. Release-gate report (tier γ)"
 
 REPORT="${REPO_ROOT}/tests/release-gate-report.json"
-if [[ -f "${REPORT}" ]]; then
+if [[ "${LOCAL}" == true ]]; then
+	warn "LOCAL rehearsal: skipping remote tier-γ release-gate report"
+	warn "Local success is insufficient for release authorization; a fresh non-local all-pass report is required"
+elif [[ -f "${REPORT}" ]]; then
 	if python3 - "${REPORT}" <<'PY'; then
 import json, sys, time
 report = json.loads(open(sys.argv[1]).read())
@@ -230,10 +262,16 @@ fi
 step "6. Git state"
 
 cd "${REPO_ROOT}"
-if [[ -z "$(git status --porcelain)" ]]; then
-	info "working tree clean"
+GIT_DIRT="$(
+	git status --porcelain=v1 --untracked-files=all -- . \
+		':(exclude).pi/shepherd/**' \
+		':(exclude).pi-subagents/**' \
+		':(exclude)graphify-out/**'
+)"
+if [[ -z "${GIT_DIRT}" ]]; then
+	info "working tree clean (excluding generated state)"
 else
-	fail "working tree is dirty — commit or stash before tagging"
+	fail "working tree is dirty — commit or stash source changes before tagging"
 fi
 
 if [[ -n "${PROPOSED_TAG}" ]]; then
@@ -382,7 +420,12 @@ fi
 # ── Summary ───────────────────────────────────────────────────────────────────
 printf "\n"
 if [[ "${FAILURES}" -eq 0 ]]; then
-	printf "${GREEN}${BOLD}Release check passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
+	if [[ "${LOCAL}" == true ]]; then
+		warn "Local success is insufficient for release authorization; run the non-local check with a fresh all-pass report"
+		printf "${GREEN}${BOLD}Local release rehearsal passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
+	else
+		printf "${GREEN}${BOLD}Release check passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
+	fi
 	exit 0
 else
 	printf "${RED}${BOLD}Release check FAILED${RESET} — %d gate(s) failed.\n\n" "${FAILURES}"
