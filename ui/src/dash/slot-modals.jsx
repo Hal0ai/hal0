@@ -21,7 +21,11 @@ import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
-import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from "@/lib/normalizeApiModel";
+import {
+	normalizeApiModel,
+	isUpstreamModel,
+	isMtpEligibleModel,
+} from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
 
 const {
@@ -164,6 +168,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		slot?.parallel != null ? String(slot.parallel) : "",
 	);
 	const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
+	// LLAMA_SET_ROWS=1 — splits a single model across multiple GPUs at the
+	// row level. Env var toggle, not a container arg.
+	const [llamaSetRows, setLlamaSetRows] = useStateSM(
+		slot?.llama_set_rows === true,
+	);
 	const [submitErr, setSubmitErr] = useStateSM(null);
 	// Dirty-close confirms through the shared ConfirmDialog (state-driven),
 	// replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
@@ -339,6 +348,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			// #587: re-seed from the slot prop so the drawer tracks the real
 			// on-disk values.
 			setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
+			setLlamaSetRows(slot.llama_set_rows === true);
 			setSubmitErr(null);
 			setDiscardOpen(false);
 			setPendingSwap(null);
@@ -465,6 +475,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			}
 			if (extraArgsChanged) {
 				slotBody.server = { extra_args: extraArgs };
+			}
+			if (llamaSetRows !== (slot.llama_set_rows === true)) {
+				slotBody.llama_set_rows = llamaSetRows;
 			}
 			// parallel is a top-level slot field. Empty → null (inherit; the
 			// None-means-delete merge clears any persisted override).
@@ -792,15 +805,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
           The slot owns the physical/placement layer as 4 typed fields:
           DEVICE · IMAGE · BINARY · THREADS · NGL. Every
           HW change is a cold restart, applied on Save. */}
-				<FieldGroup
-					label="Slot"
-					hint="device · image · binary · threads · ngl"
-				>
+				<FieldGroup label="Slot" hint="device · image · binary · threads · ngl">
 					<div className="form-row">
 						<div className="form-lbl">
 							<span>Name</span>
-							<FieldInfoIcon description="A display label. Rename any time — the stable slot number never
-								changes." />
+							<FieldInfoIcon
+								description="A display label. Rename any time — the stable slot number never
+								changes."
+							/>
 						</div>
 						<div
 							className="form-ctl"
@@ -931,9 +943,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Binary</span>
-										<FieldInfoIcon description="⟳ Which runner build to use. Empty = auto-detect from
+										<FieldInfoIcon
+											description="⟳ Which runner build to use. Empty = auto-detect from
 											device. (The bound runner shows on the slot card chip —
-											change it by picking a different model.)" />
+											change it by picking a different model.)"
+										/>
 									</div>
 									<div className="form-ctl">
 										<select
@@ -978,8 +992,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Threads</span>
-										<FieldInfoIcon description="CPU thread count for the runner. 0 = let the runtime
-											decide." />
+										<FieldInfoIcon
+											description="CPU thread count for the runner. 0 = let the runtime
+											decide."
+										/>
 									</div>
 									<div className="form-ctl">
 										<input
@@ -1006,8 +1022,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Ngl</span>
-										<FieldInfoIcon description="GPU layers to offload — emits -ngl to the runner.
-											-1 = all layers, 0 = CPU only." />
+										<FieldInfoIcon
+											description="GPU layers to offload — emits -ngl to the runner.
+											-1 = all layers, 0 = CPU only."
+										/>
 									</div>
 									<div className="form-ctl">
 										<input
@@ -1028,6 +1046,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												{fieldErrs.ngl}
 											</div>
 										)}
+									</div>
+								</div>
+
+								<div className="form-row">
+									<div className="form-lbl">
+										<span>Rows Split</span>
+									</div>
+									<div className="form-ctl">
+										<PillToggle
+											on={llamaSetRows}
+											disabled={saving}
+											label="Rows Split"
+											stateText={llamaSetRows ? "On" : "Off"}
+											onToggle={(next) => setLlamaSetRows(next)}
+										/>
+										<FieldInfoIcon description="LLAMA_SET_ROWS=1 — splits a single model across multiple GPUs at the row level. Useful for multi-GPU boxes where the model exceeds any single GPU's VRAM." />
 									</div>
 								</div>
 							</>
@@ -1065,9 +1099,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Model</span>
-										<FieldInfoIcon description="{isContainer
+										<FieldInfoIcon
+											description="{isContainer
 												? &quot;Swap restarts the container to load the new model&quot;
-												: &quot;Applies immediately&quot;}" />
+												: &quot;Applies immediately&quot;}"
+										/>
 									</div>
 									<div className="form-ctl">
 										<select
@@ -1114,8 +1150,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Context</span>
-								<FieldInfoIcon description="⟳ ctx_size — context window in tokens. PATCHes /defaults;
-									takes effect on next request. (~model-load seconds)" />
+								<FieldInfoIcon
+									description="⟳ ctx_size — context window in tokens. PATCHes /defaults;
+									takes effect on next request. (~model-load seconds)"
+								/>
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1153,8 +1191,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Template</span>
-										<FieldInfoIcon description="⟳ Pick a chat format for this model. Auto uses the
-											built-in template." />
+										<FieldInfoIcon
+											description="⟳ Pick a chat format for this model. Auto uses the
+											built-in template."
+										/>
 									</div>
 									<div className="form-ctl">
 										{!overrideOpen ? (
@@ -1265,8 +1305,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Parallel</span>
-										<FieldInfoIcon description="⟳ How many requests can run at once. Empty = use the
-											profile default." />
+										<FieldInfoIcon
+											description="⟳ How many requests can run at once. Empty = use the
+											profile default."
+										/>
 									</div>
 									<div className="form-ctl">
 										<input
@@ -1314,8 +1356,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Extra Args</span>
-								<FieldInfoIcon description="extra_args — per-slot override flags appended to the runner
-									argv. Takes precedence over the profile defaults." />
+								<FieldInfoIcon
+									description="extra_args — per-slot override flags appended to the runner
+									argv. Takes precedence over the profile defaults."
+								/>
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1365,8 +1409,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>NPU · Chat</span>
-										<FieldInfoIcon description="NPU language model. Pick any model — downloads
-											automatically." />
+										<FieldInfoIcon
+											description="NPU language model. Pick any model — downloads
+											automatically."
+										/>
 									</div>
 									<div className="form-ctl">
 										<span
@@ -1410,8 +1456,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>NPU · ASR</span>
-										<FieldInfoIcon description="Speech-to-text on the NPU (whisper). Shares the NPU
-											process." />
+										<FieldInfoIcon
+											description="Speech-to-text on the NPU (whisper). Shares the NPU
+											process."
+										/>
 									</div>
 									<div className="form-ctl">
 										<span
@@ -1436,8 +1484,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>NPU · Embed</span>
-										<FieldInfoIcon description="Text embeddings on the NPU (embed-gemma). Shares the NPU
-											process." />
+										<FieldInfoIcon
+											description="Text embeddings on the NPU (embed-gemma). Shares the NPU
+											process."
+										/>
 									</div>
 									<div className="form-ctl">
 										<span
@@ -1478,8 +1528,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Reasoning</span>
-								<FieldInfoIcon description="Stream reasoning before the answer. Off = faster, direct
-									replies. Applies to the next message." />
+								<FieldInfoIcon
+									description="Stream reasoning before the answer. Off = faster, direct
+									replies. Applies to the next message."
+								/>
 							</div>
 							<div className="form-ctl">
 								<PillToggle
@@ -1504,9 +1556,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												);
 										} catch (err) {
 											setThinking(!next);
-											setThinkingErr(
-												err?.message || "reasoning toggle failed",
-											);
+											setThinkingErr(err?.message || "reasoning toggle failed");
 										} finally {
 											setThinkingPending(false);
 										}
@@ -1548,17 +1598,20 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							);
 							const profileOptsIn = !!prof?.mtp;
 							const autoActive = modelEligible && profileOptsIn;
-							const inactiveReason = !modelEligible && !profileOptsIn
-								? "model has no MTP heads and profile doesn't enable MTP"
-								: !modelEligible
-									? "model has no MTP heads"
-									: "profile doesn't enable MTP";
+							const inactiveReason =
+								!modelEligible && !profileOptsIn
+									? "model has no MTP heads and profile doesn't enable MTP"
+									: !modelEligible
+										? "model has no MTP heads"
+										: "profile doesn't enable MTP";
 							return (
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>MTP</span>
-										<FieldInfoIcon description="Multi-token speculative decoding. Auto follows the model
-											+ profile; On/Off force it. Restarts the container." />
+										<FieldInfoIcon
+											description="Multi-token speculative decoding. Auto follows the model
+											+ profile; On/Off force it. Restarts the container."
+										/>
 									</div>
 									<div className="form-ctl">
 										<MtpControl
@@ -1573,11 +1626,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												const prev = mtp;
 												setMtp(next);
 												setSubmitErr(null);
-												const word = next == null
-													? "auto"
-													: next
-														? "on"
-														: "off";
+												const word =
+													next == null ? "auto" : next ? "on" : "off";
 												try {
 													await editMut.mutateAsync({
 														name: slot.name,
@@ -1586,10 +1636,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													restartMut.mutate(slot.name, {
 														onError: (err) =>
 															window.__hal0Toast &&
-																	window.__hal0Toast(
-																		`MTP restart failed — ${err?.message || "see logs"}`,
-																		"err",
-																	),
+															window.__hal0Toast(
+																`MTP restart failed — ${err?.message || "see logs"}`,
+																"err",
+															),
 													});
 													window.__hal0Toast &&
 														window.__hal0Toast(
@@ -1598,9 +1648,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														);
 												} catch (err) {
 													setMtp(prev);
-													setSubmitErr(
-														err?.message || "MTP change failed",
-													);
+													setSubmitErr(err?.message || "MTP change failed");
 												}
 											}}
 										/>
@@ -1625,8 +1673,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							<div className="form-row">
 								<div className="form-lbl">
 									<span>Vision</span>
-									<FieldInfoIcon description="Let the slot accept images. Off saves ~0.9 GB of VRAM (text
-										only)." />
+									<FieldInfoIcon
+										description="Let the slot accept images. Off saves ~0.9 GB of VRAM (text
+										only)."
+									/>
 								</div>
 								<div className="form-ctl">
 									<PillToggle

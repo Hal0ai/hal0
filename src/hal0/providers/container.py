@@ -865,6 +865,7 @@ def _llama_launch_plan(
     slot_threads: int | None = None,
     slot_parallel: int | None = None,
     env: dict[str, str] | None = None,
+    llama_set_rows: bool = False,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -912,7 +913,10 @@ def _llama_launch_plan(
         command=command,
         # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
         # operators can tune the runtime without forking the image.
-        env=dict(env) if env else {},
+        env={
+                **(env or {}),
+                **({'LLAMA_SET_ROWS': '1'} if llama_set_rows else {}),
+        },
         mounts=[model_store_module.mount_for(root, read_only=True) for root in model_stores],
         devices=list(devices),
         group_add=list(group_ids),
@@ -1327,6 +1331,7 @@ class ContainerProvider(Provider):
             slot_threads=scalars["slot_threads"],
             slot_parallel=scalars["slot_parallel"],
             env=merged_env or None,
+            llama_set_rows=bool(slot_cfg.get("llama_set_rows", False)),
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────

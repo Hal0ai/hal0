@@ -487,6 +487,16 @@ class SlotConfig(BaseModel):
             "resolve_chat_template and slot_flags_fold."
         ),
     )
+    llama_set_rows: bool = Field(
+        default=False,
+        description=(
+            "LLAMA_SET_ROWS=1 \u2014 splits a single model across multiple GPUs "
+            "at the row level (--gpu-split auto --set-row 1). Useful for "
+            "multi-GPU boxes where the model exceeds a single GPU's VRAM. "
+            "The env var is emitted as Environment=LLAMA_SET_ROWS=1 in the "
+            "container unit."
+        ),
+    )
     vision: bool = Field(
         default=True,
         description=(
