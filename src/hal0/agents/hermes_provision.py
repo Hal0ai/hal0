@@ -415,7 +415,9 @@ def _validate_hermes_python(path: str, *, runner: Any = subprocess) -> tuple[int
         raise ValueError(f"Hermes Python override is not executable: {path}") from exc
     version = (result.stdout or "").strip()
     if version != "3.12":
-        raise ValueError(f"Hermes Python must be exactly 3.12: {path} reports {version or 'unknown'}")
+        raise ValueError(
+            f"Hermes Python must be exactly 3.12: {path} reports {version or 'unknown'}"
+        )
     return (3, 12)
 
 
@@ -424,7 +426,11 @@ def _read_hermes_python_env(path: Path = HERMES_PYTHON_ENV) -> str | None:
     if not path.exists():
         return None
     lines = path.read_text(encoding="utf-8").splitlines()
-    values = [line.removeprefix("HAL0_HERMES_PYTHON=") for line in lines if line.startswith("HAL0_HERMES_PYTHON=")]
+    values = [
+        line.removeprefix("HAL0_HERMES_PYTHON=")
+        for line in lines
+        if line.startswith("HAL0_HERMES_PYTHON=")
+    ]
     if len(lines) != 1 or len(values) != 1 or not values[0]:
         raise ValueError(f"invalid Hermes Python environment file: {path}")
     return values[0]
