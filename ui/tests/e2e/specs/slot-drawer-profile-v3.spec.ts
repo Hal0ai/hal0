@@ -88,8 +88,8 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     expect(restartCalls[0]).toBe('POST')
   })
 
-  // C7c — no-op profile Save: PUT body has no `profile` key, no restart
-  test('C7c — no-op profile Save: PUT has no profile, restart not called', async ({ page }) => {
+  // C7c — no-op Save: no empty config PUT and no restart.
+  test('C7c — no-op Save skips config PUT and restart', async ({ page }) => {
     const configPuts: any[] = []
     let restartCalled = false
 
@@ -111,13 +111,11 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    // Click Save immediately — no profile change
+    // Click Save immediately — there is no changed config to persist.
     await page.locator('.drawer button:has-text("Save")').click()
 
-    await expect.poll(() => configPuts.length).toBeGreaterThan(0)
-    // Profile must NOT be in the body
-    expect(configPuts[0]).not.toHaveProperty('profile')
-    // Restart must NOT have fired
+    await expect(page.locator('.drawer')).toHaveCount(0)
+    expect(configPuts).toEqual([])
     expect(restartCalled).toBe(false)
   })
 
