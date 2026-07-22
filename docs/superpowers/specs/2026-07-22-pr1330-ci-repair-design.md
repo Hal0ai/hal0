@@ -107,3 +107,10 @@ Before restoration, retain the existing focused failures as red evidence. After 
 ### Non-goals
 
 This amendment does not redesign the slot drawer, implement the future FLM 1.0 role-binding design, alter backend payload contracts, or broaden the repair into installer, updater, Hermes, release, or lifecycle work.
+
+## Approved field and seed-content requirements
+
+- Every editable drawer control keeps a clear human-facing label and stable test/accessibility identity; the label describes the field while the wire key remains unchanged.
+- Every rendered editable field must be wired end-to-end: initial value, local state, validation, dirty tracking, request body, persistence response, and error/revert behavior where applicable.
+- Descriptive help is never rendered as visible label/subtitle prose. It is supplied through the `i`-in-circle `FieldInfoIcon`; the description appears on pointer hover or keyboard focus and never opens or pins on click.
+- The latest seeded-profile rework is authoritative: all 16 virtual seed profiles are device-agnostic logical recipes, contain the current flags/intent/quant content, and do not carry `device_class`. `ProfileConfig.device_class` remains optional for backwards-compatible custom profiles, but seeded data and seed-specific tests must not require it.
