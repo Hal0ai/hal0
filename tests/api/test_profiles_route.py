@@ -99,7 +99,7 @@ class TestListProfiles:
             assert "image" not in item
             assert "flags" in item
             assert "mtp" in item
-            assert "device_class" in item or True  # device_class can be None post-seeded-profile rework
+            assert "device_class" in item  # device_class can be None post-seeded-profile rework — accept absent or null
             assert "resolved_flags" in item
             assert "seed" in item
 
