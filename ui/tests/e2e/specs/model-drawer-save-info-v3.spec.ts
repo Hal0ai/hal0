@@ -157,7 +157,8 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await page.keyboard.press('Escape')
     await expect(displayNameLabel.locator('.field-info-pop')).toHaveCount(0)
     await expect(page.locator('.modal-shell')).toContainText('Discard unsaved changes?')
-    await page.locator('.modal-shell').getByRole('button', { name: 'Cancel', exact: true }).click()
+    await page.locator('.modal-shell').getByRole('button', { name: 'Keep editing', exact: true }).click()
+    await expect(drawer).toBeVisible()
 
     await info.focus()
     await page.keyboard.press('Enter')
