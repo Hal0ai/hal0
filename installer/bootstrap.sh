@@ -112,7 +112,7 @@ fetch_manifest() {
     local out="$1"
     info "fetching release manifest"
     info "  ${_C_DIM}${HAL0_RELEASES_URL}${_C_RST}"
-    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${out}" "${HAL0_RELEASES_URL}"; then
+    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${out}" --url "${HAL0_RELEASES_URL}"; then
         die "could not download release manifest from ${HAL0_RELEASES_URL}"
     fi
 }
@@ -140,9 +140,11 @@ validate_manifest_for_channel() {
     # This is deliberately one fail-closed jq policy pass over the exact bytes
     # authenticated above. It emits a normalized manifest only when every
     # bootstrap-required field and channel/kind/stage relationship is valid.
-    if ! jq -e --arg requested "${requested_channel}" '
+    if ! jq -e -s --arg requested "${requested_channel}" '
         def nonempty_string: type == "string" and length > 0;
-        select(
+        select(length == 1)
+        | .[0]
+        | select(
             type == "object"
             and ._schema == "hal0.releases.v1"
             and (.version | nonempty_string)
@@ -186,7 +188,7 @@ fetch_and_hash_check() {
     local url="$1" expected_digest="$2" out="$3"
     info "downloading tarball"
     info "  ${_C_DIM}${url}${_C_RST}"
-    curl -fsSL --retry 3 --retry-delay 2 -o "${out}" "${url}" \
+    curl -fsSL --retry 3 --retry-delay 2 -o "${out}" --url "${url}" \
         || die "could not download tarball"
 
     info "verifying sha256"
@@ -203,7 +205,7 @@ fetch_sidecar() {
     local label="$1" url="$2" out="$3"
     info "downloading ${label}"
     info "  ${_C_DIM}${url}${_C_RST}"
-    curl -fsSL --retry 3 --retry-delay 2 -o "${out}" "${url}" \
+    curl -fsSL --retry 3 --retry-delay 2 -o "${out}" --url "${url}" \
         || die "could not download ${label}"
 }
 

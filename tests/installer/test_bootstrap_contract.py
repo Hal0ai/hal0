@@ -48,6 +48,7 @@ def _bootstrap_env(
     for tool in (
         "awk",
         "bash",
+        "cat",
         "gzip",
         "uname",
         "mktemp",
@@ -82,6 +83,11 @@ while (($#)); do
     case "$1" in
         -o) out="$2"; shift 2 ;;
         --retry|--retry-delay) shift 2 ;;
+        --url) url="$2"; shift 2 ;;
+        --config=*)
+            cat "${{1#*=}}" > "$CONFIG_READ_LOG"
+            shift
+            ;;
         -*) shift ;;
         *) url="$1"; shift ;;
     esac
@@ -114,6 +120,8 @@ exit "$COSIGN_RC"
         "ARTIFACT_FIXTURE": str(artifact_fixture or ""),
         "ARTIFACT_URL": artifact_url,
         "ARTIFACT_BUNDLE_URL": artifact_bundle_url,
+        "CONFIG_READ_LOG": str(tmp_path / "config-read.log"),
+        "TMPDIR": str(tmp_path),
     }
     return env, curl_log, cosign_log
 
@@ -337,6 +345,94 @@ def test_authenticated_malformed_manifest_rejected_before_artifact_io(
         f"https://releases.hal0.dev/{requested_channel}.json.bundle",
     ]
     assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param(
+            json.dumps({"not": "a release manifest"}).encode()
+            + b"\n"
+            + json.dumps(_valid_manifest()).encode(),
+            id="invalid-then-valid",
+        ),
+        pytest.param(
+            json.dumps(_valid_manifest()).encode()
+            + b"\n"
+            + json.dumps(_valid_manifest()).encode(),
+            id="valid-then-valid",
+        ),
+        pytest.param(
+            json.dumps(_valid_manifest()).encode() + b"\ntrue",
+            id="valid-then-trailing-value",
+        ),
+    ],
+)
+def test_authenticated_manifest_must_contain_exactly_one_json_value(
+    tmp_path: Path,
+    manifest: bytes,
+) -> None:
+    env, curl_log, cosign_log = _bootstrap_env(tmp_path, manifest, cosign_rc=0)
+    env["HAL0_BOOTSTRAP_KEEP_TMP"] = "1"
+    install_log = tmp_path / "install.log"
+    env["INSTALL_LOG"] = str(install_log)
+
+    proc = _run_bootstrap(env)
+
+    assert proc.returncode != 0
+    assert "authenticated release manifest failed strict policy validation" in proc.stderr
+    assert curl_log.read_text(encoding="utf-8").splitlines() == [
+        "https://releases.hal0.dev/stable.json",
+        "https://releases.hal0.dev/stable.json.bundle",
+    ]
+    assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
+    assert not install_log.exists()
+    assert not list(tmp_path.glob("hal0-install-*/artifact.tar.gz"))
+
+
+@pytest.mark.parametrize("hostile_field", ["url", "bundle_url"])
+def test_authenticated_option_like_artifact_urls_are_explicit_curl_urls(
+    tmp_path: Path,
+    hostile_field: str,
+) -> None:
+    artifact = tmp_path / "artifact.fixture"
+    artifact.write_bytes(b"authenticated artifact fixture")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    curl_config = tmp_path / "hostile.curlrc"
+    curl_config.write_text("url = file:///etc/passwd\n", encoding="utf-8")
+    hostile_url = f"--config={curl_config}"
+    artifact_url = "https://fixtures.example/hal0.tar.gz"
+    artifact_bundle_url = "https://fixtures.example/hal0.tar.gz.bundle"
+    manifest = _valid_manifest()
+    manifest.update(
+        {
+            "url": hostile_url if hostile_field == "url" else artifact_url,
+            "bundle_url": hostile_url if hostile_field == "bundle_url" else artifact_bundle_url,
+            "digest_sha256": digest,
+        }
+    )
+    env, curl_log, cosign_log = _bootstrap_env(
+        tmp_path,
+        json.dumps(manifest).encode(),
+        cosign_rc=0,
+        artifact_fixture=artifact,
+        artifact_url=artifact_url,
+        artifact_bundle_url=artifact_bundle_url,
+    )
+    env["HAL0_BOOTSTRAP_KEEP_TMP"] = "1"
+    install_log = tmp_path / "install.log"
+    env["INSTALL_LOG"] = str(install_log)
+
+    proc = _run_bootstrap(env)
+
+    assert proc.returncode != 0
+    assert curl_log.read_text(encoding="utf-8").splitlines()[-1] == hostile_url
+    assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
+    assert not Path(env["CONFIG_READ_LOG"]).exists()
+    assert not install_log.exists()
+    assert not list(tmp_path.glob("hal0-install-*/artifact.tar.gz.bundle"))
+    if hostile_field == "url":
+        assert not list(tmp_path.glob("hal0-install-*/artifact.tar.gz"))
 
 
 def test_bootstrap_missing_cosign_fails_closed_for_channel_manifest(
