@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+import hal0.updater.updater as updater_module
 from hal0.updater import (
     ReleaseInfo,
     ReleaseManifest,
@@ -47,6 +48,18 @@ from hal0.updater.updater import (
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+
+VALID_MANIFEST: dict[str, Any] = {
+    "_schema": "hal0.releases.v1",
+    "version": "1.0.0",
+    "channel": "stable",
+    "release_kind": "stable",
+    "url": "https://example.test/hal0.tar.gz",
+    "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+    "digest_sha256": "0" * 64,
+    "signer_identity": "release-workflow",
+}
 
 
 def _build_release_tarball(
@@ -174,6 +187,7 @@ def test_releases_url_defaults_per_channel(monkeypatch: pytest.MonkeyPatch) -> N
     """Without the override env var the URL is per-channel under releases.hal0.dev."""
     monkeypatch.delenv("HAL0_RELEASES_URL", raising=False)
     assert releases_url("stable") == "https://releases.hal0.dev/stable.json"
+    assert releases_url("preview") == "https://releases.hal0.dev/preview.json"
     assert releases_url("nightly") == "https://releases.hal0.dev/nightly.json"
 
 
@@ -273,6 +287,57 @@ def test_manifest_schema_accepts_revoked(tmp_path: Path) -> None:
 
 
 # ── preview / release-kind manifest validation ────────────────────────────────
+
+
+def test_preview_manifest_accepts_preview_channel() -> None:
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+        }
+    )
+    assert updater_module.validate_manifest_for_channel(manifest, "preview") is manifest
+
+
+def test_promoted_stable_manifest_is_accepted_by_preview_channel() -> None:
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "channel": "preview",
+            "release_kind": "stable",
+            "prerelease_stage": None,
+        }
+    )
+    assert updater_module.validate_manifest_for_channel(manifest, "preview") is manifest
+
+
+def test_stable_channel_rejects_preview_manifest() -> None:
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+        }
+    )
+    with pytest.raises(ValueError, match=r"requested channel.*stable"):
+        updater_module.validate_manifest_for_channel(manifest, "stable")
+
+
+def test_requested_channel_must_match_manifest_channel() -> None:
+    manifest = _parse_manifest(
+        {**VALID_MANIFEST, "channel": "nightly", "release_kind": "nightly"}
+    )
+    with pytest.raises(ValueError, match=r"manifest channel.*nightly"):
+        updater_module.validate_manifest_for_channel(manifest, "preview")
+
+
+def test_unknown_requested_channel_is_rejected() -> None:
+    manifest = _parse_manifest(VALID_MANIFEST)
+    with pytest.raises(ValueError, match="unknown requested channel"):
+        updater_module.validate_manifest_for_channel(manifest, "beta")
 
 
 def test_manifest_schema_accepts_alpha_preview() -> None:

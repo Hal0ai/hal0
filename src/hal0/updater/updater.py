@@ -63,6 +63,7 @@ from hal0.config.loader import (
 )
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
+from hal0.release.policy import ReleaseKind
 
 log = structlog.get_logger(__name__)
 
@@ -155,8 +156,8 @@ class ReleaseManifest(BaseModel):
 
     schema_id: str = Field(default="hal0.releases.v1", alias="_schema")
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
-    channel: str = Field(default="stable", description="Release channel.")
-    release_kind: Literal["stable", "nightly", "preview"] = Field(
+    channel: ReleaseKind = Field(default="stable", description="Release channel.")
+    release_kind: ReleaseKind = Field(
         default="stable",
         description="Kind of release: stable, nightly, or preview.",
     )
@@ -241,7 +242,8 @@ class ReleaseManifest(BaseModel):
 
         Rules:
         - preview requires prerelease_stage in (alpha, beta, rc) and channel="preview".
-        - stable/nightly require no prerelease_stage and channel matches release_kind.
+        - stable requires no prerelease_stage and may target stable or preview.
+        - nightly requires no prerelease_stage and channel="nightly".
         - non-empty operator_migrations require rollback_policy in
           ("backup-required", "blocked").
         """
@@ -254,16 +256,26 @@ class ReleaseManifest(BaseModel):
                 raise ValueError(
                     f"preview release_kind requires channel='preview', got {self.channel!r}"
                 )
-        if self.release_kind in ("stable", "nightly"):
+        if self.release_kind == "stable":
             if self.prerelease_stage is not None:
                 raise ValueError(
-                    f"{self.release_kind} release_kind must not have a "
+                    "stable release_kind must not have a "
                     f"prerelease_stage, got {self.prerelease_stage!r}"
                 )
-            if self.channel != self.release_kind:
+            if self.channel not in ("stable", "preview"):
                 raise ValueError(
-                    f"{self.release_kind} release_kind requires "
-                    f"channel={self.release_kind!r}, got {self.channel!r}"
+                    "stable release_kind requires channel='stable' or 'preview', "
+                    f"got {self.channel!r}"
+                )
+        if self.release_kind == "nightly":
+            if self.prerelease_stage is not None:
+                raise ValueError(
+                    "nightly release_kind must not have a "
+                    f"prerelease_stage, got {self.prerelease_stage!r}"
+                )
+            if self.channel != "nightly":
+                raise ValueError(
+                    f"nightly release_kind requires channel='nightly', got {self.channel!r}"
                 )
         if self.operator_migrations and self.rollback_policy not in (
             "backup-required",
@@ -275,6 +287,33 @@ class ReleaseManifest(BaseModel):
                 f"got {self.rollback_policy!r}"
             )
         return self
+
+
+_ACCEPTED_RELEASE_KINDS: dict[str, frozenset[ReleaseKind]] = {
+    "stable": frozenset({"stable"}),
+    "preview": frozenset({"preview", "stable"}),
+    "nightly": frozenset({"nightly"}),
+}
+
+
+def validate_manifest_for_channel(
+    manifest: ReleaseManifest, requested_channel: str
+) -> ReleaseManifest:
+    """Return ``manifest`` when it is safe to consume for the requested channel."""
+    if requested_channel not in _ACCEPTED_RELEASE_KINDS:
+        raise ValueError(f"unknown requested channel {requested_channel!r}")
+    if manifest.channel != requested_channel:
+        raise ValueError(
+            f"manifest channel {manifest.channel!r} does not match "
+            f"requested channel {requested_channel!r}"
+        )
+    accepted_kinds = _ACCEPTED_RELEASE_KINDS[requested_channel]
+    if manifest.release_kind not in accepted_kinds:
+        raise ValueError(
+            f"release kind {manifest.release_kind!r} is not accepted for "
+            f"requested channel {requested_channel!r}"
+        )
+    return manifest
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1565,6 +1604,13 @@ class Updater:
                 details={"channel": self.channel, "error": str(exc)},
             ) from exc
         manifest = _parse_manifest(raw)
+        try:
+            validate_manifest_for_channel(manifest, self.channel)
+        except ValueError as exc:
+            raise UpdateManifestInvalid(
+                f"release manifest is not accepted for channel {self.channel!r}: {exc}",
+                details={"channel": self.channel, "error": str(exc)},
+            ) from exc
 
         # Step 2: confirm target version.
         target_version = (version or "").strip() or manifest.version
