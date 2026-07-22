@@ -103,7 +103,7 @@ class TestListProfiles:
                 "device_class" in item
             )  # device_class can be None post-seeded-profile rework — accept absent or null
             assert "resolved_flags" in item
-            assert "seed" in item  # noqa: F631
+            assert "seed" in item
 
     def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
         """Phase C6: the UI keys immutability off the serialized seed flag."""
