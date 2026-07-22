@@ -53,6 +53,23 @@ def test_catalog_deprecation_status_is_not_a_scar_marker(
     status_file.write_text("deprecated: bool = False  # legacy shim\n", encoding="utf-8")
     assert check_sunset.scar_count() == 1
 
+    status_file.write_text(
+        "deprecated: bool = False  # DEPRECATED remove this branch\n",
+        encoding="utf-8",
+    )
+    assert check_sunset.scar_count() == 1
+
+    status_file.write_text("", encoding="utf-8")
+    catalog_file = lifecycle / "catalog.py"
+    catalog_file.write_text("if runner.deprecated:\n    pass\n", encoding="utf-8")
+    assert check_sunset.scar_count() == 0
+
+    catalog_file.write_text(
+        "if runner.deprecated:  # ordinary deprecated branch\n    pass\n",
+        encoding="utf-8",
+    )
+    assert check_sunset.scar_count() == 1
+
 
 def test_prerelease_does_not_trigger_same_ga_sunset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
