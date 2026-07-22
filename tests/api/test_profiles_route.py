@@ -117,11 +117,11 @@ class TestListProfiles:
         """Phase C: device_class surfaces in the route response."""
         data = client.get("/api/profiles").json()
         flm = next(item for item in data if item["name"] == "flm")
-        assert flm["device_class"] is None
+        assert flm["device_class"] == "npu"
         kokoro = next(item for item in data if item["name"] == "kokoro")
-        assert kokoro["device_class"] is None
+        assert kokoro["device_class"] == "cpu"
         vulkan = next(item for item in data if item["name"] == "chat")
-        assert vulkan["device_class"] is None
+        assert vulkan["device_class"] == "gpu"
 
     def test_backend_values(self, client: TestClient) -> None:
         """backend surfaces in the route response (rocm|vulkan|None)."""
@@ -201,7 +201,9 @@ class TestEnrichedFields:
         data = client.get("/api/profiles").json()
         by_name = {p["name"]: p for p in data}
         rocm = by_name["chat"]
-        assert rocm["intent"] == "Generic chat (fallback for unknown models)"
+        assert (
+            rocm["intent"] == "General chat"
+        )  # post-seeded-profile rework — renamed from fallback string
         assert rocm["quant"] == ""
         assert rocm["tps"] == 52.8
         assert rocm["rtf"] is None
