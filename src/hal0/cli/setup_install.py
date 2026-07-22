@@ -48,7 +48,7 @@ except ValueError:
 
 # Imported as a MODULE ATTRIBUTE (not `from ... import _api_reachable` used at
 # call-site only) so tests can monkeypatch ``hal0.cli.setup_install._api_reachable``.
-from hal0.cli.setup_command import _api_reachable
+from hal0.cli.setup_command import _api_reachable  # noqa: E402
 
 
 def choose_apply_mode() -> str:
