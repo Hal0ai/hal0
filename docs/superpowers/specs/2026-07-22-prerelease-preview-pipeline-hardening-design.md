@@ -7,6 +7,20 @@ beta, and release-candidate builds. This design covers the local hal0 updater,
 installer contract, release workflow, and verification tests. It does not silently
 deploy or mutate the external hal0-web channel service.
 
+### Verified blockers
+
+- `v1.0.0-alpha.1` is already a manually published, empty GitHub prerelease. Its
+empty state does not make it reusable; it remains immutable and must never be
+reused. The first viable candidate is `v1.0.0-alpha.2`, or the next unused tag, on
+a matching fresh `release/v1.0.0-alpha.N` branch.
+- External verification found that `releases.hal0.dev` serves `stable.json` and
+`nightly.json`, while `stable.json.bundle`, `nightly.json.bundle`, `preview.json`,
+and `preview.json.bundle` return 404. No external pointer is therefore operational
+for hardened clients, which require both the manifest and its bundle.
+- Local static and full-suite gates do not replace the first real OIDC signing and
+remote authorization run. The non-publishing implementation and rehearsal boundary
+remains in force, and these verification results do not establish release readiness.
+
 ## Problem
 
 The repository has tag policy for `vX.Y.Z-alpha.N`, `vX.Y.Z-beta.N`, and
@@ -50,7 +64,7 @@ CLI/API/config validation.
 - Do not publish a tag, GitHub Release, PyPI distribution, or channel pointer during
 implementation or test runs.
 - Do not reuse the long-lived `prerelease-channel` branch. Each cut uses a fresh
-short-lived preparation branch such as `release/v1.0.0-alpha.1`.
+short-lived preparation branch such as `release/v1.0.0-alpha.N`.
 - Do not change the `nightly` channel semantics except where shared validation or
 workflow policy requires an explicit matrix case.
 - Do not implement or deploy the external hal0-web service in this repository. Its
