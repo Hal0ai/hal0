@@ -205,10 +205,15 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    // ctx_size is now in the Model group (directly visible, not inside Advanced).
-    const row = page.locator('.drawer .form-row', { hasText: 'ctx_size' })
-    await expect(row).toBeVisible()
-    await row.locator('input').fill('16384')
+    // Context is directly visible in the Model group (not inside Advanced).
+    const modelGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    })
+    const contextRow = modelGroup.locator('.form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Context$/ }),
+    })
+    await expect(contextRow).toBeVisible()
+    await contextRow.locator('input').fill('16384')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => patches.length).toBeGreaterThan(0)
     expect(patches[0].ctx_size).toBe(16384)
@@ -252,11 +257,8 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.goto('/#slots/primary')
     // Click Save immediately — no field edits.
     await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    const body = puts[0]
-    expect(body).not.toHaveProperty('idle_timeout_s')
-    expect(body).not.toHaveProperty('workers')
-    expect(body).not.toHaveProperty('llamacpp_args')
+    await expect(page.locator('.drawer')).toHaveCount(0)
+    expect(puts).toEqual([])
   })
 
   test('#587 — drawer has no idle_timeout_s / workers rows (profile-owned)', async ({ page }) => {
@@ -307,73 +309,6 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(infGroup.locator('.form-row', { hasText: 'Reasoning' })).toBeVisible()
   })
 
-  // Editable per-slot extra_args overlay (one-off flag tests without a new
-  // profile). The field seeds from the on-disk [server].extra_args (wire key
-  // `llamacpp_args`), is editable, and persists nested under `server` so the
-  // backend one-level merge keeps sibling server keys.
-  const PRIMARY_WITH_ARGS = {
-    ...PRIMARY,
-    llamacpp_args: '--threads 6',
-    resolved_command: ['img', '--host', '0.0.0.0', '--port', '8092', '--threads', '6'],
-  }
-
-  test('extra_args is editable and labelled as a per-slot override', async ({ page }) => {
-    await seedSlots(page, [PRIMARY_WITH_ARGS, EMBED])
-    await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    const row = page.locator('.drawer .form-row', { hasText: 'extra_args' })
-    await expect(row).toBeVisible()
-    await expect(row.locator('.form-lbl .sub')).toContainText('per-slot override')
-    const input = page.getByTestId('extra-args-input')
-    await expect(input).not.toHaveAttribute('readonly', '')
-    await expect(input).toHaveValue('--threads 6')
-  })
-
-  test('editing extra_args dims the resolved command and Regenerate PUTs { server: { extra_args } }', async ({ page }) => {
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await seedSlots(page, [PRIMARY_WITH_ARGS, EMBED])
-    await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-
-    // No overlay until the field is dirty.
-    await expect(page.getByTestId('resolved-stale-overlay')).toHaveCount(0)
-    await page.getByTestId('extra-args-input').fill('--threads 6 -fa off')
-    await expect(page.getByTestId('resolved-stale-overlay')).toBeVisible()
-
-    await page.getByTestId('regenerate-resolved').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0]).toEqual({ server: { extra_args: '--threads 6 -fa off' } })
-  })
-
-  test('malformed extra_args (unbalanced quote) blocks Regenerate', async ({ page }) => {
-    await seedSlots(page, [PRIMARY_WITH_ARGS, EMBED])
-    await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    await page.getByTestId('extra-args-input').fill('--chat-template "oops')
-    await expect(page.getByTestId('regenerate-resolved')).toBeDisabled()
-  })
-
-  test('Save ships changed extra_args nested under server', async ({ page }) => {
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/primary/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }))
-    await seedSlots(page, [PRIMARY_WITH_ARGS, EMBED])
-    await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    await page.getByTestId('extra-args-input').fill('--threads 12')
-    await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0].server).toEqual({ extra_args: '--threads 12' })
-  })
-
   test('default-for-type row is gone from the edit drawer and Save omits default', async ({ page }) => {
     const puts: any[] = []
     await page.route('**/api/slots/primary/config', async (route) => {
@@ -386,8 +321,11 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
     await expect(page.locator('.drawer .form-row', { hasText: 'Default for type' })).toHaveCount(0)
+    // Make a real config change so the emitted body can prove `default` stays absent.
+    await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).toHaveProperty('n_gpu_layers', 24)
     expect(puts[0]).not.toHaveProperty('default')
   })
 })

@@ -457,10 +457,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
           body: defaultsBody,
         });
       }
-      await editMut.mutateAsync({
-        name: slot.name,
-        body: slotBody,
-      });
+      if (Object.keys(slotBody).length > 0) {
+        await editMut.mutateAsync({
+          name: slot.name,
+          body: slotBody,
+        });
+      }
     } catch (err) {
       setSubmitErr(err?.message || "save failed");
       return;
