@@ -67,8 +67,26 @@ package_kind = "runner"
 platforms = ["linux/amd64"]
 
 [[packages]]
+id = "hal0-comfyui"
+repository = "ghcr.io/hal0ai/hal0-comfyui"
+digest = "sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b"
+package_kind = "runner"
+platforms = ["linux/amd64"]
+
+[[packages]]
+id = "hal0-toolbox-cpu"
+repository = "ghcr.io/hal0ai/hal0-toolbox-cpu"
+digest = "sha256:eab70d0355981c08133a6fff28e472690c7091f6e968da1a2f269bdfa29311a1"
+package_kind = "runner"
+platforms = ["linux/amd64"]
+
+[[packages]]
 id = "amd-strix-halo-comfyui"
 repository = "docker.io/kyuz0/amd-strix-halo-comfyui"
 digest = "sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
 package_kind = "runner"
 platforms = ["linux/amd64"]
+
+[[reviewed_exclusions]]
+name = "hal0-toolbox-comfyui"
+reason = "Legacy May 2026 toolbox image superseded by the reviewed hal0-comfyui runner package; it is not selected by the lifecycle catalog."
