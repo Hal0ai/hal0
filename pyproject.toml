@@ -121,6 +121,9 @@ addopts = "-ra --strict-markers"
 # whole files/dirs (tests/api hanging on a slow/absent podman or journalctl
 # probe was the recurring local-only pain point). A future CI tier split can
 # reuse the same markers; do not repurpose them for anything else.
+filterwarnings = [
+  "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]
 markers = [
   "slow: tests that take >1s wall-clock (engine-contract fixtures, etc.)",
   "podman: needs a real container runtime (podman/docker) reachable on the host",

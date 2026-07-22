@@ -979,6 +979,9 @@ Group=hal0
 # group-writable kludge needed, the setgid dirs already cover group access.
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
+# Shared Hermes interpreter policy, persisted by `hal0 agent install hermes`.
+# Optional so core hal0 services remain installable when Hermes is skipped/degraded.
+EnvironmentFile=-${ETC_DIR}/hermes-python.env
 # Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
 # on a fresh box with no token gathered at install time, and a missing
 # EnvironmentFile= target must not block the unit from starting.
