@@ -1,8 +1,9 @@
 # Release manifest
 
 The release manifest is the JSON schema used to describe a hal0 release on the
-`releases.hal0.dev` endpoint and consumed by the self-updater
-(``src/hal0/updater/updater.py``).
+`releases.hal0.dev` endpoint and consumed by the bootstrap installer and
+self-updater (``installer/bootstrap.sh`` and
+``src/hal0/updater/updater.py``).
 
 ## Schema identity
 
@@ -27,8 +28,8 @@ shape. Future schema iterations (v2, v3…) will use a distinct identifier.
 
 | Field                | Type                 | Default                            | Description                                              |
 |----------------------|----------------------|------------------------------------|----------------------------------------------------------|
-| `channel`            | `str`                | `"stable"`                         | Release channel.                                         |
-| `release_kind`       | `str`                | `"stable"`                         | Kind: `"stable"`, `"nightly"`, or `"preview"`.           |
+| `channel`            | `str`                | `"stable"`                         | Channel pointer targeted by this manifest.                |
+| `release_kind`       | `str`                | `"stable"`                         | Artifact kind: `"stable"`, `"nightly"`, or `"preview"`.  |
 | `prerelease_stage`   | `str` or `null`      | `null`                             | Preview stage: `"alpha"`, `"beta"`, or `"rc"`.           |
 | `rollback_policy`    | `str`                | `"safe"`                           | Rollback policy: `"safe"`, `"backup-required"`, `"blocked"`. |
 | `upgrade_from`       | `str`                | `""`                               | Version constraint for supported upgrade paths, e.g. `">=0.9.8"`. |
@@ -50,12 +51,44 @@ The pydantic model enforces these rules at parse time:
    - `prerelease_stage` must be one of `"alpha"`, `"beta"`, or `"rc"`.
    - `channel` must be `"preview"`.
 
-2. **Stable / nightly coherence** — When `release_kind` is `"stable"` or `"nightly"`:
-   - `prerelease_stage` must be `null`.
-   - `channel` must match `release_kind`.
+2. **Stable / nightly coherence**:
+   - Stable artifacts have `release_kind: "stable"`, no `prerelease_stage`,
+     and may target the `stable` or `preview` pointer. This permits promotion
+     of an already-built stable artifact to preview before advancing stable.
+   - Nightly artifacts have `release_kind: "nightly"`, no `prerelease_stage`,
+     and target only the `nightly` pointer.
 
 3. **Operator-migration safety** — When `operator_migrations` is non-empty:
    - `rollback_policy` must be `"backup-required"` or `"blocked"`.
+
+## Channel pointers and artifact kinds
+
+Clients select one of the canonical pointers at
+`https://releases.hal0.dev/<channel>.json`, where `<channel>` is `stable`,
+`preview`, or `nightly`. The `channel` field identifies the pointer being
+advanced; `release_kind` classifies the immutable artifact it references.
+They are intentionally not synonyms: `preview.json` may point to a stable
+artifact during promotion, but `stable.json` accepts only stable artifacts.
+Consequently, stable clients never consume preview artifacts.
+
+Each pointer has an exact sibling Sigstore bundle, for example
+`preview.json.bundle`. The bootstrap and updater download the manifest bytes
+and sibling bundle, then run `cosign verify-blob` with their client-pinned
+`.github/workflows/release.yml` identity and
+`https://token.actions.githubusercontent.com` issuer before trusting artifact
+URLs. The bootstrap performs this check before parsing the JSON; the updater
+may decode for schema/channel rejection first but does not return or act on the
+manifest until authentication succeeds. The manifest's own `signer_identity`
+and `signer_issuer` fields become trusted only after that check. A missing
+bundle, missing `cosign`, or failed verification aborts closed. Tarball digest
+and bundle verification then remain defense-in-depth.
+
+The release workflow produces each pointer and bundle together as release
+assets. Serving or advancing those external `releases.hal0.dev` pointers is a
+separate **hal0-web release gate**: hal0-web must publish the exact manifest
+bytes and matching sibling `.bundle`, and must not expose a new pointer when
+either asset is absent. This repository does not make that external serving
+step optional.
 
 ## Backward compatibility
 
@@ -88,6 +121,26 @@ update is offered.
   "version": "1.0.0",
   "channel": "stable",
   "release_kind": "stable",
+  "rollback_policy": "safe",
+  "url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz",
+  "bundle_url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz.bundle",
+  "digest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signer_identity": "^https://github\\.example/haloai/hal0/.*"
+}
+```
+
+## Example: stable artifact promoted to preview
+
+The pointer target remains `preview`, while the immutable artifact keeps its
+stable classification:
+
+```json
+{
+  "_schema": "hal0.releases.v1",
+  "version": "1.0.0",
+  "channel": "preview",
+  "release_kind": "stable",
+  "prerelease_stage": null,
   "rollback_policy": "safe",
   "url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz",
   "bundle_url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz.bundle",

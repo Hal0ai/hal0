@@ -19,22 +19,17 @@
 #
 # Env overrides:
 #   HAL0_RELEASES_URL           full URL to a hal0.releases.v1 manifest
-#                               (default: GitHub Releases /latest/download/stable.json)
-#   HAL0_CHANNEL                channel name when using the default URL (default: stable)
-#   HAL0_INSTALL_REQUIRE_COSIGN=1
-#                               fail the install if cosign is not present
-#                               (restores the old hard requirement for
-#                               security-conscious / enterprise installs)
+#                               (default: https://releases.hal0.dev/<channel>.json)
+#   HAL0_CHANNEL                stable, preview, or nightly (default: stable)
 #   HAL0_BOOTSTRAP_KEEP_TMP=1   don't delete the work directory on exit
 #                               (debugging the unpacked tree)
 #
-# This script is the trust boundary for the one-line install. The tarball's
-# sha256 is ALWAYS checked against the manifest digest (fatal on mismatch)
-# before anything is executed. cosign then verifies the publisher signature
-# against the workflow OIDC identity — but cosign is no longer a hard
-# install-time dependency: if the binary is absent, the install proceeds on
-# the sha256 check alone with a loud warning (opt back into strict mode with
-# HAL0_INSTALL_REQUIRE_COSIGN=1). See docs/internal/release-manifest.md.
+# This script is the trust boundary for the one-line install. It first verifies
+# the exact channel-manifest bytes with their sibling Sigstore bundle and a
+# client-pinned release-workflow identity. Only then does it parse artifact
+# URLs. The tarball's sha256 and publisher signature are both checked again as
+# defense-in-depth before anything is executed. cosign is therefore a required
+# bootstrap dependency. See docs/internal/release-manifest.md.
 #
 # Schema reference: docs/internal/release-manifest.md (hal0.releases.v1).
 
@@ -42,7 +37,13 @@ set -euo pipefail
 IFS=$'\n\t'
 
 HAL0_CHANNEL="${HAL0_CHANNEL:-stable}"
-HAL0_RELEASES_URL="${HAL0_RELEASES_URL:-https://github.com/Hal0ai/hal0/releases/latest/download/${HAL0_CHANNEL}.json}"
+HAL0_RELEASES_URL="${HAL0_RELEASES_URL:-}"
+
+# Keep this trust root in lockstep with src/hal0/updater/updater.py. These
+# values authenticate the channel pointer itself; signer claims inside that
+# unauthenticated JSON are trusted only after this verification succeeds.
+_MANIFEST_SIGNER_IDENTITY_REGEXP='^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@(refs/tags/v\d+\.\d+\.\d+(-(alpha|beta|rc)\.(0|[1-9]\d*)|-nightly\.\d{14})?|refs/heads/main)$'
+_MANIFEST_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
 
 # ── tiny output helpers ────────────────────────────────────────────────────
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -75,7 +76,30 @@ preflight() {
     need python3
 }
 
-# ── manifest fetch + parse ────────────────────────────────────────────────
+validate_channel() {
+    case "${HAL0_CHANNEL}" in
+        stable|preview|nightly) ;;
+        *) die "HAL0_CHANNEL must be one of: stable, preview, nightly (got ${HAL0_CHANNEL})" ;;
+    esac
+}
+
+resolve_release_manifest_url() {
+    if [[ -z "${HAL0_RELEASES_URL}" ]]; then
+        HAL0_RELEASES_URL="https://releases.hal0.dev/${HAL0_CHANNEL}.json"
+    fi
+}
+
+release_manifest_bundle_url() {
+    python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+scheme, netloc, path, query, fragment = urlsplit(sys.argv[1])
+print(urlunsplit((scheme, netloc, f"{path}.bundle", query, fragment)))
+PY
+}
+
+# ── manifest fetch + authenticate + parse ─────────────────────────────────
 fetch_manifest() {
     local out="$1"
     info "fetching release manifest"
@@ -83,6 +107,50 @@ fetch_manifest() {
     if ! curl -fsSL --retry 3 --retry-delay 2 -o "${out}" "${HAL0_RELEASES_URL}"; then
         die "could not download release manifest from ${HAL0_RELEASES_URL}"
     fi
+}
+
+verify_release_manifest() {
+    local manifest="$1" bundle="$2"
+    command -v cosign >/dev/null 2>&1 \
+        || die "cosign is required to verify the release manifest but is not installed.
+   install it from https://docs.sigstore.dev/cosign/installation/"
+
+    info "verifying release manifest with pinned workflow identity"
+    if ! cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity-regexp "${_MANIFEST_SIGNER_IDENTITY_REGEXP}" \
+            --certificate-oidc-issuer "${_MANIFEST_SIGNER_ISSUER}" \
+            "${manifest}" >/dev/null 2>&1; then
+        die "release manifest signature verification FAILED — refusing to trust artifact URLs"
+    fi
+    ok "release manifest signature OK"
+}
+
+validate_manifest_for_channel() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as manifest_file:
+    manifest = json.load(manifest_file)
+requested_channel = sys.argv[2]
+manifest_channel = manifest.get("channel", "stable")
+release_kind = manifest.get("release_kind", "stable")
+accepted_kinds = {
+    "stable": {"stable"},
+    "preview": {"preview", "stable"},
+    "nightly": {"nightly"},
+}
+if manifest_channel != requested_channel:
+    sys.exit(
+        f"manifest channel {manifest_channel} does not match requested channel "
+        f"{requested_channel}"
+    )
+if release_kind not in accepted_kinds[requested_channel]:
+    sys.exit(
+        f"release kind {release_kind} is not accepted for channel {requested_channel}"
+    )
+PY
 }
 
 parse_manifest_field() {
@@ -128,7 +196,7 @@ fetch_and_hash_check() {
     ok "sha256 OK (${actual:0:12}…)"
 }
 
-# ── cosign verify (or documented skip) ────────────────────────────────────
+# ── tarball cosign verify (defense-in-depth) ───────────────────────────────
 fetch_sidecar() {
     local label="$1" url="$2" out="$3"
     info "downloading ${label}"
@@ -142,25 +210,8 @@ cosign_verify() {
     # transition-window fallback for manifests without bundle_url). See main().
     local tarball="$1" bundle="$2" sig="$3" cert="$4" identity="$5" issuer="$6"
 
-    if ! command -v cosign >/dev/null 2>&1; then
-        if [[ "${HAL0_INSTALL_REQUIRE_COSIGN:-0}" == "1" ]]; then
-            die "cosign is required (HAL0_INSTALL_REQUIRE_COSIGN=1) but not installed.
-   install it from https://docs.sigstore.dev/cosign/installation/"
-        fi
-        # cosign is not a hard dependency: the tarball's sha256 was already
-        # verified against the manifest digest (fetch_and_hash_check, fatal on
-        # mismatch), so integrity relative to the manifest holds. What we lose
-        # by skipping is proof that the tarball was built by hal0's signing
-        # workflow rather than substituted upstream of the manifest — hence the
-        # loud warning. Install cosign, or set HAL0_INSTALL_REQUIRE_COSIGN=1, to
-        # keep that guarantee.
-        warn "cosign not installed — skipping publisher signature verification"
-        warn "  the tarball sha256 was verified against the manifest, but its"
-        warn "  cosign/OIDC signature was NOT checked."
-        warn "  for full supply-chain verification install cosign:"
-        warn "    ${_C_DIM}https://docs.sigstore.dev/cosign/installation/${_C_RST}"
-        return 0
-    fi
+    command -v cosign >/dev/null 2>&1 \
+        || die "cosign disappeared after release manifest verification — refusing to install"
 
     info "verifying signature with cosign keyless OIDC"
     info "  identity-regex: ${_C_DIM}${identity}${_C_RST}"
@@ -197,19 +248,28 @@ cosign_verify() {
 
 # ── main ──────────────────────────────────────────────────────────────────
 main() {
+    validate_channel
     banner
     preflight
+    resolve_release_manifest_url
 
     local work
     work="$(mktemp -d -t hal0-install-XXXXXX)"
     if [[ "${HAL0_BOOTSTRAP_KEEP_TMP:-0}" != "1" ]]; then
-        trap 'rm -rf "${work}"' EXIT
+        trap "rm -rf '${work}'" EXIT
     else
         warn "HAL0_BOOTSTRAP_KEEP_TMP=1 — leaving work dir ${work}"
     fi
 
     local manifest="${work}/manifest.json"
+    local manifest_bundle="${work}/manifest.json.bundle"
     fetch_manifest "${manifest}"
+    fetch_sidecar \
+        "release manifest signature bundle" \
+        "$(release_manifest_bundle_url "${HAL0_RELEASES_URL}")" \
+        "${manifest_bundle}"
+    verify_release_manifest "${manifest}" "${manifest_bundle}"
+    validate_manifest_for_channel "${manifest}" "${HAL0_CHANNEL}"
 
     local version url bundle_url sig_url cert_url digest identity issuer
     version="$(parse_manifest_field "${manifest}" version)"

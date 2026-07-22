@@ -67,15 +67,27 @@ hal0 update --target v0.8.4b1
 
 ## Channels
 
-Two release channels are available: **`stable`** and **`nightly`**. Set
-your channel (it persists in `hal0.toml`), which also runs a check:
+Three release channels are available: **`stable`**, **`preview`**, and
+**`nightly`**. Set your updater channel (it persists in `hal0.toml`), which
+also runs a check:
 
 ```sh
+hal0 update --channel preview
+# or
 hal0 update --channel nightly
 ```
 
+For a new preview-channel bootstrap, pass the channel to the receiving shell:
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | HAL0_CHANNEL=preview bash
+```
+
 The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
-(overridable via `HAL0_RELEASES_URL` for dev / air-gapped installs).
+(overridable via `HAL0_RELEASES_URL` for dev / air-gapped installs). Preview is
+strictly opt-in: stable clients accept only stable pointer contents and never
+consume preview artifacts. A stable artifact may be promoted through the
+preview pointer without changing its `release_kind`.
 
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
@@ -112,16 +124,20 @@ testing, not production.
 
 <Steps>
 
-1. **Fetch** the release manifest for the channel.
+1. **Fetch and authenticate** the exact release-manifest bytes and sibling
+   `<channel>.json.bundle` with `cosign verify-blob`, using the updater's
+   client-pinned release-workflow identity and issuer. No artifact URL is
+   trusted before authentication succeeds. A missing `cosign`, missing bundle,
+   or failed verification aborts closed.
 
-2. **Download** the release tarball plus its detached cosign signature and
-   Fulcio certificate into a per-version cache under `/var/lib/hal0`.
+2. **Download** the release tarball plus its Sigstore bundle into a per-version
+   cache under `/var/lib/hal0`.
 
-3. **Verify** the SHA-256 digest against the manifest, then the signature
-   with `cosign verify-blob` against the GitHub Actions OIDC identity
-   declared in the manifest (`signer_identity` / `signer_issuer`). A missing
-   `cosign` binary or a failed verification aborts the update — nothing is
-   swapped.
+3. **Verify** the SHA-256 digest against the authenticated manifest, then
+   verify the tarball signature against the GitHub Actions OIDC identity
+   declared in the trusted manifest (`signer_identity` / `signer_issuer`).
+   This artifact verification remains defense-in-depth; failure aborts the
+   update and nothing is swapped.
 
 4. **Extract** the tarball and run any forward config migrations the
    release needs, plus three self-healing passes over on-disk state:
@@ -172,13 +188,10 @@ that skip hatch is active.
 </Aside>
 
 <Aside type="note">
-This mandatory check is for the ongoing `hal0 update` path above. The
-**initial one-line installer** is more lenient: it does not
-hard-requires the `cosign` binary to be present — a missing `cosign` logs a
-warning and the install proceeds without publisher-signature verification
-(the tarball's checksum is still checked). Set
-`HAL0_INSTALL_REQUIRE_COSIGN=1` before running the installer to restore the
-old hard-require behavior.
+The **initial one-line installer** uses the same signed-manifest trust
+contract. It requires cosign, verifies the sibling channel-manifest bundle
+against the same pinned release-workflow identity and issuer before parsing,
+and then verifies the tarball digest and signature as defense-in-depth.
 </Aside>
 
 ## Roll back

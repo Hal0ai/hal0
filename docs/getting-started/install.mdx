@@ -1,6 +1,6 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), installs podman, scaffolds empty capability slots, and starts the API.
+description: Install hal0 with one command — the bootstrap verifies the signed channel manifest and release artifact, installs podman, scaffolds empty capability slots, and starts the API.
 sidebar:
   order: 10
 ---
@@ -14,6 +14,15 @@ it, and hands off to the real installer.
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
+
+To install from the opt-in preview channel instead:
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | HAL0_CHANNEL=preview bash
+```
+
+Only `stable`, `preview`, and `nightly` are accepted. The channel is validated
+before any download, and stable clients never consume preview artifacts.
 
 <Aside type="note">
 The installer needs root to write to `/etc`, `/usr/lib`, and the systemd
@@ -30,6 +39,9 @@ itself under `sudo` automatically. You can also run it explicitly:
 - **systemd** — `systemctl` must be on `PATH` (outside `--dev` mode).
 - **Python ≥ 3.12** — the package requires 3.12+; the installer is tested
   on 3.11–3.14 and builds a dedicated virtualenv.
+- **cosign** — required to authenticate the channel manifest and release
+  artifact against hal0's pinned GitHub Actions workflow identity. The
+  bootstrap fails closed when `cosign` or a signature bundle is missing.
 - **A container runtime** — every inference slot runs in a container. The
   installer auto-installs **podman** if no runtime is found.
 - **~20 GB free disk** under the data directory, plus free ports `8080`
@@ -75,21 +87,21 @@ For a full production deployment, use the bootstrap script above.
 
 <Steps>
 
-1. **Fetch the release manifest** — by default the latest `stable.json`
-   from GitHub Releases. Override with `HAL0_RELEASES_URL` or pick a
-   channel with `HAL0_CHANNEL`.
+1. **Fetch and authenticate the channel manifest** — by default from
+   `https://releases.hal0.dev/stable.json`, or the selected
+   `HAL0_CHANNEL`. The bootstrap downloads the exact sibling
+   `<channel>.json.bundle` and verifies the manifest bytes with cosign against
+   the client-pinned release-workflow identity and issuer before parsing JSON
+   or trusting artifact URLs. Missing cosign, a missing bundle, or failed
+   verification aborts the install. `HAL0_RELEASES_URL` still overrides the
+   full manifest URL; its sibling `.bundle` must satisfy the same contract.
 
-2. **Download and SHA-256-verify the tarball** against the digest in the
-   manifest. A mismatch aborts the install.
+2. **Download and SHA-256-verify the tarball** against the authenticated
+   manifest digest. A mismatch aborts the install.
 
-3. **Cosign keyless verify, when available** — if `cosign` is on `PATH`,
-   the Fulcio-issued certificate and signature are checked against the
-   workflow OIDC identity declared in the manifest; a failed check aborts
-   the install. If `cosign` is **not** installed, the bootstrap proceeds
-   on the SHA-256 check alone with a loud warning — cosign is no longer a
-   hard requirement for the one-line install. Set
-   `HAL0_INSTALL_REQUIRE_COSIGN=1` to restore the old strict behavior
-   (fail instead of warn when cosign is missing).
+3. **Cosign keyless verify the tarball** — the artifact's Sigstore bundle is
+   checked against the workflow OIDC identity declared in the now-trusted
+   manifest. This second signature check is defense-in-depth.
 
 4. **Unpack and hand off** to `installer/install.sh`, which runs
    pre-flight checks, installs podman + the Python venv, builds the
@@ -113,7 +125,8 @@ flags:
 | `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
 | `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (empty capability-slot scaffolding) |
-| `HAL0_INSTALL_REQUIRE_COSIGN` | _(unset)_ | Set to `1` to make the bootstrap refuse the install outright when `cosign` isn't present, instead of warning and proceeding on the SHA-256 check alone |
+| `HAL0_CHANNEL` | `stable` | Bootstrap channel: `stable`, `preview`, or `nightly` |
+| `HAL0_RELEASES_URL` | `https://releases.hal0.dev/<channel>.json` | Full manifest URL override; the exact sibling `.bundle` remains mandatory |
 
 | Flag | Effect |
 |---|---|
