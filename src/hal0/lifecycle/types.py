@@ -1,0 +1,140 @@
+"""Immutable shapes for the release-owned lifecycle catalog."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+Sha256Image = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
+Sha256File = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+ImmutableRevision = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+
+
+class FrozenModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class PackageDefinition(FrozenModel):
+    id: str
+    repository: str
+    digest: Sha256Image
+    package_kind: Literal["runner", "service", "toolbox", "ui", "migration"]
+    platforms: tuple[str, ...]
+    deprecated: bool = False
+    replacement: str | None = None
+    terminal: bool = False
+
+
+class RunnerDefinition(FrozenModel):
+    id: str
+    package: str
+    runtime_family: str
+    capabilities: frozenset[str]
+    hosts: frozenset[str]
+    backends: frozenset[str]
+    architectures: frozenset[str]
+    model_formats: frozenset[str]
+    priority: int = 0
+    default_for: tuple[str, ...] = ()
+    deprecated: bool = False
+    replacement: str | None = None
+
+
+class ModelFile(FrozenModel):
+    filename: str = Field(min_length=1)
+    sha256: Sha256File
+    size_bytes: int = Field(gt=0)
+    format: str = Field(min_length=1)
+    quantization: str = Field(min_length=1)
+    optional: bool = False
+
+
+class PromptContract(FrozenModel):
+    template_id: str = Field(min_length=1)
+    stop_tokens: tuple[str, ...]
+    tool_protocol: str | None = None
+    parser_id: str | None = None
+    deterministic_tool_selection: bool
+    maximum_tool_calls_per_turn: int | None = Field(default=None, gt=0)
+    validate_tool_schema: bool = False
+    stop_after_complete_call: bool = False
+
+
+class ModelDefinition(FrozenModel):
+    id: str
+    source: str
+    revision: ImmutableRevision
+    files: tuple[ModelFile, ...]
+    architecture: str
+    formats: frozenset[str]
+    capabilities: frozenset[str]
+    roles: frozenset[str]
+    prompt_contract: PromptContract
+    runners: tuple[str, ...]
+    license: str = Field(min_length=1)
+    priority: int = 0
+    deprecated: bool = False
+    replacement: str | None = None
+
+
+class ProfileDefinition(FrozenModel):
+    id: str
+    ownership: Literal["builtin"]
+    role: str
+    capabilities: frozenset[str]
+    runner_policy: str
+    model_policy: str | None = None
+    runtime_options: dict[str, Any] = Field(default_factory=dict)
+    profile_version: str
+    integration: str | None = None
+
+
+class InitialSlotPolicy(FrozenModel):
+    name: str
+    role: str
+    profile: str | None = None
+    enabled: bool
+    model_policy: str | None = None
+    ready_without_model: bool
+
+
+class HermesBootstrapPolicy(FrozenModel):
+    default_install: bool
+    detect_existing: bool
+    explicit_opt_out: bool
+    brain_slot: InitialSlotPolicy
+    model_policy: str
+
+
+class BootstrapPolicy(FrozenModel):
+    initial_slots: tuple[InitialSlotPolicy, ...]
+    default_runner_policy: str
+    pull_default_runner: bool
+    hermes: HermesBootstrapPolicy
+    capability_scaffolding: Literal["none"]
+
+
+class CatalogEnvelope(FrozenModel):
+    schema_version: int
+    catalog_version: str
+    release: str
+    generated_format: Literal["canonical-json-v1"]
+    packages: tuple[PackageDefinition, ...]
+    runners: tuple[RunnerDefinition, ...]
+    models: tuple[ModelDefinition, ...]
+    profiles: tuple[ProfileDefinition, ...]
+    runner_policies: dict[str, tuple[str, ...]]
+    model_policies: dict[str, tuple[str, ...]]
+    bootstrap: BootstrapPolicy
+
+
+class CompatibilityResult(FrozenModel):
+    compatible: bool
+    reason_code: str
+    detail: str = ""
+
+
+class CatalogReport(FrozenModel):
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
