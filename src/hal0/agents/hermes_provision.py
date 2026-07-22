@@ -45,6 +45,7 @@ import shutil
 import sqlite3
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -137,7 +138,7 @@ def content_hash(*pieces: str | bytes) -> str:
 # Pinned constants — keep these in sync with installer/agents/hermes/
 # requirements.txt and the wrapper script. The constants are exposed
 # at module scope so tests can monkey-patch them onto a tmp path.
-PYTHON_MIN = (3, 11)
+PYTHON_MIN = (3, 12)
 # Exclusive cap for the hermes venv interpreter, mirroring hermes-agent's
 # wheel metadata: every release since 0.16.0 pins `requires-python
 # >=3.11,<3.14`. On a >=3.14 interpreter pip filters those wheels out and
@@ -146,7 +147,7 @@ PYTHON_MIN = (3, 11)
 # rejected, not merely deprioritized (#1248). Single source of truth for the
 # resolver, the preflight message, and the stale-venv rebuild; relax it here
 # when upstream ships 3.14 support (#1249).
-PYTHON_MAX_EXCLUSIVE = (3, 14)
+PYTHON_MAX_EXCLUSIVE = (3, 13)
 MIN_FREE_GIB = 4
 DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/health"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
@@ -369,21 +370,19 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
 def _python_range_error() -> str:
     """Actionable failure text for hosts with no hermes-compatible Python."""
     lo = ".".join(str(p) for p in PYTHON_MIN)
-    hi = f"{PYTHON_MAX_EXCLUSIVE[0]}.{PYTHON_MAX_EXCLUSIVE[1] - 1}"
     cap = ".".join(str(p) for p in PYTHON_MAX_EXCLUSIVE)
     return (
-        f"no Python {lo}-{hi} interpreter found — hermes-agent wheels pin "
-        f"`requires-python <{cap}`, so the hermes venv needs {lo}-{hi}. "
-        f"Install one and re-run, e.g. `apt install python{hi} python{hi}-venv`; "
-        f"on distros that ship only {cap}+ (Ubuntu 26.04) use the deadsnakes "
-        f"PPA — or install uv (https://astral.sh/uv), and hal0 will provision "
-        f"Python {UV_PYTHON_FALLBACK} itself"
+        f"exact Python 3.12 was not found — Hermes requires a deterministic "
+        f"3.12 venv (upstream metadata is `{lo} <= version < {cap}`). "
+        f"Install python3.12 with its venv module, or install uv "
+        f"(https://astral.sh/uv); hal0 will provision Python {UV_PYTHON_FALLBACK} "
+        f"under {UV_PYTHON_INSTALL_DIR}"
     )
 
 
 #: Minor version uv provisions when no system interpreter qualifies (#1250).
 #: Newest supported release — keep inside [PYTHON_MIN, PYTHON_MAX_EXCLUSIVE).
-UV_PYTHON_FALLBACK = "3.13"
+UV_PYTHON_FALLBACK = "3.12"
 
 #: Where uv-managed interpreters land. uv's default (~/.local/share/uv) is
 #: under /root with mode 0700 when provisioning runs as root — but the hermes
@@ -398,6 +397,79 @@ UV_PYTHON_INSTALL_DIR = Path("/var/lib/hal0/python")
 _HAL0_STATE_ROOT = Path("/var/lib/hal0")
 #: uv cache home, pinned under the hal0 state root (never ~/.cache → /root).
 UV_CACHE_DIR = _HAL0_STATE_ROOT / ".cache" / "uv"
+HERMES_PYTHON_ENV = Path("/etc/hal0/hermes-python.env")
+
+
+def _validate_hermes_python(path: str, *, runner: Any = subprocess) -> tuple[int, int]:
+    """Execute *path* and require the exact Hermes Python policy version."""
+    if not path or not Path(path).is_absolute() or any(c in path for c in "\n\r\\\"';&|$"):
+        raise ValueError(f"invalid HAL0_HERMES_PYTHON path: {path!r}")
+    try:
+        result = runner.run(
+            [path, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise ValueError(f"Hermes Python override is not executable: {path}") from exc
+    version = (result.stdout or "").strip()
+    if version != "3.12":
+        raise ValueError(f"Hermes Python must be exactly 3.12: {path} reports {version or 'unknown'}")
+    return (3, 12)
+
+
+def _read_hermes_python_env(path: Path = HERMES_PYTHON_ENV) -> str | None:
+    """Read the persisted single-variable Hermes interpreter contract."""
+    if not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines()
+    values = [line.removeprefix("HAL0_HERMES_PYTHON=") for line in lines if line.startswith("HAL0_HERMES_PYTHON=")]
+    if len(lines) != 1 or len(values) != 1 or not values[0]:
+        raise ValueError(f"invalid Hermes Python environment file: {path}")
+    return values[0]
+
+
+def _persist_hermes_python(
+    path: str, env_path: Path = HERMES_PYTHON_ENV, *, runner: Any = subprocess
+) -> None:
+    """Atomically persist a validated Hermes interpreter path."""
+    _validate_hermes_python(path, runner=runner)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    content = f"HAL0_HERMES_PYTHON={path}\n"
+    if env_path.exists() and env_path.read_text(encoding="utf-8") == content:
+        return
+    tmp = env_path.with_name(f".{env_path.name}.{os.getpid()}.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, env_path)
+
+
+def resolve_hermes_python(
+    *,
+    env: dict[str, str] | None = None,
+    env_path: Path = HERMES_PYTHON_ENV,
+    prober: Callable[[str], str | None] = shutil.which,
+    runner: Any = subprocess,
+) -> str:
+    """Resolve exact Python 3.12 using the documented precedence order."""
+    environ = os.environ if env is None else env
+    source = "environment"
+    candidate = environ.get("HAL0_HERMES_PYTHON")
+    if candidate is None:
+        candidate = _read_hermes_python_env(env_path)
+        source = "persisted"
+    if candidate is None:
+        candidate = prober("python3.12")
+        source = "system"
+    if candidate is None:
+        candidate = _provision_python_via_uv(prober, runner)
+        source = "uv-managed"
+    if candidate is None:
+        raise RuntimeError("Python 3.12 is unavailable; install python3.12 or uv and retry")
+    _validate_hermes_python(candidate, runner=runner)
+    log.info("hermes-python-resolved", source=source, path=candidate, version="3.12")
+    return candidate
 
 
 def _hal0_service_home() -> str:
@@ -510,6 +582,12 @@ def _ensure_supported_python(
     when PATH and the running interpreter both fail the range check, so hosts
     with a packaged 3.11-3.13 never pull a managed build (#1250).
     """
+    configured = os.environ.get("HAL0_HERMES_PYTHON")
+    if configured is None:
+        configured = _read_hermes_python_env()
+    if configured is not None:
+        _validate_hermes_python(configured, runner=runner)
+        return configured
     found = _resolve_supported_python(prober, running=running)
     if found is not None:
         return found
@@ -579,30 +657,36 @@ def _install_venv(
         raise RuntimeError(_python_range_error())
     venv.parent.mkdir(parents=True, exist_ok=True)
     existing_minor = _venv_python_minor(venv) if venv.exists() else None
-    if existing_minor is not None and not (PYTHON_MIN <= existing_minor < PYTHON_MAX_EXCLUSIVE):
-        # A previous run built this venv on an unsupported interpreter (the
-        # pre-guard fallback happily used 3.14). pip-installing into it can
-        # never converge — every supported hermes-agent wheel is filtered out
-        # by requires-python — so rebuild on the resolved interpreter. Venv
-        # holds packages only; $HERMES_HOME state is untouched.
-        shutil.rmtree(venv)
-    # Sanitize HOME for venv + pip (same O15 leak class as uv above): as hal0
-    # with a leaked HOME=/root, pip's ~/.cache/pip + ~/.config/pip land under
-    # root's unwritable home. Pin HOME to the hal0 home so both stay hal0-owned.
-    env = _hal0_subprocess_env()
-    if not venv.exists():
-        runner.run([py, "-m", "venv", str(venv)], check=True, env=env)  # nosec B603
-    pip = _venv_python(venv)
-    runner.run(  # nosec B603 — argv from local config
-        [str(pip), "-m", "pip", "install", "--upgrade", "pip"],
-        check=True,
-        env=env,
-    )
-    runner.run(  # nosec B603
-        [str(pip), "-m", "pip", "install", "-r", str(requirements)],
-        check=True,
-        env=env,
-    )
+    needs_replacement = existing_minor is not None and existing_minor != (3, 12)
+    target = venv
+    rollback: Path | None = None
+    if needs_replacement:
+        # Build beside the live venv. The live tree remains runnable if pip,
+        # network, or the replacement interpreter fails.
+        target = Path(tempfile.mkdtemp(prefix=f".{venv.name}.build-", dir=venv.parent))
+    try:
+        env = _hal0_subprocess_env()
+        target_preexists = target.exists()
+        if not target_preexists:
+            target.mkdir(parents=True, exist_ok=True)
+        if needs_replacement or not target_preexists:
+            runner.run([py, "-m", "venv", str(target)], check=True, env=env)  # nosec B603
+        pip = _venv_python(target)
+        runner.run([str(pip), "-m", "pip", "install", "--upgrade", "pip"], check=True, env=env)  # nosec B603
+        runner.run([str(pip), "-m", "pip", "install", "-r", str(requirements)], check=True, env=env)  # nosec B603
+        if needs_replacement:
+            rollback = venv.with_name(f"{venv.name}.rollback-{os.getpid()}")
+            os.replace(venv, rollback)
+            try:
+                os.replace(target, venv)
+            except BaseException:
+                os.replace(rollback, venv)
+                raise
+            shutil.rmtree(rollback)
+    except BaseException:
+        if needs_replacement and target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        raise
 
 
 #: Default managed-venv + requirements + HERMES_HOME for the upgrade path.

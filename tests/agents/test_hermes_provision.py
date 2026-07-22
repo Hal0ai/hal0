@@ -356,8 +356,56 @@ def test_install_phase_runs_venv_install_when_binary_missing(
     assert install_calls == [venv]
 
 
+def test_persisted_hermes_python_is_atomic_and_idempotent(tmp_path: Path) -> None:
+    env_path = tmp_path / "hermes-python.env"
+
+    class _Runner:
+        @staticmethod
+        def run(_argv: list[str], **_kwargs: Any) -> Any:
+            return type("Result", (), {"stdout": "3.12\n"})()
+
+    hp._persist_hermes_python("/opt/python3.12", env_path, runner=_Runner)
+    first = env_path.read_text()
+    hp._persist_hermes_python("/opt/python3.12", env_path, runner=_Runner)
+    assert env_path.read_text() == first == "HAL0_HERMES_PYTHON=/opt/python3.12\n"
+    assert env_path.stat().st_mode & 0o777 == 0o644
+
+
+def test_invalid_persisted_hermes_python_does_not_fall_back(tmp_path: Path) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text("HAL0_HERMES_PYTHON=/opt/python3.11\n")
+
+    class _Runner:
+        @staticmethod
+        def run(_argv: list[str], **_kwargs: Any) -> Any:
+            return type("Result", (), {"stdout": "3.11\n"})()
+
+    with pytest.raises(ValueError, match=r"exactly 3\.12"):
+        hp.resolve_hermes_python(
+            env_path=env_path,
+            prober=lambda _name: "/usr/bin/python3.12",
+            runner=_Runner,
+        )
+
+
+def test_resolve_python_uses_only_exact_312() -> None:
+    probed: list[str] = []
+
+    def _prober(name: str) -> str | None:
+        probed.append(name)
+        return f"/opt/{name}" if name == "python3.12" else None
+
+    assert hp._resolve_supported_python(prober=_prober) == "/opt/python3.12"
+    assert probed == ["python3.12"]
+
+
+def test_resolve_python_rejects_non_312_running_interpreters() -> None:
+    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 11)) is None
+    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 13)) is None
+
+
 def test_resolve_python_prefers_newest_explicit_in_range() -> None:
-    # All of 3.11-3.13 on PATH → the newest wins; 3.14 is never probed.
+    # The Hermes policy probes only exact Python 3.12.
     probed: list[str] = []
 
     def _prober(name: str) -> str | None:
@@ -365,15 +413,15 @@ def test_resolve_python_prefers_newest_explicit_in_range() -> None:
         return f"/opt/{name}/bin/{name}"
 
     out = hp._resolve_supported_python(prober=_prober)
-    assert out == "/opt/python3.13/bin/python3.13"
-    assert "python3.14" not in probed
+    assert out == "/opt/python3.12/bin/python3.12"
+    assert probed == ["python3.12"]
 
 
 def test_resolve_python_walks_down_to_oldest_supported() -> None:
     out = hp._resolve_supported_python(
-        prober=lambda name: "/usr/bin/python3.11" if name == "python3.11" else None
+        prober=lambda name: "/usr/bin/python3.12" if name == "python3.12" else None
     )
-    assert out == "/usr/bin/python3.11"
+    assert out == "/usr/bin/python3.12"
 
 
 def test_resolve_python_falls_back_to_sys_executable_in_range() -> None:
@@ -404,8 +452,8 @@ def test_preflight_fails_actionably_when_no_supported_python(
     io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
     out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
-    assert "3.11-3.13" in (out.reason or "")
-    assert "deadsnakes" in (out.reason or "")
+    assert "3.12" in (out.reason or "")
+    assert "Python 3.12" in (out.reason or "")
     assert "uv" in (out.reason or "")
 
 
@@ -429,7 +477,7 @@ def test_preflight_passes_when_uv_can_provision_python(
 
 
 def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
-    # A qualifying system Python must win without uv ever being invoked.
+    # A qualifying system Python 3.12 must win without uv ever being invoked.
     ran: list[list[str]] = []
 
     class _Runner:
@@ -450,7 +498,7 @@ def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
     envs: list[dict[str, str] | None] = []
 
     class _Result:
-        stdout = "/var/lib/hal0/python/cpython-3.13.5-linux-x86_64-gnu/bin/python3.13\n"
+        stdout = "/var/lib/hal0/python/cpython-3.12.5-linux-x86_64-gnu/bin/python3.12\n"
 
     class _Runner:
         @staticmethod
@@ -464,7 +512,7 @@ def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
         runner=_Runner,
         running=(3, 14),
     )
-    assert out == "/var/lib/hal0/python/cpython-3.13.5-linux-x86_64-gnu/bin/python3.13"
+    assert out == "/var/lib/hal0/python/cpython-3.12.5-linux-x86_64-gnu/bin/python3.12"
     # install runs before find, both pinned to UV_PYTHON_FALLBACK...
     assert [a[1:3] for a in ran] == [["python", "install"], ["python", "find"]]
     assert all(a[3] == hp.UV_PYTHON_FALLBACK for a in ran)
@@ -492,7 +540,7 @@ def test_provision_via_uv_sanitizes_leaked_root_home(
     envs: list[dict[str, str] | None] = []
 
     class _Result:
-        stdout = "/var/lib/hal0/python/cpython-3.13/bin/python3.13\n"
+        stdout = "/var/lib/hal0/python/cpython-3.12/bin/python3.12\n"
 
     class _Runner:
         @staticmethod
@@ -504,7 +552,7 @@ def test_provision_via_uv_sanitizes_leaked_root_home(
         prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
         runner=_Runner,
     )
-    assert out == "/var/lib/hal0/python/cpython-3.13/bin/python3.13"
+    assert out == "/var/lib/hal0/python/cpython-3.12/bin/python3.12"
     assert envs, "uv must have been invoked"
     for e in envs:
         assert e is not None
@@ -553,7 +601,7 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     modes_at_run: list[int] = []
 
     class _Result:
-        stdout = f"{install_dir}/cpython-3.13/bin/python3.13\n"
+        stdout = f"{install_dir}/cpython-3.12/bin/python3.12\n"
 
     class _Runner:
         @staticmethod
@@ -571,7 +619,7 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     finally:
         os.umask(old_umask)
 
-    assert out == f"{install_dir}/cpython-3.13/bin/python3.13"
+    assert out == f"{install_dir}/cpython-3.12/bin/python3.12"
     # World-traversable despite the 077 umask (a plain mkdir would be 0700)...
     assert install_dir.is_dir()
     assert install_dir.stat().st_mode & 0o777 == 0o755
@@ -599,9 +647,8 @@ def test_ensure_python_returns_none_when_uv_fetch_fails() -> None:
 
 
 def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -> None:
-    # A venv already built on 3.14 (the pre-guard fallback) can never
-    # converge by pip alone — _install_venv must detect it from the
-    # lib/pythonX.Y layout and rebuild on the resolved interpreter.
+    # A venv already built on 3.14 can never converge by pip alone. The
+    # replacement is built beside the live tree and swapped transactionally.
     venv = tmp_path / "venv"
     (venv / "lib" / "python3.14" / "site-packages").mkdir(parents=True)
     stale_marker = venv / "lib" / "python3.14" / "site-packages" / "hermes_cli"
@@ -614,10 +661,10 @@ def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -
             calls.append(argv)
 
     hp._install_venv(
-        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.13"
+        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.12"
     )
-    assert not stale_marker.exists()  # stale 3.14 tree removed
-    assert calls[0][:3] == ["/usr/bin/python3.13", "-m", "venv"]
+    assert not stale_marker.exists()  # successful swap removes the rollback tree
+    assert calls[0][:3] == ["/usr/bin/python3.12", "-m", "venv"]
 
 
 def test_install_venv_keeps_supported_venv(tmp_path: Path) -> None:

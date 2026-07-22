@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Iterator
 
 import pytest
+
+# Test collection must not import the application against the host's FHS
+# config. In particular, /etc/hal0/hal0.toml may be root-only on a deployed
+# machine. Set an isolated root before importing hal0.api below.
+if not os.environ.get("HAL0_HOME"):
+    os.environ["HAL0_HOME"] = tempfile.mkdtemp(prefix="hal0-pytest-")
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

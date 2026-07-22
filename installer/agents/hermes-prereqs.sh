@@ -22,9 +22,9 @@ info() { printf '[hermes-prereqs] %s\n' "$*"; }
 warn() { printf '[hermes-prereqs] WARN: %s\n' "$*" >&2; }
 die() { printf '[hermes-prereqs] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Pick the python interpreter the bootstrap will use. Prefer an explicit
-# python3.11+ but fall back to python3 (preflight enforces the >=3.11 floor).
-PY="$(command -v python3.12 || command -v python3.11 || command -v python3 || true)"
+# Hermes is deliberately pinned to Python 3.12. The hal0 runtime has its
+# separate Python policy; do not use python3, python3.11, or python3.13 here.
+PY="$(command -v python3.12 || command -v python3 || true)"
 
 # ── Probe: is the toolchain already complete? ────────────────────────────────
 have_venv() { [ -n "${PY}" ] && "${PY}" -c 'import venv, ensurepip' >/dev/null 2>&1; }
@@ -39,10 +39,8 @@ have_uv() { command -v uv >/dev/null 2>&1; }
 # 3.12 with `uv python install` — but only if `uv` is on PATH. So on a
 # 3.14-only box, uv is a REQUIRED prerequisite; where a system 3.11-3.13 exists
 # it's unnecessary.
-have_system_range_py() {
-    command -v python3.11 >/dev/null 2>&1 \
-        || command -v python3.12 >/dev/null 2>&1 \
-        || command -v python3.13 >/dev/null 2>&1
+have_system_hermes_py() {
+    command -v python3.12 >/dev/null 2>&1
 }
 
 # Install uv to a PATH location (pipx → /usr/local/bin) so the provisioner's
@@ -61,8 +59,8 @@ ensure_uv() {
 # toolchain complete: hermes-agent wheels require Python <3.14, so a 3.14-only
 # box needs uv on PATH (the provisioner then fetches a managed 3.12/3.13).
 ensure_interpreter_path() {
-    if have_system_range_py; then
-        info "system Python 3.11-3.13 present — uv fallback not required"
+    if have_system_hermes_py; then
+        info "system Python 3.12 present — uv fallback not required"
     elif ensure_uv; then
         info "uv ready ($(command -v uv)) — provisioner will fetch a managed Python <3.14"
     else
@@ -74,7 +72,7 @@ uv could not be installed for the managed-interpreter fallback. Install uv
 
 # Toolchain is "complete" only when the interpreter fallback is also satisfiable:
 # venv+pip+pipx AND (a system Python in range OR uv for the managed fallback).
-if have_venv && have_pip && have_pipx && { have_system_range_py || have_uv; }; then
+if have_venv && have_pip && have_pipx && { have_system_hermes_py || have_uv; }; then
     info "toolchain already present (python venv + pip + pipx + interpreter path) — nothing to do"
     exit 0
 fi
@@ -120,7 +118,7 @@ if ! eval "${cmd}"; then
 fi
 
 # ── Verify ───────────────────────────────────────────────────────────────────
-PY="$(command -v python3.12 || command -v python3.11 || command -v python3 || true)"
+PY="$(command -v python3.12 || command -v python3 || true)"
 have_venv || die "python venv module still missing after install — check ${PY:-python3} and \`$(python_venv_hint)\`"
 have_pip || warn "python pip still not importable — bootstrap will bootstrap it via ensurepip"
 have_pipx || warn "pipx not on PATH after install — Hermes still installs into the managed venv; pipx is optional tooling"
