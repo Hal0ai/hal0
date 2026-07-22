@@ -102,7 +102,23 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(input).not.toHaveAttribute('readonly', '')
     await expect(input).toHaveValue('-1')
     const row = page.locator('.drawer .form-row', { hasText: 'NGL' })
-    await expect(row.locator('.form-lbl .sub')).toContainText('emits -ngl')
+    const info = row.getByRole('button', { name: 'Info' })
+    await info.hover()
+    await expect(row.locator('.field-info-pop')).toContainText('emits -ngl')
+    await page.mouse.move(0, 0)
+    await expect(row.locator('.field-info-pop')).toBeHidden()
+  })
+
+  test('Parallel description is available only from its info icon', async ({ page }) => {
+    await seedSlots(page, [PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+
+    const row = page.locator('.drawer .form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Parallel$/ }),
+    })
+    await expect(row).toBeVisible()
+    await expect(row.locator('.field-info-pop')).toContainText('How many requests can run at once')
+    await expect(row.locator('.form-ctl > .hint')).toHaveCount(0)
   })
 
   test('C5 — editing NGL Save PUTs /config { n_gpu_layers } (top-level)', async ({ page }) => {
@@ -162,6 +178,49 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.getByTestId('slot-hw-image-pin')).toBeVisible()
   })
 
+  test('HW grid — all editable fields persist their wire keys', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/system-info', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          backends: {
+            rocmfpx: {
+              backend: 'rocm',
+              supported_backends: ['rocm'],
+              image: 'ghcr.io/hal0ai/runner:test',
+            },
+          },
+        }),
+      }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, device: 'gpu-rocm', threads: 0, binary: '', image_pin: null }, EMBED])
+
+    await page.goto('/#slots/primary')
+    await page.getByTestId('slot-hw-device').selectOption('cpu')
+    await page.getByTestId('slot-hw-ngl').fill('0')
+    await page.getByTestId('slot-hw-threads').fill('8')
+    await page.getByTestId('slot-hw-binary').selectOption({ index: 1 })
+    await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).toMatchObject({
+      device: 'cpu',
+      n_gpu_layers: 0,
+      threads: 8,
+      image_pin: 'ghcr.io/example/runner:test',
+    })
+    expect(puts[0].binary).toBeTruthy()
+  })
+
   test('HW grid — fit-check warns when device backend ∉ BINARY supported_backends (§4)', async ({ page }) => {
     // rocmfpx serves rocm/vulkan; a cpu-device slot pinned to it does not fit →
     // non-blocking warning. system-info supplies the supported_backends the
@@ -191,6 +250,61 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.getByTestId('slot-hw-fit-warning')).toBeVisible()
+  })
+
+  test('extra_args is editable and persists under server', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, llamacpp_args: '--threads 6' }, EMBED])
+
+    await page.goto('/#slots/primary')
+    const input = page.getByTestId('extra-args-input')
+    await expect(input).toHaveValue('--threads 6')
+    await input.fill('--threads 6 -fa on')
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].server).toEqual({ extra_args: '--threads 6 -fa on' })
+  })
+
+  test('NPU modality controls remain visible and wire ASR updates', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/npu/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/npu/restart', (route) =>
+      route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/slots/flm/models', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ models: [{ model: 'flm-chat', installed: true }] }),
+      }),
+    )
+    await seedSlots(page, [{
+      ...PRIMARY,
+      name: 'npu',
+      device: 'npu',
+      profile: 'flm',
+      model: 'flm-chat',
+      model_id: 'flm-chat',
+      npu: { chat: true, asr: false, embed: false },
+    }, EMBED])
+
+    await page.goto('/#slots/npu')
+    await expect(page.getByText('NPU · Chat')).toBeVisible()
+    await expect(page.getByText('NPU · ASR')).toBeVisible()
+    await expect(page.getByText('NPU · Embed')).toBeVisible()
+    await page.locator('.drawer .form-row', { hasText: 'NPU · ASR' }).getByRole('switch').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].npu).toMatchObject({ chat: true, asr: true, embed: false })
   })
 
   test('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {

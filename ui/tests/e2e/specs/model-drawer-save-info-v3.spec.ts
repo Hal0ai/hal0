@@ -134,7 +134,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await expect(page.locator('.hal0-toast')).toContainText('Updated Original model name')
   })
 
-  test('every described label uses click/keyboard info help with Escape and outside-click dismissal', async ({ page }) => {
+  test('every described label uses hover/focus-only info help', async ({ page }) => {
     await seedProductionModel(page)
     await mockDrawerLookups(page)
     await openDrawer(page)
@@ -145,24 +145,29 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
     await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(14)
 
-    const displayNameLabel = labels.filter({ hasText: 'display name' })
+    const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })
-    await expect(displayNameLabel.locator('.field-info-pop')).toHaveCount(0)
+    const popover = displayNameLabel.locator('.field-info-pop')
+    await expect(popover).toHaveCount(1)
+    await expect(popover).toBeHidden()
 
-    // Keep the drawer mounted when its own Escape handler also runs, so this
-    // assertion specifically observes the info popover's dismissal.
-    await page.getByTestId('model-name-input').fill('Dirty while testing help')
+    // Pointer activation does not focus the button, so moving away immediately
+    // after the click cannot leave the description pinned open.
     await info.click()
-    await expect(displayNameLabel.locator('.field-info-pop')).toHaveText('empty keeps the model id')
-    await page.keyboard.press('Escape')
-    await expect(displayNameLabel.locator('.field-info-pop')).toHaveCount(0)
-    await expect(page.locator('.modal-shell')).toContainText('Discard unsaved changes?')
-    await page.locator('.modal-shell').getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(info).not.toBeFocused()
+    await page.mouse.move(0, 0)
+    await expect(popover).toBeHidden()
 
+    // Pointer hover reveals the description and leaving the icon hides it.
+    await info.hover()
+    await expect(popover).toBeVisible()
+    await page.mouse.move(0, 0)
+    await expect(popover).toBeHidden()
+
+    // Keyboard focus provides the same transient help without a click.
     await info.focus()
-    await page.keyboard.press('Enter')
-    await expect(displayNameLabel.locator('.field-info-pop')).toBeVisible()
-    await drawer.locator('.form-section').first().click()
-    await expect(displayNameLabel.locator('.field-info-pop')).toHaveCount(0)
+    await expect(popover).toBeVisible()
+    await page.keyboard.press('Tab')
+    await expect(popover).toBeHidden()
   })
 })

@@ -103,7 +103,7 @@ class TestListProfiles:
                 "device_class" in item
             )  # device_class can be None post-seeded-profile rework — accept absent or null
             assert "resolved_flags" in item
-            assert "seed" in item  # noqa: F631
+            assert "seed" in item
 
     def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
         """Phase C6: the UI keys immutability off the serialized seed flag."""
@@ -112,14 +112,9 @@ class TestListProfiles:
         assert vulkan["seed"] is True
 
     def test_device_class_values(self, client: TestClient) -> None:
-        """Phase C: device_class surfaces in the route response."""
+        """All virtual 1.0 seeds leave device ownership to the slot."""
         data = client.get("/api/profiles").json()
-        flm = next(item for item in data if item["name"] == "flm")
-        assert flm["device_class"] is None
-        kokoro = next(item for item in data if item["name"] == "kokoro")
-        assert kokoro["device_class"] is None
-        vulkan = next(item for item in data if item["name"] == "chat")
-        assert vulkan["device_class"] is None
+        assert all(item["device_class"] is None for item in data)
 
     def test_backend_values(self, client: TestClient) -> None:
         """backend surfaces in the route response (rocm|vulkan|None)."""
