@@ -35,9 +35,7 @@ def _make_tree(
         encoding="utf-8",
     )
     (root / "uv.lock").write_bytes(b"fixture lock bytes\n")
-    (root / ".gitignore").write_text(
-        ".pi/\ngraphify-out/*\n", encoding="utf-8"
-    )
+    (root / ".gitignore").write_text(".pi/\ngraphify-out/*\n", encoding="utf-8")
     tracked_generated = {
         root / ".pi" / "shepherd" / "index.json": "generated index\n",
         root / ".pi" / "shepherd" / "nearby.json": "tracked source state\n",
@@ -178,6 +176,8 @@ def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Pat
     [
         (None, False),
         ({**_fresh_report(), "generated": int(time.time()) - 25 * 3600}, False),
+        ({**_fresh_report(), "generated": int(time.time()) + 10 * 60}, False),
+        ({**_fresh_report(), "generated": "not-a-timestamp"}, False),
         (_fresh_report(**{"fail": 1, "pass": 0}), False),
         (_fresh_report(), True),
     ],

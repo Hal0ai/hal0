@@ -246,8 +246,12 @@ if not isinstance(report, dict):
 if report.get("_schema") != "hal0.release-gate-report.v1":
     sys.exit("release-test report _schema must equal 'hal0.release-gate-report.v1'")
 generated = report.get("generated", 0)
+if type(generated) is not int or generated <= 0:
+    sys.exit("release-test report generated must be a positive integer timestamp")
 age_s = time.time() - generated
-if generated <= 0 or age_s > 24 * 3600:
+if age_s < -5 * 60:
+    sys.exit(f"report timestamp is in the future (skew={-age_s:.0f}s) — check clocks and re-run `make release-test`")
+if age_s > 24 * 3600:
     sys.exit(f"report is stale (age={age_s/3600:.1f}h) — re-run `make release-test`")
 summary = report.get("summary")
 if not isinstance(summary, dict):
