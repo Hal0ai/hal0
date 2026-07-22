@@ -462,7 +462,7 @@ class TestContainerEnrichment:
         # group logical workload families. Backend remains slot hardware state,
         # not a profile-derived selector.
         out = await container_enrichment(
-            [_container_cfg(profile="chat")],
+            [_container_cfg(profile="qwen3-tts")],
             pull_jobs={},
             provider=FakeContainerProvider(active=True, healthy=True),
         )

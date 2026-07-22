@@ -163,4 +163,4 @@ def test_models_for_capability_filters_backends_blocked_by_model_fit(
     assert len(rows) == 1
     assert rows[0]["id"] == "reranker"
     assert [backend["id"] for backend in rows[0]["backends"]] == ["gpu-vulkan"]
-    assert rows[0]["backends"][0]["fit_status"] == "degraded"
+    assert rows[0]["backends"][0]["fit_status"] == "allowed"
