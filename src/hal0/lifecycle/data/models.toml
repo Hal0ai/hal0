@@ -1,0 +1,91 @@
+schema_version = 1
+catalog_version = "1.0.0"
+release = "1.0.0-alpha.1"
+generated_format = "canonical-json-v1"
+
+[[models]]
+id = "hal0-brain-rocmfpx-agent"
+source = "Hal0ai/hal0-brain-sft-fpx8-agent"
+revision = "5a1c6b40ff5bb1a57d2878cece569d01a817d27e"
+architecture = "llama"
+formats = ["rocmfpx-gguf"]
+capabilities = ["chat", "tool-use"]
+roles = ["brain"]
+runners = ["rocmfpx", "vulkanfpx"]
+license = "apache-2.0"
+priority = 300
+
+[models.prompt_contract]
+template_id = "hal0-function-xml"
+stop_tokens = ["</function>"]
+tool_protocol = "xml-function"
+parser_id = "hal0-xml-function-v1"
+deterministic_tool_selection = true
+maximum_tool_calls_per_turn = 1
+validate_tool_schema = true
+stop_after_complete_call = true
+
+[[models.files]]
+filename = "model.gguf"
+sha256 = "18e8a20fb0fd592ad07d8789dd9144daf3bc4f84e9fd50ba356572c3d9ae1dd1"
+size_bytes = 1153529376
+format = "rocmfpx-gguf"
+quantization = "fpx8"
+
+[[models]]
+id = "hal0-brain-stock-gguf"
+source = "Hal0ai/hal0-brain-sft-GGUF"
+revision = "6b190df6e816cc806f7fa7ae3de7248f5551e00b"
+architecture = "llama"
+formats = ["stock-gguf"]
+capabilities = ["chat", "tool-use"]
+roles = ["brain"]
+runners = ["vulkan", "cpu", "cuda"]
+license = "apache-2.0"
+priority = 200
+
+[models.prompt_contract]
+template_id = "hal0-function-xml"
+stop_tokens = ["</function>"]
+tool_protocol = "xml-function"
+parser_id = "hal0-xml-function-v1"
+deterministic_tool_selection = true
+maximum_tool_calls_per_turn = 1
+validate_tool_schema = true
+stop_after_complete_call = true
+
+[[models.files]]
+filename = "model.gguf"
+sha256 = "ed9d28c4eac1d7c291bc80d9410c243a3d28e655921ccaf90f2b6619aa24d2c3"
+size_bytes = 2166552096
+format = "stock-gguf"
+quantization = "f16"
+
+[[models]]
+id = "minicpm5-agentic-tooluse-q8"
+source = "ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF"
+revision = "57cd9c9f35b83770732b1833732bb79d6c2b1513"
+architecture = "minicpm5"
+formats = ["stock-gguf"]
+capabilities = ["chat", "tool-use"]
+roles = ["brain"]
+runners = ["vulkan", "cpu", "cuda"]
+license = "other"
+priority = 100
+
+[models.prompt_contract]
+template_id = "minicpm5-tool-xml"
+stop_tokens = ["</function>", "<|eot_id|>"]
+tool_protocol = "xml-function"
+parser_id = "minicpm5-xml-function-v1"
+deterministic_tool_selection = true
+maximum_tool_calls_per_turn = 1
+validate_tool_schema = true
+stop_after_complete_call = true
+
+[[models.files]]
+filename = "MiniCPM5-1B-Agentic-Tooluse-Nemotron-DPO.Q8_0.gguf"
+sha256 = "3cc43d741c951b81ec1b99e42617c10c90204b54c11e311825180ffca6c4e450"
+size_bytes = 1153529856
+format = "stock-gguf"
+quantization = "q8_0"

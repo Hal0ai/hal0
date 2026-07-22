@@ -1,0 +1,111 @@
+schema_version = 1
+catalog_version = "1.0.0"
+release = "1.0.0-alpha.1"
+generated_format = "canonical-json-v1"
+
+[[runners]]
+id = "rocmfpx"
+package = "hal0-rocmfpx"
+runtime_family = "llama-server"
+capabilities = ["chat", "embedding", "reranking"]
+hosts = ["amd-rocm"]
+backends = ["rocm"]
+architectures = ["amd64"]
+model_formats = ["rocmfpx-gguf"]
+priority = 100
+default_for = ["amd-rocm/chat", "amd-rocm/embedding", "amd-rocm/reranking"]
+
+[[runners]]
+id = "vulkanfpx"
+package = "hal0-rocmfpx"
+runtime_family = "llama-server"
+capabilities = ["chat", "embedding", "reranking"]
+hosts = ["amd-vulkan"]
+backends = ["vulkan"]
+architectures = ["amd64"]
+model_formats = ["rocmfpx-gguf"]
+priority = 90
+
+[[runners]]
+id = "vulkan"
+package = "amd-strix-halo-toolboxes"
+runtime_family = "llama-server"
+capabilities = ["chat", "embedding", "reranking"]
+hosts = ["amd-vulkan"]
+backends = ["vulkan"]
+architectures = ["amd64"]
+model_formats = ["stock-gguf"]
+priority = 100
+default_for = ["amd-vulkan/chat", "amd-vulkan/embedding", "amd-vulkan/reranking"]
+
+[[runners]]
+id = "cpu"
+package = "amd-strix-halo-toolboxes"
+runtime_family = "llama-server"
+capabilities = ["chat", "embedding", "reranking"]
+hosts = ["cpu"]
+backends = ["cpu"]
+architectures = ["amd64"]
+model_formats = ["stock-gguf"]
+priority = 100
+default_for = ["cpu/chat", "cpu/embedding", "cpu/reranking"]
+
+[[runners]]
+id = "cuda"
+package = "llama-cpp-cuda"
+runtime_family = "llama-server"
+capabilities = ["chat", "embedding", "reranking"]
+hosts = ["nvidia-cuda"]
+backends = ["cuda"]
+architectures = ["amd64"]
+model_formats = ["stock-gguf"]
+priority = 100
+default_for = ["nvidia-cuda/chat", "nvidia-cuda/embedding", "nvidia-cuda/reranking"]
+
+[[runners]]
+id = "flm"
+package = "hal0-toolbox-flm"
+runtime_family = "flm"
+capabilities = ["chat"]
+hosts = ["amd-npu"]
+backends = ["npu"]
+architectures = ["amd64"]
+model_formats = ["flm"]
+priority = 100
+default_for = ["amd-npu/chat"]
+
+[[runners]]
+id = "kokoro"
+package = "hal0-toolbox-kokoro"
+runtime_family = "kokoro"
+capabilities = ["text-to-speech"]
+hosts = ["cpu"]
+backends = ["cpu"]
+architectures = ["amd64"]
+model_formats = ["kokoro"]
+priority = 100
+default_for = ["cpu/text-to-speech"]
+
+[[runners]]
+id = "qwen3tts"
+package = "hal0-toolbox-qwen3tts"
+runtime_family = "qwen3tts"
+capabilities = ["text-to-speech"]
+hosts = ["amd-rocm"]
+backends = ["rocm"]
+architectures = ["amd64"]
+model_formats = ["qwen3tts"]
+priority = 100
+default_for = ["amd-rocm/text-to-speech"]
+
+[[runners]]
+id = "comfyui"
+package = "amd-strix-halo-comfyui"
+runtime_family = "comfyui"
+capabilities = ["image-generation"]
+hosts = ["amd-rocm"]
+backends = ["rocm"]
+architectures = ["amd64"]
+model_formats = ["safetensors"]
+priority = 100
+default_for = ["amd-rocm/image-generation"]

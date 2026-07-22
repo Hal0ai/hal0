@@ -1,0 +1,30 @@
+schema_version = 1
+catalog_version = "1.0.0"
+release = "1.0.0-alpha.1"
+generated_format = "canonical-json-v1"
+
+[bootstrap]
+default_runner_policy = "default-chat"
+pull_default_runner = true
+capability_scaffolding = "none"
+
+[[bootstrap.initial_slots]]
+name = "agent"
+role = "agent"
+profile = "agent"
+enabled = true
+ready_without_model = true
+
+[bootstrap.hermes]
+default_install = true
+detect_existing = true
+explicit_opt_out = true
+model_policy = "brain-fallback-chain"
+
+[bootstrap.hermes.brain_slot]
+name = "brain"
+role = "brain"
+profile = "hal0-brain"
+enabled = false
+model_policy = "brain-fallback-chain"
+ready_without_model = false

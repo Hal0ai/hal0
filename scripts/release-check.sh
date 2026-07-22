@@ -5,9 +5,10 @@
 # safety net between "main looks good" and `git tag`.
 #
 # Usage:
-#   bash scripts/release-check.sh [--channel stable|nightly] [--tag vX.Y.Z]
+#   bash scripts/release-check.sh [--local] [--channel stable|nightly] [--tag vX.Y.Z]
 #
 # Gates (in order):
+#   0.  Lifecycle catalog compiled and valid (--local runs only this fast gate)
 #   1.  Backend tests green (pytest)
 #   2.  UI build clean (npm run build)
 #   3.  Lint clean (ruff + shellcheck if present)
@@ -47,6 +48,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="${HAL0_CHANNEL:-stable}"
 PROPOSED_TAG=""
 DRY_RUN=false
+LOCAL_ONLY=false
 FAILURES=0
 
 while [[ $# -gt 0 ]]; do
@@ -73,12 +75,54 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=true
 		shift
 		;;
+	--local)
+		LOCAL_ONLY=true
+		shift
+		;;
 	*)
 		warn "unknown arg: $1 (ignored)"
 		shift
 		;;
 	esac
 done
+
+# ── 0. Release-owned lifecycle catalog ───────────────────────────────────────
+step "0. Lifecycle catalog"
+
+if [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+	CATALOG_PYTHON="${REPO_ROOT}/.venv/bin/python"
+else
+	CATALOG_PYTHON="python3"
+fi
+
+if PYTHONPATH="${REPO_ROOT}/src" "${CATALOG_PYTHON}" \
+	"${REPO_ROOT}/scripts/compile-lifecycle-catalog.py" --check 2>&1; then
+	info "lifecycle catalog: compiled output current"
+else
+	fail "lifecycle catalog: compiled output absent, stale, or invalid"
+fi
+
+if PYTHONPATH="${REPO_ROOT}/src" "${CATALOG_PYTHON}" - <<'PY' 2>&1; then
+from hal0.lifecycle.catalog import LifecycleCatalog
+
+report = LifecycleCatalog.load_bundled().validate()
+if report.errors:
+    raise SystemExit("catalog validation failed: " + "; ".join(report.errors))
+print("bundled lifecycle catalog valid")
+PY
+	info "lifecycle catalog: bundled validation green"
+else
+	fail "lifecycle catalog: bundled validation failed"
+fi
+
+if [[ "${LOCAL_ONLY}" == true ]]; then
+	if [[ "${FAILURES}" -eq 0 ]]; then
+		printf "\n${GREEN}${BOLD}Local lifecycle release check passed${RESET}\n\n"
+		exit 0
+	fi
+	printf "\n${RED}${BOLD}Local lifecycle release check FAILED${RESET} — %d gate(s) failed.\n\n" "${FAILURES}"
+	exit 1
+fi
 
 # ── 1. Backend tests ──────────────────────────────────────────────────────────
 step "1. Backend tests"

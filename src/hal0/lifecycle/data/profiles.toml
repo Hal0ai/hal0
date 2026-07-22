@@ -1,0 +1,35 @@
+schema_version = 1
+catalog_version = "1.0.0"
+release = "1.0.0-alpha.1"
+generated_format = "canonical-json-v1"
+
+[runner_policies]
+default-chat = ["rocmfpx", "vulkan", "cuda", "cpu", "flm"]
+brain-compatible = ["rocmfpx", "vulkanfpx", "vulkan", "cuda", "cpu"]
+
+[model_policies]
+brain-fallback-chain = [
+  "hal0-brain-rocmfpx-agent",
+  "hal0-brain-stock-gguf",
+  "minicpm5-agentic-tooluse-q8",
+]
+
+[[profiles]]
+id = "agent"
+ownership = "builtin"
+role = "agent"
+capabilities = ["chat", "tool-use"]
+runner_policy = "default-chat"
+profile_version = "1.0.0"
+runtime_options = { waiting_without_model = true }
+
+[[profiles]]
+id = "hal0-brain"
+ownership = "builtin"
+role = "brain"
+capabilities = ["chat", "tool-use"]
+runner_policy = "brain-compatible"
+model_policy = "brain-fallback-chain"
+profile_version = "1.0.0"
+integration = "hermes"
+runtime_options = { tool_model = "hal0/agent", context_size = 65536 }
