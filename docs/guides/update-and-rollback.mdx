@@ -1,6 +1,6 @@
 ---
 title: Update and roll back
-description: Cosign-verified, atomic self-update for hal0 — check the stable or nightly channel, apply or pin a specific version, and roll back to the previous tree.
+description: Cosign-verified, atomic self-update for hal0 — check the stable, preview, or nightly channel, apply or pin a specific version, and roll back to the previous tree.
 sidebar:
   order: 110
 ---
@@ -83,11 +83,14 @@ For a new preview-channel bootstrap, pass the channel to the receiving shell:
 curl -fsSL https://hal0.dev/install.sh | HAL0_CHANNEL=preview bash
 ```
 
-The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
-(overridable via `HAL0_RELEASES_URL` for dev / air-gapped installs). Preview is
-strictly opt-in: stable clients accept only stable pointer contents and never
-consume preview artifacts. A stable artifact may be promoted through the
-preview pointer without changing its `release_kind`.
+The manifest URL contract is `https://releases.hal0.dev/<channel>.json`
+(overridable via `HAL0_RELEASES_URL` for dev / air-gapped installs). Availability
+still depends on the separately operated external release service publishing
+that exact pointer and sibling bundle; this repository does not make those
+external pointers operational. Preview is strictly opt-in: stable clients
+accept only stable pointer contents and never consume preview artifacts. A
+stable artifact may be promoted through the preview pointer without changing
+its `release_kind`.
 
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
@@ -189,9 +192,11 @@ that skip hatch is active.
 
 <Aside type="note">
 The **initial one-line installer** uses the same signed-manifest trust
-contract. It requires cosign, verifies the sibling channel-manifest bundle
-against the same pinned release-workflow identity and issuer before parsing,
-and then verifies the tarball digest and signature as defense-in-depth.
+contract. It requires jq and cosign, verifies the sibling channel-manifest
+bundle against the same pinned release-workflow identity and issuer before
+parsing, then applies a strict `hal0.releases.v1` channel policy. It requires
+the artifact `bundle_url`; detached signature/certificate fallback is not
+accepted. Digest and bundle verification remain defense-in-depth.
 </Aside>
 
 ## Roll back

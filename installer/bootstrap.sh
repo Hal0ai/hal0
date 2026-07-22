@@ -80,6 +80,7 @@ preflight() {
     need curl
     need tar
     need sha256sum
+    need jq
     need python3
 }
 
@@ -134,56 +135,50 @@ verify_release_manifest() {
 }
 
 validate_manifest_for_channel() {
-    python3 - "$1" "$2" <<'PY'
-import json
-import sys
+    local manifest="$1" requested_channel="$2" normalized="$3"
 
-with open(sys.argv[1], encoding="utf-8") as manifest_file:
-    manifest = json.load(manifest_file)
-requested_channel = sys.argv[2]
-manifest_channel = manifest.get("channel", "stable")
-release_kind = manifest.get("release_kind", "stable")
-accepted_kinds = {
-    "stable": {"stable"},
-    "preview": {"preview", "stable"},
-    "nightly": {"nightly"},
-}
-if manifest_channel != requested_channel:
-    sys.exit(
-        f"manifest channel {manifest_channel} does not match requested channel "
-        f"{requested_channel}"
-    )
-if release_kind not in accepted_kinds[requested_channel]:
-    sys.exit(
-        f"release kind {release_kind} is not accepted for channel {requested_channel}"
-    )
-PY
+    # This is deliberately one fail-closed jq policy pass over the exact bytes
+    # authenticated above. It emits a normalized manifest only when every
+    # bootstrap-required field and channel/kind/stage relationship is valid.
+    if ! jq -e --arg requested "${requested_channel}" '
+        def nonempty_string: type == "string" and length > 0;
+        select(
+            type == "object"
+            and ._schema == "hal0.releases.v1"
+            and (.version | nonempty_string)
+            and (.url | nonempty_string)
+            and (.bundle_url | nonempty_string)
+            and (.signer_identity | nonempty_string)
+            and (.signer_issuer | nonempty_string)
+            and (try (.digest_sha256 | test("^(sha256:)?[0-9A-Fa-f]{64}$")) catch false)
+            and (.channel == "stable" or .channel == "preview" or .channel == "nightly")
+            and (.release_kind == "stable" or .release_kind == "preview" or .release_kind == "nightly")
+            and .channel == $requested
+            and (
+                ($requested == "stable" and .release_kind == "stable")
+                or ($requested == "preview" and (.release_kind == "preview" or .release_kind == "stable"))
+                or ($requested == "nightly" and .release_kind == "nightly")
+            )
+            and (
+                (.release_kind == "preview" and (
+                    .prerelease_stage == "alpha"
+                    or .prerelease_stage == "beta"
+                    or .prerelease_stage == "rc"
+                ))
+                or ((.release_kind == "stable" or .release_kind == "nightly") and .prerelease_stage == null)
+            )
+        )
+        | .digest_sha256 |= (ascii_downcase | sub("^sha256:"; ""))
+    ' "${manifest}" >"${normalized}"; then
+        rm -f -- "${normalized}"
+        die "authenticated release manifest failed strict policy validation"
+    fi
 }
 
 parse_manifest_field() {
     local file="$1" field="$2"
-    python3 -c "
-import json, sys
-try:
-    v = json.load(open('${file}')).get('${field}')
-    if v is None:
-        sys.exit('manifest missing required field: ${field}')
-    print(v)
-except json.JSONDecodeError as e:
-    sys.exit(f'manifest is not valid JSON: {e}')
-"
-}
-
-# Like parse_manifest_field but prints nothing (rather than dying) when the
-# field is absent — used for the transition-window bundle_url/sig_url/
-# cert_url fields, which are mutually optional (see cosign_verify below).
-parse_manifest_field_optional() {
-    local file="$1" field="$2"
-    python3 -c "
-import json
-v = json.load(open('${file}')).get('${field}')
-print(v if v is not None else '')
-"
+    jq -er --arg field "${field}" '.[$field] | select(type == "string")' "${file}" \
+        || die "validated release manifest field extraction failed: ${field}"
 }
 
 # ── tarball fetch + sha256 verify ─────────────────────────────────────────
@@ -213,9 +208,7 @@ fetch_sidecar() {
 }
 
 cosign_verify() {
-    # bundle may be empty — in that case sig and cert must both be set (the
-    # transition-window fallback for manifests without bundle_url). See main().
-    local tarball="$1" bundle="$2" sig="$3" cert="$4" identity="$5" issuer="$6"
+    local tarball="$1" bundle="$2" identity="$3" issuer="$4"
 
     command -v cosign >/dev/null 2>&1 \
         || die "cosign disappeared after release manifest verification — refusing to install"
@@ -224,25 +217,9 @@ cosign_verify() {
     info "  identity-regex: ${_C_DIM}${identity}${_C_RST}"
     info "  issuer:         ${_C_DIM}${issuer}${_C_RST}"
 
-    local -a verify_args
-    if [[ -n "${bundle}" ]]; then
-        # Keyless verification uses a Sigstore bundle. The bundle carries the
-        # Fulcio cert, the signature, AND the Rekor Signed Entry Timestamp
-        # (SET) — the trusted timestamp that lets verify-blob succeed after
-        # the short-lived (~10 min) signing cert has expired, which is
-        # always the case by the time a user runs the installer.
-        # --certificate-identity-regexp is matched against the cert SAN
-        # carried in the bundle. (A detached .sig + .crt had no SET and
-        # failed on every client — #1159.)
-        verify_args=(--bundle "${bundle}")
-    else
-        # Transition-window fallback: manifest had no bundle_url (older
-        # release, or a manifest generated before #1159 shipped). This path
-        # inherits the known post-expiry failure the bundle fixes — kept
-        # only so manifests without bundle_url still attempt verification
-        # instead of erroring outright.
-        verify_args=(--signature "${sig}" --certificate "${cert}")
-    fi
+    # The authenticated manifest must provide a Sigstore bundle. Detached
+    # signature/certificate sidecars are not an accepted bootstrap scheme.
+    local -a verify_args=(--bundle "${bundle}")
     if ! cosign verify-blob \
             "${verify_args[@]}" \
             --certificate-identity-regexp "${identity}" \
@@ -277,44 +254,32 @@ main() {
         "$(release_manifest_bundle_url "${HAL0_RELEASES_URL}")" \
         "${manifest_bundle}"
     verify_release_manifest "${manifest}" "${manifest_bundle}"
-    validate_manifest_for_channel "${manifest}" "${HAL0_CHANNEL}"
 
-    local version url bundle_url sig_url cert_url digest identity issuer
-    version="$(parse_manifest_field "${manifest}" version)"
-    url="$(parse_manifest_field "${manifest}" url)"
-    bundle_url="$(parse_manifest_field_optional "${manifest}" bundle_url)"
-    sig_url="$(parse_manifest_field_optional "${manifest}" sig_url)"
-    cert_url="$(parse_manifest_field_optional "${manifest}" cert_url)"
-    digest="$(parse_manifest_field "${manifest}" digest_sha256)"
-    identity="$(parse_manifest_field "${manifest}" signer_identity)"
-    issuer="$(parse_manifest_field "${manifest}" signer_issuer)"
+    local validated_manifest="${work}/manifest.validated.json"
+    validate_manifest_for_channel "${manifest}" "${HAL0_CHANNEL}" "${validated_manifest}"
 
-    if [[ -z "${bundle_url}" && ( -z "${sig_url}" || -z "${cert_url}" ) ]]; then
-        die "manifest has no usable signing scheme (need bundle_url, or both sig_url and cert_url)"
-    fi
+    local version url bundle_url digest identity issuer
+    version="$(parse_manifest_field "${validated_manifest}" version)"
+    url="$(parse_manifest_field "${validated_manifest}" url)"
+    bundle_url="$(parse_manifest_field "${validated_manifest}" bundle_url)"
+    digest="$(parse_manifest_field "${validated_manifest}" digest_sha256)"
+    identity="$(parse_manifest_field "${validated_manifest}" signer_identity)"
+    issuer="$(parse_manifest_field "${validated_manifest}" signer_issuer)"
 
     info "release: ${_C_BLD}hal0 v${version}${_C_RST} (${HAL0_CHANNEL})"
 
-    local tarball="${work}/hal0-${version}.tar.gz"
+    # Manifest strings never become shell syntax or path components.
+    local tarball="${work}/artifact.tar.gz"
     fetch_and_hash_check "${url}" "${digest}" "${tarball}"
 
-    # Prefer the Sigstore bundle (survives cert expiry, #1159); fall back to
-    # the transition-window sig_url/cert_url pair when bundle_url is absent.
-    local bundle="" sig="" cert=""
-    if [[ -n "${bundle_url}" ]]; then
-        bundle="${tarball}.bundle"
-        fetch_sidecar "signature bundle" "${bundle_url}" "${bundle}"
-    else
-        sig="${tarball}.sig"
-        cert="${tarball}.crt"
-        fetch_sidecar "signature" "${sig_url}" "${sig}"
-        fetch_sidecar "certificate" "${cert_url}" "${cert}"
-    fi
-    cosign_verify "${tarball}" "${bundle}" "${sig}" "${cert}" "${identity}" "${issuer}"
+    local bundle="${tarball}.bundle"
+    fetch_sidecar "signature bundle" "${bundle_url}" "${bundle}"
+    cosign_verify "${tarball}" "${bundle}" "${identity}" "${issuer}"
 
     info "extracting tarball"
-    tar -xzf "${tarball}" -C "${work}"
-    local unpacked="${work}/hal0-${version}"
+    local unpacked="${work}/unpacked"
+    mkdir "${unpacked}"
+    tar -xzf "${tarball}" --strip-components=1 -C "${unpacked}"
     [[ -x "${unpacked}/installer/install.sh" ]] \
         || die "extracted tree is missing installer/install.sh — corrupt tarball?"
 

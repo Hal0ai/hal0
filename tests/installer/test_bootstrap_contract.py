@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ def _bootstrap_env(
     artifact_fixture: Path | None = None,
     artifact_url: str = "",
     artifact_bundle_url: str = "",
+    with_jq: bool = True,
 ) -> tuple[dict[str, str], Path, Path]:
     """Build a hermetic PATH that records network and cosign behavior."""
     bin_dir = tmp_path / "bin"
@@ -49,6 +51,7 @@ def _bootstrap_env(
         "gzip",
         "uname",
         "mktemp",
+        "mkdir",
         "rm",
         "tar",
         "sha256sum",
@@ -57,6 +60,10 @@ def _bootstrap_env(
         target = shutil.which(tool)
         assert target is not None
         os.symlink(target, bin_dir / tool)
+    if with_jq:
+        jq = shutil.which("jq")
+        assert jq is not None
+        os.symlink(jq, bin_dir / "jq")
 
     manifest_fixture = tmp_path / "manifest.fixture"
     manifest_fixture.write_bytes(manifest)
@@ -126,10 +133,39 @@ def _run_bootstrap(
     )
 
 
+def _valid_manifest(
+    *,
+    channel: str = "stable",
+    release_kind: str = "stable",
+    prerelease_stage: str | None = None,
+) -> dict[str, object]:
+    return {
+        "_schema": "hal0.releases.v1",
+        "version": "1.2.3",
+        "channel": channel,
+        "release_kind": release_kind,
+        "prerelease_stage": prerelease_stage,
+        "url": "https://fixtures.example/hal0.tar.gz",
+        "bundle_url": "https://fixtures.example/hal0.tar.gz.bundle",
+        "digest_sha256": "A" * 64,
+        "signer_identity": _CANONICAL_IDENTITY,
+        "signer_issuer": _CANONICAL_ISSUER,
+    }
+
+
 def test_bootstrap_uses_canonical_channel_endpoint() -> None:
     script = _BOOTSTRAP.read_text(encoding="utf-8")
     assert "https://releases.hal0.dev/${HAL0_CHANNEL}.json" in script
     assert "/releases/latest/download" not in script
+
+
+def test_bootstrap_requires_jq_and_artifact_bundle_without_detached_fallback() -> None:
+    script = _BOOTSTRAP.read_text(encoding="utf-8")
+    assert "need jq" in script
+    assert 'verify_args=(--bundle "${bundle}")' in script
+    assert "--signature" not in script
+    assert "sig_url" not in script
+    assert "cert_url" not in script
 
 
 @pytest.mark.parametrize("channel", ["stable", "preview", "nightly"])
@@ -149,9 +185,7 @@ def test_bootstrap_accepts_supported_channels_and_fetches_exact_sibling_bundle(
 
 
 @pytest.mark.parametrize("channel", ["beta", "PREVIEW", "stable/../../owned"])
-def test_bootstrap_rejects_invalid_channel_before_network(
-    tmp_path: Path, channel: str
-) -> None:
+def test_bootstrap_rejects_invalid_channel_before_network(tmp_path: Path, channel: str) -> None:
     env, curl_log, _ = _bootstrap_env(tmp_path, b"{}")
     env["HAL0_CHANNEL"] = channel
 
@@ -159,6 +193,16 @@ def test_bootstrap_rejects_invalid_channel_before_network(
 
     assert proc.returncode != 0
     assert "HAL0_CHANNEL must be one of: stable, preview, nightly" in proc.stderr
+    assert not curl_log.exists()
+
+
+def test_bootstrap_missing_jq_fails_preflight_before_network(tmp_path: Path) -> None:
+    env, curl_log, _ = _bootstrap_env(tmp_path, b"{}", with_jq=False)
+
+    proc = _run_bootstrap(env)
+
+    assert proc.returncode != 0
+    assert "missing dependency: jq" in proc.stderr
     assert not curl_log.exists()
 
 
@@ -181,14 +225,22 @@ def test_bootstrap_preserves_override_and_places_bundle_before_query(
 def test_bootstrap_verifies_manifest_before_parsing_or_fetching_artifacts(
     tmp_path: Path,
 ) -> None:
-    manifest = b'{"url":"https://attacker.example/untrusted.tar.gz"}'
+    manifest = b'{"url":"https://attacker.example/untrusted.tar.gz", "x": "$(touch owned)"}'
     env, curl_log, cosign_log = _bootstrap_env(tmp_path, manifest, cosign_rc=1)
+    jq_log = tmp_path / "jq.log"
+    (tmp_path / "bin" / "jq").unlink()
+    _write_executable(
+        tmp_path / "bin" / "jq",
+        f"#!/usr/bin/env bash\nprintf invoked > {jq_log}\nexit 99\n",
+    )
 
     proc = _run_bootstrap(env)
 
     assert proc.returncode != 0
     assert "release manifest signature verification FAILED" in proc.stderr
     assert "attacker.example" not in curl_log.read_text(encoding="utf-8")
+    assert not jq_log.exists()
+    assert not (tmp_path / "owned").exists()
     args = cosign_log.read_text(encoding="utf-8").splitlines()
     assert args[0] == "verify-blob"
     assert args[1] == "--bundle"
@@ -198,31 +250,93 @@ def test_bootstrap_verifies_manifest_before_parsing_or_fetching_artifacts(
     assert args[-1].endswith("/manifest.json")
 
 
-def test_stable_bootstrap_rejects_authenticated_preview_artifact(
+@pytest.mark.parametrize(
+    ("updates", "removals", "requested_channel"),
+    [
+        pytest.param({}, {"_schema"}, "stable", id="schema-missing"),
+        pytest.param({"_schema": "hal0.releases.v2"}, set(), "stable", id="schema-unknown"),
+        pytest.param({"_schema": 1}, set(), "stable", id="schema-non-string"),
+        pytest.param({}, {"version"}, "stable", id="version-missing"),
+        pytest.param({"version": ""}, set(), "stable", id="version-empty"),
+        pytest.param({"version": 1}, set(), "stable", id="version-non-string"),
+        pytest.param({}, {"url"}, "stable", id="url-missing"),
+        pytest.param({"url": ""}, set(), "stable", id="url-empty"),
+        pytest.param({"url": []}, set(), "stable", id="url-non-string"),
+        pytest.param({}, {"bundle_url"}, "stable", id="bundle-url-missing"),
+        pytest.param({"bundle_url": ""}, set(), "stable", id="bundle-url-empty"),
+        pytest.param({"bundle_url": 1}, set(), "stable", id="bundle-url-non-string"),
+        pytest.param({}, {"signer_identity"}, "stable", id="identity-missing"),
+        pytest.param({"signer_identity": ""}, set(), "stable", id="identity-empty"),
+        pytest.param({"signer_identity": False}, set(), "stable", id="identity-non-string"),
+        pytest.param({}, {"signer_issuer"}, "stable", id="issuer-missing"),
+        pytest.param({"signer_issuer": ""}, set(), "stable", id="issuer-empty"),
+        pytest.param({"signer_issuer": {}}, set(), "stable", id="issuer-non-string"),
+        pytest.param({}, {"digest_sha256"}, "stable", id="digest-missing"),
+        pytest.param({"digest_sha256": 1}, set(), "stable", id="digest-non-string"),
+        pytest.param({"digest_sha256": "0" * 63}, set(), "stable", id="digest-short"),
+        pytest.param({"digest_sha256": "md5:" + "0" * 64}, set(), "stable", id="digest-prefix"),
+        pytest.param({}, {"channel"}, "stable", id="channel-missing"),
+        pytest.param({"channel": 1}, set(), "stable", id="channel-non-string"),
+        pytest.param({"channel": "beta"}, set(), "stable", id="channel-noncanonical"),
+        pytest.param({}, {"release_kind"}, "stable", id="kind-missing"),
+        pytest.param({"release_kind": []}, set(), "stable", id="kind-non-string"),
+        pytest.param({"release_kind": "beta"}, set(), "stable", id="kind-noncanonical"),
+        pytest.param({}, set(), "preview", id="requested-channel-mismatch"),
+        pytest.param(
+            {"release_kind": "preview", "prerelease_stage": "rc"},
+            set(),
+            "stable",
+            id="stable-rejects-preview-kind",
+        ),
+        pytest.param(
+            {"channel": "preview", "release_kind": "preview", "prerelease_stage": None},
+            set(),
+            "preview",
+            id="preview-stage-missing",
+        ),
+        pytest.param(
+            {"channel": "preview", "release_kind": "preview", "prerelease_stage": "dev"},
+            set(),
+            "preview",
+            id="preview-stage-unknown",
+        ),
+        pytest.param({"prerelease_stage": "rc"}, set(), "stable", id="stable-has-stage"),
+        pytest.param(
+            {"channel": "nightly", "release_kind": "nightly", "prerelease_stage": "alpha"},
+            set(),
+            "nightly",
+            id="nightly-has-stage",
+        ),
+        pytest.param(
+            {"channel": "preview", "prerelease_stage": "rc"},
+            set(),
+            "preview",
+            id="promoted-stable-has-stage",
+        ),
+    ],
+)
+def test_authenticated_malformed_manifest_rejected_before_artifact_io(
     tmp_path: Path,
+    updates: dict[str, object],
+    removals: set[str],
+    requested_channel: str,
 ) -> None:
-    manifest = json.dumps(
-        {
-            "version": "1.0.0-rc.1",
-            "channel": "stable",
-            "release_kind": "preview",
-            "prerelease_stage": "rc",
-            "url": "https://attacker.example/preview.tar.gz",
-            "bundle_url": "https://attacker.example/preview.tar.gz.bundle",
-            "digest_sha256": "0" * 64,
-            "signer_identity": "untrusted-until-manifest-verification",
-        }
-    ).encode()
-    env, curl_log, _ = _bootstrap_env(tmp_path, manifest, cosign_rc=0)
+    payload = copy.deepcopy(_valid_manifest())
+    payload.update(updates)
+    for field in removals:
+        payload.pop(field)
+    env, curl_log, cosign_log = _bootstrap_env(tmp_path, json.dumps(payload).encode(), cosign_rc=0)
+    env["HAL0_CHANNEL"] = requested_channel
 
     proc = _run_bootstrap(env)
 
     assert proc.returncode != 0
-    assert "release kind preview is not accepted for channel stable" in proc.stderr
+    assert "authenticated release manifest failed strict policy validation" in proc.stderr
     assert curl_log.read_text(encoding="utf-8").splitlines() == [
-        "https://releases.hal0.dev/stable.json",
-        "https://releases.hal0.dev/stable.json.bundle",
+        f"https://releases.hal0.dev/{requested_channel}.json",
+        f"https://releases.hal0.dev/{requested_channel}.json.bundle",
     ]
+    assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
 
 
 def test_bootstrap_missing_cosign_fails_closed_for_channel_manifest(
@@ -257,10 +371,28 @@ def test_bootstrap_cleanup_does_not_evaluate_hostile_tmpdir(
     assert list(hostile_tmpdir.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("channel", "release_kind", "prerelease_stage", "version"),
+    [
+        pytest.param("stable", "stable", None, "1.2.3", id="stable"),
+        pytest.param("preview", "preview", "rc", "1.2.3-rc.1", id="preview"),
+        pytest.param(
+            "nightly",
+            "nightly",
+            None,
+            "1.2.3-nightly.202607221230",
+            id="nightly",
+        ),
+        pytest.param("preview", "stable", None, "1.2.3", id="promoted-stable"),
+    ],
+)
 def test_bootstrap_successfully_verifies_extracts_and_hands_off_fixture(
     tmp_path: Path,
+    channel: str,
+    release_kind: str,
+    prerelease_stage: str | None,
+    version: str,
 ) -> None:
-    version = "1.2.3-rc.1"
     artifact_url = f"https://fixtures.example/hal0-{version}.tar.gz"
     artifact_bundle_url = f"{artifact_url}.bundle"
     artifact = tmp_path / f"hal0-{version}.tar.gz"
@@ -281,13 +413,14 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     manifest = json.dumps(
         {
+            "_schema": "hal0.releases.v1",
             "version": version,
-            "channel": "preview",
-            "release_kind": "preview",
-            "prerelease_stage": "rc",
+            "channel": channel,
+            "release_kind": release_kind,
+            "prerelease_stage": prerelease_stage,
             "url": artifact_url,
             "bundle_url": artifact_bundle_url,
-            "digest_sha256": digest,
+            "digest_sha256": f"sha256:{digest.upper()}",
             "signer_identity": _CANONICAL_IDENTITY,
             "signer_issuer": _CANONICAL_ISSUER,
         }
@@ -302,7 +435,7 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
     )
     env.update(
         {
-            "HAL0_CHANNEL": "preview",
+            "HAL0_CHANNEL": channel,
             "INSTALL_LOG": str(install_log),
         }
     )
@@ -312,8 +445,8 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
     assert proc.returncode == 0, proc.stderr
     assert f"sha256 OK ({digest[:12]}…)" in proc.stdout
     assert curl_log.read_text(encoding="utf-8").splitlines() == [
-        "https://releases.hal0.dev/preview.json",
-        "https://releases.hal0.dev/preview.json.bundle",
+        f"https://releases.hal0.dev/{channel}.json",
+        f"https://releases.hal0.dev/{channel}.json.bundle",
         artifact_url,
         artifact_bundle_url,
     ]
@@ -326,7 +459,7 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
     assert cosign_args[7].endswith("/manifest.json")
     artifact_verify = cosign_args.index("verify-blob", 1)
     assert cosign_args[artifact_verify + 1] == "--bundle"
-    assert cosign_args[artifact_verify + 2].endswith(f"hal0-{version}.tar.gz.bundle")
+    assert cosign_args[artifact_verify + 2].endswith("/artifact.tar.gz.bundle")
     assert cosign_args[artifact_verify + 3 : artifact_verify + 5] == [
         "--certificate-identity-regexp",
         _CANONICAL_IDENTITY,
@@ -335,7 +468,7 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
         "--certificate-oidc-issuer",
         _CANONICAL_ISSUER,
     ]
-    assert cosign_args[artifact_verify + 7].endswith(f"hal0-{version}.tar.gz")
+    assert cosign_args[artifact_verify + 7].endswith("/artifact.tar.gz")
     assert install_log.read_text(encoding="utf-8").splitlines() == [
         "verified=1",
         "arg=--no-tls",

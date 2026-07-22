@@ -11,30 +11,32 @@ self-updater (``installer/bootstrap.sh`` and
 "_schema": "hal0.releases.v1"
 ```
 
-All manifests carry this field so consumers can reject an unexpected schema
-shape. Future schema iterations (v2, v3…) will use a distinct identifier.
+This field is mandatory and must be the string literal shown above. Missing,
+unknown, null, or non-string schema identities are rejected. Future schema
+iterations (v2, v3…) will use a distinct identifier.
 
-## Required fields
+## Fields required by the strict bootstrap policy
 
 | Field              | Type     | Description                                              |
 |--------------------|----------|----------------------------------------------------------|
-| `version`          | `str`    | Release version, e.g. `"0.1.1"`.                        |
-| `url`              | `str`    | Tarball download URL (https or file).                    |
-| `bundle_url`       | `str`    | Sigstore bundle URL (cosign keyless OIDC).               |
-| `digest_sha256`    | `str`    | Hex sha256 of the tarball bytes (64 hex chars).          |
-| `signer_identity`  | `str`    | GitHub Actions OIDC subject regex for cosign verify.     |
+| `_schema`          | literal  | Exactly `"hal0.releases.v1"`.                           |
+| `version`          | `str`    | Nonempty release version, e.g. `"0.1.1"`.               |
+| `channel`          | `str`    | Canonical pointer: `stable`, `preview`, or `nightly`.    |
+| `release_kind`     | `str`    | Canonical artifact kind: stable, preview, or nightly.    |
+| `url`              | `str`    | Nonempty tarball download URL (https or file).           |
+| `bundle_url`       | `str`    | Nonempty, mandatory Sigstore artifact-bundle URL.        |
+| `digest_sha256`    | `str`    | 64 hex chars, optionally prefixed with `sha256:`.        |
+| `signer_identity`  | `str`    | Nonempty GitHub Actions OIDC subject regex for cosign.   |
+| `signer_issuer`    | `str`    | Nonempty OIDC issuer used for artifact verification.     |
 
 ## Optional fields
 
 | Field                | Type                 | Default                            | Description                                              |
 |----------------------|----------------------|------------------------------------|----------------------------------------------------------|
-| `channel`            | `str`                | `"stable"`                         | Channel pointer targeted by this manifest.                |
-| `release_kind`       | `str`                | `"stable"`                         | Artifact kind: `"stable"`, `"nightly"`, or `"preview"`.  |
 | `prerelease_stage`   | `str` or `null`      | `null`                             | Preview stage: `"alpha"`, `"beta"`, or `"rc"`.           |
 | `rollback_policy`    | `str`                | `"safe"`                           | Rollback policy: `"safe"`, `"backup-required"`, `"blocked"`. |
 | `upgrade_from`       | `str`                | `""`                               | Version constraint for supported upgrade paths, e.g. `">=0.9.8"`. |
 | `operator_migrations`| `list[str]`          | `[]`                               | Operator-visible migration steps for this release.        |
-| `signer_issuer`      | `str`                | `"https://token.actions.githubusercontent.com"` | OIDC issuer URL.                         |
 | `min_data_version`   | `int`                | `1`                                | Minimum config schema version.                            |
 | `revoked`            | `bool`               | `false`                            | True if the release is yanked/withdrawn.                  |
 | `revoked_reason`     | `str`                | `""`                               | Reason shown when `revoked` is true.                      |
@@ -42,6 +44,11 @@ shape. Future schema iterations (v2, v3…) will use a distinct identifier.
 | `notes_url`          | `str` or `null`      | `null`                             | URL to release notes.                                     |
 | `manifest_url`       | `str` or `null`      | `null`                             | Self-reference URL.                                       |
 | `toolbox_images`     | `dict`               | `{}`                               | Mirror of manifest.json's toolbox_images block.           |
+
+For updater compatibility, the Python model still defaults omitted `channel`
+and `release_kind` to `stable`, and `signer_issuer` to the GitHub Actions OIDC
+issuer. The bootstrap intentionally does not apply those defaults: all three
+must be explicit nonempty strings in an authenticated pointer.
 
 ## Cross-field validation
 
@@ -76,12 +83,17 @@ Each pointer has an exact sibling Sigstore bundle, for example
 and sibling bundle, then run `cosign verify-blob` with their client-pinned
 `.github/workflows/release.yml` identity and
 `https://token.actions.githubusercontent.com` issuer before trusting artifact
-URLs. The bootstrap performs this check before parsing the JSON; the updater
+URLs. The bootstrap performs this check before parsing the JSON; no manifest
+field can influence manifest verification. After authentication, one jq
+1.6-compatible fail-closed pass requires the exact schema, nonempty bootstrap
+strings, normalized digest, requested-channel equality, the stable/preview/
+nightly kind matrix, and preview-only alpha/beta/rc stage rules. The updater
 may decode for schema/channel rejection first but does not return or act on the
 manifest until authentication succeeds. The manifest's own `signer_identity`
 and `signer_issuer` fields become trusted only after that check. A missing
-bundle, missing `cosign`, or failed verification aborts closed. Tarball digest
-and bundle verification then remain defense-in-depth.
+`jq`, bundle, or `cosign`, or failed validation/verification aborts closed.
+The artifact `bundle_url` is mandatory; bootstrap has no detached `.sig`/`.crt`
+fallback. Tarball digest and bundle verification then remain defense-in-depth.
 
 The release workflow produces each pointer and bundle together as release
 assets. Serving or advancing those external `releases.hal0.dev` pointers is a

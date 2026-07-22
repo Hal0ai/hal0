@@ -343,6 +343,26 @@ def test_manifest_schema_rejects_missing_required_fields() -> None:
         _parse_manifest({"version": "9.9.9", "url": "https://x/y.tar.gz"})
 
 
+@pytest.mark.parametrize(
+    ("schema_value", "missing"),
+    [
+        pytest.param(None, True, id="missing"),
+        pytest.param("hal0.releases.v2", False, id="unknown"),
+        pytest.param(1, False, id="number"),
+        pytest.param(None, False, id="null"),
+    ],
+)
+def test_manifest_schema_requires_exact_v1_schema(schema_value: object, missing: bool) -> None:
+    payload = dict(VALID_MANIFEST)
+    if missing:
+        payload.pop("_schema")
+    else:
+        payload["_schema"] = schema_value
+
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(payload)
+
+
 def test_manifest_schema_rejects_malformed_digest() -> None:
     """digest_sha256 must be hex; garbage strings fail validation."""
     payload = {

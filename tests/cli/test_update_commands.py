@@ -10,12 +10,14 @@ running daemon.
 from __future__ import annotations
 
 import inspect
+from typing import get_args
 
 import pytest
 from typer.testing import CliRunner
 
 from hal0.cli import update_commands as uc
 from hal0.cli.main import app
+from hal0.release.policy import ReleaseKind
 
 runner = CliRunner()
 
@@ -83,13 +85,24 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     return captured
 
 
-def test_preview_channel_posts_preview_payload(stub_api: dict) -> None:
-    assert uc.UpdateChannel.preview.value == "preview"
+def test_update_channel_values_match_shared_release_kinds() -> None:
+    assert {channel.value for channel in uc.UpdateChannel} == set(get_args(ReleaseKind))
 
-    result = runner.invoke(app, ["update", "--channel", "preview", "--check"])
+
+@pytest.mark.parametrize("channel", get_args(ReleaseKind))
+def test_channel_posts_shared_release_kind_payload(channel: str, stub_api: dict) -> None:
+    result = runner.invoke(app, ["update", "--channel", channel, "--check"])
 
     assert result.exit_code == 0, result.output
-    assert stub_api["put_json"] == {"channel": "preview"}
+    assert stub_api["put_json"] == {"channel": channel}
+
+
+def test_channel_help_lists_all_shared_release_kinds() -> None:
+    result = runner.invoke(app, ["update", "--help"])
+
+    assert result.exit_code == 0, result.output
+    for channel in get_args(ReleaseKind):
+        assert channel in result.output
 
 
 def test_restart_slots_flag_present_and_drift_aware() -> None:

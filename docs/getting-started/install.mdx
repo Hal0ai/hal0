@@ -21,8 +21,11 @@ To install from the opt-in preview channel instead:
 curl -fsSL https://hal0.dev/install.sh | HAL0_CHANNEL=preview bash
 ```
 
-Only `stable`, `preview`, and `nightly` are accepted. The channel is validated
-before any download, and stable clients never consume preview artifacts.
+Only `stable`, `preview`, and `nightly` are accepted. The requested channel is
+validated before any download, and stable clients never consume preview
+artifacts. These URLs describe the client contract; installation also depends
+on the external release service publishing the selected pointer and sibling
+bundle, which this repository does not operate.
 
 <Aside type="note">
 The installer needs root to write to `/etc`, `/usr/lib`, and the systemd
@@ -42,6 +45,8 @@ itself under `sudo` automatically. You can also run it explicitly:
 - **cosign** — required to authenticate the channel manifest and release
   artifact against hal0's pinned GitHub Actions workflow identity. The
   bootstrap fails closed when `cosign` or a signature bundle is missing.
+- **jq 1.6 or newer** — required for the authenticated manifest's strict,
+  fail-closed schema and channel-policy validation.
 - **A container runtime** — every inference slot runs in a container. The
   installer auto-installs **podman** if no runtime is found.
 - **~20 GB free disk** under the data directory, plus free ports `8080`
@@ -92,16 +97,21 @@ For a full production deployment, use the bootstrap script above.
    `HAL0_CHANNEL`. The bootstrap downloads the exact sibling
    `<channel>.json.bundle` and verifies the manifest bytes with cosign against
    the client-pinned release-workflow identity and issuer before parsing JSON
-   or trusting artifact URLs. Missing cosign, a missing bundle, or failed
-   verification aborts the install. `HAL0_RELEASES_URL` still overrides the
-   full manifest URL; its sibling `.bundle` must satisfy the same contract.
+   or trusting artifact URLs. Then one jq-compatible policy pass requires the
+   exact `hal0.releases.v1` schema, required strings and digest shape, and the
+   canonical requested-channel/kind/stage matrix. Missing jq or cosign, a
+   missing bundle, or failed validation/verification aborts the install.
+   `HAL0_RELEASES_URL` still overrides the full manifest URL; its sibling
+   `.bundle` must satisfy the same contract.
 
 2. **Download and SHA-256-verify the tarball** against the authenticated
    manifest digest. A mismatch aborts the install.
 
-3. **Cosign keyless verify the tarball** — the artifact's Sigstore bundle is
-   checked against the workflow OIDC identity declared in the now-trusted
-   manifest. This second signature check is defense-in-depth.
+3. **Cosign keyless verify the tarball** — the mandatory artifact Sigstore
+   bundle from `bundle_url` is checked against the workflow OIDC identity
+   declared in the now-trusted manifest. Detached signature/certificate
+   fallback is not accepted by the bootstrap. This second signature check is
+   defense-in-depth.
 
 4. **Unpack and hand off** to `installer/install.sh`, which runs
    pre-flight checks, installs podman + the Python venv, builds the

@@ -170,7 +170,7 @@ class ReleaseManifest(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
-    schema_id: str = Field(default="hal0.releases.v1", alias="_schema")
+    schema_id: Literal["hal0.releases.v1"] = Field(alias="_schema")
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
     channel: ReleaseKind = Field(default="stable", description="Release channel.")
     release_kind: ReleaseKind = Field(
