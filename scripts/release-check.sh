@@ -15,7 +15,7 @@
 #   2.  UI build clean (npm run build)
 #   3.  Lint clean (ruff + shellcheck if present)
 #   4.  Toolbox image manifest pinned (manifest.json digests non-empty)
-#   5.  Release-gate report present, fresh (≤24h), all-pass
+#   5.  Release-gate report present, fresh (≤24h), coherent, no failures
 #   6.  Working tree clean, proposed tag doesn't exist
 #   7.  pyproject.toml version matches the proposed tag
 #   8.  Release preflight — policy, tag/release collisions, PyPI
@@ -127,7 +127,7 @@ cleanup() {
 trap cleanup EXIT
 
 run_repo_python() {
-	PYTHONPATH="${REPO_ROOT}/src" HAL0_HOME="${HAL0_CHECK_HOME}" uv run "$@"
+	PYTHONPATH="${REPO_ROOT}/src" HAL0_HOME="${HAL0_CHECK_HOME}" uv run --locked "$@"
 }
 
 if [[ "${LOCAL}" == true ]]; then
@@ -141,7 +141,7 @@ if command -v uv &>/dev/null; then
 	# Unit tier only — tier β + γ run elsewhere (the integration workflow
 	# and `make release-test` respectively).
 	if run_repo_python pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
-		info "uv run pytest (-m 'not integration'): green"
+		info "uv run --locked pytest (-m 'not integration'): green"
 	else
 		fail "pytest: test failures — fix before release"
 	fi
@@ -169,7 +169,7 @@ step "3. Lint"
 
 if command -v uv &>/dev/null; then
 	if run_repo_python ruff check "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" 2>&1; then
-		info "uv run ruff: clean"
+		info "uv run --locked ruff: clean"
 	else
 		fail "ruff found lint errors"
 	fi
@@ -235,7 +235,7 @@ step "5. Release-gate report (tier γ)"
 REPORT="${REPO_ROOT}/tests/release-gate-report.json"
 if [[ "${LOCAL}" == true ]]; then
 	warn "LOCAL rehearsal: skipping remote tier-γ release-gate report"
-	warn "Local success is insufficient for release authorization; a fresh non-local all-pass report is required"
+	warn "Local success is insufficient for release authorization; a fresh coherent non-local report is required"
 elif [[ -f "${REPORT}" ]]; then
 	if python3 - "${REPORT}" <<'PY'; then
 import json, sys, time
@@ -244,15 +244,43 @@ generated = report.get("generated", 0)
 age_s = time.time() - generated
 if generated <= 0 or age_s > 24 * 3600:
     sys.exit(f"report is stale (age={age_s/3600:.1f}h) — re-run `make release-test`")
-summary = report.get("summary", {})
-if summary.get("fail", 0):
-    sys.exit(f"release-test has {summary['fail']} failed row(s)")
-print(f"release-test fresh (age={age_s/3600:.1f}h), {summary.get('pass', 0)} pass, "
-      f"{summary.get('skip', 0)} skip, {summary.get('deferred', 0)} deferred")
+summary = report.get("summary")
+if not isinstance(summary, dict):
+    sys.exit("report summary must be an object")
+keys = ("total", "pass", "fail", "skip", "deferred")
+counts = {}
+for key in keys:
+    value = summary.get(key)
+    if type(value) is not int or value < 0:
+        sys.exit(f"report summary {key!r} must be a nonnegative integer")
+    counts[key] = value
+if counts["total"] <= 0:
+    sys.exit("release-test report has no rows")
+if counts["total"] != sum(counts[key] for key in keys[1:]):
+    sys.exit("release-test summary total does not equal status counts")
+if counts["pass"] <= 0:
+    sys.exit("release-test report must contain at least one passed row")
+if counts["fail"] != 0:
+    sys.exit(f"release-test has {counts['fail']} failed row(s)")
+if "rows" in report:
+    rows = report["rows"]
+    if not isinstance(rows, list):
+        sys.exit("release-test rows must be an array")
+    row_counts = {key: 0 for key in keys[1:]}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or row.get("status") not in row_counts:
+            sys.exit(f"release-test row {index} has an invalid status")
+        row_counts[row["status"]] += 1
+    if len(rows) != counts["total"]:
+        sys.exit("release-test rows length does not match summary total")
+    if any(row_counts[key] != counts[key] for key in row_counts):
+        sys.exit("release-test row statuses do not match summary counts")
+print(f"release-test fresh (age={age_s/3600:.1f}h): {counts['pass']} pass, "
+      f"{counts['skip']} skip, {counts['deferred']} deferred; no failed rows")
 PY
-		info "release-gate report fresh and clean"
+		info "release-gate report accepted"
 	else
-		fail "release-gate report is stale or has failures — run 'make release-test'"
+		fail "release-gate report is invalid, stale, or has failures — run 'make release-test'"
 	fi
 else
 	fail "tests/release-gate-report.json not found — run 'make release-test'"
@@ -421,7 +449,7 @@ fi
 printf "\n"
 if [[ "${FAILURES}" -eq 0 ]]; then
 	if [[ "${LOCAL}" == true ]]; then
-		warn "Local success is insufficient for release authorization; run the non-local check with a fresh all-pass report"
+		warn "Local success is insufficient for release authorization; run the non-local check with a fresh coherent report"
 		printf "${GREEN}${BOLD}Local release rehearsal passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
 	else
 		printf "${GREEN}${BOLD}Release check passed${RESET} (channel: %s)\n\n" "${CHANNEL}"

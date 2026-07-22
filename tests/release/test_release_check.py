@@ -34,6 +34,7 @@ def _make_tree(
         json.dumps({"toolbox_images": {"test": {"digest": "sha256:abc"}}}),
         encoding="utf-8",
     )
+    (root / "uv.lock").write_bytes(b"fixture lock bytes\n")
     if report is not None:
         (root / "tests" / "release-gate-report.json").write_text(
             json.dumps(report), encoding="utf-8"
@@ -44,7 +45,12 @@ def _make_tree(
     uv_log = tmp_path / "uv.log"
     _write_executable(
         fake_bin / "uv",
-        '#!/usr/bin/env bash\nprintf "%s|%s|%s\\n" "$PYTHONPATH" "$HAL0_HOME" "$*" >> "$UV_LOG"\n',
+        """#!/usr/bin/env bash
+printf "%s|%s|%s\\n" "$PYTHONPATH" "$HAL0_HOME" "$*" >> "$UV_LOG"
+if [[ "$*" != "run --locked "* ]]; then
+    printf 'unexpected lock rewrite\\n' > uv.lock
+fi
+""",
     )
     _write_executable(fake_bin / "shellcheck", "#!/usr/bin/env bash\nexit 0\n")
 
@@ -105,9 +111,12 @@ def test_help_and_unknown_argument_contract(tmp_path: Path) -> None:
 def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Path) -> None:
     root, env = _make_tree(tmp_path)
 
+    original_lock = (root / "uv.lock").read_bytes()
+
     result = _run(root, env, "--local")
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (root / "uv.lock").read_bytes() == original_lock
     output = result.stdout + result.stderr
     assert "LOCAL rehearsal" in output
     assert "skipping remote tier-" in output
@@ -122,11 +131,11 @@ def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Pat
         assert hal0_home != env["HAL0_HOME"]
         assert "hal0-release-check." in hal0_home
         homes.add(hal0_home)
-        assert command.startswith("run ")
+        assert command.startswith("run --locked ")
     assert len(homes) == 1
     assert not Path(next(iter(homes))).exists()
-    assert any("run pytest" in call for call in uv_calls)
-    assert any("run ruff check" in call for call in uv_calls)
+    assert any("run --locked pytest" in call for call in uv_calls)
+    assert any("run --locked ruff check" in call for call in uv_calls)
 
 
 @pytest.mark.parametrize(
@@ -138,7 +147,7 @@ def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Pat
         (_fresh_report(), True),
     ],
 )
-def test_nonlocal_requires_fresh_all_pass_report(
+def test_nonlocal_requires_fresh_coherent_report(
     tmp_path: Path, report: dict[str, object] | None, expected_success: bool
 ) -> None:
     root, env = _make_tree(tmp_path, report)
@@ -148,10 +157,67 @@ def test_nonlocal_requires_fresh_all_pass_report(
     assert (result.returncode == 0) is expected_success
     output = result.stdout + result.stderr
     if expected_success:
-        assert "release-gate report fresh and clean" in output
+        assert "release-gate report accepted" in output
     else:
         assert "release-gate report" in output.lower()
         assert "FAILED" in output
+
+
+@pytest.mark.parametrize(
+    ("summary", "rows", "expected_success"),
+    [
+        ({"total": 0, "pass": 0, "fail": 0, "skip": 0, "deferred": 0}, None, False),
+        ({"total": 1, "pass": 0, "fail": 0, "skip": 1, "deferred": 0}, None, False),
+        ({"total": 1, "pass": 0, "fail": 0, "skip": 0, "deferred": 1}, None, False),
+        ({"total": 2, "pass": 1, "fail": 0, "skip": 0, "deferred": 0}, None, False),
+        ({"total": 1, "pass": "1", "fail": 0, "skip": 0, "deferred": 0}, None, False),
+        (
+            {"total": 2, "pass": 1, "fail": 0, "skip": 1, "deferred": 0},
+            [{"status": "pass"}, {"status": "skip"}],
+            True,
+        ),
+        (
+            {"total": 2, "pass": 1, "fail": 1, "skip": 0, "deferred": 0},
+            [{"status": "pass"}, {"status": "fail"}],
+            False,
+        ),
+        (
+            {"total": 2, "pass": 1, "fail": 0, "skip": 1, "deferred": 0},
+            [{"status": "pass"}, {"status": "deferred"}],
+            False,
+        ),
+    ],
+    ids=[
+        "empty-report",
+        "all-skipped",
+        "all-deferred",
+        "inconsistent-counts",
+        "malformed-count",
+        "pass-with-skip",
+        "failed-row",
+        "rows-summary-mismatch",
+    ],
+)
+def test_tier_gamma_report_policy(
+    tmp_path: Path,
+    summary: dict[str, object],
+    rows: list[dict[str, str]] | None,
+    expected_success: bool,
+) -> None:
+    report: dict[str, object] = {"generated": int(time.time()), "summary": summary}
+    if rows is not None:
+        report["rows"] = rows
+    root, env = _make_tree(tmp_path, report)
+
+    result = _run(root, env, "--dry-run")
+    output = result.stdout + result.stderr
+
+    assert (result.returncode == 0) is expected_success, output
+    if expected_success:
+        assert "1 pass, 1 skip, 0 deferred; no failed rows" in output
+        assert "all-pass" not in output.lower()
+    else:
+        assert "Release check FAILED" in output
 
 
 def test_git_cleanliness_ignores_only_generated_paths(tmp_path: Path) -> None:
