@@ -420,6 +420,26 @@ def test_authenticated_manifest_signer_must_match_exact_release_identity(
     assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
 
 
+def test_authenticated_manifest_rejects_forged_issuer_before_artifact_io(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_manifest()
+    payload["signer_issuer"] = "https://issuer.attacker.example"
+    env, curl_log, cosign_log = _bootstrap_env(tmp_path, json.dumps(payload).encode(), cosign_rc=0)
+
+    proc = _run_bootstrap(env)
+
+    assert proc.returncode != 0
+    assert "authenticated release manifest failed strict policy validation" in proc.stderr
+    assert curl_log.read_text(encoding="utf-8").splitlines() == [
+        "https://releases.hal0.dev/stable.json",
+        "https://releases.hal0.dev/stable.json.bundle",
+    ]
+    cosign_args = cosign_log.read_text(encoding="utf-8").splitlines()
+    assert cosign_args.count("verify-blob") == 1
+    assert cosign_args[5:7] == ["--certificate-oidc-issuer", _CANONICAL_ISSUER]
+
+
 @pytest.mark.parametrize(
     "manifest",
     [

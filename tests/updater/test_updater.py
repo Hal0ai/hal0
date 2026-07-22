@@ -868,6 +868,46 @@ def test_authenticated_manifest_rejects_broad_signer_before_exact_reverify(
     assert identities == [updater_module.manifest_admission_identity("stable")]
 
 
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_authenticated_manifest_rejects_forged_issuer_before_artifact_download(
+    operation: str,
+    synthetic_release: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = synthetic_release["payload"]
+    payload["signer_issuer"] = "https://issuer.attacker.example"
+    synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
+    verified_issuers: list[str] = []
+    downloads: list[str] = []
+    original_download = updater_module._download
+
+    def record_verify(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        verified_issuers.append(issuer)
+
+    async def record_download(url: str, destination: Path) -> None:
+        downloads.append(url)
+        await original_download(url, destination)
+
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
+    monkeypatch.setattr(updater_module, "_download", record_download)
+
+    with pytest.raises(UpdateManifestInvalid, match="signer_issuer"):
+        asyncio.run(getattr(Updater(channel="stable"), operation)())
+
+    manifest_path = synthetic_release["manifest_path"]
+    assert verified_issuers == [updater_module._MANIFEST_SIGNER_ISSUER]
+    assert downloads == [f"{manifest_path}.bundle"]
+    assert not updater_module._cache_dir(synthetic_release["version"]).exists()
+    assert not _current_symlink().exists()
+
+
 @pytest.mark.parametrize(
     ("channel", "accepted", "rejected"),
     [
@@ -1501,6 +1541,67 @@ def test_commit_rejects_cached_manifest_for_different_version(
         "manifest_version": "0.0.2",
     }
     assert not _current_symlink().exists()
+
+
+def test_commit_revalidates_cached_manifest_channel_before_activation(
+    synthetic_preview_release: dict[str, Any],
+    cosign_skip: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = synthetic_preview_release["version"]
+    asyncio.run(Updater(channel="preview").prepare())
+    side_effects: list[str] = []
+
+    def unexpected_migration(*args: Any, **kwargs: Any) -> tuple[int, int]:
+        side_effects.append("migration")
+        return (1, 1)
+
+    def unexpected_swap(*args: Any, **kwargs: Any) -> None:
+        side_effects.append("symlink")
+
+    monkeypatch.setattr(updater_module, "_maybe_run_config_migrations", unexpected_migration)
+    monkeypatch.setattr(updater_module, "_atomic_symlink_swap", unexpected_swap)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").commit(version))
+
+    assert exc_info.value.details["channel"] == "stable"
+    assert side_effects == []
+    assert not _current_symlink().exists()
+    assert _versioned_install_dir(version).is_dir()
+
+
+def test_preview_commit_accepts_promoted_stable_manifest(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
+) -> None:
+    version = "99.0.0"
+    artifacts = tmp_path / "promoted-stable-artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "preview.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={"channel": "preview", "release_kind": "stable"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(
+        updater_module,
+        "_reinstall_into_venv",
+        lambda install_dir, *, job_id=None: None,
+    )
+
+    updater = Updater(channel="preview")
+    asyncio.run(updater.prepare())
+    committed = asyncio.run(updater.commit(version))
+
+    assert committed["version"] == version
+    assert Path(os.readlink(_current_symlink())).name == f"hal0-{version}"
 
 
 def test_prepare_then_commit_swaps(synthetic_release: dict[str, Any], cosign_skip: None) -> None:

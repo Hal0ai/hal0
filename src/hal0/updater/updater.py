@@ -830,6 +830,15 @@ async def _fetch_verified_release_manifest(
                     "manifest_signer_identity": manifest.signer_identity,
                 },
             )
+        if manifest.signer_issuer != _MANIFEST_SIGNER_ISSUER:
+            raise UpdateManifestInvalid(
+                "release manifest signer_issuer does not match the pinned issuer",
+                details={
+                    "channel": channel,
+                    "expected_signer_issuer": _MANIFEST_SIGNER_ISSUER,
+                    "manifest_signer_issuer": manifest.signer_issuer,
+                },
+            )
 
         if exact_identity != admission_identity:
             await asyncio.to_thread(
@@ -1836,7 +1845,7 @@ class Updater:
             tarball_path,
             bundle_path,
             identity_regexp=expected_identity,
-            issuer=manifest.signer_issuer,
+            issuer=_MANIFEST_SIGNER_ISSUER,
             job_id=self.job_id,
         )
 
@@ -1895,6 +1904,13 @@ class Updater:
                     "manifest_version": manifest.version,
                 },
             )
+        try:
+            validate_manifest_for_channel(manifest, self.channel)
+        except ValueError as exc:
+            raise UpdateManifestInvalid(
+                f"cached manifest is not accepted for channel {self.channel!r}: {exc}",
+                details={"channel": self.channel, "error": str(exc)},
+            ) from exc
         log.info("updater.commit_start", job_id=self.job_id, version=target_version)
 
         # Step 7: config migrations.

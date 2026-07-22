@@ -173,7 +173,9 @@ validate_manifest_for_channel() {
     # This is deliberately one fail-closed jq policy pass over the exact bytes
     # authenticated above. It emits a normalized manifest only when every
     # bootstrap-required field and channel/kind/stage relationship is valid.
-    if ! jq -e -s --arg requested "${requested_channel}" '
+    if ! jq -e -s \
+            --arg requested "${requested_channel}" \
+            --arg trusted_issuer "${_MANIFEST_SIGNER_ISSUER}" '
         def nonempty_string: type == "string" and length > 0;
         select(length == 1)
         | .[0]
@@ -184,7 +186,7 @@ validate_manifest_for_channel() {
             and (.url | nonempty_string)
             and (.bundle_url | nonempty_string)
             and (.signer_identity | nonempty_string)
-            and (.signer_issuer | nonempty_string)
+            and .signer_issuer == $trusted_issuer
             and (try (.digest_sha256 | test("^(sha256:)?[0-9A-Fa-f]{64}$")) catch false)
             and (.channel == "stable" or .channel == "preview" or .channel == "nightly")
             and (.release_kind == "stable" or .release_kind == "preview" or .release_kind == "nightly")
@@ -257,14 +259,14 @@ fetch_sidecar() {
 }
 
 cosign_verify() {
-    local tarball="$1" bundle="$2" identity="$3" issuer="$4"
+    local tarball="$1" bundle="$2" identity="$3"
 
     command -v cosign >/dev/null 2>&1 \
         || die "cosign disappeared after release manifest verification — refusing to install"
 
     info "verifying signature with cosign keyless OIDC"
     info "  identity-regex: ${_C_DIM}${identity}${_C_RST}"
-    info "  issuer:         ${_C_DIM}${issuer}${_C_RST}"
+    info "  issuer:         ${_C_DIM}${_MANIFEST_SIGNER_ISSUER}${_C_RST}"
 
     # The authenticated manifest must provide a Sigstore bundle. Detached
     # signature/certificate sidecars are not an accepted bootstrap scheme.
@@ -272,7 +274,7 @@ cosign_verify() {
     if ! cosign verify-blob \
             "${verify_args[@]}" \
             --certificate-identity-regexp "${identity}" \
-            --certificate-oidc-issuer "${issuer}" \
+            --certificate-oidc-issuer "${_MANIFEST_SIGNER_ISSUER}" \
             "${tarball}" >/dev/null 2>&1; then
         die "cosign signature verification FAILED — refusing to install"
     fi
@@ -310,14 +312,13 @@ main() {
     local validated_manifest="${work}/manifest.validated.json"
     validate_manifest_for_channel "${manifest}" "${HAL0_CHANNEL}" "${validated_manifest}"
 
-    local version release_kind url bundle_url digest manifest_identity expected_identity issuer
+    local version release_kind url bundle_url digest manifest_identity expected_identity
     version="$(parse_manifest_field "${validated_manifest}" version)"
     release_kind="$(parse_manifest_field "${validated_manifest}" release_kind)"
     url="$(parse_manifest_field "${validated_manifest}" url)"
     bundle_url="$(parse_manifest_field "${validated_manifest}" bundle_url)"
     digest="$(parse_manifest_field "${validated_manifest}" digest_sha256)"
     manifest_identity="$(parse_manifest_field "${validated_manifest}" signer_identity)"
-    issuer="$(parse_manifest_field "${validated_manifest}" signer_issuer)"
     expected_identity="$(exact_manifest_identity "${release_kind}" "${version}")" \
         || die "validated release manifest has unsupported release identity policy"
     if [[ "${manifest_identity}" != "${expected_identity}" ]]; then
@@ -335,7 +336,7 @@ main() {
 
     local bundle="${tarball}.bundle"
     fetch_sidecar "signature bundle" "${bundle_url}" "${bundle}"
-    cosign_verify "${tarball}" "${bundle}" "${expected_identity}" "${issuer}"
+    cosign_verify "${tarball}" "${bundle}" "${expected_identity}"
 
     info "extracting tarball"
     local unpacked="${work}/unpacked"
