@@ -110,10 +110,17 @@ test.describe('ImageGen section — deferred row hidden', () => {
 })
 
 test.describe('Voice section — Kokoro label', () => {
-  test('Sub-text says "bundled voices (Kokoro v1)"', async ({ page }) => {
+  test('Default voice help identifies the bundled Kokoro v1 pack', async ({ page }) => {
     await page.goto('/#settings')
     await page.locator('.nav-item', { hasText: 'Voice' }).click()
-    await expect(page.locator('body')).toContainText('bundled voices (Kokoro v1)', { timeout: FIVE_S })
+    const defaultVoiceRow = page.locator('.settings-content .s-row').filter({
+      has: page.locator('.k > span', { hasText: /^Default voice$/ }),
+    })
+    await expect(defaultVoiceRow).toBeVisible()
+    await defaultVoiceRow.getByRole('button', { name: 'Info' }).click()
+    await expect(defaultVoiceRow.locator('.field-info-pop')).toContainText(
+      'bundled voices (Kokoro v1)',
+    )
   })
 })
 

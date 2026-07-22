@@ -94,9 +94,13 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots/primary')
-    // ctx_size lives in the now-collapsed Advanced section — expand it first.
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    const ctxInput = page.locator('.drawer .form-row', { hasText: 'ctx_size' }).locator('input')
+    const modelGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    })
+    const contextRow = modelGroup.locator('.form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Context$/ }),
+    })
+    const ctxInput = contextRow.locator('input')
     await expect(ctxInput).toBeVisible()
     await ctxInput.fill('16384')
     await page.locator('.drawer button:has-text("Save")').click()

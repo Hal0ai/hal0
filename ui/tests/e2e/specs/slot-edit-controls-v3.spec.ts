@@ -101,8 +101,11 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(input).toBeVisible()
     await expect(input).not.toHaveAttribute('readonly', '')
     await expect(input).toHaveValue('-1')
-    const row = page.locator('.drawer .form-row', { hasText: 'NGL' })
-    await expect(row.locator('.form-lbl .sub')).toContainText('emits -ngl')
+    const row = page.locator('.drawer .form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Ngl$/i }),
+    })
+    await row.getByRole('button', { name: 'Info' }).click()
+    await expect(row.locator('.field-info-pop')).toContainText('emits -ngl')
   })
 
   test('C5 — editing NGL Save PUTs /config { n_gpu_layers } (top-level)', async ({ page }) => {
@@ -205,8 +208,13 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    // ctx_size is now in the Model group (directly visible, not inside Advanced).
-    const row = page.locator('.drawer .form-row', { hasText: 'ctx_size' })
+    // Context is directly visible in the Model group, not inside Advanced.
+    const modelGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    })
+    const row = modelGroup.locator('.form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Context$/ }),
+    })
     await expect(row).toBeVisible()
     await row.locator('input').fill('16384')
     await page.locator('.drawer button:has-text("Save")').click()
@@ -317,13 +325,15 @@ test.describe('Slot edit controls (/slots)', () => {
     resolved_command: ['img', '--host', '0.0.0.0', '--port', '8092', '--threads', '6'],
   }
 
-  test('extra_args is editable and labelled as a per-slot override', async ({ page }) => {
+  test('extra_args is editable and described as a per-slot override', async ({ page }) => {
     await seedSlots(page, [PRIMARY_WITH_ARGS, EMBED])
     await page.goto('/#slots/primary')
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    const row = page.locator('.drawer .form-row', { hasText: 'extra_args' })
+    const row = page.locator('.drawer .form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Extra Args$/ }),
+    })
     await expect(row).toBeVisible()
-    await expect(row.locator('.form-lbl .sub')).toContainText('per-slot override')
+    await row.getByRole('button', { name: 'Info' }).click()
+    await expect(row.locator('.field-info-pop')).toContainText('per-slot override')
     const input = page.getByTestId('extra-args-input')
     await expect(input).not.toHaveAttribute('readonly', '')
     await expect(input).toHaveValue('--threads 6')
