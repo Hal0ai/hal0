@@ -1524,16 +1524,18 @@ class Updater:
                 details={"channel": ch, "url": url, "error": str(exc)},
             ) from exc
 
-        # Soft-validate: some routes (test fixture) ship a minimal manifest
-        # with just {"version": "9.9.9"} — surface it without forcing a
-        # full schema match. Strict validation happens inside ``apply()``.
-        latest = ""
-        revoked = False
-        revoked_reason = ""
-        if isinstance(raw, dict):
-            latest = str(raw.get("version") or raw.get("latest_version") or "")
-            revoked = bool(raw.get("revoked", False))
-            revoked_reason = str(raw.get("revoked_reason") or "")
+        manifest = _parse_manifest(raw)
+        try:
+            validate_manifest_for_channel(manifest, ch)
+        except ValueError as exc:
+            raise UpdateManifestInvalid(
+                f"release manifest is not accepted for channel {ch!r}: {exc}",
+                details={"channel": ch, "error": str(exc)},
+            ) from exc
+
+        latest = manifest.version
+        revoked = manifest.revoked
+        revoked_reason = manifest.revoked_reason
         # A revoked (yanked/withdrawn) latest is never recommended — the
         # operator should not be nudged toward a release we've pulled. The
         # version is still surfaced (revoked + reason) so the dashboard can
@@ -1552,13 +1554,13 @@ class Updater:
             channel=ch,
             update_available=update_available,
             manifest_url=url,
-            digest_sha256=raw.get("digest_sha256") if isinstance(raw, dict) else None,
-            signer_identity=raw.get("signer_identity") if isinstance(raw, dict) else None,
-            min_data_version=raw.get("min_data_version") if isinstance(raw, dict) else None,
-            notes_url=raw.get("notes_url") if isinstance(raw, dict) else None,
+            digest_sha256=manifest.digest_sha256,
+            signer_identity=manifest.signer_identity,
+            min_data_version=manifest.min_data_version,
+            notes_url=manifest.notes_url,
             revoked=revoked,
             revoked_reason=revoked_reason,
-            raw_manifest=raw if isinstance(raw, dict) else {},
+            raw_manifest=raw,
         )
 
     # ── apply ──────────────────────────────────────────────────────────────────
@@ -2028,4 +2030,5 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "releases_url",
+    "validate_manifest_for_channel",
 ]

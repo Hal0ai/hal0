@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+import hal0.updater as updater_package
 import hal0.updater.updater as updater_module
 from hal0.updater import (
     ReleaseInfo,
@@ -494,6 +495,38 @@ def test_check_handles_missing_manifest(
     monkeypatch.setenv("HAL0_RELEASES_URL", str(tmp_path / "nope.json"))
     with pytest.raises(UpdateError):
         asyncio.run(Updater().check())
+
+
+def test_check_rejects_wrong_channel_manifest(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """check() rejects a manifest that prepare() would reject for the channel."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version="99.0.0")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version="99.0.0",
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").check())
+
+    assert exc_info.value.code == "system.update_manifest_invalid"
+    assert exc_info.value.details["channel"] == "stable"
+
+
+def test_validate_manifest_for_channel_is_public_export() -> None:
+    """The shared channel validator is available from the updater package."""
+    assert "validate_manifest_for_channel" in updater_package.__all__
+    assert (
+        updater_package.validate_manifest_for_channel
+        is updater_module.validate_manifest_for_channel
+    )
 
 
 def test_check_does_not_recommend_revoked_latest(
@@ -1079,23 +1112,21 @@ def test_rollback_repip_failure_re_swaps_symlink_forward(
 def test_check_uses_per_channel_url(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The check() method honours the channel argument when looking up the URL.
-
-    With HAL0_RELEASES_URL set to a file:// path, the channel parameter
-    doesn't rewrite the URL but the returned ReleaseInfo.channel reflects
-    the requested channel — exactly the contract the route layer needs.
-    """
+    """The check() method honours its channel argument when looking up the URL."""
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     tarball = _build_release_tarball(tmp=artifacts, version="0.0.1")
     manifest_path = artifacts / "latest.json"
-    _write_release_manifest(manifest_path=manifest_path, tarball=tarball, version="0.0.1")
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version="0.0.1",
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
 
-    info_stable = asyncio.run(Updater(channel="stable").check())
-    info_nightly = asyncio.run(Updater(channel="nightly").check())
-    assert info_stable.channel == "stable"
-    assert info_nightly.channel == "nightly"
+    info = asyncio.run(Updater(channel="stable").check(channel="nightly"))
+    assert info.channel == "nightly"
 
 
 # ── #510: dead-code sweep ──────────────────────────────────────────────────────
