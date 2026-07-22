@@ -14,6 +14,28 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text()
 
 
+def _workflow_command_lines(text: str) -> list[str]:
+    """Return action invocations and non-comment shell lines from every run block."""
+    command_lines: list[str] = []
+    run_indent: int | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if run_indent is not None:
+            if stripped and indent <= run_indent:
+                run_indent = None
+            elif stripped and not stripped.startswith("#"):
+                command_lines.append(stripped)
+                continue
+            else:
+                continue
+        if re.match(r"^\s*run:\s*\|\s*$", line):
+            run_indent = indent
+        elif re.match(r"^\s*uses:\s*", line):
+            command_lines.append(stripped)
+    return command_lines
+
+
 def test_release_resolves_policy_before_building() -> None:
     text = _workflow_text()
     assert "resolve:" in text
@@ -59,10 +81,7 @@ def test_release_checkouts_pin_canonical_repository_and_immutable_tag() -> None:
 
     assert text.count("uses: actions/checkout@") == 3
     assert len(checkout_with_blocks) == 3
-    assert all(
-        block.count("repository: Hal0ai/hal0") == 1
-        for block in checkout_with_blocks
-    )
+    assert all(block.count("repository: Hal0ai/hal0") == 1 for block in checkout_with_blocks)
     assert sum(block.count("repository: Hal0ai/hal0") for block in checkout_with_blocks) == 3
     assert text.count("ref: refs/tags/${{ needs.resolve.outputs.tag }}") == 2
     assert text.count("EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}") == 2
@@ -86,7 +105,7 @@ def test_preview_release_is_not_latest_and_upload_is_immutable() -> None:
     assert 'gh release upload "${TAG}" "${ASSETS[@]}"' in publish
     assert "--clobber" not in text
     assert 'gh release view "${TAG}"' in text
-    assert 'asset collision:' in text
+    assert "asset collision:" in text
 
 
 def test_release_policy_controls_manifests_and_pypi() -> None:
@@ -109,15 +128,38 @@ def test_release_signs_verifies_and_uploads_every_manifest_bundle() -> None:
 
 def test_channel_pointer_advancement_is_a_separate_final_gate() -> None:
     text = _workflow_text()
-    gate = text.split(
-        "      - name: Record separately verified channel pointer gate", 1
-    )[1].split("      - name: Summary", 1)[0]
+    gate = text.split("      - name: Record separately verified channel pointer gate", 1)[1].split(
+        "      - name: Summary", 1
+    )[0]
 
     assert "channel pointer" in text.lower()
     assert "separately verified" in text.lower()
     assert 'echo "Channel pointer advancement remains external' in gate
     for publishing_command in ("curl ", "gh ", "git push", "upload", "release create"):
         assert publishing_command not in gate
+
+    # The external pointer endpoint may be documented, but never executed by
+    # this workflow. This scans every job rather than trusting the named gate.
+    pointer_endpoint_mentions = [
+        line for line in text.splitlines() if "releases.hal0.dev" in line.lower()
+    ]
+    assert pointer_endpoint_mentions
+    assert all(line.lstrip().startswith("#") for line in pointer_endpoint_mentions)
+
+    command_surface = "\n".join(_workflow_command_lines(text)).lower()
+    external_pointer_markers = (
+        r"releases\.hal0\.dev",
+        r"\bhal0-web\b",
+        r"\bcloudflare\b",
+        r"\bwrangler\b",
+        r"\bapi\.cloudflare\.com\b",
+        r"\b(?:aws\s+s3|gsutil|rclone)\b",
+        r"\br2(?:://|\s+(?:bucket|object|put|copy))\b",
+        r"\b(?:advance|update|publish|promote|write|sync)[-_ ](?:channel[-_ ]?)?pointer\b",
+        r"\bchannel[-_ ]pointer[-_ ](?:advance|update|publish|promote|write|sync)\b",
+    )
+    for marker in external_pointer_markers:
+        assert re.search(marker, command_surface) is None, marker
 
 
 def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
@@ -126,9 +168,7 @@ def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
         "      - name: Stage release notes", 1
     )[0]
 
-    staged_roots = re.findall(
-        r'(?m)^\s*cp -a\s+(\S+)\s+"\$\{STAGE\}/"\s*$', stage
-    )
+    staged_roots = re.findall(r'(?m)^\s*cp -a\s+(\S+)\s+"\$\{STAGE\}/"\s*$', stage)
     assert staged_roots == [
         "src",
         "manifest.json",

@@ -1,11 +1,11 @@
 """Tests for hal0.updater.Updater — apply, rollback, check semantics.
 
 These tests run entirely against ``HAL0_HOME`` tmp dirs and ``file://``
-release manifests; no network, no real cosign. The ``cosign_skip`` fixture
-stubs :func:`hal0.updater.updater._verify_cosign` to a no-op for the
-happy-path tests so the swap orchestration can be exercised without a real
-signed artifact — cosign verification itself is mandatory in production and
-has no runtime bypass.
+release manifests; no network and no cryptographic claims. Most happy-path
+swap tests use the ``cosign_skip`` verification seam. Preview rehearsal tests
+instead execute the real :func:`hal0.updater.updater._verify_cosign` subprocess
+path against a hermetic fake ``cosign`` executable that validates and records
+its bundle/blob arguments; cosign remains mandatory in production.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -108,9 +109,9 @@ def _write_release_manifest(
 ) -> dict[str, Any]:
     """Write a full hal0.releases.v1 manifest pointing at file:// URLs.
 
-    The manifest carries a ``bundle_url`` (a Sigstore bundle that embeds the
-    cert + signature + Rekor SET, #1159) — the only signing scheme the
-    updater accepts.
+    The synthetic manifest has the production ``bundle_url`` shape, but its
+    placeholder bundle bytes are only for exercising test verification seams;
+    they are not cryptographic signatures.
     """
     bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
     if not bundle.exists():
@@ -137,6 +138,73 @@ def _write_release_manifest(
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     Path(f"{manifest_path}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
     return payload
+
+
+def _install_fake_cosign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reject: bool = False
+) -> Path:
+    """Install a hermetic cosign verifier that validates pairs and logs argv.
+
+    This exercises the updater's real subprocess wrapper, not cryptography.
+    The executable requires the exact production ``verify-blob`` argument
+    shape, existing files, and a sibling ``<blob>.bundle`` path.
+    """
+    fake_bin = tmp_path / "fake-cosign-bin"
+    fake_bin.mkdir(exist_ok=True)
+    log_path = tmp_path / "fake-cosign-invocations.jsonl"
+    fake = fake_bin / "cosign"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        + """import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if len(args) != 8 or args[0] != "verify-blob":
+    print(f"unexpected cosign argv: {args!r}", file=sys.stderr)
+    raise SystemExit(64)
+if args[1] != "--bundle" or args[3] != "--certificate-identity-regexp":
+    print(f"unexpected cosign flags: {args!r}", file=sys.stderr)
+    raise SystemExit(64)
+if args[5] != "--certificate-oidc-issuer":
+    print(f"unexpected cosign flags: {args!r}", file=sys.stderr)
+    raise SystemExit(64)
+
+bundle = Path(args[2])
+blob = Path(args[7])
+if bundle != Path(f"{blob}.bundle"):
+    print(f"bundle/blob mismatch: {bundle} != {blob}.bundle", file=sys.stderr)
+    raise SystemExit(65)
+if not blob.is_file() or not bundle.is_file():
+    print(f"missing verification input: blob={blob} bundle={bundle}", file=sys.stderr)
+    raise SystemExit(66)
+
+entry = {
+    "args": args,
+    "blob": str(blob),
+    "bundle": str(bundle),
+    "blob_sha256": hashlib.sha256(blob.read_bytes()).hexdigest(),
+    "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+}
+with Path(os.environ["HAL0_FAKE_COSIGN_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(entry) + "\\n")
+if os.environ.get("HAL0_FAKE_COSIGN_MODE") == "reject":
+    print("synthetic signature rejection", file=sys.stderr)
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("HAL0_FAKE_COSIGN_LOG", str(log_path))
+    monkeypatch.setenv("HAL0_FAKE_COSIGN_MODE", "reject" if reject else "accept")
+    return log_path
+
+
+def _fake_cosign_calls(log_path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
 
 @pytest.fixture
@@ -193,7 +261,11 @@ def synthetic_release(
 def synthetic_preview_release(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> dict[str, Any]:
-    """Build an entirely local alpha release and signed-manifest fixture."""
+    """Build local alpha bytes for the updater's synthetic verification seam.
+
+    The bundle files are placeholders accepted by the fake cosign executable;
+    this fixture does not represent or claim real cryptographic verification.
+    """
     artifacts = tmp_path / "preview-artifacts"
     artifacts.mkdir()
     version = "99.0.0-alpha.1"
@@ -526,11 +598,13 @@ def test_check_returns_typed_release_info(
     assert info.update_available is True or info.update_available is False  # type sanity
 
 
-def test_preview_check_and_prepare_verify_local_signed_manifest_without_activation(
-    synthetic_preview_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+def test_preview_check_and_prepare_exercise_cosign_subprocess_without_activation(
+    synthetic_preview_release: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Rehearse preview check + prepare using file:// artifacts only."""
-    verification_calls: list[tuple[str, bytes, bytes, str, str]] = []
+    """Rehearse preview verification plumbing with synthetic file:// inputs."""
+    cosign_log = _install_fake_cosign(tmp_path, monkeypatch)
     download_urls: list[str] = []
     original_download = updater_module._download
 
@@ -538,26 +612,7 @@ def test_preview_check_and_prepare_verify_local_signed_manifest_without_activati
         download_urls.append(url)
         await original_download(url, destination)
 
-    def record_verification(
-        blob: Path,
-        bundle: Path,
-        *,
-        identity_regexp: str,
-        issuer: str,
-        job_id: str | None = None,
-    ) -> None:
-        verification_calls.append(
-            (
-                blob.name,
-                blob.read_bytes(),
-                bundle.read_bytes(),
-                identity_regexp,
-                issuer,
-            )
-        )
-
     monkeypatch.setattr(updater_module, "_download", record_local_download)
-    monkeypatch.setattr(updater_module, "_verify_cosign", record_verification)
 
     updater = Updater(channel="preview")
     info = asyncio.run(updater.check())
@@ -583,22 +638,46 @@ def test_preview_check_and_prepare_verify_local_signed_manifest_without_activati
         payload["bundle_url"],
     ]
     assert all(url.startswith("file://") for url in download_urls)
-    assert [call[0] for call in verification_calls] == [
+
+    verification_calls = _fake_cosign_calls(cosign_log)
+    assert [Path(call["blob"]).name for call in verification_calls] == [
         "manifest.json",
         "manifest.json",
         synthetic_preview_release["tarball"].name,
     ]
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    manifest_bundle_digest = hashlib.sha256(
+        Path(f"{manifest_path}.bundle").read_bytes()
+    ).hexdigest()
     for call in verification_calls[:2]:
-        assert call[1] == manifest_path.read_bytes()
-        assert call[2] == Path(f"{manifest_path}.bundle").read_bytes()
-        assert call[3:] == (
+        assert call["blob_sha256"] == manifest_digest
+        assert call["bundle_sha256"] == manifest_bundle_digest
+        assert call["args"] == [
+            "verify-blob",
+            "--bundle",
+            call["bundle"],
+            "--certificate-identity-regexp",
             updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP,
+            "--certificate-oidc-issuer",
             updater_module._MANIFEST_SIGNER_ISSUER,
-        )
-    assert verification_calls[2][3:] == (
+            call["blob"],
+        ]
+
+    artifact_call = verification_calls[2]
+    cached_tarball = updater_module._cache_dir(version) / f"hal0-{version}.tar.gz"
+    assert artifact_call["blob"] == str(cached_tarball)
+    assert artifact_call["bundle"] == f"{cached_tarball}.bundle"
+    assert artifact_call["blob_sha256"] == _sha256_of(synthetic_preview_release["tarball"])
+    assert artifact_call["args"] == [
+        "verify-blob",
+        "--bundle",
+        str(Path(f"{cached_tarball}.bundle")),
+        "--certificate-identity-regexp",
         payload["signer_identity"],
+        "--certificate-oidc-issuer",
         payload["signer_issuer"],
-    )
+        str(cached_tarball),
+    ]
 
 
 @pytest.mark.parametrize("operation", ["check", "prepare"])
@@ -606,8 +685,10 @@ def test_preview_manifest_verification_failure_leaves_no_staged_state(
     operation: str,
     synthetic_preview_release: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """A rejected channel-manifest bundle cannot reach artifact staging."""
+    """A fake-cosign rejection cannot reach artifact staging or activation."""
+    cosign_log = _install_fake_cosign(tmp_path, monkeypatch, reject=True)
     download_urls: list[str] = []
     original_download = updater_module._download
 
@@ -615,11 +696,7 @@ def test_preview_manifest_verification_failure_leaves_no_staged_state(
         download_urls.append(url)
         await original_download(url, destination)
 
-    def reject_manifest(*args: Any, **kwargs: Any) -> None:
-        raise UpdateCosignFailed("local rehearsal rejected manifest signature")
-
     monkeypatch.setattr(updater_module, "_download", record_local_download)
-    monkeypatch.setattr(updater_module, "_verify_cosign", reject_manifest)
 
     updater = Updater(channel="preview")
     with pytest.raises(UpdateCosignFailed):
@@ -628,7 +705,9 @@ def test_preview_manifest_verification_failure_leaves_no_staged_state(
     version = synthetic_preview_release["version"]
     manifest_path = synthetic_preview_release["manifest_path"]
     assert download_urls == [f"{manifest_path.as_uri()}.bundle"]
+    assert len(_fake_cosign_calls(cosign_log)) == 1
     assert not updater_module._cache_dir(version).exists()
+    assert not updater_module._manifest_cache_path(version).exists()
     assert not _versioned_install_dir(version).exists()
     assert not _current_symlink().is_symlink()
 

@@ -440,22 +440,32 @@ def test_route_validation_returns_typed_4xx(
     assert isinstance(envelope["error"]["details"], dict)
 
 
-def test_updater_channel_invalid_after_validation(slot_client: TestClient) -> None:
-    """updater.py:331 — Hal0Config rejecting a merged channel value surfaces
-    as ``channel.invalid`` (400), not as a 500.
+def test_updater_channel_invalid_after_validation(
+    slot_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The valid nightly channel is checked and persisted without network I/O.
 
-    This path is hard to trigger via the public PUT because the prior
-    allowlist check (line 318 → ``channel.unknown``) catches every bad
-    value first. We exercise it by stuffing a synthetic config into
-    app.state where ``model_dump`` produces a payload that re-validates
-    cleanly, then making sure the route doesn't 500 on the happy path —
-    a regression here would mean the secondary validation try/except
-    swallowed the wrong exception class.
+    The real HTTP route, allowlist, config merge, pydantic validation, and
+    atomic persistence path all run. Only the updater's remote manifest check
+    is replaced with a recording async seam so this happy path is hermetic.
     """
-    # The happy-path call must still 200 — covers the "no exception" branch.
+    checked_channels: list[str] = []
+
+    async def record_check(updater: Any) -> None:
+        checked_channels.append(updater.channel)
+
+    monkeypatch.setattr("hal0.api.routes.updater.Updater.check", record_check)
+
     r = slot_client.put("/api/updates/channel", json={"channel": "nightly"})
+
     assert r.status_code == 200, r.text
     assert r.json() == {"channel": "nightly"}
+    assert checked_channels == ["nightly"]
+    assert slot_client.app.state.hal0_config.telemetry.channel == "nightly"
+
+    from hal0.config.loader import load_hal0_config
+
+    assert load_hal0_config().telemetry.channel == "nightly"
 
 
 def test_models_unknown_id_returns_404_not_found(slot_client: TestClient) -> None:
