@@ -789,15 +789,16 @@ def test_commit_route_requires_version(isolated_client: TestClient) -> None:
         ("v1.2.3", "1.2.3"),
         ("1.2.3-rc.1", "1.2.3-rc.1"),
         ("1.2.3-nightly.20260721060000", "1.2.3-nightly.20260721060000"),
+        ("1.2.3-nightly.20260721", "1.2.3-nightly.20260721"),
     ],
 )
-def test_commit_route_accepts_canonical_version_before_queueing(
+def test_commit_route_accepts_supported_version_before_queueing(
     supplied: str,
     normalized: str,
     isolated_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Canonical versions queue, including compatible single-leading-v input."""
+    """Current and legacy-compatible versions queue after leading-v normalization."""
     from hal0.api.routes import updater as u_mod
 
     def discard_task(request: object, coro: Any) -> None:
@@ -821,6 +822,9 @@ def test_commit_route_accepts_canonical_version_before_queueing(
         "/tmp/outside",
         " 1.2.3 ",
         "1.2.3-preview.1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
     ],
 )
 def test_commit_route_rejects_invalid_version_before_queueing(

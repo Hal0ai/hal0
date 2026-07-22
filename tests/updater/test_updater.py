@@ -352,6 +352,19 @@ def test_manifest_schema_accepts_canonical_release_versions(version: str) -> Non
     assert manifest.version == version
 
 
+def test_manifest_schema_accepts_legacy_date_only_nightly_version() -> None:
+    version = "1.2.3-nightly.20260721"
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "version": version,
+            "channel": "nightly",
+            "release_kind": "nightly",
+        }
+    )
+    assert manifest.version == version
+
+
 @pytest.mark.parametrize(
     "version",
     [
@@ -362,6 +375,11 @@ def test_manifest_schema_accepts_canonical_release_versions(version: str) -> Non
         " 1.2.3 ",
         "1.2.3-preview.1",
         "1.2.3-alpha1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
+        "1.2.3-nightly.2026072106000",
+        "1.2.3-nightly.202607210600000",
     ],
 )
 def test_manifest_schema_rejects_hostile_or_noncanonical_versions(version: str) -> None:
@@ -1173,6 +1191,9 @@ def test_prepare_rejects_mismatched_pin_before_staging_paths(
         "/tmp/outside",
         " 0.0.1 ",
         "1.2.3-preview.1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
     ],
 )
 def test_prepare_rejects_invalid_pin_before_staging_paths(
@@ -1242,6 +1263,41 @@ def test_prepare_matching_pin_stages_authenticated_manifest_version(
     assert res["version"] == "0.0.1"
     assert _versioned_install_dir("0.0.1").is_dir()
     assert updater_module._manifest_cache_path("0.0.1").is_file()
+
+
+def test_legacy_nightly_exact_prepare_pin_and_commit_are_accepted(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
+) -> None:
+    """Legacy date-only nightlies remain readable, stageable, and installable."""
+    version = "1.2.3-nightly.20260721"
+    artifacts = tmp_path / "legacy-nightly-artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "nightly.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(
+        updater_module,
+        "_reinstall_into_venv",
+        lambda install_dir, *, job_id=None: None,
+    )
+
+    updater = Updater(channel="nightly")
+    prepared = asyncio.run(updater.prepare(version))
+    committed = asyncio.run(updater.commit(version))
+
+    assert prepared["version"] == version
+    assert committed["version"] == version
+    assert Path(os.readlink(_current_symlink())).name == f"hal0-{version}"
 
 
 def test_apply_mismatched_pin_never_commits(
@@ -1317,6 +1373,9 @@ def test_commit_without_prepare_raises(tmp_hal0_home: str, monkeypatch: pytest.M
         "/tmp/outside",
         " 1.2.3 ",
         "1.2.3-preview.1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
     ],
 )
 def test_commit_rejects_invalid_version_before_any_staging_path(

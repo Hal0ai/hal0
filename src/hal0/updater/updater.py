@@ -157,17 +157,30 @@ class UpdateRollbackUnavailable(UpdateError):
 # ── Release-manifest schema (pydantic) ─────────────────────────────────────────
 
 
-def validate_release_version(version: str) -> str:
-    """Return an exact supported release version or raise ``ValueError``.
+# Read/install compatibility for nightly manifests published before the current
+# 14-digit timestamp policy. This is deliberately anchored and ASCII-only so the
+# updater can safely reuse the value in cache/install paths without making legacy
+# 8-digit tags valid for new publication through ReleasePolicy.
+_LEGACY_NIGHTLY_VERSION_RE = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}$"
+)
 
-    ReleasePolicy is the stdlib source of truth shared with release publishing;
-    updater paths only accept its canonical, leading-``v``-free version form.
+
+def validate_release_version(version: str) -> str:
+    """Return an exact supported updater version or raise ``ValueError``.
+
+    ReleasePolicy remains the source of truth for every currently publishable
+    version. The updater additionally accepts the documented, path-safe legacy
+    nightly read/install form ``X.Y.Z-nightly.YYYYMMDD`` for compatibility with
+    existing manifests and staged releases.
     """
     if not isinstance(version, str):
         raise ValueError(f"release version must be a string, got {type(version).__name__}")
     try:
         policy = ReleasePolicy.from_tag(f"v{version}")
     except ReleaseTagError as exc:
+        if _LEGACY_NIGHTLY_VERSION_RE.fullmatch(version):
+            return version
         raise ValueError(f"unsupported release version: {version!r}") from exc
     if policy.version != version:
         raise ValueError(f"noncanonical release version: {version!r}")
