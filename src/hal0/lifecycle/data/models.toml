@@ -5,8 +5,8 @@ generated_format = "canonical-json-v1"
 
 [[models]]
 id = "hal0-brain-rocmfpx-agent"
-source = "Hal0ai/hal0-brain-sft-fpx8-agent"
-revision = "be851673c0356437909833afe3a2fcd67803b883"
+source = "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
+revision = "29b846147f30fc631e163a493e9d3d537df474a9"
 architecture = "llama"
 formats = ["rocmfpx-gguf"]
 capabilities = ["chat", "tool-use"]
@@ -26,7 +26,7 @@ validate_tool_schema = true
 stop_after_complete_call = true
 
 [[models.files]]
-filename = "model.gguf"
+filename = "hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf"
 sha256 = "eeb38e45877d26a5923d2ec22e1c887a0b12f0c40f9df72015bd73f11d1263e4"
 size_bytes = 1144682016
 format = "rocmfpx-gguf"
