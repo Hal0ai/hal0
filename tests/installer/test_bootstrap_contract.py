@@ -16,14 +16,30 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BOOTSTRAP = _REPO_ROOT / "installer" / "bootstrap.sh"
-_CANONICAL_IDENTITY = (
+_IDENTITY_PREFIX = (
     r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
     r"\.github/workflows/release\.yml@"
-    r"(refs/tags/v\d+\.\d+\.\d+"
-    r"(-(alpha|beta|rc)\.(0|[1-9]\d*)|-nightly\.\d{14})?"
-    r"|refs/heads/main)$"
 )
+_STABLE_ADMISSION = _IDENTITY_PREFIX + r"refs/tags/v\d+\.\d+\.\d+$"
+_PREVIEW_ADMISSION = (
+    _IDENTITY_PREFIX + r"refs/tags/v\d+\.\d+\.\d+(-(alpha|beta|rc)\.(0|[1-9]\d*))?$"
+)
+_MAIN_IDENTITY = _IDENTITY_PREFIX + r"refs/heads/main$"
 _CANONICAL_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+def _admission_identity(channel: str) -> str:
+    return {
+        "stable": _STABLE_ADMISSION,
+        "preview": _PREVIEW_ADMISSION,
+        "nightly": _MAIN_IDENTITY,
+    }[channel]
+
+
+def _exact_identity(release_kind: str, version: str) -> str:
+    if release_kind == "nightly":
+        return _MAIN_IDENTITY
+    return _IDENTITY_PREFIX + "refs/tags/v" + version.replace(".", r"\.") + "$"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -146,17 +162,18 @@ def _valid_manifest(
     channel: str = "stable",
     release_kind: str = "stable",
     prerelease_stage: str | None = None,
+    version: str = "1.2.3",
 ) -> dict[str, object]:
     return {
         "_schema": "hal0.releases.v1",
-        "version": "1.2.3",
+        "version": version,
         "channel": channel,
         "release_kind": release_kind,
         "prerelease_stage": prerelease_stage,
         "url": "https://fixtures.example/hal0.tar.gz",
         "bundle_url": "https://fixtures.example/hal0.tar.gz.bundle",
         "digest_sha256": "A" * 64,
-        "signer_identity": _CANONICAL_IDENTITY,
+        "signer_identity": _exact_identity(release_kind, version),
         "signer_issuer": _CANONICAL_ISSUER,
     }
 
@@ -230,6 +247,25 @@ def test_bootstrap_preserves_override_and_places_bundle_before_query(
     ]
 
 
+@pytest.mark.parametrize("channel", ["stable", "preview", "nightly"])
+def test_bootstrap_first_verification_identity_depends_only_on_requested_channel(
+    tmp_path: Path, channel: str
+) -> None:
+    forged = _valid_manifest(
+        channel="nightly",
+        release_kind="nightly",
+        version="1.2.3-nightly.20260722123000",
+    )
+    env, _, cosign_log = _bootstrap_env(tmp_path, json.dumps(forged).encode(), cosign_rc=1)
+    env["HAL0_CHANNEL"] = channel
+
+    proc = _run_bootstrap(env)
+
+    assert proc.returncode != 0
+    args = cosign_log.read_text(encoding="utf-8").splitlines()
+    assert args[3:5] == ["--certificate-identity-regexp", _admission_identity(channel)]
+
+
 def test_bootstrap_verifies_manifest_before_parsing_or_fetching_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -253,7 +289,7 @@ def test_bootstrap_verifies_manifest_before_parsing_or_fetching_artifacts(
     assert args[0] == "verify-blob"
     assert args[1] == "--bundle"
     assert args[2].endswith("/manifest.json.bundle")
-    assert args[3:5] == ["--certificate-identity-regexp", _CANONICAL_IDENTITY]
+    assert args[3:5] == ["--certificate-identity-regexp", _STABLE_ADMISSION]
     assert args[5:7] == ["--certificate-oidc-issuer", _CANONICAL_ISSUER]
     assert args[-1].endswith("/manifest.json")
 
@@ -267,6 +303,28 @@ def test_bootstrap_verifies_manifest_before_parsing_or_fetching_artifacts(
         pytest.param({}, {"version"}, "stable", id="version-missing"),
         pytest.param({"version": ""}, set(), "stable", id="version-empty"),
         pytest.param({"version": 1}, set(), "stable", id="version-non-string"),
+        pytest.param({"version": "1.2.3-rc.1"}, set(), "stable", id="stable-version-preview"),
+        pytest.param(
+            {
+                "version": "1.2.3",
+                "channel": "preview",
+                "release_kind": "preview",
+                "prerelease_stage": "rc",
+            },
+            set(),
+            "preview",
+            id="preview-version-final",
+        ),
+        pytest.param(
+            {
+                "version": "1.2.3-nightly.20260722123",
+                "channel": "nightly",
+                "release_kind": "nightly",
+            },
+            set(),
+            "nightly",
+            id="nightly-version-wrong-width",
+        ),
         pytest.param({}, {"url"}, "stable", id="url-missing"),
         pytest.param({"url": ""}, set(), "stable", id="url-empty"),
         pytest.param({"url": []}, set(), "stable", id="url-non-string"),
@@ -347,6 +405,21 @@ def test_authenticated_malformed_manifest_rejected_before_artifact_io(
     assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
 
 
+def test_authenticated_manifest_signer_must_match_exact_release_identity(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_manifest()
+    payload["signer_identity"] = _PREVIEW_ADMISSION
+    env, curl_log, cosign_log = _bootstrap_env(tmp_path, json.dumps(payload).encode(), cosign_rc=0)
+
+    proc = _run_bootstrap(env)
+
+    assert proc.returncode != 0
+    assert "signer_identity does not match exact release identity" in proc.stderr
+    assert len(curl_log.read_text(encoding="utf-8").splitlines()) == 2
+    assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
+
+
 @pytest.mark.parametrize(
     "manifest",
     [
@@ -357,9 +430,7 @@ def test_authenticated_malformed_manifest_rejected_before_artifact_io(
             id="invalid-then-valid",
         ),
         pytest.param(
-            json.dumps(_valid_manifest()).encode()
-            + b"\n"
-            + json.dumps(_valid_manifest()).encode(),
+            json.dumps(_valid_manifest()).encode() + b"\n" + json.dumps(_valid_manifest()).encode(),
             id="valid-then-valid",
         ),
         pytest.param(
@@ -427,7 +498,7 @@ def test_authenticated_option_like_artifact_urls_are_explicit_curl_urls(
 
     assert proc.returncode != 0
     assert curl_log.read_text(encoding="utf-8").splitlines()[-1] == hostile_url
-    assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 1
+    assert cosign_log.read_text(encoding="utf-8").splitlines().count("verify-blob") == 2
     assert not Path(env["CONFIG_READ_LOG"]).exists()
     assert not install_log.exists()
     assert not list(tmp_path.glob("hal0-install-*/artifact.tar.gz.bundle"))
@@ -476,8 +547,15 @@ def test_bootstrap_cleanup_does_not_evaluate_hostile_tmpdir(
             "nightly",
             "nightly",
             None,
-            "1.2.3-nightly.202607221230",
+            "1.2.3-nightly.20260722123000",
             id="nightly",
+        ),
+        pytest.param(
+            "nightly",
+            "nightly",
+            None,
+            "1.2.3-nightly.20260722",
+            id="legacy-nightly",
         ),
         pytest.param("preview", "stable", None, "1.2.3", id="promoted-stable"),
     ],
@@ -517,7 +595,7 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
             "url": artifact_url,
             "bundle_url": artifact_bundle_url,
             "digest_sha256": f"sha256:{digest.upper()}",
-            "signer_identity": _CANONICAL_IDENTITY,
+            "signer_identity": _exact_identity(release_kind, version),
             "signer_issuer": _CANONICAL_ISSUER,
         }
     ).encode()
@@ -547,18 +625,31 @@ printf 'arg=%s\\n' "$@" >> "$INSTALL_LOG"
         artifact_bundle_url,
     ]
     cosign_args = cosign_log.read_text(encoding="utf-8").splitlines()
-    assert cosign_args.count("verify-blob") == 2
+    expected_identity = _exact_identity(release_kind, version)
+    expected_verify_count = 2 if channel == "nightly" else 3
+    assert cosign_args.count("verify-blob") == expected_verify_count
     assert cosign_args[1] == "--bundle"
     assert cosign_args[2].endswith("/manifest.json.bundle")
-    assert cosign_args[3:5] == ["--certificate-identity-regexp", _CANONICAL_IDENTITY]
+    assert cosign_args[3:5] == [
+        "--certificate-identity-regexp",
+        _admission_identity(channel),
+    ]
     assert cosign_args[5:7] == ["--certificate-oidc-issuer", _CANONICAL_ISSUER]
     assert cosign_args[7].endswith("/manifest.json")
-    artifact_verify = cosign_args.index("verify-blob", 1)
+    if channel == "nightly":
+        artifact_verify = cosign_args.index("verify-blob", 1)
+    else:
+        exact_verify = cosign_args.index("verify-blob", 1)
+        assert cosign_args[exact_verify + 3 : exact_verify + 5] == [
+            "--certificate-identity-regexp",
+            expected_identity,
+        ]
+        artifact_verify = cosign_args.index("verify-blob", exact_verify + 1)
     assert cosign_args[artifact_verify + 1] == "--bundle"
     assert cosign_args[artifact_verify + 2].endswith("/artifact.tar.gz.bundle")
     assert cosign_args[artifact_verify + 3 : artifact_verify + 5] == [
         "--certificate-identity-regexp",
-        _CANONICAL_IDENTITY,
+        expected_identity,
     ]
     assert cosign_args[artifact_verify + 5 : artifact_verify + 7] == [
         "--certificate-oidc-issuer",

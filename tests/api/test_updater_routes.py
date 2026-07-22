@@ -51,7 +51,10 @@ def isolated_client(
             "url": "https://example.test/hal0-9.9.9.tar.gz",
             "bundle_url": "https://example.test/hal0-9.9.9.tar.gz.bundle",
             "digest_sha256": "0" * 64,
-            "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
+            "signer_identity": (
+                r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+                r"\.github/workflows/release\.yml@refs/tags/v9\.9\.9$"
+            ),
         },
     )
     Path(f"{manifest}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
@@ -359,7 +362,15 @@ def test_channel_put_persists_to_hal0_toml(isolated_client: TestClient, tmp_hal0
     """PUT /api/updates/channel writes telemetry.channel into hal0.toml."""
     manifest_path = isolated_client.__dict__["_manifest_path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest.update(channel="nightly", release_kind="nightly")
+    manifest.update(
+        version="9.9.9-nightly.20260722123000",
+        channel="nightly",
+        release_kind="nightly",
+        signer_identity=(
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            r"\.github/workflows/release\.yml@refs/heads/main$"
+        ),
+    )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     r = isolated_client.put("/api/updates/channel", json={"channel": "nightly"})
@@ -387,6 +398,10 @@ def test_channel_put_accepts_preview(isolated_client: TestClient, tmp_hal0_home:
         channel="preview",
         release_kind="preview",
         prerelease_stage="alpha",
+        signer_identity=(
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            r"\.github/workflows/release\.yml@refs/tags/v9\.9\.9-alpha\.1$"
+        ),
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -481,6 +496,10 @@ def test_channel_put_rejects_signature_invalid_manifest_without_mutation(
         channel="preview",
         release_kind="preview",
         prerelease_stage="rc",
+        signer_identity=(
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            r"\.github/workflows/release\.yml@refs/tags/v9\.9\.9-rc\.1$"
+        ),
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 

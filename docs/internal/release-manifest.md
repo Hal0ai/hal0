@@ -26,7 +26,7 @@ iterations (v2, v3…) will use a distinct identifier.
 | `url`              | `str`    | Nonempty tarball download URL (https or file).           |
 | `bundle_url`       | `str`    | Nonempty, mandatory Sigstore artifact-bundle URL.        |
 | `digest_sha256`    | `str`    | 64 hex chars, optionally prefixed with `sha256:`.        |
-| `signer_identity`  | `str`    | Nonempty GitHub Actions OIDC subject regex for cosign.   |
+| `signer_identity`  | `str`    | Exact generated GitHub Actions OIDC subject regex.       |
 | `signer_issuer`    | `str`    | Nonempty OIDC issuer used for artifact verification.     |
 
 ## Optional fields
@@ -52,7 +52,7 @@ must be explicit nonempty strings in an authenticated pointer.
 
 ## Cross-field validation
 
-The pydantic model enforces these rules at parse time:
+Client schema and authenticated admission validation enforce these rules:
 
 1. **Preview coherence** — When `release_kind` is `"preview"`:
    - `prerelease_stage` must be one of `"alpha"`, `"beta"`, or `"rc"`.
@@ -64,6 +64,10 @@ The pydantic model enforces these rules at parse time:
      of an already-built stable artifact to preview before advancing stable.
    - Nightly artifacts have `release_kind: "nightly"`, no `prerelease_stage`,
      and target only the `nightly` pointer.
+   - Versions match their artifact kind: `X.Y.Z` for stable,
+     `X.Y.Z-(alpha|beta|rc).N` for preview, and
+     `X.Y.Z-nightly.YYYYMMDDHHMMSS` for current nightlies. Clients retain
+     read compatibility for legacy `X.Y.Z-nightly.YYYYMMDD` manifests.
 
 3. **Operator-migration safety** — When `operator_migrations` is non-empty:
    - `rollback_policy` must be `"backup-required"` or `"blocked"`.
@@ -79,19 +83,22 @@ artifact during promotion, but `stable.json` accepts only stable artifacts.
 Consequently, stable clients never consume preview artifacts.
 
 Each pointer has an exact sibling Sigstore bundle, for example
-`preview.json.bundle`. The bootstrap and updater download the manifest bytes
-and sibling bundle, then run `cosign verify-blob` with their client-pinned
-`.github/workflows/release.yml` identity and
-`https://token.actions.githubusercontent.com` issuer before trusting artifact
-URLs. The bootstrap performs this check before parsing the JSON; no manifest
-field can influence manifest verification. After authentication, one jq
-1.6-compatible fail-closed pass requires the exact schema, nonempty bootstrap
-strings, normalized digest, requested-channel equality, the stable/preview/
-nightly kind matrix, and preview-only alpha/beta/rc stage rules. The updater
-may decode for schema/channel rejection first but does not return or act on the
-manifest until authentication succeeds. The manifest's own `signer_identity`
-and `signer_issuer` fields become trusted only after that check. A missing
-`jq`, bundle, or `cosign`, or failed validation/verification aborts closed.
+`preview.json.bundle`. The bootstrap and updater download the exact manifest
+bytes and sibling bundle, then verify before parsing any JSON. The first
+identity is selected only from the locally requested channel: stable admits
+final `vX.Y.Z` tag identities, preview admits final or
+`vX.Y.Z-(alpha|beta|rc).N` tag identities, and nightly admits only
+`.github/workflows/release.yml@refs/heads/main`. Tag identities never admit a
+nightly manifest, and the main identity never admits stable or preview.
+
+After admission, schema/channel/version policy is validated, including the
+legacy 8-digit nightly read form. Clients derive the one exact expected
+identity from authenticated `release_kind` + `version`, require
+`signer_identity` to equal that generated contract, and reverify broader tag
+admissions with the exact escaped tag identity. Artifact verification uses
+that derived exact identity rather than a manifest-selected regex. Manifest
+verification pins `https://token.actions.githubusercontent.com`. A missing
+`jq`, bundle, or `cosign`, or failed validation or verification aborts closed.
 The artifact `bundle_url` is mandatory; bootstrap has no detached `.sig`/`.crt`
 fallback. Tarball digest and bundle verification then remain defense-in-depth.
 
@@ -137,7 +144,7 @@ update is offered.
   "url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz",
   "bundle_url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz.bundle",
   "digest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "signer_identity": "^https://github\\.example/haloai/hal0/.*"
+  "signer_identity": "^https://github\\.com/(Hal0ai|hal0ai)/hal0/\\.github/workflows/release\\.yml@refs/tags/v1\\.0\\.0$"
 }
 ```
 
@@ -157,7 +164,7 @@ stable classification:
   "url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz",
   "bundle_url": "https://releases.hal0.dev/v1.0.0/hal0.tar.gz.bundle",
   "digest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "signer_identity": "^https://github\\.example/haloai/hal0/.*"
+  "signer_identity": "^https://github\\.com/(Hal0ai|hal0ai)/hal0/\\.github/workflows/release\\.yml@refs/tags/v1\\.0\\.0$"
 }
 ```
 
@@ -176,6 +183,6 @@ stable classification:
   "url": "https://releases.hal0.dev/v1.0.0-alpha.1/hal0.tar.gz",
   "bundle_url": "https://releases.hal0.dev/v1.0.0-alpha.1/hal0.tar.gz.bundle",
   "digest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "signer_identity": "^https://github\\.example/haloai/hal0/.*"
+  "signer_identity": "^https://github\\.com/(Hal0ai|hal0ai)/hal0/\\.github/workflows/release\\.yml@refs/tags/v1\\.0\\.0-alpha\\.1$"
 }
 ```

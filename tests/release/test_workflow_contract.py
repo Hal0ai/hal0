@@ -47,6 +47,7 @@ def test_release_resolves_policy_before_building() -> None:
         "github_prerelease",
         "github_latest",
         "publish_pypi",
+        "signer_identity",
     ):
         assert f"{output}: ${{{{ steps.policy.outputs.{output} }}}}" in text
 
@@ -69,6 +70,24 @@ def test_resolve_uses_only_the_tag_namespace_and_exports_target_sha() -> None:
     assert 'git show-ref --verify --quiet "refs/tags/${TAG}"' in text
     assert 'git rev-parse "refs/tags/${TAG}^{commit}"' in text
     assert 'echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"' in text
+
+
+def test_resolve_enforces_event_and_ref_authority_for_each_release_kind() -> None:
+    text = _workflow_text()
+    policy = text.split("      - name: Verify requested tag and export policy", 1)[1].split(
+        "\n  release:", 1
+    )[0]
+
+    assert 'if [[ "${KIND}" == "nightly" ]]' in policy
+    assert '"${GITHUB_EVENT_NAME}" != "workflow_call"' in policy
+    assert '"${GITHUB_REF}" != "refs/heads/main"' in policy
+    assert (
+        '"${GITHUB_EVENT_NAME}" != "push" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch"'
+        in policy
+    )
+    assert '"${GITHUB_REF}" != "refs/tags/${TAG}"' in policy
+    assert "signer_identity=${IDENT_PREFIX}refs/heads/main$" in policy
+    assert "signer_identity=${IDENT_PREFIX}refs/tags/${ESCAPED_TAG}$" in policy
 
 
 def test_release_checkouts_pin_canonical_repository_and_immutable_tag() -> None:
@@ -122,8 +141,20 @@ def test_release_signs_verifies_and_uploads_every_manifest_bundle() -> None:
     assert 'ASSETS+=("${MANIFEST}" "${MANIFEST}.bundle")' in text
     assert "ReleaseManifest.model_validate(payload)" in text
     assert "refs/heads/main" in text
-    assert "refs/tags/v" in text
+    assert "refs/tags/${ESCAPED_TAG}" in text
     assert text.count("https://token.actions.githubusercontent.com") >= 3
+
+
+def test_generated_and_self_verified_identities_are_exact_policy_output() -> None:
+    text = _workflow_text()
+    assert "signer_identity: ${{ steps.policy.outputs.signer_identity }}" in text
+    assert text.count("SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}") >= 3
+    assert '"signer_identity": ident' in text
+    assert '--certificate-identity-regexp "${SIGNER_IDENTITY}"' in text
+    assert "tag-or-main" not in text
+    assert "|refs/heads/main" not in text
+    assert "refs/heads/main)$" not in text
+    assert "refs/tags/v[0-9]" not in text
 
 
 def test_channel_pointer_advancement_is_a_separate_final_gate() -> None:

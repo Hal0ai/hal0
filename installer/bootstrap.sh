@@ -39,10 +39,12 @@ IFS=$'\n\t'
 HAL0_CHANNEL="${HAL0_CHANNEL:-stable}"
 HAL0_RELEASES_URL="${HAL0_RELEASES_URL:-}"
 
-# Keep this trust root in lockstep with src/hal0/updater/updater.py. These
-# values authenticate the channel pointer itself; signer claims inside that
-# unauthenticated JSON are trusted only after this verification succeeds.
-_MANIFEST_SIGNER_IDENTITY_REGEXP='^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@(refs/tags/v\d+\.\d+\.\d+(-(alpha|beta|rc)\.(0|[1-9]\d*)|-nightly\.\d{14})?|refs/heads/main)$'
+# Keep these trust roots in lockstep with src/hal0/updater/updater.py. The
+# requested channel selects admission before any manifest JSON is parsed.
+_MANIFEST_IDENTITY_PREFIX='^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@'
+_STABLE_MANIFEST_ADMISSION_IDENTITY="${_MANIFEST_IDENTITY_PREFIX}refs/tags/v\\d+\\.\\d+\\.\\d+$"
+_PREVIEW_MANIFEST_ADMISSION_IDENTITY="${_MANIFEST_IDENTITY_PREFIX}refs/tags/v\\d+\\.\\d+\\.\\d+(-(alpha|beta|rc)\\.(0|[1-9]\\d*))?$"
+_NIGHTLY_MANIFEST_IDENTITY="${_MANIFEST_IDENTITY_PREFIX}refs/heads/main$"
 _MANIFEST_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
 
 # ── tiny output helpers ────────────────────────────────────────────────────
@@ -91,6 +93,37 @@ validate_channel() {
     esac
 }
 
+manifest_admission_identity() {
+    case "$1" in
+        stable) printf '%s\n' "${_STABLE_MANIFEST_ADMISSION_IDENTITY}" ;;
+        preview) printf '%s\n' "${_PREVIEW_MANIFEST_ADMISSION_IDENTITY}" ;;
+        nightly) printf '%s\n' "${_NIGHTLY_MANIFEST_IDENTITY}" ;;
+        *) return 1 ;;
+    esac
+}
+
+exact_manifest_identity() {
+    local release_kind="$1" version="$2" escaped_version
+    case "${release_kind}" in
+        stable)
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+            ;;
+        preview)
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.(0|[1-9][0-9]*)$ ]] \
+                || return 1
+            ;;
+        nightly)
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-nightly\.([0-9]{8}|[0-9]{14})$ ]] \
+                || return 1
+            printf '%s\n' "${_NIGHTLY_MANIFEST_IDENTITY}"
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+    escaped_version="${version//./\\.}"
+    printf '%srefs/tags/v%s$\n' "${_MANIFEST_IDENTITY_PREFIX}" "${escaped_version}"
+}
+
 resolve_release_manifest_url() {
     if [[ -z "${HAL0_RELEASES_URL}" ]]; then
         HAL0_RELEASES_URL="https://releases.hal0.dev/${HAL0_CHANNEL}.json"
@@ -118,7 +151,7 @@ fetch_manifest() {
 }
 
 verify_release_manifest() {
-    local manifest="$1" bundle="$2"
+    local manifest="$1" bundle="$2" identity="$3"
     command -v cosign >/dev/null 2>&1 \
         || die "cosign is required to verify the release manifest but is not installed.
    install it from https://docs.sigstore.dev/cosign/installation/"
@@ -126,7 +159,7 @@ verify_release_manifest() {
     info "verifying release manifest with pinned workflow identity"
     if ! cosign verify-blob \
             --bundle "${bundle}" \
-            --certificate-identity-regexp "${_MANIFEST_SIGNER_IDENTITY_REGEXP}" \
+            --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "${_MANIFEST_SIGNER_ISSUER}" \
             "${manifest}" >/dev/null 2>&1; then
         die "release manifest signature verification FAILED — refusing to trust artifact URLs"
@@ -168,6 +201,20 @@ validate_manifest_for_channel() {
                     or .prerelease_stage == "rc"
                 ))
                 or ((.release_kind == "stable" or .release_kind == "nightly") and .prerelease_stage == null)
+            )
+            and (
+                (.release_kind == "stable"
+                    and (try (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) catch false))
+                or (.release_kind == "preview" and (
+                    (.prerelease_stage == "alpha" and
+                        (try (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+-alpha\\.(0|[1-9][0-9]*)$")) catch false))
+                    or (.prerelease_stage == "beta" and
+                        (try (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+-beta\\.(0|[1-9][0-9]*)$")) catch false))
+                    or (.prerelease_stage == "rc" and
+                        (try (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+-rc\\.(0|[1-9][0-9]*)$")) catch false))
+                ))
+                or (.release_kind == "nightly" and
+                    (try (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+-nightly\\.([0-9]{8}|[0-9]{14})$")) catch false))
             )
         )
         | .digest_sha256 |= (ascii_downcase | sub("^sha256:"; ""))
@@ -235,6 +282,9 @@ cosign_verify() {
 # ── main ──────────────────────────────────────────────────────────────────
 main() {
     validate_channel
+    local admission_identity
+    admission_identity="$(manifest_admission_identity "${HAL0_CHANNEL}")" \
+        || die "could not derive manifest admission identity"
     banner
     preflight
     resolve_release_manifest_url
@@ -255,18 +305,27 @@ main() {
         "release manifest signature bundle" \
         "$(release_manifest_bundle_url "${HAL0_RELEASES_URL}")" \
         "${manifest_bundle}"
-    verify_release_manifest "${manifest}" "${manifest_bundle}"
+    verify_release_manifest "${manifest}" "${manifest_bundle}" "${admission_identity}"
 
     local validated_manifest="${work}/manifest.validated.json"
     validate_manifest_for_channel "${manifest}" "${HAL0_CHANNEL}" "${validated_manifest}"
 
-    local version url bundle_url digest identity issuer
+    local version release_kind url bundle_url digest manifest_identity expected_identity issuer
     version="$(parse_manifest_field "${validated_manifest}" version)"
+    release_kind="$(parse_manifest_field "${validated_manifest}" release_kind)"
     url="$(parse_manifest_field "${validated_manifest}" url)"
     bundle_url="$(parse_manifest_field "${validated_manifest}" bundle_url)"
     digest="$(parse_manifest_field "${validated_manifest}" digest_sha256)"
-    identity="$(parse_manifest_field "${validated_manifest}" signer_identity)"
+    manifest_identity="$(parse_manifest_field "${validated_manifest}" signer_identity)"
     issuer="$(parse_manifest_field "${validated_manifest}" signer_issuer)"
+    expected_identity="$(exact_manifest_identity "${release_kind}" "${version}")" \
+        || die "validated release manifest has unsupported release identity policy"
+    if [[ "${manifest_identity}" != "${expected_identity}" ]]; then
+        die "authenticated release manifest signer_identity does not match exact release identity"
+    fi
+    if [[ "${admission_identity}" != "${expected_identity}" ]]; then
+        verify_release_manifest "${manifest}" "${manifest_bundle}" "${expected_identity}"
+    fi
 
     info "release: ${_C_BLD}hal0 v${version}${_C_RST} (${HAL0_CHANNEL})"
 
@@ -276,7 +335,7 @@ main() {
 
     local bundle="${tarball}.bundle"
     fetch_sidecar "signature bundle" "${bundle_url}" "${bundle}"
-    cosign_verify "${tarball}" "${bundle}" "${identity}" "${issuer}"
+    cosign_verify "${tarball}" "${bundle}" "${expected_identity}" "${issuer}"
 
     info "extracting tarball"
     local unpacked="${work}/unpacked"

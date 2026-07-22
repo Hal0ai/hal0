@@ -76,6 +76,7 @@ jobs:
       github_prerelease: ${{ steps.policy.outputs.github_prerelease }}
       github_latest: ${{ steps.policy.outputs.github_latest }}
       publish_pypi: ${{ steps.policy.outputs.publish_pypi }}
+      signer_identity: ${{ steps.policy.outputs.signer_identity }}
       target_sha: ${{ steps.policy.outputs.target_sha }}
 
     steps:
@@ -136,6 +137,34 @@ jobs:
             echo "::error::input channel ${INPUT_CHANNEL} conflicts with tag policy ${KIND}"
             exit 1
           fi
+
+          # GitHub's keyless certificate binds the reusable workflow to the ref
+          # from which release.yml itself executes. Nightly is called from main;
+          # stable/preview execute directly at their immutable tag ref.
+          IDENT_PREFIX='^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@'
+          if [[ "${KIND}" == "nightly" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" != "workflow_call" ]]; then
+              echo "::error::nightly releases require workflow_call"
+              exit 1
+            fi
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "::error::nightly release workflow must execute from refs/heads/main"
+              exit 1
+            fi
+            signer_identity=${IDENT_PREFIX}refs/heads/main$
+          else
+            if [[ "${GITHUB_EVENT_NAME}" != "push" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+              echo "::error::${KIND} releases require push or workflow_dispatch"
+              exit 1
+            fi
+            if [[ "${GITHUB_REF}" != "refs/tags/${TAG}" ]]; then
+              echo "::error::${KIND} release workflow ref ${GITHUB_REF} must equal refs/tags/${TAG}"
+              exit 1
+            fi
+            ESCAPED_TAG="${TAG//./\\.}"
+            signer_identity=${IDENT_PREFIX}refs/tags/${ESCAPED_TAG}$
+          fi
+          echo "signer_identity=${signer_identity}" >> "$GITHUB_OUTPUT"
 
   release:
     name: Build, sign, publish
@@ -350,12 +379,11 @@ jobs:
       # ── 4. Self-verify before publishing — never ship a release we can't
       #       verify with our own production code path. ────────────────────────
       - name: Self-verify (cosign verify-blob with workflow OIDC identity)
+        env:
+          SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}
         run: |
           TARBALL="${{ steps.tarball.outputs.path }}"
           BUNDLE="${{ steps.sign.outputs.bundle }}"
-          # This is the same release.yml tag-or-main trust root pinned by
-          # updater.py for authenticating channel-manifest bundles.
-          IDENT="^https://github\\.com/(Hal0ai|hal0ai)/hal0/\\.github/workflows/release\\.yml@(refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.(0|[1-9][0-9]*)|-nightly\\.[0-9]{14})?|refs/heads/main)$"
           ISSUER="https://token.actions.githubusercontent.com"
           # Verify exactly as the client will (bootstrap.sh + updater.py):
           # the bundle supplies the cert + signature + Rekor SET, so this
@@ -363,7 +391,7 @@ jobs:
           # meaningful mirror of the real install path.
           cosign verify-blob \
               --bundle "${BUNDLE}" \
-              --certificate-identity-regexp "${IDENT}" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
               --certificate-oidc-issuer    "${ISSUER}" \
               "${TARBALL}"
 
@@ -378,7 +406,7 @@ jobs:
           cosign verify-blob \
               --signature "${SIG}" \
               --certificate "${CRT}" \
-              --certificate-identity-regexp "${IDENT}" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
               --certificate-oidc-issuer    "${ISSUER}" \
               "${TARBALL}"
 
@@ -392,16 +420,16 @@ jobs:
           PRERELEASE_STAGE: ${{ needs.resolve.outputs.prerelease_stage }}
           MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
           DIGEST: ${{ steps.tarball.outputs.digest }}
+          SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}
         run: |
           python3 -m pip install -e ".[dev]" >/dev/null
           OUT_DIR="${RUNNER_TEMP}/manifests"
           mkdir -p "${OUT_DIR}"
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
-          IDENT="^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@(refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.(0|[1-9][0-9]*)|-nightly\.[0-9]{14})?|refs/heads/main)$"
 
           python3 - "${OUT_DIR}" "${VERSION}" "${TAG}" "${RELEASE_KIND}" \
                    "${PRERELEASE_STAGE}" "${MANIFEST_TARGETS}" "${DIGEST}" \
-                   "${BASE_URL}" "${IDENT}" <<'PY'
+                   "${BASE_URL}" "${SIGNER_IDENTITY}" <<'PY'
           import datetime as dt
           import json
           import os
@@ -452,8 +480,8 @@ jobs:
         env:
           MANIFEST_DIR: ${{ steps.manifest.outputs.dir }}
           MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+          SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}
         run: |
-          IDENT="^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@(refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.(0|[1-9][0-9]*)|-nightly\.[0-9]{14})?|refs/heads/main)$"
           ISSUER="https://token.actions.githubusercontent.com"
           IFS=',' read -ra TARGETS <<< "${MANIFEST_TARGETS}"
           for CHANNEL in "${TARGETS[@]}"; do
@@ -461,7 +489,7 @@ jobs:
             cosign sign-blob --yes --bundle "${MANIFEST}.bundle" "${MANIFEST}"
             cosign verify-blob \
               --bundle "${MANIFEST}.bundle" \
-              --certificate-identity-regexp "${IDENT}" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
               --certificate-oidc-issuer "${ISSUER}" \
               "${MANIFEST}"
           done

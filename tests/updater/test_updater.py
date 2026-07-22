@@ -53,6 +53,19 @@ from hal0.updater.updater import (
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 
+_IDENTITY_PREFIX = (
+    r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+    r"\.github/workflows/release\.yml@"
+)
+_MAIN_IDENTITY = _IDENTITY_PREFIX + r"refs/heads/main$"
+
+
+def _test_exact_identity(release_kind: str, version: str) -> str:
+    if release_kind == "nightly":
+        return _MAIN_IDENTITY
+    return _IDENTITY_PREFIX + "refs/tags/v" + version.replace(".", r"\.") + "$"
+
+
 VALID_MANIFEST: dict[str, Any] = {
     "_schema": "hal0.releases.v1",
     "version": "1.0.0",
@@ -123,10 +136,6 @@ def _write_release_manifest(
         "url": f"file://{tarball}",
         "bundle_url": f"file://{bundle}",
         "digest_sha256": _sha256_of(tarball),
-        "signer_identity": (
-            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
-            rf"\.github/workflows/release\.yml@refs/tags/v{re.escape(version)}$"
-        ),
         "signer_issuer": "https://token.actions.githubusercontent.com",
         "min_data_version": 1,
         "released_at": "2026-05-15T12:00:00Z",
@@ -135,6 +144,10 @@ def _write_release_manifest(
     }
     if overrides:
         payload.update(overrides)
+    payload.setdefault(
+        "signer_identity",
+        _test_exact_identity(str(payload.get("release_kind", "stable")), version),
+    )
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     Path(f"{manifest_path}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
     return payload
@@ -713,27 +726,34 @@ def test_preview_check_and_prepare_exercise_cosign_subprocess_without_activation
     assert [Path(call["blob"]).name for call in verification_calls] == [
         "manifest.json",
         "manifest.json",
+        "manifest.json",
+        "manifest.json",
         synthetic_preview_release["tarball"].name,
     ]
     manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     manifest_bundle_digest = hashlib.sha256(
         Path(f"{manifest_path}.bundle").read_bytes()
     ).hexdigest()
-    for call in verification_calls[:2]:
+    for index, call in enumerate(verification_calls[:4]):
         assert call["blob_sha256"] == manifest_digest
         assert call["bundle_sha256"] == manifest_bundle_digest
+        expected_identity = (
+            updater_module.manifest_admission_identity("preview")
+            if index % 2 == 0
+            else payload["signer_identity"]
+        )
         assert call["args"] == [
             "verify-blob",
             "--bundle",
             call["bundle"],
             "--certificate-identity-regexp",
-            updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP,
+            expected_identity,
             "--certificate-oidc-issuer",
             updater_module._MANIFEST_SIGNER_ISSUER,
             call["blob"],
         ]
 
-    artifact_call = verification_calls[2]
+    artifact_call = verification_calls[4]
     cached_tarball = updater_module._cache_dir(version) / f"hal0-{version}.tar.gz"
     assert artifact_call["blob"] == str(cached_tarball)
     assert artifact_call["bundle"] == f"{cached_tarball}.bundle"
@@ -782,17 +802,18 @@ def test_preview_manifest_verification_failure_leaves_no_staged_state(
     assert not _current_symlink().is_symlink()
 
 
-def test_check_uses_pinned_trust_root_for_unauthenticated_manifest(
+def test_check_uses_channel_admission_before_parsing_untrusted_manifest(
     synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Manifest-provided signer claims cannot select the manifest trust root."""
-    forged_identity = r"^https://github\.com/attacker/forged/.*$"
-    forged_issuer = "https://attacker.example/oidc"
+    """Untrusted JSON fields cannot influence the first verification identity."""
     payload = synthetic_release["payload"]
-    payload["signer_identity"] = forged_identity
-    payload["signer_issuer"] = forged_issuer
+    payload.update(
+        release_kind="nightly",
+        signer_identity=_MAIN_IDENTITY,
+    )
     synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
-    calls: list[tuple[bytes, bytes, str, str]] = []
+    events: list[tuple[str, str]] = []
+    original_decode = updater_module._decode_release_manifest
 
     def record_verify(
         blob: Path,
@@ -802,47 +823,96 @@ def test_check_uses_pinned_trust_root_for_unauthenticated_manifest(
         issuer: str,
         job_id: str | None = None,
     ) -> None:
-        calls.append((blob.read_bytes(), bundle.read_bytes(), identity_regexp, issuer))
+        events.append(("verify", identity_regexp))
+
+    def record_decode(raw_bytes: bytes, url: str) -> dict[str, Any]:
+        events.append(("decode", ""))
+        return original_decode(raw_bytes, url)
+
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
+    monkeypatch.setattr(updater_module, "_decode_release_manifest", record_decode)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(Updater(channel="stable").check())
+
+    assert events == [
+        ("verify", updater_module.manifest_admission_identity("stable")),
+        ("decode", ""),
+    ]
+    assert _MAIN_IDENTITY not in [value for event, value in events if event == "verify"]
+
+
+def test_authenticated_manifest_rejects_broad_signer_before_exact_reverify(
+    synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = synthetic_release["payload"]
+    payload["signer_identity"] = updater_module.manifest_admission_identity("preview")
+    synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
+    identities: list[str] = []
+
+    def record_verify(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        identities.append(identity_regexp)
 
     monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
 
-    info = asyncio.run(Updater().check())
+    with pytest.raises(UpdateManifestInvalid, match="signer_identity"):
+        asyncio.run(Updater(channel="stable").check())
 
-    assert calls == [
+    assert identities == [updater_module.manifest_admission_identity("stable")]
+
+
+@pytest.mark.parametrize(
+    ("channel", "accepted", "rejected"),
+    [
         (
-            synthetic_release["manifest_path"].read_bytes(),
-            b"manifest-bundle-placeholder\n",
-            updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP,
-            updater_module._MANIFEST_SIGNER_ISSUER,
-        )
-    ]
-    assert info.signer_identity == forged_identity
+            "stable",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+        ),
+        (
+            "preview",
+            "https://github.com/hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3-rc.1",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+        ),
+        (
+            "nightly",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3-nightly.20260722123000",
+        ),
+    ],
+)
+def test_manifest_admission_identity_is_channel_scoped(
+    channel: str, accepted: str, rejected: str
+) -> None:
+    identity = updater_module.manifest_admission_identity(channel)
+    assert re.fullmatch(identity, accepted)
+    assert re.fullmatch(identity, rejected) is None
+
+
+def test_preview_admission_accepts_promoted_stable_tag() -> None:
+    identity = updater_module.manifest_admission_identity("preview")
+    subject = "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3"
+    assert re.fullmatch(identity, subject)
 
 
 @pytest.mark.parametrize(
-    "identity",
+    ("release_kind", "version", "expected"),
     [
-        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3",
-        "https://github.com/hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3-rc.1",
-        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+        ("stable", "1.2.3", _test_exact_identity("stable", "1.2.3")),
+        ("preview", "1.2.3-beta.4", _test_exact_identity("preview", "1.2.3-beta.4")),
+        ("nightly", "1.2.3-nightly.20260722123000", _MAIN_IDENTITY),
+        ("nightly", "1.2.3-nightly.20260722", _MAIN_IDENTITY),
     ],
 )
-def test_manifest_pinned_identity_accepts_supported_release_refs(identity: str) -> None:
-    """The trust root covers direct release tags and nightly's reusable caller ref."""
-    assert re.fullmatch(updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP, identity)
-
-
-@pytest.mark.parametrize(
-    "identity",
-    [
-        "https://github.com/attacker/hal0/.github/workflows/release.yml@refs/tags/v1.2.3",
-        "https://github.com/Hal0ai/hal0/.github/workflows/other.yml@refs/tags/v1.2.3",
-        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/feature",
-        "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/not-v1.2.3",
-    ],
-)
-def test_manifest_pinned_identity_rejects_unofficial_subjects(identity: str) -> None:
-    assert re.fullmatch(updater_module._MANIFEST_SIGNER_IDENTITY_REGEXP, identity) is None
+def test_exact_manifest_identity_matrix(release_kind: str, version: str, expected: str) -> None:
+    assert updater_module.exact_manifest_identity(release_kind, version) == expected
 
 
 def test_check_handles_missing_manifest(
@@ -855,7 +925,10 @@ def test_check_handles_missing_manifest(
 
 
 def test_check_rejects_wrong_channel_manifest(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
 ) -> None:
     """check() rejects a manifest that prepare() would reject for the channel."""
     artifacts = tmp_path / "artifacts"
@@ -878,7 +951,10 @@ def test_check_rejects_wrong_channel_manifest(
 
 
 def test_prepare_rejects_wrong_channel_before_download_or_cache_write(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
 ) -> None:
     """prepare() validates channel coherence before creating staged state."""
     artifacts = tmp_path / "artifacts"
@@ -903,7 +979,7 @@ def test_prepare_rejects_wrong_channel_before_download_or_cache_write(
     with pytest.raises(UpdateManifestInvalid):
         asyncio.run(Updater(channel="stable").prepare())
 
-    assert downloads == []
+    assert downloads == [f"{manifest_path}.bundle"]
     assert not updater_module._cache_dir("99.0.0").exists()
 
 
@@ -1757,12 +1833,13 @@ def test_check_uses_per_channel_url(
     """The check() method honours its channel argument when looking up the URL."""
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    tarball = _build_release_tarball(tmp=artifacts, version="0.0.1")
+    version = "0.0.1-nightly.20260722123000"
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
     manifest_path = artifacts / "latest.json"
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
-        version="0.0.1",
+        version=version,
         overrides={"channel": "nightly", "release_kind": "nightly"},
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))

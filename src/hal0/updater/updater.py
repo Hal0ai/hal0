@@ -5,8 +5,8 @@ Updater handles the full update lifecycle:
      for a newer version.
   2. Download tarball + cosign signature to ``/var/lib/hal0/cache/<version>/``.
   3. Verify the SHA-256 digest against the release manifest.
-  4. ``cosign verify-blob`` against the GitHub Actions OIDC identity
-     declared in the manifest (``signer_identity`` / ``signer_issuer``).
+  4. ``cosign verify-blob`` against the exact GitHub Actions OIDC identity
+     derived from the authenticated release kind and version.
   5. Extract to ``/usr/lib/hal0-<version>/`` (refuses non-empty paths).
   6. Run pending config migrations (``hal0.config.migrations.run_migrations``)
      when ``min_data_version`` advances the schema.
@@ -68,20 +68,60 @@ from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 log = structlog.get_logger(__name__)
 
 
-# Client-pinned trust root for authenticating release manifests. Direct release
-# jobs sign at their immutable v... tag ref. The current nightly workflow calls
-# release.yml from main, so GitHub records the reusable job identity at
-# refs/heads/main (see release.yml's signing comments). Keep this independent of
-# signer_identity/signer_issuer in the unauthenticated manifest; those fields are
-# trusted only after this verification and are then used for the release tarball.
-_MANIFEST_SIGNER_IDENTITY_REGEXP = (
+# Read/install compatibility for nightly manifests published before the current
+# 14-digit timestamp policy. This does not make legacy tags publishable through
+# ReleasePolicy; it only preserves existing manifest and staged-release reads.
+_LEGACY_NIGHTLY_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}$")
+
+
+# Client-pinned trust roots for authenticating release manifests. Admission is
+# selected only from the locally requested channel, before any JSON is decoded.
+# Stable and preview admit only their respective immutable tag grammars. Nightly
+# is signed by the reusable release workflow as invoked from main, so its sole
+# admitted identity is release.yml@refs/heads/main. After authenticated parsing,
+# every manifest is bound to one exact release identity before artifact fields
+# are consumed.
+_MANIFEST_IDENTITY_PREFIX = (
     r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
     r"\.github/workflows/release\.yml@"
-    r"(refs/tags/v\d+\.\d+\.\d+"
-    r"(-(alpha|beta|rc)\.(0|[1-9]\d*)|-nightly\.\d{14})?"
-    r"|refs/heads/main)$"
 )
 _MANIFEST_SIGNER_ISSUER = "https://token.actions.githubusercontent.com"
+_STABLE_MANIFEST_ADMISSION_IDENTITY = _MANIFEST_IDENTITY_PREFIX + r"refs/tags/v\d+\.\d+\.\d+$"
+_PREVIEW_MANIFEST_ADMISSION_IDENTITY = (
+    _MANIFEST_IDENTITY_PREFIX + r"refs/tags/v\d+\.\d+\.\d+(-(alpha|beta|rc)\.(0|[1-9]\d*))?$"
+)
+_NIGHTLY_MANIFEST_IDENTITY = _MANIFEST_IDENTITY_PREFIX + r"refs/heads/main$"
+
+
+def manifest_admission_identity(channel: str) -> str:
+    """Return the first-verification identity for a trusted requested channel."""
+    identities = {
+        "stable": _STABLE_MANIFEST_ADMISSION_IDENTITY,
+        "preview": _PREVIEW_MANIFEST_ADMISSION_IDENTITY,
+        "nightly": _NIGHTLY_MANIFEST_IDENTITY,
+    }
+    try:
+        return identities[channel]
+    except KeyError as exc:
+        raise ValueError(f"unknown requested channel {channel!r}") from exc
+
+
+def exact_manifest_identity(release_kind: str, version: str) -> str:
+    """Derive the sole accepted signer identity from authenticated release policy."""
+    if release_kind == "nightly" and _LEGACY_NIGHTLY_VERSION_RE.fullmatch(version):
+        return _NIGHTLY_MANIFEST_IDENTITY
+    try:
+        policy = ReleasePolicy.from_tag(f"v{version}")
+    except ReleaseTagError as exc:
+        raise ValueError(f"unsupported release version: {version!r}") from exc
+    if policy.version != version or policy.kind != release_kind:
+        raise ValueError(
+            f"release kind {release_kind!r} does not match version policy {policy.kind!r}"
+        )
+    if policy.kind == "nightly":
+        return _NIGHTLY_MANIFEST_IDENTITY
+    escaped_tag = f"v{version}".replace(".", r"\.")
+    return _MANIFEST_IDENTITY_PREFIX + f"refs/tags/{escaped_tag}$"
 
 
 # ── Typed errors (system.update_*) ─────────────────────────────────────────────
@@ -155,15 +195,6 @@ class UpdateRollbackUnavailable(UpdateError):
 
 
 # ── Release-manifest schema (pydantic) ─────────────────────────────────────────
-
-
-# Read/install compatibility for nightly manifests published before the current
-# 14-digit timestamp policy. This is deliberately anchored and ASCII-only so the
-# updater can safely reuse the value in cache/install paths without making legacy
-# 8-digit tags valid for new publication through ReleasePolicy.
-_LEGACY_NIGHTLY_VERSION_RE = re.compile(
-    r"^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}$"
-)
 
 
 def validate_release_version(version: str) -> str:
@@ -249,8 +280,8 @@ class ReleaseManifest(BaseModel):
     signer_identity: str = Field(
         ...,
         description=(
-            "GitHub Actions OIDC subject. Used as a regex for "
-            "``cosign verify-blob --certificate-identity-regexp``."
+            "Exact generated GitHub Actions OIDC subject regex for this release. "
+            "Clients derive and enforce the same value from release_kind + version."
         ),
     )
     signer_issuer: str = Field(
@@ -735,36 +766,28 @@ def _verify_cosign(
 async def _fetch_verified_release_manifest(
     channel: str, *, job_id: str | None = None
 ) -> tuple[dict[str, Any], ReleaseManifest, str]:
-    """Fetch, validate, and authenticate a channel manifest and sibling bundle.
+    """Fetch and authenticate exact manifest bytes before parsing any JSON.
 
-    Verification uses the exact fetched JSON bytes, a client-pinned workflow
-    identity and OIDC issuer, and the existing mandatory Cosign primitive. The
-    manifest's own signer claims remain untrusted until this succeeds. Temporary
-    files live outside the updater cache, so failed validation cannot leave
-    staged update state behind.
+    The first identity depends only on the trusted requested channel. Once the
+    admitted bytes pass schema and channel policy, they are rebound to the exact
+    identity derived from authenticated ``release_kind`` + ``version``. Temporary
+    files live outside the updater cache, so rejection cannot stage update state.
     """
+    try:
+        admission_identity = manifest_admission_identity(channel)
+    except ValueError as exc:
+        raise UpdateManifestInvalid(
+            f"release manifest channel is invalid: {exc}",
+            details={"channel": channel, "error": str(exc)},
+        ) from exc
+
     url = releases_url(channel)
     try:
         raw_bytes = await _fetch_release_manifest_bytes(channel)
-        raw = _decode_release_manifest(raw_bytes, url)
     except OSError as exc:
         raise UpdateError(
             f"could not fetch release manifest: {exc}",
             details={"channel": channel, "url": url, "error": str(exc)},
-        ) from exc
-    except ValueError as exc:
-        raise UpdateError(
-            f"release manifest is not valid JSON: {exc}",
-            details={"channel": channel, "url": url, "error": str(exc)},
-        ) from exc
-
-    manifest = _parse_manifest(raw)
-    try:
-        validate_manifest_for_channel(manifest, channel)
-    except ValueError as exc:
-        raise UpdateManifestInvalid(
-            f"release manifest is not accepted for channel {channel!r}: {exc}",
-            details={"channel": channel, "error": str(exc)},
         ) from exc
 
     bundle_url = _release_manifest_bundle_url(url)
@@ -777,10 +800,46 @@ async def _fetch_verified_release_manifest(
             _verify_cosign,
             manifest_path,
             bundle_path,
-            identity_regexp=_MANIFEST_SIGNER_IDENTITY_REGEXP,
+            identity_regexp=admission_identity,
             issuer=_MANIFEST_SIGNER_ISSUER,
             job_id=job_id,
         )
+
+        try:
+            raw = _decode_release_manifest(raw_bytes, url)
+        except ValueError as exc:
+            raise UpdateError(
+                f"release manifest is not valid JSON: {exc}",
+                details={"channel": channel, "url": url, "error": str(exc)},
+            ) from exc
+        manifest = _parse_manifest(raw)
+        try:
+            validate_manifest_for_channel(manifest, channel)
+            exact_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
+        except ValueError as exc:
+            raise UpdateManifestInvalid(
+                f"release manifest is not accepted for channel {channel!r}: {exc}",
+                details={"channel": channel, "error": str(exc)},
+            ) from exc
+        if manifest.signer_identity != exact_identity:
+            raise UpdateManifestInvalid(
+                "release manifest signer_identity does not match exact release identity",
+                details={
+                    "channel": channel,
+                    "expected_signer_identity": exact_identity,
+                    "manifest_signer_identity": manifest.signer_identity,
+                },
+            )
+
+        if exact_identity != admission_identity:
+            await asyncio.to_thread(
+                _verify_cosign,
+                manifest_path,
+                bundle_path,
+                identity_regexp=exact_identity,
+                issuer=_MANIFEST_SIGNER_ISSUER,
+                job_id=job_id,
+            )
 
     return raw, manifest, url
 
@@ -1769,12 +1828,14 @@ class Updater:
             )
         log.info("updater.sha256_ok", job_id=self.job_id, digest=got_digest)
 
-        # Step 5: cosign verify-blob.
+        # Step 5: verify against the identity derived from authenticated release
+        # policy, never a manifest-selected broader expression.
+        expected_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
         await asyncio.to_thread(
             _verify_cosign,
             tarball_path,
             bundle_path,
-            identity_regexp=manifest.signer_identity,
+            identity_regexp=expected_identity,
             issuer=manifest.signer_issuer,
             job_id=self.job_id,
         )
