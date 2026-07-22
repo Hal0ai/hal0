@@ -5,7 +5,7 @@
 # safety net between "main looks good" and `git tag`.
 #
 # Usage:
-#   bash scripts/release-check.sh [--channel stable|nightly] [--tag vX.Y.Z]
+#   bash scripts/release-check.sh [--channel stable|preview|nightly] [--tag vX.Y.Z]
 #
 # Gates (in order):
 #   1.  Backend tests green (pytest)
@@ -42,6 +42,17 @@ fail() {
 	FAILURES=$((FAILURES + 1))
 }
 step() { printf "\n${BOLD}── %s${RESET}\n" "$*"; }
+usage() {
+	cat <<'EOF'
+Usage: bash scripts/release-check.sh [options]
+
+Options:
+  --channel stable|preview|nightly  Release channel (default: stable)
+  --tag vX.Y.Z                     Proposed immutable release tag
+  --dry-run                        Run read-only preflight; never publish or tag
+  -h, --help                       Show this help
+EOF
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="${HAL0_CHANNEL:-stable}"
@@ -73,12 +84,26 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=true
 		shift
 		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
 	*)
-		warn "unknown arg: $1 (ignored)"
-		shift
+		usage >&2
+		printf "Unknown argument: %s\n" "$1" >&2
+		exit 2
 		;;
 	esac
 done
+
+case "${CHANNEL}" in
+stable | preview | nightly) ;;
+*)
+	usage >&2
+	printf "Invalid channel: %s (expected stable|preview|nightly)\n" "${CHANNEL}" >&2
+	exit 2
+	;;
+esac
 
 # ── 1. Backend tests ──────────────────────────────────────────────────────────
 step "1. Backend tests"
@@ -237,9 +262,28 @@ PY
 info "pyproject.toml version: ${PYPROJ_VERSION:-<unknown>}"
 
 if [[ -n "${PROPOSED_TAG}" ]]; then
-	# Strip leading "v" if present so `v0.1.0` and `0.1.0` both match.
-	NORMALISED_TAG="${PROPOSED_TAG#v}"
-	if [[ "${PYPROJ_VERSION}" == "${NORMALISED_TAG}" ]]; then
+	case "${CHANNEL}" in
+	stable)
+		[[ "${PROPOSED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+			fail "stable tag must match vX.Y.Z"
+		;;
+	preview)
+		[[ "${PROPOSED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.(0|[1-9][0-9]*)$ ]] ||
+			fail "preview tag must match vX.Y.Z-(alpha|beta|rc).N"
+		;;
+	nightly)
+		[[ "${PROPOSED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{14}$ ]] ||
+			fail "nightly tag must match vX.Y.Z-nightly.YYYYMMDDhhmmss"
+		;;
+	esac
+
+	TAG_BASE="$(PYTHONPATH=src python3 -c 'import sys; from hal0.release.channel import base_version; print(base_version(sys.argv[1]))' "${PROPOSED_TAG}")"
+	PYPROJECT_BASE="$(PYTHONPATH=src python3 -c 'import sys; from hal0.release.channel import base_version; print(base_version(sys.argv[1]))' "${PYPROJ_VERSION}")"
+	if [[ "${TAG_BASE}" != "${PYPROJECT_BASE}" ]]; then
+		fail "tag base '${TAG_BASE}' does not match pyproject.toml base '${PYPROJECT_BASE}'"
+	elif [[ "${CHANNEL}" == "nightly" ]]; then
+		info "nightly tag base matches pyproject.toml"
+	elif [[ "${PYPROJ_VERSION}" == "${PROPOSED_TAG#v}" ]]; then
 		info "version matches proposed tag"
 	else
 		fail "pyproject.toml version '${PYPROJ_VERSION}' does not match tag '${PROPOSED_TAG}'"
@@ -254,34 +298,40 @@ cd "${REPO_ROOT}"
 if [[ -z "${PROPOSED_TAG}" ]]; then
 	warn "no --tag provided — skipping preflight"
 else
-	# Derive policy from the proposed tag
+	# Derive every publication decision from the shared release policy.
 	POLICY_JSON="$(PYTHONPATH=src python3 -m hal0.release.policy "${PROPOSED_TAG}" --format json 2>/dev/null || true)"
 	if [[ -z "${POLICY_JSON}" ]]; then
 		fail "release.policy failed for tag '${PROPOSED_TAG}'"
 	else
 		POLICY_VERSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' <<<"${POLICY_JSON}")"
 		POLICY_KIND="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["kind"])' <<<"${POLICY_JSON}")"
+		POLICY_PYTHON_VERSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["python_version"] or "")' <<<"${POLICY_JSON}")"
+		POLICY_PUBLISH_PYPI="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["publish_pypi"]).lower())' <<<"${POLICY_JSON}")"
 		info "policy: ${POLICY_VERSION} (${POLICY_KIND})"
 
-		# Compare normalised source versions
-		NORMALISED_TAG_VERSION="${PROPOSED_TAG#v}"
-		if [[ "${POLICY_VERSION}" != "${NORMALISED_TAG_VERSION}" ]]; then
+		if [[ "${POLICY_KIND}" != "${CHANNEL}" ]]; then
+			fail "channel '${CHANNEL}' conflicts with tag policy '${POLICY_KIND}'"
+		else
+			info "channel agrees with tag policy"
+		fi
+
+		if [[ "${POLICY_VERSION}" != "${PROPOSED_TAG#v}" ]]; then
 			fail "policy version '${POLICY_VERSION}' does not match tag '${PROPOSED_TAG}'"
 		else
 			info "policy version agrees with tag"
 		fi
 
-		if [[ "${POLICY_KIND}" != "nightly" ]] && [[ "${DRY_RUN}" == false ]]; then
-			# Check tag target = origin/main
-			TAG_SHA="$(git rev-parse "${PROPOSED_TAG}" 2>/dev/null || true)"
+		# Official stable/preview tags must be cut from origin/main. All checks
+		# here are reads, including --dry-run mode.
+		if [[ "${POLICY_KIND}" != "nightly" ]]; then
+			TAG_SHA="$(git rev-list -n1 "${PROPOSED_TAG}" 2>/dev/null || true)"
 			MAIN_SHA="$(git rev-parse origin/main 2>/dev/null || true)"
 			if [[ -z "${MAIN_SHA}" ]]; then
 				warn "cannot resolve origin/main — skipping target check"
-			elif [[ -n "${TAG_SHA}" ]] && [[ "${TAG_SHA}" != "${MAIN_SHA}" ]]; then
+			elif [[ -n "${TAG_SHA}" && "${TAG_SHA}" != "${MAIN_SHA}" ]]; then
 				fail "tag '${PROPOSED_TAG}' points to ${TAG_SHA}, not origin/main (${MAIN_SHA})"
 			fi
 
-			# Query GitHub checks for the target SHA (requires gh CLI)
 			if command -v gh &>/dev/null && [[ -n "${MAIN_SHA}" ]]; then
 				GH_CHECKS="$(gh api "repos/:owner/:repo/commits/${MAIN_SHA}/check-runs" --jq '.check_runs[].conclusion' 2>/dev/null || true)"
 				if echo "${GH_CHECKS}" | grep -q -v "success" 2>/dev/null; then
@@ -292,35 +342,39 @@ else
 			else
 				warn "gh CLI not available or no main SHA — skipping GitHub check query"
 			fi
+		fi
 
-			# Reject existing local/remote tags
-			if git rev-parse "${PROPOSED_TAG}" >/dev/null 2>&1; then
-				fail "tag '${PROPOSED_TAG}' already exists locally"
-			fi
-			if git ls-remote --tags origin "${PROPOSED_TAG}" 2>/dev/null | grep -q "${PROPOSED_TAG}"; then
-				fail "tag '${PROPOSED_TAG}' already exists on origin"
-			fi
+		if git ls-remote --tags origin "${PROPOSED_TAG}" 2>/dev/null | grep -q "refs/tags/${PROPOSED_TAG}"; then
+			fail "tag '${PROPOSED_TAG}' already exists on origin"
+		else
+			info "remote tag '${PROPOSED_TAG}' is available"
+		fi
 
-			# Reject existing GitHub Release (requires gh CLI)
-			if command -v gh &>/dev/null; then
-				if gh release view "${PROPOSED_TAG}" 2>/dev/null | head -1 | grep -q .; then
-					fail "GitHub Release '${PROPOSED_TAG}' already exists"
-				fi
-			fi
-
-			# Reject existing PyPI version
-			NORMALISED_TAG_VERSION="${PROPOSED_TAG#v}"
-			if curl -sf "https://pypi.org/pypi/hal0ai/${NORMALISED_TAG_VERSION}/json" >/dev/null 2>&1; then
-				fail "PyPI already has hal0ai==${NORMALISED_TAG_VERSION}"
+		if command -v gh &>/dev/null; then
+			if gh release view "${PROPOSED_TAG}" >/dev/null 2>&1; then
+				fail "GitHub Release '${PROPOSED_TAG}' already exists"
 			else
-				info "PyPI does not have hal0ai==${NORMALISED_TAG_VERSION}"
+				info "GitHub Release '${PROPOSED_TAG}' is available"
 			fi
-		elif [[ "${POLICY_KIND}" == "nightly"* ]]; then
-			info "nightly tag — keeping existing base-match and collision behavior (gate 6)"
+		else
+			warn "gh CLI not available — skipping GitHub Release collision check"
+		fi
+
+		if [[ "${POLICY_PUBLISH_PYPI}" == "true" ]]; then
+			STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/hal0ai/${POLICY_PYTHON_VERSION}/json" || true)"
+			if [[ "${STATUS}" == "200" ]]; then
+				fail "PyPI already has hal0ai==${POLICY_PYTHON_VERSION}"
+			elif [[ "${STATUS}" == "404" ]]; then
+				info "PyPI does not have hal0ai==${POLICY_PYTHON_VERSION}"
+			else
+				fail "PyPI collision preflight returned HTTP ${STATUS:-<none>}"
+			fi
+		else
+			info "policy disables PyPI publication"
 		fi
 
 		if [[ "${DRY_RUN}" == true ]]; then
-			info "DRY-RUN: policy printed above; no tag or release mutation performed"
+			info "DRY-RUN: all preflight operations were read-only; no tag or release mutation performed"
 		fi
 	fi
 fi

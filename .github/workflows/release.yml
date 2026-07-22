@@ -3,19 +3,16 @@ name: Release
 # Cut a hal0 release on a `v*` tag push:
 #   1. build the source + UI tarball with the layout the updater expects
 #   2. cosign keyless-sign the tarball against the workflow's OIDC subject
-#   3. write a hal0.releases.v1 manifest pointing at the GH-release assets
-#   4. publish tarball + .sig + manifest as a GitHub Release
+#   3. write, validate, and sign every policy-targeted channel manifest
+#   4. immutably publish tarball signatures, manifests, and sibling bundles
 #
 # Triggered by: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 # Also reusable via workflow_call from nightly.yml (a GITHUB_TOKEN tag push
 # can't trigger this workflow's `push` event, so nightly invokes it directly).
 #
-# The manifest is automatically served at https://releases.hal0.dev/<channel>.json
-# (e.g. /stable.json) by the Cloudflare Pages middleware in hal0-web
-# (functions/_middleware.ts). On a successful upload here, the next request
-# to releases.hal0.dev picks it up within ~60s (CF cache TTL) — no hal0-web
-# deploy needed. Updater clients should point at
-# HAL0_RELEASES_URL=https://releases.hal0.dev/stable.json.
+# Updater clients consume https://releases.hal0.dev/<channel>.json. Advancing
+# those external channel pointers is deliberately a separate, final gate after
+# this workflow's immutable assets have been verified and uploaded.
 #
 # What this workflow does NOT do (deliberate, see "Blockers" in
 # scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
@@ -35,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to (re)build a release for, e.g. v0.1.0-rc1"
+        description: "Exact new release tag, e.g. v1.0.0-rc.1"
         required: true
         default: ""
       channel:
@@ -64,67 +61,112 @@ concurrency:
   cancel-in-progress: false # never cancel a half-published release
 
 jobs:
+  resolve:
+    name: Resolve immutable release policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.policy.outputs.tag }}
+      base_version: ${{ steps.policy.outputs.base_version }}
+      version: ${{ steps.policy.outputs.version }}
+      python_version: ${{ steps.policy.outputs.python_version }}
+      kind: ${{ steps.policy.outputs.kind }}
+      prerelease_stage: ${{ steps.policy.outputs.prerelease_stage }}
+      manifest_targets: ${{ steps.policy.outputs.manifest_targets }}
+      github_prerelease: ${{ steps.policy.outputs.github_prerelease }}
+      github_latest: ${{ steps.policy.outputs.github_latest }}
+      publish_pypi: ${{ steps.policy.outputs.publish_pypi }}
+
+    steps:
+      - name: Resolve requested tag
+        id: requested
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${INPUT_TAG}"
+            if [[ -z "${TAG}" ]]; then
+              echo "::error::workflow_dispatch/workflow_call requires a tag"
+              exit 1
+            fi
+          fi
+          if [[ -z "${TAG}" || "${TAG}" == "${GITHUB_REF}" ]]; then
+            echo "::error::could not resolve a tag from event ${GITHUB_EVENT_NAME}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout requested tag for policy resolution
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.requested.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify requested tag and export policy
+        id: policy
+        env:
+          TAG: ${{ steps.requested.outputs.tag }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-list -n1 "${TAG}")"
+          if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
+            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TAG_SHA})"
+            exit 1
+          fi
+          PYTHONPATH=src python3 -m hal0.release.policy "${TAG}" --format github >> "$GITHUB_OUTPUT"
+          KIND="$(sed -n 's/^kind=//p' "$GITHUB_OUTPUT" | tail -n1)"
+          if [[ -n "${INPUT_CHANNEL}" && "${INPUT_CHANNEL}" != "${KIND}" ]]; then
+            echo "::error::input channel ${INPUT_CHANNEL} conflicts with tag policy ${KIND}"
+            exit 1
+          fi
+
   release:
     name: Build, sign, publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: resolve
 
     steps:
-      # ── 0. Resolve tag + version ────────────────────────────────────────────
-      - name: Checkout
+      - name: Checkout exact release tag
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.resolve.outputs.tag }}
           fetch-depth: 0
 
-      - name: Resolve tag + version
-        id: ver
+      - name: Verify exact release commit
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
-          if [[ -z "${TAG}" ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          # Strip leading "v"; updater compares dotted versions without it.
-          VERSION="${TAG#v}"
-          if [[ -z "${VERSION}" ]]; then
-            echo "::error::could not resolve version from tag '${TAG}'"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-list -n1 "${TAG}")"
+          if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
+            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TAG_SHA})"
             exit 1
           fi
-          # Channel: an explicit input wins; otherwise derive from the tag
-          # (a `-nightly.<date>` segment ⇒ nightly, else stable).
-          # On a plain tag-push event `inputs` is undefined and ${{ inputs.channel }}
-          # renders empty, so the -z branch (Python derivation) is the push path.
-          # TAG goes through the environment, not string-interpolated into the
-          # one-liner, so an odd tag can't break/inject into the Python literal.
-          CHANNEL="${{ inputs.channel }}"
-          if [[ -z "${CHANNEL}" ]]; then
-            CHANNEL="$(TAG="${TAG}" PYTHONPATH=src python3 -c "import os; from hal0.release.channel import channel_for_tag; print(channel_for_tag(os.environ['TAG']))")"
-          fi
-          echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
-          echo "channel=${CHANNEL}"   >> "$GITHUB_OUTPUT"
 
-      - name: Confirm pyproject.toml version matches the tag
+      - name: Confirm pyproject.toml version matches release policy
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BASE_VERSION: ${{ needs.resolve.outputs.base_version }}
+          KIND: ${{ needs.resolve.outputs.kind }}
         run: |
           PYV="$(python3 -c '
           import tomllib
           print(tomllib.loads(open("pyproject.toml","rb").read().decode())["project"]["version"])
           ')"
           echo "pyproject.toml version: ${PYV}"
-          echo "tag-derived version:    ${{ steps.ver.outputs.version }}"
-          CHANNEL="${{ steps.ver.outputs.channel }}"
-          if [[ "${CHANNEL}" == "nightly" ]]; then
-            # Nightly: pyproject stays on its dev version (e.g. 0.5.0-alpha.1)
-            # while the tag is v<base>-nightly.<date>; require only the base
-            # X.Y.Z to match so we never ship a tarball off the wrong line.
-            # PYV/TAG via env (not interpolated into the literal) so an odd
-            # version/tag string can't break or inject into the Python.
-            if ! PYV="${PYV}" TAG="${{ steps.ver.outputs.tag }}" PYTHONPATH=src python3 -c "import os, sys; from hal0.release.channel import base_matches; sys.exit(0 if base_matches(os.environ['PYV'], os.environ['TAG']) else 1)"; then
-              echo "::error::nightly tag base ≠ pyproject base version (${PYV})"
+          echo "policy version:          ${VERSION}"
+          if [[ "${KIND}" == "nightly" ]]; then
+            if ! PYV="${PYV}" TAG="${TAG}" PYTHONPATH=src python3 -c "import os, sys; from hal0.release.channel import base_matches; sys.exit(0 if base_matches(os.environ['PYV'], os.environ['TAG']) else 1)"; then
+              echo "::error::nightly tag base differs from pyproject.toml (${PYV})"
               exit 1
             fi
-          elif [[ "${PYV}" != "${{ steps.ver.outputs.version }}" ]]; then
-            echo "::error::pyproject.toml version (${PYV}) ≠ tag (${{ steps.ver.outputs.version }})"
-            echo "::error::bump pyproject.toml + retag, or use scripts/release-check.sh --tag ${{ steps.ver.outputs.tag }} first"
+          elif [[ "${PYV}" != "${VERSION}" ]]; then
+            echo "::error::pyproject.toml version (${PYV}) differs from policy (${VERSION})"
             exit 1
           fi
 
@@ -146,7 +188,7 @@ jobs:
       - name: Stage release tree
         id: stage
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
+          VERSION="${{ needs.resolve.outputs.version }}"
           STAGE="${RUNNER_TEMP}/hal0-${VERSION}"
           mkdir -p "${STAGE}"
 
@@ -186,14 +228,14 @@ jobs:
       - name: Stage release notes
         run: |
           python3 scripts/gen_release_notes.py \
-            --tag "${{ steps.ver.outputs.tag }}" \
-            --channel "${{ steps.ver.outputs.channel }}" \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --channel "${{ needs.resolve.outputs.kind }}" \
             --out-dir "${{ steps.stage.outputs.stage }}"
 
       - name: Build tarball
         id: tarball
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
+          VERSION="${{ needs.resolve.outputs.version }}"
           OUT="${RUNNER_TEMP}/hal0-${VERSION}.tar.gz"
           # Use --owner/--group to make the archive reproducible-ish across
           # runners. The updater doesn't care, but it makes diffs sane.
@@ -274,18 +316,9 @@ jobs:
         run: |
           TARBALL="${{ steps.tarball.outputs.path }}"
           BUNDLE="${{ steps.sign.outputs.bundle }}"
-          # The identity regex must match what we'll write into the
-          # manifest below — keep these two strings in lock-step.
-          # github.repository preserves case (Hal0ai/hal0); use (?i) to
-          # absorb the lowercase `hal0ai` redirect form too.
-          # The Fulcio cert SAN is the workflow that OWNS the signing job
-          # (release.yml — the job_workflow_ref) at the CALLER's ref:
-          # release.yml@refs/tags/vX on a direct tag push, or
-          # release.yml@refs/heads/main when invoked via workflow_call from
-          # nightly.yml. github.ref is the caller's ref in BOTH cases — NOT
-          # github.workflow_ref, which is the entry-point (nightly.yml) and
-          # does NOT match the cert SAN under workflow_call.
-          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
+          # This is the same release.yml tag-or-main trust root pinned by
+          # updater.py for authenticating channel-manifest bundles.
+          IDENT="^https://github\\.com/(Hal0ai|hal0ai)/hal0/\\.github/workflows/release\\.yml@(refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.(0|[1-9][0-9]*)|-nightly\\.[0-9]{14})?|refs/heads/main)$"
           ISSUER="https://token.actions.githubusercontent.com"
           # Verify exactly as the client will (bootstrap.sh + updater.py):
           # the bundle supplies the cert + signature + Rekor SET, so this
@@ -312,90 +345,96 @@ jobs:
               --certificate-oidc-issuer    "${ISSUER}" \
               "${TARBALL}"
 
-      # ── 5. Generate the hal0.releases.v1 manifest ───────────────────────────
-      - name: Generate release manifest
+      # ── 5. Generate, validate, sign, and verify every policy target ────────
+      - name: Generate and validate target manifests
         id: manifest
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_KIND: ${{ needs.resolve.outputs.kind }}
+          PRERELEASE_STAGE: ${{ needs.resolve.outputs.prerelease_stage }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+          DIGEST: ${{ steps.tarball.outputs.digest }}
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          TAG="${{ steps.ver.outputs.tag }}"
-          CHANNEL="${{ steps.ver.outputs.channel }}"
-          DIGEST="${{ steps.tarball.outputs.digest }}"
-          OUT="${RUNNER_TEMP}/${CHANNEL}.json"
-
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
-          MANIFEST_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${CHANNEL}.json"
-
-          # Must match the Self-verify identity above (and the cert SAN) so the
-          # updater's cosign verify-blob succeeds. release.yml@<caller-ref> via
-          # github.ref — correct for both tag-push and workflow_call (nightly).
-          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
-
-          PYTHONPATH=src python3 - "${OUT}" "${VERSION}" "${TAG}" "${CHANNEL}" "${DIGEST}" \
-                   "${BASE_URL}" "${MANIFEST_URL}" "${IDENT}" <<'PY'
-          import json, sys, datetime as dt
-          from hal0.release.policy import ReleasePolicy
-          out, version, tag, channel, digest, base, self_url, ident = sys.argv[1:]
-          # Derive release_kind + prerelease_stage from the tag so the
-          # ReleaseManifest pydantic schema's cross-field validator sees
-          # consistent values (release_kind must match channel, and preview
-          # requires a non-None prerelease_stage).
-          policy = ReleasePolicy.from_tag(tag)
-          # Mirror the toolbox_images block from manifest.json into the
-          # release manifest so an updater can pull the matching image
-          # set (see docs/internal/release-manifest.md §"What the release pipeline
-          # must guarantee", item 6).
-          repo_manifest = json.loads(open("manifest.json").read())
-          payload = {
-              "_schema":         "hal0.releases.v1",
-              "version":         version,
-              "channel":         channel,
-              "release_kind":    policy.kind,
-              "prerelease_stage": policy.prerelease_stage,
-              "url":             f"{base}/hal0-{version}.tar.gz",
-              "bundle_url":      f"{base}/hal0-{version}.tar.gz.bundle",
-              # Transition-window fields (see the sign step above) — dropped
-              # once the fleet has moved past sig_url-only clients (#1159).
-              "sig_url":         f"{base}/hal0-{version}.tar.gz.sig",
-              "cert_url":        f"{base}/hal0-{version}.tar.gz.crt",
-              "digest_sha256":   digest,
-              "signer_identity": ident,
-              "signer_issuer":   "https://token.actions.githubusercontent.com",
-              "min_data_version": int(repo_manifest.get("min_data_version", 1)),
-              "released_at":     dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
-              "notes_url":       f"https://github.com/{__import__('os').environ['GITHUB_REPOSITORY']}/releases/tag/{tag}",
-              "manifest_url":    self_url,
-              "toolbox_images":  repo_manifest.get("toolbox_images", {}),
-          }
-          # Refuse to publish if any toolbox digest is null/missing — the
-          # release would advertise images we never actually pinned.
-          missing = [n for n, e in payload["toolbox_images"].items() if not e.get("digest")]
-          if missing:
-              sys.exit(f"toolbox_images digests missing for: {missing} - run scripts/update-toolbox-digests.sh on main first")
-          open(out, "w").write(json.dumps(payload, indent=2) + "\n")
-          print(f"wrote {out}")
-          PY
-          echo "path=${OUT}" >> "$GITHUB_OUTPUT"
-
-      - name: Self-validate manifest against ReleaseManifest schema
-        run: |
-          # Catch shape regressions before publish. Uses the runtime's
-          # own pydantic schema so the manifest can never drift from
-          # what hal0.updater can actually parse.
           python3 -m pip install -e ".[dev]" >/dev/null
-          python3 - "${{ steps.manifest.outputs.path }}" <<'PY'
-          import json, sys
-          from hal0.updater.updater import _parse_manifest
-          raw = json.loads(open(sys.argv[1]).read())
-          mf = _parse_manifest(raw)
-          print(f"manifest OK: version={mf.version} digest_sha256={mf.digest_sha256[:12]}…")
+          OUT_DIR="${RUNNER_TEMP}/manifests"
+          mkdir -p "${OUT_DIR}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          IDENT="^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@(refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.(0|[1-9][0-9]*)|-nightly\.[0-9]{14})?|refs/heads/main)$"
+
+          python3 - "${OUT_DIR}" "${VERSION}" "${TAG}" "${RELEASE_KIND}" \
+                   "${PRERELEASE_STAGE}" "${MANIFEST_TARGETS}" "${DIGEST}" \
+                   "${BASE_URL}" "${IDENT}" <<'PY'
+          import datetime as dt
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from hal0.updater.updater import ReleaseManifest
+
+          out_dir, version, tag, kind, stage, targets, digest, base, ident = sys.argv[1:]
+          repo_manifest = json.loads(Path("manifest.json").read_text())
+          toolbox_images = repo_manifest.get("toolbox_images", {})
+          missing = [name for name, entry in toolbox_images.items() if not entry.get("digest")]
+          if missing:
+              sys.exit(f"toolbox_images digests missing for: {missing}")
+
+          released_at = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+          common = {
+              "_schema": "hal0.releases.v1",
+              "version": version,
+              "release_kind": kind,
+              "prerelease_stage": stage or None,
+              "url": f"{base}/hal0-{version}.tar.gz",
+              "bundle_url": f"{base}/hal0-{version}.tar.gz.bundle",
+              "sig_url": f"{base}/hal0-{version}.tar.gz.sig",
+              "cert_url": f"{base}/hal0-{version}.tar.gz.crt",
+              "digest_sha256": digest,
+              "signer_identity": ident,
+              "signer_issuer": "https://token.actions.githubusercontent.com",
+              "min_data_version": int(repo_manifest.get("min_data_version", 1)),
+              "released_at": released_at,
+              "notes_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{tag}",
+              "toolbox_images": toolbox_images,
+          }
+          for channel in targets.split(","):
+              payload = {
+                  **common,
+                  "channel": channel,
+                  "manifest_url": f"{base}/{channel}.json",
+              }
+              ReleaseManifest.model_validate(payload)
+              path = Path(out_dir, f"{channel}.json")
+              path.write_text(json.dumps(payload, indent=2) + "\n")
+              print(f"manifest OK: {path}")
           PY
+          echo "dir=${OUT_DIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign and self-verify every manifest bundle
+        env:
+          MANIFEST_DIR: ${{ steps.manifest.outputs.dir }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+        run: |
+          IDENT="^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@(refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.(0|[1-9][0-9]*)|-nightly\.[0-9]{14})?|refs/heads/main)$"
+          ISSUER="https://token.actions.githubusercontent.com"
+          IFS=',' read -ra TARGETS <<< "${MANIFEST_TARGETS}"
+          for CHANNEL in "${TARGETS[@]}"; do
+            MANIFEST="${MANIFEST_DIR}/${CHANNEL}.json"
+            cosign sign-blob --yes --bundle "${MANIFEST}.bundle" "${MANIFEST}"
+            cosign verify-blob \
+              --bundle "${MANIFEST}.bundle" \
+              --certificate-identity-regexp "${IDENT}" \
+              --certificate-oidc-issuer "${ISSUER}" \
+              "${MANIFEST}"
+          done
 
       # ── 6. Generate release notes ────────────────────────────────────────────
       - name: Generate release notes
         id: notes
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
-          CHANNEL="${{ steps.ver.outputs.channel }}"
+          TAG="${{ needs.resolve.outputs.tag }}"
+          CHANNEL="${{ needs.resolve.outputs.kind }}"
           NOTES_FILE="${RUNNER_TEMP}/RELEASE_NOTES.md"
 
           # Non-fatal wrapper: if anything goes wrong we still publish.
@@ -464,69 +503,96 @@ jobs:
 
           echo "path=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
 
-      # ── 7. Publish GitHub Release with all three assets ─────────────────────
-      - name: Publish GitHub Release
+      # ── 7. Publish one immutable GitHub Release ────────────────────────────
+      - name: Preflight immutable publication
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          PUBLISH_PYPI: ${{ needs.resolve.outputs.publish_pypi }}
+          PYPI_VERSION: ${{ needs.resolve.outputs.python_version }}
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
-          TARBALL="${{ steps.tarball.outputs.path }}"
-          BUNDLE="${{ steps.sign.outputs.bundle }}"
-          SIG="${{ steps.sign.outputs.sig }}"
-          CRT="${{ steps.sign.outputs.cert }}"
-          MANIFEST="${{ steps.manifest.outputs.path }}"
-          NOTES_FILE="${{ steps.notes.outputs.path }}"
-
-          # Create the release if it doesn't already exist (workflow_dispatch
-          # rebuild path) — otherwise just upload the assets, replacing
-          # any prior copies with --clobber.
-          if ! gh release view "${TAG}" >/dev/null 2>&1; then
-            if [[ "${{ steps.ver.outputs.channel }}" == "nightly" ]]; then
-              # Nightly: a real prerelease, and deliberately NOT --latest —
-              # /releases/latest and the "Latest" badge must keep pointing at
-              # the newest STABLE release that install.sh + stable `hal0 update`
-              # depend on. The nightly channel is followed via releases.hal0.dev
-              # /nightly.json, not /releases/latest.
-              gh release create "${TAG}" \
-                --title "hal0 ${TAG}" \
-                --notes-file "${NOTES_FILE}" \
-                --draft=false \
-                --prerelease=true
-            else
-              # Stable: see hal0_v0.1.0-alpha-launch + hal0_release_prerelease_flag
-              # memories. Pre-v1.0 tags are published --prerelease=false --latest
-              # on purpose so /releases/latest works while we're pre-stable.
-              gh release create "${TAG}" \
-                --title "hal0 ${TAG}" \
-                --notes-file "${NOTES_FILE}" \
-                --draft=false \
-                --prerelease=false \
-                --latest
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::error::GitHub Release ${TAG} already exists"
+            exit 1
+          fi
+          if [[ "${PUBLISH_PYPI}" == "true" ]]; then
+            STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/hal0ai/${PYPI_VERSION}/json")"
+            if [[ "${STATUS}" == "200" ]]; then
+              echo "::error::PyPI already has hal0ai==${PYPI_VERSION}"
+              exit 1
+            elif [[ "${STATUS}" != "404" ]]; then
+              echo "::error::PyPI collision preflight returned HTTP ${STATUS}"
+              exit 1
             fi
           fi
 
-          gh release upload "${TAG}" "${TARBALL}" "${BUNDLE}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          GITHUB_PRERELEASE: ${{ needs.resolve.outputs.github_prerelease }}
+          GITHUB_LATEST: ${{ needs.resolve.outputs.github_latest }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+          MANIFEST_DIR: ${{ steps.manifest.outputs.dir }}
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          BUNDLE: ${{ steps.sign.outputs.bundle }}
+          SIG: ${{ steps.sign.outputs.sig }}
+          CRT: ${{ steps.sign.outputs.cert }}
+          NOTES_FILE: ${{ steps.notes.outputs.path }}
+        run: |
+          gh release create "${TAG}" --verify-tag --title "hal0 ${TAG}" --notes-file "${NOTES_FILE}" \
+            --draft=false --prerelease="${GITHUB_PRERELEASE}" --latest="${GITHUB_LATEST}"
+
+          ACTUAL_PRERELEASE="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.prerelease')"
+          LATEST_TAG="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+          ACTUAL_LATEST=false
+          [[ "${LATEST_TAG}" == "${TAG}" ]] && ACTUAL_LATEST=true
+          if [[ "${ACTUAL_PRERELEASE}" != "${GITHUB_PRERELEASE}" || \
+                "${ACTUAL_LATEST}" != "${GITHUB_LATEST}" ]]; then
+            echo "::error::release flags differ from policy: prerelease=${ACTUAL_PRERELEASE}, latest=${ACTUAL_LATEST}"
+            exit 1
+          fi
+
+          ASSETS=("${TARBALL}" "${BUNDLE}" "${SIG}" "${CRT}")
+          IFS=',' read -ra TARGETS <<< "${MANIFEST_TARGETS}"
+          for CHANNEL in "${TARGETS[@]}"; do
+            MANIFEST="${MANIFEST_DIR}/${CHANNEL}.json"
+            ASSETS+=("${MANIFEST}" "${MANIFEST}.bundle")
+          done
+
+          EXISTING_ASSETS="$(gh release view "${TAG}" --json assets --jq '.assets[].name')"
+          for ASSET in "${ASSETS[@]}"; do
+            NAME="$(basename "${ASSET}")"
+            if grep -Fxq "${NAME}" <<< "${EXISTING_ASSETS}"; then
+              echo "::error::asset collision: ${NAME} already exists on ${TAG}"
+              exit 1
+            fi
+          done
+          gh release upload "${TAG}" "${ASSETS[@]}"
+
+      # External channel pointer advancement is intentionally NOT performed in
+      # this immutable release step. It is the final, separately verified gate
+      # after every exact manifest and sibling bundle asset has been uploaded.
+      - name: Record separately verified channel pointer gate
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+        run: |
+          echo "Channel pointer advancement remains external for ${TAG}: ${MANIFEST_TARGETS}"
 
       - name: Summary
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
           {
             echo "## hal0 ${TAG} published"
             echo ""
             echo "| asset | sha256 |"
             echo "|---|---|"
-            echo "| hal0-${{ steps.ver.outputs.version }}.tar.gz | \`${{ steps.tarball.outputs.digest }}\` |"
+            echo "| hal0-${{ needs.resolve.outputs.version }}.tar.gz | \`${{ steps.tarball.outputs.digest }}\` |"
             echo ""
-            echo "Manifest URL (until releases.hal0.dev exists): "
-            echo ""
-            echo "    https://github.com/${{ github.repository }}/releases/download/${TAG}/${{ steps.ver.outputs.channel }}.json"
-            echo ""
-            echo "Verify locally:"
-            echo ""
-            echo '```'
-            echo "HAL0_RELEASES_URL='https://github.com/${{ github.repository }}/releases/download/${TAG}/${{ steps.ver.outputs.channel }}.json' \\"
-            echo "  hal0 update --check"
-            echo '```'
+            echo "Immutable manifests (each uploaded with a sibling .bundle): ${MANIFEST_TARGETS}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ── 8. PyPI wheel — convenience install, not the production path ────────────
@@ -544,47 +610,54 @@ jobs:
     name: PyPI wheel
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: release # never ship a wheel for a release the tarball job couldn't verify
+    if: needs.resolve.outputs.publish_pypi == 'true'
+    needs: [resolve, release]
     environment: pypi
     permissions:
       contents: read
       id-token: write # required for PyPI OIDC
 
     steps:
-      - name: Resolve tag
-        id: tag
-        run: |
-          TAG="${{ inputs.tag }}"
-          if [[ -z "${TAG}" ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          if [[ -z "${TAG}" ]]; then
-            echo "::error::could not resolve tag"
-            exit 1
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout
+      - name: Checkout exact release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify exact release commit
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-list -n1 "${TAG}")"
+          if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
+            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TAG_SHA})"
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Verify pyproject version matches tag
+      - name: Verify source and PyPI version remain available
+        env:
+          EXPECTED_SOURCE_VERSION: ${{ needs.resolve.outputs.version }}
+          PYPI_VERSION: ${{ needs.resolve.outputs.python_version }}
         run: |
-          EXPECT="${TAG#v}"
           ACTUAL="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          if [[ "${ACTUAL}" != "${EXPECT}" ]]; then
-            echo "::error::pyproject.toml version (${ACTUAL}) does not match tag (${TAG})"
+          if [[ "${ACTUAL}" != "${EXPECTED_SOURCE_VERSION}" ]]; then
+            echo "::error::pyproject.toml version (${ACTUAL}) differs from policy (${EXPECTED_SOURCE_VERSION})"
             exit 1
           fi
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/hal0ai/${PYPI_VERSION}/json")"
+          if [[ "${STATUS}" == "200" ]]; then
+            echo "::error::PyPI already has hal0ai==${PYPI_VERSION}"
+            exit 1
+          elif [[ "${STATUS}" != "404" ]]; then
+            echo "::error::PyPI collision preflight returned HTTP ${STATUS}"
+            exit 1
+          fi
 
       - name: Build wheel + sdist
         run: |
