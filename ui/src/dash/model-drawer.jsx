@@ -23,13 +23,31 @@
 // only the keys we surface (emptying an input deletes just that key).
 
 import {
-  findManagedFlags,
-  findSlotHardwareFlags,
-  MANAGED_FLAG_SOURCE,
-  highlightSegments,
-  diffFlags,
-  tokenizeFlags,
-} from '@/dash/flags-tune.js'
+	useModelUpdate,
+	useModelSetDefault,
+	useModelDuplicate,
+} from "@/api/hooks/useModels";
+import { useChatTemplates } from "@/api/hooks/useChatTemplates";
+import { useProfiles } from "@/api/hooks/useProfiles";
+import { useMetaEnums } from "@/api/hooks/useMeta";
+import {
+	canonicalCapabilities,
+	modelDeviceClasses,
+	profileDeviceClass,
+} from "@/lib/deviceMeta";
+import {
+	MODEL_TYPE_TAGS,
+	splitModelTags,
+	mergeModelTags,
+} from "@/dash/model-types.js";
+import {
+	findManagedFlags,
+	findSlotHardwareFlags,
+	MANAGED_FLAG_SOURCE,
+	highlightSegments,
+	diffFlags,
+	tokenizeFlags,
+} from "@/dash/flags-tune.js";
 
 const {
 	useState: useStateMD,
@@ -472,53 +490,55 @@ function ModelDrawer({ open, onClose, model }) {
 	const enums = useMetaEnums();
 	const init = model?.defaults || {};
 
-  // Identity + typed fields (preserve the full RecipeEditor save surface).
-  const [name, setName] = useStateMD("");
-  const [types, setTypes] = useStateMD([]);
-  const [otherTags, setOtherTags] = useStateMD([]);
-  const [caps, setCaps] = useStateMD([]);
-  const [backends, setBackends] = useStateMD([]);
-  const [mmproj, setMmproj] = useStateMD("");
-  const [hfRepo, setHfRepo] = useStateMD("");
-  const [hfFilename, setHfFilename] = useStateMD("");
-  // Flags / template (the launch tune).
-  const [extra, setExtra] = useStateMD("");
-  const [profile, setProfile] = useStateMD("");
-  // Typed caps.
-  const [ctx, setCtx] = useStateMD("");
-  const [chatTemplate, setChatTemplate] = useStateMD("auto");
-  const [mtp, setMtp] = useStateMD("auto");
-  const [jinja, setJinja] = useStateMD("auto");
-  // Local UI state.
-  const [dupOpen, setDupOpen] = useStateMD(false);
-  const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
-  // Per-type default: `model` is a SNAPSHOT captured when the drawer opened
-  // (models.jsx passes the selected row), so the invalidation-driven list
-  // refetch never reaches this prop. Track the POST response as the local
-  // authority so the badge flips live; null = defer to the snapshot.
-  const [defaultOverride, setDefaultOverride] = useStateMD(null);
+	// Identity + typed fields (preserve the full RecipeEditor save surface).
+	const [name, setName] = useStateMD("");
+	const [types, setTypes] = useStateMD([]);
+	const [otherTags, setOtherTags] = useStateMD([]);
+	const [caps, setCaps] = useStateMD([]);
+	const [backends, setBackends] = useStateMD([]);
+	const [mmproj, setMmproj] = useStateMD("");
+	const [hfRepo, setHfRepo] = useStateMD("");
+	const [hfFilename, setHfFilename] = useStateMD("");
+	// Flags / template (the launch tune).
+	const [extra, setExtra] = useStateMD("");
+	const [profile, setProfile] = useStateMD("");
+	// Typed caps.
+	const [ctx, setCtx] = useStateMD("");
+	const [chatTemplate, setChatTemplate] = useStateMD("auto");
+	const [mtp, setMtp] = useStateMD("auto");
+	const [thinking, setThinking] = useStateMD("auto");
+	const [jinja, setJinja] = useStateMD("auto");
+	// Local UI state.
+	const [dupOpen, setDupOpen] = useStateMD(false);
+	const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
+	// Per-type default: `model` is a SNAPSHOT captured when the drawer opened
+	// (models.jsx passes the selected row), so the invalidation-driven list
+	// refetch never reaches this prop. Track the POST response as the local
+	// authority so the badge flips live; null = defer to the snapshot.
+	const [defaultOverride, setDefaultOverride] = useStateMD(null);
 
-  useEffectMD(() => {
-    if (open && model) {
-      setName(model.name || "");
-      const split = splitModelTags(model.tags);
-      setTypes(split.selected);
-      setOtherTags(split.other);
-      setCaps(canonicalCapabilities(model.capabilities, enums));
-      setBackends(Array.isArray(model.backends) ? model.backends : []);
-      setMmproj(model.mmproj || "");
-      setHfRepo(model.hf_repo || "");
-      setHfFilename(model.hf_filename || "");
-      setExtra(init.extra_args || "");
-      setProfile(init.profile || "");
-      setCtx(init.context_size != null ? String(init.context_size) : "");
-      setChatTemplate(init.chat_template ?? "auto");
-      setMtp(triFromDefault(init.mtp));
-      setJinja(triFromDefault(init.jinja));
-      setDefaultOverride(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, model?.id]);
+	useEffectMD(() => {
+		if (open && model) {
+			setName(model.name || "");
+			const split = splitModelTags(model.tags);
+			setTypes(split.selected);
+			setOtherTags(split.other);
+			setCaps(canonicalCapabilities(model.capabilities, enums));
+			setBackends(Array.isArray(model.backends) ? model.backends : []);
+			setMmproj(model.mmproj || "");
+			setHfRepo(model.hf_repo || "");
+			setHfFilename(model.hf_filename || "");
+			setExtra(init.extra_args || "");
+			setProfile(init.profile || "");
+			setCtx(init.context_size != null ? String(init.context_size) : "");
+			setChatTemplate(init.chat_template ?? "auto");
+			setMtp(triFromDefault(init.mtp));
+			setThinking(triFromDefault(init.enable_thinking));
+			setJinja(triFromDefault(init.jinja));
+			setDefaultOverride(null);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open, model?.id]);
 
 	const toggleType = (t) =>
 		setTypes((p) => (p.includes(t) ? p.filter((x) => x !== t) : [...p, t]));
@@ -567,22 +587,22 @@ function ModelDrawer({ open, onClose, model }) {
 	);
 	const diverged = !!(diff && diff.diverged);
 
-  // Managed-arg + slot-hardware + shlex validation on the flags text (inline,
-  // blocks save). spec-hw-slot-ownership §5: the model is device-agnostic, so
-  // the grid-owned hardware flags (-ngl/-dev/--threads) are rejected with a
-  // "belongs on the slot" message — mirrors the server hard-reject Lane C adds.
-  // Checked BEFORE the managed set so --n-gpu-layers (in both) gets the more
-  // specific slot-hardware message.
-  const managedOffenders = useMemoMD(() => findManagedFlags(extra), [extra]);
-  const hwOffenders = useMemoMD(() => findSlotHardwareFlags(extra), [extra]);
-  const shlexErr = useMemoMD(() => tokenizeFlags(extra).error, [extra]);
-  const flagsError = shlexErr
-    ? shlexErr
-    : hwOffenders.length
-      ? slotHardwareFlagMessage(hwOffenders)
-      : managedOffenders.length
-        ? managedFlagMessage(managedOffenders)
-        : null;
+	// Managed-arg + slot-hardware + shlex validation on the flags text (inline,
+	// blocks save). spec-hw-slot-ownership §5: the model is device-agnostic, so
+	// the grid-owned hardware flags (-ngl/-dev/--threads) are rejected with a
+	// "belongs on the slot" message — mirrors the server hard-reject Lane C adds.
+	// Checked BEFORE the managed set so --n-gpu-layers (in both) gets the more
+	// specific slot-hardware message.
+	const managedOffenders = useMemoMD(() => findManagedFlags(extra), [extra]);
+	const hwOffenders = useMemoMD(() => findSlotHardwareFlags(extra), [extra]);
+	const shlexErr = useMemoMD(() => tokenizeFlags(extra).error, [extra]);
+	const flagsError = shlexErr
+		? shlexErr
+		: hwOffenders.length
+			? slotHardwareFlagMessage(hwOffenders)
+			: managedOffenders.length
+				? managedFlagMessage(managedOffenders)
+				: null;
 
 	// Return null when closed — matching the Modal contract the old
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
@@ -591,25 +611,46 @@ function ModelDrawer({ open, onClose, model }) {
 	// the DOM (colliding with the AddByHF modal's fields). All hooks run above.
 	if (!open || !model) return null;
 
-  // STAMP: selecting a profile copies its flags into the editor. Confirm if the
-  // current flags would be clobbered (non-empty and not already the target text).
-  const stampProfile = (nextName) => {
-    const target = (profilesQuery.data || []).find((p) => p.name === nextName);
-    const targetFlags = target ? (target.flags || "") : "";
-    const doStamp = () => { setProfile(nextName); setExtra(targetFlags); setConfirm(null); };
-    if (!nextName) { setProfile(""); setConfirm(null); return; }
-    const wouldClobber = extra.trim() && diffFlags(extra, targetFlags).diverged;
-    if (wouldClobber) {
-      setConfirm({
-        title: "Replace launch flags?",
-        message: `Replace flags with ${nextName}'s template? Unsaved edits to the current flags are lost.`,
-        confirmLabel: "Replace flags",
-        onConfirm: doStamp,
-      });
-    } else {
-      doStamp();
-    }
-  };
+	// STAMP: selecting a profile copies its flags into the editor. Confirm if the
+	// current flags would be clobbered (non-empty and not already the target text).
+	const stampProfile = (nextName) => {
+		const target = (profilesQuery.data || []).find((p) => p.name === nextName);
+		const targetFlags = target ? target.flags || "" : "";
+		const doStamp = () => {
+			setProfile(nextName);
+			setExtra(targetFlags);
+			setConfirm(null);
+		};
+		if (!nextName) {
+			setProfile("");
+			setConfirm(null);
+			return;
+		}
+		const wouldClobber = extra.trim() && diffFlags(extra, targetFlags).diverged;
+		if (wouldClobber) {
+			setConfirm({
+				title: "Replace launch flags?",
+				message: `Replace flags with ${nextName}'s template? Unsaved edits to the current flags are lost.`,
+				confirmLabel: "Replace flags",
+				onConfirm: doStamp,
+			});
+		} else {
+			doStamp();
+		}
+	};
+
+	const resetToProfile = () => {
+		if (!sourceProfile) return;
+		setConfirm({
+			title: `Re-stamp from ${sourceProfile.name}?`,
+			message: `Re-stamp from ${sourceProfile.name}? This replaces the model's launch flags with the profile's current text. Your edits are discarded.`,
+			confirmLabel: "Reset to profile",
+			onConfirm: () => {
+				setExtra(sourceProfile.flags || "");
+				setConfirm(null);
+			},
+		});
+	};
 
 	// Per-type default marker toggle. Server-side single chokepoint enforces
 	// "one default per type" (promoting demotes the current holder). The list's
@@ -657,35 +698,69 @@ function ModelDrawer({ open, onClose, model }) {
 		thinking !== triFromDefault(init.enable_thinking) ||
 		jinja !== triFromDefault(init.jinja);
 
-  const dirty =
-    name !== (model.name || "") ||
-    !sameSet(types, splitModelTags(model.tags).selected) ||
-    !sameSet(caps, canonicalCapabilities(model.capabilities, enums)) ||
-    !sameSet(backends, Array.isArray(model.backends) ? model.backends : []) ||
-    mmproj !== (model.mmproj || "") ||
-    hfRepo !== (model.hf_repo || "") ||
-    hfFilename !== (model.hf_filename || "") ||
-    extra !== (init.extra_args || "") ||
-    profile !== (init.profile || "") ||
-    ctx !== (init.context_size != null ? String(init.context_size) : "") ||
-    chatTemplate !== (init.chat_template ?? "auto") ||
-    mtp !== triFromDefault(init.mtp) ||
-    jinja !== triFromDefault(init.jinja);
+	const onSave = async () => {
+		if (flagsError) return; // inline errors block; no PUT fires
+		// Start from stored defaults; override only surfaced keys (empty = delete).
+		const defaults = { ...init };
+		if (ctx.trim()) {
+			const n = parseInt(ctx, 10);
+			if (Number.isFinite(n)) defaults.context_size = n;
+			else delete defaults.context_size;
+		} else delete defaults.context_size;
+		// n_gpu_layers is no longer a model default (spec-hw-slot-ownership §2): drop
+		// any stored value so a save unsets the sunset key rather than round-tripping it.
+		delete defaults.n_gpu_layers;
+		if (extra.trim()) defaults.extra_args = extra;
+		else delete defaults.extra_args;
+		if (chatTemplate && chatTemplate !== "auto")
+			defaults.chat_template = chatTemplate;
+		else delete defaults.chat_template;
+		if (profile.trim()) defaults.profile = profile.trim();
+		else delete defaults.profile;
+		// Typed caps: auto = absent (delete the key), on/off = boolean.
+		if (mtp === "on") defaults.mtp = true;
+		else if (mtp === "off") defaults.mtp = false;
+		else delete defaults.mtp;
+		if (thinking === "on") defaults.enable_thinking = true;
+		else if (thinking === "off") defaults.enable_thinking = false;
+		else delete defaults.enable_thinking;
+		if (jinja === "on") defaults.jinja = true;
+		else if (jinja === "off") defaults.jinja = false;
+		else delete defaults.jinja;
 
-  const onSave = async () => {
-    if (flagsError) return; // inline errors block; no PUT fires
-    // Start from stored defaults; override only surfaced keys (empty = delete).
-    const defaults = { ...init };
-    if (ctx.trim()) { const n = parseInt(ctx, 10); if (Number.isFinite(n)) defaults.context_size = n; else delete defaults.context_size; } else delete defaults.context_size;
-    // n_gpu_layers is no longer a model default (spec-hw-slot-ownership §2): drop
-    // any stored value so a save unsets the sunset key rather than round-tripping it.
-    delete defaults.n_gpu_layers;
-    if (extra.trim()) defaults.extra_args = extra; else delete defaults.extra_args;
-    if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate; else delete defaults.chat_template;
-    if (profile.trim()) defaults.profile = profile.trim(); else delete defaults.profile;
-    // Typed caps: auto = absent (delete the key), on/off = boolean.
-    if (mtp === "on") defaults.mtp = true; else if (mtp === "off") defaults.mtp = false; else delete defaults.mtp;
-    if (jinja === "on") defaults.jinja = true; else if (jinja === "off") defaults.jinja = false; else delete defaults.jinja;
+		const body = { defaults };
+		const trimmedName = name.trim();
+		if (trimmedName && trimmedName !== (model.name || ""))
+			body.name = trimmedName;
+		const nextTags = mergeModelTags(otherTags, types);
+		const prevTags = Array.isArray(model.tags) ? model.tags : [];
+		const sameTags =
+			nextTags.length === prevTags.length &&
+			[...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
+		if (!sameTags) body.tags = nextTags;
+		if (!sameSet(caps, canonicalCapabilities(model.capabilities, enums)))
+			body.capabilities = caps;
+		if (!sameSet(backends, Array.isArray(model.backends) ? model.backends : []))
+			body.backends = backends;
+		const trimmedMmproj = mmproj.trim();
+		if (trimmedMmproj !== (model.mmproj || ""))
+			body.mmproj = trimmedMmproj || null;
+		const trimmedRepo = hfRepo.trim();
+		if (trimmedRepo !== (model.hf_repo || "")) body.hf_repo = trimmedRepo;
+		const trimmedFile = hfFilename.trim();
+		if (trimmedFile !== (model.hf_filename || ""))
+			body.hf_filename = trimmedFile;
+		try {
+			await update.mutateAsync({ id: model.id, body });
+			window.__hal0Toast &&
+				window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
+			onClose();
+		} catch (e) {
+			// Surface the server envelope inline (managed-arg rejection etc.).
+			window.__hal0Toast &&
+				window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+		}
+	};
 
 	const modality = modalityLabel(caps, model.type);
 
@@ -729,8 +804,8 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Identity ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>display name</span>
-						<span className="sub">empty keeps the model id</span>
+						<span>Display name</span>
+						<FieldInfoIcon description="empty keeps the model id" />
 					</div>
 					<div className="form-ctl">
 						<input
@@ -744,10 +819,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>types</span>
-						<span className="sub">
-							capability tags · drive routing &amp; slot features
-						</span>
+						<span>Types</span>
+						<FieldInfoIcon description="capability tags · drive routing &amp; slot features" />
 					</div>
 					<div
 						className="form-ctl"
@@ -772,47 +845,75 @@ function ModelDrawer({ open, onClose, model }) {
 					</div>
 				</div>
 
-  return (
-    <>
-      <Drawer
-        open={open}
-        onClose={onClose}
-        width={600}
-        dirty={dirty}
-        eyebrow="Edit model · the launchable thing"
-        title={model.longName || model.name || model.id}
-        foot={
-          <>
-            <span style={{ color: "var(--warn)" }}>⟳ changes require the slot to restart</span>
-            <span style={{ display: "inline-flex", gap: 8 }}>
-              <button className="btn ghost sm" data-testid="model-duplicate-open" onClick={() => setDupOpen(true)}>⋯ Duplicate for device</button>
-              <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-              <button className="btn sm" data-testid="model-save" onClick={onSave} disabled={update.isPending || !!flagsError}>
-                {update.isPending ? "Saving…" : "Save model"}
-              </button>
-            </span>
-          </>
-        }
-      >
-        {/* ── Identity ── */}
-        <div className="form-row">
-          <div className="form-lbl"><span>display name</span><span className="sub">empty keeps the model id</span></div>
-          <div className="form-ctl">
-            <input className="input" data-testid="model-name-input" placeholder={model.id} value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-lbl"><span>types</span><span className="sub">capability tags · drive routing &amp; slot features</span></div>
-          <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {MODEL_TYPE_TAGS.map((tag) => {
-              const on = types.includes(tag);
-              return (
-                <button key={tag} type="button" role="switch" aria-checked={on} data-testid={`type-toggle-${tag}`}
-                  className={"mdl-chip" + (on ? " on" : "")} onClick={() => toggleType(tag)}>{tag}</button>
-              );
-            })}
-          </div>
-        </div>
+				{/* ── Per-type default marker (Set / Remove) ── */}
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>Default for {typeLabel}</span>
+						<FieldInfoIcon description="the model this type falls back to · one per type" />
+					</div>
+					<div
+						className="form-ctl"
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 10,
+							flexWrap: "wrap",
+						}}
+					>
+						{isTypeDefault ? (
+							<span
+								className="tag"
+								data-testid="model-default-badge"
+								style={{
+									color: "var(--ok)",
+									borderColor: "var(--ok)",
+									background: "var(--bg-2)",
+									fontFamily: "var(--jbm)",
+									fontSize: 9,
+									letterSpacing: ".05em",
+									textTransform: "uppercase",
+									padding: "2px 6px",
+									borderRadius: 3,
+									border: "1px solid var(--ok)",
+								}}
+							>
+								✓ {typeLabel} default
+							</span>
+						) : (
+							<span
+								className="tag"
+								data-testid="model-default-none"
+								style={{
+									color: "var(--fg-4)",
+									borderColor: "var(--line)",
+									background: "var(--bg-2)",
+									fontFamily: "var(--jbm)",
+									fontSize: 9,
+									letterSpacing: ".05em",
+									textTransform: "uppercase",
+									padding: "2px 6px",
+									borderRadius: 3,
+									border: "1px solid var(--line)",
+								}}
+							>
+								not the default
+							</span>
+						)}
+						<button
+							type="button"
+							className="btn ghost sm"
+							data-testid="model-default-toggle"
+							onClick={onToggleDefault}
+							disabled={setDefault.isPending}
+						>
+							{setDefault.isPending
+								? "Saving…"
+								: isTypeDefault
+									? "Remove default"
+									: "Set as default"}
+						</button>
+					</div>
+				</div>
 
 				{/* ── Launch-command hero: template + flags (1b) ── */}
 				<div
@@ -999,9 +1100,7 @@ function ModelDrawer({ open, onClose, model }) {
 				<div className="form-row">
 					<div className="form-lbl">
 						<span>Thinking</span>
-						<span className="sub">
-							Show reasoning steps before the answer. Auto defers to profile.
-						</span>
+						<FieldInfoIcon description="Show reasoning steps before the answer. Auto defers to profile." />
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg
@@ -1013,10 +1112,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>mtp</span>
-						<span className="sub">
-							Speculative decode. Auto defers to eligibility.
-						</span>
+						<span>MTP</span>
+						<FieldInfoIcon description="Speculative decode. Auto defers to eligibility." />
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg id="mtp" value={mtp} onChange={setMtp} />
@@ -1024,8 +1121,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>jinja</span>
-						<span className="sub">jinja chat-template rendering</span>
+						<span>Jinja</span>
+						<FieldInfoIcon description="jinja chat-template rendering" />
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg id="jinja" value={jinja} onChange={setJinja} />
@@ -1033,10 +1130,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>chat_template</span>
-						<span className="sub">
-							auto = use the template embedded in the GGUF
-						</span>
+						<span>Chat template</span>
+						<FieldInfoIcon description="auto = use the template embedded in the GGUF" />
 					</div>
 					<div className="form-ctl">
 						<select
@@ -1058,8 +1153,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>modality</span>
-						<span className="sub">derived from capabilities</span>
+						<span>Modality</span>
+						<FieldInfoIcon description="derived from capabilities" />
 					</div>
 					<div className="form-ctl">
 						<span
@@ -1083,10 +1178,8 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Numeric tune (typed source of the managed --ctx-size) ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>context_size</span>
-						<span className="sub">
-							tokens · empty = launcher default · sets managed --ctx-size
-						</span>
+						<span>Context size</span>
+						<FieldInfoIcon description="tokens · empty = launcher default · sets managed --ctx-size" />
 					</div>
 					<div className="form-ctl">
 						<input
@@ -1103,24 +1196,124 @@ function ModelDrawer({ open, onClose, model }) {
             slot-owned hardware now (the slot's HW grid), not a model default.
             The one-shot migration folds model.defaults.n_gpu_layers → slot NGL. */}
 
-        {/* ── Numeric tune (typed source of the managed --ctx-size) ── */}
-        <div className="form-row">
-          <div className="form-lbl"><span>context_size</span><span className="sub">tokens · empty = launcher default · sets managed --ctx-size</span></div>
-          <div className="form-ctl"><input className="input mono" data-testid="model-ctx-input" inputMode="numeric" placeholder="e.g. 8192" value={ctx} onChange={(e) => setCtx(e.target.value)} /></div>
-        </div>
-        {/* n_gpu_layers input removed (spec-hw-slot-ownership §2/§6): NGL is
-            slot-owned hardware now (the slot's HW grid), not a model default.
-            The one-shot migration folds model.defaults.n_gpu_layers → slot NGL. */}
+				{/* ── Routing (capabilities + backends) ── */}
+				<div className="form-section" style={{ marginTop: 16 }}>
+					Routing
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>Capabilities</span>
+						<FieldInfoIcon description="dispatch / omni eligibility · canonical vocab" />
+					</div>
+					<div
+						className="form-ctl"
+						style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
+					>
+						{enums.model_capabilities.map((cap) => {
+							const on = caps.includes(cap);
+							return (
+								<button
+									key={cap}
+									type="button"
+									role="switch"
+									aria-checked={on}
+									data-testid={`cap-toggle-${cap}`}
+									className={"mdl-chip" + (on ? " on" : "")}
+									onClick={() => toggleCap(cap)}
+								>
+									{cap}
+								</button>
+							);
+						})}
+					</div>
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>Backends</span>
+						<FieldInfoIcon description="runners this model can bind · drives compatible-runner filtering" />
+					</div>
+					<div
+						className="form-ctl"
+						style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
+					>
+						{enums.model_backends.map((b) => {
+							const on = backends.includes(b);
+							return (
+								<button
+									key={b}
+									type="button"
+									role="switch"
+									aria-checked={on}
+									data-testid={`backend-toggle-${b}`}
+									className={"mdl-chip" + (on ? " on" : "")}
+									onClick={() => toggleBackend(b)}
+								>
+									{b}
+								</button>
+							);
+						})}
+					</div>
+				</div>
 
 				{/* Runner / image section removed (spec-hw-slot-ownership §8): the model
             is device-agnostic and no longer resolves to a runner or image. The
             runner is chosen on the slot (BINARY → RUNNER_IMAGES); the Runtimes
             page (Settings → Runtimes) shows which slots resolve to each runner. */}
 
-        {/* Runner / image section removed (spec-hw-slot-ownership §8): the model
-            is device-agnostic and no longer resolves to a runner or image. The
-            runner is chosen on the slot (BINARY → RUNNER_IMAGES); the Runtimes
-            page (Settings → Runtimes) shows which slots resolve to each runner. */}
+				{/* ── Source · re-pull coords ── */}
+				<div className="form-section" style={{ marginTop: 16 }}>
+					Source · re-pull coords
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>MMProj</span>
+						<FieldInfoIcon description="vision projector sidecar path" />
+					</div>
+					<div className="form-ctl">
+						<input
+							className="input mono"
+							data-testid="model-mmproj-input"
+							placeholder="/var/lib/hal0/models/…/mmproj-Q8.gguf"
+							value={mmproj}
+							onChange={(e) => setMmproj(e.target.value)}
+						/>
+						{caps.includes("vision") && !mmproj.trim() && (
+							<div className="err" style={{ marginTop: 6 }}>
+								vision capability requires an mmproj sidecar path
+							</div>
+						)}
+					</div>
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>HF repo</span>
+						<FieldInfoIcon description="HuggingFace repo · needed to re-pull" />
+					</div>
+					<div className="form-ctl">
+						<input
+							className="input mono"
+							data-testid="model-hfrepo-input"
+							placeholder="unsloth/Qwen3-8B-GGUF"
+							value={hfRepo}
+							onChange={(e) => setHfRepo(e.target.value)}
+						/>
+					</div>
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>HF filename</span>
+						<FieldInfoIcon description="variant filename within the repo" />
+					</div>
+					<div className="form-ctl">
+						<input
+							className="input mono"
+							data-testid="model-hffile-input"
+							placeholder="qwen3-8b-q4_k_m.gguf"
+							value={hfFilename}
+							onChange={(e) => setHfFilename(e.target.value)}
+						/>
+					</div>
+				</div>
 
 				{update.isError && (
 					<div className="err">{update.error?.message || "Save failed"}</div>
@@ -1172,9 +1365,15 @@ function canonManagedForMsg(flag) {
 // device-agnostic — hardware flags belong on the slot's HW grid. Names the
 // offending flag(s) and points at where they're set.
 function slotHardwareFlagMessage(offenders) {
-  const first = offenders[0];
-  const rest = offenders.length > 1 ? ` (also: ${offenders.slice(1).join(", ")})` : "";
-  return `${first} is hardware — it belongs on the slot (device · NGL · THREADS grid), not the model. The model is device-agnostic. Remove it.${rest}`;
+	const first = offenders[0];
+	const rest =
+		offenders.length > 1 ? ` (also: ${offenders.slice(1).join(", ")})` : "";
+	return `${first} is hardware — it belongs on the slot (device · NGL · THREADS grid), not the model. The model is device-agnostic. Remove it.${rest}`;
 }
 
-Object.assign(window, { ModelDrawer, FlagsEditor, DivergenceDiff, DuplicateModelDialog });
+Object.assign(window, {
+	ModelDrawer,
+	FlagsEditor,
+	DivergenceDiff,
+	DuplicateModelDialog,
+});

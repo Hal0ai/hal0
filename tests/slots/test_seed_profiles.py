@@ -85,48 +85,13 @@ def test_catalog_has_exactly_16_profiles() -> None:
     assert names == sorted(ALL_16_PROFILES), f"catalog profiles out of order or missing: {names}"
 
 
-# Per Option B: device-specific profiles declare device_class explicitly
-# (cpu-chat=cpu, flm=npu, kokoro=cpu, qwen3-tts=gpu, comfyui=img). Generic
-# profiles are device-agnostic (no device_class field) per spec §4.1.
-DEVICE_AGNOSTIC_PROFILES = [
-    "profile.chat",
-    "profile.chat-long-context",
-    "profile.dense",
-    "profile.moe",
-    "profile.embedding",
-    "profile.reranking",
-    "profile.brain",
-    "profile.chadrock-dense",
-    "profile.chadrock-moe",
-    "profile.thinking",
-    "profile.coding",
-]
-DEVICE_SPECIFIC_PROFILES = [
-    ("profile.cpu-chat", "cpu"),
-    ("profile.flm", "npu"),
-    ("profile.kokoro", "cpu"),
-    ("profile.qwen3-tts", "gpu"),
-    ("profile.comfyui", "img"),
-]
-
-
-@pytest.mark.parametrize("profile_name", DEVICE_AGNOSTIC_PROFILES)
-def test_agnostic_profile_has_no_device_class(profile_name: str) -> None:
+@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+def test_every_seed_profile_is_device_agnostic(profile_name: str) -> None:
     profiles = _load_seed_profiles()
     assert profile_name in profiles, f"missing {profile_name}"
     assert "device_class" not in profiles[profile_name], (
-        f"{profile_name} should be device-agnostic but has device_class "
-        f"(slot owns device per spec §4.1)"
-    )
-
-
-@pytest.mark.parametrize("profile_name,expected_class", DEVICE_SPECIFIC_PROFILES)
-def test_specific_profile_has_device_class(profile_name: str, expected_class: str) -> None:
-    profiles = _load_seed_profiles()
-    assert profile_name in profiles, f"missing {profile_name}"
-    assert profiles[profile_name].get("device_class") == expected_class, (
-        f"{profile_name}: expected device_class={expected_class!r}, "
-        f"got {profiles[profile_name].get('device_class')!r}"
+        f"{profile_name} should be device-agnostic; the slot owns device "
+        "per seeded-profile-rework §4.1"
     )
 
 

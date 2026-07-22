@@ -79,7 +79,7 @@ function ThEyebrow({ dot, live, label, sub, right }) {
     <div className="th-eyebrow">
       {dot && <span className={'d' + (live ? ' live' : '')} style={{ background: dot, color: dot }} />}
       <span>{label}</span>
-      {sub && <FieldInfoIcon description="{sub}" />}
+      {sub && <FieldInfoIcon description={sub} />}
       {right && <span className="right">{right}</span>}
     </div>
   )
