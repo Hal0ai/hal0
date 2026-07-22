@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -249,6 +250,7 @@ def set_version(root: Path, version: str) -> None:
     # repository root.  Keeping candidates beside their destinations guarantees
     # os.replace() stays on one filesystem (and cannot fail with EXDEV).
     tmpdir = Path(tempfile.mkdtemp(prefix=".set-version.", dir=root))
+    preserve_transaction = False
     try:
         temp_paths: list[tuple[Path, Path]] = []
         for dst, content in candidates:
@@ -328,20 +330,32 @@ def set_version(root: Path, version: str) -> None:
                     f"{hal0ai_final!r} != expected {pep440!r}"
                 )
         except Exception as update_error:
-            rollback_errors: list[str] = []
+            rollback_errors: list[tuple[Path, Path, Exception]] = []
             for backup_path, dst_path in backups:
                 try:
                     os.replace(str(backup_path), str(dst_path))
                 except Exception as rollback_error:  # continue restoring every file
-                    rollback_errors.append(f"{dst_path}: {rollback_error!r}")
+                    rollback_errors.append((backup_path, dst_path, rollback_error))
             if rollback_errors:
-                details = "; ".join(rollback_errors)
+                preserve_transaction = True
+                # Updated candidates cannot recover original data, so remove any
+                # that were not consumed when it is safe to do so. Cleanup must
+                # never endanger the retained original backups.
+                for candidate_path, _ in temp_paths:
+                    with suppress(OSError):
+                        candidate_path.unlink(missing_ok=True)
+                details = "; ".join(
+                    f"restore {backup_path} -> {dst_path} ({rollback_error!r})"
+                    for backup_path, dst_path, rollback_error in rollback_errors
+                )
                 raise RuntimeError(
-                    f"version update failed ({update_error!r}); ROLLBACK FAILED: {details}"
+                    f"version update failed ({update_error!r}); ROLLBACK FAILED; "
+                    f"recovery required: {details}"
                 ) from update_error
             raise
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not preserve_transaction:
+            shutil.rmtree(tmpdir)
 
 
 def _main() -> None:

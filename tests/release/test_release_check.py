@@ -35,6 +35,17 @@ def _make_tree(
         encoding="utf-8",
     )
     (root / "uv.lock").write_bytes(b"fixture lock bytes\n")
+    (root / ".gitignore").write_text(
+        ".pi/\ngraphify-out/*\n", encoding="utf-8"
+    )
+    tracked_generated = {
+        root / ".pi" / "shepherd" / "index.json": "generated index\n",
+        root / ".pi" / "shepherd" / "nearby.json": "tracked source state\n",
+        root / "graphify-out" / "graph.json": "generated graph\n",
+    }
+    for path, content in tracked_generated.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
     if report is not None:
         (root / "tests" / "release-gate-report.json").write_text(
             json.dumps(report), encoding="utf-8"
@@ -56,6 +67,19 @@ fi
 
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "add",
+            "-f",
+            ".pi/shepherd/index.json",
+            ".pi/shepherd/nearby.json",
+            "graphify-out/graph.json",
+        ],
+        check=True,
+    )
     subprocess.run(
         [
             "git",
@@ -92,7 +116,17 @@ def _run(root: Path, env: dict[str, str], *args: str) -> subprocess.CompletedPro
 def _fresh_report(**summary_overrides: int) -> dict[str, object]:
     summary = {"total": 1, "pass": 1, "fail": 0, "skip": 0, "deferred": 0}
     summary.update(summary_overrides)
-    return {"generated": int(time.time()), "summary": summary}
+    rows = [
+        {"status": status}
+        for status in ("pass", "fail", "skip", "deferred")
+        for _ in range(summary[status])
+    ]
+    return {
+        "_schema": "hal0.release-gate-report.v1",
+        "generated": int(time.time()),
+        "summary": summary,
+        "rows": rows,
+    }
 
 
 def test_help_and_unknown_argument_contract(tmp_path: Path) -> None:
@@ -103,7 +137,8 @@ def test_help_and_unknown_argument_contract(tmp_path: Path) -> None:
 
     assert help_result.returncode == 0
     assert "--local" in help_result.stdout
-    assert "non-publishing" in help_result.stdout.lower()
+    assert "publication-read-only" in help_result.stdout.lower()
+    assert "dependency/build caches may change" in help_result.stdout.lower()
     assert bad_result.returncode == 2
     assert "Unknown argument" in bad_result.stderr
 
@@ -164,6 +199,36 @@ def test_nonlocal_requires_fresh_coherent_report(
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-schema",
+        "wrong-schema",
+        "missing-rows",
+        "rows-not-list",
+        "invalid-row-status",
+    ],
+)
+def test_tier_gamma_requires_schema_and_valid_rows(tmp_path: Path, mutation: str) -> None:
+    report = _fresh_report()
+    if mutation == "missing-schema":
+        report.pop("_schema")
+    elif mutation == "wrong-schema":
+        report["_schema"] = "hal0.release-gate-report.v2"
+    elif mutation == "missing-rows":
+        report.pop("rows")
+    elif mutation == "rows-not-list":
+        report["rows"] = {"status": "pass"}
+    else:
+        report["rows"] = [{"status": "unknown"}]
+    root, env = _make_tree(tmp_path, report)
+
+    result = _run(root, env, "--dry-run")
+
+    assert result.returncode == 1
+    assert "Release check FAILED" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
     ("summary", "rows", "expected_success"),
     [
         ({"total": 0, "pass": 0, "fail": 0, "skip": 0, "deferred": 0}, None, False),
@@ -204,7 +269,11 @@ def test_tier_gamma_report_policy(
     rows: list[dict[str, str]] | None,
     expected_success: bool,
 ) -> None:
-    report: dict[str, object] = {"generated": int(time.time()), "summary": summary}
+    report: dict[str, object] = {
+        "_schema": "hal0.release-gate-report.v1",
+        "generated": int(time.time()),
+        "summary": summary,
+    }
     if rows is not None:
         report["rows"] = rows
     root, env = _make_tree(tmp_path, report)
@@ -220,24 +289,50 @@ def test_tier_gamma_report_policy(
         assert "Release check FAILED" in output
 
 
-def test_git_cleanliness_ignores_only_generated_paths(tmp_path: Path) -> None:
+def test_git_cleanliness_allows_exact_generated_dirt(tmp_path: Path) -> None:
     root, env = _make_tree(tmp_path)
-    generated = [
-        root / ".pi" / "shepherd" / "index.json",
-        root / ".pi-subagents" / "worker.log",
-        root / "graphify-out" / "graph.json",
-    ]
-    for path in generated:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("generated\n", encoding="utf-8")
+    (root / ".pi" / "shepherd" / "index.json").write_text(
+        "modified generated index\n", encoding="utf-8"
+    )
+    (root / "graphify-out" / "graph.json").write_text(
+        "modified generated graph\n", encoding="utf-8"
+    )
+    subagent_log = root / ".pi-subagents" / "worker.log"
+    subagent_log.parent.mkdir(parents=True)
+    subagent_log.write_text("untracked generated log\n", encoding="utf-8")
 
-    generated_result = _run(root, env, "--local")
-    assert generated_result.returncode == 0, generated_result.stdout + generated_result.stderr
-    assert "working tree clean (excluding generated state)" in generated_result.stdout
+    result = _run(root, env, "--local")
 
-    source_dirt = root / "src" / "unexpected.py"
-    source_dirt.write_text("dirty = True\n", encoding="utf-8")
-    source_result = _run(root, env, "--local")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "working tree clean (excluding generated state)" in result.stdout
 
-    assert source_result.returncode == 1
-    assert "working tree is dirty" in source_result.stderr
+
+@pytest.mark.parametrize(
+    ("relative_path", "tracked"),
+    [
+        (Path(".pi/shepherd/nearby.json"), True),
+        (Path(".pi/shepherd/untracked.json"), False),
+        (Path("graphify-out/untracked.json"), False),
+        (Path("src/unexpected.py"), False),
+    ],
+    ids=[
+        "nearby-tracked-shepherd-file",
+        "nearby-untracked-shepherd-file",
+        "untracked-graphify-file",
+        "source-file",
+    ],
+)
+def test_git_cleanliness_rejects_all_other_dirt(
+    tmp_path: Path, relative_path: Path, tracked: bool
+) -> None:
+    root, env = _make_tree(tmp_path)
+    dirty_path = root / relative_path
+    dirty_path.parent.mkdir(parents=True, exist_ok=True)
+    if tracked:
+        assert dirty_path.exists()
+    dirty_path.write_text("unexpected dirt\n", encoding="utf-8")
+
+    result = _run(root, env, "--local")
+
+    assert result.returncode == 1
+    assert "working tree is dirty" in result.stderr

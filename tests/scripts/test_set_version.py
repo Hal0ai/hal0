@@ -256,11 +256,12 @@ class TestSetVersion:
 
         _assert_original_bytes(paths, originals)
 
-    def test_rollback_failure_is_reported_loudly(
+    def test_rollback_failure_preserves_original_backup_and_reports_recovery_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A restore error is not hidden behind the original update error."""
-        _populate_project(tmp_path, "1.0.0-alpha.0")
+        """A failed restore retains the original bytes and recovery instructions."""
+        paths = _populate_project(tmp_path, "1.0.0-alpha.0")
+        originals = _original_bytes(paths)
         mod = _load_set_version()
         real_replace = mod.os.replace
         calls = 0
@@ -275,10 +276,17 @@ class TestSetVersion:
         monkeypatch.setattr(mod.os, "replace", fail_update_and_restore)
         monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: None)
 
-        with pytest.raises(RuntimeError, match="ROLLBACK FAILED"):
+        with pytest.raises(RuntimeError, match="ROLLBACK FAILED") as exc_info:
             mod.set_version(tmp_path, "1.0.0-alpha.2")
 
-        assert not list(tmp_path.glob(".set-version.*"))
+        transaction_dirs = list(tmp_path.glob(".set-version.*"))
+        assert len(transaction_dirs) == 1
+        failed_backup = transaction_dirs[0] / ".original.0"
+        assert failed_backup.read_bytes() == originals["pyproject.toml"]
+        error = str(exc_info.value)
+        assert str(failed_backup) in error
+        assert str(paths["pyproject.toml"]) in error
+        assert sorted(path.name for path in transaction_dirs[0].iterdir()) == [".original.0"]
 
     def test_uv_lock_failure_rolls_back_every_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -294,6 +302,28 @@ class TestSetVersion:
         monkeypatch.setattr(mod.subprocess, "run", fail_uv_lock)
 
         with pytest.raises(mod.subprocess.CalledProcessError):
+            mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        _assert_original_bytes(paths, originals)
+
+    def test_post_lock_revalidation_failure_restores_every_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-lock mismatch restores all originals and removes transaction state."""
+        paths = _populate_project(tmp_path, "1.0.0-alpha.0")
+        originals = _original_bytes(paths)
+        mod = _load_set_version()
+
+        def corrupt_regenerated_lock(*args: object, **kwargs: object) -> None:
+            lock_path = tmp_path / "uv.lock"
+            lock_path.write_text(
+                _replace_lock_version(lock_path.read_text(encoding="utf-8"), "9.9.9"),
+                encoding="utf-8",
+            )
+
+        monkeypatch.setattr(mod.subprocess, "run", corrupt_regenerated_lock)
+
+        with pytest.raises(RuntimeError, match="post-lock re-validation"):
             mod.set_version(tmp_path, "1.0.0-alpha.2")
 
         _assert_original_bytes(paths, originals)

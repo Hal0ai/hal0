@@ -7,8 +7,9 @@
 # Usage:
 #   bash scripts/release-check.sh [--local] [--channel stable|preview|nightly] [--tag vX.Y.Z]
 #
-# --local is a non-publishing, read-only rehearsal. It skips the remote tier-γ
-# report gate, so a local pass never authorizes a release.
+# --local is a publication-read-only rehearsal: it never creates or mutates a
+# tag, release, or published artifact, though dependency/build caches may change.
+# It skips the remote tier-γ report gate, so a local pass never authorizes a release.
 #
 # Gates (in order):
 #   1.  Backend tests green (pytest)
@@ -53,7 +54,7 @@ Options:
   --channel stable|preview|nightly  Release channel (default: stable)
   --tag vX.Y.Z                     Proposed immutable release tag
   --dry-run                        Run read-only preflight; never publish or tag
-  --local                          Non-publishing local rehearsal (implies --dry-run)
+  --local                          Publication-read-only rehearsal; dependency/build caches may change
   -h, --help                       Show this help
 EOF
 }
@@ -131,7 +132,7 @@ run_repo_python() {
 }
 
 if [[ "${LOCAL}" == true ]]; then
-	warn "LOCAL rehearsal mode is read-only and non-publishing (--dry-run implied)"
+	warn "LOCAL rehearsal is publication-read-only (--dry-run implied); dependency/build caches may change"
 fi
 
 # ── 1. Backend tests ──────────────────────────────────────────────────────────
@@ -240,6 +241,10 @@ elif [[ -f "${REPORT}" ]]; then
 	if python3 - "${REPORT}" <<'PY'; then
 import json, sys, time
 report = json.loads(open(sys.argv[1]).read())
+if not isinstance(report, dict):
+    sys.exit("release-test report must be an object")
+if report.get("_schema") != "hal0.release-gate-report.v1":
+    sys.exit("release-test report _schema must equal 'hal0.release-gate-report.v1'")
 generated = report.get("generated", 0)
 age_s = time.time() - generated
 if generated <= 0 or age_s > 24 * 3600:
@@ -258,23 +263,24 @@ if counts["total"] <= 0:
     sys.exit("release-test report has no rows")
 if counts["total"] != sum(counts[key] for key in keys[1:]):
     sys.exit("release-test summary total does not equal status counts")
+rows = report.get("rows")
+if not isinstance(rows, list):
+    sys.exit("release-test rows must be present and must be an array")
+if not rows:
+    sys.exit("release-test rows must not be empty")
+row_counts = {key: 0 for key in keys[1:]}
+for index, row in enumerate(rows):
+    if not isinstance(row, dict) or row.get("status") not in row_counts:
+        sys.exit(f"release-test row {index} has an invalid status")
+    row_counts[row["status"]] += 1
+if len(rows) != counts["total"]:
+    sys.exit("release-test rows length does not match summary total")
+if any(row_counts[key] != counts[key] for key in row_counts):
+    sys.exit("release-test row statuses do not match summary counts")
 if counts["pass"] <= 0:
     sys.exit("release-test report must contain at least one passed row")
 if counts["fail"] != 0:
     sys.exit(f"release-test has {counts['fail']} failed row(s)")
-if "rows" in report:
-    rows = report["rows"]
-    if not isinstance(rows, list):
-        sys.exit("release-test rows must be an array")
-    row_counts = {key: 0 for key in keys[1:]}
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict) or row.get("status") not in row_counts:
-            sys.exit(f"release-test row {index} has an invalid status")
-        row_counts[row["status"]] += 1
-    if len(rows) != counts["total"]:
-        sys.exit("release-test rows length does not match summary total")
-    if any(row_counts[key] != counts[key] for key in row_counts):
-        sys.exit("release-test row statuses do not match summary counts")
 print(f"release-test fresh (age={age_s/3600:.1f}h): {counts['pass']} pass, "
       f"{counts['skip']} skip, {counts['deferred']} deferred; no failed rows")
 PY
@@ -290,13 +296,26 @@ fi
 step "6. Git state"
 
 cd "${REPO_ROOT}"
-GIT_DIRT="$(
-	git status --porcelain=v1 --untracked-files=all -- . \
-		':(exclude).pi/shepherd/**' \
-		':(exclude).pi-subagents/**' \
-		':(exclude)graphify-out/**'
+TRACKED_DIRT="$(
+	{
+		git diff --name-only -- . \
+			':(exclude).pi/shepherd/index.json' \
+			':(exclude)graphify-out/**'
+		git diff --cached --name-only -- . \
+			':(exclude).pi/shepherd/index.json' \
+			':(exclude)graphify-out/**'
+	}
 )"
-if [[ -z "${GIT_DIRT}" ]]; then
+UNTRACKED_DIRT="$(
+	{
+		git ls-files --others --exclude-standard -- . \
+			':(exclude).pi-subagents/**'
+		# These generated roots are ignored globally, but policy permits only
+		# their already-tracked outputs to change during rehearsal.
+		git ls-files --others -- .pi/shepherd graphify-out
+	}
+)"
+if [[ -z "${TRACKED_DIRT}" && -z "${UNTRACKED_DIRT}" ]]; then
 	info "working tree clean (excluding generated state)"
 else
 	fail "working tree is dirty — commit or stash source changes before tagging"
