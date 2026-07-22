@@ -10,9 +10,10 @@ name: Release
 # Also reusable via workflow_call from nightly.yml (a GITHUB_TOKEN tag push
 # can't trigger this workflow's `push` event, so nightly invokes it directly).
 #
-# Updater clients consume https://releases.hal0.dev/<channel>.json. Advancing
-# those external channel pointers is deliberately a separate, final gate after
-# this workflow's immutable assets have been verified and uploaded.
+# Updater clients consume https://releases.hal0.dev/<channel>.json. This workflow
+# only authorizes the immutable remote publication; it never advances an external
+# channel pointer. Static contract tests cannot prove remote behavior, so the
+# first real release run is required before relying on this authorization gate.
 #
 # What this workflow does NOT do (deliberate, see "Blockers" in
 # scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
@@ -171,6 +172,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: resolve
+    outputs:
+      tarball_digest: ${{ steps.tarball.outputs.digest }}
 
     steps:
       - name: Checkout exact release tag
@@ -635,16 +638,6 @@ jobs:
           done
           gh release upload "${TAG}" "${ASSETS[@]}"
 
-      # External channel pointer advancement is intentionally NOT performed in
-      # this immutable release step. It is the final, separately verified gate
-      # after every exact manifest and sibling bundle asset has been uploaded.
-      - name: Record separately verified channel pointer gate
-        env:
-          TAG: ${{ needs.resolve.outputs.tag }}
-          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
-        run: |
-          echo "Channel pointer advancement remains external for ${TAG}: ${MANIFEST_TARGETS}"
-
       - name: Summary
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
@@ -732,3 +725,301 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ── 9. Read-only authorization of the exact remote publication ─────────────
+  # This is deliberately an evidence gate, not a pointer publisher. It starts
+  # from a clean checkout and re-downloads every byte from the release API.
+  authorize-pointer:
+    name: Authorize verified remote publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [resolve, release, pypi-publish]
+    if: >-
+      ${{ always()
+          && needs.resolve.result == 'success'
+          && needs.release.result == 'success'
+          && ((needs.resolve.outputs.publish_pypi == 'true'
+               && needs.pypi-publish.result == 'success')
+              || (needs.resolve.outputs.publish_pypi == 'false'
+                  && needs.pypi-publish.result == 'skipped')) }}
+    permissions:
+      contents: read
+    outputs:
+      authorized: ${{ steps.evidence.outputs.authorized }}
+
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@v6
+        with:
+          repository: Hal0ai/hal0
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify exact release commit
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [[ "${HEAD_SHA}" != "${EXPECTED_SHA}" ]]; then
+            echo "::error::checked-out tag ${TAG} resolved to ${HEAD_SHA}, expected ${EXPECTED_SHA}"
+            exit 1
+          fi
+
+      - name: Install release validation dependencies
+        run: python3 -m pip install -e ".[dev]" >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Download and verify exact remote publication
+        id: remote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          PYPI_VERSION: ${{ needs.resolve.outputs.python_version }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+          EXPECTED_PRERELEASE: ${{ needs.resolve.outputs.github_prerelease }}
+          EXPECTED_LATEST: ${{ needs.resolve.outputs.github_latest }}
+          PUBLISH_PYPI: ${{ needs.resolve.outputs.publish_pypi }}
+          SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}
+          EXPECTED_DIGEST: ${{ needs.release.outputs.tarball_digest }}
+        run: |
+          set -euo pipefail
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "${VERIFY_DIR}"' EXIT
+          RELEASE_JSON="${VERIFY_DIR}/release.json"
+          LATEST_JSON="${VERIFY_DIR}/latest.json"
+          ASSET_INDEX="${VERIFY_DIR}/assets.tsv"
+          DOWNLOAD_DIR="${VERIFY_DIR}/downloaded"
+          mkdir "${DOWNLOAD_DIR}"
+
+          # Query one exact release. The latest endpoint is consulted only to
+          # observe GitHub's computed flag; it is never used to choose assets.
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > "${RELEASE_JSON}"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "${LATEST_JSON}"
+
+          python3 - "${RELEASE_JSON}" "${LATEST_JSON}" "${ASSET_INDEX}" <<'PY'
+          import json
+          import os
+          import sys
+          from collections import Counter
+          from pathlib import Path
+
+          release_path, latest_path, index_path = map(Path, sys.argv[1:])
+          release = json.loads(release_path.read_bytes())
+          latest = json.loads(latest_path.read_bytes())
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          targets = os.environ["MANIFEST_TARGETS"].split(",")
+          expected_prerelease = os.environ["EXPECTED_PRERELEASE"] == "true"
+          expected_latest = os.environ["EXPECTED_LATEST"] == "true"
+
+          if release.get("tag_name") != tag:
+              raise SystemExit("exact release API returned a tag mismatch")
+          if release.get("draft") is not False:
+              raise SystemExit("exact release is still a draft")
+          if release.get("prerelease") is not expected_prerelease:
+              raise SystemExit("exact release prerelease flag differs from policy")
+          observed_latest = latest.get("tag_name") == tag
+          if observed_latest is not expected_latest:
+              raise SystemExit("GitHub latest release differs from policy")
+
+          tarball = f"hal0-{version}.tar.gz"
+          expected_assets = {
+              tarball,
+              f"{tarball}.bundle",
+              f"{tarball}.sig",
+              f"{tarball}.crt",
+          }
+          for channel in targets:
+              expected_assets.update({f"{channel}.json", f"{channel}.json.bundle"})
+          print("EXPECTED_ASSETS=" + ",".join(sorted(expected_assets)))
+
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              raise SystemExit("exact release has no asset list")
+          names = [asset.get("name") for asset in assets]
+          duplicates = sorted(name for name, count in Counter(names).items() if count != 1)
+          if duplicates:
+              raise SystemExit(f"duplicate remote asset names: {duplicates}")
+          observed_assets = set(names)
+          if observed_assets != expected_assets:
+              missing = sorted(expected_assets - observed_assets)
+              extra = sorted(observed_assets - expected_assets)
+              raise SystemExit(f"remote asset set mismatch; missing={missing}, extra={extra}")
+
+          rows = []
+          for asset in assets:
+              name = asset["name"]
+              if asset.get("state") != "uploaded":
+                  raise SystemExit(f"non-uploaded remote asset: {name}")
+              if not isinstance(asset.get("size"), int) or asset["size"] <= 0:
+                  raise SystemExit(f"empty remote asset: {name}")
+              asset_id = asset.get("id")
+              if not isinstance(asset_id, int) or asset_id <= 0:
+                  raise SystemExit(f"invalid numeric asset ID: {name}")
+              rows.append((name, asset_id))
+          index_path.write_text("".join(f"{name}\t{asset_id}\n" for name, asset_id in rows))
+          PY
+
+          while IFS=$'\t' read -r ASSET_NAME ASSET_ID; do
+            DESTINATION="${DOWNLOAD_DIR}/${ASSET_NAME}"
+            if [[ -e "${DESTINATION}" ]]; then
+              echo "::error::refusing duplicate asset destination ${ASSET_NAME}"
+              exit 1
+            fi
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" > "${DESTINATION}"
+            if [[ ! -s "${DESTINATION}" ]]; then
+              echo "::error::downloaded empty asset ${ASSET_NAME}"
+              exit 1
+            fi
+          done < "${ASSET_INDEX}"
+
+          TARBALL="${DOWNLOAD_DIR}/hal0-${VERSION}.tar.gz"
+          OBSERVED_DIGEST="$(sha256sum "${TARBALL}" | awk '{print $1}')"
+          if [[ "${OBSERVED_DIGEST}" != "${EXPECTED_DIGEST}" ]]; then
+            echo "::error::remote tarball digest ${OBSERVED_DIGEST} differs from build ${EXPECTED_DIGEST}"
+            exit 1
+          fi
+
+          ISSUER="https://token.actions.githubusercontent.com"
+          cosign verify-blob --bundle "${TARBALL}.bundle" \
+            --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            "${TARBALL}"
+          cosign verify-blob \
+            --signature "${TARBALL}.sig" \
+            --certificate "${TARBALL}.crt" \
+            --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            "${TARBALL}"
+
+          IFS=',' read -ra TARGETS <<< "${MANIFEST_TARGETS}"
+          for CHANNEL in "${TARGETS[@]}"; do
+            MANIFEST="${DOWNLOAD_DIR}/${CHANNEL}.json"
+            # Verify the exact downloaded bytes before parsing any field.
+            cosign verify-blob --bundle "${MANIFEST}.bundle" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+              --certificate-oidc-issuer "${ISSUER}" \
+              "${MANIFEST}"
+          done
+
+          PYTHONPATH=src python3 - "${RELEASE_JSON}" "${LATEST_JSON}" "${DOWNLOAD_DIR}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from hal0.release.policy import ReleasePolicy
+          from hal0.updater.updater import ReleaseManifest
+
+          release_path, latest_path, download_dir = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+          release = json.loads(release_path.read_bytes())
+          latest = json.loads(latest_path.read_bytes())
+          tag = os.environ["TAG"]
+          policy = ReleasePolicy.from_tag(tag)
+          expected_digest = os.environ["EXPECTED_DIGEST"]
+          expected_identity = os.environ["SIGNER_IDENTITY"]
+          expected_issuer = "https://token.actions.githubusercontent.com"
+          expected_base = f"https://github.com/Hal0ai/hal0/releases/download/{tag}"
+          expected_targets = tuple(os.environ["MANIFEST_TARGETS"].split(","))
+
+          if policy.manifest_targets != expected_targets:
+              raise SystemExit("resolved manifest targets differ from ReleasePolicy")
+          if policy.github_prerelease != (os.environ["EXPECTED_PRERELEASE"] == "true"):
+              raise SystemExit("resolved prerelease flag differs from ReleasePolicy")
+          if policy.github_latest != (os.environ["EXPECTED_LATEST"] == "true"):
+              raise SystemExit("resolved latest flag differs from ReleasePolicy")
+          if release["prerelease"] != policy.github_prerelease:
+              raise SystemExit("remote prerelease flag differs from ReleasePolicy")
+          if (latest.get("tag_name") == tag) != policy.github_latest:
+              raise SystemExit("remote latest observation differs from ReleasePolicy")
+
+          identities = {}
+          for channel in policy.manifest_targets:
+              manifest_path = download_dir / f"{channel}.json"
+              payload = json.loads(manifest_path.read_bytes())
+              manifest = ReleaseManifest.model_validate(payload)
+              expected_urls = {
+                  "url": f"{expected_base}/hal0-{policy.version}.tar.gz",
+                  "bundle_url": f"{expected_base}/hal0-{policy.version}.tar.gz.bundle",
+                  "sig_url": f"{expected_base}/hal0-{policy.version}.tar.gz.sig",
+                  "cert_url": f"{expected_base}/hal0-{policy.version}.tar.gz.crt",
+                  "manifest_url": f"{expected_base}/{channel}.json",
+                  "notes_url": f"https://github.com/Hal0ai/hal0/releases/tag/{tag}",
+              }
+              if manifest.channel != channel:
+                  raise SystemExit(f"manifest channel mismatch: {channel}")
+              if manifest.version != policy.version:
+                  raise SystemExit(f"manifest version mismatch: {channel}")
+              if manifest.release_kind != policy.kind:
+                  raise SystemExit(f"manifest release policy mismatch: {channel}")
+              if manifest.prerelease_stage != policy.prerelease_stage:
+                  raise SystemExit(f"manifest prerelease policy mismatch: {channel}")
+              if manifest.digest_sha256 != expected_digest:
+                  raise SystemExit(f"manifest digest_sha256 differs from tarball: {channel}")
+              if manifest.signer_identity != expected_identity:
+                  raise SystemExit(f"manifest signer_identity mismatch: {channel}")
+              if manifest.signer_issuer != expected_issuer:
+                  raise SystemExit(f"manifest signer_issuer mismatch: {channel}")
+              for field, expected in expected_urls.items():
+                  if payload.get(field) != expected:
+                      raise SystemExit(f"manifest {field} mismatch: {channel}")
+              identities[channel] = tuple(payload[field] for field in (
+                  "version", "release_kind", "url", "bundle_url", "sig_url",
+                  "cert_url", "digest_sha256", "signer_identity", "signer_issuer",
+              ))
+
+          if policy.kind == "stable" and identities["stable"] != identities["preview"]:
+              raise SystemExit("stable and preview manifests differ in artifact identity")
+          PY
+
+          if [[ "${PUBLISH_PYPI}" == "true" ]]; then
+            PYPI_JSON="${VERIFY_DIR}/pypi.json"
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-delay 2 --retry-all-errors \
+              --connect-timeout 5 --max-time 20 \
+              "https://pypi.org/pypi/hal0ai/${PYPI_VERSION}/json" \
+              --output "${PYPI_JSON}"
+            python3 - "${PYPI_JSON}" "${PYPI_VERSION}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_bytes())
+          expected = sys.argv[2]
+          if payload["info"]["name"] != "hal0ai":
+              raise SystemExit("PyPI project name differs from hal0ai")
+          if payload["info"]["version"] != expected:
+              raise SystemExit("PyPI exact version differs from release policy")
+          PY
+            echo "pypi_evidence=PyPI publication | hal0ai==${PYPI_VERSION} verified" >> "$GITHUB_OUTPUT"
+          else
+            echo "pypi_evidence=PyPI publication | not required (nightly policy)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record non-mutating authorization evidence
+        id: evidence
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          MANIFEST_TARGETS: ${{ needs.resolve.outputs.manifest_targets }}
+          EXPECTED_DIGEST: ${{ needs.release.outputs.tarball_digest }}
+          PYPI_EVIDENCE: ${{ steps.remote.outputs.pypi_evidence }}
+        run: |
+          {
+            echo "## Remote publication authorized: ${TAG}"
+            echo ""
+            echo "| evidence | observed result |"
+            echo "|---|---|"
+            echo "| Exact GitHub release | tag, draft, prerelease, and latest policy verified |"
+            echo "| Exact remote asset set | IDs, uploaded state, non-empty bytes, and signatures verified |"
+            echo "| Tarball SHA-256 | \`${EXPECTED_DIGEST}\` (release output and every manifest) |"
+            echo "| Manifest targets | ${MANIFEST_TARGETS} (exact bytes and sibling bundles verified) |"
+            echo "| ${PYPI_EVIDENCE} |"
+            echo ""
+            echo "**No external channel pointer was mutated.** This job performed read-only authorization only."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "authorized=true" >> "$GITHUB_OUTPUT"

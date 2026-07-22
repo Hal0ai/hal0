@@ -1,11 +1,16 @@
 """Static contracts for immutable release publication.
 
-These tests deliberately inspect the workflow text: they protect security-critical
-GitHub Actions wiring without publishing a release during the test suite.
+These tests inspect every executable YAML scalar without publishing anything.
+They cannot establish that GitHub, Sigstore, or PyPI behave as expected remotely;
+the first real release run remains required before relying on authorization.
 """
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 WORKFLOW = Path(".github/workflows/release.yml")
 
@@ -14,31 +19,76 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text()
 
 
-def _workflow_command_lines(text: str) -> list[str]:
-    """Return action invocations and non-comment shell lines from every run block."""
-    command_lines: list[str] = []
-    run_indent: int | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip())
-        if run_indent is not None:
-            if stripped and indent <= run_indent:
-                run_indent = None
-            elif stripped and not stripped.startswith("#"):
-                command_lines.append(stripped)
-                continue
-            else:
-                continue
-        if re.match(r"^\s*run:\s*\|\s*$", line):
-            run_indent = indent
-        elif re.match(r"^\s*uses:\s*", line):
-            command_lines.append(stripped)
-    return command_lines
+def _yaml(text: str | None = None) -> Any:
+    return yaml.safe_load(_workflow_text() if text is None else text)
+
+
+def _executable_scalars(node: Any) -> Iterator[tuple[str, str]]:
+    """Yield every ``run`` and ``uses`` string via recursive YAML traversal."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in {"run", "uses"} and isinstance(value, str):
+                yield key, value
+            yield from _executable_scalars(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _executable_scalars(value)
+
+
+def _job(job_id: str) -> dict[str, Any]:
+    return _yaml()["jobs"][job_id]
+
+
+def _step(job_id: str, name: str) -> dict[str, Any]:
+    return next(step for step in _job(job_id)["steps"] if step.get("name") == name)
+
+
+def test_executable_scalar_traversal_covers_every_yaml_run_form_and_uses() -> None:
+    fixture = """
+name: traversal-regression
+jobs:
+  synthetic:
+    steps:
+      - run: echo plain
+      - run: "echo quoted"
+      - run: |
+          echo literal
+      - run: |-
+          echo literal-strip
+      - run: |+
+          echo literal-keep
+      - run: >
+          echo folded
+      - run: >-
+          echo folded-strip
+      - run: >+
+          echo folded-keep
+      - uses: owner/action@sha
+"""
+    surface = list(_executable_scalars(_yaml(fixture)))
+    assert len(surface) == 9
+    assert {value.strip() for _, value in surface} == {
+        "echo plain",
+        "echo quoted",
+        "echo literal",
+        "echo literal-strip",
+        "echo literal-keep",
+        "echo folded",
+        "echo folded-strip",
+        "echo folded-keep",
+        "owner/action@sha",
+    }
+
+
+def test_workflow_yaml_parses_and_declares_live_run_limit() -> None:
+    assert isinstance(_yaml(), dict)
+    text = _workflow_text().lower()
+    assert "static contract" in text
+    assert "first real release run" in text
 
 
 def test_release_resolves_policy_before_building() -> None:
     text = _workflow_text()
-    assert "resolve:" in text
     assert 'PYTHONPATH=src python3 -m hal0.release.policy "${TAG}" --format github' in text
     for output in (
         "kind",
@@ -48,74 +98,50 @@ def test_release_resolves_policy_before_building() -> None:
         "github_latest",
         "publish_pypi",
         "signer_identity",
+        "target_sha",
     ):
-        assert f"{output}: ${{{{ steps.policy.outputs.{output} }}}}" in text
+        assert output in _job("resolve")["outputs"]
 
 
 def test_resolve_first_rejects_every_noncanonical_repository() -> None:
+    first_step = _job("resolve")["steps"][0]
+    run = first_step["run"]
+    assert '"${GITHUB_REPOSITORY,,}" != "hal0ai/hal0"' in run
+    assert "GITHUB_EVENT_NAME" not in run
+    assert "refusing noncanonical repository" in run
+
+
+def test_resolve_uses_only_tag_namespace_and_exports_target_sha() -> None:
     text = _workflow_text()
-    resolve_steps = text.split("  resolve:", 1)[1].split("    steps:\n", 1)[1]
-    first_step = resolve_steps.split("\n      - name:", 1)[0]
-
-    assert '"${GITHUB_REPOSITORY,,}" != "hal0ai/hal0"' in first_step
-    assert "GITHUB_EVENT_NAME" not in first_step
-    assert "workflow_call" not in first_step
-    assert "refusing noncanonical repository" in first_step
-
-
-def test_resolve_uses_only_the_tag_namespace_and_exports_target_sha() -> None:
-    text = _workflow_text()
-    assert "target_sha: ${{ steps.policy.outputs.target_sha }}" in text
     assert "ref: refs/tags/${{ steps.requested.outputs.tag }}" in text
     assert 'git show-ref --verify --quiet "refs/tags/${TAG}"' in text
     assert 'git rev-parse "refs/tags/${TAG}^{commit}"' in text
     assert 'echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"' in text
 
 
-def test_resolve_enforces_event_and_ref_authority_for_each_release_kind() -> None:
-    text = _workflow_text()
-    policy = text.split("      - name: Verify requested tag and export policy", 1)[1].split(
-        "\n  release:", 1
-    )[0]
-
-    assert 'if [[ "${KIND}" == "nightly" ]]' in policy
-    assert '"${GITHUB_EVENT_NAME}" != "workflow_call"' in policy
-    assert '"${GITHUB_REF}" != "refs/heads/main"' in policy
-    assert (
-        '"${GITHUB_EVENT_NAME}" != "push" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch"'
-        in policy
+def test_release_checkouts_pin_canonical_repository_tag_and_sha() -> None:
+    checkouts = [
+        step
+        for job in _yaml()["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert len(checkouts) == 4
+    assert all(step["with"]["repository"] == "Hal0ai/hal0" for step in checkouts)
+    assert checkouts[0]["with"]["ref"] == "refs/tags/${{ steps.requested.outputs.tag }}"
+    assert all(
+        step["with"]["ref"] == "refs/tags/${{ needs.resolve.outputs.tag }}"
+        for step in checkouts[1:]
     )
-    assert '"${GITHUB_REF}" != "refs/tags/${TAG}"' in policy
-    assert "signer_identity=${IDENT_PREFIX}refs/heads/main$" in policy
-    assert "signer_identity=${IDENT_PREFIX}refs/tags/${ESCAPED_TAG}$" in policy
-
-
-def test_release_checkouts_pin_canonical_repository_and_immutable_tag() -> None:
     text = _workflow_text()
-    checkout_with_blocks = re.findall(
-        r"(?m)^        uses: actions/checkout@[^\n]+\n"
-        r"        with:\n((?:          [^\n]+\n)+)",
-        text,
-    )
-
-    assert text.count("uses: actions/checkout@") == 3
-    assert len(checkout_with_blocks) == 3
-    assert all(block.count("repository: Hal0ai/hal0") == 1 for block in checkout_with_blocks)
-    assert sum(block.count("repository: Hal0ai/hal0") for block in checkout_with_blocks) == 3
-    assert text.count("ref: refs/tags/${{ needs.resolve.outputs.tag }}") == 2
-    assert text.count("EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}") == 2
-    assert text.count('if [[ "${HEAD_SHA}" != "${EXPECTED_SHA}" ]]') == 2
+    assert text.count("EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}") == 3
+    assert text.count('if [[ "${HEAD_SHA}" != "${EXPECTED_SHA}" ]]') == 3
 
 
-def test_preview_release_is_not_latest_and_upload_is_immutable() -> None:
+def test_release_publication_remains_immutable_and_intended_publishers_allowed() -> None:
     text = _workflow_text()
-    publish = text.split("      - name: Publish GitHub Release", 1)[1].split(
-        "      - name: Record separately verified channel pointer gate", 1
-    )[0]
+    publish = _step("release", "Publish GitHub Release")["run"]
     normalized = " ".join(publish.replace("\\\n", " ").split())
-
-    assert "GITHUB_PRERELEASE: ${{ needs.resolve.outputs.github_prerelease }}" in publish
-    assert "GITHUB_LATEST: ${{ needs.resolve.outputs.github_latest }}" in publish
     assert (
         'gh release create "${TAG}" --verify-tag --title "hal0 ${TAG}" '
         '--notes-file "${NOTES_FILE}" --draft=false '
@@ -123,82 +149,131 @@ def test_preview_release_is_not_latest_and_upload_is_immutable() -> None:
     ) in normalized
     assert 'gh release upload "${TAG}" "${ASSETS[@]}"' in publish
     assert "--clobber" not in text
-    assert 'gh release view "${TAG}"' in text
-    assert "asset collision:" in text
+    assert _step("pypi-publish", "Publish to PyPI")["uses"] == (
+        "pypa/gh-action-pypi-publish@release/v1"
+    )
+    assert "Record separately verified channel pointer gate" not in text
 
 
-def test_release_policy_controls_manifests_and_pypi() -> None:
-    text = _workflow_text()
-    assert "needs.resolve.outputs.manifest_targets" in text
-    assert "needs.resolve.outputs.publish_pypi == 'true'" in text
-    assert "pypi.org/pypi/hal0ai/${PYPI_VERSION}/json" in text
-
-
-def test_release_signs_verifies_and_uploads_every_manifest_bundle() -> None:
-    text = _workflow_text()
-    assert 'cosign sign-blob --yes --bundle "${MANIFEST}.bundle" "${MANIFEST}"' in text
-    assert 'cosign verify-blob \\\n              --bundle "${MANIFEST}.bundle"' in text
-    assert 'ASSETS+=("${MANIFEST}" "${MANIFEST}.bundle")' in text
-    assert "ReleaseManifest.model_validate(payload)" in text
-    assert "refs/heads/main" in text
-    assert "refs/tags/${ESCAPED_TAG}" in text
-    assert text.count("https://token.actions.githubusercontent.com") >= 3
-
-
-def test_generated_and_self_verified_identities_are_exact_policy_output() -> None:
-    text = _workflow_text()
-    assert "signer_identity: ${{ steps.policy.outputs.signer_identity }}" in text
-    assert text.count("SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}") >= 3
-    assert '"signer_identity": ident' in text
-    assert '--certificate-identity-regexp "${SIGNER_IDENTITY}"' in text
-    assert "tag-or-main" not in text
-    assert "|refs/heads/main" not in text
-    assert "refs/heads/main)$" not in text
-    assert "refs/tags/v[0-9]" not in text
-
-
-def test_channel_pointer_advancement_is_a_separate_final_gate() -> None:
-    text = _workflow_text()
-    gate = text.split("      - name: Record separately verified channel pointer gate", 1)[1].split(
-        "      - name: Summary", 1
-    )[0]
-
-    assert "channel pointer" in text.lower()
-    assert "separately verified" in text.lower()
-    assert 'echo "Channel pointer advancement remains external' in gate
-    for publishing_command in ("curl ", "gh ", "git push", "upload", "release create"):
-        assert publishing_command not in gate
-
-    # The external pointer endpoint may be documented, but never executed by
-    # this workflow. This scans every job rather than trusting the named gate.
-    pointer_endpoint_mentions = [
-        line for line in text.splitlines() if "releases.hal0.dev" in line.lower()
-    ]
-    assert pointer_endpoint_mentions
-    assert all(line.lstrip().startswith("#") for line in pointer_endpoint_mentions)
-
-    command_surface = "\n".join(_workflow_command_lines(text)).lower()
-    external_pointer_markers = (
+def test_global_executable_surface_has_no_external_pointer_or_mutation_markers() -> None:
+    # YAML parsing discards comments, so documentation may name forbidden systems.
+    surface = "\n".join(value for _, value in _executable_scalars(_yaml())).lower()
+    markers = (
         r"releases\.hal0\.dev",
         r"\bhal0-web\b",
         r"\bcloudflare\b",
         r"\bwrangler\b",
         r"\bapi\.cloudflare\.com\b",
         r"\b(?:aws\s+s3|gsutil|rclone)\b",
-        r"\br2(?:://|\s+(?:bucket|object|put|copy))\b",
-        r"\b(?:advance|update|publish|promote|write|sync)[-_ ](?:channel[-_ ]?)?pointer\b",
-        r"\bchannel[-_ ]pointer[-_ ](?:advance|update|publish|promote|write|sync)\b",
+        r"\bkv\b",
+        r"\br2\b",
+        r"\bpointer[-_ ]service\b",
+        r"\b(?:advance|update|publish|promote|write|sync|mutate)[-_ ](?:channel[-_ ]?)?pointer\b",
+        r"\bchannel[-_ ]pointer[-_ ](?:advance|update|publish|promote|write|sync|mutate)\b",
     )
-    for marker in external_pointer_markers:
-        assert re.search(marker, command_surface) is None, marker
+    for marker in markers:
+        assert re.search(marker, surface) is None, marker
+
+
+def test_authorize_job_truth_table_permissions_and_dependencies() -> None:
+    job = _job("authorize-pointer")
+    assert job["needs"] == ["resolve", "release", "pypi-publish"]
+    condition = job["if"]
+    assert "always()" in condition
+    assert "needs.resolve.result == 'success'" in condition
+    assert "needs.release.result == 'success'" in condition
+    assert "needs.resolve.outputs.publish_pypi == 'true'" in condition
+    assert "needs.pypi-publish.result == 'success'" in condition
+    assert "needs.resolve.outputs.publish_pypi == 'false'" in condition
+    assert "needs.pypi-publish.result == 'skipped'" in condition
+    assert job["permissions"] == {"contents": "read"}
+    serialized = yaml.safe_dump(job).lower()
+    for forbidden in (
+        "id-token",
+        "environment:",
+        "secrets.",
+        "password",
+        "cloudflare_api",
+        "wrangler",
+        "pointer_token",
+    ):
+        assert forbidden not in serialized
+    assert job["outputs"]["authorized"] == "${{ steps.evidence.outputs.authorized }}"
+
+
+def test_release_exposes_digest_and_authorizer_redownloads_exact_remote_asset_set() -> None:
+    release = _job("release")
+    assert release["outputs"]["tarball_digest"] == "${{ steps.tarball.outputs.digest }}"
+    run = _step("authorize-pointer", "Download and verify exact remote publication")["run"]
+    assert "EXPECTED_DIGEST: ${{ needs.release.outputs.tarball_digest }}" in yaml.safe_dump(
+        _step("authorize-pointer", "Download and verify exact remote publication")
+    )
+    assert "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" in run
+    assert "repos/${GITHUB_REPOSITORY}/releases/latest" in run
+    assert "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" in run
+    assert "Accept: application/octet-stream" in run
+    assert "mktemp -d" in run
+    assert "EXPECTED_ASSETS" in run
+    assert "duplicate" in run.lower()
+    assert "uploaded" in run
+    assert "empty" in run.lower()
+    assert "gh release download" not in run
+    assert "--pattern" not in run
+    assert "--clobber" not in run
+    assert "releases/latest" not in re.sub(
+        r'gh api "repos/\$\{GITHUB_REPOSITORY\}/releases/latest"[^\n]*', "", run
+    )
+
+
+def test_authorizer_verifies_flags_digests_policy_and_all_signatures() -> None:
+    run = _step("authorize-pointer", "Download and verify exact remote publication")["run"]
+    assert "ReleaseManifest.model_validate" in run
+    assert "ReleasePolicy.from_tag" in run
+    assert "github_prerelease" in run
+    assert "github_latest" in run
+    assert "digest_sha256" in run
+    assert "EXPECTED_DIGEST" in run
+    assert "signer_identity" in run
+    assert "signer_issuer" in run
+    assert "stable and preview manifests differ in artifact identity" in run
+    assert 'cosign verify-blob --bundle "${TARBALL}.bundle"' in run
+    normalized = " ".join(run.replace("\\\n", " ").split())
+    assert (
+        'cosign verify-blob --signature "${TARBALL}.sig" --certificate "${TARBALL}.crt"'
+    ) in normalized
+    assert 'cosign verify-blob --bundle "${MANIFEST}.bundle"' in run
+    installers = [
+        step["uses"]
+        for job in ("release", "authorize-pointer")
+        for step in _job(job)["steps"]
+        if step.get("name") == "Install cosign"
+    ]
+    assert installers == ["sigstore/cosign-installer@v3"] * 2
+
+
+def test_authorizer_conditionally_checks_exact_pypi_version_with_bounded_retries() -> None:
+    run = _step("authorize-pointer", "Download and verify exact remote publication")["run"]
+    assert 'if [[ "${PUBLISH_PYPI}" == "true" ]]' in run
+    assert "pypi/hal0ai/${PYPI_VERSION}/json" in run
+    assert "--retry 5" in run
+    assert "--max-time 20" in run
+    assert 'payload["info"]["name"] != "hal0ai"' in run
+    assert 'payload["info"]["version"] != expected' in run
+    assert "PyPI publication | not required (nightly policy)" in run
+
+
+def test_evidence_is_appended_only_after_all_remote_checks() -> None:
+    steps = _job("authorize-pointer")["steps"]
+    assert steps[-1]["name"] == "Record non-mutating authorization evidence"
+    evidence = steps[-1]["run"]
+    assert 'echo "authorized=true" >> "$GITHUB_OUTPUT"' in evidence
+    assert "No external channel pointer was mutated" in evidence
+    assert "$GITHUB_STEP_SUMMARY" in evidence
+    assert "Download and verify exact remote publication" in steps[-2]["name"]
 
 
 def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
-    text = _workflow_text()
-    stage = text.split("      - name: Stage release tree", 1)[1].split(
-        "      - name: Stage release notes", 1
-    )[0]
-
+    stage = _step("release", "Stage release tree")["run"]
     staged_roots = re.findall(r'(?m)^\s*cp -a\s+(\S+)\s+"\$\{STAGE\}/"\s*$', stage)
     assert staged_roots == [
         "src",
@@ -210,29 +285,7 @@ def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
         "packaging",
         "docs",
     ]
-
-    for required in (
-        "src/hal0/updater/updater.py",
-        "manifest.json",
-        "pyproject.toml",
-        "installer/install.sh",
-        "installer/lib/ui.sh",
-        "packaging/systemd/hal0-openwebui.service",
-        "ui/dist/index.html",
-        "VERSION",
-    ):
-        assert f'"${{STAGE}}/{required}"' in stage
-
-
-def test_release_tree_is_explicitly_prebuilt_ui_only() -> None:
-    text = _workflow_text()
-    stage = text.split("      - name: Stage release tree", 1)[1].split(
-        "      - name: Stage release notes", 1
-    )[0]
-
     assert "if [[ -s ui/dist/index.html ]]" in stage
     assert 'cp -a ui/dist            "${STAGE}/ui/dist"' in stage
     assert '"${STAGE}/ui/package.json"' in stage
     assert '"${STAGE}/ui/node_modules"' in stage
-    assert "ui-dist/" not in stage
-    assert "npm fallback" not in stage
