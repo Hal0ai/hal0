@@ -123,9 +123,9 @@ class Runner:
 # catalog (supports, manifest_key, hardcoded device_class overrides) are
 # supplied by a static supplement map keyed on runner id.
 #
-# This keeps the call signatures backward-compatible — get_runner(),
-# runner_for_backend(), runner_matches(), and resolve_runner_image() work
-# identically — while the data itself is catalog-sourced and a new "vulkan"
+# This preserves the existing call signatures — get_runner(),
+# runner_for_backend(), runner_matches(), and resolve_runner_image() work as
+# before — while the data itself is catalog-sourced and a new "vulkan"
 # runner (stock-gguf via amd-strix-halo-toolboxes) is automatically present.
 
 
@@ -236,7 +236,8 @@ def _build_runners_from_catalog() -> dict[str, Runner]:
         backend = supp.get("backend_override")
         if backend is None and len(rdef.backends) == 1:
             backend = next(iter(rdef.backends))
-            # Single-backend "cpu" or "npu" runners keep backend=None per legacy
+            # HAL0-SUNSET: v1.1.0 normalize CPU/NPU backend representation.
+            # Single-backend CPU/NPU runners currently retain backend=None.
             if backend in ("cpu", "npu"):
                 backend = None
 

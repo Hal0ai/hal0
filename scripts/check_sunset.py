@@ -33,6 +33,12 @@ BASELINE = Path(__file__).resolve().parent / "scar_baseline.txt"
 
 # Keep in lockstep with docs: this is the canonical scar-marker definition.
 SCAR_RE = re.compile(r"removed in #|DEPRECATED|deprecated|\blegacy\b|backward.compat|compat shim")
+CATALOG_STATUS_FILES = frozenset(
+    {
+        Path("src/hal0/lifecycle/catalog.py"),
+        Path("src/hal0/lifecycle/types.py"),
+    }
+)
 SUNSET_RE = re.compile(r"HAL0-SUNSET:\s*v?(\d+)\.(\d+)(?:\.(\d+))?")
 PROJECT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)$")
 PEP440_PRERELEASE_RE = re.compile(r"^\.?(?:a|alpha|b|beta|rc|pre|preview|dev)", re.IGNORECASE)
@@ -72,12 +78,22 @@ def _py_files() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
 
 
+def _is_scar_line(path: Path, line: str) -> bool:
+    """Match migration scars without counting catalog lifecycle status vocabulary."""
+    relative_path = path.relative_to(ROOT)
+    if relative_path in CATALOG_STATUS_FILES:
+        line = re.sub(r"\bdeprecated\b", "", line, flags=re.IGNORECASE)
+    return SCAR_RE.search(line) is not None
+
+
 def scar_count() -> int:
     n = 0
     for f in _py_files():
         with suppress(OSError):
             n += sum(
-                1 for line in f.read_text(errors="ignore").splitlines() if SCAR_RE.search(line)
+                1
+                for line in f.read_text(errors="ignore").splitlines()
+                if _is_scar_line(f, line)
             )
     return n
 

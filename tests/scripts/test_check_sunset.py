@@ -29,6 +29,31 @@ def _configure_project(
     monkeypatch.setattr(check_sunset, "BASELINE", baseline)
 
 
+def test_catalog_deprecation_status_is_not_a_scar_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_project(
+        tmp_path,
+        monkeypatch,
+        version="1.0.0-alpha.0",
+        source="deprecated = True\n",
+    )
+
+    assert check_sunset.scar_count() == 1
+
+    example = tmp_path / "src" / "example.py"
+    example.write_text("", encoding="utf-8")
+    lifecycle = tmp_path / "src" / "hal0" / "lifecycle"
+    lifecycle.mkdir(parents=True)
+    status_file = lifecycle / "types.py"
+    status_file.write_text("deprecated: bool = False\n", encoding="utf-8")
+
+    assert check_sunset.scar_count() == 0
+
+    status_file.write_text("deprecated: bool = False  # legacy shim\n", encoding="utf-8")
+    assert check_sunset.scar_count() == 1
+
+
 def test_prerelease_does_not_trigger_same_ga_sunset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
