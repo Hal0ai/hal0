@@ -404,20 +404,7 @@ def test_resolve_python_rejects_non_312_running_interpreters() -> None:
     assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 13)) is None
 
 
-def test_resolve_python_prefers_newest_explicit_in_range() -> None:
-    # The Hermes policy probes only exact Python 3.12.
-    probed: list[str] = []
-
-    def _prober(name: str) -> str | None:
-        probed.append(name)
-        return f"/opt/{name}/bin/{name}"
-
-    out = hp._resolve_supported_python(prober=_prober)
-    assert out == "/opt/python3.12/bin/python3.12"
-    assert probed == ["python3.12"]
-
-
-def test_resolve_python_walks_down_to_oldest_supported() -> None:
+def test_resolve_python_finds_exact_python3_12() -> None:
     out = hp._resolve_supported_python(
         prober=lambda name: "/usr/bin/python3.12" if name == "python3.12" else None
     )
@@ -430,10 +417,7 @@ def test_resolve_python_falls_back_to_sys_executable_in_range() -> None:
 
 
 def test_resolve_python_rejects_unsupported_running_interpreter() -> None:
-    # The Ubuntu 26.04 case (#1248): only a 3.14 interpreter exists. The old
-    # ">= 3.11" fallback accepted it and pip resolved the broken
-    # hermes-agent 0.15.2; now the resolver must return None so the
-    # preflight fails with the actionable range message.
+    # Only Python 3.12 may be used for the managed Hermes venv.
     assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 14)) is None
     assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 10)) is None
 
@@ -646,12 +630,13 @@ def test_ensure_python_returns_none_when_uv_fetch_fails() -> None:
     assert out is None
 
 
-def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path) -> None:
-    # A venv already built on 3.14 can never converge by pip alone. The
-    # replacement is built beside the live tree and swapped transactionally.
+@pytest.mark.parametrize("minor", ["3.11", "3.13", "3.14"])
+def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path, minor: str) -> None:
+    # A non-3.12 venv can never converge by pip alone. The replacement is
+    # built beside the live tree and swapped transactionally.
     venv = tmp_path / "venv"
-    (venv / "lib" / "python3.14" / "site-packages").mkdir(parents=True)
-    stale_marker = venv / "lib" / "python3.14" / "site-packages" / "hermes_cli"
+    (venv / "lib" / f"python{minor}" / "site-packages").mkdir(parents=True)
+    stale_marker = venv / "lib" / f"python{minor}" / "site-packages" / "hermes_cli"
     stale_marker.mkdir()
     calls: list[list[str]] = []
 
