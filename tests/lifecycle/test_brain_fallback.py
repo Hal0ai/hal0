@@ -42,8 +42,7 @@ def test_architecture_mismatch_rejects_all(
 ) -> None:
     """When architecture is non-amd64, no runners match."""
     host = HostFacts(
-        host="amd-vulkan", device_class="gpu", backend="vulkan",
-        architectures=frozenset({"arm64"})
+        host="amd-vulkan", device_class="gpu", backend="vulkan", architectures=frozenset({"arm64"})
     )
     plan = catalog.resolve(ResolutionRequest.setup(host=host, intent=hermes_intent))
     decision = plan.selection("brain.model")
@@ -51,9 +50,7 @@ def test_architecture_mismatch_rejects_all(
     assert len(decision.rejected) >= 1
 
 
-def test_capability_mismatch_no_brain(
-    catalog: LifecycleCatalog
-) -> None:
+def test_capability_mismatch_no_brain(catalog: LifecycleCatalog) -> None:
     """When a model's required capability (chat) is present, selection proceeds
     based on runner-host-model compatibility — the resolver filters runners by
     capability, not the intent alone. The brain model selection uses the

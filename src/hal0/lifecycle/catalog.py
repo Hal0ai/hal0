@@ -54,16 +54,22 @@ class LifecycleCatalog:
         self._models = MappingProxyType({item.id: item for item in envelope.models})
         self._profiles = MappingProxyType({item.id: item for item in envelope.profiles})
         self._host_runners: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
-            {host: tuple(sorted(r.id for r in envelope.runners if host in r.hosts))
-             for host in sorted({h for r in envelope.runners for h in r.hosts})}
+            {
+                host: tuple(sorted(r.id for r in envelope.runners if host in r.hosts))
+                for host in sorted({h for r in envelope.runners for h in r.hosts})
+            }
         )
         self._capability_runners: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
-            {cap: tuple(sorted(r.id for r in envelope.runners if cap in r.capabilities))
-             for cap in sorted({c for r in envelope.runners for c in r.capabilities})}
+            {
+                cap: tuple(sorted(r.id for r in envelope.runners if cap in r.capabilities))
+                for cap in sorted({c for r in envelope.runners for c in r.capabilities})
+            }
         )
         self._format_runners: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
-            {fmt: tuple(sorted(r.id for r in envelope.runners if fmt in r.model_formats))
-             for fmt in sorted({f for r in envelope.runners for f in r.model_formats})}
+            {
+                fmt: tuple(sorted(r.id for r in envelope.runners if fmt in r.model_formats))
+                for fmt in sorted({f for r in envelope.runners for f in r.model_formats})
+            }
         )
 
     @classmethod
@@ -446,11 +452,14 @@ class LifecycleCatalog:
     def _resolve_default_runner(self, host: HostFacts, *, capability: str) -> str:
         """Find the default runner for a host/capability scope."""
         scope = f"{host.host}/{capability}"
-        rdefs = [r for r in self.envelope.runners
-                 if scope in r.default_for
-                 and self._runner_matches_hardware(r, host)
-                 and not r.architectures.isdisjoint(host.architectures)
-                 and not r.deprecated]
+        rdefs = [
+            r
+            for r in self.envelope.runners
+            if scope in r.default_for
+            and self._runner_matches_hardware(r, host)
+            and not r.architectures.isdisjoint(host.architectures)
+            and not r.deprecated
+        ]
         if not rdefs:
             # Fall back to policy-based resolution with filtering
             policy = self.envelope.bootstrap.default_runner_policy
@@ -458,7 +467,8 @@ class LifecycleCatalog:
             host_runner_ids = set(self._host_runners.get(host.host, ()))
             cap_runner_ids = set(self._capability_runners.get(capability, ()))
             candidates = [
-                rid for rid in (host_runner_ids & cap_runner_ids & set(policy_runners))
+                rid
+                for rid in (host_runner_ids & cap_runner_ids & set(policy_runners))
                 if not self._runners[rid].deprecated
                 and self._runner_matches_hardware(self._runners[rid], host)
                 and not self._runners[rid].architectures.isdisjoint(host.architectures)
@@ -496,9 +506,7 @@ class LifecycleCatalog:
         for model_id in model_ids:
             model = self._models.get(model_id)
             if model is None:
-                rejected.append(
-                    RejectedCandidate(id=model_id, reason_code="model.unknown")
-                )
+                rejected.append(RejectedCandidate(id=model_id, reason_code="model.unknown"))
                 continue
             # Find the best runner on this host for this model
             runner_id = self._find_host_runner_for_model(host, model)
@@ -511,11 +519,7 @@ class LifecycleCatalog:
             else:
                 # Compute the reason code from the model's required runner list
                 reason_code = self._rejection_reason(host, model)
-                rejected.append(
-                    RejectedCandidate(
-                        id=model_id, reason_code=reason_code, detail=""
-                    )
-                )
+                rejected.append(RejectedCandidate(id=model_id, reason_code=reason_code, detail=""))
 
         return SelectionDecision(
             path="brain.model",
@@ -585,9 +589,7 @@ class LifecycleCatalog:
                 return f"runner.{runner_id}_arch_mismatch"
         return "runner.none_compatible"
 
-    def _resolve_runner_for_model(
-        self, host: HostFacts, model_id: str
-    ) -> SelectionDecision:
+    def _resolve_runner_for_model(self, host: HostFacts, model_id: str) -> SelectionDecision:
         """Select the best runner for a given model on this host."""
         model = self._models.get(model_id)
         if model is None:
