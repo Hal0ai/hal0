@@ -73,3 +73,37 @@ Stop and return to the integration owner if:
 - The known failure cannot be reproduced or evidence contradicts this design.
 - Gamma correctness would require skipping coverage or inventing behavior.
 - An unrelated verification failure cannot be isolated without broadening scope.
+
+## Approved slot-modal restoration amendment
+
+### Root cause
+
+Commit `51be6cf7` changed `ui/src/dash/slot-modals.jsx` by 1,612 lines while implementing seeded profiles. Its parent, `6af8759b`, has the same slot-modal blob as current `main` (`f07a1cb6`). The rewrite introduced the intended dedicated Hardware field group, but also accidentally replaced newer drawer code with stale code. In particular, it removed the rendered per-slot `extra_args` editor, the NPU Chat/ASR/Embed capability matrix, and newer Reasoning/MTP behavior already present on `main`.
+
+Commit `4a6ba552` removes duplicated malformed JSX and restores parsing, but parser success alone is insufficient: focused Chromium evidence still reports four failures because `extra_args` is no longer rendered, plus two stale `ctx_size` selectors. The NPU regression is not covered by those failing tests.
+
+### Restoration strategy
+
+Use the known-good `6af8759b`/current-`main` slot modal as the behavioral reference. Restore its current drawer behavior, then reapply only the PR's intended Hardware ownership change:
+
+- Keep one Slot group for instance identity.
+- Keep one Hardware group containing exactly one device, NGL, threads, binary, fit-warning, and image-pin control.
+- Preserve the current-main Model, `extra_args`, NPU Chat/ASR/Embed, Reasoning, MTP, Inference, and Advanced behavior.
+- Preserve the PR's existing request construction and validation unless the reference behavior and a failing test prove it was stale-overwritten.
+- Do not import unrelated changes or use test skips.
+
+Implement this as an additive corrective commit; do not rewrite or reset existing branch history.
+
+### Regression evidence
+
+Before restoration, retain the existing focused failures as red evidence. After restoration:
+
+1. Rewrite only stale `ctx_size` selectors to target the current `Context` replacement control.
+2. Add focused coverage proving each Hardware test ID occurs exactly once.
+3. Add focused NPU coverage proving Chat, ASR, and Embed controls remain rendered and usable while the generic non-NPU Model group stays hidden.
+4. Run lint, production build, typecheck, unit tests, focused Chromium, and the workflow-equivalent Gamma command.
+5. Stop rather than weaken coverage if restored current-main behavior conflicts with the approved hardware-ownership contract.
+
+### Non-goals
+
+This amendment does not redesign the slot drawer, implement the future FLM 1.0 role-binding design, alter backend payload contracts, or broaden the repair into installer, updater, Hermes, release, or lifecycle work.
